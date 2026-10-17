@@ -166,7 +166,7 @@ fn simultaneous_restores_share_verified_descriptors_not_reader_positions() {
     )
     .unwrap();
     source.step(Timestamp::from_nanos(20)).unwrap();
-    let expected = source.drain_events();
+    let expected = session_events(source.drain_events());
     drop(source);
     let envelope = read(&path).unwrap();
     let checkpoint = open(&envelope, limits())
@@ -214,7 +214,7 @@ fn simultaneous_restores_share_verified_descriptors_not_reader_positions() {
                 assert_eq!(live.load(Ordering::SeqCst), 0);
                 assert_eq!(peak.load(Ordering::SeqCst), 1);
                 branch.step(Timestamp::from_nanos(20)).unwrap();
-                assert_eq!(&branch.drain_events(), expected);
+                assert_eq!(&session_events(branch.drain_events()), expected);
                 drop(branch);
                 assert_eq!(drops.load(Ordering::SeqCst), 3);
             }));
@@ -246,7 +246,7 @@ fn descriptor_backed_restore_has_one_decoded_body_at_a_time_and_cleans_partial_t
     )
     .unwrap();
     source.step(Timestamp::from_nanos(20)).unwrap();
-    let expected = source.drain_events();
+    let expected = session_events(source.drain_events());
     drop(source);
     let envelope = read(&manifest).unwrap();
     let checkpoint = open(&envelope, limits())
@@ -295,7 +295,7 @@ fn descriptor_backed_restore_has_one_decoded_body_at_a_time_and_cleans_partial_t
         assert_eq!(peak.load(Ordering::SeqCst), 1);
         assert!(branch.drain_events().is_empty());
         branch.step(Timestamp::from_nanos(20)).unwrap();
-        assert_eq!(branch.drain_events(), expected);
+        assert_eq!(session_events(branch.drain_events()), expected);
         drop(branch);
         assert_eq!(drops.load(Ordering::SeqCst) - before, 3);
     }

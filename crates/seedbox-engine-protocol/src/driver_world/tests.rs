@@ -167,3 +167,46 @@ fn readiness_keeps_nonempty_names_without_a_new_semantic_length_pin() {
         serde_json::from_slice(&serde_json::to_vec(&readiness).unwrap()).unwrap();
     assert_eq!(restored, readiness);
 }
+
+#[test]
+fn observer_history_is_not_serializable_but_current_outcome_continues() {
+    let mut source = Publication {
+        oracle_exit: Some(17),
+        ..Default::default()
+    };
+    source.session.next_driver_sequence = 91;
+    source.session.observation_records = 72;
+    source.session.witness = [3; 32];
+    source.session.witness_records = 91;
+    source.session.applied_faults.push(AppliedFault {
+        requested_at_ns: 1,
+        applied_at_ns: 2,
+        service: "a".into(),
+        action: "crash".into(),
+        detail: "confirmed".into(),
+    });
+    let bytes = serde_json::to_vec(&source).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+        serde_json::json!({"oracle_exit":17})
+    );
+    let restored: Publication = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(restored.oracle_exit, source.oracle_exit);
+    assert_eq!(restored.session, PublicationSession::default());
+    assert_eq!(
+        source.session.next_driver_sequence, 91,
+        "encoding does not drain source history"
+    );
+}
+#[test]
+fn older_envelope_version_has_actionable_refusal_before_body_decode() {
+    let text = r#"{"contract":"driver-world-v1","version":2}"#;
+    let error = serde_json::from_str::<Checkpoint>(text)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("checkpoint was made by an older or incompatible engine; replay with its retained engine or run fresh"), "{error}");
+    assert!(
+        !error.contains("missing field"),
+        "old version is diagnosed before body decode"
+    );
+}

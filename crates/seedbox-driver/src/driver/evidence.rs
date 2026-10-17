@@ -29,7 +29,16 @@ where
         &self,
         output: &mut impl Write,
     ) -> std::result::Result<(), CodecError> {
-        // Exhaustive destructuring forces review when Driver authority expands.
+        self.driver.execution.write_policy_evidence(output)
+    }
+}
+
+impl<M> ExecutionState<M> {
+    fn write_policy_evidence(
+        &self,
+        output: &mut impl Write,
+    ) -> std::result::Result<(), CodecError> {
+        // The writer can see execution only, never host intent or observation.
         let ExecutionState {
             clock,
             rng,
@@ -41,6 +50,7 @@ where
             completed_quanta,
             quantum_committed,
             failed,
+            stopped,
             oracle,
             finished,
             oracle_stops,
@@ -49,15 +59,7 @@ where
             trigger_marker,
             definitions,
             network,
-        } = &self.driver.execution;
-        let ObservationState {
-            staged_events,
-            published: _,
-            next_sequence,
-            capacity: _,
-            omitted: _,
-        } = &self.driver.observations;
-        let playback = &self.driver.playback;
+        } = self;
         let SimulationRng::Seeded(rng) = rng else {
             return Err(CodecError::Invalid(
                 "policy evidence requires the owned seeded Driver RNG",
@@ -65,7 +67,7 @@ where
         };
         output.write_all(b"SBXPOLE\0")?;
         let mut e = Encoder { output };
-        1u32.put(&mut e)?;
+        2u32.put(&mut e)?;
         Timestamp::from_nanos(clock.now()).put(&mut e)?;
         rng.put(&mut e)?;
         quantum_ns.put(&mut e)?;
@@ -97,14 +99,12 @@ where
             last_ended_published.put(&mut e)?;
         }
         events.put(&mut e)?;
-        staged_events.put(&mut e)?;
-        next_sequence.put(&mut e)?;
         boundary_index.put(&mut e)?;
         completed_quanta.put(&mut e)?;
         quantum_committed.put(&mut e)?;
         // Temporary host pause/speed/step controls do not change simulated
         // execution identity. Permanent stop is continuing logical authority.
-        playback.stopped.put(&mut e)?;
+        stopped.put(&mut e)?;
         failed.put(&mut e)?;
         oracle.put(&mut e)?;
         finished.put(&mut e)?;

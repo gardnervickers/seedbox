@@ -641,6 +641,30 @@ it must neither repeat consumed overrides nor lose pending ones. Capture require
 a committed boundary with no outstanding I/O cost. A requested checkpoint may
 therefore need another step before it becomes available.
 
+Driver checkpoints contain continuing execution and playback intent, not observer
+sessions. Scheduled work, accepted responses, boot-end validation cursors, network
+tracking/counters, input ownership and held effects remain authoritative. Policy
+evidence includes execution only, not playback pacing or observations. Frame/event/log
+retention, resizing, overflow and draining change neither continuing bytes nor policy
+evidence. The service consumes the required typed commit handoff before optional
+publication; at capture it drains locally without releasing a held effect or waiting
+for an observer.
+
+Restore preserves current service readiness, outcome, bindings and input cursors,
+but starts empty log/event/frame sessions and fresh observer cursors/checksums.
+Exports contain no pre-checkpoint history or history sidecar. The source keeps its
+own bounded history; `seedbox logs` and `seedbox events` on an imported run diagnose
+`omission: history before checkpoint not available` on stderr, without invented
+missing counts or application bytes. Only post-checkpoint observations are available
+in that run. SDK capture likewise leaves source observations intact, but does not
+carry even an undrained publication suffix into restore.
+
+Driver codec v5 and service envelope v3 reject older formats; replay with the
+retained engine or run fresh, rather than migrating captures. Policy framing v2
+excludes observer staging/cursors. Cross-engine service comparison checks full
+run identity before interpreting witness differences; incompatible identities are
+NotComparable, not a simulation mismatch.
+
 Machine lifecycle updates must occur at their defined commit points around
 fallible backend operations. A failed crash transaction poisons the world and
 terminates its workers; a retry cannot continue using partially changed state.

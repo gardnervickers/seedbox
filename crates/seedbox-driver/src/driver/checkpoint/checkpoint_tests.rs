@@ -29,6 +29,7 @@ fn source_destroyed_capture_reused_workers_and_nonclone_snapshots() {
     // Intra-block RNG cursors, not just u64-aligned draws, have accumulated.
     assert!(states(&d)[0].entropy.len() > 32);
     let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     let expected = advance(&mut d, 60);
     let expected_states = states(&d);
     let expected_position = d.position();
@@ -68,7 +69,7 @@ fn seeded_constructor_is_exactly_old_private_seeded_stream() {
 }
 
 #[test]
-fn drained_and_undrained_publications_and_staging_are_retained_once() {
+fn source_keeps_publications_but_imported_session_has_no_suffix() {
     for drain in [false, true] {
         let mut d = build(vec![spec(0, true, vec![])], vec![], true);
         if drain {
@@ -83,6 +84,9 @@ fn drained_and_undrained_publications_and_staging_are_retained_once() {
             },
         );
         let c = d.checkpoint().unwrap();
+        assert_eq!(d.observations.staged_events.len(), 1);
+        assert_eq!(d.observations.published.is_empty(), drain);
+        reference_observer_session(&mut d);
         let expected = advance(&mut d, 11);
         for workers in [1, 4] {
             let mut b = restore(&c, workers);
@@ -177,6 +181,7 @@ fn partial_restore_and_context_failure_drop_machines_and_join_contexts() {
         true,
     );
     let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     drop(d);
     let contexts = Arc::new(AtomicUsize::new(0));
     let machines = Arc::new(AtomicUsize::new(0));
@@ -296,6 +301,7 @@ fn paused_lagging_blocked_fractional_timer_and_handles_continue() {
         },
     });
     let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     let expected = advance(&mut d, 25);
     for workers in [1, 4] {
         let mut b = restore(&c, workers);
@@ -334,6 +340,7 @@ fn before_fault_keeps_admitted_handle_and_applies_held_effect_once() {
         1000
     );
     let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
         .unwrap();
     let expected = advance(&mut d, 20);
@@ -413,6 +420,7 @@ fn pending_commands_replies_sleep_and_partial_trigger_keep_control_cursors() {
     ));
     assert!(d.execution.trigger_marker.is_some());
     let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     let expected = advance(&mut d, 30);
     assert!(expected.iter().any(|e| matches!(
         e.kind,
@@ -499,6 +507,7 @@ fn causal_network_flights_pair_cursors_fifo_and_stacked_cuts_continue() {
         Some(LiveInput::Handle(_))
     ));
     let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     let expected = advance(&mut d, 35);
     for workers in [1, 4] {
         let mut b = restore(&c, workers);
@@ -515,6 +524,7 @@ fn causal_network_flights_pair_cursors_fifo_and_stacked_cuts_continue() {
         );
         // Even an empty-flight capture must retain pair RNG and FIFO history.
         let c2 = b.checkpoint().unwrap();
+        reference_observer_session(&mut b);
         let mut b2 = restore(&c2, workers);
         for router in [&mut b.execution.network, &mut b2.execution.network] {
             let Response::TransmitFrame { bytes } = frame(mac(0), 6) else {
@@ -557,6 +567,7 @@ fn finished_oracle_and_permanent_stop_are_capturable_but_not_resumed() {
         d.execution.oracle_stops.insert((7, nz(31)));
         let before = d.position();
         let c = d.checkpoint().unwrap();
+        reference_observer_session(&mut d);
         let expected = d.step(at(100)).unwrap();
         let publications = d.drain_events();
         drop(d);
@@ -624,6 +635,7 @@ fn seeded_clock_fault_cursor_and_pending_input_rejections_continue() {
         Some(LiveInput::Pending)
     ));
     let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     let expected = advance(&mut d, 25);
     assert_eq!(
         states(&d)[1]
@@ -689,6 +701,7 @@ fn staged_prior_boot_ack_does_not_consume_restored_oracle_stop() {
     };
     d.execution.machines[0].staged.push(ack(0));
     let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     drop(d);
     for workers in [1, 4] {
         let mut b = restore(&c, workers);
@@ -726,6 +739,7 @@ fn reserved_spawn_identity_is_retained_without_factory_or_seed_re_admission() {
     assert_eq!(d.execution.machines.len(), 1);
     assert!(d.execution.control.spawn_pending());
     let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
         .unwrap();
     let expected = advance(&mut d, 20);
@@ -813,6 +827,7 @@ fn paused_machine_need_not_map_the_current_shared_time_to_be_captured() {
         .floor(d.now().as_nanos())
         .is_err());
     let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     drop(d);
     let mut b = restore(&c, 4);
     assert_eq!(b.now(), at(u64::MAX - 2));
@@ -840,6 +855,7 @@ fn limited_playback_reanchors_at_restored_time_without_charging_downtime() {
         Some(Duration::from_nanos(3))
     );
     let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     // Capture resets only its owned anchor, not the live source's pacing debt.
     assert_eq!(
         d.playback.delay(position, origin),
@@ -886,6 +902,7 @@ fn simulation_admission_rng_crosses_cache_boundary_after_three_captured_seeds() 
     );
     advance(&mut d, 3);
     let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     let mut reference = SeededRng::new(51);
     let mut first_three = [0; 24];
     reference.fill_bytes(&mut first_three);
@@ -986,6 +1003,7 @@ fn in_flight_frame_is_delivered_to_receivers_rebooted_current_boot() {
     assert!(arrival > 4);
     assert_eq!(d.execution.machines[1].lifecycle.boot(), 0);
     let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     let expected = advance(&mut d, 15);
     let expected_states = states(&d);
     let expected_position = d.position();
@@ -1064,6 +1082,7 @@ fn nth_capture_failure_drops_partial_saved_owners_without_poisoning_source() {
         .state
         .fail_capture = false;
     let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     assert_eq!(dropped.load(Ordering::SeqCst), 2);
     drop(c);
     assert_eq!(dropped.load(Ordering::SeqCst), 5);
@@ -1080,6 +1099,7 @@ fn unfinished_quantum_and_pending_step_target_survive_restore() {
     })
     .unwrap();
     let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     assert_eq!(c.quantum_end, at(10));
     assert!(status(&mut d).stepping);
     let expected = advance(&mut d, 10);

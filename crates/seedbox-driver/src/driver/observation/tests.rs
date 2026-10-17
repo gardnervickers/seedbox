@@ -18,10 +18,12 @@ fn zero_event_capacity_keeps_same_turn_admit_reject_and_continuation() {
     let mut reference = None;
     for workers in [1, 4] {
         for capacity in [0, usize::MAX] {
-            let mut driver = build(
+            let mut driver = build_network_workers(
                 vec![spec(0, true, vec![]), spec(1, true, vec![])],
                 vec![],
                 true,
+                false,
+                workers,
             );
             driver.set_event_capacity(capacity);
             driver
@@ -38,7 +40,15 @@ fn zero_event_capacity_keeps_same_turn_admit_reject_and_continuation() {
                     Action::Heal(HealTarget::Input(key("absent"))),
                 )
                 .unwrap();
-            advance(&mut driver, 40);
+            // Retain the required handoff until one unified drain. Legacy
+            // selective drains intentionally consume their typed duplicate.
+            for _ in 0..1000 {
+                if driver.now() >= at(40) {
+                    break;
+                }
+                driver.step(at(40)).unwrap();
+            }
+            assert_eq!(driver.now(), at(40));
             let batch = driver.drain_observations();
             let ordered: Vec<_> = batch
                 .changes

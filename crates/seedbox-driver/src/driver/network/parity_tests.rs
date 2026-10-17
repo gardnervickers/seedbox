@@ -1,4 +1,5 @@
 //! Router arithmetic/stream/codec checks; Driver admission is tested separately.
+use super::test_observer::ObservedNetwork as Network;
 use super::*;
 use crate::driver::network_test_frames as frames;
 use crate::persistence::{CodecError, DecodeLimits, Decoder, Encoder, Wire};
@@ -420,7 +421,7 @@ fn extra_delay_saturates_and_overflowing_duplicate_is_skipped() {
     assert_eq!(n.layers[&1].counts.duplicated, 0);
 }
 #[test]
-fn complete_policy_tracker_rng_counters_and_undrained_facts_roundtrip() {
+fn complete_policy_tracker_rng_counters_roundtrip_with_fresh_observer() {
     let mut n = net(
         NetworkSetup::new(config(), Some(1_000_000_000), None, vec![])
             .unwrap()
@@ -445,10 +446,14 @@ fn complete_policy_tracker_rng_counters_and_undrained_facts_roundtrip() {
     n.route(MachineId(1), 0, &plain(1, 0, 3)).unwrap();
     n.route(MachineId(0), 0, &tcp(0, 1, (1234, 80), 8, 1, 0x10))
         .unwrap();
-    assert_eq!(n.frames.len(), 2);
-    assert_eq!(n.omitted, 1);
+    assert_eq!(n.observations.frames.len(), 2);
+    assert_eq!(n.observations.omitted, 1);
     let mut restored = decode(&n, 0);
-    assert_eq!(n.drain_frames(), restored.drain_frames());
+    let original = n.drain_frames();
+    assert_eq!(original.facts.len(), 2);
+    assert_eq!(original.omitted, 1);
+    assert!(restored.drain_frames().facts.is_empty());
+    assert_eq!(restored.observations.capacity, 0);
     for i in 1..6 {
         for net in [&mut n, &mut restored] {
             net.route(MachineId(1), i, &plain(1, 0, i as u8)).unwrap();
@@ -466,7 +471,7 @@ fn complete_policy_tracker_rng_counters_and_undrained_facts_roundtrip() {
     ));
 }
 #[test]
-fn malformed_layer_and_observation_relations_do_not_enter_continuation() {
+fn malformed_layers_reject_but_observer_fields_never_enter_continuation() {
     let mut n = net(NetworkSetup::from(config()).with_frame_capacity(1));
     n.shape(
         1,
@@ -477,43 +482,35 @@ fn malformed_layer_and_observation_relations_do_not_enter_continuation() {
         NetworkFaults::default(),
     );
     n.route(MachineId(0), 0, &plain(0, 1, 1)).unwrap();
-    for case in 0..5 {
+    for case in 0..3 {
         let mut bad = n.clone();
         match case {
             0 => bad.layers.get_mut(&1).unwrap().queue.matched = 1,
             1 => bad.layers.get_mut(&1).unwrap().counts.matched = 1,
-            2 => {
+            _ => {
                 bad.layers
                     .get_mut(&1)
                     .unwrap()
                     .burst
                     .insert((MachineId(0), MachineId(1)), 0);
             }
-            3 => bad.frames[0].due = Some(Timestamp::from_nanos(0)),
-            _ => bad.frame_capacity = 0,
         }
-        assert!(
-            bad.check_persist(3, 0, &[])
-                .and_then(
-                    |_| bad.check_frame_positions_persist(crate::driver::Position {
-                        at: Timestamp::from_nanos(0),
-                        boundary_index: 0,
-                        completed_quanta: 0
-                    })
-                )
-                .is_err(),
-            "case {case}"
-        );
+        assert!(bad.check_persist(3, 0, &[]).is_err(), "case {case}");
     }
-    n.frames[0].position.boundary_index = 1;
-    assert!(n
-        .check_frame_positions_persist(crate::driver::Position {
-            at: Timestamp::from_nanos(0),
-            boundary_index: 0,
-            completed_quanta: 0
-        })
-        .is_err());
+    let expected = serialized(&n);
+    // Even deliberately nonsensical observer copies cannot reach the encoder.
+    n.observations.frames[0].due = Some(Timestamp::from_nanos(0));
+    n.observations.frames[0].position.boundary_index = 1;
+    // Old codec negative case: retained facts with capacity zero are not a
+    // continuing-state relation at all; even malformed private copies stay out.
+    n.observations.capacity = 0;
+    assert_eq!(serialized(&n), expected);
+    n.observations.capacity = usize::MAX;
+    n.observations.omitted = u64::MAX;
+    assert_eq!(serialized(&n), expected);
+    assert!(n.check_persist(3, 0, &[]).is_ok());
 }
+
 #[test]
 fn validation_index_items_are_reserved_before_validation_allocations() {
     let mut bytes = 1u64.to_le_bytes().to_vec();
@@ -571,7 +568,7 @@ fn tracker_capacity_and_conversion_items_reject_before_element_reads() {
     let bytes = serialized(&n);
     let mut l = limits();
     l.total_items = 3;
-    let mut d = Decoder::new(Prefix(&bytes[..bytes.len() - 40]), bytes.len() as u64, l);
+    let mut d = Decoder::new(Prefix(&bytes[..bytes.len() - 16]), bytes.len() as u64, l);
     assert!(matches!(
         Network::get(&mut d),
         Err(CodecError::Limit("aggregate items"))

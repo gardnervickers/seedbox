@@ -239,6 +239,7 @@ struct ExecutionState<M> {
     completed_quanta: u64,
     quantum_committed: bool,
     failed: bool,
+    stopped: bool,
     oracle: MachineId,
     finished: Option<(Timestamp, ExitReason)>,
     oracle_stops: BTreeSet<(u64, NonZeroU32)>,
@@ -258,6 +259,7 @@ struct ObservationState {
     next_sequence: u64,
     capacity: usize,
     omitted: u64,
+    frames: observation::FrameObservations,
 }
 impl Default for ObservationState {
     fn default() -> Self {
@@ -267,6 +269,7 @@ impl Default for ObservationState {
             next_sequence: 0,
             capacity: usize::MAX,
             omitted: 0,
+            frames: observation::FrameObservations::default(),
         }
     }
 }
@@ -536,6 +539,7 @@ where
         control.declare_spawnable(&spawnable);
         control.controller = controller;
         control.service.reply_latency_ns = controller.map_or(0, |setup| setup.latency_ns);
+        let frames = observation::FrameObservations::from_setup(&network);
         let mut network = network::Network::from_setup(network);
         for (index, (definition, &seed)) in definitions.iter().zip(&seeds).enumerate() {
             network.admit(
@@ -558,6 +562,7 @@ where
                 completed_quanta: 0,
                 quantum_committed: false,
                 failed: false,
+                stopped: false,
                 oracle: MachineId(0),
                 finished: None,
                 oracle_stops: BTreeSet::new(),
@@ -567,7 +572,10 @@ where
                 definitions: spawnable,
                 network,
             },
-            observations: ObservationState::default(),
+            observations: ObservationState {
+                frames,
+                ..ObservationState::default()
+            },
             committed: Vec::new(),
             playback: Playback::default(),
             factory: Box::new(factory),
@@ -593,12 +601,14 @@ where
     // Constructor-only capacity cannot rebind a captured Driver to an absent or
     // new observer without changing simulation authority; keep this telemetry-only.
     pub fn set_frame_capacity(&mut self, capacity: usize) {
-        self.execution.network.set_frame_capacity(capacity);
+        self.observations.frames.set_capacity(capacity);
     }
 
     /// Drain committed bounded frame observations independently of EventKind.
     /// Works after failure/stop/completion, does no machine work, and never
     /// changes authoritative counters or dense event/witness sequencing.
+    /// This legacy selective drain also consumes the required-change prefix;
+    /// hosts needing that prefix must use `drain_observations` exclusively.
     pub fn drain_frames(&mut self) -> FrameFacts {
         let mut batch = self.drain_observations();
         let frames = std::mem::take(&mut batch.frames);
@@ -620,6 +630,8 @@ where
     /// Transfer committed bookkeeping and optional descriptions exactly once.
     /// Changes are never capacity-limited. Retained events and frames may have
     /// explicit gaps; this never executes work or drains future scheduled inputs.
+    /// Use this API exclusively when consuming required changes: legacy selective
+    /// drains consume that prefix without returning its typed duplicate.
     // TODO: Re-evaluate: one handoff prevents service input/status continuation
     // from depending on optional Event retention or a second publication path.
     pub fn drain_observations(&mut self) -> FlushResults {
@@ -627,21 +639,21 @@ where
             position: self.position(),
             changes: std::mem::take(&mut self.committed),
             events: std::mem::take(&mut self.observations.published),
-            frames: self.execution.network.drain_frames(),
+            frames: self.observations.frames.drain(),
             omitted_events: std::mem::take(&mut self.observations.omitted),
             next_event_sequence: self.observations.next_sequence,
         }
     }
 
-    // Legacy selective drains delegate to the same handoff and leave the other
-    // streams untouched. The service uses only drain_observations.
+    // Legacy selective drains delegate to the same handoff and leave other
+    // optional streams untouched. They consume the required-change prefix too:
+    // legacy clients process their own Event facts, and must not retain an
+    // unbounded, inaccessible duplicate. Hosts needing required changes use
+    // drain_observations exclusively; the service does so.
     fn restore_other_observations(&mut self, batch: FlushResults) {
-        self.committed = batch.changes;
         self.observations.published = batch.events;
         self.observations.omitted = batch.omitted_events;
-        self.execution
-            .network
-            .restore_frame_observations(batch.frames);
+        self.observations.frames.restore(batch.frames);
     }
 
     /// Read cumulative per-pair decisions and confirmed receive offers without
@@ -663,8 +675,9 @@ where
     /// Each event is returned exactly once. The driver keeps no history of
     /// drained events: the host owns retained history. Default retention is
     /// unbounded; hosts should drain after every `step` and barrier callback.
-    /// Use `drain_observations` for required changes and explicit loss watermarks
-    /// when `set_event_capacity` limits optional copies.
+    /// This legacy selective drain also consumes the required-change prefix.
+    /// Use `drain_observations` exclusively for required changes and explicit loss
+    /// watermarks when `set_event_capacity` limits optional copies.
     ///
     /// # Order
     ///
@@ -1026,7 +1039,7 @@ where
                 self.playback.before_next = false;
                 return Ok(self.outcome());
             }
-            if self.playback.stopped {
+            if self.execution.stopped {
                 return Ok(StepOutcome::Stopped { at: self.now() });
             }
             let position = self.position();
@@ -1104,7 +1117,7 @@ where
         outputs.sort_by_key(|output| (output.at, output.machine));
         // Frames are routed in publication order; validated when their run was accepted.
         let position = self.position();
-        let observation_mark = self.execution.network.observation_mark();
+        let observation_mark = self.observations.frames.mark();
         for output in &outputs {
             if let Response::TransmitFrame { bytes } = &output.payload {
                 if let Err(error) = self.execution.network.route_at(
@@ -1112,10 +1125,9 @@ where
                     output.machine,
                     output.at.as_nanos(),
                     bytes,
+                    &mut self.observations.frames,
                 ) {
-                    self.execution
-                        .network
-                        .discard_uncommitted_facts(observation_mark);
+                    self.observations.frames.discard(observation_mark);
                     return Err(match error {
                         network::RouteError::ArrivalOverflow => Error::TimeOverflow,
                         network::RouteError::SequenceOverflow => Error::PositionOverflow,
@@ -2417,6 +2429,7 @@ where
                     delivery.sent,
                     delivery.bytes.len(),
                     true,
+                    &mut self.observations.frames,
                 );
                 continue;
             }
@@ -2443,9 +2456,15 @@ where
             return Err(error);
         }
         for (from, to, sent, bytes) in offered {
-            self.execution
-                .network
-                .delivery_result(position, from, to, sent, bytes, false);
+            self.execution.network.delivery_result(
+                position,
+                from,
+                to,
+                sent,
+                bytes,
+                false,
+                &mut self.observations.frames,
+            );
         }
         self.commit_boundary()?;
         Ok(true)
@@ -2738,7 +2757,9 @@ where
 {
     /// Observe playback and the committed simulation position without progress.
     pub fn playback(&self) -> PlaybackStatus {
-        self.driver.playback.status(self.driver.position())
+        self.driver
+            .playback
+            .status(self.driver.position(), self.driver.execution.stopped)
     }
 
     /// Select host pacing from this boundary. This cancels a pending single
@@ -2800,7 +2821,7 @@ where
     /// callers cooperate by checking cancellation between calls. There is no
     /// promise to interrupt a hung `Machine::run`.
     pub fn stop(&mut self) {
-        self.driver.playback.stopped = true;
+        self.driver.execution.stopped = true;
         self.driver.playback.finish();
         self.driver.playback.before_next = false;
     }
@@ -2808,7 +2829,7 @@ where
     fn check_running(&self) -> Result<(), Error<M::Error>> {
         if self.driver.execution.finished.is_some() {
             Err(Error::Completed)
-        } else if self.driver.playback.stopped {
+        } else if self.driver.execution.stopped {
             Err(Error::Stopped)
         } else {
             Ok(())

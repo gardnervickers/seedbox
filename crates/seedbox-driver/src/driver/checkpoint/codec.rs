@@ -1,12 +1,12 @@
-//! Version 4: fixed header then closed, field-ordered binary records.
-//! Adds explicit controller authority/latency and boot-pinned delayed replies.
+//! Version 5: fixed header then closed, field-ordered binary records.
+//! Contains only continuing state; observation sessions are never encoded.
 use super::*;
 use crate::persistence::{
     require, CodecError, DecodeLimits, Decoder, Encoder, Result, SnapshotReference, Wire,
 };
 use std::io::{Read, Write};
 const MAGIC: [u8; 8] = *b"SBXDRVR\0";
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 
 impl<S> Checkpoint<S> {
     /// Consume this capture, replacing opaque snapshots in insertion order.
@@ -27,10 +27,10 @@ impl<S> Checkpoint<S> {
             quantum_end,
             machines,
             events,
-            observations,
             boundary_index,
             completed_quanta,
             quantum_committed,
+            stopped,
             playback,
             oracle,
             finished,
@@ -80,10 +80,10 @@ impl<S> Checkpoint<S> {
             quantum_end,
             machines,
             events,
-            observations,
             boundary_index,
             completed_quanta,
             quantum_committed,
+            stopped,
             playback,
             oracle,
             finished,
@@ -150,7 +150,7 @@ impl Checkpoint<SnapshotReference> {
         )?;
         let mut d = Decoder::new(reader, limits.encoded_bytes, limits);
         require(<[u8; 8]>::get(&mut d)? == MAGIC, "magic")?;
-        require(u32::get(&mut d)? == VERSION, "version")?;
+        require(u32::get(&mut d)? == VERSION, "checkpoint version was made by an older or incompatible engine; replay with its retained engine or run fresh")?;
         let length = u64::get(&mut d)?;
         if length > d.remaining {
             return Err(CodecError::Limit("encoded bytes"));
@@ -340,63 +340,6 @@ impl Checkpoint<SnapshotReference> {
         }
         Ok(())
     }
-    fn check_kind(&self, k: &EventKind) -> Result<()> {
-        if let EventKind::FaultSettled {
-            record,
-            network: Some(counts),
-            ..
-        } = k
-        {
-            counts.check_persist()?;
-            require(
-                record.action == FaultAction::Heal
-                    && match &record.target {
-                        FaultTarget::DirectedLinks { .. } => counts.selection.is_none(),
-                        FaultTarget::Connection { .. } => counts.selection.is_some(),
-                        _ => false,
-                    },
-                "network settlement scope",
-            )?;
-        }
-        match k {
-            EventKind::Output(o) => {
-                require(
-                    o.machine.0 < self.machines.len() && o.at <= self.now,
-                    "output identity/time",
-                )?;
-                require(
-                    o.boot <= self.machines[o.machine.0].lifecycle.boot(),
-                    "output boot",
-                )?;
-            }
-            EventKind::MachineAdded { machine, .. }
-            | EventKind::Transition { machine, .. }
-            | EventKind::ReplyAdmitted { machine, .. } => {
-                require(machine.0 < self.machines.len(), "event machine")?
-            }
-            EventKind::FaultAdmitted(r) | EventKind::FaultSettled { record: r, .. } => {
-                self.check_record(r)?
-            }
-            EventKind::TriggerArmed {
-                trigger,
-                source,
-                target,
-                ..
-            } => require(
-                self.control.service.trigger_persist(*trigger)
-                    && source.0 < self.machines.len()
-                    && target.is_none_or(|id| id.0 < self.machines.len()),
-                "trigger event",
-            )?,
-            EventKind::TriggerResolved { trigger, fault, .. } => require(
-                self.control.service.trigger_persist(*trigger)
-                    && fault.is_none_or(|f| self.control.service.token_persist(f.0)),
-                "trigger result",
-            )?,
-            EventKind::InputRejected { .. } => {}
-        }
-        Ok(())
-    }
     fn check_retired_outputs(&self) -> Result<()> {
         let mut seen = BTreeSet::new();
         let mut visit = |output: &MachineResponse| -> Result<()> {
@@ -425,16 +368,6 @@ impl Checkpoint<SnapshotReference> {
                 visit(output)?;
             }
         }
-        for event in &self.observations.published {
-            if let EventKind::Output(output) = &event.kind {
-                visit(output)?;
-            }
-        }
-        for event in &self.observations.staged_events {
-            if let Staged::Driver(_, EventKind::Output(output)) = event {
-                visit(output)?;
-            }
-        }
         Ok(())
     }
     fn validate_decoded(&self) -> Result<()> {
@@ -446,16 +379,6 @@ impl Checkpoint<SnapshotReference> {
             &self.machines,
             &self.control,
             &self.network,
-        )
-        .map_err(CodecError::Invalid)?;
-        validate_publications(
-            &self.observations.published,
-            self.observations.next_sequence,
-            Position {
-                boundary_index: self.boundary_index,
-                completed_quanta: self.completed_quanta,
-                at: self.now,
-            },
         )
         .map_err(CodecError::Invalid)?;
         self.rng
@@ -478,11 +401,6 @@ impl Checkpoint<SnapshotReference> {
         )?;
         self.network
             .check_persist(self.machines.len(), self.now.as_nanos(), &self.definitions)?;
-        self.network.check_frame_positions_persist(Position {
-            at: self.now,
-            boundary_index: self.boundary_index,
-            completed_quanta: self.completed_quanta,
-        })?;
         self.rng.check_admissions_persist(
             (0..self.machines.len()).map(|i| self.network.member_seed(i)),
         )?;
@@ -529,32 +447,11 @@ impl Checkpoint<SnapshotReference> {
             }
             for output in &entry.staged {
                 require(
-                    output.machine == MachineId(id) && output.at <= self.now,
+                    output.machine == MachineId(id)
+                        && output.at <= self.now
+                        && output.boot <= entry.lifecycle.boot(),
                     "staged output identity/time",
                 )?;
-            }
-        }
-        for event in &self.observations.published {
-            self.check_kind(&event.kind)?;
-        }
-        for staged in &self.observations.staged_events {
-            match staged {
-                Staged::Driver(at, kind) => {
-                    require(*at <= self.now, "staged fact time")?;
-                    self.check_kind(kind)?;
-                }
-                Staged::Notice(n) => {
-                    self.control.check_notice_persist(n, self.now.as_nanos())?;
-                    let scope = match n {
-                        crate::oracle::service::Notice::Admitted(a) => Some(&a.scope),
-                        crate::oracle::service::Notice::Settled(s) => Some(&s.scope),
-                        _ => None,
-                    };
-                    if let Some(scope) = scope {
-                        self.network
-                            .check_scope_persist(scope, &|name| self.control.reply_target(name))?;
-                    }
-                }
             }
         }
         let mut pending = BTreeSet::new();
@@ -701,6 +598,7 @@ impl Checkpoint<SnapshotReference> {
         self.check_retired_outputs()?;
         self.playback.check_persist(self.completed_quanta)?;
         if let Some(held) = &self.playback.held {
+            self.check_record(held)?;
             require(
                 self.control.has_pending(held.fault),
                 "held fault is not pending",
@@ -751,20 +649,4 @@ impl<T: Wire> Wire for Entry<T> {
         })
     }
 }
-// This grouping is transparent to the existing v4 byte order and depth budget.
-impl Wire for ObservationState {
-    fn put<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
-        self.staged_events.put(e)?;
-        self.published.put(e)?;
-        self.next_sequence.put(e)
-    }
-    fn get<R: Read>(d: &mut Decoder<R>) -> Result<Self> {
-        Ok(Self {
-            staged_events: Wire::get(d)?,
-            published: Wire::get(d)?,
-            next_sequence: Wire::get(d)?,
-            ..ObservationState::default()
-        })
-    }
-}
-wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,quantum_end,machines,events,observations,boundary_index,completed_quanta,quantum_committed,playback,oracle,finished,oracle_stops,control,inputs,trigger_marker,definitions,network});
+wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,quantum_end,machines,events,boundary_index,completed_quanta,quantum_committed,stopped,playback,oracle,finished,oracle_stops,control,inputs,trigger_marker,definitions,network});

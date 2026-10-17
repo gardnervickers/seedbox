@@ -67,6 +67,7 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback, Vec<Committed>) {
         completed_quanta,
         quantum_committed,
         failed,
+        stopped,
         oracle,
         finished,
         oracle_stops,
@@ -82,6 +83,7 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback, Vec<Committed>) {
         next_sequence,
         capacity: _,
         omitted: _,
+        frames: _,
     } = observations;
     let SimulationRng::Seeded(rng) = rng else {
         panic!("owned RNG required by probe")
@@ -100,8 +102,9 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback, Vec<Committed>) {
         boundary_index,
         completed_quanta,
         quantum_committed,
-        playback,
+        playback.checkpoint(),
         failed,
+        stopped,
         oracle,
         finished,
         oracle_stops,
@@ -807,6 +810,7 @@ fn unarmed_paused_hold_roundtrips_codec_and_releases_once_workers_one_four() {
     let p = prepare(&mut d, "held", throttle());
     assert!(matches!(commit(&mut d, &p), DueOutcome::BeforeFault { .. }));
     let (encoded, store) = bytes(&mut d);
+    reference_observer_session(&mut d);
     d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
         .unwrap();
     let expected = advance(&mut d, 30);

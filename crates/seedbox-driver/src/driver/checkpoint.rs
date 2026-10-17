@@ -9,9 +9,11 @@ mod controller_tests;
 
 /// An independently owned, stopped simulation capture.
 ///
-/// This retains all Driver-owned deterministic state and undrained publications,
+/// This retains all Driver-owned deterministic state,
 /// plus each machine's opaque snapshot. It does not retain worker threads,
-/// contexts, factories, wall-clock anchors or history already drained by the host.
+/// contexts, factories, wall-clock anchors or any observation history, buffers,
+/// capacities, omissions or stream cursors. Restore starts a fresh, empty
+/// observer session; capture leaves the source session intact.
 /// Captures can be borrowed repeatedly after the source Driver is destroyed;
 /// machine snapshots need not implement Clone or a serialization trait.
 /// This type is not a persistence/export format.
@@ -25,11 +27,11 @@ pub struct Checkpoint<S> {
     quantum_end: Timestamp,
     machines: Vec<Entry<S>>,
     events: BTreeMap<Timestamp, VecDeque<Scheduled>>,
-    observations: ObservationState,
     boundary_index: u64,
     completed_quanta: u64,
     quantum_committed: bool,
-    playback: Playback,
+    stopped: bool,
+    playback: playback::PlaybackIntent,
     oracle: MachineId,
     finished: Option<(Timestamp, ExitReason)>,
     oracle_stops: BTreeSet<(u64, NonZeroU32)>,
@@ -150,28 +152,6 @@ fn validate<T>(
     Ok(())
 }
 
-fn validate_publications(
-    events: &[Event],
-    next: u64,
-    position: Position,
-) -> Result<(), &'static str> {
-    let count = u64::try_from(events.len()).map_err(|_| "publication length overflow")?;
-    let first = next
-        .checked_sub(count)
-        .ok_or("invalid publication cursor")?;
-    for (event, sequence) in events.iter().zip(first..next) {
-        if event.sequence != sequence
-            || event.position.boundary_index > position.boundary_index
-            || event.position.completed_quanta > position.completed_quanta
-            || event.position.at > position.at
-            || event.at > position.at
-        {
-            return Err("invalid publication suffix");
-        }
-    }
-    Ok(())
-}
-
 impl<M> Driver<M>
 where
     M: Machine + Send + 'static,
@@ -250,7 +230,7 @@ where
     ///
     /// Paused, held-before-fault, permanently stopped and completed simulations
     /// retain their logical state; capture never resumes them. The capture owns
-    /// exact scheduling, control, network, RNG and publication state. Drained
+    /// exact scheduling, control, network and RNG state. Observation
     /// history and external construction authority remain the caller's concern.
     ///
     /// Drivers constructed with an arbitrary RNG through [`Self::new`] return
@@ -281,7 +261,7 @@ where
     /// may retain snapshots, and Rust metadata/future definitions still take space.
     /// This is not a bound on whole-process memory or an allocation-free operation.
     ///
-    /// The result owns the same exact continuation and publication state as
+    /// The result owns the same exact continuing state as
     /// `checkpoint`, without Clone or serialization bounds on snapshots. No guest
     /// runs, RNG draws, factory calls, admission or source execution changes occur.
     /// Paused, held, stopped and completed boundaries are preserved, not resumed.
@@ -316,12 +296,6 @@ where
             &self.execution.network,
         )
         .map_err(|error| capture(Error::InvalidCheckpoint(error)))?;
-        validate_publications(
-            &self.observations.published,
-            self.observations.next_sequence,
-            self.position(),
-        )
-        .map_err(|error| capture(Error::InvalidCheckpoint(error)))?;
         let rng = rng.clone();
         let machines = self
             .execution
@@ -351,10 +325,10 @@ where
             quantum_ns: self.execution.quantum_ns,
             quantum_end: self.execution.quantum_end,
             events: self.execution.events.clone(),
-            observations: self.observations.clone(),
             boundary_index: self.execution.boundary_index,
             completed_quanta: self.execution.completed_quanta,
             quantum_committed: self.execution.quantum_committed,
+            stopped: self.execution.stopped,
             playback: self.playback.checkpoint(),
             oracle: self.execution.oracle,
             finished: self.execution.finished,
@@ -385,7 +359,7 @@ where
     /// at its original initial-call count. Contexts/factories must not introduce
     /// host timing or worker identity into simulation behavior. These external
     /// obligations are not serialized or validated by this typed capture.
-    /// Already-drained history and service input-program cursors must be retained
+    /// Observation history is not restored. Service input-program cursors must be retained
     /// separately by the host; this operation alone is not checkpoint export.
     // TODO: Re-evaluate: opaque backend restore callbacks supply native resources
     // without adding a common Machine constructor. New ownership makes partial
@@ -408,16 +382,6 @@ where
             &checkpoint.machines,
             &checkpoint.control,
             &checkpoint.network,
-        )
-        .map_err(Error::InvalidCheckpoint)?;
-        validate_publications(
-            &checkpoint.observations.published,
-            checkpoint.observations.next_sequence,
-            Position {
-                boundary_index: checkpoint.boundary_index,
-                completed_quanta: checkpoint.completed_quanta,
-                at: checkpoint.now,
-            },
         )
         .map_err(Error::InvalidCheckpoint)?;
         let workers = Workers::new(workers, context)?;
@@ -446,6 +410,7 @@ where
                 completed_quanta: checkpoint.completed_quanta,
                 quantum_committed: checkpoint.quantum_committed,
                 failed: false,
+                stopped: checkpoint.stopped,
                 oracle: checkpoint.oracle,
                 finished: checkpoint.finished,
                 oracle_stops: checkpoint.oracle_stops.clone(),
@@ -456,9 +421,9 @@ where
                 network: checkpoint.network.clone(),
             },
             workers,
-            observations: checkpoint.observations.clone(),
+            observations: ObservationState::default(),
             committed: Vec::new(),
-            playback: checkpoint.playback.checkpoint(),
+            playback: Playback::from_intent(checkpoint.playback.clone()),
             factory: Box::new(factory),
         })
     }

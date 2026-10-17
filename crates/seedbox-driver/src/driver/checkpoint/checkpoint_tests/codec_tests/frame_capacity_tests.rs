@@ -1,4 +1,5 @@
-//! Retention capacity is a scalar, not a decoded collection allocation.
+//! Retention capacity is an observer scalar: neither a decoded allocation nor
+//! continuing checkpoint data. Preserve the small-capture bd-40a regression.
 use super::*;
 
 fn tight_roundtrip(driver: &mut Driver<Mock>) -> Checkpoint<Saved> {
@@ -18,10 +19,19 @@ fn tight_roundtrip(driver: &mut Driver<Mock>) -> Checkpoint<Saved> {
 fn unused_frame_capacity_larger_than_capture_roundtrips_with_tight_limits() {
     for capacity in [1024, usize::MAX] {
         let mut driver = build(vec![spec(0, true, vec![])], vec![], true);
+        let allocation = driver.observations.frames.frames.capacity();
+        let authority = artifact(driver.checkpoint().unwrap()).0;
         driver.set_frame_capacity(capacity);
+        assert_eq!(
+            driver.observations.frames.frames.capacity(),
+            allocation,
+            "unused observer retention must not reserve configured capacity"
+        );
         let (bytes, _) = artifact(driver.checkpoint().unwrap());
+        assert_eq!(bytes, authority, "retention scalar cannot reach the codec");
         assert!(bytes.len() < capacity, "small service capture regression");
         let checkpoint = tight_roundtrip(&mut driver);
+        reference_observer_session(&mut driver);
         let expected = advance(&mut driver, 60);
         let expected_states = states(&driver);
         for workers in [1, 4] {
@@ -59,11 +69,12 @@ fn buffered_frames_shrunk_cleared_or_with_unused_capacity_roundtrip() {
         let kept = capacity.min(3);
         assert_eq!(retained.facts.len(), kept);
         assert_eq!(retained.omitted, (3 - kept) as u64);
+        reference_observer_session(&mut driver);
         let expected = advance(&mut driver, 80);
         let expected_states = states(&driver);
         for workers in [1, 4] {
             let mut restored = restore(&checkpoint, workers);
-            assert_eq!(restored.drain_frames(), retained);
+            assert_eq!(restored.drain_frames(), FrameFacts::default());
             assert_eq!(advance(&mut restored, 80), expected);
             assert_eq!(states(&restored), expected_states);
         }

@@ -4,10 +4,12 @@
 //! routing time, in the Driver's output publication order, and owns in-flight
 //! frames, per-pair FIFO clocks and seeded loss/jitter streams. It is never part
 //! of a machine snapshot; whole-Driver checkpoints retain it.
-use super::MachineId;
+use super::{observation::FrameObservations, MachineId};
 #[cfg(test)]
 use super::{Position, Timestamp};
 mod parity;
+#[cfg(test)]
+mod test_observer;
 use crate::{
     definition::MacAddress,
     rng::{RngDomain, RngStreamExt, SeededRng},
@@ -185,9 +187,6 @@ pub(crate) struct Network {
     connections: seedbox_engine_core::connections::Connections,
     queue_counts: BTreeMap<(MachineId, MachineId), QueueCounts>,
     counts: BTreeMap<(MachineId, MachineId), NetworkPairCounts>,
-    frame_capacity: usize,
-    frames: std::collections::VecDeque<FrameFact>,
-    omitted: u64,
     /// Active partitions per directed pair; overlapping partitions stack.
     cuts: BTreeMap<(MachineId, MachineId), u32>,
     /// The directed pairs each active partition handle cut.
@@ -218,9 +217,6 @@ impl Network {
             connections: seedbox_engine_core::connections::Connections::default(),
             queue_counts: BTreeMap::new(),
             counts: BTreeMap::new(),
-            frame_capacity: 0,
-            frames: std::collections::VecDeque::new(),
-            omitted: 0,
             members: Vec::new(),
             pairs: BTreeMap::new(),
             in_flight: BTreeMap::new(),
@@ -327,6 +323,7 @@ impl Network {
             from,
             sent,
             bytes,
+            &mut FrameObservations::default(),
         )
     }
 

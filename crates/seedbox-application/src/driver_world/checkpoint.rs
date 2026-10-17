@@ -5,7 +5,7 @@ pub(super) fn validate_metadata(bytes: &[u8]) -> Result<()> {
     metadata::validate(bytes).map_err(Error::from)
 }
 use crate::{Error, Result};
-use seedbox_driver::driver::{Checkpoint, Driver, Event, SnapshotReference};
+use seedbox_driver::driver::{Checkpoint, Driver, SnapshotReference};
 use seedbox_engine_protocol::driver_world::{self as wire, Artifact, Inventory, State};
 use seedbox_machine::machine::Machine;
 use sha2::{Digest, Sha256};
@@ -62,7 +62,7 @@ pub(super) fn capture<M>(
     capture: Capture<'_>,
     output: &Path,
     request_id: &str,
-    mut publish: impl FnMut(&mut State, Event) -> Result<()>,
+    mut publish: impl FnMut(&mut State, seedbox_driver::driver::FlushResults) -> Result<()>,
     mut write_snapshot: impl FnMut(M::Snapshot, &mut BufWriter<File>) -> Result<()>,
 ) -> CaptureResult<PathBuf>
 where
@@ -113,11 +113,9 @@ where
         let inventory = copy_inventory(capture.inventory, staging.path(), &final_dir)?;
         // Publish exactly once before native capture. A failed publisher has lost
         // the drained suffix: distinguish it from a recoverable capture refusal.
-        for event in driver.drain_events() {
-            if let Err(error) = publish(capture.state, event) {
-                publication_failed = true;
-                return Err(error);
-            }
+        if let Err(error) = publish(capture.state, driver.drain_observations()) {
+            publication_failed = true;
+            return Err(error);
         }
         let position = playback.position;
         capture.state.world.position = seedbox_engine_protocol::host_control::BoundaryPosition {

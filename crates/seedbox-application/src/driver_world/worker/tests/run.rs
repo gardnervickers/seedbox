@@ -79,7 +79,10 @@ fn loop_processes_real_control_prepare_commit_retry_and_resumes_exactly_once() {
         assert_eq!(worker.state.world.input_program.admissions.len(), 1);
         assert_eq!(worker.state.world.input_program.admissions[0].plan.id, 1);
         assert_eq!(worker.state.world.position.simulated_time_ns, 30);
-        assert_eq!(worker.state.world.publication.applied_faults.len(), 1);
+        assert_eq!(
+            worker.state.world.publication.session.applied_faults.len(),
+            1
+        );
     }
 }
 

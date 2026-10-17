@@ -157,14 +157,6 @@ impl Control {
             crate::persistence::CodecError::Invalid("machine identity overflow"),
         )
     }
-    pub(crate) fn check_notice_persist(
-        &self,
-        n: &crate::oracle::service::Notice,
-        now: u64,
-    ) -> crate::persistence::Result<()> {
-        self.service
-            .check_notice_persist(n, now, &|n| self.known_persist(n))
-    }
     pub(crate) fn check_plan_persist(
         &self,
         p: &crate::oracle::service::Plan,

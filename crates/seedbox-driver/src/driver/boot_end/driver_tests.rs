@@ -254,12 +254,16 @@ fn an_offered_but_unconsumed_crash_is_not_end_proof() {
 }
 
 #[test]
-fn natural_exit_and_program_exit_payloads_survive_the_closed_codec() {
+fn boot_end_cursor_but_not_historical_payloads_survives_the_closed_codec() {
     for mode in [Mode::NaturalExit, Mode::ProgramExit(17)] {
         let mut d = make(mode, 1, 1);
         step(&mut d, 10);
         let c = roundtrip(d.checkpoint().unwrap());
         let expected = d.drain_events();
+        assert!(
+            !expected.is_empty(),
+            "source keeps its own historical payloads"
+        );
         let mut restored = Driver::<Mock>::from_checkpoint(
             &c,
             1,
@@ -268,7 +272,7 @@ fn natural_exit_and_program_exit_payloads_survive_the_closed_codec() {
             |_| Err(io::Error::other("unexpected spawn")),
         )
         .unwrap();
-        assert_eq!(restored.drain_events(), expected);
+        assert!(restored.drain_events().is_empty());
         assert_eq!(restored.execution.machines[1].last_ended_published, Some(0));
     }
 }
@@ -463,7 +467,10 @@ fn cursor_codec_and_mock_continuation_match_one_and_four_workers() {
         .skip(1)
         .all(|e| e.last_ended_published == Some(0)));
     let prefix = source.drain_events();
+    assert!(!prefix.is_empty(), "source history remains source-owned");
     let continue_driver = |d: &mut Driver<Mock>| {
+        d.drain_observations();
+        d.observations = Default::default();
         for id in 1..=3 {
             schedule(
                 d,
@@ -491,7 +498,7 @@ fn cursor_codec_and_mock_continuation_match_one_and_four_workers() {
             .iter()
             .skip(1)
             .all(|e| e.last_ended_published == Some(0)));
-        assert_eq!(restored.drain_events(), prefix);
+        assert!(restored.drain_events().is_empty());
         assert_eq!(continue_driver(&mut restored), expected);
         assert!(restored
             .execution

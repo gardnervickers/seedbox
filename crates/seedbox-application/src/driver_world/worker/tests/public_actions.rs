@@ -129,8 +129,8 @@ fn public_authored_clock_draw_heal_draw_runs_in_order_without_a_service_alias_ta
         );
         worker.state.world.input_program.validate_at(10).unwrap();
         results.push((
-            worker.state.world.publication.witness,
-            worker.state.world.publication.witness_records,
+            worker.state.world.publication.session.witness,
+            worker.state.world.publication.session.witness_records,
         ));
     }
     assert_eq!(results[0], results[1]);

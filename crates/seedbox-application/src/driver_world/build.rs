@@ -210,13 +210,6 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
             "Driver checkpoint readiness/name inventory differs from prepared initial machines",
         ));
     }
-    if envelope.state.world.publication.witness_records
-        != envelope.state.world.publication.next_driver_sequence
-    {
-        return Err(bad(
-            "Driver checkpoint publication continuation is inconsistent",
-        ));
-    }
     envelope
         .state
         .world
@@ -229,7 +222,7 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
         .input_program
         .validate_at(envelope.state.world.position.simulated_time_ns)
         .map_err(bad)?;
-    // Bind the codec4 controller/latency before extracting a factory runtime
+    // Bind the codec5 controller/latency before extracting a factory runtime
     // or restoring even the first native machine. Saved queues stay in Driver.
     let retained = checkpoint::open(&envelope, driver_limits(envelope.driver.length)?)?;
     super::controller::resolve(

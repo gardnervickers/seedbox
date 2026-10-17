@@ -1,6 +1,6 @@
 //! Committed Driver publications become service observations and result evidence.
 //! Transport loss never changes witness state. A restored branch starts a new
-//! transport stream but continues the logical publication and evidence cursors.
+//! transport stream, publication cursor and observer checksum.
 use crate::{Error, Result};
 use seedbox_driver::driver::{
     self as driver, Event, EventKind, FaultAction, FaultOrigin, FaultRecord, FaultTarget,
@@ -41,6 +41,25 @@ impl Publisher {
             sequence: 0,
         })
     }
+    /// Fan out one already-bookkept handoff; never accept unconsumed causal facts.
+    pub(super) fn batch(
+        &mut self,
+        state: &mut State,
+        names: &BTreeMap<MachineId, String>,
+        batch: driver::FlushResults,
+    ) -> Result<()> {
+        if !batch.changes.is_empty() {
+            return Err(invalid(
+                "observation publication received unconsumed required changes",
+            ));
+        }
+        for event in batch.events {
+            self.publish(state, names, event)?;
+        }
+        state.world.position = super::worker::position(batch.position);
+        self.event_gap(state, batch.omitted_events, batch.next_event_sequence)?;
+        self.frames(state, names, batch.frames)
+    }
     fn emit(
         &mut self,
         state: &mut State,
@@ -55,9 +74,10 @@ impl Publisher {
             .sequence
             .checked_add(1)
             .ok_or_else(|| invalid("Driver observation sequence exhausted"))?;
-        state.world.publication.observation_records = state
+        state.world.publication.session.observation_records = state
             .world
             .publication
+            .session
             .observation_records
             .checked_add(1)
             .ok_or_else(|| invalid("Driver logical observation count exhausted"))?;
@@ -130,9 +150,10 @@ impl Publisher {
                 .sequence
                 .checked_add(facts.omitted)
                 .ok_or_else(|| invalid("Driver frame observation sequence exhausted"))?;
-            state.world.publication.observation_records = state
+            state.world.publication.session.observation_records = state
                 .world
                 .publication
+                .session
                 .observation_records
                 .checked_add(facts.omitted)
                 .ok_or_else(|| invalid("Driver logical frame observation count exhausted"))?;
@@ -148,9 +169,10 @@ impl Publisher {
                 .sequence
                 .checked_add(omitted)
                 .ok_or_else(|| invalid("Driver event observation sequence exhausted"))?;
-            state.world.publication.observation_records = state
+            state.world.publication.session.observation_records = state
                 .world
                 .publication
+                .session
                 .observation_records
                 .checked_add(omitted)
                 .ok_or_else(|| invalid("Driver event observation count exhausted"))?;
@@ -162,7 +184,7 @@ impl Publisher {
                 Kind::Frames { frames: vec![] },
             )?;
         }
-        state.world.publication.next_driver_sequence = next;
+        state.world.publication.session.next_driver_sequence = next;
         Ok(())
     }
 
@@ -181,7 +203,7 @@ impl Publisher {
         names: &BTreeMap<MachineId, String>,
         event: Event,
     ) -> Result<()> {
-        if event.sequence != state.world.publication.next_driver_sequence {
+        if event.sequence != state.world.publication.session.next_driver_sequence {
             return Err(invalid(
                 "Driver publication cursor differs from service continuation",
             ));
@@ -191,15 +213,17 @@ impl Publisher {
         let publication = &mut state.world.publication;
         let mut hash = Sha256::new();
         hash.update(b"seedbox-driver-event-chain-v1\0");
-        hash.update(publication.witness);
+        hash.update(publication.session.witness);
         hash.update((bytes.len() as u64).to_le_bytes());
         hash.update(bytes);
-        publication.witness = hash.finalize().into();
-        publication.witness_records = publication
+        publication.session.witness = hash.finalize().into();
+        publication.session.witness_records = publication
+            .session
             .witness_records
             .checked_add(1)
             .ok_or_else(|| invalid("Driver witness record count exhausted"))?;
-        publication.next_driver_sequence = publication
+        publication.session.next_driver_sequence = publication
+            .session
             .next_driver_sequence
             .checked_add(1)
             .ok_or_else(|| invalid("Driver publication sequence exhausted"))?;

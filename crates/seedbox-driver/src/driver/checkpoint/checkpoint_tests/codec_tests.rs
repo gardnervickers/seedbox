@@ -1,4 +1,5 @@
 //! Driver-owned binary persistence with a deliberately separate mock artifact codec.
+mod authority_tests;
 mod frame_capacity_tests;
 mod streaming_tests;
 use super::*;
@@ -7,6 +8,7 @@ use crate::persistence::{Decoder, Encoder, Wire};
 use sha2::{Digest, Sha256};
 use std::io::{self, Read, Write};
 fn continue_from(d: &mut Driver<Mock>) -> (Vec<Event>, Position, Vec<State>, PlaybackStatus) {
+    reference_observer_session(d);
     let observed = status(d);
     if d.execution.finished.is_none()
         && !observed.stopped
@@ -469,6 +471,12 @@ fn future_binary_closure_is_exact_and_invalid_resources_remain_deferred() {
 fn framing_truncation_unknown_tags_budgets_and_partial_io_fail_closed() {
     let mut d = build(vec![spec(0, true, vec![])], vec![], true);
     d.step(at(1)).unwrap();
+    // A real pending guest input exercises the blob quota; optional publication
+    // log bytes are deliberately no longer part of this codec.
+    d.execution.machines[0].inbox.push_back(crate::pv::Input {
+        at: at(1),
+        payload: crate::pv::Request::ReceiveFrame { bytes: vec![0; 14] },
+    });
     let (bytes, _) = artifact(d.checkpoint().unwrap());
     for n in 0..bytes.len() {
         assert!(
@@ -551,7 +559,7 @@ fn decoded_invariants_reject_untrusted_complete_objects() {
             0 => c.quantum_ns = 0,
             1 => c.oracle = MachineId(100),
             2 => c.network = network::Network::new(NetworkConfig::default()),
-            3 => c.observations.next_sequence = 0,
+            3 => c.completed_quanta = u64::MAX,
             4 => c.machines[0].machine = None,
             5 => c.machines[0].lifecycle.uncertain_failure(),
             6 => {
@@ -568,9 +576,9 @@ fn decoded_invariants_reject_untrusted_complete_objects() {
         let mut e = Encoder { output: Vec::new() };
         c.put(&mut e).unwrap();
         let mut bad = b"SBXDRVR\0".to_vec();
-        // Use current v4 framing so the intended state invariant, not version,
+        // Use current v5 framing so the intended state invariant, not version,
         // is what rejects these deliberately malformed imported bodies.
-        bad.extend(4u32.to_le_bytes());
+        bad.extend(5u32.to_le_bytes());
         bad.extend((e.output.len() as u64).to_le_bytes());
         bad.extend(e.output);
         assert!(
@@ -729,6 +737,7 @@ fn held_effect_survives_running_rate_selection_and_rearm() {
         );
         let (bytes, store) = artifact(d.checkpoint().unwrap());
         let finish = |driver: &mut Driver<Mock>| {
+            reference_observer_session(driver);
             // Assert the round-tripped limited rate before normalizing pacing;
             // continuation assertions depend only on virtual execution, not time.
             assert_eq!(status(driver), before);
@@ -841,13 +850,13 @@ fn closed_codec_version_and_orphaned_network_ownership_fail_before_restore() {
     let mut d = net(initial(), setup(8), 1);
     advance(&mut d, 1);
     let (bytes, _) = artifact(d.checkpoint().unwrap());
-    assert_eq!(&bytes[8..12], &4u32.to_le_bytes());
-    for version in [1u32, 2, 3, 5] {
+    assert_eq!(&bytes[8..12], &5u32.to_le_bytes());
+    for version in [0u32, 1, 2, 3, 4, 6, u32::MAX] {
         let mut old = bytes.clone();
         old[8..12].copy_from_slice(&version.to_le_bytes());
         assert!(matches!(
             Checkpoint::read_from(&mut &old[..], limits()),
-            Err(CodecError::Invalid("version"))
+            Err(CodecError::Invalid(message)) if message.contains("replay with its retained engine or run fresh")
         ));
     }
     for shape_layer in [false, true] {

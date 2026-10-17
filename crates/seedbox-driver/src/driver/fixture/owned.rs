@@ -198,6 +198,15 @@ pub(in crate::driver) fn build_network(
     seeded: bool,
     networked: bool,
 ) -> Driver<Mock> {
+    build_network_workers(specs, spawn, seeded, networked, 1)
+}
+pub(in crate::driver) fn build_network_workers(
+    specs: Vec<State>,
+    spawn: Vec<State>,
+    seeded: bool,
+    networked: bool,
+    workers: usize,
+) -> Driver<Mock> {
     let definition = |index| {
         let mut d = fixture::definition(index);
         if networked {
@@ -232,7 +241,7 @@ pub(in crate::driver) fn build_network(
         Driver::new_seeded(
             at(0),
             Duration::from_nanos(10),
-            1,
+            workers,
             51,
             || Ok(Context(None)),
             oracle,
@@ -246,7 +255,7 @@ pub(in crate::driver) fn build_network(
         Driver::new(
             at(0),
             Duration::from_nanos(10),
-            1,
+            workers,
             SeededRng::new(51),
             || Ok(Context(None)),
             oracle,
@@ -282,6 +291,13 @@ pub(in crate::driver) fn states(d: &Driver<Mock>) -> Vec<State> {
         .iter()
         .map(|e| e.machine.as_ref().unwrap().state.clone())
         .collect()
+}
+/// Compare a live continuation against an imported one with the same NEW
+/// observer session. Test-only: production capture leaves source history intact.
+/// Reset no execution state, native state, queues, clocks or RNG cursors.
+pub(in crate::driver) fn reference_observer_session(d: &mut Driver<Mock>) {
+    d.drain_observations();
+    d.observations = ObservationState::default();
 }
 pub(in crate::driver) fn advance(d: &mut Driver<Mock>, end: u64) -> Vec<Event> {
     let mut events = d.drain_events();

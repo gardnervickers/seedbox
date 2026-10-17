@@ -171,11 +171,14 @@ fn actual_driver_before_fault_hold_is_captured_without_applying_effect() {
         },
         root.path(),
         "held",
-        |state, event| {
-            if let EventKind::FaultSettled { .. } = &event.kind {
-                effects.push(event.clone());
+        |state, batch| {
+            for change in &batch.changes {
+                if let seedbox_driver::driver::CommittedChange::FaultSettled { .. } = &change.change
+                {
+                    effects.push(change.clone());
+                }
             }
-            publish(state, event)
+            publish(state, batch)
         },
         encode,
     )

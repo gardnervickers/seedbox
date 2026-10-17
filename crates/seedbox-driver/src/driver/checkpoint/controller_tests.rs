@@ -60,7 +60,7 @@ fn imported(c: &Checkpoint<SnapshotReference>) -> Vec<u8> {
     let mut encoder = Encoder { output: Vec::new() };
     c.put(&mut encoder).unwrap();
     let mut bytes = b"SBXDRVR\0".to_vec();
-    bytes.extend(4u32.to_le_bytes());
+    bytes.extend(5u32.to_le_bytes());
     bytes.extend((encoder.output.len() as u64).to_le_bytes());
     bytes.extend(encoder.output);
     bytes
@@ -131,7 +131,7 @@ fn malformed_reply_queue_boot_authority_metadata_and_duplicates_fail() {
     }
 }
 #[test]
-fn delayed_queues_obey_decode_limits_and_v3_is_not_accepted_as_v4() {
+fn delayed_queues_obey_decode_limits_and_v4_is_not_accepted_as_v5() {
     for reply in [false, true] {
         let c = valid(reply);
         let bytes = imported(&c);
@@ -145,7 +145,7 @@ fn delayed_queues_obey_decode_limits_and_v3_is_not_accepted_as_v4() {
         old[8..12].copy_from_slice(&3u32.to_le_bytes());
         assert!(matches!(
             Checkpoint::read_from(&mut &old[..], limits()),
-            Err(CodecError::Invalid("version"))
+            Err(CodecError::Invalid(message)) if message.contains("replay with its retained engine or run fresh")
         ));
     }
 }

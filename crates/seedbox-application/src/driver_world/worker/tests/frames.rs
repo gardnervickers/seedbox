@@ -92,14 +92,17 @@ fn routed_frame_fates_and_overflow_map_to_observations_not_witness() {
     let closed = receive(&socket);
     assert_eq!(closed.sequence, 5);
     assert_eq!(closed.kind, Kind::Closed);
-    assert_eq!(state.world.publication.witness, original.witness);
     assert_eq!(
-        state.world.publication.witness_records,
-        original.witness_records
+        state.world.publication.session.witness,
+        original.session.witness
     );
     assert_eq!(
-        state.world.publication.next_driver_sequence,
-        original.next_driver_sequence
+        state.world.publication.session.witness_records,
+        original.session.witness_records
+    );
+    assert_eq!(
+        state.world.publication.session.next_driver_sequence,
+        original.session.next_driver_sequence
     );
 }
 
@@ -260,9 +263,9 @@ fn routed_frame_draining_keeps_policy_and_event_witness_equal_off_on_and_workers
             let publication = &worker.state.world.publication;
             evidence.push((
                 policy,
-                publication.witness,
-                publication.witness_records,
-                publication.next_driver_sequence,
+                publication.session.witness,
+                publication.session.witness_records,
+                publication.session.next_driver_sequence,
                 worker.driver.network_counters(),
             ));
             assert_eq!(worker.driver.drain_frames(), FrameFacts::default());
@@ -312,7 +315,7 @@ fn actual_bounded_routing_overflow_reports_a_source_gap_and_keeps_authority() {
             .unwrap();
         evidence.push((
             policy,
-            worker.state.world.publication.witness,
+            worker.state.world.publication.session.witness,
             worker.driver.network_counters(),
         ));
     }

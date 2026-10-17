@@ -238,9 +238,21 @@ fn held_crash_partition_and_same_time_order_survive_binary_capture_one_and_four_
                 source_observed.effects().is_empty(),
                 "capture must not emit an effect"
             );
-            assert!(source.state.world.publication.applied_faults.is_empty());
+            assert!(source
+                .state
+                .world
+                .publication
+                .session
+                .applied_faults
+                .is_empty());
             let envelope = checkpoint::read(&source.output.join("checkpoint-held.json")).unwrap();
-            assert!(envelope.state.world.publication.applied_faults.is_empty());
+            assert!(envelope
+                .state
+                .world
+                .publication
+                .session
+                .applied_faults
+                .is_empty());
             assert_eq!(envelope.state.world.input_program.next, 1);
             assert_eq!(
                 playback(
@@ -274,6 +286,7 @@ fn held_crash_partition_and_same_time_order_survive_binary_capture_one_and_four_
             for workers in [1, 4] {
                 for step in [false, true] {
                     let mut branch = restore(&envelope, workers, root.path());
+                    assert_eq!(branch.state.world.publication.session, Default::default());
                     let mut observed = Observed::attach(
                         &mut branch,
                         &root.path().join(format!("branch-{workers}-{step}.sock")),
@@ -331,7 +344,14 @@ fn held_crash_partition_and_same_time_order_survive_binary_capture_one_and_four_
                         branch.state.world.input_program,
                         source.state.world.input_program
                     );
-                    assert_eq!(branch.state.world.publication, expected);
+                    assert_eq!(
+                        branch.state.world.publication.oracle_exit,
+                        expected.oracle_exit
+                    );
+                    assert_eq!(
+                        branch.state.world.publication.session.applied_faults,
+                        expected.session.applied_faults
+                    );
                     assert_eq!(states(&mut branch), expected_states);
                 }
             }

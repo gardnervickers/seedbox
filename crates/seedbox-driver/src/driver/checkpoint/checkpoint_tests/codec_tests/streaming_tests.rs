@@ -123,6 +123,7 @@ fn streamed_capture_preserves_held_fault_and_pending_quantum_without_resuming() 
             .factor_permille(),
         1000
     );
+    reference_observer_session(&mut d);
     d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
         .unwrap();
     let expected = advance(&mut d, 30);
@@ -455,7 +456,7 @@ fn every_boundary_validation_precedes_first_capture_and_mapping() {
             2 => d.execution.machines[2].rng = None,
             3 => d.execution.quantum_ns = 0,
             4 => d.execution.machines[2].reached = at(1),
-            5 => d.observations.next_sequence = 0,
+            5 => d.execution.oracle = MachineId(99),
             _ => unreachable!(),
         }
         let runs = audit.runs.load(Ordering::SeqCst);

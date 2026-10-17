@@ -43,24 +43,54 @@ pub(super) struct Playback {
     step_after: Option<u64>,
     pub(super) before_next: bool,
     pub(super) held: Option<FaultRecord>,
-    pub(super) stopped: bool,
 }
 
+/// Captured continuation intent cannot contain a wall-clock anchor by type.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub(super) struct PlaybackIntent {
+    pub(super) rate: PlaybackRate,
+    step_after: Option<u64>,
+    pub(super) before_next: bool,
+    pub(super) held: Option<FaultRecord>,
+}
 impl Playback {
-    /// Logical playback survives capture; elapsed host waiting does not.
-    pub(super) fn checkpoint(&self) -> Self {
+    pub(super) fn checkpoint(&self) -> PlaybackIntent {
+        let Self {
+            rate,
+            anchor: _,
+            step_after,
+            before_next,
+            held,
+        } = self;
+        PlaybackIntent {
+            rate: *rate,
+            step_after: *step_after,
+            before_next: *before_next,
+            held: held.clone(),
+        }
+    }
+    pub(super) fn from_intent(intent: PlaybackIntent) -> Self {
+        let PlaybackIntent {
+            rate,
+            step_after,
+            before_next,
+            held,
+        } = intent;
         Self {
+            rate,
             anchor: None,
-            ..self.clone()
+            step_after,
+            before_next,
+            held,
         }
     }
 
-    pub(super) fn status(&self, position: Position) -> PlaybackStatus {
+    pub(super) fn status(&self, position: Position, stopped: bool) -> PlaybackStatus {
         PlaybackStatus {
             position,
             rate: self.rate,
             stepping: self.step_after.is_some(),
-            stopped: self.stopped,
+            stopped,
             before_next_fault: self.before_next,
             before_fault: self.held.clone(),
         }

@@ -87,6 +87,8 @@ where
         // Observation is host-owned even when the Driver came from a capture.
         // Do not retain frame bodies/facts for non-publishing callers.
         driver.set_frame_capacity(if observations.is_some() { 1024 } else { 0 });
+        let mut state = state;
+        state.world.publication.session = Default::default();
         Ok(Self {
             driver,
             state,
@@ -112,7 +114,7 @@ where
         }
         let result = (|| {
             let mut facts = Facts::default();
-            let batch = self.driver.drain_observations();
+            let mut batch = self.driver.drain_observations();
             for committed in &batch.changes {
                 match &committed.change {
                     driver::CommittedChange::MachineAdded { machine, .. } => {
@@ -156,7 +158,7 @@ where
                     } if *status == driver::SettlementStatus::Applied => {
                         let (machine, _) =
                             super::events::target_machine(&self.names, &record.target)?;
-                        self.state.world.publication.applied_faults.push(
+                        self.state.world.publication.session.applied_faults.push(
                             seedbox_engine_protocol::driver_world::AppliedFault {
                                 requested_at_ns: record.requested_at.as_nanos(),
                                 applied_at_ns: outcome_at.unwrap_or(committed.at).as_nanos(),
@@ -169,18 +171,8 @@ where
                     _ => {}
                 }
             }
-            for event in batch.events {
-                self.publisher
-                    .publish(&mut self.state, &self.names, event)?;
-            }
-            self.state.world.position = position(batch.position);
-            self.publisher.event_gap(
-                &mut self.state,
-                batch.omitted_events,
-                batch.next_event_sequence,
-            )?;
-            self.publisher
-                .frames(&mut self.state, &self.names, batch.frames)?;
+            batch.changes.clear(); // Required bookkeeping above consumed this prefix.
+            self.publisher.batch(&mut self.state, &self.names, batch)?;
             Ok(facts)
         })();
         if result.is_err() {
@@ -353,7 +345,7 @@ where
             },
             &self.output,
             &checkpoint.request_id,
-            |state, event| publisher.publish(state, names, event),
+            |state, batch| publisher.batch(state, names, batch),
             self.write_snapshot,
         );
         if let Err(error) = result {
@@ -864,6 +856,7 @@ where
             witness,
             full_state,
             faults: publication
+                .session
                 .applied_faults
                 .iter()
                 .map(|fault| crate::execution::FaultEvent {

@@ -26,7 +26,7 @@ mod policy;
 pub use policy::BackendPolicy;
 
 pub const CONTRACT: &str = "driver-world-v1";
-pub const ENVELOPE_VERSION: u32 = 2;
+pub const ENVELOPE_VERSION: u32 = 3;
 pub const MAX_ENVELOPE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// A materialized, immutable artifact. Paths are service-supplied authority,
@@ -293,21 +293,22 @@ fn strictly_ordered(names: &[String]) -> bool {
     names.iter().all(|name| !name.is_empty()) && names.windows(2).all(|pair| pair[0] < pair[1])
 }
 
-/// History already drained from the Driver is never replayed as a publication
-/// suffix. These cursors and digest state continue observations and evidence.
+/// Current service outcome continues; observer sessions and history do not.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Publication {
+    #[serde(skip)]
+    pub session: PublicationSession,
+    pub oracle_exit: Option<u8>,
+}
+/// Runtime-only observer bookkeeping. Intentionally has no serialization trait.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PublicationSession {
     pub next_driver_sequence: u64,
-    /// Logical emitted-record count across continuation. Each new observation
-    /// socket has its own sequence starting at one, so a branch's empty stream
-    /// does not falsely report its intentionally absent prefix as packet loss.
     pub observation_records: u64,
-    /// State of the versioned service evidence hash chain, not a snapshot hash.
     pub witness: [u8; 32],
     pub witness_records: u64,
     pub applied_faults: Vec<AppliedFault>,
-    pub oracle_exit: Option<u8>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -367,12 +368,20 @@ pub struct State {
 #[serde(deny_unknown_fields)]
 pub struct Checkpoint {
     pub contract: String,
+    #[serde(deserialize_with = "checkpoint_version")]
     pub version: u32,
     pub inventory: Inventory,
     pub driver: Artifact,
     /// Native bodies in the Driver's insertion order, independent of filenames.
     pub machines: Vec<Artifact>,
     pub state: State,
+}
+fn checkpoint_version<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<u32, D::Error> {
+    let version = u32::deserialize(decoder)?;
+    if version != ENVELOPE_VERSION {
+        return Err(serde::de::Error::custom("checkpoint was made by an older or incompatible engine; replay with its retained engine or run fresh"));
+    }
+    Ok(version)
 }
 impl Checkpoint {
     pub fn validate(&self) -> Result<(), String> {

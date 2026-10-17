@@ -9,7 +9,7 @@ mod lazy_restore_tests;
 mod metadata_roundtrip_tests;
 #[path = "publication_tests.rs"]
 mod publication_tests;
-use seedbox_driver::driver::{EventKind, NetworkConfig};
+use seedbox_driver::driver::NetworkConfig;
 use seedbox_machine::{
     definition::{FilesystemArchive, Launch, MachineDefinition, PreparedApplication, Resources},
     machine::{RunContext, StopReason, Timestamp},
@@ -188,11 +188,29 @@ fn state(count: usize) -> State {
         },
     }
 }
-fn publish(state: &mut State, event: Event) -> Result<()> {
-    assert_eq!(event.sequence, state.world.publication.next_driver_sequence);
-    state.world.publication.next_driver_sequence += 1;
+// Compare exact future facts/positions while each observer session owns its
+// independent dense sequence. Never drop or filter an event or its payload.
+fn session_events(
+    mut events: Vec<seedbox_driver::driver::Event>,
+) -> Vec<seedbox_driver::driver::Event> {
+    let first = events.first().map_or(0, |event| event.sequence);
+    for (offset, event) in events.iter_mut().enumerate() {
+        assert_eq!(event.sequence, first + offset as u64);
+        event.sequence = offset as u64;
+    }
+    events
+}
+fn publish(state: &mut State, batch: seedbox_driver::driver::FlushResults) -> Result<()> {
+    for event in batch.events {
+        assert_eq!(
+            event.sequence,
+            state.world.publication.session.next_driver_sequence
+        );
+        state.world.publication.session.next_driver_sequence += 1;
+    }
     Ok(())
 }
+
 fn encode(snapshot: Saved, writer: &mut BufWriter<File>) -> Result<()> {
     writer.write_all(&snapshot.at.to_le_bytes())?;
     writer.write_all(&snapshot.random)?;
@@ -280,17 +298,16 @@ fn streamed_world_capture_survives_source_drop_and_branches_with_one_or_four_wor
         },
         &output,
         "saved",
-        |state, event| {
-            if let EventKind::Output(output) = &event.kind {
-                if output.payload == Response::Ready {
-                    let index = identities
-                        .iter()
-                        .position(|id| *id == output.machine)
-                        .unwrap();
+        |state, batch| {
+            for change in &batch.changes {
+                if let seedbox_driver::driver::CommittedChange::Ready { machine, .. } =
+                    &change.change
+                {
+                    let index = identities.iter().position(|id| id == machine).unwrap();
                     state.world.readiness.observe(names[index]);
                 }
             }
-            publish(state, event)
+            publish(state, batch)
         },
         encode,
     )
@@ -303,11 +320,15 @@ fn streamed_world_capture_survives_source_drop_and_branches_with_one_or_four_wor
         "capture must drain publications once"
     );
     source_driver.step(Timestamp::from_nanos(20)).unwrap();
-    let expected = source_driver.drain_events();
+    let expected = session_events(source_driver.drain_events());
     drop(source_driver);
     fs::remove_dir_all(source).unwrap();
     let envelope = read(&manifest).unwrap();
-    assert_eq!(envelope.state, state);
+    assert_eq!(
+        serde_json::to_value(&envelope.state).unwrap(),
+        serde_json::to_value(&state).unwrap()
+    );
+    assert_eq!(envelope.state.world.publication.session, Default::default());
     for workers in [1, 4] {
         let checkpoint = resolve(&envelope, limits(), decode).unwrap();
         let mut branch = restored(&checkpoint, workers);
@@ -316,7 +337,7 @@ fn streamed_world_capture_survives_source_drop_and_branches_with_one_or_four_wor
             "restoration must not reemit published prefix"
         );
         branch.step(Timestamp::from_nanos(20)).unwrap();
-        assert_eq!(branch.drain_events(), expected);
+        assert_eq!(session_events(branch.drain_events()), expected);
     }
 }
 

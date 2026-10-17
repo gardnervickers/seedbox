@@ -259,7 +259,7 @@ where
             return Err(Error::PreparedInputMismatch);
         }
         let result = (|| {
-            let start = self.driver.observations.published.len();
+            let start = self.driver.committed.len();
             self.driver
                 .execution
                 .inputs
@@ -271,11 +271,11 @@ where
                 self.driver.now(),
             )?;
             self.driver.commit_boundary()?;
-            if !self.driver.observations.published[start..]
+            if !self.driver.committed[start..]
                 .iter()
-                .any(|event| {
-                    matches!((&event.kind, &prepared.outcome),
-                    (EventKind::FaultAdmitted(fault), PreparedOutcome::Admitted(expected))
+                .any(|committed| {
+                    matches!((&committed.change, &prepared.outcome),
+                    (observation::CommittedChange::FaultAdmitted(fault), PreparedOutcome::Admitted(expected))
                     if fault == expected)
                 })
             {

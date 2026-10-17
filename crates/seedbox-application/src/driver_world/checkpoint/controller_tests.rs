@@ -4,7 +4,7 @@ use super::*;
 use crate::driver_world::controller;
 
 #[test]
-fn codec4_service_envelope_preserves_controller_and_disabled_authority() {
+fn codec5_service_envelope_preserves_controller_and_disabled_authority() {
     for enabled in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let output = root.path().join("retained");
@@ -60,7 +60,7 @@ fn codec4_service_envelope_preserves_controller_and_disabled_authority() {
         )
         .unwrap();
         source.step(Timestamp::from_nanos(20)).unwrap();
-        let expected = source.drain_events();
+        let expected = session_events(source.drain_events());
         drop(source);
         let envelope = read(&manifest).unwrap();
         assert_eq!(
@@ -93,7 +93,7 @@ fn codec4_service_envelope_preserves_controller_and_disabled_authority() {
             authority.validate_saved(branch.controller_setup()).unwrap();
             assert!(branch.drain_events().is_empty());
             branch.step(Timestamp::from_nanos(20)).unwrap();
-            assert_eq!(branch.drain_events(), expected);
+            assert_eq!(session_events(branch.drain_events()), expected);
         }
     }
 }

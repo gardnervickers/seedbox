@@ -25,6 +25,7 @@ fn call_and_boot_pinned_reply_are_both_closed_codec_state() {
             1
         );
         let c = d.checkpoint().unwrap();
+        reference_observer_session(&mut d);
         assert_eq!(c.controller_setup(), d.controller_setup());
         let (bytes, store) = artifact(c);
         let expected = advance(&mut d, 25);
@@ -38,6 +39,7 @@ fn call_and_boot_pinned_reply_are_both_closed_codec_state() {
         }
         let mut fresh_four = configured(specs, Some(Some(MachineId::ORACLE)), 4);
         advance(&mut fresh_four, boundary);
+        reference_observer_session(&mut fresh_four);
         assert_eq!(advance(&mut fresh_four, 25), expected);
         assert_eq!(states(&fresh_four), state);
     }
@@ -243,6 +245,7 @@ fn pending_old_boot_call_cannot_steal_reused_successor_rpc_identity() {
         .push_back((9, call(1, r#""op":"now""#)));
     advance(&mut d, 15);
     let (bytes, store) = artifact(d.checkpoint().unwrap());
+    reference_observer_session(&mut d);
     let expected = advance(&mut d, 40);
     let expected_states = states(&d);
     let result = replies(&d);

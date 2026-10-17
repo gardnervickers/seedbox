@@ -1,6 +1,5 @@
 //! Version 2 closed network policy/observation and canonical tracker records.
 use super::*;
-use crate::driver::Position;
 use crate::persistence::{require, CodecError, Decoder, Encoder, Result, Wire};
 use seedbox_engine_core::connections::{
     ConnectionState, Connections, SelectionState, SessionState,
@@ -192,9 +191,6 @@ impl Wire for Network {
             connections,
             queue_counts,
             counts,
-            frame_capacity,
-            frames,
-            omitted,
         } = self;
         config.put(e)?;
         members.put(e)?;
@@ -208,9 +204,7 @@ impl Wire for Network {
         connections.export_state().put(e)?;
         queue_counts.put(e)?;
         counts.put(e)?;
-        frame_capacity.put(e)?;
-        frames.put(e)?;
-        omitted.put(e)
+        Ok(())
     }
     fn get<R: Read>(d: &mut Decoder<R>) -> Result<Self> {
         let config = Wire::get(d)?;
@@ -246,13 +240,6 @@ impl Wire for Network {
             .map_err(|_| CodecError::Invalid("connection tracker"))?;
         let queue_counts = Wire::get(d)?;
         let counts = Wire::get(d)?;
-        let frame_capacity: usize = Wire::get(d)?;
-        let frames: std::collections::VecDeque<FrameFact> = Wire::get(d)?;
-        let omitted = Wire::get(d)?;
-        // Capacity is a scalar retention setting, not a decoded allocation.
-        // Wire::get already bounds the actual frame collection; a small capture
-        // may legitimately have more unused capacity than encoded bytes.
-        require(frames.len() <= frame_capacity, "frame observation capacity")?;
         Ok(Self {
             config,
             members,
@@ -266,9 +253,6 @@ impl Wire for Network {
             connections,
             queue_counts,
             counts,
-            frame_capacity,
-            frames,
-            omitted,
         })
     }
 }
@@ -277,7 +261,7 @@ impl Network {
     pub(super) fn check_parity_persist(
         &self,
         n: usize,
-        now: u64,
+        _now: u64,
         definitions: &[crate::definition::MachineDefinition],
     ) -> Result<()> {
         require(
@@ -389,32 +373,6 @@ impl Network {
         }
         for counts in self.queue_counts.values() {
             require(counts.queue_dropped <= counts.matched, "pair queue counts")?;
-        }
-        require(
-            // A disabled buffer can retain a clearing omission until drained.
-            self.frames.len() <= self.frame_capacity,
-            "frame observation capacity",
-        )?;
-        for f in &self.frames {
-            require(
-                pair_valid((f.from, f.to))
-                    && f.position.at.as_nanos() <= now
-                    && f.sent <= f.position.at
-                    && f.bytes >= 14
-                    && f.bytes <= crate::pv::MAX_FRAME_BYTES,
-                "frame fact",
-            )?;
-            require(
-                match f.fate {
-                    FrameFate::Scheduled | FrameFate::ReceiverDropped => f
-                        .sent
-                        .as_nanos()
-                        .checked_add(self.config.latency_ns)
-                        .is_some_and(|floor| f.due.is_some_and(|due| due.as_nanos() >= floor)),
-                    _ => f.due.is_none(),
-                },
-                "frame fate deadline",
-            )?;
         }
         Ok(())
     }
@@ -575,35 +533,5 @@ impl Network {
                 Ok(())
             }
         }
-    }
-    pub(crate) fn check_frame_positions_persist(&self, max: Position) -> Result<()> {
-        let mut previous = None;
-        for f in &self.frames {
-            require(
-                f.position.boundary_index <= max.boundary_index
-                    && f.position.completed_quanta <= max.completed_quanta
-                    && f.position.completed_quanta <= f.position.boundary_index,
-                "frame fact position",
-            )?;
-            if let Some(p) = previous {
-                let p: Position = p;
-                require(
-                    p.at <= f.position.at
-                        && p.boundary_index <= f.position.boundary_index
-                        && p.completed_quanta <= f.position.completed_quanta,
-                    "frame fact order",
-                )?;
-            }
-            require(
-                match f.fate {
-                    FrameFate::Scheduled => f.due.is_some_and(|due| due >= f.position.at),
-                    FrameFate::ReceiverDropped => f.due == Some(f.position.at),
-                    _ => true,
-                },
-                "frame fact occurrence",
-            )?;
-            previous = Some(f.position);
-        }
-        Ok(())
     }
 }

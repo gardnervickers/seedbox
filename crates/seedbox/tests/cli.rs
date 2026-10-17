@@ -2279,6 +2279,9 @@ fn backend_flag_is_typed_and_only_on_the_four_execution_commands() {
 #[cfg(unix)]
 #[path = "cli/checkpoint_history.rs"]
 mod checkpoint_history;
+#[cfg(unix)]
+#[path = "cli/checkpoint_version.rs"]
+mod checkpoint_version;
 
 // Explicit application acceptance, using the normal release CLI for each guest.
 // Its interactions case covers run/logs/events/wait/replay/shutdown on Driver.

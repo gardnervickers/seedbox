@@ -94,7 +94,8 @@ impl NetworkSetup {
     }
     /// Opt into at most capacity undrained frame facts; zero disables collection.
     /// Overflow increments omitted, never changes routing or authoritative counts.
-    /// Both the limit and undrained state survive checkpoints.
+    /// This is host observer configuration, never continuing checkpoint state.
+    /// Restore starts with frame retention disabled and no pre-checkpoint history.
     // TODO: Re-evaluate: packet observation must be bounded and separate from
     // dense committed EventKind sequencing and deterministic witness content.
     pub fn with_frame_capacity(mut self, capacity: usize) -> Self {
@@ -255,7 +256,6 @@ impl Network {
     pub(crate) fn from_setup(setup: NetworkSetup) -> Self {
         let mut n = Self::new(setup.config);
         n.global = setup.global();
-        n.frame_capacity = setup.frame_capacity;
         n.baselines = setup
             .links
             .into_iter()
@@ -281,37 +281,6 @@ impl Network {
             }
         }
         Ok(())
-    }
-    pub(super) fn fact(&mut self, fact: FrameFact) {
-        if self.frame_capacity == 0 {
-            return;
-        }
-        if self.frames.len() < self.frame_capacity {
-            self.frames.push_back(fact);
-        } else {
-            self.omitted = self.omitted.saturating_add(1);
-        }
-    }
-    pub(crate) fn set_frame_capacity(&mut self, capacity: usize) {
-        self.frame_capacity = capacity;
-        if self.frames.len() > capacity {
-            let discarded = self.frames.len() - capacity;
-            self.frames.truncate(capacity);
-            self.omitted = self.omitted.saturating_add(discarded as u64);
-        }
-    }
-
-    pub(crate) fn restore_frame_observations(&mut self, frames: FrameFacts) {
-        debug_assert!(self.frames.is_empty() && self.omitted == 0);
-        self.frames = frames.facts.into();
-        self.omitted = frames.omitted;
-    }
-
-    pub(crate) fn drain_frames(&mut self) -> FrameFacts {
-        FrameFacts {
-            facts: self.frames.drain(..).collect(),
-            omitted: std::mem::take(&mut self.omitted),
-        }
     }
     pub(crate) fn connection_members(&self, c: &Connection) -> bool {
         c.from != c.to
@@ -442,12 +411,13 @@ impl Network {
             })
             .unwrap_or(self.global)
     }
-    pub(crate) fn route_at(
+    pub(in crate::driver) fn route_at(
         &mut self,
         position: Position,
         from: MachineId,
         sent: u64,
         bytes: &[u8],
+        observations: &mut FrameObservations,
     ) -> Result<(), RouteError> {
         let destination: [u8; 6] = bytes[..6].try_into().expect("bounded frame");
         let receivers: Vec<_> = if destination == [255; 6] {
@@ -481,7 +451,7 @@ impl Network {
             };
             if cut {
                 self.counts.entry(pair_key).or_default().partition_dropped += 1;
-                self.fact(fact);
+                observations.record(fact);
                 continue;
             }
             let sequence = self.members[from.0].sent;
@@ -505,7 +475,7 @@ impl Network {
             if selected || loss {
                 self.counts.entry(pair_key).or_default().loss_dropped += 1;
                 fact.fate = FrameFate::LossDropped;
-                self.fact(fact);
+                observations.record(fact);
                 continue;
             }
             if let Some(id) = layer {
@@ -528,7 +498,7 @@ impl Network {
                         l.counts.burst_dropped += 1;
                         self.counts.entry(pair_key).or_default().loss_dropped += 1;
                         fact.fate = FrameFate::LossDropped;
-                        self.fact(fact);
+                        observations.record(fact);
                         continue;
                     }
                 }
@@ -557,7 +527,7 @@ impl Network {
                 if dropped {
                     self.counts.entry(pair_key).or_default().queue_dropped += 1;
                     fact.fate = FrameFate::QueueDropped;
-                    self.fact(fact);
+                    observations.record(fact);
                     continue;
                 }
                 let depart = depart.unwrap();
@@ -613,11 +583,11 @@ impl Network {
             fact.fate = FrameFate::Scheduled;
             fact.due = Some(Timestamp::from_nanos(at));
             fact.bytes = delivered.len();
-            self.fact(fact.clone());
+            observations.record(fact.clone());
             if duplicate {
                 let due = at + 1;
                 fact.due = Some(Timestamp::from_nanos(due));
-                self.fact(fact);
+                observations.record(fact);
                 self.in_flight.insert(
                     (due, from, sequence, to),
                     Flight {
@@ -636,7 +606,8 @@ impl Network {
         }
         Ok(())
     }
-    pub(crate) fn delivery_result(
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::driver) fn delivery_result(
         &mut self,
         position: Position,
         from: MachineId,
@@ -644,11 +615,12 @@ impl Network {
         sent: u64,
         bytes: usize,
         dropped: bool,
+        observations: &mut FrameObservations,
     ) {
         let counts = self.counts.entry((from, to)).or_default();
         if dropped {
             counts.receiver_dropped += 1;
-            self.fact(FrameFact {
+            observations.record(FrameFact {
                 position,
                 from,
                 to,
@@ -661,11 +633,13 @@ impl Network {
             counts.delivered += 1;
         }
     }
-    pub(crate) fn observation_mark(&self) -> (usize, u64) {
-        (self.frames.len(), self.omitted)
-    }
-    pub(crate) fn discard_uncommitted_facts(&mut self, mark: (usize, u64)) {
-        self.frames.truncate(mark.0);
-        self.omitted = mark.1;
+}
+
+impl FrameObservations {
+    pub(in crate::driver) fn from_setup(setup: &NetworkSetup) -> Self {
+        Self {
+            capacity: setup.frame_capacity,
+            ..Self::default()
+        }
     }
 }

@@ -17,9 +17,6 @@ impl Network {
             connections,
             queue_counts,
             counts,
-            frame_capacity: _,
-            frames: _,
-            omitted: _,
             cuts,
             partitions,
         } = self;

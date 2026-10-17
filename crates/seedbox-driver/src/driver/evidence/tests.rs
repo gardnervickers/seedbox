@@ -48,6 +48,7 @@ fn policy_projection_does_not_capture_native_state_draw_rng_or_retain_publicatio
     assert_eq!(evidence(&mut d), before);
     assert_eq!(evidence(&mut d), before);
     let captured = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
     let expected = advance(&mut d, 60);
     let expected_states = states(&d);
     let mut reference = restore(&captured, 1);
@@ -156,7 +157,7 @@ fn optional_frame_capture_capacity_and_draining_never_change_policy_evidence() {
     let captured = decode(&encoded, &store);
     let mut restored_cleared = restore(&captured, 4);
     let cleared = disabled.drain_frames();
-    assert_eq!(restored_cleared.drain_frames(), cleared);
+    assert_eq!(restored_cleared.drain_frames(), FrameFacts::default());
     assert!(cleared.facts.is_empty());
     assert_eq!(cleared.omitted, 3);
     assert_eq!(disabled.drain_frames(), FrameFacts::default());
@@ -186,15 +187,7 @@ fn optional_frame_capture_capacity_and_draining_never_change_policy_evidence() {
             let mut branch = restore(&checkpoint, workers);
             branch.set_frame_capacity(capacity);
             let observations = branch.drain_frames();
-            if capacity == 0 {
-                assert!(observations.facts.is_empty());
-                assert_eq!(
-                    observations.omitted,
-                    retained.omitted + retained.facts.len() as u64
-                );
-            } else {
-                assert_eq!(observations, retained);
-            }
+            assert_eq!(observations, FrameFacts::default());
             advance(&mut branch, 80);
             assert_eq!(evidence(&mut branch), expected);
         }

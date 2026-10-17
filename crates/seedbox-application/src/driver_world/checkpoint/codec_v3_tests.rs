@@ -166,7 +166,12 @@ fn codec_v3_service_descriptor_roundtrip_distinguishes_none_and_some_zero() {
             },
             root.path(),
             "d6-roundtrip",
-            |state, event| publisher.publish(state, &names, event),
+            |state, mut batch| {
+                // This fixture prebinds current service state; no causal action
+                // is reconstructed from its optional publication copies.
+                batch.changes.clear();
+                publisher.batch(state, &names, batch)
+            },
             |saved, writer| {
                 let EndSaved::Live(oracle, ended, boot, deferred) = saved else {
                     panic!("new source snapshot must be owned")
