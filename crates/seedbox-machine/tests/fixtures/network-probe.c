@@ -35,21 +35,25 @@
  *       Print "NETPROBE idle" and pause forever: a live peer with no network
  *       activity.
  *   drop-client ADDRESS PORT
- *       Run as the controlling oracle, for a host-injected connection drop.
- *       Echo a short stream to a server, read the server-to-client direction
- *       of that TCP incarnation through the guest control API and print it,
- *       then keep echoing 64-byte rounds every 10 ms with a one-second
- *       TCP_USER_TIMEOUT. Once the host drops that direction, a round goes
- *       unacknowledged and the kernel aborts the connection. Then reconnect
- *       and echo; the server's single echo slot frees only after the host
- *       heals the drop. Finally read the direction again for a newer
- *       incarnation. Prints:
+ *       The client of a host-injected connection drop. Echo a short stream,
+ *       print "NETPROBE drop first ok", then keep echoing 64-byte rounds every
+ *       10 ms with a one-second TCP_USER_TIMEOUT. Once the host drops the
+ *       server-to-client direction, a round goes unanswered and the kernel
+ *       aborts the connection. Reconnect and echo; the server's single echo
+ *       slot frees only after the host heals the drop. Then idle. Prints:
  *         NETPROBE drop first ok
- *         NETPROBE drop connection=JSON          (the control reply's object)
  *         NETPROBE drop aborted errno=E rounds=N
  *         NETPROBE drop reconnected connects=N
- *         NETPROBE drop reincarnation old=I new=J
  *         NETPROBE drop done
+ *   drop-watch
+ *       The controlling oracle of that case, with no network interface of
+ *       its own (a controller is outside the failure model). Through the
+ *       guest control API, poll the server-to-client direction every 10 ms of
+ *       guest time until an incarnation appears and print it; then poll for a
+ *       newer incarnation, print both, wait one guest second for the client
+ *       to finish its echo, and exit 0. Prints:
+ *         NETPROBE drop connection=JSON          (the control reply's object)
+ *         NETPROBE drop reincarnation old=I new=J
  *
  * Retries run on the guest's own clock, which the simulation owns, so a
  * server that is still booting is reached deterministically. Failures print
@@ -484,23 +488,11 @@ static int echo(int stream, size_t length) {
 static int drop_client(const char *address, unsigned long port) {
     struct sockaddr_in server = {.sin_family = AF_INET, .sin_port = htons((uint16_t)port)};
     if (inet_pton(AF_INET, address, &server.sin_addr) != 1) return 64;
-    struct sockaddr_un path = {.sun_family = AF_UNIX};
-    const char control_path[] = "/run/seedbox/control.sock";
-    memcpy(path.sun_path, control_path, sizeof(control_path));
-    int control = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (control < 0 || connect(control, (struct sockaddr *)&path, sizeof(path))) return fail("control connect");
     int attempts;
     int stream = connect_retry(&server, &attempts);
     if (stream < 0) return fail("drop connect");
     if (echo(stream, 64)) return fail("drop first echo");
     printf("NETPROBE drop first ok\n");
-    fflush(stdout);
-    if (control_call(control, 1, "\"op\":\"connections\",\"from\":{\"machine\":\"server\"},\"to\":{\"machine\":\"oracle\"}"))
-        return 70;
-    char connection[512];
-    unsigned long long old;
-    if (first_connection(connection, sizeof(connection), &old)) return fail("drop observe connection");
-    printf("NETPROBE drop connection=%s\n", connection);
     fflush(stdout);
     unsigned timeout_ms = 1000;
     if (setsockopt(stream, IPPROTO_TCP, TCP_USER_TIMEOUT, &timeout_ms, sizeof(timeout_ms)))
@@ -521,17 +513,41 @@ static int drop_client(const char *address, unsigned long port) {
     if (stream < 0) return fail("drop reconnect");
     if (echo(stream, 64)) return fail("drop second echo");
     printf("NETPROBE drop reconnected connects=%d\n", attempts);
-    fflush(stdout);
-    char operation[256];
-    snprintf(operation, sizeof(operation),
-             "\"op\":\"connections\",\"from\":{\"machine\":\"server\"},\"to\":{\"machine\":\"oracle\"},\"after\":%llu", old);
-    if (control_call(control, 2, operation)) return 70;
-    unsigned long long renewed;
-    if (first_connection(connection, sizeof(connection), &renewed) || renewed <= old) return fail("drop reincarnation");
-    printf("NETPROBE drop reincarnation old=%llu new=%llu\n", old, renewed);
     printf("NETPROBE drop done\n");
     fflush(stdout);
-    close(stream);
+    for (;;) pause();
+}
+/* Poll server-to-client incarnations after `after` until one appears. */
+static int watch(int control, unsigned *id, unsigned long long after, char *connection, size_t size,
+                 unsigned long long *incarnation) {
+    for (int attempt = 0; attempt < 6000; ++attempt) {
+        char operation[256];
+        snprintf(operation, sizeof(operation),
+                 "\"op\":\"connections\",\"from\":{\"machine\":\"server\"},\"to\":{\"machine\":\"client\"},\"after\":%llu",
+                 after);
+        if (control_call(control, ++*id, operation)) return 70;
+        if (!first_connection(connection, size, incarnation)) return 0;
+        if (control_call(control, ++*id, "\"op\":\"sleep\",\"duration_ns\":10000000")) return 70;
+    }
+    errno = ETIMEDOUT;
+    return fail("drop watch");
+}
+static int drop_watch(void) {
+    struct sockaddr_un path = {.sun_family = AF_UNIX};
+    const char control_path[] = "/run/seedbox/control.sock";
+    memcpy(path.sun_path, control_path, sizeof(control_path));
+    int control = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (control < 0 || connect(control, (struct sockaddr *)&path, sizeof(path))) return fail("control connect");
+    unsigned id = 0;
+    char connection[512];
+    unsigned long long old, renewed;
+    if (watch(control, &id, 0, connection, sizeof(connection), &old)) return 70;
+    printf("NETPROBE drop connection=%s\n", connection);
+    fflush(stdout);
+    if (watch(control, &id, old, connection, sizeof(connection), &renewed)) return 70;
+    printf("NETPROBE drop reincarnation old=%llu new=%llu\n", old, renewed);
+    fflush(stdout);
+    if (control_call(control, ++id, "\"op\":\"sleep\",\"duration_ns\":1000000000")) return 70;
     close(control);
     return 0;
 }
@@ -546,6 +562,7 @@ int main(int argc, char **argv) {
     }
     if (argc == 4 && !strcmp(argv[1], "drop-client") && !number(argv[3], 65535, &port) && port)
         return drop_client(argv[2], port);
+    if (argc == 2 && !strcmp(argv[1], "drop-watch")) return drop_watch();
     if (argc == 2 && !strcmp(argv[1], "idle")) {
         printf("NETPROBE idle\n");
         fflush(stdout);
@@ -554,6 +571,6 @@ int main(int argc, char **argv) {
     if (argc == 5 && !strcmp(argv[1], "client") && !number(argv[3], 65535, &port) && port &&
         !number(argv[4], 1ul << 30, &bytes))
         return client(argv[2], port, bytes);
-    fprintf(stderr, "usage: network-probe server PORT | server-disk PORT | client ADDRESS PORT BYTES | drop-client ADDRESS PORT | idle\n");
+    fprintf(stderr, "usage: network-probe server PORT | server-disk PORT | client ADDRESS PORT BYTES | drop-client ADDRESS PORT | drop-watch | idle\n");
     return 64;
 }

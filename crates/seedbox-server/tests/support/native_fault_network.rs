@@ -266,20 +266,27 @@ pub async fn network_shape_heal_replay(backend: DriverBackend) {
     .await;
 }
 
-/// The drop world: the oracle is network-probe `drop-client`, holding the
-/// guest control socket, and talks to the ordinary echo server.
-const DROP_MACHINES: [ProbeMachine; 2] = [
+/// The drop world: the oracle is network-probe `drop-watch`, holding the
+/// guest control socket with no network interface (a controller is outside
+/// the failure model); `drop-client` talks to the ordinary echo server.
+const DROP_MACHINES: [ProbeMachine; 3] = [
     ProbeMachine {
         name: "oracle",
         binary: "SEEDBOX_PV_NETWORK_APPLICATION",
-        argv: &["drop-client", "10.0.0.1", PROBE_PORT],
-        interface: Some((3, [10, 0, 0, 3])),
+        argv: &["drop-watch"],
+        interface: None,
     },
     ProbeMachine {
         name: "server",
         binary: "SEEDBOX_PV_NETWORK_APPLICATION",
         argv: &["server", PROBE_PORT],
         interface: Some((1, [10, 0, 0, 1])),
+    },
+    ProbeMachine {
+        name: "client",
+        binary: "SEEDBOX_PV_NETWORK_APPLICATION",
+        argv: &["drop-client", "10.0.0.1", PROBE_PORT],
+        interface: Some((2, [10, 0, 0, 2])),
     },
 ];
 const DROP_CONNECTION: &str = "NETPROBE drop connection=";
@@ -324,14 +331,15 @@ async fn step(session: &NativeSession, id: &seedbox_api::SimulationId) {
         tokio::task::yield_now().await;
     }
 }
-/// Step until the oracle's committed stdout contains `marker`.
-async fn until_oracle(
+/// Step until `machine`'s committed stdout contains `marker`.
+async fn until_output(
     session: &NativeSession,
     id: &seedbox_api::SimulationId,
+    machine: &str,
     marker: &str,
 ) -> String {
     loop {
-        let output = session.stdout(id, "oracle", false).await;
+        let output = session.stdout(id, machine, false).await;
         if output.contains(marker) {
             return output;
         }
@@ -339,7 +347,8 @@ async fn until_oracle(
         assert_ne!(
             phase,
             seedbox_api::Phase::Completed,
-            "oracle ended before {marker:?}: {output}"
+            "run ended before {machine} printed {marker:?}: {output} oracle: {}",
+            session.stdout(id, "oracle", false).await
         );
         step(session, id).await;
     }
@@ -373,11 +382,12 @@ async fn inject(
     intervention.plan.id
 }
 
-/// Drop the server-to-oracle direction of an observed TCP incarnation. The
+/// Drop the server-to-client direction of an observed TCP incarnation. The
 /// oracle reads the connection through the guest control API and prints it;
 /// the host parses that public log line and injects the drop live, then the
-/// heal once the oracle reports its connection aborted. The oracle then
-/// reconnects and observes a newer incarnation of the same direction.
+/// heal once the client reports its connection aborted. The client then
+/// reconnects, and the oracle observes a newer incarnation of the same
+/// direction.
 pub async fn network_drop_connection_replay(backend: DriverBackend) {
     use seedbox_api::{ControlCommand, FaultAction, PlaybackRate};
     native_case(move |owner| {
@@ -398,7 +408,7 @@ pub async fn network_drop_connection_replay(backend: DriverBackend) {
             session
                 .control(&source, "drop-initial-pause", ControlCommand::SetRate { rate: PlaybackRate::Paused })
                 .await;
-            let observed = until_oracle(session, &source, DROP_CONNECTION).await;
+            let observed = until_output(session, &source, "oracle", DROP_CONNECTION).await;
             let line = observed
                 .lines()
                 .find_map(|line| line.strip_prefix(DROP_CONNECTION))
@@ -407,9 +417,12 @@ pub async fn network_drop_connection_replay(backend: DriverBackend) {
                 serde_json::from_str(line).expect("oracle printed the control API's connection object");
             assert_eq!(
                 (connection.from.as_str(), connection.to.as_str(), connection.src_port),
-                ("server", "oracle", PROBE_PORT.parse().unwrap())
+                ("server", "client", PROBE_PORT.parse().unwrap())
             );
-            assert!(!observed.contains("NETPROBE drop aborted"), "aborted before the drop");
+            assert!(
+                session.stdout(&source, "client", false).await.contains("NETPROBE drop first ok"),
+                "the observed incarnation has carried an echo"
+            );
             let drop = inject(
                 session,
                 &source,
@@ -417,7 +430,7 @@ pub async fn network_drop_connection_replay(backend: DriverBackend) {
                 FaultAction::DropConnection { handle: HANDLE.into(), connection: connection.clone() },
             )
             .await;
-            let aborted = until_oracle(session, &source, DROP_ABORTED).await;
+            let aborted = until_output(session, &source, "client", DROP_ABORTED).await;
             assert!(!aborted.contains("NETPROBE drop reconnected"), "reconnected before the heal");
             let heal = inject(session, &source, "drop-heal", FaultAction::Heal { handle: HANDLE.into() }).await;
             assert_ne!(drop, heal);
@@ -426,7 +439,9 @@ pub async fn network_drop_connection_replay(backend: DriverBackend) {
                 .await;
             let source_witness = session.complete(&source, false, 1, SEED).await.unwrap();
             let oracle = session.stdout(&source, "oracle", false).await;
-            assert!(oracle.ends_with("NETPROBE drop done\n"), "{oracle}");
+            let client = session.stdout(&source, "client", false).await;
+            assert!(client.ends_with("NETPROBE drop done\n"), "client did not recover: {client}");
+            assert!(client.contains("NETPROBE drop reconnected connects="), "{client}");
             let renewed = oracle
                 .lines()
                 .find_map(|line| line.strip_prefix(DROP_REINCARNATION))
@@ -457,7 +472,7 @@ pub async fn network_drop_connection_replay(backend: DriverBackend) {
             session.worker(&replay).await;
             let replay_witness = session.complete(&replay, false, 1, SEED).await.unwrap();
             assert_eq!(source_witness, replay_witness, "raw native witnesses differ");
-            for machine in ["oracle", "server"] {
+            for machine in ["oracle", "server", "client"] {
                 assert_eq!(
                     session.stdout(&source, machine, false).await,
                     session.stdout(&replay, machine, false).await,
