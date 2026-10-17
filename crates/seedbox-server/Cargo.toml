@@ -29,6 +29,7 @@ futures-util.workspace = true
 seedbox-spec.workspace = true
 
 [dev-dependencies]
+seedbox-driver.workspace = true
 seedbox-test-time.workspace = true
 seedbox-client.workspace = true
 seedbox-machine = { workspace = true, features = ["test-support"] }

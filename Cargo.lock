@@ -2176,6 +2176,7 @@ dependencies = [
  "seedbox-artifacts",
  "seedbox-client",
  "seedbox-control",
+ "seedbox-driver",
  "seedbox-engine-protocol",
  "seedbox-machine",
  "seedbox-machine-pv",

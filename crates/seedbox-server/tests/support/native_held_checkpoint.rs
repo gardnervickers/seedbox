@@ -1,4 +1,6 @@
 //! Public held-throttle checkpoint continuation on the normal retained worker.
+#[path = "native_held_checkpoint/authority.rs"]
+mod authority;
 use super::*;
 use seedbox_api::{
     CheckpointState, ControlCommand, ControlState, EventDelivery, EventKind, FaultStatus,
@@ -170,7 +172,7 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
         let resume = launch.resume_checkpoint.as_ref().expect("actual resume required");
         assert!(resume.is_file());
         let saved: wire::Checkpoint = serde_json::from_reader(fs::File::open(resume).unwrap()).unwrap();
-        assert!(saved.state.world.publication.applied_faults.is_empty(), "saved capture contains an effect");
+        authority::assert_saved_pending(&saved, fault_id);
         assert_eq!(saved.state.world.input_program.next, 1);
         assert_eq!(saved.state.world.input_program.admissions.len(), 1);
         assert_eq!(saved.state.world.input_program.admissions[0].plan.id, fault_id);
