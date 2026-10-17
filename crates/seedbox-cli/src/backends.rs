@@ -65,13 +65,20 @@ impl ExecutionBackend for Executor {
         eprintln!(
             "running: starting {} machines through {}",
             request.prepared.guests.len(),
-            if cfg!(target_os = "macos") {
-                "HVF"
-            } else {
-                "KVM"
-            }
+            execution_backend_label(&self.backend().profile().backend)
         );
         self.backend().execute(request)
+    }
+}
+
+fn execution_backend_label(backend: &seedbox_application::execution::Backend) -> &'static str {
+    if matches!(backend, seedbox_application::execution::Backend::Other(name) if name == "driver-tcg")
+    {
+        "TCG"
+    } else if cfg!(target_os = "macos") {
+        "HVF"
+    } else {
+        "KVM"
     }
 }
 
@@ -370,7 +377,24 @@ pub fn container_engine() -> Result<bollard::Docker> {
     reason = "test code: spawns here never race a Seedbox process writing an executable"
 )]
 mod tests {
-    use super::{assets_beside, cached_kernel};
+    use super::{assets_beside, cached_kernel, execution_backend_label};
+
+    #[test]
+    fn backend_progress_names_tcg_from_profile_not_host() {
+        use seedbox_application::execution::Backend;
+        assert_eq!(
+            execution_backend_label(&Backend::Other("driver-tcg".into())),
+            "TCG"
+        );
+        assert_eq!(
+            execution_backend_label(&Backend::Other("driver-pv".into())),
+            if cfg!(target_os = "macos") {
+                "HVF"
+            } else {
+                "KVM"
+            }
+        );
+    }
 
     #[test]
     fn default_driver_selection_preserves_explicit_legacy_inputs() {
