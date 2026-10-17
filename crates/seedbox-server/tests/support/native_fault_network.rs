@@ -19,18 +19,23 @@ struct Transfer {
 }
 
 /// `request` carrying `inputs` (key, at_ns, public action) as its program.
-fn with_inputs(mut request: SubmitRequest, inputs: &[(&str, u64, serde_json::Value)]) -> SubmitRequest {
+fn with_inputs(
+    mut request: SubmitRequest,
+    inputs: &[(&str, u64, serde_json::Value)],
+) -> SubmitRequest {
     let seedbox_api::InputSource::Resolved { definition } = &request.spec.inputs else {
         panic!("resolved submission required")
     };
     let mut definition = definition.as_ref().clone();
     for (key, at_ns, action) in inputs {
-        definition.overrides.push(seedbox_spec::definition::Override {
-            id: (*key).into(),
-            at_ns: *at_ns,
-            action: action.clone(),
-            timeout_ns: seedbox_spec::definition::default_timeout_ns(),
-        });
+        definition
+            .overrides
+            .push(seedbox_spec::definition::Override {
+                id: (*key).into(),
+                at_ns: *at_ns,
+                action: action.clone(),
+                timeout_ns: seedbox_spec::definition::default_timeout_ns(),
+            });
     }
     request.spec = SimulationSpec::resolved(definition);
     assert_eq!(request.spec.program.len(), inputs.len());
@@ -50,7 +55,9 @@ async fn applied(session: &NativeSession, id: &seedbox_api::SimulationId) -> Vec
                     status: FaultStatus::Applied,
                     ..
                 } => applied.push((id, action)),
-                EventKind::OverrideRejected { input_key, reason, .. } => {
+                EventKind::OverrideRejected {
+                    input_key, reason, ..
+                } => {
                     panic!("network fault input {input_key} rejected: {reason}")
                 }
                 EventKind::SourceGap { .. } | EventKind::SourceUnavailable => {
@@ -74,7 +81,13 @@ async fn unfaulted(session: &mut NativeSession, backend: DriverBackend) -> Trans
     let transfer = Transfer {
         begin_ns: marker_time(&timed, PROBE_CLIENT_MID),
         end_ns: marker_time(&timed, PROBE_TCP_DONE),
-        final_ns: session.client.describe(&id).await.unwrap().status.simulated_time_ns,
+        final_ns: session
+            .client
+            .describe(&id)
+            .await
+            .unwrap()
+            .status
+            .simulated_time_ns,
         witness,
         client: timed.0,
     };
@@ -100,12 +113,20 @@ async fn faulted_and_replayed(
     let source_witness = session.complete(&source, false, 1, SEED).await.unwrap();
     let world = session.client.world(&source).await.unwrap();
     let timed = session.stdout_timed(&source, "client", false).await;
-    assert_eq!(count(&timed.0, PROBE_TCP_DONE), 1, "client did not recover: {}", timed.0);
+    assert_eq!(
+        count(&timed.0, PROBE_TCP_DONE),
+        1,
+        "client did not recover: {}",
+        timed.0
+    );
     assert!(timed.0.ends_with("NETPROBE done\n"), "{}", timed.0);
     assert_eq!(session.stdout(&source, "server", false).await, PROBE_READY);
     let source_applied = applied(session, &source).await;
     assert_eq!(
-        source_applied.iter().map(|(_, action)| action.as_str()).collect::<Vec<_>>(),
+        source_applied
+            .iter()
+            .map(|(_, action)| action.as_str())
+            .collect::<Vec<_>>(),
         actions,
         "each input applied exactly once, in order"
     );
@@ -125,7 +146,10 @@ async fn faulted_and_replayed(
         .await;
     session.worker(&replay).await;
     let replay_witness = session.complete(&replay, false, 1, SEED).await.unwrap();
-    assert_eq!(source_witness, replay_witness, "raw native witnesses differ");
+    assert_eq!(
+        source_witness, replay_witness,
+        "raw native witnesses differ"
+    );
     for machine in ["oracle", "server", "client"] {
         assert_eq!(
             session.stdout(&source, machine, false).await,
@@ -144,7 +168,11 @@ async fn faulted_and_replayed(
     (marker_time(&timed, PROBE_TCP_DONE), world, source_witness)
 }
 
-fn link<'a>(world: &'a seedbox_api::WorldState, from: &str, to: &str) -> &'a seedbox_api::LinkState {
+fn link<'a>(
+    world: &'a seedbox_api::WorldState,
+    from: &str,
+    to: &str,
+) -> &'a seedbox_api::LinkState {
     world
         .links
         .iter()
