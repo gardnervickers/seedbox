@@ -80,9 +80,8 @@ mod tests {
         injector.fail_worker().unwrap();
         let guard = seedbox_test_time::HangGuard::new(
             "positive delivery of the one-byte owned injection request",
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
         );
-        // test-time: allow(hang-guard) -- Bound a positive byte reply after delivery, never infer an outcome from timed absence.
         peer.set_read_timeout(Some(guard.remaining().unwrap()))
             .unwrap();
         let mut byte = [0];

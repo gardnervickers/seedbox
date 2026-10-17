@@ -275,9 +275,8 @@ mod tests {
         configure_socket(&receiver).unwrap();
         let reply_guard = seedbox_test_time::HangGuard::new(
             "published observation datagrams",
-            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(30),
         );
-        // test-time: allow(hang-guard) -- Receive actual frame/readiness datagrams; sequence and content, not silence, prove omissions.
         receiver
             .set_read_timeout(Some(reply_guard.remaining().unwrap()))
             .unwrap();

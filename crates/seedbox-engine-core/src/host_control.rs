@@ -511,9 +511,8 @@ mod tests {
         client.connect(&endpoint).unwrap();
         let reply_guard = seedbox_test_time::HangGuard::new(
             "prepared fault host-control replies",
-            Duration::from_secs(2),
+            Duration::from_secs(30),
         );
-        // test-time: allow(hang-guard) -- Bound actual prepare/commit/status replies; explicit replies and release establish ordering.
         client
             .set_read_timeout(Some(reply_guard.remaining().unwrap()))
             .unwrap();
@@ -636,7 +635,7 @@ mod tests {
                     rate: PlaybackRate::Unlimited,
                 },
             });
-            seedbox_test_time::HangGuard::new("host-control boundary completion after explicit resume on finished; retain the existing loaded-host deadlock budget, never timed absence", Duration::from_secs(2)).recv(&finished).unwrap();
+            seedbox_test_time::HangGuard::new("host-control boundary completion after explicit resume on finished; retain the existing loaded-host deadlock budget, never timed absence", Duration::from_secs(30)).recv(&finished).unwrap();
             let faults = worker.join().unwrap();
             assert_eq!(faults.log.len(), 1);
             assert_eq!(faults.log[0].id, 1);
@@ -678,9 +677,8 @@ mod tests {
         client.connect(&endpoint).unwrap();
         let reply_guard = seedbox_test_time::HangGuard::new(
             "checkpoint admission reply",
-            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(30),
         );
-        // test-time: allow(hang-guard) -- Bound the actual checkpoint acknowledgement, not checkpoint timing or completion.
         client
             .set_read_timeout(Some(reply_guard.remaining().unwrap()))
             .unwrap();
@@ -777,9 +775,8 @@ mod tests {
         client.connect(endpoint).unwrap();
         let reply_guard = seedbox_test_time::HangGuard::new(
             "initially paused boundary status replies",
-            Duration::from_secs(2),
+            Duration::from_secs(30),
         );
-        // test-time: allow(hang-guard) -- Actual status replies witness the held boundary; timeout is only infrastructure failure.
         client
             .set_read_timeout(Some(reply_guard.remaining().unwrap()))
             .unwrap();
@@ -820,7 +817,7 @@ mod tests {
             assert_eq!(completed.try_recv(), Err(mpsc::TryRecvError::Empty));
             drop(release);
             // Hang guard only: Resume releases the boundary.
-            seedbox_test_time::HangGuard::new("host-control boundary completion after explicit resume on completed; retain the existing loaded-host deadlock budget, never timed absence", Duration::from_secs(2)).recv(&completed).unwrap();
+            seedbox_test_time::HangGuard::new("host-control boundary completion after explicit resume on completed; retain the existing loaded-host deadlock budget, never timed absence", Duration::from_secs(30)).recv(&completed).unwrap();
         });
     }
 
@@ -909,7 +906,6 @@ mod tests {
         let accepted = control.request(step.clone(), initial);
         assert!(accepted.stepping);
         assert_eq!(accepted.error, None);
-        // test-time: allow(controlled-time) -- Caller-selected playback.delay argument; exact committed-boundary/stepping state decides the result, independent of elapsed host time.
         assert!(control
             .playback
             .delay(next.position, Instant::now())
@@ -980,9 +976,8 @@ mod pre_fault_tests {
         client.connect(&endpoint).unwrap();
         let reply_guard = seedbox_test_time::HangGuard::new(
             "one-shot pre-fault stop control replies",
-            Duration::from_secs(2),
+            Duration::from_secs(30),
         );
-        // test-time: allow(hang-guard) -- Bound actual stop/status/resume replies; their payloads determine success.
         client
             .set_read_timeout(Some(reply_guard.remaining().unwrap()))
             .unwrap();

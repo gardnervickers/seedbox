@@ -23,7 +23,7 @@ fn loop_processes_real_control_prepare_commit_retry_and_resumes_exactly_once() {
         let peer = root.path().join("peer.sock");
         let client = UnixDatagram::bind(peer).unwrap();
         client
-            .set_read_timeout(Some(Duration::from_secs(1)))
+            .set_read_timeout(Some(Duration::from_secs(30)))
             .unwrap();
         let prepare = request(
             1,

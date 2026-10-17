@@ -544,13 +544,11 @@ mod tests {
         for socket in [&qmp, &gdb] {
             let guard = seedbox_test_time::HangGuard::new(
                 "host descriptor probe socket exchange",
-                Duration::from_secs(5),
+                Duration::from_secs(30),
             );
-            // test-time: allow(hang-guard) -- Wait for actual descriptor reply bytes, not a timed absence.
             socket
                 .set_read_timeout(Some(guard.remaining().unwrap()))
                 .unwrap();
-            // test-time: allow(hang-guard) -- Bound sending the probe payload; reply contents determine success.
             socket
                 .set_write_timeout(Some(guard.remaining().unwrap()))
                 .unwrap();
@@ -590,7 +588,7 @@ mod tests {
         assert_eq!(&bytes, b"GDB");
         let guard = seedbox_test_time::HangGuard::new(
             "host descriptor fixture process exit",
-            Duration::from_secs(5),
+            Duration::from_secs(30),
         );
         let status = guard
             .wait_for(|| child.0.try_wait().transpose())

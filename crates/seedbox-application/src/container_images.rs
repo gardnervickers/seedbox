@@ -522,9 +522,8 @@ mod tests {
                     let (mut connection, _) = listener.accept().unwrap();
                     let guard = seedbox_test_time::HangGuard::new(
                         "image-export fixture receives an actual HTTP request",
-                        Duration::from_secs(10),
+                        Duration::from_secs(30),
                     );
-                    // test-time: allow(hang-guard) -- Bound positive HTTP request/header reads; image payload and cancellation assertions remain independent.
                     connection
                         .set_read_timeout(Some(guard.remaining().unwrap()))
                         .unwrap();

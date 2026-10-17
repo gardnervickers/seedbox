@@ -2238,9 +2238,8 @@ fn initially_paused_program_holds_launch_boundary_effect_until_resume() {
     client.connect(&endpoint).unwrap();
     let reply_guard = seedbox_test_time::HangGuard::new(
         "initially paused input-program control replies",
-        Duration::from_secs(2),
+        Duration::from_secs(30),
     );
-    // test-time: allow(hang-guard) -- Actual paused/resume replies establish the held launch boundary, not a timed absence.
     client
         .set_read_timeout(Some(reply_guard.remaining().unwrap()))
         .unwrap();

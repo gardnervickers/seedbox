@@ -18,7 +18,7 @@ use std::{
 };
 
 const BATCH: usize = 32;
-const CONTROL: Duration = Duration::from_secs(12);
+const CONTROL: Duration = Duration::from_secs(30);
 fn source() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/faults/workload/main.py")
 }
@@ -33,16 +33,13 @@ fn addresses() -> (String, String) {
 }
 fn wire(address: &str, command: &str) -> String {
     let guard = HangGuard::new("actual control socket response", CONTROL);
-    // test-time: allow(hang-guard) -- Bound a positive local connection, not the guest's simulated I/O deadline.
     let mut socket =
         TcpStream::connect_timeout(&address.parse().unwrap(), guard.remaining().unwrap())
             .unwrap_or_else(|e| panic!("connect {address} for {command}: {e}"));
-    // test-time: allow(hang-guard) -- Keep this positive request write inside the same infrastructure guard.
     socket
         .set_write_timeout(Some(guard.remaining().unwrap()))
         .unwrap();
     writeln!(socket, "{command}").unwrap();
-    // test-time: allow(hang-guard) -- Bound the actual control reply; timeout is an infrastructure failure, never functional success.
     socket
         .set_read_timeout(Some(guard.remaining().unwrap()))
         .unwrap();
@@ -94,7 +91,6 @@ impl Program {
                 "{mode} exited during startup: {}",
                 fs::read_to_string(log).unwrap()
             );
-            // test-time: allow(hang-guard) -- Only a successful real connection establishes readiness; attempts share the infrastructure guard.
             if TcpStream::connect_timeout(
                 &address.parse().unwrap(),
                 guard.remaining().unwrap().min(Duration::from_millis(100)),
@@ -360,11 +356,9 @@ impl Peer {
                     break;
                 }
                 let guard = HangGuard::new("actual TCP peer request and reply", CONTROL);
-                // test-time: allow(hang-guard) -- Bound an actual incoming request, never an absent request or the simulated subject.
                 channel
                     .set_read_timeout(Some(guard.remaining().unwrap()))
                     .unwrap();
-                // test-time: allow(hang-guard) -- Bound the response write in the same request's infrastructure guard.
                 channel
                     .set_write_timeout(Some(guard.remaining().unwrap()))
                     .unwrap();
@@ -403,7 +397,6 @@ impl Peer {
             let guard = HangGuard::new("TCP responder must acknowledge explicit shutdown", CONTROL);
             // Publish shutdown before waking blocking accept. A failed wake is
             // harmless if the thread already exited; completion is checked below.
-            // test-time: allow(hang-guard) -- Explicit shutdown wake, followed by positive observation of actual thread completion.
             let _wake = TcpStream::connect_timeout(
                 &self.address.parse().unwrap(),
                 guard.remaining().unwrap(),

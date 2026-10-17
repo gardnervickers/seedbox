@@ -116,7 +116,6 @@ mod tests {
 
     #[test]
     fn measured_rate_uses_the_selected_interval_and_resets_after_rewind() {
-        // test-time: allow(controlled-time) -- Opaque Instant origin; measurement inputs advance by exact caller-selected nanoseconds, so the achieved-rate assertion is fully synthetic.
         let start = Instant::now();
         let mut playback = Playback::default();
         playback.delay(position(0, 0), start);
@@ -142,7 +141,6 @@ mod tests {
 
     #[test]
     fn pacing_changes_waiting_only_and_resets_its_origin_after_a_pause() {
-        // test-time: allow(controlled-time) -- Opaque Instant origin; all pacing/reset calculations use exact origin-plus-duration inputs, not host passage.
         let start = Instant::now();
         let mut playback = Playback::default();
         let twice = PlaybackRate::Limited {
@@ -171,7 +169,6 @@ mod tests {
 
     #[test]
     fn step_waits_for_a_real_commit_and_then_stays_paused() {
-        // test-time: allow(controlled-time) -- Caller-selected Instant parameter; committed-round identity alone decides step completion, not elapsed time.
         let now = Instant::now();
         let mut playback = Playback::default();
         assert!(playback.step(position(7, 100)).is_err());

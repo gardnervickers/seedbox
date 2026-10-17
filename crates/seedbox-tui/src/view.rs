@@ -3799,7 +3799,6 @@ mod tests {
             request: "raw-payload-secret-to-operator-view".into(),
             result: "connection lost".into(),
             ok: false,
-            // test-time: allow(controlled-time) -- Opaque Inspector timestamp; render_with_time receives this exact same instant, so snapshot visibility cannot depend on host passage or the five-second TTL.
             at: Instant::now(),
         });
         app.details = false;

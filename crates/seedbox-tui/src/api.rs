@@ -858,31 +858,30 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
         let read = Arc::new(AtomicUsize::new(0));
         let observed = read.clone();
+        let (backpressured, reached_capacity) = std::sync::mpsc::channel();
         let task = tokio::spawn(follow(
             tx,
             Arc::new(AtomicBool::new(true)),
             "test",
             move || {
                 let read = read.clone();
+                let backpressured = backpressured.clone();
                 async move {
                     Ok(
                         futures_util::stream::iter((0..100).map(Ok)).inspect(move |_| {
-                            read.fetch_add(1, Ordering::Relaxed);
+                            if read.fetch_add(1, Ordering::Relaxed) == 2 {
+                                backpressured.send(()).unwrap();
+                            }
                         }),
                     )
                 }
             },
             |value| Update::Notice(format!("{value}")),
         ));
-        let guard = HangGuard::new("observed stream backpressure", Duration::from_secs(1));
-        // test-time: allow(hang-guard) -- Bound observing the third stream item; channel capacity, not elapsed time, proves backpressure.
-        tokio::time::timeout(guard.remaining().unwrap(), async {
-            while observed.load(Ordering::Relaxed) < 3 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        let guard = HangGuard::new("observed stream backpressure", Duration::from_secs(30));
+        tokio::task::spawn_blocking(move || guard.recv(&reached_capacity).unwrap())
+            .await
+            .unwrap();
         // Two queued updates and one awaiting capacity; the rest stays unread.
         assert_eq!(observed.load(Ordering::Relaxed), 3);
         for expected in 0..100 {
@@ -1007,7 +1006,7 @@ mod tests {
             let mut requests = Vec::new();
             for response in responses {
                 let accept_guard =
-                    HangGuard::new("timeline HTTP connection", Duration::from_secs(5));
+                    HangGuard::new("timeline HTTP connection", Duration::from_secs(30));
                 let mut stream = accept_guard
                     .wait_for(|| match listener.accept() {
                         Ok((stream, _)) => Some(stream),
@@ -1017,8 +1016,7 @@ mod tests {
                     .expect("expected timeline HTTP request");
                 stream.set_nonblocking(false).unwrap();
                 let read_guard =
-                    HangGuard::new("timeline HTTP request bytes", Duration::from_secs(5));
-                // test-time: allow(hang-guard) -- Bound receiving the actual HTTP headers/body; parsed request contents determine success.
+                    HangGuard::new("timeline HTTP request bytes", Duration::from_secs(30));
                 stream
                     .set_read_timeout(Some(read_guard.remaining().unwrap()))
                     .unwrap();

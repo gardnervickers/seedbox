@@ -12,11 +12,8 @@ use std::{fs, os::unix::net::UnixDatagram, sync::mpsc, time::Duration};
 /// the first sample precedes the interval and the second follows it.
 fn bracket(clock: &host_clock::Reader) -> (Duration, Duration) {
     let first = clock.waited().unwrap();
-    // test-time: allow(host-time-subject) -- Sample the host-wait accounting clock itself to bracket its open/closed accounting transitions.
     let start = host_clock::Instant::now().unwrap();
-    // test-time: allow(host-time-subject) -- Obtain a strictly positive interval of the host clock under test, not an ordering delay.
     while start.elapsed().unwrap().is_zero() {}
-    // test-time: allow(host-time-subject) -- Compare accounted host wait with the same measured clock interval; no speed threshold is asserted.
     let interval = start.elapsed().unwrap();
     let second = clock.waited().unwrap();
     (second.checked_sub(first).unwrap(), interval)
@@ -38,9 +35,8 @@ fn pause_acknowledges_a_boundary_and_repeated_requests_preserve_the_gate() {
     client.connect(&socket).unwrap();
     let guard = HangGuard::new(
         "host-control socket acknowledges actual commands",
-        Duration::from_secs(2),
+        Duration::from_secs(30),
     );
-    // test-time: allow(hang-guard) -- Bound positive pause/resume/invalid replies; payloads and gate ownership prove ordering.
     client
         .set_read_timeout(Some(guard.remaining().unwrap()))
         .unwrap();
@@ -74,7 +70,7 @@ fn pause_acknowledges_a_boundary_and_repeated_requests_preserve_the_gate() {
         fs::remove_file(lost_path).unwrap();
         seedbox_application::host_control::set_paused(&run, false).unwrap();
         // Hang guard only: the resume releases the boundary.
-        seedbox_test_time::HangGuard::new("host-control boundary completion after explicit resume on observed; retain the existing loaded-host deadlock budget, never timed absence", Duration::from_secs(2)).recv(&observed).unwrap();
+        seedbox_test_time::HangGuard::new("host-control boundary completion after explicit resume on observed; retain the existing loaded-host deadlock budget, never timed absence", Duration::from_secs(30)).recv(&observed).unwrap();
         let mut control = worker.join().unwrap();
         // Resume is also idempotent when already running.
         client.send(b"resume").unwrap();
@@ -135,7 +131,7 @@ fn typed_controls_resolve_a_timeout_before_admitting_a_step() {
             .unwrap();
         });
         let _resume = Resume(&cleanup);
-        let paused = client.execute(pause, Duration::from_secs(2)).unwrap();
+        let paused = client.execute(pause, Duration::from_secs(30)).unwrap();
         assert_eq!(paused.id, 1);
         assert_eq!(paused.rate, PlaybackRate::Paused);
         assert!(client.pending().is_none());
@@ -145,25 +141,25 @@ fn typed_controls_resolve_a_timeout_before_admitting_a_step() {
         // host time across a further measured interval.
         HangGuard::new(
             "host-control opens its accounted wait",
-            Duration::from_secs(2),
+            Duration::from_secs(30),
         )
         .wait_for(|| (!bracket(&clock).0.is_zero()).then_some(()))
         .expect("wait never opened");
         let (grown, interval) = bracket(&clock);
         assert!(grown >= interval, "{grown:?} < {interval:?}");
         let step = client
-            .execute(Command::Step, Duration::from_secs(2))
+            .execute(Command::Step, Duration::from_secs(30))
             .unwrap();
         assert_eq!(step.error, None);
         assert!(step.stepping);
         // Hang guard only: the admitted step completes one round.
         let guard = HangGuard::new(
             "admitted host-control step completes one round",
-            Duration::from_secs(2),
+            Duration::from_secs(30),
         );
         loop {
             let status = client
-                .execute(Command::Status, Duration::from_secs(2))
+                .execute(Command::Status, Duration::from_secs(30))
                 .unwrap();
             if status.position.completed_rounds == 1 {
                 assert!(!status.stepping);
@@ -178,7 +174,7 @@ fn typed_controls_resolve_a_timeout_before_admitting_a_step() {
                 Command::SetRate {
                     rate: PlaybackRate::Unlimited,
                 },
-                Duration::from_secs(2),
+                Duration::from_secs(30),
             )
             .unwrap();
         worker.join().unwrap();

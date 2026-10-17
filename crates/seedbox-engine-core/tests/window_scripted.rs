@@ -7,7 +7,6 @@ use seedbox_engine_core::window::{
     Output, Params, Report, Router, Time, World, NEVER,
 };
 use std::collections::{BTreeMap, VecDeque};
-use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Msg {
@@ -52,8 +51,8 @@ struct Script {
     /// (receiver time, event key, message) for each delivery.
     trace: Vec<(Time, EventKey, Msg)>,
     exited: Option<Time>,
-    /// Host time spent per run: perturbs completion order only.
-    host_delay: Duration,
+    /// Finite scheduling opportunities per run: perturbs host execution only.
+    host_yields: usize,
     /// Wake only when about to act, as a halted guest does, instead of
     /// jumping to the assignment's wake time first. Such a machine may stop
     /// short of the slice end when idle.
@@ -74,7 +73,7 @@ impl Script {
             received: 0,
             trace: Vec::new(),
             exited: None,
-            host_delay: Duration::ZERO,
+            host_yields: 0,
             lazy: false,
         }
     }
@@ -160,8 +159,11 @@ impl Machine<Msg> for Script {
     type Context = ();
 
     fn run(&mut self, _: &mut (), a: &Assignment<Msg>) -> Result<Report<Msg>, String> {
-        // test-time: allow(host-timing-perturbation) -- Compare exact deterministic transcripts/checkpoints across delayed worker profiles; never infer completion order or speed from the delay.
-        std::thread::sleep(self.host_delay);
+        // Vary worker-side scheduling pressure without a clock or any claim
+        // about which worker the host will finish first.
+        for _ in 0..self.host_yields {
+            std::thread::yield_now();
+        }
         // Idle until the first possible action, as a halted guest is woken.
         if !self.lazy {
             self.time = self.time.max(a.wake);
@@ -330,7 +332,7 @@ struct Witness {
     dropped: Vec<(Time, Msg)>,
 }
 
-/// None: serial. Some(w): w workers. `reverse`: higher machines finish first.
+/// None: serial. Some(w): w workers. `reverse`: lower machines yield more.
 fn execute(
     params: &Params,
     scripts: &[Script],
@@ -342,9 +344,9 @@ fn execute(
     let mut world = World::new(scripts.len(), params.clone())?;
     let mut machines = scripts.to_vec();
     if reverse {
-        let n = machines.len() as u64;
+        let n = machines.len();
         for m in &mut machines {
-            m.host_delay = Duration::from_micros((n - m.id as u64) * 300);
+            m.host_yields = (n - m.id) * 300;
         }
     }
     let mut links = Links::new(seed, params.latency, 400, loss_ppm);
@@ -353,7 +355,7 @@ fn execute(
         Some(w) => run_parallel(&mut world, &mut machines, w, |_| Ok(()), &mut links, NoHook)?,
     };
     for m in &mut machines {
-        m.host_delay = Duration::ZERO;
+        m.host_yields = 0;
     }
     Ok(Witness {
         outcome,
@@ -464,7 +466,7 @@ fn simultaneous_sends_reach_a_receiver_in_machine_order() {
     for workers in [None, Some(3)] {
         let mut world = World::new(3, p.clone()).unwrap();
         let mut machines = scripts.clone();
-        machines[1].host_delay = Duration::from_millis(5);
+        machines[1].host_yields = 5_000;
         let mut links = Links::new(1, p.latency, 0, 0);
         match workers {
             None => run_serial(&mut world, &mut machines, &mut (), &mut links, NoHook).unwrap(),
@@ -696,8 +698,8 @@ fn a_failing_machine_aborts_without_committing_and_the_lowest_failure_wins() {
             let mut world = World::new(4, params()).unwrap();
             let mut machines = scripts.clone();
             if reverse {
-                machines[2].host_delay = Duration::ZERO;
-                machines[1].host_delay = Duration::from_millis(3);
+                machines[2].host_yields = 0;
+                machines[1].host_yields = 3_000;
             }
             let mut links = Links::new(1, 1_000, 0, 0);
             let e = match workers {

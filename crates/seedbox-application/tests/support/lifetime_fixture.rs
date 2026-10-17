@@ -5,22 +5,86 @@ use std::{
     fs, io,
     path::Path,
     process::{Command, Stdio},
-    time::{Duration, Instant},
 };
 
+// The owning integration test bounds this child with its HangGuard. Subscribe
+// before checking the marker so creation between the check and wait is not lost.
+#[cfg(target_os = "linux")]
 fn wait(path: &Path) -> io::Result<()> {
-    // test-time: allow(hang-guard) -- This feature-gated fixture binary bounds positive marker-file readiness without linking a production toolkit dependency.
-    let start = Instant::now();
-    while !path.exists() {
-        // test-time: allow(hang-guard) -- Preserve the fifteen-second infrastructure error while awaiting the actual marker file.
-        if start.elapsed() > Duration::from_secs(15) {
-            return Err(io::Error::other(format!(
-                "fixture timed out waiting for {}",
-                path.display()
-            )));
+    use std::io::Read;
+    use std::os::{fd::FromRawFd, unix::ffi::OsStrExt};
+    let parent = std::ffi::CString::new(path.parent().unwrap().as_os_str().as_bytes())?;
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut events = unsafe { fs::File::from_raw_fd(fd) };
+    if unsafe { libc::inotify_add_watch(fd, parent.as_ptr(), libc::IN_CREATE | libc::IN_MOVED_TO) }
+        < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let mut bytes = [0; 4096];
+    while !path.try_exists()? {
+        match events.read(&mut bytes) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => {
+                if result? == 0 {
+                    return Err(io::Error::other("marker notification stream closed"));
+                }
+            }
         }
-        // test-time: allow(hang-guard) -- Pace only the positive marker-file poll; elapsed time never establishes readiness.
-        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}
+#[cfg(target_os = "macos")]
+fn wait(path: &Path) -> io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let parent = fs::File::open(path.parent().unwrap())?;
+    let fd = unsafe { libc::kqueue() };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let queue = unsafe { fs::File::from_raw_fd(fd) };
+    let event = libc::kevent {
+        ident: parent.as_raw_fd() as libc::uintptr_t,
+        filter: libc::EVFILT_VNODE,
+        flags: libc::EV_ADD | libc::EV_CLEAR,
+        fflags: libc::NOTE_WRITE,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    if unsafe {
+        libc::kevent(
+            queue.as_raw_fd(),
+            &event,
+            1,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    while !path.try_exists()? {
+        let mut observed = event;
+        if unsafe {
+            libc::kevent(
+                queue.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                &mut observed,
+                1,
+                std::ptr::null(),
+            )
+        } < 0
+        {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
     }
     Ok(())
 }
