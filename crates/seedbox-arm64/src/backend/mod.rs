@@ -135,6 +135,11 @@ pub trait Backend: Sized {
     }
 }
 
+// Native adapters and the portable register mocks share this encoding.
+#[cfg(any(
+    test,
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+))]
 pub(crate) fn core_index(reg: CoreReg) -> Result<u32> {
     match reg {
         CoreReg::X(n @ 0..=30) => Ok(n as u32),

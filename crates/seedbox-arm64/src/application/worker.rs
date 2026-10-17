@@ -1055,7 +1055,7 @@ impl OwnedWorker {
                         matches!(request.operation, Operation::AdvanceUntilIdle { .. })
                             && *t == *time_ns
                             && !observation.pending_irq
-                            && deadline.map_or(u64::MAX, |d| d) == observation.next_deadline
+                            && deadline.unwrap_or(u64::MAX) == observation.next_deadline
                             && deadline.is_none_or(|d| d > *t)
                             && !observation.powered_off
                             && observation.exit.is_none()

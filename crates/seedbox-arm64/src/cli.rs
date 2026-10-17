@@ -1,5 +1,7 @@
 //! CLI boundary for the experimental arm64 fixture engine.
-use crate::{machine::Machine, witness::Report, Result};
+#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+use crate::machine::Machine;
+use crate::{witness::Report, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 #[derive(Clone, Copy, ValueEnum)]
@@ -112,6 +114,9 @@ fn run(
     seed: u64,
     ram_pages: Option<&mut dyn std::io::Write>,
 ) -> Result<Report> {
+    // Unsupported hosts keep the same backend errors and never consume inputs.
+    #[cfg(not(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))))]
+    let _ = (kernel, initrd, seed, ram_pages);
     match choice {
         Choice::Hvf => {
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
