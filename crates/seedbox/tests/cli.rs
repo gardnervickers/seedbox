@@ -86,7 +86,7 @@ fn long_server_state_path_fails_before_creating_state() {
 }
 
 #[test]
-fn explicit_asset_directory_overrides_bundled_kernel_without_build_tools() {
+fn explicit_asset_directory_overrides_bundled_driver_without_build_tools() {
     // Hard-link instead of copying: a copy holds a writable descriptor that a
     // concurrently forked test child can inherit, making exec fail with ETXTBSY.
     // CARGO_TARGET_TMPDIR shares the binary's filesystem, so linking works.
@@ -94,7 +94,7 @@ fn explicit_asset_directory_overrides_bundled_kernel_without_build_tools() {
     let root = directory.path().canonicalize().unwrap();
     let binary = root.join("seedbox");
     fs::hard_link(env!("CARGO_BIN_EXE_seedbox"), &binary).unwrap();
-    let output = Command::new(binary)
+    let output = Command::new(&binary)
         .arg("doctor")
         .current_dir(&root)
         .env_clear()
@@ -104,8 +104,42 @@ fn explicit_asset_directory_overrides_bundled_kernel_without_build_tools() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output), format!("error: --kernel {}: not found; from the Seedbox checkout run `cargo xtask build-assets`, or pass --kernel PATH\n", root.join(std::env::consts::ARCH).join("kernel").display()));
+    let archive = root
+        .join(std::env::consts::ARCH)
+        .join("driver-runtime.tar.gz");
+    assert_eq!(stderr(&output), format!("error: driver runtime {}: {}; run cargo xtask build-assets or supply a complete runtime archive\n", archive.display(), std::io::Error::from_raw_os_error(2)));
+    assert!(output.stdout.is_empty());
+    // The asset directory locates the selected backend's package; it does not
+    // select legacy mode. Explicit kernel/VMM paths still take precedence.
+    for (flag, variable, path) in [
+        ("--kernel", "SEEDBOX_KERNEL", "missing-kernel"),
+        ("--vmm", "SEEDBOX_VMM", "missing-vmm"),
+    ] {
+        for from_environment in [false, true] {
+            let mut command = Command::new(&binary);
+            command
+                .arg("doctor")
+                .current_dir(&root)
+                .env_clear()
+                .env("HOME", &root)
+                .env("SEEDBOX_ASSET_DIR", &root)
+                .env("PATH", "");
+            if from_environment {
+                command.env(variable, path);
+            } else {
+                command.args([flag, path]);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(2));
+            assert_eq!(
+                stderr(&output),
+                format!("error: {flag} {path}: not found\n")
+            );
+            assert!(output.stdout.is_empty());
+        }
+    }
     assert!(!root.join(".seedbox").exists());
+    assert!(!root.join(".local/state/seedbox").exists());
 }
 
 #[test]

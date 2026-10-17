@@ -415,8 +415,9 @@ deliberately change one.
 
 `doctor` checks KVM device access and the guest
 kernel/VMM/runtime inputs. By default it selects the native Driver PV package,
-validates its inputs, and probes with its guest kernel. Explicit kernel/VMM
-overrides keep legacy lookup behavior; host-kernel bytes are not checked. VMM resolution is lookup-only and must never invoke a
+validates its inputs, and probes with its guest kernel. `SEEDBOX_ASSET_DIR`
+relocates the selected backend's package; it does not select legacy mode.
+Explicit kernel/VMM overrides keep legacy lookup behavior; host-kernel bytes are not checked. VMM resolution is lookup-only and must never invoke a
 compiler or launch the worker. Success reports
 only the exact cleaned-up probe observations; the library does
 not read arguments/environment or print. It creates no state/run and never prepares
