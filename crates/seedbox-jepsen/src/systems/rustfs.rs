@@ -337,7 +337,7 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     kit::pause(args.quiet as f64);
     let (live, down) = recover(&s3, args, bucket);
     // A final read of every key, retried on other nodes until one answers.
-    for (k, key) in keys.iter().enumerate() {
+    for (k, key) in keys.iter().enumerate().filter(|_| !live.is_empty()) {
         'key: for attempt in 0..3u64 {
             for node in &live {
                 if let Some(bad) =
@@ -751,7 +751,11 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     let mut missing = Vec::new();
     let mut corrupt = Vec::new();
     let mut unreadable = Vec::new();
-    for key in &acknowledged {
+    // With no server answering, every object is unreadable: skip the retries.
+    if live.is_empty() {
+        unreadable.clone_from(&acknowledged);
+    }
+    for key in acknowledged.iter().filter(|_| !live.is_empty()) {
         let expected = contents(key, args.size);
         let mut outcome = None;
         for attempt in 0..3 {
