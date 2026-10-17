@@ -125,10 +125,12 @@ fn pv_msr_state_is_independent_of_host_time() {
         .unwrap()
     };
     let first = make();
-    // test-time: allow(host-timing-perturbation) -- Separate the two vCPUs' host clocks; only their deterministic MSR state is compared, never elapsed time.
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    let a = first.read_msrs().unwrap();
+    // The completed first sample precedes a second real KVM vCPU creation.
+    // That positive kernel-work boundary separates observations without a
+    // hoped-for host-time delay; only deterministic MSR contents are compared.
     let second = make();
-    let (a, b) = (first.read_msrs().unwrap(), second.read_msrs().unwrap());
+    let b = second.read_msrs().unwrap();
     assert!(a.iter().all(|(index, _)| !host_owned_msr(*index)));
     assert_eq!(a, b);
 }

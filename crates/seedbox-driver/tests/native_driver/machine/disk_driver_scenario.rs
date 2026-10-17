@@ -10,10 +10,8 @@ use seedbox_machine::{
         at, definition, raw_image, Backend, BOOT_LIMIT, HOST_LIMIT, QUANTUM,
     },
 };
-use std::{
-    fmt::Debug,
-    time::{Duration, Instant},
-};
+use seedbox_test_time::HangGuard;
+use std::{fmt::Debug, time::Duration};
 /// Snapshot replaces the running machine with one restored from it, so the
 /// Driver continues on the restored copy.
 struct Migrating<M: Machine> {
@@ -103,7 +101,7 @@ where
     let targets: Vec<MachineId> = driver
         .with_barrier(|b| Ok(b.machines().skip(1).map(|(id, _)| id).collect()))
         .unwrap();
-    let started = Instant::now();
+    let guard = HangGuard::new("native disk marker transport must return", HOST_LIMIT);
     let mut events = Vec::new();
     let mut now = at(0);
     let mut advance_until = |driver: &mut Driver<Migrating<M>>, marker: &str| {
@@ -111,7 +109,7 @@ where
             .iter()
             .all(|&target| stdout(&events, target).contains(marker))
         {
-            assert!(started.elapsed() < HOST_LIMIT, "host diagnostic: no stop");
+            guard.remaining().expect("disk marker infrastructure hang");
             assert!(now.as_nanos() < 3 * BOOT_LIMIT, "simulated bound");
             let outcome = driver.step(at(now.as_nanos() + QUANTUM)).unwrap();
             events.extend(driver.drain_events());

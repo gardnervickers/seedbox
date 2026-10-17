@@ -24,12 +24,7 @@ use seedbox_machine::{
     rng::RngStream,
 };
 use seedbox_test_time::{GuestProgress, HangGuard};
-use std::{
-    fmt::Debug,
-    fs,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::{fmt::Debug, fs, path::PathBuf, time::Duration};
 
 const QUANTUM: u64 = 5_000_000;
 struct FixtureRng(u8);
@@ -50,7 +45,7 @@ fn input(name: &str) -> PathBuf {
         .into()
 }
 
-struct Session<M: Machine<Context = ()>, T = Instant> {
+struct Session<M: Machine<Context = ()>, T = HangGuard> {
     driver: Driver<M>,
     ids: Vec<MachineId>,
     events: Vec<MachineResponse>,
@@ -175,8 +170,8 @@ where
             .unwrap()
     }
 }
-// Keep unrelated legacy owners unchanged; only registered RPC/epoch callers
-// instantiate the same observation helpers with infrastructure-only timing.
+// Every session waits for real guest responses under an infrastructure guard;
+// simulated phase bounds remain separate from host transport liveness.
 impl<M> Session<M>
 where
     M: Machine<Context = ()> + Send + 'static,
@@ -187,11 +182,9 @@ where
             if predicate(self) {
                 return;
             }
-            assert!(
-                self.started.elapsed() < Duration::from_secs(180),
-                "native Driver deadline: {:?}",
-                self.events
-            );
+            self.started
+                .remaining()
+                .expect("native Driver response infrastructure hang");
             let upto = at(self.now().as_nanos() + QUANTUM);
             self.driver.step(upto).unwrap();
             self.drain();
@@ -296,7 +289,10 @@ where
         ids: ids.clone(),
         events: Vec::new(),
         all: Vec::new(),
-        started: Instant::now(),
+        started: HangGuard::new(
+            "native Driver service transport must return",
+            Duration::from_secs(180),
+        ),
     };
     session.pump_until(|s| {
         s.ids.iter().all(|&id| {
@@ -438,18 +434,19 @@ where
                 .iter()
                 .all(|&id| s.output(id, 0, Stream::Stdout) == b"app\0out\napp\0out\n")
     });
-    assert!(
-        session
-            .ids
-            .iter()
-            .all(|&id| (1..=4).all(|command| session.ack(id, 0, command)))
-    );
+    assert!(session
+        .ids
+        .iter()
+        .all(|&id| (1..=4).all(|command| session.ack(id, 0, command))));
     session.apply(each("shutdown", &Action::Shutdown));
     for _ in 0..20000 {
         if session.all_exited() {
             break;
         }
-        assert!(session.started.elapsed() < Duration::from_secs(180));
+        session
+            .started
+            .remaining()
+            .expect("native Driver shutdown infrastructure hang");
         let upto = at(session.now().as_nanos() + QUANTUM);
         session.driver.step(upto).unwrap();
         session.drain();
@@ -512,10 +509,10 @@ where
         if session.all_exited() {
             break;
         }
-        assert!(
-            session.started.elapsed() < Duration::from_secs(180),
-            "native Driver shutdown deadline"
-        );
+        session
+            .started
+            .remaining()
+            .expect("native Driver shutdown infrastructure hang");
         let upto = at(session.now().as_nanos() + QUANTUM);
         session.driver.step(upto).unwrap();
         session.drain();
@@ -538,12 +535,10 @@ where
         );
         assert_eq!(session.output(id, 1, Stream::Stderr), b"\xff\0z");
     }
-    assert!(
-        !session
-            .events
-            .iter()
-            .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. }))
-    );
+    assert!(!session
+        .events
+        .iter()
+        .any(|event| matches!(event.payload, Response::ApplicationOutcome { .. })));
     // Each application session emits its one control call; Restart starts a
     // second session in boot zero. Driver replies automatically.
     for &machine in &session.ids {
@@ -969,8 +964,8 @@ fn spawn_scenario<M>(
     mut definition: machine_crate::definition::MachineDefinition,
     application: Vec<u8>,
     factory: impl FnMut(&machine_crate::definition::MachineDefinition) -> Result<M, M::Error>
-    + Send
-    + 'static,
+        + Send
+        + 'static,
 ) -> (Vec<StepOutcome>, Vec<seedbox_driver::driver::Event>)
 where
     M: Machine<Context = ()> + Send + 'static,
@@ -1002,13 +997,13 @@ where
     assert_eq!(initial.len(), 1);
     let mut events = driver.drain_events();
     let mut outcomes = Vec::new();
-    let started = Instant::now();
+    let guard = HangGuard::new(
+        "native spawn response transport must return",
+        Duration::from_secs(180),
+    );
     let mut now = at(0);
     for _ in 0..20000 {
-        assert!(
-            started.elapsed() < Duration::from_secs(180),
-            "native spawn deadline"
-        );
+        guard.remaining().expect("native spawn infrastructure hang");
         let outcome = driver.step(at(now.as_nanos() + QUANTUM)).unwrap();
         events.extend(driver.drain_events());
         outcomes.push(outcome.clone());

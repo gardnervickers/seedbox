@@ -12,12 +12,8 @@ use crate::{
     pv::Response,
     rng::RngStream,
 };
-use std::{
-    fmt::Debug,
-    fs,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use seedbox_test_time::{GuestProgress, HangGuard};
+use std::{fmt::Debug, fs, path::PathBuf, time::Duration};
 const QUANTUM: u64 = 5_000_000;
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
@@ -124,17 +120,41 @@ where
             Ok((ids[0], ids[1]))
         })
         .unwrap();
-    // test-time: pending(bd-dd9, driver-input-snapshot-tests-scenario-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-    let started = Instant::now();
+    let guard = HangGuard::new(
+        "native input/snapshot transport must return",
+        Duration::from_secs(180),
+    );
+    // Same kernel/service image as public native acceptance: its explicit TCG
+    // boot allowance is 40 simulated seconds. The fixture does no sleep before
+    // Ready. Four same-instant rounds cover initial pause admission/settlement
+    // and service/transport boundary drains, not arbitrary poll retries.
+    let mut progress =
+        GuestProgress::new("target Ready", Duration::ZERO, Duration::from_secs(40), 4).unwrap();
     let mut events: Vec<Event> = Vec::new();
     let mut now = at(0);
-    let step = |driver: &mut Driver<M>, events: &mut Vec<Event>, upto: Timestamp| {
-        // test-time: pending(bd-dd9, driver-input-snapshot-tests-scenario-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(
-            started.elapsed() < Duration::from_secs(180),
-            "native deadline"
-        );
-        let outcome = driver.step(upto).unwrap();
+    let step = |driver: &mut Driver<M>,
+                events: &mut Vec<Event>,
+                now: Timestamp,
+                upto: Timestamp,
+                progress: &mut GuestProgress| {
+        guard
+            .remaining()
+            .expect("input/snapshot infrastructure hang");
+        let limit = progress
+            .next(
+                Duration::from_nanos(now.as_nanos()),
+                Duration::from_nanos(upto.as_nanos().checked_sub(now.as_nanos()).unwrap()),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: {error}; now={now:?}; tail={:?}",
+                    progress.phase(),
+                    events.iter().rev().take(8).collect::<Vec<_>>()
+                )
+            });
+        let outcome = driver
+            .step(at(limit.as_nanos().try_into().unwrap()))
+            .unwrap();
         events.extend(driver.drain_events());
         match outcome {
             StepOutcome::BarrierReached { at } | StepOutcome::Blocked { at } => at,
@@ -145,11 +165,26 @@ where
         matches!(&event.kind,
         EventKind::Output(output) if output.machine == target && output.payload == Response::Ready)
     }) {
-        now = step(&mut driver, &mut events, at(now.as_nanos() + QUANTUM));
+        now = step(
+            &mut driver,
+            &mut events,
+            now,
+            at(now.as_nanos() + QUANTUM),
+            &mut progress,
+        );
     }
     let deadline = Duration::from_secs(5);
     let freeze_at = at(now.as_nanos() + 3 * QUANTUM / 2);
     let stop_at = at(now.as_nanos() + 20 * QUANTUM);
+    // Both commands must settle by the later Stop's existing guest deadline.
+    // Six same-instant transitions: admission, ACK and settlement per command.
+    progress = GuestProgress::new(
+        "freeze and stop settlement",
+        Duration::from_nanos(now.as_nanos()),
+        Duration::from_nanos(stop_at.as_nanos()) + deadline,
+        6,
+    )
+    .unwrap();
     driver
         .with_barrier(|b| {
             b.schedule(
@@ -177,7 +212,7 @@ where
             .unwrap();
     }
     while now < freeze_at {
-        now = step(&mut driver, &mut events, freeze_at);
+        now = step(&mut driver, &mut events, now, freeze_at, &mut progress);
     }
     // At the admission barrier: the freeze was dispatched, but the guest has
     // not acknowledged it; the stop is still pending.
@@ -190,7 +225,13 @@ where
             .unwrap();
     }
     while settled(&events, "stop").is_none() {
-        now = step(&mut driver, &mut events, at(now.as_nanos() + QUANTUM));
+        now = step(
+            &mut driver,
+            &mut events,
+            now,
+            at(now.as_nanos() + QUANTUM),
+            &mut progress,
+        );
     }
     assert_eq!(settled(&events, "freeze"), Some(SettlementStatus::Applied));
     assert_eq!(settled(&events, "stop"), Some(SettlementStatus::Applied));

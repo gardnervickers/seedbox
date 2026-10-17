@@ -78,6 +78,10 @@ pub(super) struct Workers<C> {
     pool: Option<ThreadPool>,
     threads: Vec<JoinHandle<()>>,
     context: PhantomData<fn() -> C>,
+    // Private unit-test witness after the submitted closure has published its
+    // result. Not present in runtime builds or part of Driver snapshots.
+    #[cfg(test)]
+    pub(super) result_observer: Option<Arc<dyn Fn(usize) + Send + Sync>>,
 }
 
 impl<C: 'static> Workers<C> {
@@ -138,6 +142,8 @@ impl<C: 'static> Workers<C> {
                 pool: Some(pool),
                 threads,
                 context: PhantomData,
+                #[cfg(test)]
+                result_observer: None,
             }),
             Err(source) => {
                 let worker = threads.len();
@@ -155,9 +161,20 @@ impl<C: 'static> Workers<C> {
 
     pub(super) fn submit<E>(
         &self,
-        _machine: usize,
+        machine: usize,
         job: impl FnOnce(&mut C) + Send + 'static,
     ) -> Result<(), Error<E>> {
+        let _ = machine; // Identity is observed only by the private test hook.
+        #[cfg(test)]
+        let job = {
+            let observer = self.result_observer.clone();
+            move |context: &mut C| {
+                job(context);
+                if let Some(observer) = observer {
+                    observer(machine);
+                }
+            }
+        };
         self.pool
             .as_ref()
             .expect("live worker pool")

@@ -13,12 +13,8 @@ use crate::{
     pv::{Inbox, Input, Outbox, Request, Response},
     rng::SeededRng,
 };
-use std::{
-    fmt::Debug,
-    fs,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use seedbox_test_time::HangGuard;
+use std::{fmt::Debug, fs, path::PathBuf, time::Duration};
 
 /// A boxed backend factory, as the Driver takes it.
 pub type Create<M> = Box<dyn FnMut(&MachineDefinition) -> Result<M, <M as Machine>::Error> + Send>;
@@ -183,10 +179,10 @@ where
     }
     /// Run until the application has printed `marker` in this boot.
     fn until(&mut self, marker: &str) {
-        let started = Instant::now();
+        let guard = HangGuard::new("native disk marker transport must return", HOST_LIMIT);
         let limit = self.now() + BOOT_LIMIT;
         while !self.output.contains(marker) {
-            assert!(started.elapsed() < HOST_LIMIT, "host diagnostic: no marker");
+            guard.remaining().expect("disk marker infrastructure hang");
             let upto = self.now() + QUANTUM;
             assert!(upto <= limit, "no {marker:?} within the simulated bound");
             match self.step(Vec::new(), upto) {
@@ -211,10 +207,10 @@ where
     }
     /// Run until the guest ends its boot.
     fn until_exit(&mut self) -> ExitReason {
-        let started = Instant::now();
+        let guard = HangGuard::new("native disk exit transport must return", HOST_LIMIT);
         let limit = self.now() + BOOT_LIMIT;
         loop {
-            assert!(started.elapsed() < HOST_LIMIT, "host diagnostic: no exit");
+            guard.remaining().expect("disk exit infrastructure hang");
             let upto = self.now() + QUANTUM;
             assert!(upto <= limit, "no exit within the simulated bound");
             match self.step(Vec::new(), upto) {

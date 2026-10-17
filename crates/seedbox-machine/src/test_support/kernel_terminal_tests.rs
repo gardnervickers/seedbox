@@ -16,10 +16,8 @@ use crate::{
     pv::{Inbox, Input, Outbox, Output, Request, Response},
     rng::{RngStream, SeededRng},
 };
-use std::{
-    fmt::Debug,
-    time::{Duration, Instant},
-};
+use seedbox_test_time::HangGuard;
+use std::{fmt::Debug, time::Duration};
 
 pub const QUANTUM: u64 = 10_000_000;
 /// Simulated bound for one boot to reach its terminal request and stop.
@@ -154,11 +152,13 @@ fn until_exit<M: Machine<Context = ()>>(
 where
     M::Error: Debug,
 {
-    let started = Instant::now();
+    let guard = HangGuard::new("native kernel terminal transport must return", HOST_LIMIT);
     let limit = clock.now() + BOOT_LIMIT;
     let mut outputs = Vec::new();
     loop {
-        assert!(started.elapsed() < HOST_LIMIT, "host diagnostic: no stop");
+        guard
+            .remaining()
+            .expect("kernel terminal infrastructure hang");
         let upto = clock.now() + QUANTUM;
         assert!(
             upto <= limit,

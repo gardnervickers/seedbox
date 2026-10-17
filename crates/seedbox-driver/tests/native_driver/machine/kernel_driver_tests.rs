@@ -11,12 +11,8 @@ use seedbox_machine::{
     pv::Response,
     test_support::kernel_terminal_tests::{definition, BOOT_LIMIT, HOST_LIMIT, QUANTUM},
 };
-use std::{
-    fmt::Debug,
-    fs,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use seedbox_test_time::HangGuard;
+use std::{fmt::Debug, fs, path::PathBuf, time::Duration};
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
 }
@@ -94,14 +90,14 @@ where
     let target: MachineId = driver
         .with_barrier(|b| Ok(b.machines().nth(1).unwrap().0))
         .unwrap();
-    let started = Instant::now();
+    let guard = HangGuard::new("native kernel exit transport must return", HOST_LIMIT);
     let mut events = Vec::new();
     let mut trace: Vec<(Timestamp, StopReason)> = Vec::new();
     let mut now = at(0);
     fn step<M: Machine<Context = ()> + Send + 'static>(
         driver: &mut Driver<M>,
         target: MachineId,
-        started: Instant,
+        guard: &HangGuard,
         events: &mut Vec<Event>,
         trace: &mut Vec<(Timestamp, StopReason)>,
         now: &mut Timestamp,
@@ -109,7 +105,7 @@ where
     where
         M::Error: Debug + Send + 'static,
     {
-        assert!(started.elapsed() < HOST_LIMIT, "host diagnostic: no stop");
+        guard.remaining().expect("kernel exit infrastructure hang");
         assert!(now.as_nanos() < 3 * BOOT_LIMIT, "simulated bound");
         let outcome = driver.step(at(now.as_nanos() + QUANTUM)).unwrap();
         events.extend(driver.drain_events());
@@ -126,7 +122,7 @@ where
             step(
                 &mut driver,
                 target,
-                started,
+                &guard,
                 &mut events,
                 &mut trace,
                 &mut now,

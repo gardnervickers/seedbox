@@ -13,6 +13,7 @@ use seedbox_machine::{
 use seedbox_machine_tcg::machine::tcg::{
     test_support as fixture, Error, Snapshot, TcgMachine as RawMachine,
 };
+use seedbox_test_time::HangGuard;
 use std::{
     fs,
     path::Path,
@@ -20,7 +21,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 type TcgMachine = Environment<RawMachine>;
 struct Environment<M, R = SeededRng>(
@@ -545,8 +546,10 @@ mod machine {
                 // Hang guard only: main measured ~91 host seconds for these
                 // 12 boots unloaded. Four times that permits concurrent portable
                 // checks; workload failure is determined by guest progress below.
-                let hang_guard = Duration::from_secs(4 * 91);
-                let started = Instant::now();
+                let guard = HangGuard::new(
+                    "paired native Linux boot transport must return",
+                    Duration::from_secs(4 * 91),
+                );
                 let mut reference = None;
                 for (guests, step_limit, workers) in [
                     ([("slow", "2"), ("fast", "1")], 1_000_000, 1),
@@ -612,10 +615,9 @@ mod machine {
                     let mut woke = [false; 2];
                     let mut wake_order = Vec::new();
                     loop {
-                        assert!(
-                            started.elapsed() < hang_guard,
-                            "paired Linux host hang guard expired at simulated {now:?}"
-                        );
+                        guard.remaining().unwrap_or_else(|error| {
+                            panic!("paired Linux infrastructure hang at {now:?}: {error}")
+                        });
                         let before = now;
                         let upto = progress.next_limit(step_limit).unwrap_or_else(|reason| {
                             panic!("{reason}: at {now:?}, guests={guests:?}, workers={workers}")

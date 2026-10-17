@@ -130,12 +130,10 @@ where
         self.until_ack(72);
         self.offer(73, Command::Stop);
         self.until_ack(73);
-        assert!(
-            !self
-                .events
-                .iter()
-                .any(|output| matches!(output.payload, Response::ApplicationOutcome { .. }))
-        );
+        assert!(!self
+            .events
+            .iter()
+            .any(|output| matches!(output.payload, Response::ApplicationOutcome { .. })));
         self.offer(74, Command::Start);
         self.until_ack(74);
         while !self
@@ -205,11 +203,9 @@ where
             .iter()
             .position(|output| matches!(output.payload, Response::ApplicationOutcome { .. }))
             .unwrap();
-        assert!(
-            !self.events[outcome + 1..]
-                .iter()
-                .any(|output| matches!(output.payload, Response::ApplicationOutput { .. }))
-        );
+        assert!(!self.events[outcome + 1..]
+            .iter()
+            .any(|output| matches!(output.payload, Response::ApplicationOutput { .. })));
         self.inbox.push_back(pv::Input {
             at: Timestamp::from_nanos(self.clock.now()),
             payload: pv::Request::Shutdown,

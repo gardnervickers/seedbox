@@ -842,7 +842,7 @@ fn limited_playback_reanchors_at_restored_time_without_charging_downtime() {
         numerator: nz(1),
         denominator: nz(1),
     };
-    // test-time: allow(controlled-time) -- Opaque restore pacing origin; all tested step_at times are explicit origin-plus-offset inputs, not live elapsed time.
+    // Opaque restore pacing origin; all tested step_at times are explicit origin-plus-offset inputs, not live elapsed time.
     let origin = Instant::now();
     d.playback.set_rate(rate, d.position(), origin);
     d.step_at(at(3), origin).unwrap();

@@ -2118,6 +2118,7 @@ dependencies = [
  "hex",
  "libc",
  "seedbox-test",
+ "seedbox-test-time",
  "serde",
  "serde_json",
  "sha2",

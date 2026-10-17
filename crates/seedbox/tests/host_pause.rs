@@ -7,12 +7,112 @@ use seedbox_api::{
 };
 use seedbox_client::Client;
 use seedbox_test::process::Guarded;
+use seedbox_test_time::HangGuard;
 use std::{
+    fs::{self, File},
     io::{BufRead, BufReader},
-    path::Path,
+    os::fd::AsRawFd,
+    path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
+    ptr::NonNull,
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
+
+/// Private native-test probe of the existing host-wait transport, not a new
+/// runtime API or a host elapsed-time oracle. host_clock documents its single
+/// atomic word: odd means an open wait; a different odd token witnesses a new
+/// end-wait / scheduler-attempt / begin-wait cycle. No timestamp is decoded.
+struct PausedWaitProbe(NonNull<AtomicU64>);
+impl PausedWaitProbe {
+    fn open(clock: &Path) -> Self {
+        let file = File::open(clock).unwrap();
+        let size = std::mem::size_of::<AtomicU64>();
+        assert_eq!(file.metadata().unwrap().len(), size as u64);
+        // SAFETY: same one-word, process-shared atomic layout as host_clock;
+        // its sole writer never truncates the file. Mapping is read-only,
+        // page-aligned and kept alive until this probe's Drop.
+        let address = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(address, libc::MAP_FAILED);
+        Self(NonNull::new(address.cast()).unwrap())
+    }
+    fn sample(&self) -> u64 {
+        // SAFETY: the validated mmap contains one initialized AtomicU64; all
+        // accesses after creation (including the real worker's) are atomic.
+        unsafe { self.0.as_ref() }.load(Ordering::Acquire)
+    }
+    fn new_open_wait(&self, previous: u64) -> Option<()> {
+        let word = self.sample();
+        (word & 1 != 0 && word != previous).then_some(())
+    }
+}
+impl Drop for PausedWaitProbe {
+    fn drop(&mut self) {
+        // SAFETY: release this probe's exact mapping, not the worker's file.
+        unsafe {
+            libc::munmap(self.0.as_ptr().cast(), std::mem::size_of::<AtomicU64>());
+        }
+    }
+}
+fn paused_wait_probe(state: &Path) -> PausedWaitProbe {
+    // Follow only live endpoint locators beneath THIS fixture's state root.
+    // Completed executions remove their locator, so the sole live paused run
+    // supplies the clock. Never scan unrelated /tmp directories or PIDs.
+    let mut pending = vec![state.to_owned()];
+    let mut clocks: Vec<PathBuf> = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(entry.path());
+            } else if entry.file_name() == "host-control" {
+                let socket = PathBuf::from(fs::read_to_string(entry.path()).unwrap());
+                let clock = socket.with_file_name(seedbox_engine_protocol::host_clock::FILE_NAME);
+                if socket.exists() && clock.exists() {
+                    clocks.push(clock);
+                }
+            }
+        }
+    }
+    assert_eq!(
+        clocks.len(),
+        1,
+        "fixture must own exactly one live paused worker: {clocks:?}"
+    );
+    PausedWaitProbe::open(&clocks[0])
+}
+
+#[test]
+fn pause_wait_probe_requires_a_new_open_wait_signal() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("clock");
+    let _owner = seedbox_engine_protocol::host_clock::Reader::create(&path).unwrap();
+    let mut writer = seedbox_engine_protocol::host_clock::Writer::open(&path).unwrap();
+    let probe = PausedWaitProbe::open(&path);
+    let closed = probe.sample();
+    assert!(probe.new_open_wait(closed).is_none());
+    writer.begin_wait().unwrap();
+    assert!(probe.new_open_wait(closed).is_some());
+    let open = probe.sample();
+    assert!(
+        probe.new_open_wait(open).is_none(),
+        "the old open wait is not a new scheduler witness"
+    );
+    writer.end_wait().unwrap();
+    assert!(
+        probe.new_open_wait(open).is_none(),
+        "a closed wait is not a paused scheduling witness"
+    );
+}
 
 fn cli(binary: &Path, state: &Path) -> Command {
     let mut command = Command::new(binary);
@@ -90,6 +190,10 @@ fn paused_start_and_resume_has_identical_witness_and_full_state() {
             .guarded_output()
             .unwrap(),
     );
+    assert!(
+        rerun.spec.program.is_empty(),
+        "paused-gate witness requires this fixture's empty authored-input program"
+    );
     let client = Client::connect_to(&state.join("server.sock")).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -117,7 +221,26 @@ fn paused_start_and_resume_has_identical_witness_and_full_state() {
                 assert_ne!(current.status.phase, Phase::Completed, "{current:?}");
             }
             let paused = set_rate(&client, id, PlaybackRate::Paused).await;
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            let probe = paused_wait_probe(&state);
+            let previous = probe.sample();
+            // Correlated barrier work gives even a blocking-control implementation
+            // a new scheduling opportunity. With a start-paused world at round 0,
+            // no authored input/held fault/prepared request exists: the only open
+            // wait here follows Driver::step returning Waiting for the paused gate.
+            // Observe a NEW wait cycle after the first ACK, not a timed absence or
+            // an arbitrary number of repeated HTTP position reads.
+            let confirmed = set_rate(&client, id, PlaybackRate::Paused).await;
+            assert_eq!(confirmed.position, paused.position);
+            HangGuard::new(
+                "native paused scheduler must signal a fresh declined-step wait",
+                Duration::from_secs(30),
+            )
+            .wait_for(|| probe.new_open_wait(previous))
+            .unwrap();
+            // Read the position through a fresh correlated worker barrier AFTER
+            // the signal, not merely the server's possibly lagging cached sample.
+            let after_wait = set_rate(&client, id, PlaybackRate::Paused).await;
+            assert_eq!(after_wait.position, paused.position);
             let observation = client.playback(id).await.unwrap();
             assert_eq!(observation.state.rate, PlaybackRate::Paused);
             assert_eq!(observation.state.position, paused.position);

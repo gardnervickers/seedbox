@@ -9,12 +9,8 @@ use crate::{
     rng::RngStream,
 };
 use seedbox_driver::driver::Target;
-use std::{
-    fmt::Debug,
-    fs,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use seedbox_test_time::{GuestProgress, HangGuard};
+use std::{fmt::Debug, fs, path::PathBuf, time::Duration};
 const QUANTUM: u64 = 5_000_000;
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
@@ -177,23 +173,43 @@ where
             Ok((ids[0], ids[1]))
         })
         .unwrap();
-    // test-time: pending(bd-dd9, driver-sleep-trigger-tests-scenario-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-    let started = Instant::now();
+    let guard = HangGuard::new(
+        "native sleep/trigger transport must return",
+        Duration::from_secs(180),
+    );
+    // Public native acceptance's 40s TCG boot allowance, for the same kernel
+    // and static service fixture. Initial pause admission and settlement may
+    // use two same-instant rounds before peer execution advances.
+    let mut progress =
+        GuestProgress::new("peer boot", Duration::ZERO, Duration::from_secs(40), 2).unwrap();
+    let mut control_phase = false;
     let mut events = Vec::new();
     let mut outcomes = Vec::new();
     let mut resumed = false;
     let mut sleep_checkpoint = false;
     let mut marker_checkpoint = false;
     loop {
-        // test-time: pending(bd-dd9, driver-sleep-trigger-tests-scenario-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(
-            started.elapsed() < Duration::from_secs(180),
-            "native sleep/trigger timed out"
-        );
+        guard
+            .remaining()
+            .expect("sleep/trigger infrastructure hang");
         let now = driver
             .with_barrier(|b| Ok(b.playback().position.at))
             .unwrap();
-        let result = driver.step(at(now.as_nanos() + QUANTUM)).unwrap();
+        let limit = progress
+            .next(
+                Duration::from_nanos(now.as_nanos()),
+                Duration::from_nanos(QUANTUM),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: {error}; at={now:?}; outcomes={:?}",
+                    progress.phase(),
+                    outcomes.iter().rev().take(8).collect::<Vec<_>>()
+                )
+            });
+        let result = driver
+            .step(at(limit.as_nanos().try_into().unwrap()))
+            .unwrap();
         outcomes.push(result.clone());
         events.extend(
             driver
@@ -215,9 +231,48 @@ where
                 })
                 .unwrap();
             resumed = true;
+            let start = driver
+                .with_barrier(|b| Ok(b.playback().position.at))
+                .unwrap()
+                .as_nanos();
+            // Oracle was initially paused before boot. Its own boot receives
+            // the same image-derived allowance, reset ONCE at semantic Resume.
+            progress = GuestProgress::new(
+                "oracle boot",
+                Duration::from_nanos(start),
+                Duration::from_nanos(start) + Duration::from_secs(40),
+                2,
+            )
+            .unwrap();
         }
         let stdout = output(&events, oracle, Stream::Stdout);
         let text = std::str::from_utf8(&stdout).unwrap();
+        if !control_phase
+            && events.iter().any(|event| {
+                event.machine == oracle
+                    && matches!(event.payload, Response::SimulationControl { .. })
+            })
+        {
+            let start = driver
+                .with_barrier(|b| Ok(b.playback().position.at))
+                .unwrap()
+                .as_nanos();
+            // driver-simulation-control.c: 100ms trigger match window, two
+            // 20ms sleeps, four reply rounds and the Stop's 5s command deadline.
+            // Same-instant edges: four RPC admission/replies, trigger arm/match,
+            // and Stop admission/ACK/settlement (8 + 2 + 3 = 13).
+            let work = Duration::from_millis(100 + 2 * 20)
+                + Duration::from_nanos(4 * QUANTUM)
+                + Duration::from_secs(5);
+            progress = GuestProgress::new(
+                "oracle sleep/trigger outcome",
+                Duration::from_nanos(start),
+                Duration::from_nanos(start) + work,
+                13,
+            )
+            .unwrap();
+            control_phase = true;
+        }
         if !sleep_checkpoint && events.iter().any(|event| event.machine == oracle &&
             matches!(event.payload, Response::SimulationControl { id, .. } if id.request.get() == 2)) {
             assert!(!text.contains("\"id\":2,"), "positive Sleep must still be pending at admission");

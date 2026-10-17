@@ -734,12 +734,14 @@ fn calls_overlap_clock_stays_fixed_and_failure_joins_the_whole_batch() {
                 let waiter = gate.clone();
                 let first = ProbeMachine(Box::new(move || {
                     let (lock, signal) = &*waiter;
-                    let (_ready, timeout) = signal
-                        .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(5), |ready| {
-                            !*ready
-                        })
+                    let (ready, _) = signal
+                        .wait_timeout_while(
+                            lock.lock().unwrap(),
+                            Duration::from_secs(30),
+                            |ready| !*ready,
+                        )
                         .unwrap();
-                    assert!(!timeout.timed_out(), "machine calls did not overlap");
+                    assert!(*ready, "peer completion signal did not arrive");
                     observed_overlap.store(true, Ordering::Relaxed);
                     if panic_first {
                         panic!("fixture panic");

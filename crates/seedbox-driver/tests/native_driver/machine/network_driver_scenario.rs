@@ -25,10 +25,8 @@ use crate::{
     pv::{Response, Stream},
     rng::SeededRng,
 };
-use std::{
-    fmt::Debug,
-    time::{Duration, Instant},
-};
+use seedbox_test_time::HangGuard;
+use std::{fmt::Debug, time::Duration};
 
 /// Default simulated bound for one run, matching the manual exchange scenario.
 const LIMIT: u64 = 120_000_000_000;
@@ -174,7 +172,7 @@ where
     // Whether each machine has published TCP data, for `When::TcpData`.
     let mut sent_data = [false; 3];
     let mut now = 0;
-    let started = Instant::now();
+    let guard = HangGuard::new("native network response transport must return", HOST_LIMIT);
     loop {
         let due: Vec<(Rule, u64)> = pending
             .iter()
@@ -237,12 +235,12 @@ where
             }
             _ => break,
         }
-        assert!(
-            started.elapsed() < HOST_LIMIT,
-            "host diagnostic budget exceeded at {now} ns: {:?} {:?}",
-            run.stdout,
-            run.stderr
-        );
+        guard.remaining().unwrap_or_else(|error| {
+            panic!(
+                "network response infrastructure hang at {now} ns: {error}; {:?} {:?}",
+                run.stdout, run.stderr
+            )
+        });
     }
     run
 }

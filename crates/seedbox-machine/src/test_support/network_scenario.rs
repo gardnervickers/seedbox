@@ -18,13 +18,9 @@ use crate::{
     pv::{Inbox, Input, Outbox, Request, Response},
     rng::SeededRng,
 };
+use seedbox_test_time::HangGuard;
 use sha2::{Digest, Sha256};
-use std::{
-    collections::VecDeque,
-    fmt::Debug,
-    net::Ipv4Addr,
-    time::{Duration, Instant},
-};
+use std::{collections::VecDeque, fmt::Debug, net::Ipv4Addr, time::Duration};
 
 /// Minimum one-way delay, and the lockstep quantum.
 pub const LATENCY: u64 = 1_000_000;
@@ -220,7 +216,7 @@ pub struct Exchange<M> {
     in_flight: Vec<(u64, usize, Vec<u8>)>,
     frames: Vec<Routed>,
     now: u64,
-    started: Instant,
+    guard: HangGuard,
 }
 
 impl<M: Machine<Context = ()>> Exchange<M>
@@ -240,7 +236,10 @@ where
             in_flight: Vec::new(),
             frames: Vec::new(),
             now: 0,
-            started: Instant::now(),
+            guard: HangGuard::new(
+                "native network exchange must produce a response",
+                HOST_LIMIT,
+            ),
         }
     }
     pub fn now(&self) -> u64 {
@@ -275,7 +274,10 @@ where
             in_flight: self.in_flight.clone(),
             frames: self.frames.clone(),
             now: self.now,
-            started: Instant::now(),
+            guard: HangGuard::new(
+                "restored network exchange must produce a response",
+                HOST_LIMIT,
+            ),
         }
     }
     /// Queue `request` for machine `index` at the current time.
@@ -303,10 +305,9 @@ where
             self.peers[1].output,
             self.peers[1].console
         );
-        assert!(
-            self.started.elapsed() < HOST_LIMIT,
-            "host diagnostic: no exchange"
-        );
+        self.guard
+            .remaining()
+            .expect("network exchange infrastructure hang");
         assert!(
             !self
                 .peers

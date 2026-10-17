@@ -33,14 +33,8 @@ use seedbox_machine::{
     pv::{Response, Stream},
     rng::RngStream,
 };
-use std::{
-    collections::BTreeMap,
-    fmt::Debug,
-    fs,
-    net::Ipv4Addr,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use seedbox_test_time::HangGuard;
+use std::{collections::BTreeMap, fmt::Debug, fs, net::Ipv4Addr, path::PathBuf, time::Duration};
 
 /// Simulated bound for one run.
 const LIMIT: u64 = 180_000_000_000;
@@ -333,7 +327,7 @@ where
             at: Timestamp::from_nanos(0),
         },
     };
-    let started = Instant::now();
+    let guard = HangGuard::new("native etcd response transport must return", HOST_LIMIT);
     loop {
         let outcome = driver
             .step(Timestamp::from_nanos(LIMIT))
@@ -364,11 +358,12 @@ where
             StepOutcome::BarrierReached { at } if at.as_nanos() < LIMIT => {}
             _ => break,
         }
-        assert!(
-            started.elapsed() < HOST_LIMIT,
-            "host diagnostic budget exceeded:\n{}",
-            run.report()
-        );
+        guard.remaining().unwrap_or_else(|error| {
+            panic!(
+                "etcd response infrastructure hang: {error}; {}",
+                run.report()
+            )
+        });
     }
     run
 }

@@ -1,7 +1,8 @@
 use super::fixture::auto_key;
 use super::*;
 use crate::pv::{ApplicationCommand, CommandResult, Request, Response};
-use std::num::NonZeroU32;
+use seedbox_test_time::{handshake, HangGuard, Participant};
+use std::{num::NonZeroU32, sync::Mutex};
 
 #[derive(Clone)]
 struct QueueMachine {
@@ -12,7 +13,7 @@ struct QueueMachine {
     emit: bool,
     invalid_output: bool,
     fail_second: bool,
-    delay: bool,
+    entered: Option<Arc<Mutex<Option<Participant>>>>,
     exit: bool,
 }
 impl QueueMachine {
@@ -25,7 +26,7 @@ impl QueueMachine {
             emit: false,
             invalid_output: false,
             fail_second: false,
-            delay: false,
+            entered: None,
             exit: false,
         }
     }
@@ -69,9 +70,15 @@ impl Machine for QueueMachine {
         if self.fail_second && self.calls == 2 {
             return Err(std::io::Error::other("second batch failure"));
         }
-        if self.delay {
-            // test-time: pending(bd-dd9, queue-output-order-delay) -- Hoped completion ordering needs an explicit entered/proceed witness in bd-dd9.
-            std::thread::sleep(Duration::from_millis(10));
+        if let Some(entered) = &self.entered {
+            if let Some(participant) = entered.lock().unwrap().take() {
+                participant
+                    .enter_and_wait(&HangGuard::new(
+                        "slow worker awaits actual fast result publication",
+                        Duration::from_secs(5),
+                    ))
+                    .unwrap();
+            }
         }
         if self.consume {
             while let Some(input) = context.inbox.take() {
@@ -227,11 +234,39 @@ fn ordered_reboot_discards_only_admitted_work_and_preserves_future_input() {
 fn common_barrier_sorts_worker_outputs_by_identity_then_emission_order() {
     let mut first = QueueMachine::new();
     first.emit = true;
-    first.delay = true;
-    let mut second = first.clone();
-    second.delay = false;
+    let second = first.clone();
+    let (gate, entered) = handshake();
+    first.entered = Some(Arc::new(Mutex::new(Some(entered))));
+    let gate = Arc::new(Mutex::new(Some(gate)));
+    let (published, completion) = mpsc::channel();
     let mut driver = driver(vec![first, second]);
+    driver.workers.result_observer = Some(Arc::new(move |machine| {
+        if machine == 1 {
+            let gate = gate.lock().unwrap().take().unwrap();
+            gate.wait_entered(&HangGuard::new(
+                "slow worker must enter before fast result releases it",
+                Duration::from_secs(5),
+            ))
+            .unwrap();
+            published.send(machine).unwrap();
+            gate.proceed().unwrap();
+        } else {
+            published.send(machine).unwrap();
+        }
+    }));
     driver.step(at(10)).unwrap();
+    let guard = HangGuard::new(
+        "both published worker results must be witnessed",
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        [
+            guard.recv(&completion).unwrap(),
+            guard.recv(&completion).unwrap()
+        ],
+        [1, 0],
+        "actual result publication must be reverse identity order"
+    );
     assert_eq!(
         fixture::outputs(&driver.drain_events())
             .iter()

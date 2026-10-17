@@ -13,13 +13,14 @@ use crate::{
     pv::{Response, Stream},
     rng::RngStream,
 };
+use seedbox_test_time::{GuestProgress, HangGuard};
 use std::{
     fmt::Debug,
     fs,
     num::NonZeroI64,
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const QUANTUM: u64 = 5_000_000;
@@ -243,8 +244,26 @@ where
     let clock = driver
         .with_barrier(|b| Ok(b.machines().nth(1).unwrap().0))
         .unwrap();
-    // test-time: pending(bd-dd9, driver-clock-fault-scenario-now-1) -- Native drift/fault progress deadline awaiting GuestProgress migration in bd-dd9.
-    let started = Instant::now();
+    let guard = HangGuard::new(
+        format!("{backend} clock-fault transport must return"),
+        Duration::from_secs(900),
+    );
+    // Same native kernel/clock fixture as public acceptance: 40s simulated
+    // boot allowance, then the longer idle oracle's 12.5s lifetime and two
+    // existing 5s realtime-step command ACK deadlines. These are guest-work
+    // bounds, not a conversion of the old 900s host-speed condition.
+    let finish_by =
+        Duration::from_secs(40) + Duration::from_millis(12_500) + Duration::from_secs(2 * 5);
+    // At most eight RPC admission/reply pairs, eight fault settlements, two
+    // held-effect enter/release pairs and four crash/reboot admission edges.
+    let mut progress = GuestProgress::new(
+        "clock fixture boot",
+        Duration::ZERO,
+        Duration::from_secs(40),
+        16 + 8 + 4 + 4,
+    )
+    .unwrap();
+    let mut running_phase = false;
     let mut events = driver.drain_events();
     let mut held = Vec::new();
     let mut migrated = !migrate;
@@ -256,7 +275,19 @@ where
         })
         .unwrap();
     loop {
-        let upto = at(now.as_nanos() + QUANTUM);
+        guard.remaining().expect("clock-fault infrastructure hang");
+        let limit = progress
+            .next(
+                Duration::from_nanos(now.as_nanos()),
+                Duration::from_nanos(QUANTUM),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{backend} {}: {error}; at={now:?}; held={held:?}",
+                    progress.phase()
+                )
+            });
+        let upto = at(limit.as_nanos().try_into().unwrap());
         let result = driver.step(upto).unwrap();
         events.extend(driver.drain_events());
         match result {
@@ -292,6 +323,22 @@ where
             }
             other => panic!("{backend}: unexpected {other:?}"),
         };
+        if !running_phase
+            && lines(&events, clock, plan.epoch())
+                .iter()
+                .any(|line| line.tag == "BOOT")
+        {
+            // Change phase exactly once, retaining the absolute scenario
+            // horizon; restore/held faults cannot replenish an unfinished budget.
+            progress = GuestProgress::new(
+                "clock/timer scenario",
+                Duration::from_nanos(now.as_nanos()),
+                finish_by,
+                16 + 8 + 4 + 4,
+            )
+            .unwrap();
+            running_phase = true;
+        }
         // Mid-drift, after the first step and before the crash: restore in place.
         let after_step = rates(&events, clock)
             .0
@@ -303,11 +350,6 @@ where
                 .unwrap();
             migrated = true;
         }
-        // test-time: pending(bd-dd9, driver-clock-fault-scenario-elapsed-1) -- Native drift/fault progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(
-            started.elapsed() < Duration::from_secs(900),
-            "{backend} scenario too slow"
-        );
     }
     let runs = runs.lock().unwrap().clone();
     (events, clock, runs, held, window)

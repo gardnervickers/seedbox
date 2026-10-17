@@ -178,6 +178,9 @@ positive event: HangGuard, Tokio timeouts and socket timeouts are all fine.
 Never assert on elapsed host time or infer ordering from a timed absence.
 The portable checker rejects host sleep calls in test code; no annotations or exemptions.
 Before handing off a test change, run `nix develop -c seedbox-check --test-time-policy` (~2s).
+`seedbox-test-time` is a dev-dependency; `seedbox-machine` may also enable it as an
+optional dependency only through `test-support`, leaving its default runtime
+dependency graph unchanged.
 
 Engine changes need relevant native hardware checks as well as portable tests.
 

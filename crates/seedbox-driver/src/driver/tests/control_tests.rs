@@ -27,7 +27,7 @@ fn status(driver: &mut Driver<TestMachine>) -> PlaybackStatus {
 
 #[test]
 fn rational_pacing_waits_only_at_committed_boundaries_without_sleeping() {
-    // test-time: allow(controlled-time) -- Opaque pacing anchor; exact caller-supplied offsets drive step_at and playback.delay without sleeping or sampling elapsed time.
+    // Opaque pacing anchor; exact caller-supplied offsets drive step_at and playback.delay without sleeping or sampling elapsed time.
     let host = Instant::now();
     let rate = PlaybackRate::Limited {
         numerator: 2.try_into().unwrap(),
@@ -72,7 +72,7 @@ fn rational_pacing_waits_only_at_committed_boundaries_without_sleeping() {
 
 #[test]
 fn rate_wait_holds_new_current_time_actions_until_host_pacing_permits() {
-    // test-time: allow(controlled-time) -- Opaque pacing anchor; the test advances only caller-provided step_at timestamps and checks exact admission state.
+    // Opaque pacing anchor; the test advances only caller-provided step_at timestamps and checks exact admission state.
     let host = Instant::now();
     let mut driver = controlled(1, &[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];

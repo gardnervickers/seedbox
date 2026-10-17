@@ -500,7 +500,7 @@ fn graceful_reconnect_starts_new_ids_and_preserves_explicit_handles() {
                 channel: &mut UnixStream,
                 guard: &seedbox_test_time::HangGuard,
             ) -> Option<u8> {
-                // test-time: allow(hang-guard) -- Bound an actual request byte or EOF, not a timed absence used as ordering evidence.
+                // Bound an actual request byte or EOF, not a timed absence used as ordering evidence.
                 channel
                     .set_read_timeout(Some(
                         guard.remaining().expect("Unix peer five-second deadline"),
@@ -523,7 +523,7 @@ fn graceful_reconnect_starts_new_ids_and_preserves_explicit_handles() {
                 assert!(bytes.len() <= 16384, "bounded Unix request");
             }
             requests.push(serde_json::from_slice::<Value>(&bytes).unwrap());
-            // test-time: allow(hang-guard) -- Bound the explicit SDK reply write under the same case deadline across reconnects.
+            // Bound the explicit SDK reply write under the same case deadline across reconnects.
             channel
                 .set_write_timeout(Some(
                     guard.remaining().expect("Unix peer five-second deadline"),

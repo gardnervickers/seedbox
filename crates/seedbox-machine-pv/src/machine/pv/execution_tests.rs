@@ -306,9 +306,14 @@ __attribute__((noreturn)) void _start(void)
         .unwrap();
         let clock = SimulationClock::new(0);
         let mut rng = SeededRng::new(7);
-        let started = std::time::Instant::now();
+        let guard = seedbox_test_time::HangGuard::new(
+            "native CPU rate measurement must return",
+            std::time::Duration::from_secs(60),
+        );
         for tick in 1..=10_000 {
-            assert!(started.elapsed() < std::time::Duration::from_secs(60));
+            guard
+                .remaining()
+                .expect("native CPU rate infrastructure hang");
             if matches!(
                 run(&mut machine, &clock, &mut rng, factor, tick * 1_000_000, []),
                 StopReason::Exited { .. }

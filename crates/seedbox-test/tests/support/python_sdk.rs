@@ -75,7 +75,7 @@ impl Sdk {
                 revents: 0,
             };
             let rc = unsafe {
-                // test-time: allow(hang-guard) -- Bound actual pipe readiness with the shared case guard; silence never satisfies a call.
+                // Bound actual pipe readiness with the shared case guard; silence never satisfies a call.
                 libc::poll(
                     &mut poll,
                     1,
@@ -227,7 +227,7 @@ fn blocked_real_sdk_call_has_deadline_and_child_is_reaped_on_unwind() {
     let (peer, _) = listener.accept().expect("real SDK connected");
     // A real request receipt, not silence or a sleep, establishes SDK progress.
     // The socket timeout is only a hang guard if that progress never happens.
-    // test-time: allow(hang-guard) -- Bound receipt of the actual SDK request before deliberately exhausting its I/O budget.
+    // Bound receipt of the actual SDK request before deliberately exhausting its I/O budget.
     peer.set_read_timeout(Some(sdk.guard.remaining().unwrap()))
         .unwrap();
     sdk.send_command(json!({"action":"call","op":"stop","args":["server"],"kwargs":{}}));
