@@ -301,7 +301,11 @@ async fn step(session: &NativeSession, id: &seedbox_api::SimulationId) {
         .control(id, &format!("step-{before}"), ControlCommand::Step)
         .await;
     loop {
-        let state = session.client.playback(id).await.unwrap().state;
+        // An oracle that exits ends the worker; the caller then reports why.
+        let Ok(playback) = session.client.playback(id).await else {
+            return;
+        };
+        let state = playback.state;
         check_bound_at(
             &session.client,
             id,
@@ -311,10 +315,9 @@ async fn step(session: &NativeSession, id: &seedbox_api::SimulationId) {
             "the connection-drop step committed",
         )
         .await;
-        assert!(
-            !state.terminal,
-            "oracle ended before the connection drop completed"
-        );
+        if state.terminal {
+            return;
+        }
         if !state.stepping && state.position.completed_rounds > before {
             return;
         }
@@ -332,6 +335,12 @@ async fn until_oracle(
         if output.contains(marker) {
             return output;
         }
+        let phase = session.client.describe(id).await.unwrap().status.phase;
+        assert_ne!(
+            phase,
+            seedbox_api::Phase::Completed,
+            "oracle ended before {marker:?}: {output}"
+        );
         step(session, id).await;
     }
 }
