@@ -102,3 +102,85 @@ impl OwnedProcesses {
         }
     }
 }
+
+/// Identity-stable fail-fast observation, never authority to kill a process.
+#[derive(Default)]
+pub struct LiveWorkers(std::collections::BTreeMap<u32, OwnedFd>);
+impl LiveWorkers {
+    pub fn check(&mut self, session: &Path) {
+        for (pid, descriptor) in &self.0 {
+            let mut event = libc::pollfd {
+                fd: descriptor.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut event, 1, 0) };
+            assert_eq!(
+                ready, 0,
+                "native worker/QEMU pid {pid} exited during positive wait"
+            );
+        }
+        let entries: Vec<_> = fs::read_dir("/proc")
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+                let command = fs::read(entry.path().join("cmdline")).ok()?;
+                let stat = fs::read_to_string(entry.path().join("stat")).ok()?;
+                let parent = stat
+                    .rsplit_once(')')?
+                    .1
+                    .split_whitespace()
+                    .nth(1)?
+                    .parse::<u32>()
+                    .ok()?;
+                Some((pid, parent, command, entry.path()))
+            })
+            .collect();
+        let mut workers = std::collections::BTreeSet::new();
+        for (pid, _, command, path) in &entries {
+            if command
+                .split(|byte| *byte == 0)
+                .any(|arg| arg == b"driver-world-v1")
+                && fs::read_dir(path.join("fd")).is_ok_and(|fds| {
+                    fds.filter_map(Result::ok).any(|fd| {
+                        fs::read_link(fd.path()).is_ok_and(|path| path.starts_with(session))
+                    })
+                })
+            {
+                workers.insert(*pid);
+            }
+        }
+        for (pid, parent, command, _) in &entries {
+            let qemu = command
+                .split(|byte| *byte == 0)
+                .next()
+                .is_some_and(|arg| String::from_utf8_lossy(arg).contains("qemu-system-"));
+            let mut ancestor = *parent;
+            while qemu && !workers.contains(&ancestor) {
+                let Some((_, next, _, _)) = entries.iter().find(|(pid, _, _, _)| *pid == ancestor)
+                else {
+                    break;
+                };
+                if *next == ancestor {
+                    break;
+                }
+                ancestor = *next;
+            }
+            if !workers.contains(pid) && !(qemu && workers.contains(&ancestor)) {
+                continue;
+            }
+            if self.0.contains_key(pid) {
+                continue;
+            }
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, *pid, 0u32) };
+            assert!(
+                fd >= 0,
+                "native worker/QEMU pid {pid} vanished during positive wait: {}",
+                std::io::Error::last_os_error()
+            );
+            self.0
+                .insert(*pid, unsafe { OwnedFd::from_raw_fd(fd as i32) });
+        }
+    }
+}

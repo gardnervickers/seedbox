@@ -186,7 +186,7 @@ pub async fn disk_checkpoint_continuation(backend: DriverBackend) {
                     if !status.stepping && status.position.completed_rounds > rounds {
                         break;
                     }
-                    playback_changed(&session.client, &source, status).await;
+                    playback_changed(session, &source, status).await;
                 }
                 let output = text(&session.output(&source).await);
                 assert!(

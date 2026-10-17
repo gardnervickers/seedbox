@@ -790,7 +790,12 @@ impl NativeSession {
             .await;
             let session = self.session.path().to_owned();
             let backend = self.backend;
+            let manager = self.cancel.1.clone();
+            let id = id.clone();
+            let mut processes = native_process_probe::LiveWorkers::default();
             ready("native worker scratch readiness", move || {
+                assert_active(&manager, &id);
+                processes.check(&session);
                 directories(&session).into_iter().find(|path| {
                     path.file_name()
                         .unwrap()
@@ -809,7 +814,7 @@ impl NativeSession {
         // that never prints fails at its bound instead of waiting forever.
         loop {
             tokio::select! {
-                delivery = logs.next() => {
+                delivery = bounded(logs.next()) => {
                     let Some(delivery) = delivery else { break };
                     if let seedbox_api::LogDelivery::Entry {
                         entry: seedbox_api::LogEntry::Bytes { bytes: data, .. },
@@ -822,7 +827,7 @@ impl NativeSession {
                         return;
                     }
                 }
-                state = progress.next() => {
+                state = bounded(progress.next()) => {
                     let state = state.expect("watch closed before START=").unwrap();
                     // Log and progress streams are delivered independently. Before
                     // failing, read the retained output: START= printed within the
@@ -849,7 +854,7 @@ impl NativeSession {
     async fn output(&self, id: &seedbox_api::SimulationId) -> Vec<u8> {
         let mut logs = self.client.logs_with(id, "oracle", false).await.unwrap();
         let mut bytes = Vec::new();
-        while let Some(delivery) = logs.next().await {
+        while let Some(delivery) = bounded(logs.next()).await {
             if let seedbox_api::LogDelivery::Entry {
                 entry: seedbox_api::LogEntry::Bytes { bytes: data, .. },
                 ..
@@ -879,7 +884,7 @@ impl NativeSession {
         let mut boot = None;
         let mut ended = false;
         let mut times = Vec::new();
-        while let Some(delivery) = logs.next().await {
+        while let Some(delivery) = bounded(logs.next()).await {
             let delivery = delivery.unwrap();
             assert!(
                 !ended || matches!(delivery, seedbox_api::LogDelivery::Closed),
@@ -951,8 +956,7 @@ impl NativeSession {
             "it completed"
         };
         let completed = loop {
-            let state = watch
-                .next()
+            let state = bounded(watch.next())
                 .await
                 .expect("watch closed before completion")
                 .unwrap();
@@ -1074,21 +1078,44 @@ impl NativeSession {
         command: seedbox_api::ControlCommand,
     ) -> seedbox_api::ControlReceipt {
         use seedbox_api::{ControlRequest, ControlState};
-        let mut events = self.client.events(id).await.unwrap();
-        let mut progress = self.client.watch(id).await.unwrap();
-        self.client
-            .request_control(
-                id,
-                &ControlRequest {
-                    request_id: name.into(),
-                    command,
-                },
-            )
-            .await
-            .unwrap();
-        loop {
-            let receipt = self.client.control_receipt(id, name).await.unwrap();
-            if receipt.state != ControlState::Accepted {
+        bounded(self.client.request_control(
+            id,
+            &ControlRequest {
+                request_id: name.into(),
+                command,
+            },
+        ))
+        .await
+        .unwrap();
+        let client = self.client.clone();
+        let manager = self.cancel.1.clone();
+        let id = id.clone();
+        let name = name.to_owned();
+        let session = self.session.path().to_owned();
+        let backend = self.backend;
+        let bound = self.bound;
+        let runtime = tokio::runtime::Handle::current();
+        let mut processes = native_process_probe::LiveWorkers::default();
+        ready("control acknowledgement", move || {
+            // A paused world need not publish an event or a catalogue revision.
+            // The receipt itself is the positive completion signal.
+            let receipt = runtime
+                .block_on(client.control_receipt(&id, &name))
+                .unwrap();
+            if receipt.state == ControlState::Accepted {
+                let status = manager.describe(&id).unwrap().status;
+                runtime.block_on(check_bound_at(
+                    &client,
+                    &id,
+                    backend,
+                    bound,
+                    status.simulated_time_ns,
+                    &format!("its {name} control request was acknowledged"),
+                ));
+                assert_active(&manager, &id);
+                processes.check(&session);
+                None
+            } else {
                 assert!(
                     matches!(
                         receipt.state,
@@ -1096,28 +1123,10 @@ impl NativeSession {
                     ),
                     "{receipt:?}"
                 );
-                return receipt;
+                Some(receipt)
             }
-            // An execution that keeps running while its request stays
-            // Accepted fails at its simulated bound, not at the hang guard.
-            // describe() answers in every phase, unlike playback().
-            let status = self.client.describe(id).await.unwrap().status;
-            check_bound_at(
-                &self.client,
-                id,
-                self.backend,
-                self.bound,
-                status.simulated_time_ns,
-                &format!("its {name} control request was acknowledged"),
-            )
-            .await;
-            // Observe both acknowledgement and simulated progress: an accepted
-            // request cannot hide a guest running beyond its functional bound.
-            tokio::select! {
-                event = events.next() => { event.expect("control stream closed before acknowledgement").unwrap(); },
-                state = progress.next() => { state.expect("watch closed before acknowledgement").unwrap(); },
-            }
-        }
+        })
+        .await
     }
 }
 
@@ -1173,7 +1182,7 @@ impl NativeCase {
             if let Some(mut server) = session.server.take() {
                 let result = tokio::select! {
                     result = &mut server => Some(result),
-                    () = hang_deadline(HANG_GUARD) => None,
+                    () = hang_deadline(WAIT_BOUND) => None,
                 };
                 match result {
                     Some(Ok(Ok(()))) => {}
@@ -1181,7 +1190,7 @@ impl NativeCase {
                     Some(Err(error)) => errors.push(format!("serve join: {error}")),
                     None => {
                         server.abort();
-                        let _ = server.await;
+                        let _ = bounded(server).await;
                         errors.push("cleanup join hang guard elapsed; inputs retained".into());
                     }
                 }
@@ -1210,6 +1219,24 @@ impl NativeCase {
         // self.barriers remain held until all directories have been removed.
     }
 }
+const WAIT_BOUND: Duration = Duration::from_secs(60);
+
+async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(WAIT_BOUND, future)
+        .await
+        .expect("native positive wait stalled for 60 seconds")
+}
+
+fn assert_active(manager: &Manager, id: &seedbox_api::SimulationId) {
+    let state = manager.describe(id).unwrap();
+    assert_ne!(
+        state.status.phase,
+        Phase::Completed,
+        "worker exited while waiting: {:?}",
+        state.status
+    );
+}
+
 /// Adapt the synchronous infrastructure guard without a raw test timer. Dropping
 /// the future drops the sender, cancelling the blocking receive immediately.
 async fn hang_deadline(limit: Duration) {
@@ -1233,7 +1260,7 @@ async fn ready<T: Send + 'static>(
 ) -> T {
     let (owner, cancelled) = std::sync::mpsc::channel::<()>();
     let result = tokio::task::spawn_blocking(move || {
-        seedbox_test_time::HangGuard::new(reason, HANG_GUARD)
+        seedbox_test_time::HangGuard::new(reason, WAIT_BOUND)
             .wait_for(|| {
                 if matches!(
                     cancelled.try_recv(),
@@ -1256,14 +1283,19 @@ async fn ready<T: Send + 'static>(
 /// bounds only failure to publish a new state; callers retain their guest bounds
 /// and exact readiness predicates. HTTP sampling runs off the runtime thread.
 async fn playback_changed(
-    client: &Client,
+    session: &NativeSession,
     id: &seedbox_api::SimulationId,
     previous: seedbox_api::PlaybackStatus,
 ) {
-    let client = client.clone();
+    let client = session.client.clone();
+    let manager = session.cancel.1.clone();
+    let directory = session.session.path().to_owned();
+    let mut processes = native_process_probe::LiveWorkers::default();
     let id = id.clone();
     let runtime = tokio::runtime::Handle::current();
     ready("worker playback readiness changed", move || {
+        assert_active(&manager, &id);
+        processes.check(&directory);
         let state = runtime.block_on(client.playback(&id)).unwrap().state;
         (state != previous).then_some(())
     })
@@ -1478,7 +1510,7 @@ pub async fn pv_checkpoint_continuation() {
                 )
                 .await;
                 if !status.stepping && status.position.completed_rounds > before { break status; }
-                playback_changed(&session.client, &source, status).await;
+                playback_changed(session, &source, status).await;
             };
             let bytes = session.output(&source).await;
             let started = bytes.windows(6).any(|part| part == b"START=");
@@ -1907,7 +1939,7 @@ async fn collect_frames(
     let mut stream = client.frames(id).await.unwrap();
     tokio::spawn(async move {
         let (mut frames, mut missing) = (Vec::new(), 0u64);
-        while let Some(delivery) = stream.next().await {
+        while let Some(delivery) = bounded(stream.next()).await {
             match delivery.unwrap() {
                 FrameDelivery::Frames { frames: batch, .. } => frames.extend(batch),
                 FrameDelivery::Gap { first, last } => missing += last - first + 1,
@@ -2062,7 +2094,7 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
         assert_eq!(count(&prefix[2], PROBE_TCP_DONE), 0);
         // The stream's data crossed both ways before capture, and routed
         // frames were in flight across the capture boundary.
-        let (frames, missing) = source_frames.await.unwrap();
+        let (frames, missing) = bounded(source_frames).await.unwrap();
         assert_eq!(missing, 0, "source frame batches omitted");
         assert!(frames.iter().all(|f| f.sent_ns <= captured_ns));
         let in_flight = frames
@@ -2115,7 +2147,7 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
 
         // The stream carried on from the captured connection: only frames
         // routed after the capture, including more of its data, appear.
-        let (frames, missing) = restored_frames.await.unwrap();
+        let (frames, missing) = bounded(restored_frames).await.unwrap();
         assert_eq!(missing, 0, "restored frame batches omitted");
         assert!(frames.iter().all(|f| f.sent_ns >= captured_ns));
         let up = data_frames(&frames, "client", "server").count();
@@ -2181,7 +2213,7 @@ pub async fn pv_network_frames_are_observation_only() {
                 .control(&id, "frames-run", ControlCommand::SetRate { rate: PlaybackRate::Unlimited })
                 .await;
             let witness = session.complete(&id, false, workers, seed).await.unwrap();
-            let (frames, missing) = frames.await.unwrap();
+            let (frames, missing) = bounded(frames).await.unwrap();
             let up = scheduled(&frames, "client", "server");
             let down = scheduled(&frames, "server", "client");
             eprintln!("fresh observed={observed} workers={workers} witness={witness} frames={} missing={missing} client_to_server={up:?} server_to_client={down:?}", frames.len());
@@ -2257,7 +2289,7 @@ pub async fn pv_network_frames_are_observation_only() {
         let exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
         session.client.stop(&source).await.unwrap();
         session.complete(&source, true, 1, seed).await;
-        let (frames, missing) = source_frames.await.unwrap();
+        let (frames, missing) = bounded(source_frames).await.unwrap();
         assert_eq!(missing, 0);
         assert!(frames.iter().all(|f| f.sent_ns <= captured_ns));
         let in_flight = frames
@@ -2286,7 +2318,7 @@ pub async fn pv_network_frames_are_observation_only() {
                 .control(&restored, "continue", ControlCommand::SetRate { rate: PlaybackRate::Unlimited })
                 .await;
             let continued = session.complete(&restored, false, workers, seed).await.unwrap();
-            let (frames, missing) = frames.await.unwrap();
+            let (frames, missing) = bounded(frames).await.unwrap();
             eprintln!("restored observed={observed} workers={workers} witness={continued} frames={} missing={missing}", frames.len());
             if observed {
                 // Only frames routed after the capture are published again.

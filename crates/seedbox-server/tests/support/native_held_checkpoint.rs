@@ -120,7 +120,7 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
                     break state;
                 }
             }
-            playback_changed(&session.client, &source, state).await;
+            playback_changed(session, &source, state).await;
         };
 
         assert!(held.position.completed_rounds > 0 && !held.stepping);

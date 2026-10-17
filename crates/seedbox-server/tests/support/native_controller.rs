@@ -178,7 +178,7 @@ pub async fn controller_checkpoint(backend: DriverBackend) {
                 )
                 .await;
                 if !state.stepping && state.position.completed_rounds > before { break state; }
-                playback_changed(&session.client, &source, state).await;
+                playback_changed(session, &source, state).await;
             };
             let bytes = output(session, &source).await;
             let partial = replies(&bytes);
