@@ -13,24 +13,7 @@ pub async fn pv_fault_worker_failure() {
         assert!(monitor.is_file(), "explicitly build the real test-support monitor fixture first: {}", monitor.display());
         let injector = WorkerFailureInjector::default();
         *session.worker_failure.lock().unwrap() = Some((monitor, injector.clone()));
-        let mut request = cpu_request(session);
-        request.options.start_paused = true;
-        let id = session.submit(request, 1).await;
-        session.worker(&id).await;
-        session.control(&id, "failure-initial-pause", ControlCommand::SetRate { rate: PlaybackRate::Paused }).await;
-        let output = until_output(session, &id, "START=").await;
-        assert!(!output.contains("END="), "native target ended before the failure scenario");
-        let fault = inject(session, &id, "failure-throttle", FaultAction::Throttle {
-            handle: HANDLE.into(), machine: TARGET.into(), factor_permille: 2_000,
-        }).await;
-        step(session, &id).await;
-        let world = session.client.world(&id).await.unwrap();
-        assert_eq!(world.machines.iter().find(|machine| machine.name == TARGET).unwrap().throttle_permille, Some(2_000));
-        applied_once(session, &id, &[fault]).await;
-        let paused = session.client.playback(&id).await.unwrap().state;
-        assert_eq!(paused.rate, PlaybackRate::Paused);
-        assert!(!paused.terminal && !paused.stepping);
-        assert!(!session.stdout(&id, TARGET, false).await.contains("END="));
+        let (id, fault) = active_throttle(session).await;
         // /proc and pidfds only observe liveness. Only the original spawn owner
         // behind this weak injector can signal the actual retained Driver Child.
         *captured.lock().unwrap() = Some(native_process_probe::OwnedProcesses::capture(session.session.path()));

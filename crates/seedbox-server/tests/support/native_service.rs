@@ -25,7 +25,7 @@ mod faults;
 #[cfg(all(feature = "kvm-tests", feature = "worker-failure-tests"))]
 pub use faults::pv_fault_worker_failure;
 #[cfg(feature = "kvm-tests")]
-pub use faults::pv_throttle_heal_replay;
+pub use faults::{pv_fault_cancel, pv_throttle_heal_replay};
 #[path = "case_cleanup.rs"]
 mod case_cleanup;
 use case_cleanup::{finish_before_rethrow, panic_text, DEADLINE_FAILURE};

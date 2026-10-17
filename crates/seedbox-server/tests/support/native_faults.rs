@@ -10,6 +10,10 @@ mod worker_failure;
 #[cfg(feature = "worker-failure-tests")]
 pub use worker_failure::pv_fault_worker_failure;
 
+#[path = "native_fault_cancel.rs"]
+mod cancellation;
+pub use cancellation::pv_fault_cancel;
+
 const SEED: u64 = 123;
 const TARGET: &str = "target";
 const HANDLE: &str = "public-throttle";
@@ -142,6 +146,58 @@ async fn applied_once(session: &NativeSession, id: &seedbox_api::SimulationId, e
         applied, expected,
         "missing, duplicated or reordered native fault applications"
     );
+}
+
+/// Establish a real, still-live guest under one applied public fault. The
+/// caller selects cancellation or original-worker failure only AFTER this
+/// positive application/fault/paused boundary, never by a host-time delay.
+async fn active_throttle(session: &mut NativeSession) -> (seedbox_api::SimulationId, u32) {
+    let mut request = cpu_request(session);
+    request.options.start_paused = true;
+    let id = session.submit(request, 1).await;
+    session.worker(&id).await;
+    session
+        .control(
+            &id,
+            "active-initial-pause",
+            ControlCommand::SetRate {
+                rate: PlaybackRate::Paused,
+            },
+        )
+        .await;
+    let output = until_output(session, &id, "START=").await;
+    assert!(
+        !output.contains("END="),
+        "target ended before the active-fault scenario"
+    );
+    let fault = inject(
+        session,
+        &id,
+        "active-throttle",
+        FaultAction::Throttle {
+            handle: HANDLE.into(),
+            machine: TARGET.into(),
+            factor_permille: 2_000,
+        },
+    )
+    .await;
+    step(session, &id).await;
+    let world = session.client.world(&id).await.unwrap();
+    assert_eq!(
+        world
+            .machines
+            .iter()
+            .find(|machine| machine.name == TARGET)
+            .unwrap()
+            .throttle_permille,
+        Some(2_000)
+    );
+    applied_once(session, &id, &[fault]).await;
+    let paused = session.client.playback(&id).await.unwrap().state;
+    assert_eq!(paused.rate, PlaybackRate::Paused);
+    assert!(!paused.terminal && !paused.stepping);
+    assert!(!session.stdout(&id, TARGET, false).await.contains("END="));
+    (id, fault)
 }
 
 pub async fn pv_throttle_heal_replay() {
