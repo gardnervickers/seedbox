@@ -20,9 +20,15 @@ nix develop
 cargo xtask build-assets
 cargo build --release
 ./target/release/seedbox doctor
-./target/release/seedbox run examples/etcd --paused --detach
-./target/release/seedbox tui <sim-id>
+./target/release/seedbox init ~/seedbox-quickstart --template etcd
+./target/release/seedbox run ~/seedbox-quickstart
+./target/release/seedbox replay <sim-id>
 ```
+
+`run` prints `PASS: <sim-id>` when the oracle finishes. Use that ID in the
+replay command; it should print `MATCH: <sim-id>`. The etcd example runs three
+members and a short consistency check with eight writers and 20 writes per
+writer. Allow extra time for the initial image downloads and build.
 
 The build embeds the Driver runtime, guest kernel, and helpers. `doctor` checks
 the local runtime inputs and host access before any application images are prepared.
@@ -38,7 +44,21 @@ subdirectory (for example, `x86_64/driver-runtime.tar.gz`).
 
 If no server is running, the CLI asks before starting a persistent local one.
 For scripts, start `seedbox serve` explicitly. `seedbox shutdown` stops the server
-and its simulations.
+and its simulations. Keep the server running between `run` and `replay`.
+
+## Explore in the TUI
+
+The animation above shows the [etcd example](examples/etcd/seedbox.yaml).
+For longer fault experiments, increase the oracle's `--writes` and `--duration`
+arguments in your generated `seedbox.yaml` before starting. The larger workload
+with 20,000 writes per writer and `--duration 100000s` took about **21 minutes
+on Linux x86-64 PV** on our test host; TCG can take longer. The short defaults
+are intended for the first PASS and replay, not an extended fault session.
+
+```sh
+./target/release/seedbox run ~/seedbox-quickstart --paused --detach
+./target/release/seedbox tui <sim-id>
+```
 
 In the TUI, press **Space** to resume. Press **f**, choose **Partition network**,
 put `n1` on one side and `n2` / `n3` on the other, review the expected targets
