@@ -849,6 +849,7 @@ pub async fn drive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seedbox_test_time::HangGuard;
     use std::cell::RefCell;
 
     #[tokio::test]
@@ -873,7 +874,9 @@ mod tests {
             },
             |value| Update::Notice(format!("{value}")),
         ));
-        tokio::time::timeout(Duration::from_secs(1), async {
+        let guard = HangGuard::new("observed stream backpressure", Duration::from_secs(1));
+        // test-time: allow(hang-guard) -- Bound observing the third stream item; channel capacity, not elapsed time, proves backpressure.
+        tokio::time::timeout(guard.remaining().unwrap(), async {
             while observed.load(Ordering::Relaxed) < 3 {
                 tokio::task::yield_now().await;
             }
@@ -1003,23 +1006,21 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let mut requests = Vec::new();
             for response in responses {
-                let deadline = std::time::Instant::now() + Duration::from_secs(5);
-                let mut stream = loop {
-                    match listener.accept() {
-                        Ok((stream, _)) => break stream,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(
-                                std::time::Instant::now() < deadline,
-                                "expected timeline HTTP request"
-                            );
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
+                let accept_guard =
+                    HangGuard::new("timeline HTTP connection", Duration::from_secs(5));
+                let mut stream = accept_guard
+                    .wait_for(|| match listener.accept() {
+                        Ok((stream, _)) => Some(stream),
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => None,
                         Err(error) => panic!("accept: {error}"),
-                    }
-                };
+                    })
+                    .expect("expected timeline HTTP request");
                 stream.set_nonblocking(false).unwrap();
+                let read_guard =
+                    HangGuard::new("timeline HTTP request bytes", Duration::from_secs(5));
+                // test-time: allow(hang-guard) -- Bound receiving the actual HTTP headers/body; parsed request contents determine success.
                 stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .set_read_timeout(Some(read_guard.remaining().unwrap()))
                     .unwrap();
                 let mut bytes = Vec::new();
                 let body_offset = loop {

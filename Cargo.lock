@@ -2225,6 +2225,7 @@ dependencies = [
  "seedbox-api",
  "seedbox-client",
  "seedbox-spec",
+ "seedbox-test-time",
  "serde",
  "serde_json",
  "serde_yaml_ng",

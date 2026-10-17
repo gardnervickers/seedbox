@@ -17,4 +17,5 @@ ratatui = { version = "0.29", default-features = false, features = ["crossterm"]
 crossterm = { version = "0.28", features = ["event-stream"] }
 
 [dev-dependencies]
+seedbox-test-time.workspace = true
 tempfile.workspace = true
