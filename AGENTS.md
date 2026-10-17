@@ -41,9 +41,9 @@ Open review-ready PRs as non-drafts; reviews and merges go through the user.
   Preparation never starts application containers. Replay never contacts the engine.
 - `crates/seedbox-vmm` is Linux-only and deliberately **not** a workspace member.
   It is its own workspace with its own `Cargo.lock`, because cargo unifies
-  dependency features across one build. The public CLI links its library only
-  on Linux x86-64 and retains the complete CLI executable as the new engine.
-  Standalone low-level fixtures keep a separate lockfile and identity. Build
+  dependency features across one build. The public CLI and application do not
+  link its legacy simulator; service execution uses Driver with native Machine
+  leaves. Standalone low-level fixtures keep a separate lockfile and identity. Build
   and test those from the repository root with the aliases in `.cargo/config.toml`:
   `cargo build-vmm` and `cargo test-vmm`. Both already pass `--locked`; adding
   it again is an error. It builds into `crates/seedbox-vmm/target`. Public
@@ -77,7 +77,7 @@ host-wait clock transport, and retained evidence formats. It has no CPU backend,
 owns offline records, content storage, logs, comparison and bundles; it depends
 on protocol types, never engine-core, a hypervisor, Bollard or Tokio. The
 application crate reexports retained APIs and owns parsing, preparation,
-orchestration and `engine_adapter` request/report adaptation. Native modules own
+orchestration, shared fault-input validation and Driver request/report adaptation. Native modules own
 host admission and launching. Standalone workspaces have protocol wrappers with
 canonical source links, just like their engine-core and control wrappers.
 
@@ -92,6 +92,11 @@ application crate unless they specifically exercise application composition.
 Hardware tests remain feature-controlled and compiled by portable checks.
 
 ## Shared engine policies, queues and transport
+
+Service execution uses `seedbox-driver` with the native PV/TCG Machine leaves.
+The standalone world fixtures and shared policies below are not alternate service
+executors; keep their independent CPU and ownership coverage without reconnecting
+them to CLI, daemon, preparation or retained-worker dispatch.
 
 `crates/seedbox-engine-core` owns deterministic RNG, disk, links, connection,
 trigger, fault, control and network-counter policies, plus bounded split-ring
@@ -126,11 +131,11 @@ Keep hard limits exact, including owed I/O; preserve the lifecycle commit sites
 relative to fallible architecture actions. See `docs/internals.md`.
 ARM uses this same coordinator through stopped, stamped worker primitives; no
 second world scheduler belongs in the worker. Cold run/replay require no snapshot.
-x86 runs every world through the windowed scheduler (`window/`,
+Standalone x86 world fixtures use the windowed scheduler (`window/`,
 `world_windowed.rs`, [docs/internals.md](docs/internals.md)):
 the coordinator applies control, trigger and fault boundaries, lifecycle,
 forks and checkpoints between rounds, on the calling thread, from committed
-state in a fixed order. arm64 runs its world through the same windowed
+state in a fixed order. Standalone arm64 fixtures use the same windowed
 scheduler (`application/world.rs`), serially or on a pool; the legacy loop
 (`world::simulate`) has no backend caller and stays only for its tests. Worker
 count is a performance setting.
@@ -161,10 +166,11 @@ the canonical crate; do not restore sibling source inclusion for these policies.
   exceptions (`#[rustfmt::skip]`, `rustfmt.toml`) to keep engine bytes stable.
   Reformatting, moving code and changing build flags are ordinary changes;
   run `cargo fmt` on the VMM like any other crate.
-- The linked CLI uses the root lockfile and records an explicit internal-worker
-  contract; profiles without it start a standalone `seedbox-vmm`. Both read one
-  JSON launch request (`seedbox_engine_core::launch::WorkerRequest`, written as
-  `output/worker-request.json`); the standalone VMM also builds it from its flags. Platform/version metadata never gates development replay.
+- The linked CLI uses the root lockfile and the explicit `driver-world-v1`
+  contract for service execution. Its retained Driver request owns the concrete
+  factory inventory; native PV workers and monitor/anchor entries retain their
+  separate ownership protocols. No missing descriptor selects a standalone
+  simulator. Platform/version metadata never gates development replay.
 
 ## Checks
 
