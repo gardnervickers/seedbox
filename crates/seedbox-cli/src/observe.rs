@@ -132,6 +132,22 @@ fn tail_text(deliveries: &[LogDelivery], lines: usize) -> Vec<u8> {
     text[start..].to_vec()
 }
 
+// Checkpoint history is unavailable, not a counted transport omission. Keep
+// this outside log bytes and event NDJSON, including for --json callers.
+async fn checkpoint_history_notice(client: &Client, id: &SimulationId) -> Result<()> {
+    let resource = client
+        .describe(id)
+        .await
+        .map_err(super::simulations::client_error)?;
+    if matches!(&resource.spec.inputs,
+        seedbox_api::InputSource::Resolved { definition }
+        if matches!(definition.start, seedbox_spec::definition::Start::Checkpoint { .. }))
+    {
+        eprintln!("omission: history before checkpoint not available");
+    }
+    Ok(())
+}
+
 /// Print retained output, then keep streaming with `follow`.
 pub(super) fn logs(id: &SimulationId, request: LogRequest) -> Result<u8> {
     let client = daemon::connect(None)?;
@@ -140,6 +156,7 @@ pub(super) fn logs(id: &SimulationId, request: LogRequest) -> Result<u8> {
     super::simulations::runtime()?.block_on(async {
         // History first, so --tail can choose from all of it.
         let mut history = log_stream(&client, id, request.machine, false).await?;
+        checkpoint_history_notice(&client, id).await?;
         let mut retained = Vec::new();
         let mut last = 0;
         while let Some(next) = history.next().await {
@@ -210,6 +227,7 @@ pub(super) fn events(id: &SimulationId, follow: bool) -> Result<u8> {
             .events_with(id, follow)
             .await
             .map_err(super::simulations::client_error)?;
+        checkpoint_history_notice(&client, id).await?;
         loop {
             tokio::select! {
                 next = stream.next() => match next {
