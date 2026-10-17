@@ -11,12 +11,8 @@ use seedbox_machine::{
     rng::RngStream,
 };
 use seedbox_machine_pv::machine::pv::Factory;
-use std::{
-    collections::VecDeque,
-    fs,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use seedbox_test_time::{GuestProgress, HangGuard};
+use std::{collections::VecDeque, fs, path::PathBuf, time::Duration};
 struct TestClock(u64);
 impl Clock for TestClock {
     fn now(&self) -> u64 {
@@ -68,16 +64,22 @@ fn measured(factory: &mut Factory, iterations: u64, factor: u32) -> u64 {
     let mut rng = TestRng;
     let mut inbox = VecDeque::new();
     let mut outputs = Vec::new();
-    // test-time: pending(bd-dd9, pv-progress-measured-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-    let started = Instant::now();
+    let guard = HangGuard::new("public PV CPU worker transport", Duration::from_secs(300));
+    // cpu-loop.c has one two-instruction block per iteration. Bound each by
+    // one PV call (the client actually batches), plus a million calls for
+    // loader/stdio/exit at the selected ns/call CPU factor. Linux boot/device
+    // settlement gets a separate five simulated-second allowance; no app sleeps.
+    let deadline =
+        Duration::from_secs(5) + Duration::from_nanos((iterations + 1_000_000) * u64::from(factor));
+    let mut progress =
+        GuestProgress::new("factory CPU boot/work/outcome", Duration::ZERO, deadline, 0).unwrap();
+    let mut last_stop = None;
     loop {
-        // test-time: pending(bd-dd9, pv-progress-measured-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(
-            started.elapsed() < Duration::from_secs(120),
-            "CPU fixture timed out"
-        );
+        guard.remaining().unwrap();
+        let limit = progress.next(Duration::from_nanos(clock.now()), Duration::from_millis(1))
+            .unwrap_or_else(|error| panic!("{}: {error}; now={}; last_stop={last_stop:?}; outputs={outputs:?}; pending=application outcome", progress.phase(), clock.now()));
         let now = Timestamp::from_nanos(clock.now());
-        let upto = Timestamp::from_nanos(clock.now() + 1_000_000);
+        let upto = Timestamp::from_nanos(limit.as_nanos().try_into().unwrap());
         let stop = machine
             .run(
                 &mut RunContext {
@@ -92,6 +94,7 @@ fn measured(factory: &mut Factory, iterations: u64, factor: u32) -> u64 {
             )
             .unwrap();
         assert!(!matches!(stop, StopReason::Exited { .. }), "{stop:?}");
+        last_stop = Some(stop);
         clock.0 = upto.as_nanos();
         if let Some(code) = outputs.iter().find_map(|o| match o.payload {
             Response::ApplicationOutcome { code } => Some(code),
@@ -243,17 +246,40 @@ fn instruction_run(
         move |definition| factory.create(definition),
     )
     .unwrap();
-    // test-time: pending(bd-dd9, pv-progress-instruction-run-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-    let started = Instant::now();
+    let guard = HangGuard::new(
+        "PV instruction Driver worker transport",
+        Duration::from_secs(300),
+    );
+    // pv-x86-instructions.c executes eight entropy operations or six child
+    // probes. Allow 100,000 charged calls per operation for formatting and
+    // fork/wait/signal settlement at the Driver default 1000 ns/call, plus
+    // five simulated seconds for Linux boot. Neither mode has a sleep loop.
+    let operations = match mode {
+        "entropy" => 8,
+        "probe" => 6,
+        _ => panic!("unknown fixture mode {mode}"),
+    };
+    let deadline = Duration::from_secs(5) + Duration::from_nanos(operations * 100_000 * 1000);
+    // One initial admission and one final oracle-outcome harvest may share a
+    // barrier timestamp; all intervening work must advance committed time.
+    let mut progress = GuestProgress::new(
+        "instruction boot/finite operations/exit",
+        Duration::ZERO,
+        deadline,
+        2,
+    )
+    .unwrap();
     let mut outputs = Vec::new();
+    let mut last_result = None;
     loop {
-        // test-time: pending(bd-dd9, pv-progress-instruction-run-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(started.elapsed() < Duration::from_secs(180), "{outputs:?}");
+        guard.remaining().unwrap();
         let now = driver
             .with_barrier(|b| Ok(b.playback().position.at))
             .unwrap();
+        let upto = progress.next(Duration::from_nanos(now.as_nanos()), Duration::from_nanos(quantum))
+            .unwrap_or_else(|error| panic!("{}: {error}; now={now:?}; last_result={last_result:?}; outputs={outputs:?}; pending=oracle exit", progress.phase()));
         let result = driver
-            .step(Timestamp::from_nanos(now.as_nanos() + quantum))
+            .step(Timestamp::from_nanos(upto.as_nanos().try_into().unwrap()))
             .unwrap();
         outputs.extend(
             driver
@@ -268,6 +294,7 @@ fn instruction_run(
             assert_eq!(reason, ExitReason::ProgramExit { code: 0 }, "{outputs:?}");
             break;
         }
+        last_result = Some(result);
     }
     let stdout = outputs
         .iter()

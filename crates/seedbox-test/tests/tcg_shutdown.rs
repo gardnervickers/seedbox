@@ -10,6 +10,7 @@ use seedbox_machine::{
     rng::RngStream,
 };
 use seedbox_machine_tcg::machine::tcg::TcgMachine;
+use seedbox_test_time::{GuestProgress, HangGuard};
 #[allow(dead_code)]
 #[path = "support/native_driver.rs"]
 mod native_driver;
@@ -41,11 +42,7 @@ impl RngStream for TestRng {
     }
 }
 type TestMachine = TcgMachine;
-use std::{
-    fs,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::{fs, path::PathBuf, time::Duration};
 
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
@@ -134,7 +131,12 @@ fn step(driver: &mut Harness, upto: Timestamp) -> Timestamp {
         other => panic!("unexpected playback state: {other:?}"),
     }
 }
-fn advance(driver: &mut Harness, id: MachineId, now: Timestamp) -> Timestamp {
+fn advance(
+    driver: &mut Harness,
+    id: MachineId,
+    now: Timestamp,
+    progress: &mut GuestProgress,
+) -> Timestamp {
     let upto = match stopped(driver, id) {
         StopReason::Blocked {
             deadline: Some(at), ..
@@ -144,23 +146,54 @@ fn advance(driver: &mut Harness, id: MachineId, now: Timestamp) -> Timestamp {
         }
         _ => at(now.as_nanos() + 1_000_000),
     };
-    step(driver, upto)
+    let limit = progress
+        .next(
+            Duration::from_nanos(now.as_nanos()),
+            Duration::from_nanos(
+                upto.as_nanos()
+                    .checked_sub(now.as_nanos())
+                    .expect("backwards guest deadline")
+                    .max(1),
+            ),
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "{}: {error}; now={now:?}; last_stop={:?}; outputs={}; pending=lifecycle/output",
+                progress.phase(),
+                stopped(driver, id),
+                output(driver, id)
+            )
+        });
+    // Keep a due wakeup at this instant; next() bounds any repeated rounds.
+    step(
+        driver,
+        at(upto.as_nanos().min(limit.as_nanos().try_into().unwrap())),
+    )
 }
-fn finish(driver: &mut Harness, id: MachineId, mut now: Timestamp) -> Timestamp {
-    // test-time: pending(bd-dd9, tcg-shutdown-finish-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-    let started = Instant::now();
+fn phase(name: &str, now: Timestamp, deadline: u64) -> GuestProgress {
+    // At most lifecycle adoption and final exit harvest can be same-instant
+    // rounds; queued pause/resume controls have already been explicitly stepped.
+    GuestProgress::new(
+        name,
+        Duration::from_nanos(now.as_nanos()),
+        Duration::from_nanos(deadline),
+        2,
+    )
+    .unwrap()
+}
+fn finish(driver: &mut Harness, id: MachineId, mut now: Timestamp, deadline: u64) -> Timestamp {
+    let guard = HangGuard::new(
+        "TCG shutdown Driver worker transport",
+        Duration::from_secs(300),
+    );
+    let mut progress = phase("shutdown cleanup", now, deadline);
     loop {
         if let StopReason::Exited { reached, reason } = stopped(driver, id) {
             assert_eq!(reason, ExitReason::Shutdown);
             return reached;
         }
-        // test-time: pending(bd-dd9, tcg-shutdown-finish-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(
-            started.elapsed() < Duration::from_secs(120),
-            "shutdown timed out: {}",
-            output(driver, id)
-        );
-        now = advance(driver, id, now);
+        guard.remaining().unwrap();
+        now = advance(driver, id, now, &mut progress);
     }
 }
 fn assert_clean_shutdown(output: &str) {
@@ -185,7 +218,10 @@ fn early_queued_request_after_restore_runs_real_guest_cleanup() {
         })
         .unwrap();
     step(&mut driver, at(0));
-    let reached = finish(&mut driver, id, at(0));
+    // guest_service_fixture.c sleeps one second after its output, and its
+    // SIGTERM handler only writes "cleaned" and exits. Five seconds allow
+    // Linux boot; one extra second allows supervisor cleanup/poweroff timers.
+    let reached = finish(&mut driver, id, at(0), 7_000_000_000);
     assert!(reached.as_nanos() < 100_000_000_000);
     let observed = output(&mut driver, id);
     if observed.contains("app\0out\n") {
@@ -221,20 +257,15 @@ fn early_queued_request_after_restore_runs_real_guest_cleanup() {
 fn paused_shutdown_stays_pending_until_resume_and_restores_without_duplicate() {
     let mut driver = driver(false);
     let id = machine_id(&mut driver);
-    // test-time: pending(bd-dd9, tcg-shutdown-paused-shutdown-stays-pending-until-resume-and-restores-without-duplicate-now-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-    let started = Instant::now();
+    let guard = HangGuard::new(
+        "TCG readiness Driver worker transport",
+        Duration::from_secs(300),
+    );
     let mut now = at(0);
-    loop {
-        // test-time: pending(bd-dd9, tcg-shutdown-paused-shutdown-stays-pending-until-resume-and-restores-without-duplicate-elapsed-1) -- Native phase clock/progress deadline awaiting GuestProgress migration in bd-dd9.
-        assert!(
-            started.elapsed() < Duration::from_secs(120),
-            "Linux boot timed out: {}",
-            output(&mut driver, id)
-        );
-        now = advance(&mut driver, id, now);
-        if output(&mut driver, id).contains("app\0out\n") {
-            break;
-        }
+    let mut progress = phase("Linux boot and service output", now, 5_000_000_000);
+    while !output(&mut driver, id).contains("app\0out\n") {
+        guard.remaining().unwrap();
+        now = advance(&mut driver, id, now, &mut progress);
     }
     let before = output(&mut driver, id);
     let resume = at(now.as_nanos() + 50_000_000);
@@ -266,7 +297,11 @@ fn paused_shutdown_stays_pending_until_resume_and_restores_without_duplicate() {
     }
     assert_eq!(committed, resume); // Zero-budget resume executes no instructions.
     let delivered = driver.with_barrier(|b| b.snapshot(id)).unwrap();
-    let reached = finish(&mut driver, id, resume);
+    // No application work is required after resume: SIGTERM writes the
+    // marker and exits, then supervision reaps/syncs/powers off. Allow one
+    // simulated second for this control-only phase, shared by every branch.
+    let shutdown_deadline = resume.as_nanos() + 1_000_000_000;
+    let reached = finish(&mut driver, id, resume, shutdown_deadline);
     let expected = output(&mut driver, id)[before.len()..].to_owned();
     assert_clean_shutdown(&expected);
     assert_no_natural_outcome(&driver);
@@ -297,7 +332,7 @@ fn paused_shutdown_stays_pending_until_resume_and_restores_without_duplicate() {
             events: Vec::new(),
         };
         let id = machine_id(&mut branch);
-        assert_eq!(finish(&mut branch, id, resume), reached);
+        assert_eq!(finish(&mut branch, id, resume, shutdown_deadline), reached);
         assert_eq!(output(&mut branch, id), expected);
         assert_no_natural_outcome(&branch);
     }
