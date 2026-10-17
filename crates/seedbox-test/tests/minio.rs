@@ -1,11 +1,12 @@
 //! Rust-owned portable controls against the unchanged MinIO Python programs.
 //! Nix provisions the guest's exact wheel lock; synthetic transports forbid sockets.
+use seedbox_test_time::HangGuard;
 use serde_json::{json, Value};
 use std::{
     fs,
     path::Path,
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const A: &str = "61636b6e6f776c65646765642d76616c75652d41";
@@ -54,17 +55,13 @@ fn call(mut request: Value) -> Value {
             .spawn()
             .unwrap(),
     );
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            break status;
-        }
-        assert!(
-            started.elapsed() < ADAPTER_HANG_GUARD,
-            "MinIO adapter infrastructure hang guard expired (not a case deadline): {request}"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    };
+    let guard = HangGuard::new(
+        "MinIO adapter process exit (not a case deadline)",
+        ADAPTER_HANG_GUARD,
+    );
+    let status = guard.wait_for(|| child.0.try_wait().transpose())
+        .unwrap_or_else(|error| panic!("MinIO adapter infrastructure hang guard expired (not a case deadline): {request}: {error}"))
+        .unwrap();
     assert!(status.success(), "MinIO adapter {status}: {request}");
     assert!(
         fs::metadata(&output).unwrap().len() < 8 * 1024 * 1024,

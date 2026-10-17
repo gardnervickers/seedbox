@@ -1,5 +1,6 @@
 //! Host-only report comparability checks against the actual ARM report CLI.
 //! compare.py remains the production report comparator, not a Python test runner.
+use seedbox_test_time::HangGuard;
 use serde_json::{json, Value};
 use std::{
     ffi::OsStr,
@@ -7,8 +8,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 struct OwnedChild(Child);
@@ -32,19 +32,18 @@ fn run(command: &mut Command) -> io::Result<Output> {
             .stderr(File::create(&stderr)?)
             .spawn()?,
     );
-    let start = Instant::now();
-    let status = loop {
-        if let Some(status) = child.0.try_wait()? {
-            break status;
-        }
-        if start.elapsed() >= Duration::from_secs(10) {
-            return Err(io::Error::new(
+    let guard = HangGuard::new(
+        "ARM report comparator process exit",
+        Duration::from_secs(10),
+    );
+    let status = guard
+        .wait_for(|| child.0.try_wait().transpose())
+        .map_err(|error| {
+            io::Error::new(
                 io::ErrorKind::TimedOut,
-                format!("{command:?} exceeded 10s"),
-            ));
-        }
-        thread::sleep(Duration::from_millis(10));
-    };
+                format!("{command:?} exceeded 10s: {error}"),
+            )
+        })??;
     Ok(Output {
         status,
         stdout: fs::read(stdout)?,

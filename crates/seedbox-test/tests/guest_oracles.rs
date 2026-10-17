@@ -1,10 +1,11 @@
 //! Portable negative controls of real Python guest programs, not VM execution.
+use seedbox_test_time::HangGuard;
 use serde_json::{json, Value};
 use std::{
     fs,
     path::Path,
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 struct OwnedChild(Child);
@@ -32,17 +33,11 @@ fn exercise(request: Value) -> Value {
             .spawn()
             .unwrap(),
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let status = loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            break status;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "guest oracle adapter exceeded five seconds"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    };
+    let guard = HangGuard::new("guest oracle adapter process exit", Duration::from_secs(5));
+    let status = guard
+        .wait_for(|| child.0.try_wait().transpose())
+        .expect("guest oracle adapter exceeded five seconds")
+        .unwrap();
     assert!(status.success(), "guest oracle adapter: {status}");
     let bytes = fs::read(output).unwrap();
     assert!(bytes.len() < 256 * 1024, "bounded guest oracle observation");
