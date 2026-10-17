@@ -251,7 +251,7 @@ async fn status_refreshes_elapsed_time_and_preserves_failed_preparation_timing()
     let (preparing, _) = manager.begin(&id).unwrap().unwrap();
     let mut watch = client.watch(&id).await.unwrap();
     let first = watch.next().await.unwrap().unwrap();
-    let second = tokio::time::timeout(std::time::Duration::from_secs(5), watch.next())
+    let second = tokio::time::timeout(std::time::Duration::from_secs(60), watch.next())
         .await
         .unwrap()
         .unwrap()
@@ -279,7 +279,7 @@ async fn status_refreshes_elapsed_time_and_preserves_failed_preparation_timing()
             });
         })
         .unwrap();
-    let finished = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             let resource = watch.next().await.unwrap().unwrap();
             if resource.status.phase == Phase::Completed {

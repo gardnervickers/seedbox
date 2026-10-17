@@ -90,9 +90,12 @@ impl ExecutionBackend for FixtureExecutor {
         }
         self.entered.notify_one();
         if matches!(self.behavior, Behavior::UntilCancelled) {
-            while !request.cancellation.is_cancelled() {
-                std::thread::sleep(Duration::from_millis(1));
-            }
+            seedbox_test_time::HangGuard::new(
+                "wait for the fixture cancellation or socket signal",
+                Duration::from_secs(60),
+            )
+            .wait_for(|| request.cancellation.is_cancelled().then_some(()))
+            .unwrap();
         }
         Ok(ExecutionReport {
             reason: match self.behavior {
@@ -320,7 +323,7 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
 
 #[tokio::test]
 async fn public_dispatch_retains_oracle_and_missing_witness_errors_without_comparability() {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(60), async {
         for (behavior, diagnostic) in [
             (
                 Behavior::MissingWitness,
@@ -453,12 +456,12 @@ async fn public_dispatch_retains_oracle_and_missing_witness_errors_without_compa
         }
     })
     .await
-    .expect("host service dispatch did not finish within five seconds");
+    .expect("host service dispatch did not finish before the infrastructure hang guard expired");
 }
 
 #[tokio::test]
 async fn public_stop_and_service_shutdown_cancel_dispatched_host_execution() {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(60), async {
         for shutdown in [false, true] {
             let host = HostService::start(Behavior::UntilCancelled).await;
             let accepted = host
@@ -524,5 +527,7 @@ async fn public_stop_and_service_shutdown_cancel_dispatched_host_execution() {
         }
     })
     .await
-    .expect("host service cancellation did not finish within five seconds");
+    .expect(
+        "host service cancellation did not finish before the infrastructure hang guard expired",
+    );
 }

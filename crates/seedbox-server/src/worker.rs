@@ -357,7 +357,7 @@ mod tests {
         let endpoint = directory.path().join("socket");
         let socket = UnixDatagram::bind(&endpoint).unwrap();
         socket
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(60)))
             .unwrap();
         fs::write(
             directory.path().join("output/host-control"),

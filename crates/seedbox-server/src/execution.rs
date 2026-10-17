@@ -838,7 +838,7 @@ mod tests {
     use super::*;
     use seedbox_api::{SimulationSpec, SubmitRequest, TestVerdict};
 
-    struct WaitingProvider(AtomicBool);
+    struct WaitingProvider(AtomicBool, tokio::sync::Notify);
     impl BackendProvider for WaitingProvider {
         fn project(
             &self,
@@ -846,10 +846,13 @@ mod tests {
             _: &ContentStore,
             cancellation: &CancellationToken,
         ) -> seedbox_application::Result<Backends> {
-            let limit = std::time::Instant::now() + Duration::from_secs(2);
-            while !cancellation.is_cancelled() && std::time::Instant::now() < limit {
-                std::thread::sleep(Duration::from_millis(1));
-            }
+            self.1.notify_one();
+            seedbox_test_time::HangGuard::new(
+                "wait for the fixture cancellation or socket signal",
+                Duration::from_secs(60),
+            )
+            .wait_for(|| cancellation.is_cancelled().then_some(()))
+            .unwrap();
             self.0.store(cancellation.is_cancelled(), Ordering::Release);
             Err(seedbox_application::Error::PreparationCancelled)
         }
@@ -869,12 +872,13 @@ mod tests {
         let manager = Arc::new(Manager::new(
             catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
         ));
+        let provider = Arc::new(WaitingProvider(AtomicBool::new(false), Default::default()));
         let execution = Arc::new(
             ExecutionService::new(
                 manager,
                 root.into(),
                 ContentStore::new(root.join("store")),
-                Arc::new(WaitingProvider(AtomicBool::new(false))),
+                provider.clone(),
             )
             .unwrap(),
         );
@@ -912,41 +916,25 @@ mod tests {
         };
         let first = client.submit(&request("first")).await.unwrap().metadata.id;
         let second = client.submit(&request("second")).await.unwrap().metadata.id;
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let capacity = client.capacity().await.unwrap();
-                if capacity.occupying.iter().any(|o| o.simulation == first) {
-                    assert_eq!(capacity.slots, 1);
-                    assert_eq!(capacity.occupying.len(), 1);
-                    assert_eq!(capacity.queued.len(), 1);
-                    assert_eq!(capacity.queued[0].simulation, second);
-                    assert_eq!(
-                        capacity.queued[0].reason,
-                        seedbox_api::QueueReason::ResidentCapacity
-                    );
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
+        provider.1.notified().await;
+        let capacity = client.capacity().await.unwrap();
+        assert!(capacity.occupying.iter().any(|o| o.simulation == first));
+        assert_eq!(capacity.slots, 1);
+        assert_eq!(capacity.occupying.len(), 1);
+        assert_eq!(capacity.queued.len(), 1);
+        assert_eq!(capacity.queued[0].simulation, second);
+        assert_eq!(
+            capacity.queued[0].reason,
+            seedbox_api::QueueReason::ResidentCapacity
+        );
         client.stop(&first).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let capacity = client.capacity().await.unwrap();
-                if capacity.occupying.iter().any(|o| o.simulation == second) {
-                    assert_eq!(capacity.occupying.len(), 1);
-                    assert!(capacity.queued.is_empty());
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
+        provider.1.notified().await;
+        let capacity = client.capacity().await.unwrap();
+        assert!(capacity.occupying.iter().any(|o| o.simulation == second));
+        assert_eq!(capacity.occupying.len(), 1);
+        assert!(capacity.queued.is_empty());
         shutdown.cancel();
-        tokio::time::timeout(Duration::from_secs(5), owner)
+        tokio::time::timeout(Duration::from_secs(60), owner)
             .await
             .unwrap()
             .unwrap()
@@ -1022,7 +1010,7 @@ mod tests {
                 manager.clone(),
                 root.into(),
                 ContentStore::new(root.join("store")),
-                Arc::new(WaitingProvider(AtomicBool::new(false))),
+                Arc::new(WaitingProvider(AtomicBool::new(false), Default::default())),
             )
             .unwrap(),
         );
@@ -1070,7 +1058,7 @@ mod tests {
         });
         // Hang guard only: correctness follows from the failed acquisition of
         // the actual gate, which active_operation still owns below.
-        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        entered.recv_timeout(Duration::from_secs(60)).unwrap();
         assert!(manager.describe(&id).unwrap().status.stop_requested);
         // Execution can complete before the held control operation finishes.
         manager
@@ -1086,7 +1074,7 @@ mod tests {
         fs::write(attempt.join("checkpoint-history"), b"finished control I/O").unwrap();
         drop(active_operation);
         completion
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(60))
             .unwrap()
             .unwrap();
         deletion.join().unwrap();
@@ -1120,7 +1108,7 @@ mod tests {
                 manager.clone(),
                 root.into(),
                 ContentStore::new(root.join("store")),
-                Arc::new(WaitingProvider(AtomicBool::new(false))),
+                Arc::new(WaitingProvider(AtomicBool::new(false), Default::default())),
             )
             .unwrap(),
         );
@@ -1175,7 +1163,7 @@ mod tests {
         });
         // Hang guard only; the probe establishes actual retirement contention
         // while the test retains the control-I/O gate.
-        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        entered.recv_timeout(Duration::from_secs(60)).unwrap();
         assert_eq!(
             completion.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)
@@ -1183,7 +1171,7 @@ mod tests {
         assert_eq!(manager.describe(&id).unwrap().status.phase, Phase::Running);
         fs::write(attempt.join("checkpoint-history"), b"finished control I/O").unwrap();
         drop(active_operation);
-        completion.recv_timeout(Duration::from_secs(2)).unwrap();
+        completion.recv_timeout(Duration::from_secs(60)).unwrap();
         finalization.join().unwrap();
         assert_eq!(
             manager.describe(&id).unwrap().status.phase,
@@ -1217,7 +1205,7 @@ mod tests {
         let manager = Arc::new(Manager::new(
             catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
         ));
-        let provider = Arc::new(WaitingProvider(AtomicBool::new(false)));
+        let provider = Arc::new(WaitingProvider(AtomicBool::new(false), Default::default()));
         let mut service = ExecutionService::new(
             manager.clone(),
             root.into(),

@@ -181,9 +181,7 @@ mod tests {
             fs::create_dir_all(run.join("output")).unwrap();
             let endpoint = directory.path().join(format!("{name}.sock"));
             let socket = UnixDatagram::bind(&endpoint).unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_millis(50)))
-                .unwrap();
+            socket.set_nonblocking(true).unwrap();
             fs::write(
                 run.join("output/host-control"),
                 endpoint.as_os_str().as_encoded_bytes(),
@@ -196,23 +194,29 @@ mod tests {
             peers.push(std::thread::spawn(move || {
                 let mut buffer = [0; MAX_DATAGRAM + 1];
                 while !stop.load(Ordering::Acquire) {
-                    let (count, peer) = match socket.recv_from(&mut buffer) {
-                        Ok(received) => received,
-                        Err(error)
-                            if matches!(
-                                error.kind(),
-                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                            ) =>
-                        {
-                            continue
+                    let received = seedbox_test_time::HangGuard::new(
+                        "wait for the fixture cancellation or socket signal",
+                        Duration::from_secs(60),
+                    )
+                    .wait_for(|| {
+                        if stop.load(Ordering::Acquire) {
+                            return Some(None);
                         }
-                        Err(error) => panic!("fake worker: {error}"),
+                        match socket.recv_from(&mut buffer) {
+                            Ok(received) => Some(Some(received)),
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => None,
+                            Err(error) => panic!("fake worker: {error}"),
+                        }
+                    })
+                    .unwrap();
+                    let Some((count, peer)) = received else {
+                        break;
                     };
                     let request: Request = serde_json::from_slice(&buffer[..count]).unwrap();
                     let bytes = if malformed {
                         if let Some(gate) = gate.take() {
                             request_seen.send(()).unwrap();
-                            gate.recv_timeout(Duration::from_secs(2)).unwrap();
+                            gate.recv_timeout(Duration::from_secs(60)).unwrap();
                         }
                         b"malformed reply".to_vec()
                     } else {
@@ -266,7 +270,7 @@ mod tests {
             .unwrap()
             .gate_failure_publication(failure_entered, failure_gate);
         let driver = tokio::spawn(run(manager.clone(), shutdown.clone()));
-        tokio::task::spawn_blocking(move || seen.recv_timeout(Duration::from_secs(2)).unwrap())
+        tokio::task::spawn_blocking(move || seen.recv_timeout(Duration::from_secs(60)).unwrap())
             .await
             .unwrap();
         release_reply.send(()).unwrap();
@@ -275,7 +279,7 @@ mod tests {
         // release the gate before the test explicitly permits publication.
         tokio::task::spawn_blocking(move || {
             failure_observed
-                .recv_timeout(Duration::from_secs(2))
+                .recv_timeout(Duration::from_secs(60))
                 .unwrap()
         })
         .await
@@ -299,7 +303,7 @@ mod tests {
             retired_tx
                 .send(owner.describe(&completing).unwrap().status.termination)
                 .unwrap();
-            finish_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            finish_rx.recv_timeout(Duration::from_secs(60)).unwrap();
             owner
                 .update(&completing, |resource| {
                     resource.status.phase = Phase::Completed;
@@ -309,34 +313,40 @@ mod tests {
         });
         // Hang guard only: this signal follows a failed acquisition of the
         // actual gate held at failure publication, under explicit test control.
-        blocked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        blocked_rx.recv_timeout(Duration::from_secs(60)).unwrap();
         assert_eq!(
             retired_rx.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)
         );
         publish_failure.send(()).unwrap();
 
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let mut failures = manager.watch(broken).unwrap();
+            while !matches!(
+                failures.borrow_and_update().status.termination,
+                Some(ExecutionTermination::Error { .. })
+            ) {
+                failures.changed().await.unwrap();
+            }
+            let mut events = manager.events(healthy, true).unwrap();
             loop {
-                let failed = manager.describe(broken).unwrap();
                 let acknowledged = manager
                     .read(|catalogue| {
                         Ok(matches!(
                             catalogue
                                 .control_receipt(healthy, "step")?
-                                .map(|receipt| &receipt.state),
+                                .map(|r| &r.state),
                             Some(ControlState::Acknowledged { .. })
                         ))
                     })
                     .unwrap();
-                if matches!(
-                    failed.status.termination,
-                    Some(ExecutionTermination::Error { .. })
-                ) && acknowledged
-                {
+                if acknowledged {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                assert!(matches!(
+                    events.recv().await,
+                    crate::stream::Delivery::Record(_)
+                ));
             }
         })
         .await
@@ -355,7 +365,7 @@ mod tests {
             .any(|(id, _)| id == broken));
         // Execution retains ownership through cleanup and completion. Its ordinary
         // cancellation reason must not overwrite the observed operational error.
-        let retired_termination = retired_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let retired_termination = retired_rx.recv_timeout(Duration::from_secs(60)).unwrap();
         assert_eq!(retired_termination, failed.status.termination);
         // Retirement cannot finish until the error was durably recorded under
         // the same worker gate, even if execution cleanup raced the reply.

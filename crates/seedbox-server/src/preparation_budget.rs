@@ -129,11 +129,19 @@ mod tests {
     fn deadline_cancels_owned_preparation_without_cancelling_the_simulation() {
         let parent = CancellationToken::default();
         let expired = Arc::new(AtomicBool::new(false));
-        let budget = Budget::start(&parent, expired, Duration::from_millis(10)).unwrap();
-        let limit = Instant::now() + Duration::from_secs(2);
-        while !budget.cancellation.is_cancelled() && Instant::now() < limit {
-            thread::sleep(Duration::from_millis(1));
-        }
+        let elapsed = Arc::new(AtomicBool::new(false));
+        let mut budget =
+            Budget::start_with_deadline(&parent, expired, Deadline::Controlled(elapsed.clone()))
+                .unwrap();
+        elapsed.store(true, Ordering::Release);
+        // Wake the deadline owner explicitly; host passage cannot fire it.
+        budget.stop.take().unwrap().send(()).unwrap();
+        seedbox_test_time::HangGuard::new(
+            "wait for the fixture cancellation or socket signal",
+            Duration::from_secs(60),
+        )
+        .wait_for(|| budget.cancellation.is_cancelled().then_some(()))
+        .unwrap();
         assert!(budget.cancellation.is_cancelled());
         assert!(!parent.is_cancelled());
         assert!(budget.finish());

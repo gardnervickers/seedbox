@@ -108,7 +108,7 @@ impl ExecutionBackend for Counter {
         let endpoint = tempfile::tempdir()?;
         let socket_path = endpoint.path().join("control");
         let socket = UnixDatagram::bind(&socket_path)?;
-        socket.set_read_timeout(Some(Duration::from_millis(10)))?;
+        socket.set_nonblocking(true)?;
         fs::write(
             request.output.join("host-control"),
             socket_path.as_os_str().as_encoded_bytes(),
@@ -116,17 +116,23 @@ impl ExecutionBackend for Counter {
         self.state.ready.notify_one();
         while !request.cancellation.is_cancelled() {
             let mut buffer = [0; MAX_DATAGRAM + 1];
-            let (length, peer) = match socket.recv_from(&mut buffer) {
-                Ok(value) => value,
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                    ) =>
-                {
-                    continue
+            let received = seedbox_test_time::HangGuard::new(
+                "wait for the fixture cancellation or socket signal",
+                Duration::from_secs(60),
+            )
+            .wait_for(|| {
+                if request.cancellation.is_cancelled() {
+                    return Some(Ok(None));
                 }
-                Err(e) => return Err(e.into()),
+                match socket.recv_from(&mut buffer) {
+                    Ok(value) => Some(Ok(Some(value))),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .unwrap()?;
+            let Some((length, peer)) = received else {
+                break;
             };
             let control: Request = serde_json::from_slice(&buffer[..length])?;
             let position = BoundaryPosition {
@@ -215,9 +221,9 @@ async fn completed(client: &Client, id: &seedbox_api::SimulationId) -> seedbox_a
 
 #[tokio::test]
 async fn public_checkpoint_export_outlives_capture_and_materializes_into_continuation() {
-    tokio::time::timeout(Duration::from_secs(5), checkpoint_roundtrip())
+    tokio::time::timeout(Duration::from_secs(60), checkpoint_roundtrip())
         .await
-        .expect("host checkpoint protocol round-trip did not complete within five seconds");
+        .expect("host checkpoint protocol round-trip hung");
 }
 async fn checkpoint_roundtrip() {
     let directory = tempfile::tempdir().unwrap();
@@ -258,12 +264,16 @@ async fn checkpoint_roundtrip() {
     };
     let accepted = client.request_control(id, &request).await.unwrap();
     assert_eq!(accepted.state, ControlState::Accepted);
+    let mut changes = client.events_with(id, true).await.unwrap();
     let captured = loop {
         let receipt = client.control_receipt(id, "saved").await.unwrap();
         if receipt.state != ControlState::Accepted {
             break receipt;
         }
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert!(matches!(
+            changes.next().await.unwrap().unwrap(),
+            seedbox_api::EventDelivery::Event { .. }
+        ));
     };
     assert!(matches!(&captured.state, ControlState::Acknowledged {
         checkpoint: Some(checkpoint), error: None, ..

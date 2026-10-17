@@ -11,16 +11,14 @@ async fn dropping_an_unpolled_body_cancels_its_blocking_worker() {
     let (observed, finished) = tokio::sync::oneshot::channel();
     let response = response(CancellationToken::default(), move |progress| {
         entered.send(()).unwrap();
-        // test-time: allow(hang-guard) -- Explicit release gates this callback; 5s only bounds a stuck/contended test thread, never establishes cancellation by elapsed absence.
-        let _ = gate.recv_timeout(Duration::from_secs(5));
+        gate.recv_timeout(Duration::from_secs(60)).unwrap();
         observed.send(progress.advance(64 * 1024).is_err()).unwrap();
         Err(HttpError::internal("gate done"))
     });
     ready.await.unwrap();
     drop(response);
     release.send(()).unwrap();
-    // test-time: allow(hang-guard) -- Await the positive callback cancellation observation; retain 5s loaded-runtime scheduling room, with the received boolean deciding success.
-    assert!(tokio::time::timeout(Duration::from_secs(5), finished)
+    assert!(tokio::time::timeout(Duration::from_secs(60), finished)
         .await
         .unwrap()
         .unwrap());
@@ -33,17 +31,15 @@ async fn parent_shutdown_stops_export_without_dropping_its_body() {
     let (release, gate) = std::sync::mpsc::channel();
     let response = response(shutdown.clone(), move |progress| {
         entered.send(()).unwrap();
-        // test-time: allow(hang-guard) -- Explicit release follows parent cancellation; this existing 5s guard only prevents a broken fixture gate wedging the worker.
-        let _ = gate.recv_timeout(Duration::from_secs(5));
+        gate.recv_timeout(Duration::from_secs(60)).unwrap();
         assert!(progress.advance(0).is_err());
         Err(HttpError::internal("gate done"))
     });
     ready.await.unwrap();
     shutdown.cancel();
     release.send(()).unwrap();
-    // test-time: allow(hang-guard) -- Bound positive body completion after cancellation; decoded error records, not elapsed speed, are the oracle, with 5s scheduling room.
     let bytes = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(60),
         axum::body::to_bytes(response.into_body(), 4096),
     )
     .await
@@ -65,8 +61,7 @@ async fn progress_backpressure_never_blocks_work_and_panics_are_terminal() {
         sent.send(()).unwrap();
         panic!("deliberate export fixture panic")
     });
-    // test-time: allow(hang-guard) -- Positive completion of finite 10000-item backpressure work; keep the existing 5s host guard, never an elapsed-performance assertion.
-    tokio::time::timeout(Duration::from_secs(5), finished)
+    tokio::time::timeout(Duration::from_secs(60), finished)
         .await
         .unwrap()
         .unwrap();
@@ -80,8 +75,7 @@ async fn progress_backpressure_never_blocks_work_and_panics_are_terminal() {
 
 #[tokio::test]
 async fn public_definition_preserves_structured_errors_and_rejects_truncation() {
-    // test-time: allow(hang-guard) -- Outer 5s safety budget for finite local HTTP exchanges; exact structured error/truncation records decide success.
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(60), async {
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("api.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -133,16 +127,12 @@ async fn public_export_stream_peer_drop_cancels_work() {
                     response(parent, move |progress| {
                         // Await cancellation, not an elapsed-time target. Guard only
                         // prevents a broken cancellation path wedging the test runtime.
-                        // test-time: allow(hang-guard) -- Anchor the existing 5s positive peer-disconnect observation guard; injected Tokio time never changes this infrastructure budget.
-                        let guard = std::time::Instant::now() + Duration::from_secs(5);
-                        while progress.advance(0).is_ok() {
-                            // test-time: allow(hang-guard) -- Only fail a wedged cancellation callback after 5s; progress.advance returning cancellation is the positive completion witness.
-                            assert!(
-                                std::time::Instant::now() < guard,
-                                "peer disconnect did not cancel export"
-                            );
-                            std::thread::yield_now();
-                        }
+                        seedbox_test_time::HangGuard::new(
+                            "wait for the fixture cancellation or socket signal",
+                            Duration::from_secs(60),
+                        )
+                        .wait_for(|| progress.advance(0).is_err().then_some(()))
+                        .unwrap();
                         observed.lock().unwrap().take().unwrap().send(()).unwrap();
                         Err(HttpError::internal("cancelled"))
                     })
@@ -168,14 +158,12 @@ async fn public_export_stream_peer_drop_cancels_work() {
         // Duration/reset behavior is tested against the shared controlled clock
         // in seedbox-client; this real connection test owns peer-drop cleanup.
         drop(updates);
-        // test-time: allow(hang-guard) -- Positive exporter cancellation acknowledgement after peer drop; 5s allows loaded-runtime dispatch, never timed absence.
-        tokio::time::timeout(Duration::from_secs(5), finished)
+        tokio::time::timeout(Duration::from_secs(60), finished)
             .await
             .unwrap()
             .unwrap();
         stop.send(()).unwrap();
-        // test-time: allow(hang-guard) -- Positive local server join after its explicit stop message; retain the 5s infrastructure cleanup budget.
-        tokio::time::timeout(Duration::from_secs(5), server)
+        tokio::time::timeout(Duration::from_secs(60), server)
             .await
             .unwrap()
             .unwrap();
