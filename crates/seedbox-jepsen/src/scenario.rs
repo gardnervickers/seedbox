@@ -1065,6 +1065,21 @@ fn tigerbeetle() -> Vec<Scenario> {
         out.extend(strings(&["--await-release", d]));
         out
     };
+    // The same quick installs with no scripted pause: the later installs land
+    // at seeded offsets, so seeds and campaign reseeds explore the race window
+    // (a newer binary arriving between a replica's last read of its binary and
+    // its exec), and pauses and partitions come from
+    // harness/jepsen/tigerbeetle/generic-faults.yaml.
+    let quick_upgrades_generic = |releases: [&str; 3]| {
+        let [b, c, d] = releases;
+        let s1 = format!("5:install:!ring-last:{b}");
+        let s2 = format!("5:install:ring-last:{c}");
+        let s3 = format!("+0-4:install:ring-last:{d}");
+        let s4 = format!("+2-8:install:!ring-last:{d}");
+        let mut out = steady("45", &[&s1, &s2, "5:await:all:upgrading from", &s3, &s4]);
+        out.extend(strings(&["--await-release", d]));
+        out
+    };
     // tigerbeetle#2763: a rolling install (one replica a second), then a view
     // change across the release transition. The replica at the end of the
     // replication ring is paused as the primary proposes the upgrade, so it
@@ -1150,6 +1165,12 @@ fn tigerbeetle() -> Vec<Scenario> {
         TbSpec { name: "tb-2758-quick-upgrades-fixed", comment: "Negative control for tb-2758-quick-upgrades: the same schedule from 0.16.29 through\n0.16.30, 0.16.31 and 0.16.32, which log the race instead of asserting.",
             run: Prod("0.16.29"), replicas: 3, memory: 3072, oracle_memory: 512,
             args: quick_upgrades(["0.16.30", "0.16.31", "0.16.32"]), probe: false },
+        TbSpec { name: "tb-2758-quick-generic", comment: "tigerbeetle#2758 without a scripted nemesis: the quick installs of 0.16.27, 0.16.28\nand 0.16.29 with the later ones at seeded offsets. Run it with\n`--fault-profile harness/jepsen/tigerbeetle/generic-faults.yaml`.",
+            run: Prod("0.16.26"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: quick_upgrades_generic(["0.16.27", "0.16.28", "0.16.29"]), probe: false },
+        TbSpec { name: "tb-2758-quick-generic-fixed", comment: "Negative control for tb-2758-quick-generic: 0.16.29 through 0.16.30, 0.16.31 and\n0.16.32 under the same generic faults.",
+            run: Prod("0.16.29"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: quick_upgrades_generic(["0.16.30", "0.16.31", "0.16.32"]), probe: false },
         TbSpec { name: "tb-2763-rolling-upgrade", comment: "tigerbeetle#2763 (Jepsen 3.11, deprecated message types): a rolling upgrade from\n0.16.26 to 0.16.27 with a view change during it. A replica already on 0.16.27 receives\nthe deprecated start_view message a 0.16.26 primary still sends, and panics.",
             run: Prod("0.16.26"), replicas: 3, memory: 3072, oracle_memory: 512,
             args: rolling("0.16.27"), probe: false },
