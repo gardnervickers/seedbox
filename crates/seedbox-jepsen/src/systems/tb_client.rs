@@ -1,5 +1,12 @@
 //! TigerBeetle's C client (`tb_client`, release 0.16.11, and on Linux also
-//! 0.16.17 for the eviction control) from Rust.
+//! 0.16.17 for the eviction control and 0.17.9, the current release) from
+//! Rust.
+//!
+//! 0.17 changed the C API: an opaque 32-byte client handle the caller owns,
+//! a smaller packet, renumbered operations and packet statuses, and one
+//! result per created event (its timestamp and status, `created` being
+//! `0xFFFFFFFF`) instead of a list of the failed events. Its completions are
+//! translated into the 0.16 form here, so callers see one shape.
 //!
 //! The library is the static `libtb_client.a` TigerBeetle ships in its Go
 //! client module for each release (see `tools::tb_client_lib`); `build.rs`
@@ -168,6 +175,9 @@ pub enum Release {
     /// (tigerbeetle#2484, fixed in 0.16.13). Linux builds only.
     #[value(name = "0.16.17")]
     V0_16_17,
+    /// 0.17.9, for 0.17 servers. Linux builds only.
+    #[value(name = "0.17.9")]
+    V0_17_9,
 }
 
 impl Release {
@@ -175,6 +185,7 @@ impl Release {
         match self {
             Self::V0_16_11 => "0.16.11",
             Self::V0_16_17 => "0.16.17",
+            Self::V0_17_9 => "0.17.9",
         }
     }
 
@@ -190,6 +201,12 @@ impl Release {
             (Self::V0_16_17, 3) => "client_shutdown",
             (Self::V0_16_17, 4) => "invalid_operation",
             (Self::V0_16_17, 5) => "invalid_data_size",
+            (Self::V0_17_9, 2) => "client_evicted",
+            (Self::V0_17_9, 3) => "client_release_too_low",
+            (Self::V0_17_9, 4) => "client_release_too_high",
+            (Self::V0_17_9, 5) => "client_shutdown",
+            (Self::V0_17_9, 6) => "invalid_operation",
+            (Self::V0_17_9, 7) => "invalid_data_size",
             _ => "unknown",
         }
     }
@@ -204,9 +221,66 @@ struct Pending {
     done: Sender<Completion>,
 }
 
+/// 0.17's `tb_packet_t`.
+#[repr(C)]
+struct Packet17 {
+    user_data: *mut c_void,
+    data: *mut c_void,
+    data_size: u32,
+    user_tag: u16,
+    operation: u8,
+    status: u8,
+    opaque: [u8; 64],
+}
+
+struct Pending17 {
+    packet: Packet17,
+    data: Vec<u8>,
+    done: Sender<Completion>,
+}
+
+impl Operation {
+    /// The 0.17 `TB_OPERATION` code.
+    fn code17(self) -> u8 {
+        match self {
+            Self::LookupAccounts => 140,
+            Self::LookupTransfers => 141,
+            Self::GetAccountTransfers => 142,
+            Self::GetAccountBalances => 143,
+            Self::QueryAccounts => 144,
+            Self::QueryTransfers => 145,
+            Self::CreateAccounts => 146,
+            Self::CreateTransfers => 147,
+        }
+    }
+}
+
+/// A 0.17 create reply (one 16-byte result per event: timestamp, status,
+/// reserved) in the 0.16 form: the index and status of each event not
+/// created. Other replies are unchanged.
+fn reply16(operation: u8, reply: &[u8]) -> Vec<u8> {
+    if operation != Operation::CreateAccounts.code17()
+        && operation != Operation::CreateTransfers.code17()
+    {
+        return reply.to_vec();
+    }
+    reply
+        .chunks_exact(16)
+        .enumerate()
+        .filter_map(|(index, result)| {
+            let status = u32::from_le_bytes(result[8..12].try_into().unwrap());
+            (status != 0xffff_ffff)
+                .then(|| [(index as u32).to_le_bytes(), status.to_le_bytes()].concat())
+        })
+        .flatten()
+        .collect()
+}
+
 /// One client session to a cluster.
 pub struct Client {
     raw: usize,
+    /// A 0.17 client's handle, which must not move.
+    handle17: Option<Box<[u64; 4]>>,
     pub release: Release,
 }
 
@@ -247,6 +321,45 @@ mod ffi17 {
             on_completion: extern "C" fn(usize, usize, *mut Packet, u64, *const u8, u32),
         ) -> i32;
         pub fn tb17_client_submit(client: usize, packet: *mut Packet);
+    }
+}
+
+/// 0.17.9's client, exports renamed (see `tools::tb_client_lib`).
+#[cfg(tb_client_0_17_9)]
+mod ffi179 {
+    use super::Packet17;
+    #[link(name = "tb_client_0_17_9", kind = "static")]
+    extern "C" {
+        pub fn tb179_client_init(
+            client_out: *mut [u64; 4],
+            cluster_id: *const u8,
+            address_ptr: *const u8,
+            address_len: u32,
+            completion_ctx: usize,
+            completion: extern "C" fn(usize, *mut Packet17, u64, *const u8, u32),
+        ) -> i32;
+        pub fn tb179_client_submit(client: *mut [u64; 4], packet: *mut Packet17) -> i32;
+    }
+}
+
+#[cfg_attr(not(tb_client_0_17_9), allow(dead_code))]
+extern "C" fn on_completion179(
+    _ctx: usize,
+    packet: *mut Packet17,
+    _timestamp: u64,
+    data: *const u8,
+    len: u32,
+) {
+    // SAFETY: as in `on_completion`, for the 0.17 packet.
+    unsafe {
+        let pending = Box::from_raw((*packet).user_data as *mut Pending17);
+        let bytes: &[u8] = if data.is_null() || len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(data, len as usize)
+        };
+        let reply = reply16((*packet).operation, bytes);
+        let _ = pending.done.send(((*packet).status, reply));
     }
 }
 
@@ -299,6 +412,35 @@ fn init_status(status: i32) -> &'static str {
 impl Client {
     /// Start a client for `cluster` at `addresses` (`ip:port,...`, replica order).
     pub fn connect(release: Release, cluster: u128, addresses: &str) -> Result<Self, String> {
+        if release == Release::V0_17_9 {
+            #[cfg(tb_client_0_17_9)]
+            {
+                let mut handle = Box::new([0u64; 4]);
+                let id = cluster.to_le_bytes();
+                // SAFETY: the id and address bytes outlive the call; the
+                // boxed handle stays put for the client's life.
+                let status = unsafe {
+                    ffi179::tb179_client_init(
+                        &mut *handle,
+                        id.as_ptr(),
+                        addresses.as_ptr(),
+                        addresses.len() as u32,
+                        0,
+                        on_completion179,
+                    )
+                };
+                if status != 0 {
+                    return Err(format!("tb_client_init 0.17.9: {}", init_status(status)));
+                }
+                return Ok(Self {
+                    raw: 0,
+                    handle17: Some(handle),
+                    release,
+                });
+            }
+            #[cfg(not(tb_client_0_17_9))]
+            return Err("this build has no 0.17.9 TigerBeetle client library".into());
+        }
         if release == Release::V0_16_17 {
             #[cfg(tb_client_0_16_17)]
             {
@@ -318,7 +460,11 @@ impl Client {
                 if status != 0 {
                     return Err(format!("tb_client_init 0.16.17: {}", init_status(status)));
                 }
-                return Ok(Self { raw, release });
+                return Ok(Self {
+                    raw,
+                    handle17: None,
+                    release,
+                });
             }
             #[cfg(not(tb_client_0_16_17))]
             return Err("this build has no 0.16.17 TigerBeetle client library".into());
@@ -340,7 +486,11 @@ impl Client {
             if status != 0 {
                 return Err(format!("tb_client_init: {}", init_status(status)));
             }
-            Ok(Self { raw, release })
+            Ok(Self {
+                raw,
+                handle17: None,
+                release,
+            })
         }
         #[cfg(not(tb_client))]
         {
@@ -355,6 +505,42 @@ impl Client {
     /// Submit one request; the receiver yields its completion.
     pub fn submit(&self, operation: Operation, data: Vec<u8>) -> Receiver<Completion> {
         let (done, completion) = mpsc::channel();
+        if let Some(handle) = &self.handle17 {
+            let mut pending = Box::new(Pending17 {
+                packet: Packet17 {
+                    user_data: std::ptr::null_mut(),
+                    data: std::ptr::null_mut(),
+                    data_size: data.len() as u32,
+                    user_tag: 0,
+                    operation: operation.code17(),
+                    status: 0,
+                    opaque: [0; 64],
+                },
+                data,
+                done,
+            });
+            pending.packet.data = pending.data.as_mut_ptr() as *mut c_void;
+            let pending = Box::into_raw(pending);
+            // SAFETY: the Box stays alive until on_completion179 reclaims
+            // it; the handle is boxed and outlives the client's requests.
+            unsafe {
+                (*pending).packet.user_data = pending as *mut c_void;
+                #[cfg(tb_client_0_17_9)]
+                {
+                    let handle = &**handle as *const [u64; 4] as *mut [u64; 4];
+                    if ffi179::tb179_client_submit(handle, &mut (*pending).packet) != 0 {
+                        let pending = Box::from_raw(pending);
+                        let _ = pending.done.send((u8::MAX, Vec::new()));
+                    }
+                }
+                #[cfg(not(tb_client_0_17_9))]
+                {
+                    let _ = handle;
+                    on_completion179(0, &mut (*pending).packet, 0, std::ptr::null(), 0);
+                }
+            }
+            return completion;
+        }
         let mut pending = Box::new(Pending {
             packet: Packet {
                 next: std::ptr::null_mut(),
@@ -460,5 +646,42 @@ mod tests {
         assert_eq!(values_of::<Transfer>(&bytes), transfers);
         // The id is the first 16 bytes, little-endian.
         assert_eq!(bytes[0], 7);
+    }
+
+    #[test]
+    fn a_017_create_reply_becomes_the_failed_events() {
+        let result = |timestamp: u64, status: u32| {
+            [
+                timestamp.to_le_bytes().to_vec(),
+                status.to_le_bytes().to_vec(),
+                0u32.to_le_bytes().to_vec(),
+            ]
+            .concat()
+        };
+        let reply = [
+            result(10, 0xffff_ffff),
+            result(0, 46),
+            result(11, 0xffff_ffff),
+            result(0, 54),
+        ]
+        .concat();
+        let failed: Vec<CreateResult> =
+            values_of(&reply16(Operation::CreateTransfers.code17(), &reply));
+        assert_eq!(
+            failed,
+            [
+                CreateResult {
+                    index: 1,
+                    result: 46
+                },
+                CreateResult {
+                    index: 3,
+                    result: 54
+                }
+            ]
+        );
+        // Lookups pass through.
+        assert_eq!(reply16(Operation::LookupAccounts.code17(), &reply), reply);
+        assert_eq!(std::mem::size_of::<Packet17>(), 88);
     }
 }

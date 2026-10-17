@@ -1,0 +1,17 @@
+# generic-faults.yaml plus power loss: a crashed replica loses its unflushed
+# writes and page cache, and its machine reboots after the downtime. The
+# generic scenarios pass --start-on-reboot, so the agent restarts the replica
+# on that boot without an oracle step.
+start: 4s
+end: 40s
+interval: 3s
+faults:
+  - kind: pause_process
+    weight: 2
+    duration: {min: 500ms, max: 6s}
+  - kind: partition
+    weight: 2
+    duration: {min: 1s, max: 6s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 5s}

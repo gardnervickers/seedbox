@@ -27,7 +27,10 @@
 //! panics) for `status`. Lines the agent writes itself start with `TBNODE`.
 //! Addresses are resolved to IPv4 here, because TigerBeetle 0.16 accepts only
 //! IP addresses. With `--respawn N` an unexpected exit is followed by a new
-//! `start` a second later, up to N times, as a service manager would.
+//! `start` a second later, up to N times, as a service manager would. With
+//! `--start-on-reboot` a boot that finds an existing data file (the machine
+//! rebooted after a crash) starts the replica at once, so generated crashes
+//! need no oracle step to bring it back.
 //!
 //! `--probe DIR` first checks that `DIR`'s file system takes O_DIRECT reads
 //! and writes through io_uring (TigerBeetle's I/O path) and `fallocate`, and
@@ -73,6 +76,9 @@ pub struct Args {
     /// Start the replica again after this many unexpected exits.
     #[arg(long, default_value_t = 0)]
     pub respawn: u32,
+    /// On a boot that finds an existing data file, start the replica at once.
+    #[arg(long)]
+    pub start_on_reboot: bool,
     /// Extra `tigerbeetle format` argument; repeatable.
     #[arg(long = "format-arg", allow_hyphen_values = true)]
     pub format_args: Vec<String>,
@@ -635,6 +641,10 @@ pub fn run(args: Args) -> u8 {
         if let Err(error) = agent.format() {
             say(json!({"event": "fatal", "error": error}));
             return 2;
+        }
+    } else if agent.args.start_on_reboot {
+        if let Err(error) = agent.start() {
+            say(json!({"event": "start-on-reboot", "error": error}));
         }
     }
     let listener = match TcpListener::bind(("0.0.0.0", agent.args.agent_port)) {

@@ -154,8 +154,12 @@ pub fn build_oracle(root: &Path, arch: &str, engine: Option<&str>) -> Result<Pat
 /// * 0.16.17: the client that no longer panics
 ///   on eviction (tigerbeetle#2484), as `libtb_client_0_16_17.a` with its five
 ///   exported functions renamed `tb17_client_*`, so both link into one Linux
-///   binary (everything else in the ELF archives is weak).
-const TB_GO_RELEASES: [(&str, &str, &str); 2] = [
+///   binary (everything else in the ELF archives is weak);
+/// * 0.17.9 (`h1:` not recorded; module zip SHA-256 below), the current
+///   release's client, as `libtb_client_0_17_9.a` with its exports renamed
+///   `tb179_client_*`. From 0.17 the module keeps each platform's library at
+///   `native/libtb_client_TRIPLE.a`.
+const TB_GO_RELEASES: [(&str, &str, &str); 3] = [
     (
         "0.16.11",
         "8ab91392411635c017ca54b7bb94e20213041cb5136cd6534c2f7c2277dbe29b",
@@ -166,13 +170,21 @@ const TB_GO_RELEASES: [(&str, &str, &str); 2] = [
         "d97b7bf9b3a27e00987f11a6017142b0503502d37eddb8eb1aeefb22de711d69",
         "tb17",
     ),
+    (
+        "0.17.9",
+        "7b5407d83177eb7bc46173afcf899b0aeb364b839b51c6c6c059c94f7a1608fa",
+        "tb179",
+    ),
 ];
-const TB_EXPORTS: [&str; 5] = [
+/// Every `tb_client_*` export of the releases above (0.17 adds the last two).
+const TB_EXPORTS: [&str; 7] = [
     "tb_client_init",
     "tb_client_init_echo",
     "tb_client_completion_context",
     "tb_client_submit",
     "tb_client_deinit",
+    "tb_client_init_parameters",
+    "tb_client_register_log_callback",
 ];
 
 /// The platforms `fetch-tb-client` prepares: the guests' and this Mac's.
@@ -212,8 +224,13 @@ pub fn tb_client_lib(root: &Path, triple: &str) -> Result<Vec<PathBuf>, String> 
         if sha256(&zip)? != zip_sha256 {
             return Err(format!("{}: unexpected SHA-256", zip.display()));
         }
+        let member = if release.starts_with("0.16.") {
+            format!("pkg/native/{triple}/libtb_client.a")
+        } else {
+            format!("native/libtb_client_{triple}.a")
+        };
         let bytes = run(Command::new("unzip").arg("-p").arg(&zip).arg(format!(
-            "github.com/tigerbeetle/tigerbeetle-go@v{release}/pkg/native/{triple}/libtb_client.a"
+            "github.com/tigerbeetle/tigerbeetle-go@v{release}/{member}"
         )))?;
         if bytes.is_empty() {
             return Err(format!(

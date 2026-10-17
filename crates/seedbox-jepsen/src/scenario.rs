@@ -1165,6 +1165,9 @@ fn tigerbeetle() -> Vec<Scenario> {
         TbSpec { name: "tb-2758-quick-upgrades-fixed", comment: "Negative control for tb-2758-quick-upgrades: the same schedule from 0.16.29 through\n0.16.30, 0.16.31 and 0.16.32, which log the race instead of asserting.",
             run: Prod("0.16.29"), replicas: 3, memory: 3072, oracle_memory: 512,
             args: quick_upgrades(["0.16.30", "0.16.31", "0.16.32"]), probe: false },
+        TbSpec { name: "tb-current-generic", comment: "The current release (0.17.9) under generic faults, looking for unknown bugs: steady\ntransfers from four clients for 60 s, checked for lost acknowledged transfers and\npanics. Run it with `--fault-profile harness/jepsen/tigerbeetle/generic-crash-faults.yaml`\nor `corruption-faults.yaml` (silent data corruption on one replica, which TigerBeetle\nrepairs from its peers).",
+            run: Dev("0.17.9"), replicas: 3, memory: 3072, oracle_memory: 512,
+            args: with(&steady("60", &[]), &["--client", "0.17.9"]), probe: false },
         TbSpec { name: "tb-2758-quick-generic", comment: "tigerbeetle#2758 without a scripted nemesis: the quick installs of 0.16.27, 0.16.28\nand 0.16.29 with the later ones at seeded offsets. Run it with\n`--fault-profile harness/jepsen/tigerbeetle/generic-faults.yaml`.",
             run: Prod("0.16.26"), replicas: 3, memory: 3072, oracle_memory: 512,
             args: quick_upgrades_generic(["0.16.27", "0.16.28", "0.16.29"]), probe: false },
@@ -1200,16 +1203,21 @@ fn tigerbeetle() -> Vec<Scenario> {
                 generated: format!("TigerBeetle {}, {} replicas", spec.version(), spec.replicas),
                 machines: (0..spec.replicas)
                     .map(|i| {
-                        (
-                            format!("n{}", i + 1),
-                            tb_replica(
-                                spec.run,
-                                i,
-                                spec.replicas,
-                                spec.memory,
-                                spec.probe && i == 0,
-                            ),
-                        )
+                        let mut replica = tb_replica(
+                            spec.run,
+                            i,
+                            spec.replicas,
+                            spec.memory,
+                            spec.probe && i == 0,
+                        );
+                        // Generic scenarios take generated crashes: a rebooted
+                        // replica comes back by itself.
+                        if spec.name.contains("-generic") {
+                            if let Some(entrypoint) = replica.entrypoint.as_mut() {
+                                entrypoint.push("--start-on-reboot".into());
+                            }
+                        }
+                        (format!("n{}", i + 1), replica)
                     })
                     .collect(),
                 oracle: Machine::program(&args).memory(spec.oracle_memory),

@@ -10,6 +10,7 @@ use std::{env, path::PathBuf};
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(tb_client)");
     println!("cargo:rustc-check-cfg=cfg(tb_client_0_16_17)");
+    println!("cargo:rustc-check-cfg=cfg(tb_client_0_17_9)");
     println!("cargo:rerun-if-env-changed=TB_CLIENT_LIB_DIR");
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -32,6 +33,13 @@ fn main() {
         if newer.is_file() {
             println!("cargo:rustc-link-lib=static=tb_client_0_16_17");
             println!("cargo:rustc-cfg=tb_client_0_16_17");
+        }
+        // 0.17.9's client, its exports renamed tb179_client_*.
+        let current = dir.join("libtb_client_0_17_9.a");
+        println!("cargo:rerun-if-changed={}", current.display());
+        if current.is_file() {
+            println!("cargo:rustc-link-lib=static=tb_client_0_17_9");
+            println!("cargo:rustc-cfg=tb_client_0_17_9");
         }
     }
 }

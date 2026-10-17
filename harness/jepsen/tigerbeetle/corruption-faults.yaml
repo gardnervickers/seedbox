@@ -1,0 +1,25 @@
+# generic-crash-faults.yaml plus silent corruption of n1's data reads and
+# writes (never the filesystem's metadata). TigerBeetle checksums every block
+# and repairs a corrupt one from its peers, so with corruption on one replica
+# of three no acknowledged transfer may be lost and no replica may panic.
+start: 4s
+end: 50s
+interval: 3s
+faults:
+  - kind: pause_process
+    weight: 2
+    duration: {min: 500ms, max: 6s}
+  - kind: partition
+    weight: 2
+    duration: {min: 1s, max: 6s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 5s}
+  - kind: disk_error
+    weight: 3
+    op: any
+    ppm: 20000
+    effect: corrupt
+    scope: data
+    duration: {min: 2s, max: 8s}
+    targets: [n1]

@@ -8,7 +8,7 @@ machines:
     build:
       context: ../../..
       dockerfile: harness/jepsen/tigerbeetle/image/tigerbeetle-upgrade.Dockerfile
-    entrypoint: ["/jepsen/seedbox-jepsen", "tb-node", "--replica", "0", "--peers", "n1,n2,n3", "--data", "/var/lib/tigerbeetle/0_0.tigerbeetle", "--binary-dir", "/var/lib/tigerbeetle/bin", "--release", "0.16.26", "--respawn", "2", "--start-arg=--cache-grid=128MiB"]
+    entrypoint: ["/jepsen/seedbox-jepsen", "tb-node", "--replica", "0", "--peers", "n1,n2,n3", "--data", "/var/lib/tigerbeetle/0_0.tigerbeetle", "--binary-dir", "/var/lib/tigerbeetle/bin", "--release", "0.16.26", "--respawn", "2", "--start-arg=--cache-grid=128MiB", "--start-on-reboot"]
     memoryMiB: 3072
     volumes:
       data:
@@ -18,7 +18,7 @@ machines:
     build:
       context: ../../..
       dockerfile: harness/jepsen/tigerbeetle/image/tigerbeetle-upgrade.Dockerfile
-    entrypoint: ["/jepsen/seedbox-jepsen", "tb-node", "--replica", "1", "--peers", "n1,n2,n3", "--data", "/var/lib/tigerbeetle/0_1.tigerbeetle", "--binary-dir", "/var/lib/tigerbeetle/bin", "--release", "0.16.26", "--respawn", "2", "--start-arg=--cache-grid=128MiB"]
+    entrypoint: ["/jepsen/seedbox-jepsen", "tb-node", "--replica", "1", "--peers", "n1,n2,n3", "--data", "/var/lib/tigerbeetle/0_1.tigerbeetle", "--binary-dir", "/var/lib/tigerbeetle/bin", "--release", "0.16.26", "--respawn", "2", "--start-arg=--cache-grid=128MiB", "--start-on-reboot"]
     memoryMiB: 3072
     volumes:
       data:
@@ -28,7 +28,7 @@ machines:
     build:
       context: ../../..
       dockerfile: harness/jepsen/tigerbeetle/image/tigerbeetle-upgrade.Dockerfile
-    entrypoint: ["/jepsen/seedbox-jepsen", "tb-node", "--replica", "2", "--peers", "n1,n2,n3", "--data", "/var/lib/tigerbeetle/0_2.tigerbeetle", "--binary-dir", "/var/lib/tigerbeetle/bin", "--release", "0.16.26", "--respawn", "2", "--start-arg=--cache-grid=128MiB"]
+    entrypoint: ["/jepsen/seedbox-jepsen", "tb-node", "--replica", "2", "--peers", "n1,n2,n3", "--data", "/var/lib/tigerbeetle/0_2.tigerbeetle", "--binary-dir", "/var/lib/tigerbeetle/bin", "--release", "0.16.26", "--respawn", "2", "--start-arg=--cache-grid=128MiB", "--start-on-reboot"]
     memoryMiB: 3072
     volumes:
       data:
