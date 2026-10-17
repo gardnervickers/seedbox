@@ -332,6 +332,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 );
             }
         }
+        (Screen::Campaigns, _) => campaigns(frame, app, body),
         _ => catalogue(frame, app, body),
     }
     footer(frame, app, keys, now);
@@ -367,6 +368,7 @@ fn header(frame: &mut Frame, app: &App, area: Rect) {
         tabs.push((Screen::Simulation, "2 simulation"));
     }
     tabs.push((Screen::Timeline, "3 timeline"));
+    tabs.push((Screen::Campaigns, "4 campaigns"));
     let mut x = area.x + width_of(&spans) as u16;
     for (screen, label) in tabs {
         let span = tab(label, app.screen == screen);
@@ -547,6 +549,17 @@ fn footer(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
     let mut keys: Vec<(String, String)> = Vec::new();
     let mut push = |key: &str, label: String| keys.push((key.to_owned(), label));
     match app.screen {
+        Screen::Campaigns => {
+            for (k, l) in [
+                ("↑↓", "select"),
+                ("tab", "campaigns/members"),
+                ("⏎", "open member"),
+                ("esc", "back"),
+                ("q", "quit"),
+            ] {
+                push(k, l.into());
+            }
+        }
         Screen::Timeline => {
             for (k, l) in [
                 ("↑↓", "select"),
@@ -648,6 +661,14 @@ fn footer(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
 
 fn help(frame: &mut Frame, app: &App, area: Rect) {
     let lines: &[(&str, &str)] = match app.screen {
+        Screen::Campaigns => &[
+            ("↑ ↓  j k", "select a campaign, or a member after tab"),
+            ("tab", "move between the campaigns and the members"),
+            ("⏎", "open the selected member's simulation"),
+            ("esc", "back"),
+            ("1 2 3 4", "catalogue · simulation · timeline · campaigns"),
+            ("q", "quit"),
+        ],
         Screen::Catalogue => &[
             ("↑ ↓  j k", "select a simulation"),
             ("⏎", "open it"),
@@ -2940,6 +2961,176 @@ fn summary_phase(s: &SimulationSummary) -> (&'static str, Color) {
         Phase::Finalizing => ("◌ finalizing", YELLOW),
         Phase::Completed => ("■ completed", DIM),
     }
+}
+
+/// Campaigns on the left; the selected one's findings and members, with each
+/// branch's parent and planned fault, on the right.
+fn campaigns(frame: &mut Frame, app: &App, area: Rect) {
+    let list_width = (area.width * 34 / 100).clamp(28, 56);
+    let [list_area, detail_area] =
+        Layout::horizontal([Constraint::Length(list_width), Constraint::Min(30)]).areas(area);
+    let rows: Vec<Line> = if app.campaigns.is_empty() {
+        vec![Line::styled(
+            " no campaigns yet: run `seedbox campaign`",
+            Style::new().fg(DIM),
+        )]
+    } else {
+        app.campaigns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let phase = match (&c.phase, &c.completion) {
+                    (seedbox_api::CampaignPhase::Running, _) => ("running", ICE),
+                    (_, Some(seedbox_api::CampaignCompletion::Failed { .. })) => ("failed", RED),
+                    _ => ("done", GREEN),
+                };
+                let findings = if c.findings > 0 {
+                    let noun = if c.findings == 1 {
+                        "finding"
+                    } else {
+                        "findings"
+                    };
+                    Span::styled(
+                        format!(" {} {noun}", c.findings),
+                        Style::new().fg(RED).bold(),
+                    )
+                } else {
+                    Span::styled(" no findings", Style::new().fg(DIM))
+                };
+                let line = Line::from(vec![
+                    Span::styled(format!(" {} ", c.name), Style::new().fg(TEXT)),
+                    Span::styled(format!("{} ", phase.0), Style::new().fg(phase.1)),
+                    Span::styled(
+                        format!("{}/{}", c.completed, c.budget),
+                        Style::new().fg(DIM),
+                    ),
+                    findings,
+                ]);
+                if i == app.campaign_row {
+                    line.style(Style::new().bg(SELECTED))
+                } else {
+                    line
+                }
+            })
+            .collect()
+    };
+    frame.render_widget(
+        Paragraph::new(rows).block(block("campaigns", !app.members_focus)),
+        list_area,
+    );
+    let Some(campaign) = &app.campaign else {
+        frame.render_widget(
+            Paragraph::new(" select a campaign")
+                .fg(DIM)
+                .block(block("members", false)),
+            detail_area,
+        );
+        return;
+    };
+    let findings_height = (campaign.findings.len() as u16).clamp(1, 6) + 2;
+    let [findings_area, members_area] =
+        Layout::vertical([Constraint::Length(findings_height), Constraint::Min(4)])
+            .areas(detail_area);
+    let findings: Vec<Line> = if campaign.findings.is_empty() {
+        vec![Line::styled(" none", Style::new().fg(DIM))]
+    } else {
+        campaign
+            .findings
+            .iter()
+            .map(|f| {
+                let ancestry = f
+                    .ancestry
+                    .iter()
+                    .map(u32::to_string)
+                    .chain(std::iter::once(f.ordinal.to_string()))
+                    .collect::<Vec<_>>()
+                    .join("→");
+                Line::from(vec![
+                    Span::styled(format!(" {} ", f.group), Style::new().fg(RED).bold()),
+                    Span::styled(
+                        format!(
+                            "member {ancestry} · {} · seen in {}",
+                            f.representative,
+                            f.members.len()
+                        ),
+                        Style::new().fg(DIM),
+                    ),
+                ])
+            })
+            .collect()
+    };
+    frame.render_widget(
+        Paragraph::new(findings).block(block(
+            &format!(
+                "{} · {} generations · {} features",
+                campaign.id, campaign.generations, campaign.features
+            ),
+            false,
+        )),
+        findings_area,
+    );
+    let visible = members_area.height.saturating_sub(2) as usize;
+    let first = app.member_row.saturating_sub(visible.saturating_sub(1));
+    let members: Vec<Line> = campaign
+        .members
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(visible)
+        .map(|(i, m)| {
+            let (verdict, color) = match m.verdict {
+                Some(seedbox_api::TestVerdict::Failed) => ("failed", RED),
+                Some(seedbox_api::TestVerdict::Passed) => ("passed", GREEN),
+                Some(seedbox_api::TestVerdict::Incomplete) => ("incomplete", AMBER),
+                _ => ("…", DIM),
+            };
+            let plan = match &m.plan {
+                seedbox_api::MemberPlan::Root { seed, .. } => format!("root seed {seed}"),
+                seedbox_api::MemberPlan::Branch {
+                    parent,
+                    anchor,
+                    mutation,
+                    ..
+                } => match mutation {
+                    Some(mutation) => format!("branch of {parent} at {anchor}: {mutation}"),
+                    None => format!("branch of {parent} at {anchor}"),
+                },
+            };
+            let line = Line::from(vec![
+                Span::styled(format!(" {:>3} ", m.ordinal), Style::new().fg(DIM)),
+                Span::styled(
+                    format!("{:<9}", m.simulation.as_ref().map_or("-", |s| s.as_str())),
+                    Style::new().fg(ICE),
+                ),
+                Span::styled(format!("{verdict:<11}"), Style::new().fg(color)),
+                Span::styled(
+                    if m.novelty > 0 {
+                        format!("+{:<4}", m.novelty)
+                    } else {
+                        "     ".into()
+                    },
+                    Style::new().fg(TEAL),
+                ),
+                Span::styled(plan, Style::new().fg(TEXT)),
+            ]);
+            if app.members_focus && i == app.member_row {
+                line.style(Style::new().bg(SELECTED))
+            } else {
+                line
+            }
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(members).block(block(
+            &format!(
+                "members {}/{}",
+                campaign.members.len(),
+                campaign.plan.budget
+            ),
+            app.members_focus,
+        )),
+        members_area,
+    );
 }
 
 fn catalogue(frame: &mut Frame, app: &App, area: Rect) {

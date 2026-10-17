@@ -32,6 +32,7 @@ pub enum Screen {
     Catalogue,
     Simulation,
     Timeline,
+    Campaigns,
 }
 
 /// Everything the API tasks report back to the UI.
@@ -68,6 +69,10 @@ pub enum Update {
         result: Result<ControlReceipt, String>,
     },
     Checkpoints(Vec<Checkpoint>),
+    /// The server's campaigns, from the catalogue poll.
+    Campaigns(Vec<seedbox_api::CampaignSummary>),
+    /// One campaign's members and findings.
+    Campaign(Box<seedbox_api::Campaign>),
     /// Whether the catalogue poll reached the server.
     Connection(bool),
     /// Faults and timeline of a catalogue row, for its detail pane.
@@ -107,6 +112,8 @@ pub enum Request {
     Preview(SimulationId),
     /// Inject a heal without pausing; heals are admitted at the next boundary.
     Heal(SimulationId, serde_json::Value),
+    /// Fetch one campaign's members and findings.
+    Campaign(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -790,6 +797,13 @@ pub struct App {
     pub screen: Screen,
     pub list: Vec<SimulationSummary>,
     pub list_selected: usize,
+    /// Campaigns, newest first, and the selected one's detail.
+    pub(super) campaigns: Vec<seedbox_api::CampaignSummary>,
+    pub(super) campaign: Option<seedbox_api::Campaign>,
+    pub(super) campaign_row: usize,
+    pub(super) member_row: usize,
+    /// Arrow keys move through the members rather than the campaigns.
+    pub(super) members_focus: bool,
     pub focus: Option<Focus>,
     pub notice: Option<Notice>,
     pub inspector: Option<Inspector>,
@@ -1127,6 +1141,11 @@ impl App {
             },
             list: Vec::new(),
             list_selected: 0,
+            campaigns: Vec::new(),
+            campaign: None,
+            campaign_row: 0,
+            member_row: 0,
+            members_focus: false,
             focus: focus.map(Focus::new),
             notice: None,
             inspector: None,
@@ -1387,6 +1406,23 @@ impl App {
                         Tone::Bad,
                     );
                     requests.push(Request::Close);
+                }
+            }
+            Update::Campaigns(list) => {
+                self.campaigns = list;
+                self.campaign_row = self
+                    .campaign_row
+                    .min(self.campaigns.len().saturating_sub(1));
+                if self.screen == Screen::Campaigns {
+                    return self.selected_campaign_request();
+                }
+            }
+            Update::Campaign(campaign) => {
+                if self.selected_campaign_id() == Some(campaign.id.as_str()) {
+                    self.member_row = self
+                        .member_row
+                        .min(campaign.members.len().saturating_sub(1));
+                    self.campaign = Some(*campaign);
                 }
             }
             Update::List(mut list) => {
@@ -2089,6 +2125,10 @@ impl App {
                 self.screen = Screen::Simulation;
                 return Vec::new();
             }
+            KeyCode::Char('4') => {
+                self.screen = Screen::Campaigns;
+                return self.selected_campaign_request();
+            }
             _ => {}
         }
         if self.screen == Screen::Simulation
@@ -2117,7 +2157,65 @@ impl App {
             Screen::Catalogue => self.catalogue_key(key),
             Screen::Simulation => self.simulation_key(key),
             Screen::Timeline => self.timeline_key(key),
+            Screen::Campaigns => self.campaigns_key(key),
         }
+    }
+
+    fn selected_campaign_id(&self) -> Option<&str> {
+        self.campaigns.get(self.campaign_row).map(|c| c.id.as_str())
+    }
+
+    fn selected_campaign_request(&self) -> Vec<Request> {
+        self.selected_campaign_id()
+            .map(|id| Request::Campaign(id.to_owned()))
+            .into_iter()
+            .collect()
+    }
+
+    /// The campaign list, or with tab its members; ⏎ opens a member's
+    /// simulation.
+    fn campaigns_key(&mut self, key: KeyEvent) -> Vec<Request> {
+        let members = self.campaign.as_ref().map_or(0, |c| c.members.len());
+        match key.code {
+            KeyCode::Tab => self.members_focus = !self.members_focus && members > 0,
+            KeyCode::Esc if self.members_focus => self.members_focus = false,
+            KeyCode::Esc => self.screen = Screen::Catalogue,
+            KeyCode::Down | KeyCode::Char('j') if self.members_focus => {
+                self.member_row = (self.member_row + 1).min(members.saturating_sub(1));
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.members_focus => {
+                self.member_row = self.member_row.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
+                let before = self.campaign_row;
+                self.campaign_row = if matches!(key.code, KeyCode::Down | KeyCode::Char('j')) {
+                    (before + 1).min(self.campaigns.len().saturating_sub(1))
+                } else {
+                    before.saturating_sub(1)
+                };
+                if self.campaign_row != before {
+                    self.campaign = None;
+                    self.member_row = 0;
+                    return self.selected_campaign_request();
+                }
+            }
+            KeyCode::Enter => {
+                let simulation = self
+                    .campaign
+                    .as_ref()
+                    .and_then(|c| c.members.get(self.member_row))
+                    .and_then(|m| m.simulation.clone());
+                if self.members_focus {
+                    if let Some(id) = simulation {
+                        return self.open(id);
+                    }
+                } else if members > 0 {
+                    self.members_focus = true;
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> Vec<Request> {
@@ -2232,6 +2330,7 @@ impl App {
                             Screen::Catalogue => '1',
                             Screen::Simulation => '2',
                             Screen::Timeline => '3',
+                            Screen::Campaigns => '4',
                         }),
                         KeyModifiers::NONE,
                     )))
@@ -2767,6 +2866,92 @@ pub(crate) mod tests {
 
     fn key(c: char) -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+    }
+
+    fn campaign(
+        id: &str,
+        members: &[(u32, Option<&str>, serde_json::Value)],
+    ) -> seedbox_api::Campaign {
+        let members: Vec<serde_json::Value> = members
+            .iter()
+            .map(|(ordinal, simulation, plan)| {
+                let mut m = serde_json::json!({"ordinal": ordinal, "generation": 0, "plan": plan,
+                    "novelty": 0, "inCorpus": false});
+                if let Some(s) = simulation {
+                    m["simulation"] = (*s).into();
+                }
+                m
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": "demo", "createdAtUnixMs": 1,
+            "plan": {"seed": 1, "budget": 4, "batch": 2, "freshPermille": 250, "corpusLimit": 8, "anchorsNs": []},
+            "phase": "running", "generations": 1, "features": 3, "corpus": 1, "members": members,
+            "assessment": {"status": "passed", "membersCompleted": 0, "membersIncomplete": 0,
+                "membersFailed": 0, "properties": []},
+            "findings": [], "findingsDir": "/tmp"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_campaigns_screen_lists_members_and_opens_one() {
+        let mut app = App::new(None);
+        let summaries: Vec<seedbox_api::CampaignSummary> = serde_json::from_value(serde_json::json!([
+            {"id": "campaign-b", "name": "b", "phase": "running", "budget": 4, "completed": 1, "findings": 0},
+            {"id": "campaign-a", "name": "a", "phase": "completed", "budget": 2, "completed": 2, "findings": 1}
+        ]))
+        .unwrap();
+        // Entering the screen asks for the selected campaign's detail.
+        assert!(app.apply(Update::Campaigns(summaries)).is_empty());
+        let requests = app.input(key('4'));
+        assert!(matches!(&requests[..], [Request::Campaign(id)] if id == "campaign-b"));
+        // Detail of another campaign is ignored.
+        app.apply(Update::Campaign(Box::new(campaign("campaign-a", &[]))));
+        assert!(app.campaign.is_none());
+        app.apply(Update::Campaign(Box::new(campaign(
+            "campaign-b",
+            &[
+                (0, Some("k7m2p9qx"), serde_json::json!({"kind": "root", "seed": 1})),
+                (1, Some("m3n4p5q6"), serde_json::json!({"kind": "branch", "parent": 0, "anchor": "a0", "reseed": 2, "choices": 0})),
+            ],
+        ))));
+        assert_eq!(app.campaign.as_ref().unwrap().members.len(), 2);
+        // Tab moves to the members, j selects the branch, enter opens it.
+        app.input(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        app.input(key('j'));
+        let requests = app.input(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(matches!(&requests[..], [Request::Open(id)] if id.as_str() == "m3n4p5q6"));
+        assert_eq!(app.screen, Screen::Simulation);
+        // The screen shows the campaigns, members, ancestry and plans.
+        app.screen = Screen::Campaigns;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 16)).unwrap();
+        terminal
+            .draw(|frame| crate::view::draw(frame, &app))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(120)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>() + "\n")
+            .collect();
+        if std::env::var_os("SEEDBOX_TUI_PRINT").is_some() {
+            println!("{text}");
+        }
+        for expected in [
+            "4 campaigns",
+            "campaign-b",
+            "root seed 1",
+            "branch of 0 at a0",
+            "members 2/4",
+        ] {
+            assert!(text.contains(expected), "{expected} missing:\n{text}");
+        }
     }
 
     #[test]
