@@ -14,3 +14,8 @@ async fn public_pv_partition_heal_recovers_and_replays() {
 async fn public_pv_shape_heal_recovers_and_replays() {
     native_service::network_shape_heal_replay(DriverBackend::Pv).await;
 }
+
+#[tokio::test]
+async fn public_pv_drop_connection_aborts_reincarnates_and_replays() {
+    native_service::network_drop_connection_replay(DriverBackend::Pv).await;
+}

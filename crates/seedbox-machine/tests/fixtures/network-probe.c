@@ -34,6 +34,22 @@
  *   idle
  *       Print "NETPROBE idle" and pause forever: a live peer with no network
  *       activity.
+ *   drop-client ADDRESS PORT
+ *       Run as the controlling oracle, for a host-injected connection drop.
+ *       Echo a short stream to a server, read the server-to-client direction
+ *       of that TCP incarnation through the guest control API and print it,
+ *       then keep echoing 64-byte rounds every 10 ms with a one-second
+ *       TCP_USER_TIMEOUT. Once the host drops that direction, a round goes
+ *       unacknowledged and the kernel aborts the connection. Then reconnect
+ *       and echo; the server's single echo slot frees only after the host
+ *       heals the drop. Finally read the direction again for a newer
+ *       incarnation. Prints:
+ *         NETPROBE drop first ok
+ *         NETPROBE drop connection=JSON          (the control reply's object)
+ *         NETPROBE drop aborted errno=E rounds=N
+ *         NETPROBE drop reconnected connects=N
+ *         NETPROBE drop reincarnation old=I new=J
+ *         NETPROBE drop done
  *
  * Retries run on the guest's own clock, which the simulation owns, so a
  * server that is still booting is reached deterministically. Failures print
@@ -48,7 +64,9 @@
 #include <string.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #define ATTEMPTS 200
@@ -381,6 +399,142 @@ static int client(const char *address, unsigned long port, unsigned long bytes) 
     return 0;
 }
 
+
+/* One guest control call: a request line in, one reply line out. */
+static char control_reply[8192];
+static int control_call(int control, unsigned id, const char *operation) {
+    char request[1024];
+    int size = snprintf(request, sizeof(request), "{\"version\":1,\"id\":%u,%s}\n", id, operation);
+    if (size < 0 || (size_t)size >= sizeof(request)) {
+        errno = EOVERFLOW;
+        return fail("control request");
+    }
+    if (write_all(control, (const unsigned char *)request, (size_t)size)) return fail("control write");
+    size_t used = 0;
+    for (;;) {
+        if (used + 1 == sizeof(control_reply)) {
+            errno = EOVERFLOW;
+            return fail("control reply size");
+        }
+        ssize_t count = read(control, control_reply + used, 1);
+        if (count < 0 && errno == EINTR) continue;
+        if (count != 1) return fail("control read");
+        if (control_reply[used++] == '\n') break;
+    }
+    control_reply[used] = 0;
+    if (!strstr(control_reply, "\"ok\":true")) {
+        printf("NETPROBE drop control-error %s", control_reply);
+        errno = EPROTO;
+        return fail("control result");
+    }
+    return 0;
+}
+/* The first object of the reply's "connections" array, copied verbatim. */
+static int first_connection(char *out, size_t size, unsigned long long *incarnation) {
+    const char *list = strstr(control_reply, "\"connections\":[");
+    const char *open = list ? strchr(list, '{') : NULL;
+    const char *close = open ? strchr(open, '}') : NULL;
+    const char *field = open ? strstr(open, "\"incarnation\":") : NULL;
+    if (!close || !field || field > close || (size_t)(close - open + 1) >= size) {
+        errno = ENOENT;
+        return -1;
+    }
+    memcpy(out, open, (size_t)(close - open + 1));
+    out[close - open + 1] = 0;
+    *incarnation = strtoull(field + strlen("\"incarnation\":"), NULL, 10);
+    return 0;
+}
+static int connect_retry(const struct sockaddr_in *server, int *attempts) {
+    for (*attempts = 1; *attempts <= ATTEMPTS; ++*attempts) {
+        int stream = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (stream < 0) return -1;
+        if (!connect(stream, (const struct sockaddr *)server, sizeof(*server))) return stream;
+        int error = errno;
+        close(stream);
+        if (error != ECONNREFUSED && error != ETIMEDOUT && error != EHOSTUNREACH) {
+            errno = error;
+            return -1;
+        }
+        usleep(RETRY_MS * 1000);
+    }
+    errno = ETIMEDOUT;
+    return -1;
+}
+/* Send `length` pattern bytes and read the same echo back. */
+static int echo(int stream, size_t length) {
+    unsigned char buffer[256];
+    for (size_t i = 0; i < length; ++i) buffer[i] = pattern(i);
+    if (write_all(stream, buffer, length)) return -1;
+    for (size_t received = 0; received < length;) {
+        ssize_t count = read(stream, buffer, length - received);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            if (!count) errno = EPIPE;
+            return -1;
+        }
+        for (ssize_t i = 0; i < count; ++i)
+            if (buffer[i] != pattern(received + (size_t)i)) {
+                errno = EBADMSG;
+                return -1;
+            }
+        received += (size_t)count;
+    }
+    return 0;
+}
+static int drop_client(const char *address, unsigned long port) {
+    struct sockaddr_in server = {.sin_family = AF_INET, .sin_port = htons((uint16_t)port)};
+    if (inet_pton(AF_INET, address, &server.sin_addr) != 1) return 64;
+    struct sockaddr_un path = {.sun_family = AF_UNIX};
+    const char control_path[] = "/run/seedbox/control.sock";
+    memcpy(path.sun_path, control_path, sizeof(control_path));
+    int control = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (control < 0 || connect(control, (struct sockaddr *)&path, sizeof(path))) return fail("control connect");
+    int attempts;
+    int stream = connect_retry(&server, &attempts);
+    if (stream < 0) return fail("drop connect");
+    if (echo(stream, 64)) return fail("drop first echo");
+    printf("NETPROBE drop first ok\n");
+    fflush(stdout);
+    if (control_call(control, 1, "\"op\":\"connections\",\"from\":{\"machine\":\"server\"},\"to\":{\"machine\":\"oracle\"}"))
+        return 70;
+    char connection[512];
+    unsigned long long old;
+    if (first_connection(connection, sizeof(connection), &old)) return fail("drop observe connection");
+    printf("NETPROBE drop connection=%s\n", connection);
+    fflush(stdout);
+    unsigned timeout_ms = 1000;
+    if (setsockopt(stream, IPPROTO_TCP, TCP_USER_TIMEOUT, &timeout_ms, sizeof(timeout_ms)))
+        return fail("drop user timeout");
+    /* Traffic keeps flowing until the host's drop makes a round unanswered. */
+    unsigned long rounds = 0;
+    while (!echo(stream, 64)) {
+        ++rounds;
+        usleep(10 * 1000);
+    }
+    if (errno != ETIMEDOUT) return fail("drop abort");
+    printf("NETPROBE drop aborted errno=%d rounds=%lu\n", errno, rounds);
+    fflush(stdout);
+    close(stream);
+    /* After the heal, the server's retransmission to the aborted peer draws
+     * a reset, which frees its single echo slot; the new stream then echoes. */
+    stream = connect_retry(&server, &attempts);
+    if (stream < 0) return fail("drop reconnect");
+    if (echo(stream, 64)) return fail("drop second echo");
+    printf("NETPROBE drop reconnected connects=%d\n", attempts);
+    fflush(stdout);
+    char operation[256];
+    snprintf(operation, sizeof(operation),
+             "\"op\":\"connections\",\"from\":{\"machine\":\"server\"},\"to\":{\"machine\":\"oracle\"},\"after\":%llu", old);
+    if (control_call(control, 2, operation)) return 70;
+    unsigned long long renewed;
+    if (first_connection(connection, sizeof(connection), &renewed) || renewed <= old) return fail("drop reincarnation");
+    printf("NETPROBE drop reincarnation old=%llu new=%llu\n", old, renewed);
+    printf("NETPROBE drop done\n");
+    fflush(stdout);
+    close(stream);
+    close(control);
+    return 0;
+}
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     unsigned long port, bytes;
@@ -390,6 +544,8 @@ int main(int argc, char **argv) {
         int result = disk_open(&disk);
         return result ? result : server(port, &disk);
     }
+    if (argc == 4 && !strcmp(argv[1], "drop-client") && !number(argv[3], 65535, &port) && port)
+        return drop_client(argv[2], port);
     if (argc == 2 && !strcmp(argv[1], "idle")) {
         printf("NETPROBE idle\n");
         fflush(stdout);
@@ -398,6 +554,6 @@ int main(int argc, char **argv) {
     if (argc == 5 && !strcmp(argv[1], "client") && !number(argv[3], 65535, &port) && port &&
         !number(argv[4], 1ul << 30, &bytes))
         return client(argv[2], port, bytes);
-    fprintf(stderr, "usage: network-probe server PORT | server-disk PORT | client ADDRESS PORT BYTES | idle\n");
+    fprintf(stderr, "usage: network-probe server PORT | server-disk PORT | client ADDRESS PORT BYTES | drop-client ADDRESS PORT | idle\n");
     return 64;
 }

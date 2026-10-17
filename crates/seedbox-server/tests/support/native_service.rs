@@ -1566,7 +1566,21 @@ fn network_submission(
     store: &ContentStore,
     seed: u64,
 ) -> SubmitRequest {
+    network_world_submission(backend, root, store, seed, &PROBE_MACHINES, false)
+}
+/// A network world of `machines`, the first being the oracle; with
+/// `controller`, the oracle also holds the guest control socket.
+fn network_world_submission(
+    backend: DriverBackend,
+    root: &Path,
+    store: &ContentStore,
+    seed: u64,
+    machines: &[ProbeMachine],
+    controller: bool,
+) -> SubmitRequest {
     use seedbox_machine::definition::{MacAddress, NetworkInterface};
+    assert_eq!(machines[0].name, "oracle");
+    let control = |name: &str| controller && name == "oracle";
     let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -1587,7 +1601,7 @@ fn network_submission(
     let assets = &selected.guest_assets;
     // Both backends run the same static x86 fixtures; the variable names are
     // the fixture package's, not a backend selection.
-    let machines = PROBE_MACHINES
+    let machines = machines
         .iter()
         .map(|machine| {
             let path = std::env::var_os(machine.binary)
@@ -1625,7 +1639,8 @@ fn network_submission(
                     .unwrap()
             }),
         };
-        let environment = GuestEnvironment::new(machine.name, "127.0.0.1 localhost\n", false);
+        let environment =
+            GuestEnvironment::new(machine.name, "127.0.0.1 localhost\n", control(machine.name));
         let boot = match backend {
             DriverBackend::Pv => {
                 seedbox_machine_pv::machine::pv::Factory::new(&executable, assets, 946_684_800)
@@ -1699,7 +1714,7 @@ fn network_submission(
                     max_map_count: limits.max_map_count,
                     nofile: limits.nofile,
                 },
-                control_socket: false,
+                control_socket: control(machine.name),
             },
         );
         wire_machines.push(wire::Machine {
@@ -1777,9 +1792,20 @@ fn network_submission(
         network: wire::Network::default(),
     };
     driver_world::retain_prepared(&mut inputs, &prepared, store).unwrap();
+    let services: String = machines
+        .iter()
+        .map(|(machine, ..)| {
+            let image = if machine.binary == "SEEDBOX_PV_CLOCK_APPLICATION" {
+                "fixture/clock-faults"
+            } else {
+                "fixture/network-probe"
+            };
+            format!("  {}:\n    image: {image}\n", machine.name)
+        })
+        .collect();
     let mut configuration = seedbox_application::config::parse(
         &format!(
-            "name: native-{}-in-flight\nservices:\n  oracle:\n    image: fixture/clock-faults\n  server:\n    image: fixture/network-probe\n  client:\n    image: fixture/network-probe\n",
+            "name: native-{}-in-flight\nservices:\n{services}",
             label(backend)
         ),
         Path::new("/fixture/compose.yaml"),
@@ -1787,11 +1813,13 @@ fn network_submission(
     )
     .unwrap();
     configuration.machine.memory_mb = memory_mb;
-    configuration.control = None;
+    configuration.control = controller.then(|| seedbox_spec::Control {
+        service: "oracle".into(),
+    });
     let definition =
         seedbox_application::definition::resolve(&configuration, &inputs, seed, vec![]).unwrap();
-    assert!(!definition.simulator.oracle_control);
-    assert_eq!(definition.machines.len(), 2);
+    assert_eq!(definition.simulator.oracle_control, controller);
+    assert_eq!(definition.machines.len(), machines.len() - 1);
     let mut request = SubmitRequest {
         metadata: Default::default(),
         options: Default::default(),

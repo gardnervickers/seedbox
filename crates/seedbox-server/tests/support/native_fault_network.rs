@@ -265,3 +265,205 @@ pub async fn network_shape_heal_replay(backend: DriverBackend) {
     })
     .await;
 }
+
+/// The drop world: the oracle is network-probe `drop-client`, holding the
+/// guest control socket, and talks to the ordinary echo server.
+const DROP_MACHINES: [ProbeMachine; 2] = [
+    ProbeMachine {
+        name: "oracle",
+        binary: "SEEDBOX_PV_NETWORK_APPLICATION",
+        argv: &["drop-client", "10.0.0.1", PROBE_PORT],
+        interface: Some((3, [10, 0, 0, 3])),
+    },
+    ProbeMachine {
+        name: "server",
+        binary: "SEEDBOX_PV_NETWORK_APPLICATION",
+        argv: &["server", PROBE_PORT],
+        interface: Some((1, [10, 0, 0, 1])),
+    },
+];
+const DROP_CONNECTION: &str = "NETPROBE drop connection=";
+const DROP_ABORTED: &str = "NETPROBE drop aborted errno=110 ";
+const DROP_REINCARNATION: &str = "NETPROBE drop reincarnation old=";
+
+/// Commit one more round of a paused simulation through the public Step.
+async fn step(session: &NativeSession, id: &seedbox_api::SimulationId) {
+    use seedbox_api::ControlCommand;
+    let before = session
+        .client
+        .playback(id)
+        .await
+        .unwrap()
+        .state
+        .position
+        .completed_rounds;
+    session
+        .control(id, &format!("step-{before}"), ControlCommand::Step)
+        .await;
+    loop {
+        let state = session.client.playback(id).await.unwrap().state;
+        check_bound_at(
+            &session.client,
+            id,
+            session.backend,
+            session.bound,
+            state.position.simulated_time_ns,
+            "the connection-drop step committed",
+        )
+        .await;
+        assert!(
+            !state.terminal,
+            "oracle ended before the connection drop completed"
+        );
+        if !state.stepping && state.position.completed_rounds > before {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+/// Step until the oracle's committed stdout contains `marker`.
+async fn until_oracle(
+    session: &NativeSession,
+    id: &seedbox_api::SimulationId,
+    marker: &str,
+) -> String {
+    loop {
+        let output = session.stdout(id, "oracle", false).await;
+        if output.contains(marker) {
+            return output;
+        }
+        step(session, id).await;
+    }
+}
+/// Inject `action` live through the public control API; its admitted plan id.
+async fn inject(
+    session: &NativeSession,
+    id: &seedbox_api::SimulationId,
+    name: &str,
+    action: seedbox_api::FaultAction,
+) -> u32 {
+    use seedbox_api::{ControlCommand, ControlState};
+    let receipt = session
+        .control(
+            id,
+            name,
+            ControlCommand::InjectFault {
+                action: action.clone(),
+            },
+        )
+        .await;
+    let ControlState::Acknowledged {
+        intervention: Some(intervention),
+        error: None,
+        ..
+    } = receipt.state
+    else {
+        panic!("{name}: no admitted fault plan: {receipt:?}")
+    };
+    assert_eq!(intervention.plan.action, action);
+    intervention.plan.id
+}
+
+/// Drop the server-to-oracle direction of an observed TCP incarnation. The
+/// oracle reads the connection through the guest control API and prints it;
+/// the host parses that public log line and injects the drop live, then the
+/// heal once the oracle reports its connection aborted. The oracle then
+/// reconnects and observes a newer incarnation of the same direction.
+pub async fn network_drop_connection_replay(backend: DriverBackend) {
+    use seedbox_api::{ControlCommand, FaultAction, PlaybackRate};
+    native_case(move |owner| {
+        Box::pin(async move {
+            let session = owner.session(backend);
+            session.bound = network_bound(backend);
+            let mut request = network_world_submission(
+                backend,
+                session.root.path(),
+                &session.store,
+                SEED,
+                &DROP_MACHINES,
+                true,
+            );
+            request.options.start_paused = true;
+            let source = session.submit(request, 1).await;
+            session.worker(&source).await;
+            session
+                .control(&source, "drop-initial-pause", ControlCommand::SetRate { rate: PlaybackRate::Paused })
+                .await;
+            let observed = until_oracle(session, &source, DROP_CONNECTION).await;
+            let line = observed
+                .lines()
+                .find_map(|line| line.strip_prefix(DROP_CONNECTION))
+                .expect("observed connection line");
+            let connection: seedbox_control::Connection =
+                serde_json::from_str(line).expect("oracle printed the control API's connection object");
+            assert_eq!(
+                (connection.from.as_str(), connection.to.as_str(), connection.src_port),
+                ("server", "oracle", PROBE_PORT.parse().unwrap())
+            );
+            assert!(!observed.contains("NETPROBE drop aborted"), "aborted before the drop");
+            let drop = inject(
+                session,
+                &source,
+                "drop-connection",
+                FaultAction::DropConnection { handle: HANDLE.into(), connection: connection.clone() },
+            )
+            .await;
+            let aborted = until_oracle(session, &source, DROP_ABORTED).await;
+            assert!(!aborted.contains("NETPROBE drop reconnected"), "reconnected before the heal");
+            let heal = inject(session, &source, "drop-heal", FaultAction::Heal { handle: HANDLE.into() }).await;
+            assert_ne!(drop, heal);
+            session
+                .control(&source, "drop-finish", ControlCommand::SetRate { rate: PlaybackRate::Unlimited })
+                .await;
+            let source_witness = session.complete(&source, false, 1, SEED).await.unwrap();
+            let oracle = session.stdout(&source, "oracle", false).await;
+            assert!(oracle.ends_with("NETPROBE drop done\n"), "{oracle}");
+            let renewed = oracle
+                .lines()
+                .find_map(|line| line.strip_prefix(DROP_REINCARNATION))
+                .expect("oracle observed the reincarnation");
+            let (old, new) = renewed.split_once(" new=").unwrap();
+            let (old, new): (u64, u64) = (old.parse().unwrap(), new.parse().unwrap());
+            assert_eq!(old, connection.incarnation);
+            assert!(new > old, "no newer incarnation: {renewed}");
+            let source_applied = applied(session, &source).await;
+            assert_eq!(
+                source_applied,
+                vec![(drop, "drop_connection".to_owned()), (heal, "heal".to_owned())]
+            );
+            // Replay the service-frozen spec, which carries both live inputs.
+            let resource = session.client.describe(&source).await.unwrap();
+            assert_eq!(resource.spec.program.len(), 2);
+            let replay = session
+                .submit(
+                    SubmitRequest {
+                        metadata: Default::default(),
+                        options: Default::default(),
+                        request_id: "drop-connection-replay".into(),
+                        spec: resource.spec,
+                    },
+                    1,
+                )
+                .await;
+            session.worker(&replay).await;
+            let replay_witness = session.complete(&replay, false, 1, SEED).await.unwrap();
+            assert_eq!(source_witness, replay_witness, "raw native witnesses differ");
+            for machine in ["oracle", "server"] {
+                assert_eq!(
+                    session.stdout(&source, machine, false).await,
+                    session.stdout(&replay, machine, false).await,
+                    "{machine} output differs on replay"
+                );
+            }
+            assert_eq!(applied(session, &replay).await, source_applied);
+            let comparison = session.client.compare(&source, &replay).await.unwrap();
+            assert_eq!(comparison.status, ComparisonStatus::Match);
+            assert_eq!(comparison.witness_matches, Some(true));
+            eprintln!(
+                "drop-connection replay MATCH backend={} source={source} replay={replay} witness={source_witness} connection={line} incarnation old={old} new={new} applied={source_applied:?}",
+                label(backend)
+            );
+        })
+    })
+    .await;
+}
