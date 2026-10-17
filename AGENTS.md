@@ -51,13 +51,9 @@ Open review-ready PRs as non-drafts; reviews and merges go through the user.
   Don't set a global
   `target-dir` in `.cargo/config.toml`: cargo applies it by current directory,
   so it would also move standalone crate builds and break their scripts.
-- The default Nix development shell provides sccache without overriding Cargo
-  wrapper, cache or incremental settings. It preserves a developer's existing
-  Cargo wrapper configuration and normal incremental edit loop. Keep target
-  directories private per agent; they are outputs, not the shared cache. Rust
-  cache keys retain checkout paths and Cargo environment, including target
-  directory settings, so hits are not universal. Do not erase the build-only
-  `SEEDBOX_BUILD_ROOT` checkout invalidation or reset a shared cache server.
+- Keep Cargo target directories private per agent; they are build outputs,
+  not a shared cache. Preserve the build-only `SEEDBOX_BUILD_ROOT` checkout
+  invalidation.
 - New crates go in `crates/<name>/` and inherit `version`, `edition` and
   `publish` from `[workspace.package]`. Put a dependency used by two or more
   workspace crates in `[workspace.dependencies]`. Commit both lockfiles.
@@ -160,8 +156,6 @@ the canonical crate; do not restore sibling source inclusion for these policies.
   stamp the source tree, Git revision, build flags or compiled binaries, and
   don't add compiler wrappers, reproducible-build checks, or formatting
   exceptions (`#[rustfmt::skip]`, `rustfmt.toml`) to keep engine bytes stable.
-  The development shell's sccache wrapper is allowed as a build cache, not a
-  determinism check or replay gate.
   Reformatting, moving code and changing build flags are ordinary changes;
   run `cargo fmt` on the VMM like any other crate.
 - The linked CLI uses the root lockfile and records an explicit internal-worker

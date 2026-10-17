@@ -53,7 +53,7 @@
             SEEDBOX_TCG_QEMU = "${tcgQemu}/bin/qemu-system-x86_64";
             SEEDBOX_TCG_FIRMWARE = "${tcgQemu}/share/qemu/qboot.rom";
             packages = with pkgs; [
-              rustc cargo rustfmt clippy sccache pkg-config stdenv.cc git
+              rustc cargo rustfmt clippy pkg-config stdenv.cc git
               cpio gzip curl jq python3 gnumake bc bison flex perl
               docker-client podman
               tcgQemu checker libarchive
