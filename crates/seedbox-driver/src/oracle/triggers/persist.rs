@@ -18,7 +18,8 @@ wire_struct!(Record {
     cancelled_at,
     cut_off_at,
     status,
-    rejection_reason
+    rejection_reason,
+    handle
 });
 wire_struct!(Triggers { records, failure });
 
@@ -51,7 +52,12 @@ impl Triggers {
                     })
                     && r.matched_at.is_none_or(|at| at <= now)
                     && r.cancelled_at.is_none_or(|at| at <= now)
-                    && r.cut_off_at.is_none_or(|at| at <= now),
+                    && r.cut_off_at.is_none_or(|at| at <= now)
+                    && (r.handle.is_some()
+                        == (r.status == Status::Fired
+                            && matches!(r.action, TriggerAction::Partition { .. })))
+                    && r.handle.as_ref().is_none_or(|handle| !handle.is_empty())
+                    && (r.status != Status::Fired || r.fault_id.is_some_and(|id| id != 0)),
                 "trigger record",
             )?;
             let mut failure = [0usize; MAX_MARKER];

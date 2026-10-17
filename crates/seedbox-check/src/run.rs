@@ -668,6 +668,12 @@ pub fn cargo_tests<C: Commands>(
             }
             binary = copy;
         }
+        // Native fixtures create Unix sockets beneath TMPDIR. Own a short
+        // scratch root rather than inheriting a potentially long Nix build path;
+        // keep it alive until the test process (including sudo) has exited.
+        let scratch = Temporary::in_directory(Path::new("/tmp"), "sb-check-")
+            .map_err(|e| format!("native test scratch directory: {e}"))?;
+        env.insert("TMPDIR".into(), scratch.0.to_string_lossy().into());
         let mut command = vec![binary.to_string_lossy().into(), "--test-threads=1".into()];
         if target == "applications" {
             command.push("--nocapture".into());

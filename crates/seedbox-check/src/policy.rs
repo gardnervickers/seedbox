@@ -501,6 +501,7 @@ pub fn privileged(
                 "SEEDBOX_STATIC_CC",
                 "DOCKER_HOST",
                 "SEEDBOX_ASSET_DIR",
+                "TMPDIR",
             ]
             .contains(&key.as_str())
         {

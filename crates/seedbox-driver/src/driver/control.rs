@@ -524,6 +524,11 @@ impl<M> Adapter for View<'_, M> {
                     Status::CutOff => "cut_off",
                 };
                 let mut record = serde_json::json!({"id":r.id,"source":display(&r.source)?,"marker":r.marker,"armed_at_ns":r.armed_at,"match_deadline_ns":r.match_deadline,"action":action,"prefix":r.prefix,"seen":r.seen,"resets":r.resets,"matched_at_ns":r.matched_at,"effect_at_ns":r.effect_at,"fault_id":r.fault_id,"cancelled_at_ns":r.cancelled_at,"cut_off_at_ns":r.cut_off_at,"status":status});
+                // A trigger has no fault handle until ordinary admission at
+                // its effect. The retained handle is independent of fault_id.
+                if let Some(handle) = &r.handle {
+                    record["handle"] = serde_json::json!(handle);
+                }
                 if let Some(reason) = &r.rejection_reason {
                     record["rejection_reason"] = serde_json::json!(reason);
                 }

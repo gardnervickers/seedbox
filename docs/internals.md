@@ -151,6 +151,14 @@ before a host input's newly created effect plan at the same timestamp. Frames
 follow the due timeline items, then timer wakeups; delayed control adds no second
 ordering pass.
 
+Arming a console trigger reserves only its bounded trigger ID, not a fault or
+partition handle. A fired partition's inspection record includes the actual
+opaque `handle`, allocated by ordinary fault admission at its effect; the
+numeric `fault_id` is a separate identity. The record and handle survive
+checkpoints. Python callers use `World.trigger_partition(trigger)` after firing
+to look up the healable partition without waiting or creating another effect.
+Cancelled, expired, rejected and stop triggers have no partition handle.
+
 An individually paused machine receives no positive execution budget while
 other machines advance. Due requests still receive zero-budget admission runs:
 elapsed time is adopted and overdue timers become eligible, without executing

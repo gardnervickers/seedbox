@@ -2124,7 +2124,9 @@ impl Service {
             );
             match result {
                 Ok((id, p)) => {
-                    self.triggers.resolve(effect.trigger_id, at, Ok(id))?;
+                    let handle = self.pending.get(&id).and_then(Self::handle);
+                    self.triggers
+                        .resolve(effect.trigger_id, at, Ok((id, handle)))?;
                     self.notices
                         .insert(mark, resolved(super::triggers::Status::Fired, Some(id)));
                     plans.extend(p);
@@ -2141,7 +2143,11 @@ impl Service {
                     // admission, not a successful guest effect.
                     if let Some(settlement) = e.settlements.first() {
                         let fault = settlement.fault;
-                        self.triggers.resolve(effect.trigger_id, at, Ok(fault))?;
+                        self.triggers.resolve(
+                            effect.trigger_id,
+                            at,
+                            Ok((fault, settlement.handle.clone())),
+                        )?;
                         self.notices
                             .insert(mark, resolved(super::triggers::Status::Fired, Some(fault)));
                     }

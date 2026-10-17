@@ -147,8 +147,8 @@ fn different_observation_times_in_same_commit_admit_by_arm_id() {
             .collect::<Vec<_>>(),
         [1, 2]
     );
-    assert!(engine.resolve(1, 9, Ok(7)).is_err());
-    engine.resolve(1, 10, Ok(7)).unwrap();
+    assert!(engine.resolve(1, 9, Ok((7, None))).is_err());
+    engine.resolve(1, 10, Ok((7, None))).unwrap();
     engine
         .resolve(2, 10, Err("target unavailable".into()))
         .unwrap();
@@ -160,7 +160,7 @@ fn different_observation_times_in_same_commit_admit_by_arm_id() {
         engine.records()[1].rejection_reason.as_deref(),
         Some("target unavailable")
     );
-    assert!(engine.resolve(1, 10, Ok(8)).is_err());
+    assert!(engine.resolve(1, 10, Ok((8, None))).is_err());
 }
 
 #[test]
@@ -177,7 +177,7 @@ fn near_end_round_match_uses_commit_barrier_and_keeps_observation_time() {
     assert!(engine.due(9).is_empty());
     engine.expire(10); // Match was before the exclusive deadline despite commit at it.
     assert_eq!(engine.records()[0].status, Status::Matched);
-    engine.resolve(1, 10, Ok(1)).unwrap();
+    engine.resolve(1, 10, Ok((1, None))).unwrap();
     let later = engine.committed("source", 11, b"c", 12).unwrap();
     assert_eq!(later[0].at, 12);
     assert_eq!(engine.records()[0].effect_at, Some(10));
@@ -225,7 +225,7 @@ fn cutoff_preserves_terminal_records_and_cancels_armed_and_matched_effects() {
     engine.committed("fired", 2, b"x", 2).unwrap();
     engine.committed("rejected", 2, b"x", 2).unwrap();
     engine.committed("matched", 2, b"x", 2).unwrap();
-    engine.resolve(2, 2, Ok(1)).unwrap();
+    engine.resolve(2, 2, Ok((1, None))).unwrap();
     engine.resolve(3, 2, Err("down".into())).unwrap();
     engine.cut_off(2);
     assert_eq!(
@@ -246,5 +246,79 @@ fn cutoff_preserves_terminal_records_and_cancels_armed_and_matched_effects() {
     assert_eq!(engine.records()[4].effect_at, Some(2));
     assert!(engine.due(2).is_empty());
     assert_eq!(engine.boundary(), None);
-    assert!(engine.resolve(5, 2, Ok(2)).is_err());
+    assert!(engine.resolve(5, 2, Ok((2, None))).is_err());
+}
+
+#[test]
+fn actual_partition_handle_is_absent_until_firing_and_survives_codec() {
+    use crate::persistence::{DecodeLimits, Decoder, Encoder, Wire};
+    let mut engine = Triggers::default();
+    engine
+        .arm(
+            "source".into(),
+            b"cut".to_vec(),
+            0,
+            100,
+            TriggerAction::Partition {
+                left: vec!["left".into()],
+                right: vec!["right".into()],
+            },
+        )
+        .unwrap();
+    assert_eq!(engine.records()[0].handle, None);
+    engine.committed("source", 1, b"cut", 2).unwrap();
+    assert_eq!(engine.records()[0].handle, None);
+    for result in [
+        (77, None),
+        (77, Some(String::new())),
+        (0, Some("opaque-cut".into())),
+    ] {
+        let before = engine.records().to_vec();
+        assert!(engine.resolve(1, 2, Ok(result)).is_err());
+        assert_eq!(engine.records(), before);
+    }
+    // Fault IDs and opaque network handles are distinct identities.
+    engine
+        .resolve(1, 2, Ok((77, Some("opaque-cut".into()))))
+        .unwrap();
+    assert_eq!(engine.records()[0].fault_id, Some(77));
+    assert_eq!(engine.records()[0].handle.as_deref(), Some("opaque-cut"));
+    engine.check_persist(2, &|_| true).unwrap();
+    let mut encoder = Encoder { output: Vec::new() };
+    engine.put(&mut encoder).unwrap();
+    let limits = DecodeLimits {
+        encoded_bytes: 1 << 20,
+        allocation_bytes: 1 << 20,
+        collection_items: 1000,
+        total_items: 10000,
+        string_bytes: 1000,
+        blob_bytes: 1000,
+        depth: 128,
+        archive_entries: 1000,
+        archive_path_bytes: 1000,
+        archive_expanded_bytes: 1000,
+    };
+    let mut decoder = Decoder::new(&encoder.output[..], encoder.output.len() as u64, limits);
+    let restored = Triggers::get(&mut decoder).unwrap();
+    assert_eq!(decoder.remaining, 0);
+    restored.check_persist(2, &|_| true).unwrap();
+    assert_eq!(restored.records(), engine.records());
+    for status in [
+        Status::Armed,
+        Status::Matched,
+        Status::Expired,
+        Status::Cancelled,
+        Status::Rejected,
+        Status::CutOff,
+    ] {
+        let mut invalid = restored.clone();
+        invalid.records[0].status = status;
+        assert!(invalid.check_persist(2, &|_| true).is_err());
+    }
+    let mut invalid = restored.clone();
+    invalid.records[0].handle = None;
+    assert!(invalid.check_persist(2, &|_| true).is_err());
+    let mut invalid = restored;
+    invalid.records[0].action = TriggerAction::Stop("left".into());
+    assert!(invalid.check_persist(2, &|_| true).is_err());
 }

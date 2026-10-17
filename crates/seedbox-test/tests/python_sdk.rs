@@ -72,6 +72,31 @@ fn machine_lifecycle_errors_preserve_timing_and_connection() {
     }
 }
 #[test]
+fn rejected_operations_without_effect_keep_the_connection_usable() {
+    for code in [
+        "invalid_state",
+        "invalid_target",
+        "invalid_argument",
+        "target_unavailable",
+    ] {
+        let mut sdk = Sdk::open(replies(&[
+            (
+                1,
+                json!({}),
+                json!({"ok":false,"effect_at_ns":null,"error":{"code":code,"message":"not applied"}}),
+            ),
+            (2, json!({"now_ns":30}), json!({})),
+        ]));
+        let failure = call(&mut sdk, "stop", json!(["server"]));
+        error(&failure, "FaultError");
+        assert_eq!(failure["error"]["code"], code);
+        assert_eq!(failure["error"]["response"]["effect_at_ns"], Value::Null);
+        assert_eq!(ok(&call(&mut sdk, "now_ns", json!([]))), 30);
+        assert_eq!(sdk.close()["requests"].as_array().unwrap().len(), 2);
+    }
+}
+
+#[test]
 fn machine_lifecycle_invalid_targets_do_not_send() {
     let mut sdk = Sdk::open(vec![]);
     for op in LIFECYCLE {
@@ -626,11 +651,7 @@ fn invalid_peer_response_closes_connection() {
         reply(1, json!({}), json!({"replied_at_ns":-1})),
         reply(1, json!([]), json!({})),
         reply(1, json!({}), json!({"ok":"true"})),
-        reply(
-            1,
-            json!({}),
-            json!({"ok":false,"error":{"code":"bad","message":"bad"},"effect_at_ns":null}),
-        ),
+        reply(1, json!({}), json!({"effect_at_ns":null})),
     ];
     assert_eq!(responses.len(), 13);
     for response in responses {
@@ -680,12 +701,17 @@ fn inspection_exposes_protocol_result() {
     assert_eq!(sdk.close()["requests"][0]["op"], "inspect");
 }
 #[test]
-fn arm_and_cancel_literal_wire_and_partition_handle() {
+fn arm_and_cancel_literal_wire_and_fired_partition_handle() {
     let mut sdk = Sdk::open(replies(&[
         (1, json!({"trigger_id":1}), json!({})),
         (2, json!({}), json!({})),
-        (3, json!({"trigger_id":2,"handle":"p1"}), json!({})),
-        (4, json!({}), json!({})),
+        (3, json!({"trigger_id":2}), json!({})),
+        (
+            4,
+            json!({"triggers":[{"id":2,"status":"fired","action":{"action":"partition"},"fault_id":999,"handle":"opaque-cut","effect_at_ns":30}]}),
+            json!({}),
+        ),
+        (5, json!({}), json!({})),
     ]));
     let out = sdk.call(
         "arm_console_stop",
@@ -703,10 +729,18 @@ fn arm_and_cancel_literal_wire_and_partition_handle() {
         json!([machine("server-vm"),{"$bytes":[68,79,78,69]},["server"],["client"]]),
         json!({"match_timeout":2}),
     ));
+    let partition = call(
+        &mut sdk,
+        "trigger_partition",
+        json!([reference("arm_console_partition")]),
+    );
+    typed(ok(&partition), "Partition");
+    assert_eq!(ok(&partition)["fields"]["handle"], "opaque-cut");
+    effect(&ok(&partition)["fields"]["effect"], 10, 20, 30, 40);
     ok(&call(
         &mut sdk,
         "heal",
-        json!([{"$ref":"arm_console_partition","fields":["partition"]}]),
+        json!([reference("trigger_partition")]),
     ));
     let closed = sdk.close();
     assert_eq!(
@@ -721,8 +755,111 @@ fn arm_and_cancel_literal_wire_and_partition_handle() {
         closed["requests"][2]["fault"],
         json!({"action":"partition","left":[{"service":"server"}],"right":[{"service":"client"}]})
     );
-    assert_eq!(closed["requests"][3]["handle"], "p1");
+    assert_eq!(
+        closed["requests"][3],
+        json!({"version":1,"id":4,"op":"inspect"})
+    );
+    assert_eq!(closed["requests"][4]["handle"], "opaque-cut");
 }
+#[test]
+fn trigger_partition_lookup_never_admits_or_heals_unfired_or_stop_triggers() {
+    let mut records = vec![json!([])];
+    for status in [
+        "armed",
+        "matched",
+        "expired",
+        "cancelled",
+        "rejected",
+        "cut_off",
+    ] {
+        records.push(json!([{"id":1,"status":status,"action":{"action":"partition"}}]));
+    }
+    records.push(json!([{"id":1,"status":"fired","action":{"action":"stop"},"fault_id":1}]));
+    for records in records {
+        let mut sdk = Sdk::open(replies(&[
+            (1, json!({"trigger_id":1}), json!({})),
+            (2, json!({"triggers":records}), json!({})),
+            (3, json!({"now_ns":30}), json!({})),
+        ]));
+        ok(&sdk.call(
+            "arm_console_partition",
+            json!(["server",{"$bytes":[88]},["server"],["client"]]),
+            json!({"match_timeout":1}),
+        ));
+        error(
+            &call(
+                &mut sdk,
+                "trigger_partition",
+                json!([reference("arm_console_partition")]),
+            ),
+            "ValueError",
+        );
+        assert_eq!(ok(&call(&mut sdk, "now_ns", json!([]))), 30);
+        let closed = sdk.close();
+        assert_eq!(closed["requests"].as_array().unwrap().len(), 3);
+        assert_eq!(closed["requests"][1]["op"], "inspect");
+    }
+    let mut sdk = Sdk::open(vec![]);
+    error(
+        &call(&mut sdk, "trigger_partition", json!([1])),
+        "TypeError",
+    );
+    assert_eq!(sdk.close()["requests"], json!([]));
+}
+
+#[test]
+fn trigger_partition_rejects_malformed_handles_and_effects_without_reconstructing_ids() {
+    let base = json!({"id":1,"status":"fired","action":{"action":"partition"},"fault_id":77,"handle":"opaque","effect_at_ns":30});
+    let mut cases = vec![
+        json!({"triggers":{}}),
+        json!({"triggers":[false]}),
+        json!({"triggers":[base.clone(),base.clone()]}),
+    ];
+    for patch in [
+        json!({"handle":null}),
+        json!({"handle":""}),
+        json!({"handle":77}),
+        json!({"effect_at_ns":null}),
+        json!({"effect_at_ns":true}),
+        json!({"effect_at_ns":19}),
+        json!({"effect_at_ns":31}),
+        json!({"action":null}),
+        json!({"status":false}),
+    ] {
+        let mut record = base.clone();
+        for (key, value) in patch.as_object().unwrap() {
+            record[key] = value.clone();
+        }
+        cases.push(json!({"triggers":[record]}));
+    }
+    let mut missing_handle = base;
+    missing_handle.as_object_mut().unwrap().remove("handle");
+    cases.push(json!({"triggers":[missing_handle]}));
+    for inspected in cases {
+        let mut sdk = Sdk::open(replies(&[
+            (1, json!({"trigger_id":1}), json!({})),
+            (2, inspected, json!({})),
+        ]));
+        ok(&sdk.call(
+            "arm_console_partition",
+            json!(["server",{"$bytes":[88]},["server"],["client"]]),
+            json!({"match_timeout":1}),
+        ));
+        error(
+            &call(
+                &mut sdk,
+                "trigger_partition",
+                json!([reference("arm_console_partition")]),
+            ),
+            "ProtocolError",
+        );
+        let closed = sdk.close();
+        assert_eq!(closed["closed"], true);
+        assert_eq!(closed["requests"].as_array().unwrap().len(), 2);
+        assert_eq!(closed["requests"][1]["op"], "inspect");
+    }
+}
+
 #[test]
 fn invalid_markers_timeouts_and_reply_identity() {
     for (marker, timeout) in [

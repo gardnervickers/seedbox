@@ -1038,7 +1038,9 @@ fn triggered_partitions_arm_without_a_target_and_cut_after_firing() {
         vec![
             spec(Some(1))
                 .emit(MS, arm(1, &["fixture-3"]))
-                .emit(MS, arm(2, &["fixture-2"])),
+                .emit(MS, arm(2, &["fixture-2"]))
+                .emit(2 * MS, control(3, serde_json::json!({"op":"inspect"})))
+                .emit(7 * MS, control(4, serde_json::json!({"op":"inspect"}))),
             spec(Some(2))
                 .send(2 * MS, frame(mac(3), 1))
                 .emit(
@@ -1086,6 +1088,24 @@ fn triggered_partitions_arm_without_a_target_and_cut_after_firing() {
             left: vec![MachineId(1)],
             right: vec![MachineId(2)]
         }
+    );
+    let armed = &replies[2]["result"]["triggers"][0];
+    assert_eq!(armed["status"], "armed");
+    assert!(armed.get("handle").is_none());
+    assert!(replies[2]["result"]["active_handles"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let fired = &replies[3]["result"]["triggers"][0];
+    assert_eq!(fired["status"], "fired");
+    assert_eq!(fired["fault_id"], admitted.fault.get());
+    assert_eq!(
+        fired["handle"],
+        admitted.handle.as_ref().unwrap().to_string()
+    );
+    assert_eq!(
+        replies[3]["result"]["active_handles"],
+        serde_json::json!([fired["handle"]])
     );
 }
 

@@ -617,6 +617,71 @@ fn test_signed_copies_are_executed_after_build_and_signing() {
     assert!(!std::path::Path::new(signed).exists());
 }
 #[test]
+fn native_tests_own_short_scratch_through_privileged_and_direct_execution() {
+    struct ScratchSpy {
+        scratch: Vec<PathBuf>,
+        privileged: bool,
+    }
+    impl Commands for ScratchSpy {
+        fn execute(&mut self, job: &Job) -> std::io::Result<Outcome> {
+            if job.capture {
+                assert_eq!(job.environment["TMPDIR"], "/caller/long/build/scratch");
+                return Ok(Outcome {
+                    code: 0,
+                    stdout: [
+                        artifact(std::path::Path::new("/fixture/first"), "first", true),
+                        artifact(std::path::Path::new("/fixture/second"), "second", true),
+                    ]
+                    .join("\n"),
+                });
+            }
+            let scratch = PathBuf::from(&job.environment["TMPDIR"]);
+            assert!(scratch.is_dir());
+            assert_eq!(scratch.parent(), Some(std::path::Path::new("/tmp")));
+            assert!(scratch.as_os_str().len() < 32);
+            assert!(!self.scratch.contains(&scratch));
+            if self.privileged {
+                assert_eq!(&job.args[..3], &["sudo", "-n", "env"]);
+                assert!(job.args.contains(&format!("TMPDIR={}", scratch.display())));
+            } else {
+                assert!(job.args[0].starts_with("/fixture/"));
+            }
+            fs::write(scratch.join("owned-file"), b"fixture")?;
+            self.scratch.push(scratch);
+            Ok(Outcome::default())
+        }
+    }
+    for prefix in [
+        None,
+        Some(Vec::new()),
+        Some(strings(&["sudo", "-n", "env"])),
+    ] {
+        let t = fixture();
+        let mut c = Checks::new(
+            ScratchSpy {
+                scratch: Vec::new(),
+                privileged: prefix.as_ref().is_some_and(|p| !p.is_empty()),
+            },
+            t.0.clone(),
+            env(&[("TMPDIR", "/caller/long/build/scratch")]),
+        );
+        cargo_tests(
+            &mut c,
+            "seedbox",
+            strings(&["cargo", "test", "-p", "seedbox"]),
+            &strings(&["application-tests"]),
+            prefix.as_deref(),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(c.commands.scratch.len(), 2);
+        assert!(c.commands.scratch.iter().all(|p| !p.exists()));
+        assert_eq!(c.environment["TMPDIR"], "/caller/long/build/scratch");
+    }
+}
+
+#[test]
 fn test_machine_suites_default_to_two_test_threads_in_their_child_only() {
     let e = env(&[("PATH", "/bin")]);
     let runs = machine_suite_runs(
@@ -803,10 +868,18 @@ fn test_privileged_execution_forwards_only_explicit_test_inputs() {
             strings(&["/test"]),
             &env(&[
                 ("SEEDBOX_TEST_KERNEL", "/kernel"),
+                ("TMPDIR", "/tmp/owned"),
                 ("UNRELATED_SECRET", "fixture")
             ])
         ),
-        strings(&["sudo", "-n", "env", "SEEDBOX_TEST_KERNEL=/kernel", "/test"])
+        strings(&[
+            "sudo",
+            "-n",
+            "env",
+            "SEEDBOX_TEST_KERNEL=/kernel",
+            "TMPDIR=/tmp/owned",
+            "/test"
+        ])
     );
 }
 #[test]
@@ -1607,6 +1680,10 @@ fn oci_artifacts_follow_actual_package_feature_and_socket_permissions() {
             if !accessible {
                 expected = strings(&["sudo", "-n", "env", "PATH=/fixture/shell"]);
                 expected.push(format!("DOCKER_HOST=unix://{}", socket.display()));
+                expected.push(format!(
+                    "TMPDIR={}",
+                    c.commands.jobs[1].environment["TMPDIR"]
+                ));
             }
             expected.extend([binary.to_string_lossy().into(), "--test-threads=1".into()]);
             assert_eq!(c.commands.jobs[1].args, expected);

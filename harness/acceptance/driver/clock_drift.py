@@ -1,4 +1,4 @@
-"""Per-machine clock drift: monotonic and realtime run at a rate error against the raw clock."""
+"""Per-machine drift: all guest clocks run at a rate error against the oracle."""
 import json
 import socket
 import sys
@@ -6,8 +6,9 @@ import time
 
 WINDOW_S = 2.0
 SETTLE_S = 0.1
-# Rates are measured from two samples taken right after the guest kernel has
-# folded elapsed time in at the current rate; allow 1% of the rate plus 20 ppm.
+# Measure a whole-machine time-base change against the unmodified oracle's
+# clock, not the target's raw clock (which drifts with the rest of the machine).
+# Allow 1% of the rate plus 20 ppm, as for the original rate assertions.
 FLOOR_PPB = 20_000
 # Realtime and monotonic drift together, so their difference holds to 1 ms.
 SLACK_NS = 1_000_000
@@ -51,11 +52,18 @@ def scenario():
     readers = {name: channel.makefile("rb") for name, channel in channels.items()}
 
     def sample(name):
+        before = time.monotonic_ns()
         channels[name].sendall(b"sample\n")
-        return json.loads(readers[name].readline())
+        result = json.loads(readers[name].readline())
+        after = time.monotonic_ns()
+        # Symmetric fixed-latency links put the target sample near the middle
+        # of this exchange. Constant transport/clock-read costs cancel between
+        # samples; this clock is simulated oracle time, never host wall time.
+        result["oracle_ns"] = (before + after) // 2
+        return result
 
     def rates():
-        """Each machine's monotonic rate error against its raw clock over one window, in ppb."""
+        """Each machine's clock rate error against the oracle over one window, in ppb."""
         time.sleep(SETTLE_S)
         first = {name: sample(name) for name in names}
         time.sleep(WINDOW_S)
@@ -65,9 +73,15 @@ def scenario():
             raw = last[name]["raw_ns"] - first[name]["raw_ns"]
             monotonic = last[name]["monotonic_ns"] - first[name]["monotonic_ns"]
             wall = (last[name]["realtime_ns"] - last[name]["monotonic_ns"]) - (first[name]["realtime_ns"] - first[name]["monotonic_ns"])
-            assert monotonic > 0 and raw > 0, f"{name} clocks did not advance"
+            reference = last[name]["oracle_ns"] - first[name]["oracle_ns"]
+            assert monotonic > 0 and raw > 0 and reference > 0, f"{name} clocks did not advance"
             assert abs(wall) <= SLACK_NS, f"{name} realtime left monotonic by {wall} ns"
-            result[name] = (monotonic - raw) * 1_000_000_000 // raw
+            # The Driver scales the entire machine, including MONOTONIC_RAW.
+            # Both target clocks must preserve their common rate as well as
+            # independently showing the requested drift against the oracle.
+            near((monotonic - raw) * 1_000_000_000 // raw, 0, f"{name} monotonic vs raw")
+            result[name] = (monotonic - reference) * 1_000_000_000 // reference
+            near((raw - reference) * 1_000_000_000 // reference, result[name], f"{name} raw vs oracle")
         return result
 
     def near(actual, expected, what):

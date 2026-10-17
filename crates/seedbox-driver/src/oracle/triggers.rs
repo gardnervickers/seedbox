@@ -49,6 +49,11 @@ pub(crate) struct Record {
     pub(crate) matched_at: Option<u64>,
     pub(crate) effect_at: Option<u64>,
     pub(crate) fault_id: Option<u32>,
+    // TODO: Re-evaluate: guest inspection needs the actual opaque partition
+    // handle after admission; fault IDs use a separate allocator. Retaining it
+    // here avoids preallocation at arm time or client-side handle reconstruction.
+    /// Actual partition handle allocated when this trigger fires; absent for stops.
+    pub(crate) handle: Option<String>,
     pub(crate) cancelled_at: Option<u64>,
     pub(crate) cut_off_at: Option<u64>,
     pub(crate) status: Status,
@@ -123,6 +128,7 @@ impl Triggers {
             matched_at: None,
             effect_at: None,
             fault_id: None,
+            handle: None,
             cancelled_at: None,
             cut_off_at: None,
             status: Status::Armed,
@@ -239,16 +245,24 @@ impl Triggers {
         &mut self,
         id: u32,
         at: u64,
-        result: Result<u32, String>,
+        result: Result<(u32, Option<String>), String>,
     ) -> Result<(), String> {
         let record = self.record_mut(id)?;
         if record.status != Status::Matched || record.effect_at != Some(at) {
             return Err("trigger effect admission at wrong state or time".into());
         }
         match result {
-            Ok(fault_id) => {
+            Ok((fault_id, handle)) => {
+                let partition = matches!(record.action, TriggerAction::Partition { .. });
+                if fault_id == 0
+                    || partition != handle.is_some()
+                    || handle.as_ref().is_some_and(|value| value.is_empty())
+                {
+                    return Err("trigger admission lacks its actual partition handle".into());
+                }
                 record.status = Status::Fired;
                 record.fault_id = Some(fault_id);
+                record.handle = handle;
             }
             Err(reason) => {
                 record.status = Status::Rejected;
