@@ -2355,7 +2355,7 @@ mod fork_tests {
             m.abi = abi;
             m.park().unwrap();
             let mut witness = m.witness.clone();
-            witness.update([b'R']);
+            witness.update(*b"R");
             witness.update(m.time.to_le_bytes());
             witness.update(m.time.to_le_bytes());
             // Pre-K2 exit_witness also covers pending I/O: none after park().

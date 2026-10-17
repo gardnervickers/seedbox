@@ -57,7 +57,9 @@ mod tests {
 
     fn entries(bytes: &[u8]) -> Vec<[u64; 3]> {
         bytes
-            .chunks_exact(ENTRY_BYTES)
+            .as_chunks::<ENTRY_BYTES>()
+            .0
+            .iter()
             .map(|e| {
                 std::array::from_fn(|i| u64::from_le_bytes(e[i * 8..][..8].try_into().unwrap()))
             })

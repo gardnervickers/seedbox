@@ -80,12 +80,11 @@ fn runtime_checkpoint_getrandom_and_urandom_repeat_and_diverge() {
             }
             branches.insert(checkpoint.branch_seed, values);
         }
-        for machine in 0..2 {
-            for source in 0..2 {
-                assert_ne!(
-                    branches[&42][machine][source],
-                    branches[&43][machine][source]
-                );
+        // Explicit two-element slices retain the exact 2x2 checks and still
+        // fail on a missing machine/source instead of accepting a short zip.
+        for (first, second) in branches[&42][..2].iter().zip(&branches[&43][..2]) {
+            for (first, second) in first[..2].iter().zip(&second[..2]) {
+                assert_ne!(first, second);
             }
         }
         attempts.push(branches);
