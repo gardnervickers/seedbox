@@ -1272,9 +1272,14 @@ fn mutation_summary(m: &plan::Mutation) -> String {
         other => (other.name().to_owned(), None),
     };
     let on = machine.map(|m| format!(" on {m}")).unwrap_or_default();
+    let size = match &m.kind {
+        plan::MutationKind::SlowDisk { .. } => format!(" by {}ms", m.latency_ns / 1_000_000),
+        plan::MutationKind::Preempt { ppm } => format!(" at {ppm}ppm"),
+        _ => String::new(),
+    };
     format!(
-        "{} {} for {}ms, {}ms after {what} #{}{on}",
-        format!("{:?}", m.kind).to_lowercase(),
+        "{} {}{size} for {}ms, {}ms after {what} #{}{on}",
+        m.kind.word(),
         m.target,
         m.duration_ns / 1_000_000,
         m.delay_ns / 1_000_000,
@@ -1299,6 +1304,13 @@ fn mutations(
             FaultKind::Crash { .. } => plan::MutationKind::Crash,
             FaultKind::Partition { .. } => plan::MutationKind::Isolate,
             FaultKind::Pause { .. } => plan::MutationKind::Pause,
+            FaultKind::DiskLatency {
+                latency, targets, ..
+            } => plan::MutationKind::SlowDisk {
+                latency_ns: (latency.min.0, latency.max.0),
+                targets: targets.clone(),
+            },
+            FaultKind::Preempt { ppm, .. } => plan::MutationKind::Preempt { ppm: *ppm },
             _ => continue,
         };
         if !kinds.contains(&kind) {

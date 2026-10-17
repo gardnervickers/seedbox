@@ -391,10 +391,13 @@ bucket 0 carries its first time, so the planner can pick an anchor before a
 state first appeared. Feedback also lists a member's moments: first event
 times, first state times, and crashes and reboots from its report. A branch
 sometimes adds one event-relative mutation after a parent moment later than
-its anchor: a `crash`, `isolate` or `pause` of a target, from the kinds in the
-fault profile, as a typed trigger on the `nth` occurrence of that moment's
+its anchor: a `crash`, `isolate` or `pause` of a target, a slow disk (a
+latency drawn from a profile `disk_latency` entry's range, on its targets) or
+scheduler perturbation (a profile `preempt` entry's rate), from the kinds in
+the fault profile, as a typed trigger on the `nth` occurrence of that moment's
 event or state plus a delay; its teardown (`<key>-end`) is a `fired` trigger,
-so recovery timing stays causal. Each branch draws a strategy: novelty
+so recovery timing stays causal. Mutation effects due during an oracle quiet
+period are skipped, as generated faults are; teardowns still run. Each branch draws a strategy: novelty
 weighting (half), uniform (a quarter) or rarity, which weights members by how
 few others share their features. A failure feature already seen in three or
 more members divides a source's weight by four, so budget is not spent

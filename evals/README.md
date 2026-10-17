@@ -103,5 +103,18 @@ acknowledgement; branching does not aim at that gap, and the sweep's extra
 fresh roots do better. A branched finding exports as a cold rerun when that
 matches: 60 MB for compact against 2.2 GB with its start checkpoint.
 
+Slowdisk with `slow-rare.yaml` (mostly crashes, occasional short latency
+windows), 24 members, batch 4, corpus 4, seeds 200–600; campaigns can mutate
+crashes and slow disks:
+
+| Strategy | Found | Failing members | Members to first failure |
+|---|---|---|---|
+| campaign | 3 of 5 | 11 of 120 | 10, >24, 5, 7, >24 |
+| sweep | 1 of 5 | 1 of 120 | >24, >24, 17, >24, >24 |
+
+Of the 11 failing members, five were crashes placed just after a parent's
+`acknowledged before sync` event and one a slow disk placed after a reboot;
+the rest inherited their parent's prefix with a reseed.
+
 Discovery rates depend on the engine and architecture; remeasure after
 changes rather than treating them as fixed.

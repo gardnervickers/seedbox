@@ -296,6 +296,7 @@ fn branch_programs_keep_the_prefix_and_resample_the_suffix() {
         target: "db".into(),
         duration_ns: 100_000_000,
         others: vec!["oracle".into()],
+        latency_ns: 0,
     });
     let child = branch_program(&parent, &mutated, 6, Vec::new()).unwrap();
     let keys: Vec<&str> = child.iter().map(|i| i.key.as_str()).collect();
@@ -337,4 +338,60 @@ fn later_fresh_roots_sample_fault_kinds_and_generation_zero_stays_a_sweep() {
         }
     }
     assert!(sampled > 5 && sampled < 36, "{sampled}");
+}
+
+#[test]
+fn slow_disk_and_preempt_mutations_respect_targets_and_heal() {
+    let mut config = config();
+    config.mutations = Mutations {
+        kinds: vec![
+            MutationKind::SlowDisk {
+                latency_ns: (10_000_000, 20_000_000),
+                targets: vec!["disk".into()],
+            },
+            MutationKind::Preempt { ppm: 5_000 },
+        ],
+        targets: vec!["db".into(), "disk".into()],
+        machines: vec!["db".into(), "disk".into(), "oracle".into()],
+    };
+    let mut planner = Planner::new(config).unwrap();
+    let mut mutations = Vec::new();
+    while !planner.done() {
+        let batch = planner.next_batch();
+        for plan in &batch {
+            if let PlanKind::Branch(b) = &plan.kind {
+                mutations.extend(b.mutation.clone().map(|m| (plan.ordinal, b.clone(), m)));
+            }
+            planner.report(feedback(plan)).unwrap();
+        }
+    }
+    let (mut slow, mut preempt) = (0, 0);
+    for (ordinal, branch, m) in &mutations {
+        let parent = root_program(Vec::new(), &[1_000, 2_000]).unwrap();
+        let child = branch_program(&parent, branch, *ordinal, Vec::new()).unwrap();
+        let action = |key: String| {
+            let input = child.iter().find(|i| i.key == key).unwrap();
+            serde_json::to_value(&input.action).unwrap()
+        };
+        let start = action(format!("mutate-{ordinal}"));
+        let end = action(format!("mutate-{ordinal}-end"));
+        assert_eq!(end["then"]["action"], "heal");
+        assert_eq!(end["then"]["handle"], format!("mutate-{ordinal}"));
+        match &m.kind {
+            MutationKind::SlowDisk { .. } => {
+                slow += 1;
+                assert_eq!(m.target, "disk");
+                assert!((10_000_000..=20_000_000).contains(&m.latency_ns));
+                assert_eq!(start["then"]["action"], "disk_latency");
+                assert_eq!(start["then"]["latency_ns"], m.latency_ns);
+            }
+            MutationKind::Preempt { ppm } => {
+                preempt += 1;
+                assert_eq!(start["then"]["action"], "preempt");
+                assert_eq!(start["then"]["ppm"], *ppm);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(slow > 0 && preempt > 0, "{slow} {preempt}");
 }

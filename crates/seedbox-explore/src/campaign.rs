@@ -55,7 +55,7 @@ pub struct Mutations {
     pub machines: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MutationKind {
     /// Crash the target, rebooting it after the duration.
     Crash,
@@ -63,6 +63,28 @@ pub enum MutationKind {
     Isolate,
     /// Pause the target's whole machine for the duration.
     Pause,
+    /// Slow the target's disk by a latency drawn from this range, in
+    /// nanoseconds, for the duration; only `targets` when it names any.
+    SlowDisk {
+        latency_ns: (u64, u64),
+        targets: Vec<String>,
+    },
+    /// Perturb the target's thread scheduling at this rate, per million
+    /// syscalls and progress calls, for the duration.
+    Preempt { ppm: u32 },
+}
+
+impl MutationKind {
+    /// A short word for summaries.
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::Crash => "crash",
+            Self::Isolate => "isolate",
+            Self::Pause => "pause",
+            Self::SlowDisk { .. } => "slow disk of",
+            Self::Preempt { .. } => "preempt",
+        }
+    }
 }
 
 /// A fault placed `delay_ns` after the `nth` occurrence of `when`, which the
@@ -77,6 +99,8 @@ pub struct Mutation {
     pub duration_ns: u64,
     /// Every other machine, which an isolated target is cut off from.
     pub others: Vec<String>,
+    /// The drawn size of a slow disk's latency, in nanoseconds; 0 otherwise.
+    pub latency_ns: u64,
 }
 
 const DELAYS_NS: [u64; 6] = [0, 1_000_000, 3_000_000, 10_000_000, 30_000_000, 100_000_000];
@@ -525,22 +549,36 @@ impl Planner {
             && self.rng.chance(600)
         {
             let (when, _) = later[self.rng.below(later.len() as u64) as usize].clone();
+            let kind =
+                mutations.kinds[self.rng.below(mutations.kinds.len() as u64) as usize].clone();
+            // A slow disk only targets machines its profile entry names.
+            let targets = match &kind {
+                MutationKind::SlowDisk { targets, .. } if !targets.is_empty() => targets,
+                _ => &mutations.targets,
+            };
             let near = when
                 .machines()
                 .into_iter()
-                .find(|m| mutations.targets.iter().any(|t| t == m))
+                .find(|m| targets.iter().any(|t| t == m))
                 .map(str::to_owned);
             let target = match near {
                 Some(machine) if self.rng.chance(500) => machine,
-                _ => mutations.targets[self.rng.below(mutations.targets.len() as u64) as usize]
-                    .clone(),
+                _ => targets[self.rng.below(targets.len() as u64) as usize].clone(),
+            };
+            let latency_ns = match &kind {
+                MutationKind::SlowDisk {
+                    latency_ns: (min, max),
+                    ..
+                } => min + self.rng.below(max.saturating_sub(*min) + 1),
+                _ => 0,
             };
             Some(Mutation {
                 when,
                 nth: if self.rng.chance(250) { 2 } else { 1 },
                 delay_ns: DELAYS_NS[self.rng.below(DELAYS_NS.len() as u64) as usize],
-                kind: mutations.kinds[self.rng.below(mutations.kinds.len() as u64) as usize],
+                kind,
                 duration_ns: DURATIONS_NS[self.rng.below(DURATIONS_NS.len() as u64) as usize],
+                latency_ns,
                 others: mutations
                     .machines
                     .iter()
@@ -663,7 +701,10 @@ fn mutation_inputs(
         "{}{ordinal}",
         seedbox_engine_protocol::input_program::MUTATION_PREFIX
     );
-    let (fault, undo) = match m.kind {
+    let heal = Action::Heal {
+        handle: key.clone(),
+    };
+    let (fault, undo) = match &m.kind {
         MutationKind::Crash => (
             Action::Crash {
                 machine: m.target.clone(),
@@ -686,9 +727,25 @@ fn mutation_inputs(
                 left: vec![m.target.clone()],
                 right: m.others.clone(),
             },
-            Action::Heal {
+            heal,
+        ),
+        MutationKind::SlowDisk { .. } => (
+            Action::DiskLatency {
                 handle: key.clone(),
+                machine: m.target.clone(),
+                op: seedbox_control::DiskOp::Any,
+                latency_ns: m.latency_ns,
+                jitter_ns: 0,
             },
+            heal,
+        ),
+        MutationKind::Preempt { ppm } => (
+            Action::Preempt {
+                handle: key.clone(),
+                machine: m.target.clone(),
+                ppm: *ppm,
+            },
+            heal,
         ),
     };
     let rule = |key: String, spec: TriggerSpec| TimedInput {
