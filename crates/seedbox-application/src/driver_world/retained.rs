@@ -14,13 +14,19 @@ use std::{
     path::Path,
 };
 pub(super) const MANIFEST: &str = "driver-world/manifest";
-pub(super) fn validate_contract(profile: &crate::execution::ExecutionProfile) -> Result<()> {
+pub(super) fn validate_contract(
+    profile: &crate::execution::ExecutionProfile,
+) -> Result<super::DriverBackend> {
     if profile.semantic_parameters.launch() != crate::engine::ExecutableKind::DriverWorld {
         return Err(bad(
             "Driver execution requires its recorded driver-world-v1 contract",
         ));
     }
-    profile.driver_backend().map_err(bad)?;
+    let backend = match profile.driver_backend().map_err(bad)? {
+        Some(seedbox_spec::project::CpuBackend::Pv) => super::DriverBackend::Pv,
+        Some(seedbox_spec::project::CpuBackend::Tcg) => super::DriverBackend::Tcg,
+        None => return Err(bad("Driver execution requires a recorded CPU backend")),
+    };
     for (field, enabled) in [
         ("page_timer", profile.semantic_parameters.page_timer),
         ("deferred_tx", profile.semantic_parameters.deferred_tx),
@@ -29,8 +35,33 @@ pub(super) fn validate_contract(profile: &crate::execution::ExecutionProfile) ->
             return Err(Error::Setup(format!("runtime.execution.semantic_parameters.{field}: not applicable to driver-world-v1; set {field} to false for a new Driver simulation, or replay the original retained legacy simulation")));
         }
     }
+    Ok(backend)
+}
+
+/// The validated profile is the CPU authority, including generic launch paths
+/// with no independently supplied executor. Check actual retained factory type
+/// before retaining, materializing runtime bytes, or adapting a launch request.
+fn validate_inventory(
+    profile: &crate::execution::ExecutionProfile,
+    inventory: &wire::Inventory,
+) -> Result<()> {
+    let backend = validate_contract(profile)?;
+    let actual = match inventory {
+        wire::Inventory::Pv { .. } => super::DriverBackend::Pv,
+        wire::Inventory::Tcg { .. } => super::DriverBackend::Tcg,
+    };
+    if backend != actual {
+        return Err(bad(
+            "Driver retained factory inventory backend differs from validated execution profile",
+        ));
+    }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "retained_authority_tests.rs"]
+mod authority_tests;
+
 const OBJECT: &str = "driver-world/object/";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,7 +84,7 @@ pub fn retain_prepared(
     prepared: &Prepared,
     store: &ContentStore,
 ) -> Result<()> {
-    validate_contract(&inputs.profile)?;
+    validate_inventory(&inputs.profile, &prepared.inventory)?;
     let mut prepared = prepared.clone();
     let mut objects = BTreeSet::new();
     visit(&mut prepared, |artifact| {
@@ -150,6 +181,7 @@ pub fn runtime_digest(inputs: &PreparedInputs, store: &ContentStore) -> Result<C
     super::checkpoint::validate_metadata(&bytes)?;
     let prepared: Prepared = serde_json::from_slice(&bytes)?;
     prepared.inventory.validate().map_err(bad)?;
+    validate_inventory(&inputs.profile, &prepared.inventory)?;
     let runtime = match &prepared.inventory {
         wire::Inventory::Pv { runtime, .. } | wire::Inventory::Tcg { runtime, .. } => runtime,
     };
@@ -165,7 +197,6 @@ pub fn runtime_digest(inputs: &PreparedInputs, store: &ContentStore) -> Result<C
 pub(crate) fn request(
     request: &ExecutionRequest<'_>,
     host_control: &Path,
-    backend: Option<super::DriverBackend>,
     runtime: Option<&super::binding::Binding>,
 ) -> Result<wire::Request> {
     validate_contract(&request.prepared.profile)?;
@@ -180,13 +211,10 @@ pub(crate) fn request(
         .ok_or_else(|| bad("Driver preparation manifest was not materialized"))?;
     let bytes = bounded(path)?;
     let mut prepared: Prepared = serde_json::from_slice(&bytes)?;
-    let (actual_backend, archive) = match &prepared.inventory {
-        wire::Inventory::Pv { runtime, .. } => (super::DriverBackend::Pv, runtime),
-        wire::Inventory::Tcg { runtime, .. } => (super::DriverBackend::Tcg, runtime),
+    validate_inventory(&request.prepared.profile, &prepared.inventory)?;
+    let archive = match &prepared.inventory {
+        wire::Inventory::Pv { runtime, .. } | wire::Inventory::Tcg { runtime, .. } => runtime,
     };
-    if backend.is_some_and(|backend| backend != actual_backend) {
-        return Err(bad("Driver executor backend differs from retained factory inventory; select that inventory's backend"));
-    }
     if let Some(runtime) = runtime {
         runtime.wire.validate_archive(archive).map_err(bad)?;
     }

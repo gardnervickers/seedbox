@@ -273,18 +273,16 @@ impl WorkerLaunch {
     }
 
     fn prepare_driver(request: &ExecutionRequest<'_>) -> Result<Self> {
-        Self::prepare_driver_impl(request, None, None)
+        Self::prepare_driver_impl(request, None)
     }
     pub(crate) fn prepare_driver_with_runtime(
         request: &ExecutionRequest<'_>,
-        backend: crate::driver_world::DriverBackend,
         runtime: Option<&crate::driver_world::binding::Binding>,
     ) -> Result<Self> {
-        Self::prepare_driver_impl(request, Some(backend), runtime)
+        Self::prepare_driver_impl(request, runtime)
     }
     fn prepare_driver_impl(
         request: &ExecutionRequest<'_>,
-        backend: Option<crate::driver_world::DriverBackend>,
         runtime: Option<&crate::driver_world::binding::Binding>,
     ) -> Result<Self> {
         let engine = request
@@ -295,8 +293,7 @@ impl WorkerLaunch {
             fs::set_permissions(engine, fs::Permissions::from_mode(0o500))?;
         }
         let endpoint = Endpoint::new(request.output)?;
-        let worker =
-            crate::driver_world::retained::request(request, &endpoint.socket(), backend, runtime)?;
+        let worker = crate::driver_world::retained::request(request, &endpoint.socket(), runtime)?;
         let path = request.output.join(WORKER_REQUEST_FILE);
         fs::write(&path, serde_json::to_vec_pretty(&worker)?)?;
         let report = request.output.join("vmm.json");

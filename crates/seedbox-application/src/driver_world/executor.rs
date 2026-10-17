@@ -50,7 +50,12 @@ impl DriverExecutor {
     /// Use an explicit retained profile and server-owned worker count. Factory
     /// inventory must name the same backend; no fallback or profile rewriting.
     pub fn new(profile: ExecutionProfile, backend: DriverBackend, workers: usize) -> Result<Self> {
-        super::retained::validate_contract(&profile)?;
+        let recorded = super::retained::validate_contract(&profile)?;
+        if recorded != backend {
+            return Err(Error::Integrity(
+                "Driver executor backend argument differs from validated execution profile".into(),
+            ));
+        }
         if !(1..=64).contains(&workers) {
             return Err(Error::Setup("Driver machine workers: use 1..64".into()));
         }
@@ -233,11 +238,8 @@ impl ExecutionBackend for DriverExecutor {
             return Ok(incomplete(StopReason::Cancelled));
         }
         self.admit_execution(request.control.is_some())?;
-        let mut launch = WorkerLaunch::prepare_driver_with_runtime(
-            &request,
-            self.backend,
-            self.runtime.as_ref(),
-        )?;
+        let mut launch =
+            WorkerLaunch::prepare_driver_with_runtime(&request, self.runtime.as_ref())?;
         let overrides: Vec<_> = launch
             .command
             .get_envs()

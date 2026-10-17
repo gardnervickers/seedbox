@@ -1064,7 +1064,6 @@ mod tests {
             let adapted = crate::driver_world::retained::request(
                 &supplied_request,
                 &output.join("audit-control"),
-                Some(DriverBackend::Pv),
                 None,
             )
             .unwrap();

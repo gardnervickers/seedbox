@@ -32,6 +32,40 @@ fn backend_authority_rejects_both_inconsistent_profiles_before_worker_launch() {
 }
 
 #[test]
+fn backend_authority_rejects_both_conflicting_constructor_arguments() {
+    for (backend, opposite, tag) in [
+        (DriverBackend::Pv, DriverBackend::Tcg, "driver-pv"),
+        (DriverBackend::Tcg, DriverBackend::Pv, "driver-tcg"),
+    ] {
+        let mut matching = profile();
+        matching.backend = crate::execution::Backend::Other(tag.into());
+        matching.semantic_parameters.engine = Some(DriverExecutor::descriptor(backend, "x86_64"));
+        DriverExecutor::new(matching.clone(), backend, 1).unwrap();
+        let mut legacy = matching.clone();
+        legacy.semantic_parameters.engine.as_mut().unwrap().kind =
+            crate::engine::ExecutableKind::InternalWorker;
+        let error = DriverExecutor::new(legacy, opposite, 1)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("recorded driver-world-v1 contract"),
+            "{error}"
+        );
+        // Both fields inside the profile agree. Change the independent argument,
+        // not a profile label: it must not choose a different actual executor.
+        let error = DriverExecutor::new(matching, opposite, 1)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("backend argument differs from validated execution profile"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn missing_witness_is_an_error_without_erasing_the_actual_oracle_verdict_or_observations() {
     let mut report = incomplete(StopReason::Completed);
     report.simulated_time_ns = Some(73);
