@@ -17,9 +17,25 @@
 //! transactions per client-second: a server that stalls (as in
 //! `harness/jepsen/postgres/stall/`) passes the check vacuously, so such a run
 //! is inconclusive instead.
+//!
+//! Durability and faults: every acknowledged append must be in the final read
+//! (`lost`), and no committed transaction may miss a value whose append was
+//! acknowledged before it began (`stale`, [`crate::checker::realtime`]); a
+//! single server is strictly serializable at SERIALIZABLE and gives strong
+//! snapshot isolation at REPEATABLE READ. `--crash-every` power-fails the
+//! server repeatedly during the workload (page cache and unflushed sectors
+//! are lost); generated fault profiles act from outside. After the workload
+//! the server must answer again within `--recover` seconds, or the run fails.
+//! With `--standby`, the server streams to a standby; at `--failover-at` the
+//! primary is power-failed and left down (fenced), the standby is promoted,
+//! and every client moves to it: every acknowledged commit must survive the
+//! promotion and no read on the promoted standby may be stale. A value that
+//! is not an integer (a corrupted row) reads as -1, which no one appended,
+//! so the checker reports it as garbage.
 use super::pg_proto::{Pg, PgError};
 use crate::checker::elle::{self, Atom, Mop, TxnOp};
 use crate::kit::{self, emit, evidence, now_us, verdict, Rng};
+use crate::nemesis;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
@@ -65,6 +81,36 @@ pub struct Args {
     /// stalled ones 0.035-0.11.
     #[arg(long, default_value_t = MIN_COMMIT_RATE, value_parser = non_negative)]
     pub min_commit_rate: f64,
+    /// Power-fail the server about this often during the workload (half to
+    /// one and a half times it, from the guest's seeded entropy), in seconds;
+    /// 0 never does.
+    #[arg(long, default_value_t = 0.0, value_parser = non_negative)]
+    pub crash_every: f64,
+    /// Seconds a power-failed server stays down before it boots again.
+    #[arg(long, default_value_t = 2.0, value_parser = non_negative)]
+    pub crash_down: f64,
+    /// Seconds after the workload within which the server (the promoted
+    /// standby after a failover) must answer again; one that never does
+    /// fails the run.
+    #[arg(long, default_value_t = 60.0, value_parser = non_negative)]
+    pub recover: f64,
+    /// A streaming standby of --host, to fail over to.
+    #[arg(long)]
+    pub standby: Option<String>,
+    /// Seconds into the workload at which to power-fail the primary for good
+    /// and promote the standby; 0 never fails over.
+    #[arg(long, default_value_t = 0.0, value_parser = non_negative)]
+    pub failover_at: f64,
+    /// With --standby: delay the primary's traffic to the standby by this
+    /// many milliseconds, so that streaming lags the acknowledgements the
+    /// clients see (with equal latencies an asynchronous standby receives a
+    /// commit as soon as its client does); 0 adds nothing.
+    #[arg(long, default_value_t = 0)]
+    pub replication_delay_ms: u64,
+    /// With --standby: the standby must be a synchronous one before the
+    /// workload starts (`sync_state = 'sync'` on the primary).
+    #[arg(long)]
+    pub expect_sync: bool,
     /// Generator seed; Seedbox's seed varies the schedule.
     #[arg(long, default_value_t = 1)]
     pub seed: u64,
@@ -184,12 +230,35 @@ fn table(k: i64, tables: i64) -> String {
     format!("txn{}", k.rem_euclid(tables))
 }
 
-/// A comma-separated list value; a missing row or NULL reads as [].
+/// What an element that is not an integer reads as: a value no one appends.
+pub const GARBAGE: i64 = -1;
+
+/// A comma-separated list value; a missing row or NULL reads as [], and an
+/// element that is not an integer as [`GARBAGE`]. More than one row for a
+/// key (a broken primary key) concatenates them.
 pub fn parse(rows: &[Vec<Option<String>>]) -> Vec<i64> {
-    match rows.first().and_then(|row| row.first()).cloned().flatten() {
-        Some(text) if !text.is_empty() => text.split(',').filter_map(|x| x.parse().ok()).collect(),
-        _ => Vec::new(),
+    let mut out = Vec::new();
+    for row in rows {
+        match row.first().cloned().flatten() {
+            Some(text) if !text.is_empty() => {
+                out.extend(text.split(',').map(|x| x.parse().unwrap_or(GARBAGE)))
+            }
+            _ => {}
+        }
     }
+    out
+}
+
+/// [`parse`], recording any value that is not a clean list as evidence.
+fn read_value(rows: &[Vec<Option<String>>], k: i64) -> Vec<i64> {
+    let value = parse(rows);
+    if rows.len() > 1 || value.contains(&GARBAGE) {
+        evidence(
+            "unparseable",
+            json!({"key": k, "rows": rows.iter().map(|r| r.first().cloned().flatten()).collect::<Vec<_>>()}),
+        );
+    }
+    value
 }
 
 enum Outcome {
@@ -213,7 +282,7 @@ fn execute(pg: &mut Pg, ops: &[Mop], args: &Args, rng: &mut Rng) -> Result<Outco
                         "SELECT val FROM {} WHERE {column} = {k}",
                         table(*k, args.tables)
                     ))?;
-                    value.push(Mop::Read(Atom::Int(*k), Some(parse(&rows))));
+                    value.push(Mop::Read(Atom::Int(*k), Some(read_value(&rows, *k))));
                 }
                 Mop::Append(Atom::Int(k), v) => {
                     let t = table(*k, args.tables);
@@ -246,6 +315,8 @@ fn execute(pg: &mut Pg, ops: &[Mop], args: &Args, rng: &mut Rng) -> Result<Outco
 
 struct Run {
     args: Args,
+    /// The server clients connect to: --host, then the promoted standby.
+    host: Mutex<String>,
     keys: Mutex<Keys>,
     txns: Mutex<Vec<TxnOp>>,
     started: Instant,
@@ -253,6 +324,10 @@ struct Run {
 }
 
 impl Run {
+    fn host(&self) -> String {
+        self.host.lock().unwrap().clone()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn record(
         &self,
@@ -296,7 +371,7 @@ impl Run {
         let mut pg: Option<Pg> = None;
         while Instant::now() < self.stop_at {
             if pg.is_none() {
-                match Pg::connect(&self.args.host, self.args.port, self.args.timeout) {
+                match Pg::connect(&self.host(), self.args.port, self.args.timeout) {
                     Ok(connection) => pg = Some(connection),
                     Err(error) => {
                         evidence(
@@ -329,7 +404,7 @@ impl Run {
         let keys: Vec<i64> = self.keys.lock().unwrap().touched.iter().copied().collect();
         for attempt in 0..10 {
             let read = (|| -> Result<Vec<Mop>, PgError> {
-                let mut pg = Pg::connect(&self.args.host, self.args.port, 30.0)?;
+                let mut pg = Pg::connect(&self.host(), self.args.port, 30.0)?;
                 pg.query("BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY")?;
                 let mut value = Vec::new();
                 for k in &keys {
@@ -337,7 +412,7 @@ impl Run {
                         "SELECT val FROM {} WHERE id = {k}",
                         table(*k, self.args.tables)
                     ))?;
-                    value.push(Mop::Read(Atom::Int(*k), Some(parse(&rows))));
+                    value.push(Mop::Read(Atom::Int(*k), Some(read_value(&rows, *k))));
                 }
                 pg.query("COMMIT")?;
                 Ok(value)
@@ -393,10 +468,11 @@ pub fn report(txns: &[TxnOp], model: &str, examples: usize) -> Result<elle::Chec
     Ok(result)
 }
 
-fn wait_ready(args: &Args) -> Result<Pg, String> {
-    let deadline = Instant::now() + Duration::from_secs_f64(args.ready_timeout);
+/// Connect to `host` and run `SELECT 1`, retrying until `seconds` pass.
+fn serving(host: &str, port: u16, seconds: f64) -> Result<Pg, String> {
+    let deadline = Instant::now() + Duration::from_secs_f64(seconds);
     loop {
-        let attempt = Pg::connect(&args.host, args.port, 10.0).and_then(|mut pg| {
+        let attempt = Pg::connect(host, port, 10.0).and_then(|mut pg| {
             pg.query("SELECT 1")?;
             Ok(pg)
         });
@@ -406,6 +482,136 @@ fn wait_ready(args: &Args) -> Result<Pg, String> {
             Err(_) => kit::pause(0.5),
         }
     }
+}
+
+/// The first column of the first row, if any.
+fn scalar(rows: &[Vec<Option<String>>]) -> String {
+    rows.first()
+        .and_then(|r| r.first())
+        .cloned()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// Wait until the primary reports a streaming standby (a synchronous one
+/// with `sync`), and return its `pg_stat_replication` rows.
+fn wait_streaming(args: &Args, sync: bool) -> Result<Value, String> {
+    let deadline = Instant::now() + Duration::from_secs_f64(args.ready_timeout);
+    loop {
+        let rows = Pg::connect(&args.host, args.port, 10.0).and_then(|mut pg| {
+            Ok(pg
+                .query("SELECT application_name, state, sync_state FROM pg_stat_replication")?
+                .0)
+        });
+        let last = match rows {
+            Ok(rows) => {
+                // pg_basebackup's own WAL stream is not the standby yet.
+                let ready = rows.iter().any(|r| {
+                    r.first().cloned().flatten().as_deref() != Some("pg_basebackup")
+                        && r.get(1).cloned().flatten().as_deref() == Some("streaming")
+                        && (!sync || r.get(2).cloned().flatten().as_deref() == Some("sync"))
+                });
+                if ready {
+                    return Ok(json!(rows));
+                }
+                json!(rows).to_string()
+            }
+            Err(error) => error.to_string(),
+        };
+        if Instant::now() > deadline {
+            return Err(format!("no streaming standby: {last}"));
+        }
+        kit::pause(0.5);
+    }
+}
+
+/// Power-fail the server about every `--crash-every` seconds until shortly
+/// before the workload ends, rebooting it after `--crash-down` seconds.
+fn crash_repeatedly(args: Args, started: Instant) -> Option<thread::JoinHandle<()>> {
+    let mut ctl = match kit::connect_world(None) {
+        Ok(ctl) => ctl,
+        Err(error) => {
+            evidence("nemesis-unavailable", json!({"error": error.0}));
+            return None;
+        }
+    };
+    Some(thread::spawn(move || {
+        let mut pace = nemesis::Sleep;
+        let mut rng = Rng::new(kit::rng::entropy_seed());
+        let host = args.host.as_str();
+        let mut crashes = 0;
+        loop {
+            let gap = rng.uniform(0.5, 1.5) * args.crash_every;
+            if started.elapsed().as_secs_f64() + gap + args.crash_down + 3.0 > args.duration {
+                break;
+            }
+            nemesis::Pace::wait(&mut pace, &mut ctl, gap);
+            crashes += 1;
+            if let Err(error) = nemesis::crash_all(
+                &mut ctl,
+                &mut pace,
+                &[host],
+                args.crash_down,
+                json!({"n": crashes}),
+            ) {
+                evidence("nemesis-failed", json!({"error": error.0}));
+            }
+        }
+        evidence("nemesis-done", json!({"crashes": crashes}));
+    }))
+}
+
+/// At `--failover-at`, power-fail the primary for good (it is never
+/// rebooted, so it cannot come back as a second primary), promote the
+/// standby and point every client at it.
+fn fail_over(run: Arc<Run>, standby: String) -> Option<thread::JoinHandle<()>> {
+    let mut ctl = match kit::connect_world(None) {
+        Ok(ctl) => ctl,
+        Err(error) => {
+            evidence("nemesis-unavailable", json!({"error": error.0}));
+            return None;
+        }
+    };
+    Some(thread::spawn(move || {
+        let args = &run.args;
+        let mut pace = nemesis::Sleep;
+        nemesis::Pace::wait(
+            &mut pace,
+            &mut ctl,
+            args.failover_at - run.started.elapsed().as_secs_f64(),
+        );
+        if let Err(error) = nemesis::step(&mut ctl, "crash", &[args.host.as_str()]) {
+            evidence(
+                "failover-failed",
+                json!({"step": "crash", "error": error.0}),
+            );
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_secs_f64(args.ready_timeout);
+        loop {
+            let promoted = Pg::connect(&standby, args.port, 10.0).and_then(|mut pg| {
+                let (rows, _) = pg.query("SELECT pg_promote(true, 60)")?;
+                Ok(scalar(&rows))
+            });
+            match promoted {
+                Ok(result) if result == "t" => break,
+                Ok(result) => evidence("promote-retry", json!({"result": result})),
+                // Already promoted (an earlier attempt's reply was lost).
+                Err(PgError::Server { code, message }) if code == "55000" => {
+                    evidence("promote-retry", json!({"code": code, "message": message}));
+                    break;
+                }
+                Err(error) => evidence("promote-retry", json!({"error": error.to_string()})),
+            }
+            if Instant::now() > deadline {
+                evidence("failover-failed", json!({"step": "promote"}));
+                return;
+            }
+            kit::pause(1.0);
+        }
+        *run.host.lock().unwrap() = standby.clone();
+        evidence("promoted", json!({"host": standby}));
+    }))
 }
 
 pub fn run(args: Args) -> u8 {
@@ -420,9 +626,13 @@ pub fn run(args: Args) -> u8 {
                "clients": args.clients, "duration": args.duration, "tables": args.tables, "key_count": args.key_count,
                "max_writes_per_key": args.max_writes_per_key, "max_txn_length": args.max_txn_length,
                "read_fraction": args.read_fraction, "sk_reads": args.sk_reads, "timeout": args.timeout,
-               "min_commit_rate": args.min_commit_rate, "seed": args.seed, "label": args.label}),
+               "min_commit_rate": args.min_commit_rate, "crash_every": args.crash_every,
+               "crash_down": args.crash_down, "recover": args.recover, "standby": args.standby,
+               "failover_at": args.failover_at, "expect_sync": args.expect_sync,
+               "replication_delay_ms": args.replication_delay_ms,
+               "seed": args.seed, "label": args.label}),
     );
-    let mut pg = match wait_ready(&args) {
+    let mut pg = match serving(&args.host, args.port, args.ready_timeout) {
         Ok(pg) => pg,
         Err(error) => {
             return verdict(
@@ -431,28 +641,74 @@ pub fn run(args: Args) -> u8 {
             )
         }
     };
-    let setup = (|| -> Result<String, PgError> {
-        let (version, _) = pg.query("SHOW server_version")?;
+    let setup = (|| -> Result<Value, PgError> {
+        let mut settings = serde_json::Map::new();
+        for name in [
+            "server_version",
+            "data_checksums",
+            "fsync",
+            "synchronous_commit",
+            "full_page_writes",
+            "wal_sync_method",
+            "synchronous_standby_names",
+        ] {
+            let (rows, _) = pg.query(&format!("SHOW {name}"))?;
+            settings.insert(name.into(), scalar(&rows).into());
+        }
         for i in 0..args.tables {
             pg.query(&format!("DROP TABLE IF EXISTS txn{i}"))?;
             pg.query(&format!(
                 "CREATE TABLE txn{i} (id int NOT NULL PRIMARY KEY, sk int NOT NULL, val text)"
             ))?;
         }
-        Ok(version
-            .first()
-            .and_then(|r| r.first())
-            .cloned()
-            .flatten()
-            .unwrap_or_default())
+        Ok(Value::Object(settings))
     })();
     drop(pg);
     match setup {
-        Ok(version) => evidence("ready", json!({"server_version": version})),
+        Ok(settings) => evidence("ready", settings),
         Err(error) => return verdict(kit::INCONCLUSIVE, &format!("schema setup failed: {error}")),
     }
+    if let (Some(standby), true) = (&args.standby, args.replication_delay_ms > 0) {
+        let shaped = kit::connect_world(None).and_then(|mut ctl| {
+            let world = ctl.world().ok_or("native mode has no shaping")?;
+            world
+                .shape(
+                    [args.host.as_str()],
+                    [standby.as_str()],
+                    args.replication_delay_ms * 1_000_000,
+                    seedbox_control_client::ShapeOptions::default(),
+                )
+                .map_err(kit::Error::from)?;
+            Ok(())
+        });
+        match shaped {
+            Ok(()) => evidence(
+                "replication-delay",
+                json!({"from": args.host, "to": standby, "ms": args.replication_delay_ms}),
+            ),
+            Err(error) => {
+                return verdict(
+                    kit::INCONCLUSIVE,
+                    &format!("cannot delay replication: {error}"),
+                )
+            }
+        }
+    }
+    if args.standby.is_some() {
+        match wait_streaming(&args, args.expect_sync) {
+            Ok(rows) => evidence("replication", json!({"standbys": rows})),
+            Err(error) => {
+                return verdict(
+                    kit::INCONCLUSIVE,
+                    &format!("replication never started: {error}"),
+                )
+            }
+        }
+    }
+    seedbox_sdk::setup_complete(json!({"host": args.host, "standby": args.standby}));
     let started = Instant::now();
     let run = Arc::new(Run {
+        host: Mutex::new(args.host.clone()),
         keys: Mutex::new(Keys::new(
             args.seed,
             args.key_count,
@@ -465,6 +721,13 @@ pub fn run(args: Args) -> u8 {
         stop_at: started + Duration::from_secs_f64(args.duration),
         args: args.clone(),
     });
+    let mut nemeses = Vec::new();
+    if args.crash_every > 0.0 {
+        nemeses.extend(crash_repeatedly(args.clone(), started));
+    }
+    if let (Some(standby), true) = (&args.standby, args.failover_at > 0.0) {
+        nemeses.extend(fail_over(run.clone(), standby.clone()));
+    }
     let threads: Vec<_> = (0..args.clients)
         .map(|slot| {
             let run = run.clone();
@@ -483,20 +746,40 @@ pub fn run(args: Args) -> u8 {
             json!({"ok": count("ok"), "fail": count("fail"), "info": count("info")}),
         );
     }
-    for thread in threads {
+    for thread in threads.into_iter().chain(nemeses) {
         let _ = thread.join();
     }
+    let host = run.host();
+    let waited = Instant::now();
+    if let Err(error) = serving(&host, args.port, args.recover) {
+        evidence(
+            "unrecovered",
+            json!({"host": host, "waited": waited.elapsed().as_secs_f64(), "last": error}),
+        );
+        return verdict(
+            kit::VIOLATION,
+            &format!(
+                "unrecovered: {host} did not answer within {} s after the workload: {error}",
+                args.recover
+            ),
+        );
+    }
+    evidence(
+        "recovered",
+        json!({"host": host, "after": waited.elapsed().as_secs_f64()}),
+    );
     let final_read = run.final_read();
     if let Some(value) = &final_read {
         let t = now_us();
         run.record(json!("final"), "ok", value, Some(value.clone()), t, t, None);
     }
     let txns = run.txns.lock().unwrap().clone();
-    let _ = run.started;
+    errors(&txns);
     let result = match report(&txns, &model, args.examples) {
         Ok(result) => result,
         Err(error) => return verdict(kit::INCONCLUSIVE, &format!("checker: {error}")),
     };
+    let durability = durability(&txns, final_read.as_deref(), args.examples);
     let progress = progress(&txns, args.clients, args.duration);
     evidence(
         "throughput",
@@ -505,12 +788,62 @@ pub fn run(args: Args) -> u8 {
     );
     let (code, text) = decide(
         &result,
+        durability,
         progress,
-        final_read.is_some(),
         args.isolation.name(),
         args.min_commit_rate,
     );
     verdict(code, &text)
+}
+
+/// Why transactions failed or were indeterminate, by error, as evidence.
+fn errors(txns: &[TxnOp]) {
+    let mut fail = std::collections::BTreeMap::<String, usize>::new();
+    let mut info = std::collections::BTreeMap::<String, usize>::new();
+    for t in txns {
+        let error = elle::h_line(t)["error"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect::<String>();
+        match elle::kind_of(t) {
+            "fail" => *fail.entry(error).or_default() += 1,
+            "info" => *info.entry(error).or_default() += 1,
+            _ => {}
+        }
+    }
+    evidence("errors", json!({"fail": fail, "info": info}));
+}
+
+/// Lost and stale counts beside the isolation check; `lost` is `None`
+/// without a final read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Durability {
+    pub lost: Option<usize>,
+    pub stale: usize,
+}
+
+/// Acknowledged appends missing from the final read (`lost`), and committed
+/// reads that miss an append acknowledged before they began (`stale`, not
+/// counting lost values), each with evidence.
+fn durability(txns: &[TxnOp], final_read: Option<&[Mop]>, examples: usize) -> Durability {
+    let finals = [("final".to_string(), final_read.map(<[Mop]>::to_vec))];
+    let (stale, lost) = super::galera::durability(txns, &finals);
+    let lost = lost.into_iter().next().and_then(|(_, l)| l);
+    evidence(
+        "durability",
+        json!({"lost": lost.as_ref().map(Vec::len),
+               "examples": lost.iter().flatten().take(examples).collect::<Vec<_>>()}),
+    );
+    evidence(
+        "stale-reads",
+        json!({"count": stale.len(), "examples": stale.iter().take(examples).collect::<Vec<_>>()}),
+    );
+    Durability {
+        lost: lost.map(|l| l.len()),
+        stale: stale.len(),
+    }
 }
 
 /// The clients' commits (the final read is not one) over the run's window.
@@ -526,24 +859,33 @@ fn progress(txns: &[TxnOp], clients: usize, seconds: f64) -> kit::Progress {
     }
 }
 
-/// The verdict for a checked history. An anomaly is a violation however
-/// little the clients did; a clean history is valid only when they committed
-/// something, reached `min_rate` commits per client-second and the final read
-/// succeeded, and is otherwise inconclusive.
+/// The verdict for a checked history. An anomaly, a lost acknowledged append
+/// or a stale read is a violation however little the clients did; a clean
+/// history is valid only when they committed something, reached `min_rate`
+/// commits per client-second and the final read succeeded, and is otherwise
+/// inconclusive.
 pub fn decide(
     result: &elle::Checked,
+    durability: Durability,
     progress: kit::Progress,
-    final_read: bool,
     isolation: &str,
     min_rate: f64,
 ) -> (u8, String) {
     let model = &result.model;
     let counts = json!(result.counts);
     let types = json!(result.txns);
-    if !result.valid {
+    let lost = durability.lost.unwrap_or(0);
+    let tail = format!("lost {lost} stale {}", durability.stale);
+    if !result.valid || lost > 0 || durability.stale > 0 {
+        let word = if result.valid { "valid" } else { "INVALID" };
+        let prefix = if lost > 0 || durability.stale > 0 {
+            "NOT DURABLE: "
+        } else {
+            ""
+        };
         return (
             kit::VIOLATION,
-            format!("INVALID {isolation} checked as {model}: {counts} txns {types}"),
+            format!("{prefix}{word} {isolation} checked as {model}: {counts} txns {types} {tail}"),
         );
     }
     let reason = if progress.done == 0 {
@@ -552,7 +894,7 @@ pub fn decide(
         Some(format!(
             "{shortfall}; history valid {isolation} checked as {model}"
         ))
-    } else if !final_read {
+    } else if durability.lost.is_none() {
         Some("the final read failed".to_string())
     } else {
         None
@@ -561,9 +903,20 @@ pub fn decide(
         Some(reason) => (kit::INCONCLUSIVE, format!("{reason}: {types}")),
         None => (
             kit::OK,
-            format!("valid {isolation} checked as {model}: {counts} txns {types}"),
+            format!("valid {isolation} checked as {model}: {counts} txns {types} {tail}"),
         ),
     }
+}
+
+/// What the last committed final read returned, if any.
+fn completed_final(txns: &[TxnOp]) -> Option<Vec<Mop>> {
+    txns.iter()
+        .rev()
+        .filter(|t| t.op.process == Some(Atom::from("final")))
+        .find_map(|t| match &t.outcome {
+            wgl::OpOutcome::Completed { ret, .. } => Some(ret.clone()),
+            _ => None,
+        })
 }
 
 /// Re-check a saved oracle log of `H` lines, with the oracle's verdict rules
@@ -577,13 +930,20 @@ pub fn recheck(text: &str, model: &str) -> Result<(u8, Value), String> {
         config["clients"].as_u64().unwrap_or(0) as usize,
         config["duration"].as_f64().unwrap_or(0.0),
     );
-    let final_read = txns
-        .iter()
-        .any(|t| t.op.process == Some(Atom::from("final")) && elle::kind_of(t) == "ok");
+    let final_read = completed_final(&txns);
+    let finals = [("final".to_string(), final_read)];
+    let (stale, lost) = super::galera::durability(&txns, &finals);
+    let lost = lost.into_iter().next().and_then(|(_, l)| l);
+    let durability = Durability {
+        lost: lost.as_ref().map(Vec::len),
+        stale: stale.len(),
+    };
     let isolation = config["isolation"].as_str().unwrap_or("serializable");
-    let (code, verdict) = decide(&result, progress, final_read, isolation, MIN_COMMIT_RATE);
+    let (code, verdict) = decide(&result, durability, progress, isolation, MIN_COMMIT_RATE);
     let mut out = result.to_json();
     out["verdict"] = verdict.into();
+    out["lost"] = json!(lost);
+    out["stale"] = json!(stale);
     out["throughput"] = json!({"commits": progress.done, "clients": progress.clients,
                                "seconds": progress.seconds, "per_client_second": progress.rate()});
     Ok((code, out))
@@ -700,15 +1060,30 @@ mod tests {
         ]
     }
 
-    fn decide_on(txns: &[TxnOp], clients: usize, seconds: f64, final_read: bool) -> (u8, String) {
+    fn decide_with(
+        txns: &[TxnOp],
+        clients: usize,
+        seconds: f64,
+        final_read: bool,
+        min: f64,
+    ) -> (u8, String) {
         let result = elle::check(txns, "serializable").unwrap();
+        let finals = if final_read {
+            completed_final(txns)
+        } else {
+            None
+        };
         decide(
             &result,
+            durability(txns, finals.as_deref(), 1),
             progress(txns, clients, seconds),
-            final_read,
             "serializable",
-            MIN_COMMIT_RATE,
+            min,
         )
+    }
+
+    fn decide_on(txns: &[TxnOp], clients: usize, seconds: f64, final_read: bool) -> (u8, String) {
+        decide_with(txns, clients, seconds, final_read, MIN_COMMIT_RATE)
     }
 
     #[test]
@@ -741,15 +1116,7 @@ mod tests {
             assert!(text.starts_with("valid serializable checked as serializable: {} txns"));
         }
         // Disabling the check keeps even a stalled run valid.
-        let txns = history(21, 40, true);
-        let result = elle::check(&txns, "serializable").unwrap();
-        let (code, _) = decide(
-            &result,
-            progress(&txns, 20, 15.0),
-            true,
-            "serializable",
-            0.0,
-        );
+        let (code, _) = decide_with(&history(21, 40, true), 20, 15.0, true, 0.0);
         assert_eq!(code, kit::OK);
     }
 
@@ -807,6 +1174,93 @@ mod tests {
         );
         let (code, _) = recheck(&log(config, &write_skew()), "serializable").unwrap();
         assert_eq!(code, kit::VIOLATION);
+    }
+
+    #[test]
+    fn a_lost_acknowledged_append_is_not_durable() {
+        // 300 commits on key 0; the final read (after a crash) lacks the last.
+        let mut txns = history(300, 0, false);
+        let all: Vec<i64> = (1..300).collect();
+        let at = 10_000;
+        txns.push(
+            elle::txn(
+                300,
+                "ok",
+                vec![read(0, &all)],
+                Some(Atom::from("final")),
+                at,
+                at,
+                None,
+            )
+            .unwrap(),
+        );
+        let (code, text) = decide_on(&txns, 20, 15.0, true);
+        assert_eq!(code, kit::VIOLATION);
+        assert!(
+            text.starts_with("NOT DURABLE: valid serializable checked as serializable"),
+            "{text}"
+        );
+        assert!(text.ends_with("lost 1 stale 0"), "{text}");
+    }
+
+    #[test]
+    fn a_read_missing_an_earlier_acknowledged_append_is_stale() {
+        let txns = vec![
+            elle::txn(0, "ok", vec![append(0, 1)], Some(Atom::Int(0)), 0, 10, None).unwrap(),
+            // Begins after the append was acknowledged, yet misses it.
+            elle::txn(
+                1,
+                "ok",
+                vec![read(0, &[])],
+                Some(Atom::Int(1)),
+                20,
+                30,
+                None,
+            )
+            .unwrap(),
+            elle::txn(
+                2,
+                "ok",
+                vec![read(0, &[1])],
+                Some(Atom::from("final")),
+                40,
+                40,
+                None,
+            )
+            .unwrap(),
+        ];
+        let (code, text) = decide_with(&txns, 1, 1.0, true, 0.0);
+        assert_eq!(code, kit::VIOLATION);
+        assert!(text.ends_with("lost 0 stale 1"), "{text}");
+    }
+
+    #[test]
+    fn values_that_are_not_clean_lists_read_as_garbage() {
+        let row = |v: Option<&str>| vec![v.map(str::to_owned)];
+        assert_eq!(parse(&[row(Some("1,2,3"))]), vec![1, 2, 3]);
+        assert_eq!(parse(&[row(Some("1,2\u{0}x,3"))]), vec![1, GARBAGE, 3]);
+        assert_eq!(parse(&[row(None)]), Vec::<i64>::new());
+        assert_eq!(parse(&[]), Vec::<i64>::new());
+        // Two rows for one key (a broken primary key) are both read.
+        assert_eq!(parse(&[row(Some("1")), row(Some("2"))]), vec![1, 2]);
+        // The checker calls a value nobody appended garbage.
+        let txns = vec![
+            elle::txn(0, "ok", vec![append(0, 1)], Some(Atom::Int(0)), 0, 10, None).unwrap(),
+            elle::txn(
+                1,
+                "ok",
+                vec![read(0, &[1, GARBAGE])],
+                Some(Atom::from("final")),
+                20,
+                20,
+                None,
+            )
+            .unwrap(),
+        ];
+        assert!(elle::check(&txns, "serializable")
+            .unwrap()
+            .counts
+            .contains_key("garbage"));
     }
 
     #[test]

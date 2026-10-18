@@ -1,0 +1,32 @@
+# Generic faults for one PostgreSQL server (pg18-faults): power loss, SIGKILL of
+# the server's processes, whole-machine and process pauses, partitions from the
+# clients, slow disk requests and scheduling perturbation, aimed at nothing in
+# particular. A power-failed server boots and recovers from its WAL by itself.
+start: 15s
+end: 78s
+interval: 4s
+faults:
+  - kind: crash
+    weight: 3
+    downtime: {min: 1s, max: 5s}
+  - kind: stop
+    weight: 1
+    downtime: {min: 1s, max: 4s}
+  - kind: pause
+    weight: 1
+    duration: {min: 500ms, max: 6s}
+  - kind: pause_process
+    weight: 1
+    duration: {min: 500ms, max: 6s}
+  - kind: partition
+    weight: 2
+    duration: {min: 1s, max: 8s}
+  - kind: disk_latency
+    weight: 1
+    duration: {min: 2s, max: 8s}
+    latency: {min: 5ms, max: 100ms}
+    jitter: 50ms
+  - kind: preempt
+    weight: 1
+    duration: {min: 2s, max: 8s}
+    ppm: 20000

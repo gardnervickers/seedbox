@@ -388,9 +388,10 @@ has to find a pause long enough to outlive a lease on its own.", "none", "none",
 
 // ------------------------------------------------------------ PostgreSQL
 
-const POSTGRES: [(&str, &str); 2] = [
+const POSTGRES: [(&str, &str); 3] = [
     ("12.3", "docker.io/library/postgres:12.3@sha256:a06e6e6e519b7a329c419f8221edec66cfc45511e8b80e262c12103ba745cf19"),
     ("12.4", "docker.io/library/postgres:12.4@sha256:a1e04460fdd3c338d6b65a2ab66b5aa2748eb18da3e55bcdc9ef17831ed3ad46"),
+    ("18.6", "docker.io/library/postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336"),
 ];
 
 fn pg_server(version: &str, pgmon: &str, extra: &[&str]) -> Machine {
@@ -441,6 +442,175 @@ fn postgres() -> Vec<Scenario> {
             }
         })
         .collect()
+}
+
+/// A PostgreSQL 18 server in the image's 18+ layout: one volume at
+/// /var/lib/postgresql holding PGDATA (/var/lib/postgresql/18/docker), which
+/// outlives a power failure. pgmon.sh restarts postgres 3 s after it exits.
+fn pg18_server(extra: &[&str]) -> Machine {
+    let mut command = strings(&["postgres", "-c", "log_min_messages=log"]);
+    command.extend(strings(extra));
+    // The 18 image's archive needs about 1.5 GiB of guest RAM to boot.
+    Machine::image(lookup(&POSTGRES, "18.6"))
+        .memory(2048)
+        .comment("pgmon.sh runs the official entrypoint, reports guest memory and restarts postgres if it exits.")
+        .entrypoint(&["bash", "/pgmon.sh"])
+        .comment("Log no ERROR (every serialization failure would be four lines); keep LOG, FATAL, PANIC.")
+        .command(command)
+        .file("pgmon.sh", "/pgmon.sh")
+        .file("pg-sync.sh", "/docker-entrypoint-initdb.d/pg-sync.sh")
+        .env("POSTGRES_HOST_AUTH_METHOD", "trust")
+        .env("PGMON_RESTART", "3")
+        .data_sized("/var/lib/postgresql", "2GiB")
+}
+
+/// Exercise checkpoints (and full-page writes after them) during a run.
+const PG_CHECKPOINTS: [&str; 2] = ["-c", "checkpoint_timeout=30s"];
+
+fn pg18_oracle(isolation: &str, duration: u32, label: &str, extra: &[&str]) -> Machine {
+    let mut args = strings(&[
+        "postgres",
+        "--isolation",
+        isolation,
+        "--clients",
+        "20",
+        "--duration",
+        &duration.to_string(),
+        "--label",
+        label,
+    ]);
+    args.extend(strings(extra));
+    Machine::program(&args)
+}
+
+fn postgres18() -> Vec<Scenario> {
+    let single = |name: &str, comment: &str, server: &[&str], oracle: Machine| Scenario {
+        name: name.into(),
+        comment: comment.into(),
+        generated: "PostgreSQL 18.6, one server".into(),
+        machines: vec![("pg".into(), pg18_server(server))],
+        oracle,
+        latency: "1ms".into(),
+    };
+    let crash = [
+        "--crash-every",
+        "12",
+        "--crash-down",
+        "2",
+        "--min-commit-rate",
+        "0.1",
+    ];
+    let faulted = ["--min-commit-rate", "0.05", "--recover", "90"];
+    let durable = [PG_CHECKPOINTS.as_slice()].concat();
+    let async_commit = [PG_CHECKPOINTS.as_slice(), &["-c", "synchronous_commit=off"]].concat();
+    let no_fsync = [PG_CHECKPOINTS.as_slice(), &["-c", "fsync=off"]].concat();
+    let mut out = vec![
+        single("pg18-serializable",
+            "PostgreSQL 18.6 SERIALIZABLE, looking for unknown bugs: Jepsen's list-append workload\n\
+             (20 clients, 60 s, one server, no faults) must be serializable, with no lost\n\
+             acknowledged append and no stale read (one server is strictly serializable).",
+            &[], pg18_oracle("serializable", 60, "18.6/serializable", &[])),
+        single("pg18-repeatable-read",
+            "PostgreSQL 18.6 REPEATABLE READ is snapshot isolation: G2-item (write skew) is allowed,\n\
+             but nothing else snapshot isolation forbids, no lost append and no stale read.",
+            &[], pg18_oracle("repeatable-read", 60, "18.6/repeatable-read", &[])),
+        single("pg18-read-committed",
+            "PostgreSQL 18.6 READ COMMITTED, checked as read committed (no G0, G1a, G1b or G1c),\n\
+             with no lost append and no stale read.",
+            &[], pg18_oracle("read-committed", 60, "18.6/read-committed", &[])),
+        single("pg18-crash",
+            "PostgreSQL 18.6 under power loss with the default fsync=on and synchronous_commit=on:\n\
+             the server is power-failed about every 12 s (6-18 s) during 90 s of SERIALIZABLE\n\
+             list-append and boots 2 s later (page cache and unflushed sectors are lost), with\n\
+             checkpoints every 30 s. Every acknowledged commit must survive, and the server must\n\
+             answer again within 60 s of the workload's end.",
+            &durable, pg18_oracle("serializable", 90, "18.6/crash", &crash)),
+        single("pg18-crash-async",
+            "Negative control for pg18-crash: synchronous_commit=off acknowledges a commit before\n\
+             its WAL is flushed, so power loss is expected to lose acknowledged commits (the\n\
+             checker must report them as lost).",
+            &async_commit, pg18_oracle("serializable", 90, "18.6/crash-async", &crash)),
+        single("pg18-crash-nofsync",
+            "Negative control for pg18-crash: fsync=off never flushes, so power loss is expected to\n\
+             lose acknowledged commits or corrupt the cluster.",
+            &no_fsync, pg18_oracle("serializable", 90, "18.6/crash-nofsync", &crash)),
+        single("pg18-faults",
+            "PostgreSQL 18.6, looking for unknown bugs under generated faults: 90 s of SERIALIZABLE\n\
+             list-append with checkpoints every 30 s. Run it with `--fault-profile` and one of\n\
+             harness/jepsen/postgres/*-faults.yaml (power loss, pauses, partitions, clock steps,\n\
+             data-scoped disk corruption or EIO). Acknowledged commits must survive and never read\n\
+             back wrong; errors and fail-stop are allowed, but the server must answer again within\n\
+             90 s of the workload's end.",
+            &durable, pg18_oracle("serializable", 90, "18.6/faults", &faulted)),
+        single("pg18-faults-rr",
+            "pg18-faults at REPEATABLE READ, checked as snapshot isolation.",
+            &durable, pg18_oracle("repeatable-read", 90, "18.6/faults-rr", &faulted)),
+    ];
+    // Primary and streaming standby, failing over at 30 s. Streaming takes
+    // 50 ms more than the clients' hop, so an asynchronous standby is visibly
+    // behind the commits the primary acknowledges.
+    for (name, comment, sync) in [
+        (
+            "pg18-failover-sync",
+            "PostgreSQL 18.6 primary (pg1) with a synchronous streaming standby (pg2,\n\
+          synchronous_standby_names='*', synchronous_commit=on, streaming delayed 50 ms): 30 s into 75 s of SERIALIZABLE\n\
+          list-append the primary is power-failed for good and the standby promoted\n\
+          (pg_promote), and every client moves to it. Every acknowledged commit must survive\n\
+          the promotion, and no read on the promoted standby may be stale.",
+            true,
+        ),
+        (
+            "pg18-failover-async",
+            "Negative control for pg18-failover-sync: the standby is asynchronous, so commits\n\
+          acknowledged by the primary but not yet streamed are expected to be lost when it\n\
+          fails over.",
+            false,
+        ),
+    ] {
+        let mut primary_args: Vec<&str> = PG_CHECKPOINTS.to_vec();
+        if sync {
+            primary_args.extend(["-c", "synchronous_standby_names=*"]);
+        }
+        let primary = pg18_server(&primary_args).file(
+            "pg-replication.sh",
+            "/docker-entrypoint-initdb.d/pg-replication.sh",
+        );
+        let mut standby = pg18_server(&PG_CHECKPOINTS);
+        standby.comments = vec![
+            "pg-standby.sh copies pg1 with pg_basebackup on first boot, then runs pgmon.sh.".into(),
+        ];
+        standby.entrypoint = Some(strings(&["bash", "/pg-standby.sh"]));
+        let standby = standby
+            .file("pg-standby.sh", "/pg-standby.sh")
+            .env("PRIMARY", "pg1");
+        let mut extra = vec![
+            "--host",
+            "pg1",
+            "--standby",
+            "pg2",
+            "--failover-at",
+            "30",
+            "--replication-delay-ms",
+            "50",
+            "--min-commit-rate",
+            "0.1",
+        ];
+        if sync {
+            extra.push("--expect-sync");
+        }
+        out.push(Scenario {
+            name: name.into(),
+            comment: comment.into(),
+            generated: format!(
+                "PostgreSQL 18.6, primary and {} standby",
+                if sync { "synchronous" } else { "asynchronous" }
+            ),
+            machines: vec![("pg1".into(), primary), ("pg2".into(), standby)],
+            oracle: pg18_oracle("serializable", 75, name, &extra),
+            latency: "1ms".into(),
+        });
+    }
+    out
 }
 
 fn postgres_stall() -> Scenario {
@@ -1299,6 +1469,7 @@ pub fn all() -> Vec<(String, String)> {
         ("nats", nats()),
         ("etcd", etcd()),
         ("postgres", postgres()),
+        ("postgres", postgres18()),
         ("kafka", kafka()),
         ("mysql", mysql()),
         ("galera", galera()),
