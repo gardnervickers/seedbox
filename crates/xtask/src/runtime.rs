@@ -9,11 +9,22 @@ use std::{
 };
 
 pub(super) fn nix_output(root: &Path, name: &str) -> Result<PathBuf> {
+    // Request submodules on the initial fetch: self.submodules alone can lock
+    // a clean parent before Nix notices edits confined to a child worktree.
+    let mut path = String::new();
+    for &byte in root.as_os_str().as_encoded_bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+            path.push(char::from(byte));
+        } else {
+            use std::fmt::Write;
+            write!(path, "%{byte:02X}")?;
+        }
+    }
     let output = capture(command("nix", root).args([
         "build",
         "--no-link",
         "--print-out-paths",
-        &format!(".#{name}"),
+        &format!("git+file://{path}?submodules=1#{name}"),
     ]))?;
     let paths: Vec<_> = output.lines().collect();
     if paths.len() != 1 || !Path::new(paths[0]).is_absolute() {

@@ -62,6 +62,11 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          # Nix's submodule source accessor also traverses DR's nested gitlinks.
+          submodules: recursive
+      - name: Identify the translator cache input
+        id: sources
+        run: echo "dynamorio=$(git rev-parse HEAD:vendor/dynamorio)" >> "$GITHUB_OUTPUT"
       - name: Reclaim unused hosted SDK space
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift
@@ -96,7 +101,7 @@ jobs:
       - uses: nix-community/cache-nix-action/restore@v7
         id: nix-cache
         with:
-          primary-key: pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**', 'crates/seedbox-machine/**/*.nix', 'crates/seedbox-machine/guest/**', 'crates/xtask/**') }}
+          primary-key: pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.sources.outputs.dynamorio }}-${{ hashFiles('flake.lock', 'flake.nix', '.gitmodules', 'nix/**', 'crates/seedbox-machine/**/*.nix', 'crates/seedbox-machine/guest/**', 'crates/xtask/**') }}
           restore-prefixes-first-match: |
             pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-
             pv-nix-${{ runner.os }}-${{ runner.arch }}-

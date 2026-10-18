@@ -4,7 +4,11 @@
 pkgs.rustPlatform.buildRustPackage {
   pname = "seedbox-check";
   version = "0.1.0";
-  src = pkgs.lib.cleanSource ../.;
+  src = pkgs.lib.cleanSourceWith {
+    src = ../.;
+    # The Rust checker does not consume the translator sources.
+    filter = path: type: path != toString ../vendor && pkgs.lib.cleanSourceFilter path type;
+  };
   cargoLock.lockFile = ../Cargo.lock;
   cargoBuildFlags = [ "-p" "seedbox-check" "--bin" "seedbox-check" ];
   # This tool needs neither the application's Python signing linker nor HVF.

@@ -16,7 +16,7 @@ The first build and image downloads take a while.
 ```sh
 git clone https://github.com/gardnervickers/seedbox.git
 cd seedbox
-nix develop
+seedbox_flake=$(bash tools/dev-flake.sh) && nix develop "$seedbox_flake"
 cargo xtask build --release
 alias seedbox="$PWD/target/release/seedbox"
 
@@ -39,6 +39,11 @@ commands. For scripts, start it explicitly with `seedbox server start`;
 No KVM? `run --backend tcg` uses a slower software CPU. Apple Silicon also
 requires Apple's Command Line Tools and Docker Desktop or Podman; Mac execution
 still needs hardware verification.
+
+Direnv and `tools/dev-flake.sh` initialize only missing submodules, including DR's
+nested dependencies, and preserve existing branches and edits. If initialization
+fails, fix the reported checkout or access problem and retry. The encoded reference
+includes local tracked DR edits; see [DynamoRIO development](docs/internals.md#editing-dynamorio).
 
 ## Explore a failure
 

@@ -30,6 +30,9 @@ Start with [README.md](README.md); [design](docs/design.md) and
 
 - Build inside `nix develop`; README owns the build sequence. Runtime lookup never
   builds. Replay consumes retained inputs without the image engine or source project.
+- Direnv initializes missing submodules before Nix; use `tools/dev-flake.sh` for
+  direct shell entry. Existing checkouts/edits stay untouched. Edit DR in the
+  submodule, publish its commits first, then commit the Seedbox gitlink. See internals.
 - Image preparation never starts application containers or extracts guest paths onto
   the host; see `crates/seedbox-application/src/oci.rs` and its archive renderer.
 - Keep Cargo targets private per agent; never configure a global target-dir.
