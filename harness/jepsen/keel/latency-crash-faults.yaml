@@ -1,0 +1,16 @@
+# The shape of the minimal reproduction of keel's visible-before-durable bug
+# (7gjumajg, shrunk from 8w7f6c5j): slow disk requests, which widen the window
+# between a write becoming visible and its sync, and power loss of the server
+# inside that window (volume kept). A value a client has read must survive.
+# The oracle's operations run 120 s.
+start: 15s
+end: 110s
+interval: 5s
+faults:
+  - kind: disk_latency
+    weight: 1
+    duration: {min: 5s, max: 10s}
+    latency: {min: 20ms, max: 100ms}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 3s}
