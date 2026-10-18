@@ -461,6 +461,13 @@ fn etcd_current() -> Vec<Scenario> {
             snapshots,
         ));
         specs.push((
+            format!("etcd{short}-crash-all-snapshot"),
+            format!("etcd{short}-crash-all with etcd{short}-register-snapshot's settings: with a fault\nprofile leaving a member behind, it catches up from a snapshot the leader sends,\nand the next coordinated power loss can land just after it adopts that snapshot\n(etcd#22498: the adopting rename is not synced, while the old database already\nrecords the snapshot's index)."),
+            version,
+            vec![register, "--crash-all-every", "10"],
+            snapshots,
+        ));
+        specs.push((
             format!("etcd{short}-register-disk"),
             format!("etcd{short}-register for profiles that corrupt or fail a member's disk\n(corruption-faults.yaml, eio-faults.yaml): a member whose etcd detects the damage\nand refuses to start does not fail the run, as stopping is the safe outcome; one\nthat runs but never serves, or serves wrong data, still does."),
             version,
