@@ -68,12 +68,18 @@ jobs:
           df -h /
       - name: Verify usable KVM before building
         run: |
+          grep -m1 '^vendor_id' /proc/cpuinfo
+          grep -m1 '^model name' /proc/cpuinfo
+          uname -r
           sudo chmod a+rw /dev/kvm
           python3 - <<'PYTHON'
           import fcntl, os
           with open('/dev/kvm', 'rb') as kvm:
               assert fcntl.ioctl(kvm, 0xAE00, 0) == 12, 'unsupported KVM API'
               vm = fcntl.ioctl(kvm, 0xAE01, 0)
+              # KVM_CHECK_EXTENSION(KVM_CAP_PMU_CAPABILITY), disable bit = 1.
+              pmu = fcntl.ioctl(vm, 0xAE03, 212)
+              print(f'KVM PMU capability={pmu}; disable supported={bool(pmu & 1)}')
               os.close(vm)
           print('KVM VM creation succeeded')
           PYTHON

@@ -161,16 +161,27 @@ fn guest_cpuid(mut cpuid: CpuId) -> CpuId {
     cpuid
 }
 
-/// Without the disable capability, only an explicit architectural PMU version
-/// of zero proves KVM has no vPMU. Missing CPUID evidence fails closed. Always
-/// inspect KVM's supported CPUID, not our masked guest CPUID: hiding the feature
-/// alone would leave host performance counters accessible through MSRs/RDPMC.
+/// Without the disable capability, Intel's architectural PMU version zero
+/// proves KVM has no vPMU. This is not true of AMD's legacy K7 counters, which
+/// KVM may expose through MSRs/RDPMC even with leaf A zero. Unknown vendors and
+/// missing evidence fail closed. Inspect KVM's supported CPUID, not our masked
+/// guest CPUID: hiding a feature alone does not disable its counters.
 fn pmu_needs_disable(capability: i32, supported_cpuid: &[kvm_cpuid_entry2]) -> Result<bool> {
     if capability & KVM_PMU_CAP_DISABLE as i32 != 0 {
         return Ok(true);
     }
+    let mut vendor_leaves = supported_cpuid.iter().filter(|entry| entry.function == 0);
+    let intel = vendor_leaves.next().is_some_and(|entry| {
+        [entry.ebx, entry.edx, entry.ecx]
+            == [
+                u32::from_le_bytes(*b"Genu"),
+                u32::from_le_bytes(*b"ineI"),
+                u32::from_le_bytes(*b"ntel"),
+            ]
+    }) && vendor_leaves.next().is_none();
     let mut pmu_leaves = supported_cpuid.iter().filter(|entry| entry.function == 0xa);
-    if pmu_leaves.next().is_some_and(|entry| entry.eax & 0xff == 0)
+    if intel
+        && pmu_leaves.next().is_some_and(|entry| entry.eax & 0xff == 0)
         && pmu_leaves.all(|entry| entry.eax & 0xff == 0)
     {
         Ok(false)
