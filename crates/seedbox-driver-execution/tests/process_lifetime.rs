@@ -4,7 +4,9 @@
     feature = "test-support",
     any(target_os = "linux", target_os = "macos")
 ))]
-use seedbox_application::process_lifetime::{reclaim_barrier, Completion, ExitBarrier, WorkerExit};
+use seedbox_driver_execution::process_lifetime::{
+    reclaim_barrier, Completion, ExitBarrier, WorkerExit,
+};
 use seedbox_test::process::Guarded;
 use std::{
     fs,
@@ -69,7 +71,7 @@ fn worker_death_terminates_descendants_before_cleanup() {
     reclaim_barrier(
         &root
             .path()
-            .join(seedbox_application::process_lifetime::EXECUTION_LEASE_FILE),
+            .join(seedbox_driver_execution::process_lifetime::EXECUTION_LEASE_FILE),
         Duration::ZERO,
     )
     .unwrap();
@@ -83,7 +85,7 @@ fn server_death_terminates_worker_and_descendants() {
     reclaim_barrier(
         &root
             .path()
-            .join(seedbox_application::process_lifetime::EXECUTION_LEASE_FILE),
+            .join(seedbox_driver_execution::process_lifetime::EXECUTION_LEASE_FILE),
         Duration::from_secs(7),
     )
     .unwrap();
@@ -110,7 +112,7 @@ fn stopped_worker_dies_when_server_dies() {
     reclaim_barrier(
         &root
             .path()
-            .join(seedbox_application::process_lifetime::EXECUTION_LEASE_FILE),
+            .join(seedbox_driver_execution::process_lifetime::EXECUTION_LEASE_FILE),
         Duration::from_secs(7),
     )
     .unwrap();
@@ -125,7 +127,7 @@ fn simultaneous_worker_and_server_death_releases_restart_barrier() {
     reclaim_barrier(
         &root
             .path()
-            .join(seedbox_application::process_lifetime::EXECUTION_LEASE_FILE),
+            .join(seedbox_driver_execution::process_lifetime::EXECUTION_LEASE_FILE),
         Duration::from_secs(7),
     )
     .unwrap();
@@ -151,7 +153,7 @@ fn escaped_holder_times_out_and_preserves_files() {
     assert!(reclaim_barrier(
         &root
             .path()
-            .join(seedbox_application::process_lifetime::EXECUTION_LEASE_FILE),
+            .join(seedbox_driver_execution::process_lifetime::EXECUTION_LEASE_FILE),
         Duration::ZERO
     )
     .is_err());
@@ -159,7 +161,7 @@ fn escaped_holder_times_out_and_preserves_files() {
     reclaim_barrier(
         &root
             .path()
-            .join(seedbox_application::process_lifetime::EXECUTION_LEASE_FILE),
+            .join(seedbox_driver_execution::process_lifetime::EXECUTION_LEASE_FILE),
         Duration::from_secs(2),
     )
     .unwrap();

@@ -582,7 +582,7 @@ impl ExecutionService {
         let mut resolved_spec = spec.clone();
         resolved_spec
             .resolve_project_architecture(
-                seedbox_application::driver_world::platform::Host::current()
+                seedbox_driver_execution::driver_world::platform::Host::current()
                     .project_architecture(spec.configuration.simulator.backend),
             )
             .map_err(seedbox_application::Error::Setup)?;

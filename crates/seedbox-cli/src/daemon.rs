@@ -70,13 +70,13 @@ impl BackendProvider for NativeBackends {
             .ok_or_else(|| Error::Setup("Driver contract has no validated CPU backend".into()))?
         {
             seedbox_spec::project::CpuBackend::Pv => {
-                seedbox_application::driver_world::DriverBackend::Pv
+                seedbox_driver_execution::driver_world::DriverBackend::Pv
             }
             seedbox_spec::project::CpuBackend::Tcg => {
-                seedbox_application::driver_world::DriverBackend::Tcg
+                seedbox_driver_execution::driver_world::DriverBackend::Tcg
             }
         };
-        let digest = seedbox_application::driver_world::runtime_digest(inputs, store)?;
+        let digest = seedbox_driver_execution::driver_world::runtime_digest(inputs, store)?;
         let mut archive = tempfile::NamedTempFile::new_in(&self.session_root).map_err(|error| {
             Error::Setup(format!(
                 "retained Driver runtime scratch {}: {error}",
@@ -89,11 +89,11 @@ impl BackendProvider for NativeBackends {
             &self.session_root,
         )?;
         let runtime_backend = match backend {
-            seedbox_application::driver_world::DriverBackend::Pv => {
-                seedbox_application::runtime_assets::Backend::Pv
+            seedbox_driver_execution::driver_world::DriverBackend::Pv => {
+                seedbox_driver_execution::runtime_assets::Backend::Pv
             }
-            seedbox_application::driver_world::DriverBackend::Tcg => {
-                seedbox_application::runtime_assets::Backend::Tcg
+            seedbox_driver_execution::driver_world::DriverBackend::Tcg => {
+                seedbox_driver_execution::runtime_assets::Backend::Tcg
             }
         };
         let architecture = match descriptor.guest_arch.as_str() {
@@ -106,7 +106,7 @@ impl BackendProvider for NativeBackends {
             }
         };
         let selected = runtime.select(runtime_backend, architecture)?;
-        let executor = seedbox_application::driver_world::DriverExecutor::new(
+        let executor = seedbox_driver_execution::driver_world::DriverExecutor::new(
             inputs.profile.clone(),
             backend,
             1,

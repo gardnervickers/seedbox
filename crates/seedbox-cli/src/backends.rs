@@ -15,7 +15,7 @@ use std::{
     path::Path,
 };
 
-pub struct Executor(pub Box<seedbox_application::driver_world::DriverExecutor>);
+pub struct Executor(pub Box<seedbox_driver_execution::driver_world::DriverExecutor>);
 impl Executor {
     fn backend(&self) -> &dyn ExecutionBackend {
         self.0.as_ref()
@@ -81,7 +81,7 @@ fn execution_backend_label(
 pub struct Preparer {
     pub inputs: OciPreparer,
     pub cancellation: CancellationToken,
-    pub driver_inputs: seedbox_application::runtime_assets::Inputs,
+    pub driver_inputs: seedbox_driver_execution::runtime_assets::Inputs,
 }
 impl Deref for Preparer {
     type Target = OciPreparer;
@@ -96,7 +96,7 @@ impl DerefMut for Preparer {
 }
 impl PreparationBackend for Preparer {
     fn validate_runtime_inputs(&self) -> Result<()> {
-        seedbox_application::driver_world::validate_oci_runtime(&self.inputs, &self.driver_inputs)
+        seedbox_application::preparation::validate_oci_runtime(&self.inputs, &self.driver_inputs)
     }
     fn prepare(&self, simulation: &Simulation, store: &ContentStore) -> Result<PreparedInputs> {
         let directory = tempfile::tempdir()?;
@@ -126,7 +126,7 @@ impl PreparationBackend for Preparer {
             &transport,
             &self.driver_inputs,
         )?;
-        seedbox_application::driver_world::retain_oci_prepared(
+        seedbox_application::preparation::retain_oci_prepared(
             &mut prepared,
             simulation,
             &self.driver_inputs,
@@ -164,7 +164,7 @@ fn assets_beside(
 pub fn driver_runtime(
     explicit: Option<std::path::PathBuf>,
     scratch: &Path,
-) -> Result<seedbox_application::runtime_assets::Runtime> {
+) -> Result<seedbox_driver_execution::runtime_assets::Runtime> {
     if explicit.is_some() {
         // Retained acquisition passes an exact archive. It must not consult
         // startup/default locations, even while choosing resolver arguments.
@@ -174,7 +174,7 @@ pub fn driver_runtime(
         None,
         std::env::var_os("SEEDBOX_ASSET_DIR")
             .is_none()
-            .then_some(seedbox_application::runtime_assets::EMBEDDED)
+            .then_some(seedbox_driver_execution::runtime_assets::EMBEDDED)
             .flatten(),
         &asset_directory(),
         scratch,
@@ -185,15 +185,15 @@ fn resolve_driver_runtime(
     embedded: Option<&[u8]>,
     directory: &Path,
     scratch: &Path,
-) -> Result<seedbox_application::runtime_assets::Runtime> {
+) -> Result<seedbox_driver_execution::runtime_assets::Runtime> {
     match (explicit, embedded) {
         (Some(path), _) => {
-            seedbox_application::runtime_assets::Runtime::from_archive(&path, scratch)
+            seedbox_driver_execution::runtime_assets::Runtime::from_archive(&path, scratch)
         }
         (None, Some(bytes)) => {
-            seedbox_application::runtime_assets::Runtime::from_bytes(bytes, scratch)
+            seedbox_driver_execution::runtime_assets::Runtime::from_bytes(bytes, scratch)
         }
-        (None, None) => seedbox_application::runtime_assets::Runtime::from_archive(
+        (None, None) => seedbox_driver_execution::runtime_assets::Runtime::from_archive(
             &directory.join("driver-runtime.tar.gz"),
             scratch,
         ),
@@ -206,17 +206,17 @@ pub fn doctor_kernel(
     scratch: &Path,
 ) -> Result<(
     std::path::PathBuf,
-    seedbox_application::runtime_assets::Inputs,
+    seedbox_driver_execution::runtime_assets::Inputs,
 )> {
-    let architecture = seedbox_application::driver_world::platform::Host::current()
-        .guest(seedbox_application::driver_world::DriverBackend::Pv)
+    let architecture = seedbox_driver_execution::driver_world::platform::Host::current()
+        .guest(seedbox_driver_execution::driver_world::DriverBackend::Pv)
         .ok_or_else(|| {
             seedbox_application::Error::Setup(
                 "Driver readiness requires Linux x86-64 or macOS aarch64".into(),
             )
         })?;
     let inputs = driver_runtime(None, scratch)?.select(
-        seedbox_application::runtime_assets::Backend::Pv,
+        seedbox_driver_execution::runtime_assets::Backend::Pv,
         architecture,
     )?;
     Ok((inputs.guest_assets.join("kernel"), inputs))
@@ -299,9 +299,9 @@ mod tests {
     #[test]
     fn backend_progress_names_tcg_from_profile_not_host() {
         use seedbox_application::{
-            driver_world::{DriverBackend, DriverExecutor},
             execution::{ExecutionProfile, SemanticParameters, WitnessMode},
         };
+        use seedbox_driver_execution::driver_world::{DriverBackend, DriverExecutor};
         for (cpu, tag) in [
             (DriverBackend::Pv, "driver-pv"),
             (DriverBackend::Tcg, "driver-tcg"),
@@ -331,7 +331,8 @@ mod tests {
 
     #[test]
     fn default_driver_selection_depends_only_on_the_supported_platform() {
-        let supported = seedbox_application::driver_world::platform::Host::current().runs_driver();
+        let supported =
+            seedbox_driver_execution::driver_world::platform::Host::current().runs_driver();
         for full_state in [false, true] {
             assert_eq!(crate::RuntimeInputs { full_state }.use_driver(), supported);
         }

@@ -1,4 +1,4 @@
-//! Application adapter for retained Driver executables. The server's backend
+//! Process adapter for retained Driver executables. The server's backend
 //! provider selects this only for its explicit recorded executable contract.
 #[cfg(test)]
 mod tests;

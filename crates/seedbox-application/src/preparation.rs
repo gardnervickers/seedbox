@@ -38,10 +38,10 @@ impl OciPreparer {
         store: &ContentStore,
         context: &PreparationContext,
         transport: &dyn crate::oci::ImageTransport,
-        runtime: &crate::runtime_assets::Inputs,
+        runtime: &seedbox_driver_execution::runtime_assets::Inputs,
     ) -> Result<PreparedInputs> {
         context.check()?;
-        crate::driver_world::validate_oci_runtime(self, runtime)?;
+        crate::driver_preparation::validate_oci_runtime(self, runtime)?;
         self.prepare_inner(simulation, store, context, transport, runtime)
     }
     fn prepare_inner(
@@ -50,7 +50,7 @@ impl OciPreparer {
         store: &ContentStore,
         context: &PreparationContext,
         transport: &dyn crate::oci::ImageTransport,
-        driver_runtime: &crate::runtime_assets::Inputs,
+        driver_runtime: &seedbox_driver_execution::runtime_assets::Inputs,
     ) -> Result<PreparedInputs> {
         let architecture = crate::guest::Architecture::from_profile(&self.profile)?;
         for (name, service) in &simulation.services {
@@ -190,21 +190,23 @@ impl OciPreparer {
                 })?
             }
         };
-        let driver_factory = crate::driver_world::preparation::OciBootFactory::new(
-            &self.engine,
-            driver_runtime,
-            wall_clock_epoch,
-            simulation.simulator.blocks_per_progress_call,
-        )?;
+        let driver_factory =
+            seedbox_driver_execution::driver_world::preparation::OciBootFactory::new(
+                &self.engine,
+                driver_runtime,
+                wall_clock_epoch,
+                simulation.simulator.blocks_per_progress_call,
+            )?;
         for (name, service, mounts, imported) in launches {
             context.progress(name, PreparationStage::Guest);
             context.check()?;
 
             let archive = temporary.path().join(format!("{name}.cpio"));
             let boot = driver_factory.boot(
-                crate::driver_world::preparation::OciBoot {
+                seedbox_driver_execution::driver_world::preparation::OciBoot {
                     name,
-                    image: &imported,
+                    filesystem: crate::driver_preparation::filesystem(&imported.rootfs)?,
+                    launch: &imported.image.launch,
                     simulation,
                     configs: &mounts,
                     hosts: &hosts,
@@ -212,7 +214,10 @@ impl OciPreparer {
                 store,
             )?;
             auxiliary.insert(
-                format!("{}{name}", crate::driver_world::preparation::FILESYSTEM),
+                format!(
+                    "{}{name}",
+                    seedbox_driver_execution::driver_world::preparation::FILESYSTEM
+                ),
                 boot.filesystem,
             );
             fs::write(&archive, boot.bytes)?;
@@ -314,3 +319,5 @@ fn validate_config_target(path: &str) -> Result<()> {
     }
     Ok(())
 }
+
+pub use crate::driver_preparation::{retain_oci_prepared, validate_oci_runtime};

@@ -179,7 +179,7 @@ fn driver_constructor_validates_contract_and_worker_range_without_running_tools(
 fn non_oracle_legacy_controller_refuses_before_retaining_engine_or_preparing_images() {
     let root = tempfile::tempdir().unwrap();
     let store_root = root.path().join("untouched-store");
-    let mut simulation = crate::config::parse("name: authority\nservices:\n  app: {image: example/app}\n  other: {image: example/other}\nx-seedbox:\n  version: 1\n  check: {service: app}\n", std::path::Path::new("/project/compose.yaml"), &Default::default()).unwrap();
+    let mut simulation = crate::fixture_simulation("app");
     simulation.control = Some(crate::config::Control {
         service: "other".into(),
     });

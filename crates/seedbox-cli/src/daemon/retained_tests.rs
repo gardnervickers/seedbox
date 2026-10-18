@@ -2,10 +2,10 @@
 use super::*;
 use clap::Parser;
 use seedbox_application::{
-    driver_world::{self, DriverExecutor},
     execution::{ExecutionProfile, SemanticParameters, WitnessMode},
     store::ContentDigest,
 };
+use seedbox_driver_execution::driver_world::{self, DriverExecutor};
 use seedbox_engine_protocol::driver_world as wire;
 use seedbox_test::process::Guarded;
 use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};

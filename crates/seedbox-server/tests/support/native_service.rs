@@ -58,19 +58,21 @@ use futures_util::{future::BoxFuture, StreamExt};
 use seedbox_api::{
     ComparisonStatus, ExecutionTermination, Phase, SimulationSpec, SubmitRequest, TestVerdict,
 };
-pub use seedbox_application::driver_world::DriverBackend;
 use seedbox_application::{
-    driver_world::{self, DriverExecutor},
     execution::{
         CancellationToken, ExecutionBackend, ExecutionProfile, PreparedImage, PreparedInputs,
         SemanticParameters, WitnessMode,
     },
     image::Launch,
-    process_lifetime::{reclaim_barrier, EXECUTION_LEASE_FILE, SESSION_LEASE_FILE},
-    runtime_assets::{self, Runtime},
     store::{ContentDigest, ContentStore},
 };
 use seedbox_client::Client;
+pub use seedbox_driver_execution::driver_world::DriverBackend;
+use seedbox_driver_execution::{
+    driver_world::{self, DriverExecutor},
+    process_lifetime::{reclaim_barrier, EXECUTION_LEASE_FILE, SESSION_LEASE_FILE},
+    runtime_assets::{self, Runtime},
+};
 use seedbox_engine_protocol::driver_world as wire;
 use seedbox_machine::{
     application::GuestEnvironment,
@@ -193,7 +195,7 @@ type WorkerFailureSetup = Arc<
     Mutex<
         Option<(
             PathBuf,
-            seedbox_application::process_lifetime::WorkerFailureInjector,
+            seedbox_driver_execution::process_lifetime::WorkerFailureInjector,
         )>,
     >,
 >;

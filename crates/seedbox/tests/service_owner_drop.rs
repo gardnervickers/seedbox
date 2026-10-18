@@ -8,10 +8,10 @@ use seedbox_application::{
         PreparedImage, PreparedInputs, SemanticParameters, StopReason, WitnessMode,
     },
     image::Launch,
-    process_lifetime::{
-        reclaim_barrier, LeasePaths, OwnedExecution, EXECUTION_LEASE_FILE, SESSION_LEASE_FILE,
-    },
     store::ContentStore,
+};
+use seedbox_driver_execution::process_lifetime::{
+    reclaim_barrier, LeasePaths, OwnedExecution, EXECUTION_LEASE_FILE, SESSION_LEASE_FILE,
 };
 use seedbox_server::{
     catalogue::Catalogue,

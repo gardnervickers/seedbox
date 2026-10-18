@@ -6,27 +6,28 @@ pub fn dispatch(args: impl IntoIterator<Item = OsString>) -> Option<ExitCode> {
     let mut args = args.into_iter();
     let _executable = args.next();
     #[cfg(unix)]
-    let remaining = match seedbox_application::process_lifetime::worker_arguments(args.collect()) {
-        Ok(arguments) => arguments,
-        Err(message) => return Some(error(&format!("execution lease: {message}"))),
-    };
+    let remaining =
+        match seedbox_driver_execution::process_lifetime::worker_arguments(args.collect()) {
+            Ok(arguments) => arguments,
+            Err(message) => return Some(error(&format!("execution lease: {message}"))),
+        };
     #[cfg(not(unix))]
     let remaining: Vec<_> = args.collect();
     let mut args = remaining.into_iter();
     match args.next().as_deref() {
         #[cfg(unix)]
-        Some(marker) if marker == seedbox_application::process_lifetime::MONITOR_ENTRY => {
+        Some(marker) if marker == seedbox_driver_execution::process_lifetime::MONITOR_ENTRY => {
             return Some(
-                match seedbox_application::process_lifetime::serve_monitor(args.collect()) {
+                match seedbox_driver_execution::process_lifetime::serve_monitor(args.collect()) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(message) => error(&format!("execution monitor: {message}")),
                 },
             );
         }
         #[cfg(unix)]
-        Some(marker) if marker == seedbox_application::process_lifetime::ANCHOR_ENTRY => {
+        Some(marker) if marker == seedbox_driver_execution::process_lifetime::ANCHOR_ENTRY => {
             return Some(
-                match seedbox_application::process_lifetime::serve_anchor() {
+                match seedbox_driver_execution::process_lifetime::serve_anchor() {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(message) => error(&format!("execution anchor: {message}")),
                 },
@@ -76,7 +77,8 @@ fn driver_world(arguments: Vec<OsString>) -> ExitCode {
         }
         let request = serde_json::from_slice(&bytes)
             .map_err(|error| format!("Driver request {}: {error}", path.display()))?;
-        seedbox_application::driver_world::run_request(&request).map_err(|error| error.to_string())
+        seedbox_driver_execution::driver_world::run_request(&request)
+            .map_err(|error| error.to_string())
     };
     match run() {
         Ok(report) => {

@@ -1,5 +1,5 @@
 //! Synthetic readiness tests; no KVM activity.
-use seedbox_application::{admission::*, execution::*};
+use seedbox_driver_execution::{admission::*, execution::*};
 
 fn observed() -> CoreObservation {
     let p = required_policy();

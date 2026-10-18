@@ -57,7 +57,7 @@ mod authority_tests;
 const OBJECT: &str = "driver-world/object/";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Closure {
+pub struct Closure {
     manifest: ContentDigest,
     executable: ContentDigest,
     objects: Vec<ContentDigest>,
@@ -126,7 +126,7 @@ impl Closure {
         }
         Ok(())
     }
-    pub(crate) fn from_inputs(inputs: &PreparedInputs) -> Result<Option<Self>> {
+    pub fn from_inputs(inputs: &PreparedInputs) -> Result<Option<Self>> {
         let Some(manifest) = inputs.auxiliary.get(MANIFEST) else {
             if inputs.profile.semantic_parameters.launch()
                 == Some(crate::engine::ExecutableKind::DriverWorld)
@@ -150,7 +150,7 @@ impl Closure {
         value.validate()?;
         Ok(Some(value))
     }
-    pub(crate) fn into_auxiliary(self) -> Result<BTreeMap<String, ContentDigest>> {
+    pub fn into_auxiliary(self) -> Result<BTreeMap<String, ContentDigest>> {
         self.validate()?;
         let mut entries = BTreeMap::from([
             (MANIFEST.into(), self.manifest),
@@ -443,4 +443,9 @@ fn visit(
         }
     }
     Ok(())
+}
+
+/// Adapt verified prepared inputs without selecting runtime paths or starting a worker.
+pub fn adapt_request(request: &ExecutionRequest<'_>, host_control: &Path) -> Result<wire::Request> {
+    self::request(request, host_control, None)
 }

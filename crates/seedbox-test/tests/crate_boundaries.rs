@@ -181,6 +181,7 @@ fn repository_dependency_direction() {
     let graph = local_graph(&manifest).unwrap_or_else(|error| panic!("{error}"));
     verify(&graph).unwrap_or_else(|error| panic!("{error}"));
     verify_exec(&graph).unwrap_or_else(|error| panic!("{error}"));
+    verify_driver_execution(&graph).unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// The exec-file lock is shared by production, worker and test code, so it
@@ -396,4 +397,163 @@ fn policy_required_edges_cannot_be_dev_only() {
     let mut graph = fixture();
     graph.get_mut(Path::new("seedbox-driver")).unwrap().edges[0].1 = Kind::Dev;
     assert!(verify(&graph).unwrap_err().contains("normal dependency"));
+}
+
+/// Driver execution is below application orchestration and the server. Neither
+/// production nor test edges may turn it into an application-internals adapter.
+fn verify_driver_execution(graph: &Graph) -> Result<(), String> {
+    let execution = named(graph, "seedbox-driver-execution")?;
+    let application = named(graph, "seedbox-application")?;
+    let server = named(graph, "seedbox-server")?;
+    for (source, target) in [
+        (application, execution),
+        (server, execution),
+        (execution, named(graph, "seedbox-driver")?),
+    ] {
+        if !graph[source]
+            .edges
+            .iter()
+            .any(|(path, kind)| path == target && *kind == Kind::Normal)
+        {
+            return Err(format!(
+                "{} must declare a normal dependency on {}",
+                graph[source].name, graph[target].name
+            ));
+        }
+    }
+    for target in [
+        "seedbox-driver",
+        "seedbox-machine",
+        "seedbox-machine-pv",
+        "seedbox-machine-tcg",
+    ] {
+        let target = named(graph, target)?;
+        if graph[application]
+            .edges
+            .iter()
+            .any(|(path, kind)| path == target && *kind != Kind::Dev)
+        {
+            return Err(format!(
+                "application must use Driver execution, not depend directly on {}",
+                graph[target].name
+            ));
+        }
+    }
+    let forbidden: BTreeSet<_> = [application, server, named(graph, "seedbox-cli")?]
+        .into_iter()
+        .collect();
+    let mut pending = VecDeque::from([(execution.clone(), graph[execution].name.clone())]);
+    let mut visited = BTreeSet::new();
+    while let Some((path, trace)) = pending.pop_front() {
+        if forbidden.contains(&path) {
+            return Err(format!(
+                "forbidden Driver execution dependency path: {trace}"
+            ));
+        }
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        for (next, kind) in &graph[&path].edges {
+            if *kind == Kind::Dev && &path != execution {
+                continue;
+            }
+            pending.push_back((
+                next.clone(),
+                format!("{trace} --{kind:?}--> {}", graph[next].name),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn service_fixture() -> Graph {
+    let mut graph = fixture();
+    for name in [
+        "seedbox-driver-execution",
+        "seedbox-application",
+        "seedbox-server",
+        "seedbox-cli",
+    ] {
+        graph.insert(
+            PathBuf::from(name),
+            Package {
+                name: name.into(),
+                edges: vec![],
+            },
+        );
+    }
+    for (from, to) in [
+        ("seedbox-application", "seedbox-driver-execution"),
+        ("seedbox-server", "seedbox-driver-execution"),
+        ("seedbox-driver-execution", "seedbox-driver"),
+    ] {
+        graph
+            .get_mut(Path::new(from))
+            .unwrap()
+            .edges
+            .push((PathBuf::from(to), Kind::Normal));
+    }
+    graph
+}
+
+#[test]
+fn driver_execution_policy_accepts_downward_service_edges() {
+    verify_driver_execution(&service_fixture()).unwrap();
+}
+
+#[test]
+fn driver_execution_policy_rejects_upward_edges_including_test_helpers() {
+    for target in ["seedbox-application", "seedbox-server", "seedbox-cli"] {
+        for kind in [Kind::Normal, Kind::Build, Kind::Dev] {
+            let mut graph = service_fixture();
+            graph
+                .get_mut(Path::new("seedbox-driver-execution"))
+                .unwrap()
+                .edges
+                .push((PathBuf::from("outside-workspace-helper"), kind));
+            graph
+                .get_mut(Path::new("outside-workspace-helper"))
+                .unwrap()
+                .edges
+                .push((PathBuf::from(target), Kind::Normal));
+            assert!(verify_driver_execution(&graph)
+                .unwrap_err()
+                .contains("forbidden Driver execution dependency path"));
+        }
+    }
+}
+
+#[test]
+fn application_cannot_reacquire_native_execution_dependencies() {
+    for target in [
+        "seedbox-driver",
+        "seedbox-machine",
+        "seedbox-machine-pv",
+        "seedbox-machine-tcg",
+    ] {
+        let mut graph = service_fixture();
+        graph
+            .get_mut(Path::new("seedbox-application"))
+            .unwrap()
+            .edges
+            .push((PathBuf::from(target), Kind::Normal));
+        assert!(verify_driver_execution(&graph)
+            .unwrap_err()
+            .contains("application must use Driver execution"));
+    }
+}
+
+#[test]
+fn service_execution_edges_cannot_be_dev_only() {
+    for source in [
+        "seedbox-application",
+        "seedbox-server",
+        "seedbox-driver-execution",
+    ] {
+        let mut graph = service_fixture();
+        graph.get_mut(Path::new(source)).unwrap().edges[0].1 = Kind::Dev;
+        assert!(verify_driver_execution(&graph)
+            .unwrap_err()
+            .contains("normal dependency"));
+    }
 }

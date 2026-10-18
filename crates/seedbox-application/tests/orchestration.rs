@@ -2283,23 +2283,23 @@ fn a_runtime_input_is_hashed_again_after_it_changes() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("engine");
     fs::write(&source, b"first engine").unwrap();
-    let first = seedbox_application::admission::file_digest(&source).unwrap();
+    let first = seedbox_driver_execution::admission::file_digest(&source).unwrap();
     assert_eq!(
-        seedbox_application::admission::file_digest(&source).unwrap(),
+        seedbox_driver_execution::admission::file_digest(&source).unwrap(),
         first
     );
     let store = ContentStore::new(directory.path().join("store"));
     assert_eq!(store.put_file(&source).unwrap(), first);
     // Rewritten in place, and replaced by a new file under the same name.
     fs::write(&source, b"second engine bytes").unwrap();
-    let second = seedbox_application::admission::file_digest(&source).unwrap();
+    let second = seedbox_driver_execution::admission::file_digest(&source).unwrap();
     assert_eq!(second, ContentDigest::of(b"second engine bytes"));
     assert_eq!(store.put_file(&source).unwrap(), second);
     let replacement = directory.path().join("replacement");
     fs::write(&replacement, b"third").unwrap();
     fs::rename(&replacement, &source).unwrap();
     assert_eq!(
-        seedbox_application::admission::file_digest(&source).unwrap(),
+        seedbox_driver_execution::admission::file_digest(&source).unwrap(),
         ContentDigest::of(b"third")
     );
 }
@@ -2449,4 +2449,57 @@ fn resume_preflight_runs_before_interventions_or_execution_inputs_are_materializ
     assert!(!run.directory.join("inputs").exists());
     assert!(!run.directory.join("output").exists());
     assert!(!run.directory.join("interventions.json").exists());
+}
+
+mod admission_ordering {
+    use app::{store::ContentDigest, Error, Result};
+    use seedbox_application as app;
+    use std::{collections::BTreeMap, path::Path};
+    #[test]
+    fn preflight_refusal_is_before_application_preparation_or_execution() {
+        use seedbox_application::{
+            config,
+            execution::*,
+            orchestration::{Orchestrator, RunOptions},
+            store::ContentStore,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Refused;
+        impl ExecutionBackend for Refused {
+            fn profile(&self) -> ExecutionProfile {
+                ExecutionProfile {
+                    backend: Backend::Other("fixture".into()),
+                    engine: ContentDigest::of(b"synthetic"),
+                    witness_mode: WitnessMode::Exits,
+                    semantic_parameters: SemanticParameters::new(512),
+                }
+            }
+            fn preflight(&self, _: Option<&Path>) -> Result<()> {
+                Err(Error::Setup("cannot open /dev/kvm: EACCES (13)".into()))
+            }
+            fn execute(&self, _: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+                panic!("must not execute after host refusal")
+            }
+        }
+        struct Prepare(AtomicUsize);
+        impl PreparationBackend for Prepare {
+            fn prepare(&self, _: &config::Simulation, _: &ContentStore) -> Result<PreparedInputs> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                panic!("must not prepare after host refusal")
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let prepare = Prepare(AtomicUsize::new(0));
+        let simulation=config::parse("name: host-refusal\nservices:\n  app: {image: fixture:synthetic}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n",&root.path().join("compose.yaml"),&BTreeMap::new()).unwrap();
+        let orchestrator = Orchestrator::new(
+            ContentStore::new(root.path().join("objects")),
+            root.path().join("runs"),
+        );
+        let error = orchestrator
+            .run(&simulation, RunOptions::default(), &prepare, &Refused)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("EACCES (13)"));
+        assert_eq!(prepare.0.load(Ordering::SeqCst), 0);
+    }
 }

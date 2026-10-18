@@ -418,8 +418,8 @@ impl From<TemplateArg> for Template {
 fn tcg_refusal() -> Error {
     Error::Setup(format!(
         "--backend tcg requires {}, and the normal Driver runtime",
-        seedbox_application::driver_world::platform::hosts_for(
-            seedbox_application::driver_world::DriverBackend::Tcg
+        seedbox_driver_execution::driver_world::platform::hosts_for(
+            seedbox_driver_execution::driver_world::DriverBackend::Tcg
         )
     ))
 }
@@ -544,7 +544,7 @@ struct RuntimeInputs {
 impl RuntimeInputs {
     // Only Driver hosts (Linux x86-64 or macOS aarch64) select it.
     fn use_driver(&self) -> bool {
-        seedbox_application::driver_world::platform::Host::current().runs_driver()
+        seedbox_driver_execution::driver_world::platform::Host::current().runs_driver()
     }
 
     fn driver_backends(
@@ -556,20 +556,20 @@ impl RuntimeInputs {
         engine: &Path,
         witness: WitnessMode,
     ) -> Result<(Preparer, Executor)> {
-        let executor = seedbox_application::driver_world::DriverExecutor::for_preparation(
+        let executor = seedbox_driver_execution::driver_world::DriverExecutor::for_preparation(
             simulation, witness,
         )?;
         let (backend, runtime_backend) = match simulation.simulator.backend {
             seedbox_spec::project::CpuBackend::Pv => (
-                seedbox_application::driver_world::DriverBackend::Pv,
-                seedbox_application::runtime_assets::Backend::Pv,
+                seedbox_driver_execution::driver_world::DriverBackend::Pv,
+                seedbox_driver_execution::runtime_assets::Backend::Pv,
             ),
             seedbox_spec::project::CpuBackend::Tcg => (
-                seedbox_application::driver_world::DriverBackend::Tcg,
-                seedbox_application::runtime_assets::Backend::Tcg,
+                seedbox_driver_execution::driver_world::DriverBackend::Tcg,
+                seedbox_driver_execution::runtime_assets::Backend::Tcg,
             ),
         };
-        let architecture = seedbox_application::driver_world::platform::Host::current()
+        let architecture = seedbox_driver_execution::driver_world::platform::Host::current()
             .guest(backend)
             .ok_or_else(|| {
                 Error::Setup("the Driver runtime requires Linux x86-64 or macOS aarch64".into())
@@ -898,7 +898,7 @@ fn doctor(json: bool) -> Result<u8> {
     if cancellation.is_cancelled() {
         return Err(Error::Setup("doctor cancelled".into()));
     }
-    let report = seedbox_application::driver_world::doctor(&engine, &kernel)?;
+    let report = seedbox_driver_execution::driver_world::doctor(&engine, &kernel)?;
     if json {
         output::json(&report)?;
     } else {

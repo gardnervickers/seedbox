@@ -1,6 +1,6 @@
 //! A real Driver worker failure while a public fault is active, not a test panic.
 use super::*;
-use seedbox_application::process_lifetime::WorkerFailureInjector;
+use seedbox_driver_execution::process_lifetime::WorkerFailureInjector;
 
 pub async fn pv_fault_worker_failure() {
     let processes = Arc::new(Mutex::new(None));

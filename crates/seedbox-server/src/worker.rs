@@ -1,8 +1,8 @@
 //! One serialized worker connection for playback and semantic interventions.
 //! The catalogue lock is never held during transport or journal I/O.
 use seedbox_api::{ControlCommand, ControlRequest, ControlState, Intervention, PlaybackStatus};
-use seedbox_application::host_control::{Client, ClientError};
 use seedbox_artifacts::interventions::Journal;
+use seedbox_driver_execution::host_control::{Client, ClientError};
 use seedbox_engine_protocol::host_control::{Command, Reply};
 use std::{path::PathBuf, time::Duration};
 

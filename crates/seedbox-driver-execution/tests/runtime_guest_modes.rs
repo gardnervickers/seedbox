@@ -1,7 +1,7 @@
 //! Portable composition regression: host modes on guest ELF input files do not
 //! determine the executable modes of the resulting guest initramfs entries.
 //! All binaries here are structural fixtures; none is executed.
-use seedbox_application::runtime_assets::{Backend, Runtime};
+use seedbox_driver_execution::runtime_assets::{Backend, Runtime};
 use seedbox_machine::{
     application::{boot_archive_configured, GuestBootstrap, GuestEnvironment, Kernel, NamedVolume},
     definition::{FilesystemArchive, Launch, PreparedApplication},

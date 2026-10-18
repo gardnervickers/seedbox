@@ -1,7 +1,7 @@
 //! Read-only observation of live processes holding this fixture's ownership
 //! leases. Saved PIDs never authorize signals or cleanup; only the real monitor
 //! receipt and lease barriers do that. pidfds prevent PID-reuse ambiguity.
-use seedbox_application::process_lifetime::{
+use seedbox_driver_execution::process_lifetime::{
     ANCHOR_ENTRY, EXECUTION_LEASE_FILE, MONITOR_ENTRY, SESSION_LEASE_FILE,
 };
 use std::{

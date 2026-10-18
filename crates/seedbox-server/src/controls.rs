@@ -1,7 +1,8 @@
 //! Server-owned retry driver. HTTP connection lifetime never owns a mutation.
 use crate::{catalogue::Error, manager::Manager};
 use seedbox_api::{ControlRequest, ControlState, SimulationId};
-use seedbox_application::{execution::CancellationToken, host_control::ClientError};
+use seedbox_application::execution::CancellationToken;
+use seedbox_driver_execution::host_control::ClientError;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, TryLockError},

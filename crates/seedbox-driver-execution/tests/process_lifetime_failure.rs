@@ -3,7 +3,7 @@
     feature = "test-support",
     any(target_os = "linux", target_os = "macos")
 ))]
-use seedbox_application::process_lifetime::{
+use seedbox_driver_execution::process_lifetime::{
     self, reclaim_barrier, LeasePaths, OwnedExecution, WorkerExit, WorkerFailureInjector,
 };
 use std::{fs, path::Path, sync::Arc, time::Duration};

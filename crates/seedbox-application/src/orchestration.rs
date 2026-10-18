@@ -656,6 +656,20 @@ fn performance_parameters(
 }
 
 #[cfg(test)]
+fn incomplete(reason: crate::execution::StopReason) -> crate::execution::ExecutionReport {
+    crate::execution::ExecutionReport {
+        reason,
+        workload_exit: None,
+        detail: None,
+        witness: None,
+        full_state: None,
+        host_wait_ns: 0,
+        simulated_time_ns: None,
+        faults: vec![],
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use seedbox_test_time::ControlledClock;
@@ -673,7 +687,7 @@ mod tests {
             (200, StopReason::Completed),
         ] {
             let waited = ControlledClock::new(Duration::from_millis(waited_ms));
-            let mut report = crate::worker_process::incomplete(StopReason::Completed);
+            let mut report = incomplete(StopReason::Completed);
             report.host_wait_ns = waited.now().as_nanos().try_into().unwrap();
             report.detail = Some("preserved backend report".into());
             apply_final_deadline(
@@ -701,7 +715,7 @@ mod tests {
             if cancelled {
                 cancellation.cancel();
             }
-            let mut report = crate::worker_process::incomplete(reason);
+            let mut report = incomplete(reason);
             report.detail = Some("preserved backend report".into());
             report.host_wait_ns = 123;
             apply_final_deadline(&mut report, &cancellation, 0, || {
@@ -716,7 +730,7 @@ mod tests {
 
     #[test]
     fn final_deadline_propagates_elapsed_failure_without_rewriting_the_report() {
-        let mut report = crate::worker_process::incomplete(StopReason::Completed);
+        let mut report = incomplete(StopReason::Completed);
         let error = apply_final_deadline(
             &mut report,
             &CancellationToken::default(),

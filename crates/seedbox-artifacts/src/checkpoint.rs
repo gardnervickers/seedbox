@@ -5,6 +5,9 @@ use crate::{Error, Result};
 use seedbox_engine_protocol::driver_world::Program;
 use seedbox_spec::definition::Start;
 
+mod capture;
+pub use capture::{capture_start, capture_start_observed};
+
 /// Validate a checkpoint's captured input cursor without a backend.
 pub fn validate(start: &Start) -> Result<()> {
     let Start::Checkpoint { manifest, .. } = start else {

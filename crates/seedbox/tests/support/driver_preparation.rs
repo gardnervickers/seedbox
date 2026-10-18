@@ -3,7 +3,7 @@
 #[path = "driver_interactions.rs"]
 mod interactions;
 
-use seedbox_application::process_lifetime::{reclaim_barrier, EXECUTION_LEASE_FILE};
+use seedbox_driver_execution::process_lifetime::{reclaim_barrier, EXECUTION_LEASE_FILE};
 use seedbox_test::process::Guarded;
 use seedbox_test_time::HangGuard;
 use std::{

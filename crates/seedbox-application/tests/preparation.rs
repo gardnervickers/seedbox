@@ -10,7 +10,7 @@ use seedbox_application::{
 use std::{collections::BTreeMap, fs, path::Path};
 struct FixturePreparer {
     inner: OciPreparer,
-    runtime: seedbox_application::runtime_assets::Inputs,
+    runtime: seedbox_driver_execution::runtime_assets::Inputs,
 }
 impl std::ops::Deref for FixturePreparer {
     type Target = OciPreparer;
@@ -38,7 +38,7 @@ impl FixturePreparer {
             transport,
             &self.runtime,
         )?;
-        seedbox_application::driver_world::retain_oci_prepared(
+        seedbox_application::preparation::retain_oci_prepared(
             &mut inputs,
             simulation,
             &self.runtime,
@@ -77,8 +77,9 @@ impl FixturePreparer {
     }
 }
 fn fixture(root: &Path) -> (FixturePreparer, config::Simulation, ContentStore) {
-    use seedbox_application::{driver_world::DriverExecutor, execution::ExecutionBackend};
-    let (_, runtime, _) = sdk(root, seedbox_application::runtime_assets::Backend::Pv);
+    use seedbox_application::execution::ExecutionBackend;
+    use seedbox_driver_execution::driver_world::DriverExecutor;
+    let (_, runtime, _) = sdk(root, seedbox_driver_execution::runtime_assets::Backend::Pv);
     let kernel = root.join("kernel");
     fs::copy(runtime.guest_assets.join("kernel"), &kernel).unwrap();
     let engine = std::env::current_exe().unwrap();
@@ -334,22 +335,20 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn ordinary_oci_output_retains_a_complete_driver_factory_without_source_paths() {
-    cold_driver_factory(seedbox_application::runtime_assets::Backend::Pv);
+    cold_driver_factory(seedbox_driver_execution::runtime_assets::Backend::Pv);
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn ordinary_tcg_oci_output_needs_no_pv_progress_and_retains_firmware() {
-    cold_driver_factory(seedbox_application::runtime_assets::Backend::Tcg);
+    cold_driver_factory(seedbox_driver_execution::runtime_assets::Backend::Tcg);
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn cold_driver_factory(backend: seedbox_application::runtime_assets::Backend) {
-    use seedbox_application::{
-        driver_world::{self, DriverExecutor},
-        execution::ExecutionBackend,
-        runtime_assets,
-    };
+fn cold_driver_factory(backend: seedbox_driver_execution::runtime_assets::Backend) {
+    use seedbox_application::execution::ExecutionBackend;
+    use seedbox_driver_execution::driver_world::{self, DriverExecutor};
+    use seedbox_driver_execution::runtime_assets;
     use seedbox_engine_protocol::driver_world as wire;
     struct Transport;
     impl ImageTransport for Transport {
@@ -449,8 +448,14 @@ fn cold_driver_factory(backend: seedbox_application::runtime_assets::Backend) {
         assert!(inputs.auxiliary.contains_key("guest-firmware"));
     }
     let original_boots = inputs.guests.clone();
-    driver_world::retain_oci_prepared(&mut inputs, &simulation, &selected, &store, &context)
-        .unwrap();
+    seedbox_application::preparation::retain_oci_prepared(
+        &mut inputs,
+        &simulation,
+        &selected,
+        &store,
+        &context,
+    )
+    .unwrap();
     for runtime_asset in [
         "guest-init",
         "guest-progress",
@@ -596,13 +601,13 @@ fn cold_driver_factory(backend: seedbox_application::runtime_assets::Backend) {
 
 fn sdk(
     root: &Path,
-    backend: seedbox_application::runtime_assets::Backend,
+    backend: seedbox_driver_execution::runtime_assets::Backend,
 ) -> (
-    seedbox_application::runtime_assets::Runtime,
-    seedbox_application::runtime_assets::Inputs,
+    seedbox_driver_execution::runtime_assets::Runtime,
+    seedbox_driver_execution::runtime_assets::Inputs,
     std::path::PathBuf,
 ) {
-    use seedbox_application::runtime_assets;
+    use seedbox_driver_execution::runtime_assets;
     let package = root.join("package.tar.gz");
     let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
         fs::File::create(&package).unwrap(),

@@ -1,6 +1,6 @@
 //! Session deletion requires ownership barriers, including after server death.
 use super::*;
-use seedbox_application::process_lifetime::{
+use seedbox_driver_execution::process_lifetime::{
     reclaim_barrier, EXECUTION_LEASE_FILE, SESSION_LEASE_FILE,
 };
 use std::{

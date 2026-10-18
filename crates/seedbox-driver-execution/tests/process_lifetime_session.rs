@@ -4,7 +4,9 @@
     feature = "test-support",
     any(target_os = "linux", target_os = "macos")
 ))]
-use seedbox_application::process_lifetime::{self, reclaim_barrier, LeasePaths, OwnedExecution};
+use seedbox_driver_execution::process_lifetime::{
+    self, reclaim_barrier, LeasePaths, OwnedExecution,
+};
 use std::{fs, os::fd::AsRawFd, path::Path, time::Duration};
 fn launch(root: &Path, session: Option<&Path>) -> std::io::Result<OwnedExecution> {
     let executable = Path::new(env!("CARGO_BIN_EXE_seedbox-lifetime-fixture"));

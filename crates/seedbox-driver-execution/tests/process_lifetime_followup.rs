@@ -3,7 +3,7 @@
     feature = "test-support",
     any(target_os = "linux", target_os = "macos")
 ))]
-use seedbox_application::process_lifetime::{self, reclaim_barrier, OwnedExecution};
+use seedbox_driver_execution::process_lifetime::{self, reclaim_barrier, OwnedExecution};
 use seedbox_test::process::Guarded;
 use std::{
     ffi::OsString,

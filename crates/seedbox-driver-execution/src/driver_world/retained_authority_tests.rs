@@ -154,7 +154,7 @@ fn backend_authority_checks_saved_inventory_in_runtime_and_both_launch_paths() {
             .collect();
         let output = root.path().join("out");
         fs::create_dir(&output).unwrap();
-        let simulation = crate::config::parse("name: metadata\nservices:\n  oracle: {image: fixture:metadata}\nx-seedbox:\n  version: 1\n  check: {service: oracle}\n", &root.path().join("compose.yaml"), &Default::default()).unwrap();
+        let simulation = crate::fixture_simulation("oracle");
         let cancellation = CancellationToken::default();
         let performance = BTreeMap::new();
         let request = ExecutionRequest {
@@ -196,5 +196,96 @@ fn backend_authority_checks_saved_inventory_in_runtime_and_both_launch_paths() {
         assert!(!output
             .join(crate::worker_process::WORKER_REQUEST_FILE)
             .exists());
+    }
+}
+
+#[test]
+fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
+    use crate::execution::PreparedImage;
+    use seedbox_artifacts::image::Launch;
+    for backend in [DriverBackend::Pv, DriverBackend::Tcg] {
+        let root = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(root.path().join("store"));
+        let (mut inputs, prepared, artifact) = fixture(root.path(), backend);
+        let digest = ContentDigest::try_from(artifact.sha256).unwrap();
+        inputs.wall_clock_epoch = Some(86400);
+        inputs.guests.insert("oracle".into(), digest.clone());
+        inputs.images.insert(
+            "oracle".into(),
+            PreparedImage {
+                manifest: digest.clone(),
+                config: digest.clone(),
+                layers: vec![],
+                launch: Launch {
+                    argv: prepared.oracle.process.argv.clone(),
+                    environment: Default::default(),
+                    working_dir: "/".into(),
+                    user: "".into(),
+                    volumes: vec![],
+                    disk_volumes: vec![],
+                },
+            },
+        );
+        retain_prepared(&mut inputs, &prepared, &store).unwrap();
+        let artifacts = inputs
+            .digests()
+            .enumerate()
+            .map(|(index, digest)| {
+                let path = store
+                    .materialize(digest, &root.path().join(format!("input-{index}")))
+                    .unwrap();
+                (digest.clone(), path)
+            })
+            .collect();
+        let output = root.path().join("output");
+        fs::create_dir(&output).unwrap();
+        let simulation = crate::fixture_simulation("oracle");
+        let cancellation = CancellationToken::default();
+        let performance = BTreeMap::from([("SEEDBOX_MACHINE_WORKERS".into(), "4".into())]);
+        let request = ExecutionRequest {
+            start_paused: true,
+            resume_checkpoint: None,
+            intervention_history: None,
+            replay_interventions: None,
+            observations: None,
+            seed: 42,
+            program: &[],
+            limits: &simulation.limits,
+            network: &simulation.network,
+            schedule: &simulation.schedule,
+            control: None,
+            check: &simulation.check,
+            prepared: &inputs,
+            artifacts: &artifacts,
+            output: &output,
+            cancellation: &cancellation,
+            performance_parameters: &performance,
+        };
+        let launch =
+            crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&request, None)
+                .unwrap();
+        let args: Vec<_> = launch
+            .command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            &args[..3],
+            ["__engine", crate::engine::DRIVER_WORLD_V1, "--owner-pipe"]
+        );
+        let retained: wire::Request = serde_json::from_slice(
+            &fs::read(output.join(crate::worker_process::WORKER_REQUEST_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            retained.prepared.oracle.process.argv,
+            prepared.oracle.process.argv
+        );
+        assert_eq!(retained.seed, 42);
+        assert_eq!(retained.machine_workers, 4);
+        assert!(retained.start_paused);
+        assert!(!output.join("world.json").exists());
+        drop(launch);
+        assert!(!output.join("host-control").exists());
     }
 }

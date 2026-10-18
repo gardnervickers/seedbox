@@ -3,7 +3,7 @@ use crate::{Error, Result};
 use seedbox_engine_protocol::driver_world as wire;
 use std::{fs, path::Path};
 
-pub(crate) fn restore_manifest(value: &serde_json::Value, controller: Option<&str>) -> Result<()> {
+pub fn restore_manifest(value: &serde_json::Value, controller: Option<&str>) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
     restore_bytes(&bytes, controller)
 }

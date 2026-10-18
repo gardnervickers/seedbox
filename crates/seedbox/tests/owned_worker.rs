@@ -116,7 +116,7 @@ fn eof_on_owner_pipe_stops_a_blocked_native_worker() {
 
 #[test]
 fn monitor_join_removes_parent_owned_native_scratch_after_exit_failure_cancel_and_drop() {
-    use seedbox_application::process_lifetime::{
+    use seedbox_driver_execution::process_lifetime::{
         reclaim_barrier, LeasePaths, OwnedExecution, EXECUTION_LEASE_FILE,
     };
     use std::{ffi::OsString, fs};

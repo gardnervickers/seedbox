@@ -1,58 +1,15 @@
-//! Bridge ordinary OCI preparation into the retained Driver factory closure.
-//! Image import and complete boot construction stay with OciPreparer; this
-//! retains their actual output, not a second image preparation implementation.
+//! Driver boot assembly and retention of explicit prepared factory inputs.
+//! The application supplies logical filesystem bytes and resolved launches; this
+//! module neither resolves OCI images nor imports application configuration.
 use crate::{
     config::Simulation,
     execution::PreparedInputs,
-    preparation::PreparationContext,
     runtime_assets::Inputs,
     store::{ContentDigest, ContentStore},
     Error, Result,
 };
 use seedbox_engine_protocol::driver_world as wire;
 use std::{collections::BTreeMap, fs, path::Path};
-
-// ContainerTransport's archive is ready for the legacy boot assembler: every
-// entry (and hard-link target) already carries its rootfs/ transport prefix.
-// The SDK takes an application-root tar and supplies its own rootfs/ prefix.
-// Rewrite metadata only; never extract guest paths onto the host.
-fn logical_archive(path: &Path) -> Result<Vec<u8>> {
-    fn relative(path: &Path) -> Result<&Path> {
-        let path = path.strip_prefix("rootfs").map_err(|_| {
-            Error::Integrity("OCI transport archive entry is outside rootfs".into())
-        })?;
-        if path
-            .components()
-            .any(|part| !matches!(part, std::path::Component::Normal(_)))
-        {
-            return Err(Error::Integrity("unsafe OCI transport archive path".into()));
-        }
-        Ok(if path.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            path
-        })
-    }
-    let mut input = tar::Archive::new(std::io::BufReader::new(fs::File::open(path)?));
-    let mut output = tar::Builder::new(Vec::new());
-    for entry in input.entries()? {
-        let mut entry = entry?;
-        let original = entry.path()?.into_owned();
-        let name = relative(&original)?;
-        let mut header = crate::container_images::export_header(&mut entry, name)?;
-        if let Some(link) = entry.link_name()?.map(|path| path.into_owned()) {
-            let target = if header.entry_type().is_hard_link() {
-                relative(&link)?
-            } else {
-                &link
-            };
-            output.append_link(&mut header, name, target)?;
-        } else {
-            output.append_data(&mut header, name, &mut entry)?;
-        }
-    }
-    Ok(output.into_inner()?)
-}
 
 fn artifact(path: &Path) -> Result<wire::Artifact> {
     let bytes = fs::read(path)?;
@@ -65,16 +22,17 @@ fn artifact(path: &Path) -> Result<wire::Artifact> {
             .into(),
     })
 }
-pub(crate) const FILESYSTEM: &str = "driver-world/filesystem/";
+pub const FILESYSTEM: &str = "driver-world/filesystem/";
 
-pub(crate) struct OciBoot<'a> {
+pub struct OciBoot<'a> {
     pub name: &'a str,
-    pub image: &'a crate::oci::ImportedImage,
+    pub filesystem: Vec<u8>,
+    pub launch: &'a seedbox_artifacts::image::Launch,
     pub simulation: &'a Simulation,
     pub configs: &'a BTreeMap<String, Vec<u8>>,
     pub hosts: &'a str,
 }
-pub(crate) struct BootArchive {
+pub struct BootArchive {
     pub bytes: Vec<u8>,
     pub filesystem: ContentDigest,
 }
@@ -86,7 +44,7 @@ enum BootFactory {
     Pv(seedbox_machine_pv::machine::pv::Factory),
     Tcg(seedbox_machine_tcg::machine::tcg::Factory),
 }
-pub(crate) struct OciBootFactory {
+pub struct OciBootFactory {
     #[cfg(any(
         all(target_os = "linux", target_arch = "x86_64"),
         all(target_os = "macos", target_arch = "aarch64")
@@ -94,7 +52,7 @@ pub(crate) struct OciBootFactory {
     factory: BootFactory,
 }
 impl OciBootFactory {
-    pub(crate) fn new(
+    pub fn new(
         engine: &Path,
         runtime: &Inputs,
         epoch: u32,
@@ -135,7 +93,7 @@ impl OciBootFactory {
             Err(Error::Setup(super::policy::PV_INCOMPLETE.into()))
         }
     }
-    pub(crate) fn boot(&self, request: OciBoot<'_>, store: &ContentStore) -> Result<BootArchive> {
+    pub fn boot(&self, request: OciBoot<'_>, store: &ContentStore) -> Result<BootArchive> {
         #[cfg(any(
             all(target_os = "linux", target_arch = "x86_64"),
             all(target_os = "macos", target_arch = "aarch64")
@@ -148,37 +106,11 @@ impl OciBootFactory {
                     NetworkInterface, PreparedApplication, Resources,
                 },
             };
-            let bytes = match &request.image.rootfs {
-                crate::oci::RootFilesystem::Archive(path) => logical_archive(path)?,
-                crate::oci::RootFilesystem::Directory(root) => {
-                    let mut paths = vec![];
-                    let mut pending = vec![root.to_owned()];
-                    while let Some(directory) = pending.pop() {
-                        for entry in fs::read_dir(directory)? {
-                            let entry = entry?;
-                            if entry.file_type()?.is_dir() {
-                                pending.push(entry.path());
-                            }
-                            paths.push(entry.path());
-                        }
-                    }
-                    paths.sort();
-                    let mut archive = tar::Builder::new(Vec::new());
-                    archive.follow_symlinks(false);
-                    for path in paths {
-                        archive.append_path_with_name(
-                            &path,
-                            path.strip_prefix(root)
-                                .map_err(|e| Error::Integrity(e.to_string()))?,
-                        )?;
-                    }
-                    archive.into_inner()?
-                }
-            };
+            let bytes = request.filesystem;
             let filesystem =
                 FilesystemArchive::new(bytes).map_err(|e| Error::Integrity(e.to_string()))?;
             let retained_filesystem = store.put(filesystem.as_bytes())?;
-            let launch = &request.image.image.launch;
+            let launch = request.launch;
             let volumes = super::volume_setup(launch.disk_volumes.iter());
             let index = request
                 .simulation
@@ -265,56 +197,17 @@ impl OciBootFactory {
         {
             let OciBoot {
                 name,
-                image,
+                filesystem,
+                launch,
                 simulation,
                 configs,
                 hosts,
             } = request;
-            let _ = (name, image, simulation, configs, hosts, store);
+            let _ = (name, filesystem, launch, simulation, configs, hosts, store);
             Err(Error::Setup(super::policy::PV_INCOMPLETE.into()))
         }
     }
 }
-/// Validate the explicit SDK bootstrap package without legacy-format assumptions
-/// and without opening a hypervisor, starting a worker or contacting OCI.
-pub fn validate_oci_runtime(
-    preparer: &crate::preparation::OciPreparer,
-    runtime: &Inputs,
-) -> Result<()> {
-    super::retained::validate_contract(&preparer.profile)?;
-    for (path, name) in [(&preparer.kernel, "kernel"), (&preparer.init, "init")] {
-        if fs::read(path)? != fs::read(runtime.guest_assets.join(name))? {
-            return Err(Error::Integrity(
-                "Driver OCI bootstrap differs from its selected runtime".into(),
-            ));
-        }
-    }
-    if runtime.qemu.is_none()
-        && fs::read(&preparer.progress)? != fs::read(runtime.guest_assets.join("progress.tar"))?
-    {
-        return Err(Error::Integrity(
-            "Driver PV progress differs from its selected runtime".into(),
-        ));
-    }
-    let expected = if runtime.qemu.is_some() {
-        "driver-tcg"
-    } else {
-        "driver-pv"
-    };
-    if preparer.profile.backend != expected {
-        return Err(Error::Integrity(
-            "Driver OCI backend differs from its selected runtime".into(),
-        ));
-    }
-    OciBootFactory::new(
-        &preparer.engine,
-        runtime,
-        crate::guest::MIN_WALL_CLOCK_EPOCH,
-        std::num::NonZeroU32::new(1).unwrap(),
-    )?;
-    Ok(())
-}
-
 /// Retain complete OCI boot archives, their logical filesystem views, and all
 /// stateless future-factory authority. No guest is constructed or executed.
 pub fn retain_oci_prepared(
@@ -322,10 +215,10 @@ pub fn retain_oci_prepared(
     simulation: &Simulation,
     runtime: &Inputs,
     store: &ContentStore,
-    context: &PreparationContext,
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     super::retained::validate_contract(&inputs.profile)?;
-    context.check()?;
+    check()?;
     let scratch = tempfile::tempdir()?;
     let engine = store.materialize(inputs.executable()?, &scratch.path().join("engine"))?;
     let root = &runtime.guest_assets;
@@ -337,7 +230,7 @@ pub fn retain_oci_prepared(
     let mut environments = BTreeMap::new();
     let mut boots = BTreeMap::new();
     for (index, (name, service)) in simulation.services.iter().enumerate() {
-        context.check()?;
+        check()?;
         let image = inputs
             .images
             .get(name)
@@ -487,7 +380,7 @@ pub fn retain_oci_prepared(
                 .collect(),
         },
     };
-    context.check()?;
+    check()?;
     super::retain_prepared(inputs, &prepared, store)?;
     inputs.auxiliary.retain(|name, _| {
         !matches!(
@@ -495,32 +388,5 @@ pub fn retain_oci_prepared(
             "guest-init" | "guest-progress" | "guest-firmware" | "guest-mke2fs"
         )
     });
-    context.check()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn transport_archive_requires_rooted_entries_and_hardlink_targets() {
-        for (name, link) in [("app", None), ("rootfs/link", Some("app"))] {
-            let file = tempfile::NamedTempFile::new().unwrap();
-            let mut tar = tar::Builder::new(file.reopen().unwrap());
-            let mut header = tar::Header::new_gnu();
-            header.set_uid(0);
-            header.set_gid(0);
-            header.set_mode(0o644);
-            header.set_mtime(0);
-            header.set_size(0);
-            if let Some(target) = link {
-                header.set_entry_type(tar::EntryType::Link);
-                tar.append_link(&mut header, name, target).unwrap();
-            } else {
-                tar.append_data(&mut header, name, std::io::empty())
-                    .unwrap();
-            }
-            tar.finish().unwrap();
-            assert!(logical_archive(file.path()).is_err(), "{name} {link:?}");
-        }
-    }
+    check()
 }

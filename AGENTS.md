@@ -16,6 +16,8 @@ Start with [README.md](README.md); [design](docs/design.md) and
 
 - `seedbox-server` owns resource lifetimes; only `seedbox-driver` coordinates service
   execution. `seedbox-machine` owns the contract/guest inputs; PV/TCG crates own leaves.
+- `seedbox-driver-execution` owns retained Driver adaptation, runtime packages, native
+  workers, transport and worker control. Application owns OCI preparation/orchestration.
 - `seedbox-cli` owns arguments, environment and output; libraries take explicit inputs.
   `seedbox` owns native worker dispatch/signing. Keep application independent of server/CLI.
 - `seedbox-engine-core` owns deterministic policies, not scheduling/devices;

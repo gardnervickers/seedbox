@@ -75,7 +75,7 @@ The [patch](../crates/seedbox-machine/guest/kernel/x86_64/apply.py) changes gues
 A held, admitted fault is capturable; a prepared but uncommitted intervention returns FaultPending.
 Capture needs paused, application-ready execution at a committed boundary with no outstanding I/O cost.
 It consumes the required commit handoff before optional publication, without waiting for observers or releasing held effects.
-The [service envelope](../crates/seedbox-application/src/driver_world/checkpoint.rs) retains input authority, not observation history.
+The [service envelope](../crates/seedbox-driver-execution/src/driver_world/checkpoint.rs) retains input authority, not observation history.
 
 ## Connection incarnations
 

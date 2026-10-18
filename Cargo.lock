@@ -1843,6 +1843,7 @@ dependencies = [
  "seedbox-artifacts",
  "seedbox-cli",
  "seedbox-client",
+ "seedbox-driver-execution",
  "seedbox-engine-core",
  "seedbox-engine-protocol",
  "seedbox-machine-pv",
@@ -1882,12 +1883,10 @@ dependencies = [
  "ocirender",
  "seedbox-artifacts",
  "seedbox-control",
- "seedbox-driver",
+ "seedbox-driver-execution",
  "seedbox-engine-core",
  "seedbox-engine-protocol",
  "seedbox-machine",
- "seedbox-machine-pv",
- "seedbox-machine-tcg",
  "seedbox-spec",
  "seedbox-test",
  "seedbox-test-time",
@@ -1947,6 +1946,7 @@ dependencies = [
  "seedbox-api",
  "seedbox-application",
  "seedbox-client",
+ "seedbox-driver-execution",
  "seedbox-engine-protocol",
  "seedbox-server",
  "seedbox-spec",
@@ -2002,6 +2002,32 @@ dependencies = [
  "serde_json",
  "sha2",
  "tar",
+]
+
+[[package]]
+name = "seedbox-driver-execution"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "hex",
+ "libc",
+ "seedbox-artifacts",
+ "seedbox-control",
+ "seedbox-driver",
+ "seedbox-engine-core",
+ "seedbox-engine-protocol",
+ "seedbox-machine",
+ "seedbox-machine-pv",
+ "seedbox-machine-tcg",
+ "seedbox-spec",
+ "seedbox-test",
+ "seedbox-test-time",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -2099,6 +2125,7 @@ dependencies = [
  "seedbox-client",
  "seedbox-control",
  "seedbox-driver",
+ "seedbox-driver-execution",
  "seedbox-engine-protocol",
  "seedbox-machine",
  "seedbox-machine-pv",

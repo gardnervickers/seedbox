@@ -527,7 +527,7 @@ fn durable_capture_exports_without_source_paths() {
     )
     .unwrap();
     let store = crate::store::ContentStore::new(root.path().join("store"));
-    let start = crate::definition::capture_start(&path, &output, &store).unwrap();
+    let start = seedbox_artifacts::checkpoint::capture_start(&path, &output, &store).unwrap();
     let seedbox_spec::definition::Start::Checkpoint { manifest, assets } = start else {
         panic!("expected checkpoint")
     };

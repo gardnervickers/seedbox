@@ -1,6 +1,5 @@
 [package]
 name = "seedbox-application"
-build = "build-runtime.rs"
 description = "Seedbox simulation configuration and orchestration"
 version.workspace = true
 edition.workspace = true
@@ -11,10 +10,7 @@ hex.workspace = true
 seedbox-artifacts.workspace = true
 seedbox-spec.workspace = true
 seedbox-engine-protocol.workspace = true
-seedbox-driver.workspace = true
-seedbox-machine.workspace = true
-seedbox-machine-pv.workspace = true
-seedbox-machine-tcg.workspace = true
+seedbox-driver-execution.workspace = true
 serde.workspace = true
 seedbox-control.workspace = true
 seedbox-engine-core.workspace = true
@@ -25,7 +21,7 @@ shell-words = "1"
 tempfile.workspace = true
 tar.workspace = true
 walkdir = "2"
-flate2 = "1"
+flate2.workspace = true
 xattr = "1"
 bollard.workspace = true
 futures-util.workspace = true
@@ -34,8 +30,6 @@ globset = "0.4"
 tokio.workspace = true
 libc.workspace = true
 ocirender = "0.2.2"
-
-
 
 
 [dev-dependencies]
@@ -48,16 +42,8 @@ seedbox-machine = { workspace = true, features = ["test-support"] }
 linux-oci = ["oci-tests"]
 
 [features]
-test-support = []
 oci-tests = []
 
 [[test]]
 name = "oci_engine"
 required-features = ["oci-tests"]
-
-[[bin]]
-name = "seedbox-lifetime-fixture"
-path = "tests/support/lifetime_fixture.rs"
-required-features = ["test-support"]
-test = false
-bench = false

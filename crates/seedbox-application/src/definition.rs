@@ -114,7 +114,7 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
     let settings = settings
         .as_object_mut()
         .ok_or_else(|| Error::Integrity("runtime.execution must be an inline object".into()))?;
-    let driver_closure: Option<crate::driver_world::retained::Closure> = settings
+    let driver_closure: Option<seedbox_driver_execution::driver_world::retained::Closure> = settings
         .remove("driver_world")
         .map(serde_json::from_value)
         .transpose()?;
@@ -136,14 +136,16 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
             .as_ref()
             .ok_or_else(|| Error::Integrity("Driver execution descriptor missing".into()))?;
         if descriptor.guest_arch
-            != crate::driver_world::platform::architecture_name(definition.architecture)
+            != seedbox_driver_execution::driver_world::platform::architecture_name(
+                definition.architecture,
+            )
         {
             return Err(Error::Setup(
                 "architecture differs from runtime execution guest ISA".into(),
             ));
         }
         if let Start::Checkpoint { manifest, .. } = &definition.start {
-            crate::driver_world::preflight::restore_manifest(
+            seedbox_driver_execution::driver_world::preflight::restore_manifest(
                 manifest,
                 definition
                     .simulator
@@ -246,82 +248,7 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
 }
 
 /// Capture a backend checkpoint's binary files while retaining its structured state inline.
-pub fn capture_start(
-    path: &std::path::Path,
-    owned: &std::path::Path,
-    store: &ContentStore,
-) -> Result<Start> {
-    capture_start_observed(path, owned, store, &mut |_| Ok(()))
-}
-
-/// Capture with cooperative byte-work observation, including verification passes.
-/// An observer error stops capture without returning a partial starting state.
-/// Already retained immutable assets remain reusable in the shared store.
-pub fn capture_start_observed(
-    path: &std::path::Path,
-    owned: &std::path::Path,
-    store: &ContentStore,
-    progress: &mut impl FnMut(u64) -> std::io::Result<()>,
-) -> Result<Start> {
-    progress(0)?;
-    let mut manifest: serde_json::Value = serde_json::from_reader(std::fs::File::open(path)?)?;
-    let owned = owned.canonicalize()?;
-    let mut assets = BTreeMap::new();
-    fn visit(
-        value: &mut serde_json::Value,
-        owned: &std::path::Path,
-        store: &ContentStore,
-        assets: &mut BTreeMap<String, Asset>,
-        progress: &mut impl FnMut(u64) -> std::io::Result<()>,
-    ) -> Result<()> {
-        progress(0)?;
-        match value {
-            serde_json::Value::Object(values)
-                if values.get("sha256").and_then(|v| v.as_str()).is_some()
-                    && (values.get("artifact").and_then(|v| v.as_str()).is_some()
-                        || values.get("path").and_then(|v| v.as_str()).is_some()) =>
-            {
-                let key = if values.contains_key("artifact") {
-                    "artifact"
-                } else {
-                    "path"
-                };
-                let text = values[key].as_str().ok_or_else(|| {
-                    Error::Integrity("checkpoint binary path is not a string".into())
-                })?;
-                let path = std::path::Path::new(text).canonicalize()?;
-                if !path.starts_with(owned) {
-                    return Err(Error::Integrity(
-                        "checkpoint binary refers outside its owned execution directory".into(),
-                    ));
-                }
-                let name = format!("state-{}", assets.len() + 1);
-                assets.insert(
-                    name.clone(),
-                    asset(&store.put_file_observed(&path, progress)?),
-                );
-                values.insert(key.into(), format!("asset:{name}").into());
-                for value in values.values_mut() {
-                    visit(value, owned, store, assets, progress)?;
-                }
-            }
-            serde_json::Value::Array(values) => {
-                for v in values {
-                    visit(v, owned, store, assets, progress)?;
-                }
-            }
-            serde_json::Value::Object(values) => {
-                for v in values.values_mut() {
-                    visit(v, owned, store, assets, progress)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-    visit(&mut manifest, &owned, store, &mut assets, progress)?;
-    Ok(Start::Checkpoint { manifest, assets })
-}
+pub use seedbox_artifacts::checkpoint::{capture_start, capture_start_observed};
 
 pub fn materialize_start(
     definition: &Definition,
@@ -335,7 +262,7 @@ pub fn materialize_start(
     if manifest.get("contract").and_then(|value| value.as_str())
         == Some(seedbox_engine_protocol::driver_world::CONTRACT)
     {
-        crate::driver_world::preflight::restore_manifest(
+        seedbox_driver_execution::driver_world::preflight::restore_manifest(
             manifest,
             definition
                 .simulator
@@ -423,7 +350,9 @@ pub fn materialize_start(
 // execution; an auxiliary-only manifest otherwise disappears during that step.
 pub fn execution_settings_with_inputs(inputs: &PreparedInputs) -> Result<serde_json::Value> {
     let mut settings = execution_settings(&inputs.profile)?;
-    if let Some(closure) = crate::driver_world::retained::Closure::from_inputs(inputs)? {
+    if let Some(closure) =
+        seedbox_driver_execution::driver_world::retained::Closure::from_inputs(inputs)?
+    {
         settings
             .as_object_mut()
             .ok_or_else(|| Error::Integrity("runtime execution settings are not an object".into()))?
@@ -446,6 +375,55 @@ pub fn execution_settings(profile: &ExecutionProfile) -> Result<serde_json::Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seedbox_engine_protocol::driver_world as wire;
+    fn resume_manifest(policy: Option<wire::BackendPolicy>) -> serde_json::Value {
+        let artifact = wire::Artifact {
+            sha256: "00".repeat(32),
+            length: 0,
+            artifact: "asset:body".into(),
+        };
+        serde_json::to_value(wire::Checkpoint {
+            contract: wire::CONTRACT.into(),
+            version: wire::ENVELOPE_VERSION,
+            inventory: wire::Inventory::Pv {
+                policy,
+                executable: artifact.clone(),
+                kernel: artifact.clone(),
+                init: artifact.clone(),
+                command_line: artifact.clone(),
+                progress: artifact.clone(),
+                runtime: artifact.clone(),
+                formatter: None,
+                environments: Default::default(),
+                boot_archives: Default::default(),
+                blocks_per_progress_call: std::num::NonZeroU32::new(32).unwrap(),
+                epoch_seconds: 86400,
+            },
+            driver: artifact.clone(),
+            machines: vec![artifact],
+            state: wire::State {
+                world: wire::World {
+                    seed: 123,
+                    machine_names: vec!["oracle".into()],
+                    input_program: Default::default(),
+                    intervention_next: 0,
+                    readiness: wire::Readiness {
+                        initial: vec!["oracle".into()],
+                        seen: vec!["oracle".into()],
+                        latched: true,
+                    },
+                    publication: Default::default(),
+                    position: seedbox_engine_protocol::host_control::BoundaryPosition {
+                        boundary_index: 1,
+                        completed_rounds: 1,
+                        simulated_time_ns: 1_000_000,
+                    },
+                },
+            },
+        })
+        .unwrap()
+    }
+
     fn fixture() -> (tempfile::TempDir, ContentStore, Definition, ContentDigest) {
         let temporary = tempfile::tempdir().unwrap();
         let store = ContentStore::new(temporary.path().join("store"));
@@ -579,16 +557,17 @@ mod tests {
             timer_jitter_ns: u64::MAX,
             ..Default::default()
         };
-        let manifest = crate::driver_world::preflight::tests::manifest(Some(policy));
-        let expected = crate::driver_world::preflight::restore_manifest(&manifest, None)
-            .unwrap_err()
-            .to_string();
+        let manifest = resume_manifest(Some(policy));
+        let expected =
+            seedbox_driver_execution::driver_world::preflight::restore_manifest(&manifest, None)
+                .unwrap_err()
+                .to_string();
         definition.start = Start::Checkpoint {
             manifest,
             assets: BTreeMap::from([("body".into(), Asset(format!("sha256:{}", "11".repeat(32))))]),
         };
         let mut semantic = crate::execution::SemanticParameters::new();
-        semantic.engine = Some(crate::driver_world::DriverExecutor::descriptor("x86_64"));
+        semantic.engine = Some(seedbox_driver_execution::driver_world::DriverExecutor::descriptor("x86_64"));
         let profile = ExecutionProfile {
             backend: "driver-pv".into(),
             witness_mode: crate::execution::WitnessMode::Exits,
@@ -617,7 +596,7 @@ mod tests {
         }
         let (root, store, mut definition, body) = fixture();
         definition.start = Start::Checkpoint {
-            manifest: crate::driver_world::preflight::tests::manifest(None),
+            manifest: resume_manifest(None),
             assets: BTreeMap::from([("body".into(), asset(&body))]),
         };
         let output = root.path().join("allowed");
@@ -654,7 +633,7 @@ mod tests {
     #[test]
     fn driver_closure_survives_definition_roundtrip_and_actual_launch_request_adapts_inline_edits()
     {
-        use crate::driver_world::DriverExecutor;
+        use seedbox_driver_execution::driver_world::DriverExecutor;
         use seedbox_engine_protocol::driver_world as wire;
         let (temporary, store, mut definition, _) = fixture();
         let mut inputs = prepared(&definition, &store).unwrap();
@@ -726,7 +705,12 @@ mod tests {
                 ..Default::default()
             },
         };
-        crate::driver_world::retain_prepared(&mut inputs, &prepared_world, &store).unwrap();
+        seedbox_driver_execution::driver_world::retain_prepared(
+            &mut inputs,
+            &prepared_world,
+            &store,
+        )
+        .unwrap();
         definition.runtime.execution = execution_settings_with_inputs(&inputs).unwrap();
         definition.oracle.boot_archive = asset(&rootfs);
         assert!(prepared(&definition, &store)
@@ -751,7 +735,7 @@ mod tests {
                 .is_none()));
         assert_eq!(roundtrip.guests["oracle"], rootfs);
         assert_eq!(
-            crate::driver_world::runtime_digest(&roundtrip, &store).unwrap(),
+            seedbox_driver_execution::driver_world::runtime_digest(&roundtrip, &store).unwrap(),
             ContentDigest::of(b"fixture runtime")
         );
         let mut missing_runtime = roundtrip.clone();
@@ -760,7 +744,7 @@ mod tests {
                 || digest != &ContentDigest::of(b"fixture runtime")
         });
         assert!(
-            crate::driver_world::runtime_digest(&missing_runtime, &store)
+            seedbox_driver_execution::driver_world::runtime_digest(&missing_runtime, &store)
                 .unwrap_err()
                 .to_string()
                 .contains("retained input closure")
@@ -814,25 +798,11 @@ mod tests {
             cancellation: &cancellation,
             performance_parameters: &performance,
         };
-        let launch =
-            crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&request, None)
-                .unwrap();
-        let args: Vec<_> = launch
-            .command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(
-            &args[..3],
-            ["__engine", crate::engine::DRIVER_WORLD_V1, "--owner-pipe"]
-        );
-        assert!(
-            !output.join("world.json").exists(),
-            "new Driver runs must not construct a legacy WorldConfig"
-        );
-        let worker: wire::Request =
-            serde_json::from_slice(&std::fs::read(output.join("worker-request.json")).unwrap())
-                .unwrap();
+        let worker = seedbox_driver_execution::driver_world::retained::adapt_request(
+            &request,
+            &output.join("control"),
+        )
+        .unwrap();
         assert_eq!(
             worker.prepared.oracle.process.argv,
             definition.oracle.process.argv
@@ -854,7 +824,6 @@ mod tests {
             !policy.boot_end_evidence,
             "service does not request eager boot-end reports"
         );
-        drop(launch);
 
         // Audit regression: adapt the actual retained manifest with each existing
         // policy authority. No new public speed setting or normalization of the
@@ -906,10 +875,9 @@ mod tests {
                 program: &pass_program,
                 ..request
             };
-            let adapted = crate::driver_world::retained::request(
+            let adapted = seedbox_driver_execution::driver_world::retained::adapt_request(
                 &supplied_request,
                 &output.join("audit-control"),
-                None,
             )
             .unwrap();
             let resolved = adapted.prepared.inventory.backend_policy().unwrap();
@@ -989,12 +957,11 @@ mod tests {
             output: &output,
             ..request
         };
-        let launch =
-            crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&boot_request, None)
-                .unwrap();
-        let worker: wire::Request =
-            serde_json::from_slice(&std::fs::read(output.join("worker-request.json")).unwrap())
-                .unwrap();
+        let worker = seedbox_driver_execution::driver_world::retained::adapt_request(
+            &boot_request,
+            &output.join("control"),
+        )
+        .unwrap();
         let wire::Inventory::Pv { boot_archives, .. } = &worker.prepared.inventory else {
             panic!("expected PV fixture")
         };
@@ -1012,7 +979,6 @@ mod tests {
         std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
         assert_eq!(bytes, b"replacement application bytes");
         assert!(entries.next().is_none());
-        drop(launch);
 
         // TCG launch adaptation also preserves paired complete boot authority.
         // This serializes actual worker requests only: no executable/VM starts.
@@ -1063,7 +1029,12 @@ mod tests {
             tcg_inputs
                 .guests
                 .insert("oracle".into(), replacement.clone());
-            crate::driver_world::retain_prepared(&mut tcg_inputs, &world, &store).unwrap();
+            seedbox_driver_execution::driver_world::retain_prepared(
+                &mut tcg_inputs,
+                &world,
+                &store,
+            )
+            .unwrap();
             let mut tcg_definition = definition.clone();
             tcg_definition.architecture = seedbox_spec::definition::Architecture::X86_64;
             tcg_definition.simulator.disk.torn_writes = true;
@@ -1094,14 +1065,11 @@ mod tests {
                 control: simulation.control.as_ref(),
                 ..request
             };
-            let launch = crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(
+            let worker = seedbox_driver_execution::driver_world::retained::adapt_request(
                 &tcg_request,
-                None,
+                &output.join("control"),
             )
             .unwrap();
-            let worker: wire::Request =
-                serde_json::from_slice(&std::fs::read(output.join("worker-request.json")).unwrap())
-                    .unwrap();
             let wire::Inventory::Tcg {
                 policy,
                 boot_archives,
@@ -1140,7 +1108,6 @@ mod tests {
                 assert_eq!(std::fs::read(&complete.artifact).unwrap(), boot);
             }
             assert!(!output.join("world.json").exists());
-            drop(launch);
         }
     }
 

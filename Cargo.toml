@@ -17,6 +17,7 @@ seedbox-cli = { path = "crates/seedbox-cli" }
 seedbox-machine = { path = "crates/seedbox-machine" }
 seedbox-machine-pv = { path = "crates/seedbox-machine-pv" }
 seedbox-machine-tcg = { path = "crates/seedbox-machine-tcg" }
+seedbox-driver-execution = { path = "crates/seedbox-driver-execution" }
 seedbox-driver = { path = "crates/seedbox-driver" }
 bollard = { version = "0.21", features = ["buildkit", "chrono"] }
 hex = "0.4"
@@ -35,6 +36,7 @@ futures-util = "0.3"
 getrandom = "0.4"
 tempfile = "3"
 tar = "0.4"
+flate2 = "1"
 serde_yaml_ng = "0.10"
 seedbox-engine-protocol = { path = "crates/seedbox-engine-protocol" }
 clap = { version = "4", features = ["derive", "env"] }

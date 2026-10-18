@@ -1,0 +1,42 @@
+[package]
+name = "seedbox-driver-execution"
+description = "Retained Seedbox Driver execution, workers and control transport"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+build = "build-runtime.rs"
+
+[dependencies]
+seedbox-artifacts.workspace = true
+seedbox-spec.workspace = true
+seedbox-engine-protocol.workspace = true
+seedbox-driver.workspace = true
+seedbox-machine.workspace = true
+seedbox-machine-pv.workspace = true
+seedbox-machine-tcg.workspace = true
+seedbox-control.workspace = true
+seedbox-engine-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+libc.workspace = true
+tempfile.workspace = true
+tar.workspace = true
+flate2.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+seedbox-test.workspace = true
+seedbox-test-time.workspace = true
+seedbox-machine = { workspace = true, features = ["test-support"] }
+
+[features]
+test-support = []
+
+[[bin]]
+name = "seedbox-lifetime-fixture"
+path = "tests/support/lifetime_fixture.rs"
+required-features = ["test-support"]
+test = false
+bench = false
