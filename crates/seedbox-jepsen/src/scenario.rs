@@ -461,6 +461,27 @@ fn etcd_current() -> Vec<Scenario> {
             snapshots,
         ));
         specs.push((
+            format!("etcd{short}-crash-all-snapshot"),
+            format!("etcd{short}-crash-all with etcd{short}-register-snapshot's settings: with a fault\nprofile leaving a member behind, it catches up from a snapshot the leader sends,\nand the next coordinated power loss can land just after it adopts that snapshot\n(etcd#22498: the adopting rename is not synced, while the old database already\nrecords the snapshot's index)."),
+            version,
+            vec![register, "--crash-all-every", "10"],
+            snapshots,
+        ));
+        specs.push((
+            format!("etcd{short}-register-disk"),
+            format!("etcd{short}-register for profiles that corrupt or fail a member's disk\n(corruption-faults.yaml, eio-faults.yaml): a member whose etcd detects the damage\nand refuses to start does not fail the run, as stopping is the safe outcome; one\nthat runs but never serves, or serves wrong data, still does."),
+            version,
+            vec![register, "--tolerate-exits"],
+            &[],
+        ));
+        specs.push((
+            format!("etcd{short}-crash-all-disk"),
+            format!("etcd{short}-crash-all for disk-fault profiles: coordinated power loss makes\nmembers read back what a corrupting or failing disk wrote. A member that refuses\nto start is tolerated, as in etcd{short}-register-disk."),
+            version,
+            vec![register, "--crash-all-every", "15", "--tolerate-exits"],
+            &[],
+        ));
+        specs.push((
             format!("etcd{short}-register-serializable"),
             format!("etcd{short}-register with serializable reads, which may be stale by design: they\nstay out of the linearizability check (writes, compare-and-sets and final reads\nstill take part) but must return a value some write could have produced, at a\nrevision no member gave another value."),
             version,

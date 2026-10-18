@@ -1,3 +1,4 @@
+# Use it with the -disk scenarios (etcd36-register-disk, etcd37-crash-all-disk, ...).
 # Failed disk reads and writes (EIO) on any one member at a time, restricted to
 # requests clear of ext4's metadata (an unscoped error also fails the journal and
 # leaves the filesystem unusable), with crashes, pauses and partitions. A write

@@ -12,7 +12,7 @@
 //! every member must serve reads again, a final read covers every key, and
 //! the members' `HashKV` must agree.
 use super::etcd_gateway::{b64, number, unb64};
-use super::etcd_register::{call, compare_hashes, recover, Recovery, Reply};
+use super::etcd_register::{call, compare_hashes, recover, recovery_text, Reply};
 use super::postgres::{report, Keys};
 use crate::checker::elle::{self, Atom, Mop, TxnOp};
 use crate::kit::{self, emit, Rng};
@@ -58,6 +58,10 @@ pub struct Args {
     /// Seconds after the quiet period that every member has to serve a read.
     #[arg(long, default_value_t = 120)]
     pub recover: u64,
+    /// A member whose etcd refuses to start after the faults does not fail
+    /// the run (for profiles that corrupt or fail its disk).
+    #[arg(long)]
+    pub tolerate_exits: bool,
     /// Anomaly examples printed per type.
     #[arg(long, default_value_t = 5)]
     pub examples: usize,
@@ -313,11 +317,8 @@ pub fn run(args: Args) -> u8 {
     }
     kit::evidence("progress", json!({"errors": *run.errors.lock().unwrap()}));
     kit::pause(args.quiet as f64);
-    let Recovery {
-        live,
-        down,
-        restarted,
-    } = recover(&args.members, args.recover, "final", true);
+    let recovery = recover(&args.members, args.recover, "final", true);
+    let live = recovery.live.clone();
     // A final read of every key touched, in read-only transactions of at
     // most 100 keys (etcd allows 128 operations per txn by default).
     let touched: Vec<i64> = run.keys.lock().unwrap().touched.iter().copied().collect();
@@ -377,19 +378,9 @@ pub fn run(args: Args) -> u8 {
     if !garbage.is_empty() {
         text.push_str(&format!("; values no client wrote: {garbage:?}"));
     }
-    if !restarted.is_empty() {
-        text.push_str(&format!(
-            "; {} restarted after not serving",
-            restarted.join(", ")
-        ));
-    }
-    if !down.is_empty() {
-        text.push_str(&format!(
-            "; {} never served a read again after the faults ended",
-            down.join(", ")
-        ));
-    }
-    if !result.valid || diverged.is_some() || !down.is_empty() || !garbage.is_empty() {
+    let (recovered, unrecovered) = recovery_text(&recovery, args.tolerate_exits);
+    text.push_str(&recovered);
+    if !result.valid || diverged.is_some() || unrecovered || !garbage.is_empty() {
         kit::verdict(kit::VIOLATION, &text)
     } else if committed <= 1 || !final_read {
         kit::verdict(

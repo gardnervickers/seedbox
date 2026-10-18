@@ -76,6 +76,11 @@ pub struct Args {
     pub timeout: f64,
     #[arg(long, value_enum, default_value_t = Reads::Linearizable)]
     pub reads: Reads,
+    /// A member whose etcd refuses to start after the faults (exits again
+    /// after a power cycle) does not fail the run: for profiles that corrupt
+    /// or fail its disk, where etcd stopping is the safe outcome.
+    #[arg(long)]
+    pub tolerate_exits: bool,
     /// Seconds after the final reads that each member's watch has to catch
     /// up to the last revision; 0 runs no watchers.
     #[arg(long, default_value_t = 30)]
@@ -420,17 +425,44 @@ fn read_probe(member: &str, key: &str, timeout: f64) -> Reply {
 pub(crate) struct Recovery {
     pub live: Vec<String>,
     pub down: Vec<String>,
-    /// Members still not serving halfway through that the World restarted.
+    /// Members whose etcd had exited halfway through and that were power
+    /// cycled to start it again.
     pub restarted: Vec<String>,
+    /// Members still down whose etcd had exited again by the end: they
+    /// refuse to start (etcd fails stop on a corrupt WAL or snapshot).
+    pub exited: Vec<String>,
+}
+
+/// Each machine's application state as the World reports it (`Running`,
+/// `Exited(1)`, ...).
+fn states(ctl: &mut kit::Ctl, label: &str) -> BTreeMap<String, String> {
+    let Ok(Some(world)) = ctl.inspect() else {
+        return BTreeMap::new();
+    };
+    let states = world
+        .get("machines")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            Some((
+                m["name"].as_str()?.to_string(),
+                m["state"].as_str()?.to_string(),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    kit::evidence("states", json!({"label": label, "states": states}));
+    states
 }
 
 /// Wait up to `seconds` for every member to serve a linearizable read, and
 /// split them into those that did and those that never did. With `restart`,
-/// halfway through, start the etcd process again on every member still not
-/// serving, as a service manager would after an exit (etcd exits on a disk
-/// error by design); a member that still never serves fails the run. The
-/// World connection opens only then: the guest serves one control client at
-/// a time, and the quiet request and power-loss schedule need it too.
+/// halfway through, power-cycle every member still not serving whose etcd
+/// has exited, as a service manager would start it again (etcd exits on a
+/// disk error by design; the World restarts only processes it stopped). A
+/// member that still never serves fails the run. The World connection opens
+/// only then: the guest serves one control client at a time, and the quiet
+/// request and power-loss schedule need it too.
 pub(crate) fn recover(members: &[String], seconds: u64, label: &str, restart: bool) -> Recovery {
     let start = Instant::now();
     let mut waiting = members.to_vec();
@@ -451,15 +483,17 @@ pub(crate) fn recover(members: &[String], seconds: u64, label: &str, restart: bo
         if restart && start.elapsed() >= Duration::from_secs(seconds / 2) {
             restart = false;
             if let Ok(mut ctl) = kit::connect_world(None) {
-                let ctl = &mut ctl;
-                if let Ok(Some(world)) = ctl.inspect() {
-                    kit::evidence("inspect", json!({"label": label, "world": world}));
-                }
+                let states = states(&mut ctl, label);
                 for member in &waiting {
-                    let result = ctl.restart(member);
+                    let state = states.get(member).cloned().unwrap_or_default();
+                    if !state.starts_with("Exited") {
+                        continue;
+                    }
+                    let result = ctl.crash(member).and_then(|()| ctl.reboot(member));
                     kit::evidence(
-                        "restart",
-                        json!({"label": label, "member": member, "last": last.get(member),
+                        "power-cycle",
+                        json!({"label": label, "member": member, "state": state,
+                               "last": last.get(member),
                                "error": result.as_ref().err().map(|e| e.0.clone())}),
                     );
                     if result.is_ok() {
@@ -470,11 +504,22 @@ pub(crate) fn recover(members: &[String], seconds: u64, label: &str, restart: bo
         }
         std::thread::sleep(Duration::from_secs(1));
     }
+    let mut exited = Vec::new();
+    if !waiting.is_empty() {
+        if let Ok(mut ctl) = kit::connect_world(None) {
+            let states = states(&mut ctl, label);
+            exited = waiting
+                .iter()
+                .filter(|m| states.get(*m).is_some_and(|s| s.starts_with("Exited")))
+                .cloned()
+                .collect();
+        }
+    }
     for member in &waiting {
         kit::evidence(
             "unrecovered",
             json!({"label": label, "member": member, "waited": start.elapsed().as_secs_f64(),
-                   "last": last.get(member)}),
+                   "last": last.get(member), "exited": exited.contains(member)}),
         );
     }
     let live = members
@@ -486,7 +531,48 @@ pub(crate) fn recover(members: &[String], seconds: u64, label: &str, restart: bo
         live,
         down: waiting,
         restarted,
+        exited,
     }
+}
+
+/// The verdict text for members that did not recover, and whether that
+/// violates the check: one that refuses to start is tolerated only with
+/// `tolerate_exits` (its disk took injected faults).
+pub(crate) fn recovery_text(r: &Recovery, tolerate_exits: bool) -> (String, bool) {
+    let mut text = String::new();
+    if !r.restarted.is_empty() {
+        text.push_str(&format!(
+            "; {} power-cycled after etcd exited",
+            r.restarted.join(", ")
+        ));
+    }
+    let hung: Vec<&String> = r.down.iter().filter(|m| !r.exited.contains(m)).collect();
+    if !r.exited.is_empty() {
+        text.push_str(&format!(
+            "; {} refused to start (etcd exited){}",
+            r.exited.join(", "),
+            if tolerate_exits {
+                ", tolerated after disk faults"
+            } else {
+                ""
+            }
+        ));
+    }
+    // Without a majority of running members nobody can serve a
+    // linearizable read: the hung ones are then excused.
+    let members = r.live.len() + r.down.len();
+    let quorum = members - r.exited.len() > members / 2;
+    if !hung.is_empty() {
+        let names: Vec<&str> = hung.iter().map(|m| m.as_str()).collect();
+        text.push_str(&format!(
+            "; {} running but never served a read again after the faults ended{}",
+            names.join(", "),
+            if quorum { "" } else { " (no quorum left)" }
+        ));
+    }
+    let violated = (!hung.is_empty() && (quorum || !tolerate_exits))
+        || (!r.exited.is_empty() && !tolerate_exits);
+    (text, violated)
 }
 
 /// Every live member's `HashKV` at the lowest revision any of them reports:
@@ -494,10 +580,14 @@ pub(crate) fn recover(members: &[String], seconds: u64, label: &str, restart: bo
 /// disagreement, or of why there was nothing to compare.
 pub(crate) fn compare_hashes(live: &[String]) -> (Option<String>, Value) {
     let mut revisions = BTreeMap::new();
+    // Applied raft index beside each revision: a member that applied as many
+    // entries as the others but holds fewer revisions skipped some.
+    let mut applied = BTreeMap::new();
     for member in live {
         for _ in 0..5 {
             if let Reply::Ok(status) = call(member, "/v3/maintenance/status", &json!({}), 5.0) {
                 revisions.insert(member.clone(), number(&status["header"]["revision"]));
+                applied.insert(member.clone(), number(&status["raftAppliedIndex"]));
                 break;
             }
             kit::pause(1.0);
@@ -523,7 +613,8 @@ pub(crate) fn compare_hashes(live: &[String]) -> (Option<String>, Value) {
             }
         }
     }
-    let details = json!({"revision": revision, "revisions": revisions, "hashes": hashes});
+    let details = json!({"revision": revision, "revisions": revisions, "applied": applied,
+                         "hashes": hashes});
     let distinct: std::collections::BTreeSet<_> = hashes.values().collect();
     if distinct.len() > 1 {
         (
@@ -725,11 +816,8 @@ pub fn run(args: Args) -> u8 {
         );
     }
     kit::pause(args.quiet as f64);
-    let Recovery {
-        live,
-        down,
-        restarted,
-    } = recover(&args.members, args.recover, "final", true);
+    let recovery = recover(&args.members, args.recover, "final", true);
+    let live = recovery.live.clone();
     // A final linearizable read of every key, retried on other members.
     let keys = book.lock().unwrap().keys.len();
     for key in (0..keys).filter(|_| !live.is_empty()) {
@@ -778,13 +866,14 @@ pub fn run(args: Args) -> u8 {
         "watches",
         json!({"target": last, "members": watches, "gaps": gaps}),
     );
-    conclude(&book, &down, &restarted, diverged, &gaps)
+    let (recovered, unrecovered) = recovery_text(&recovery, args.tolerate_exits);
+    conclude(&book, &recovered, unrecovered, diverged, &gaps)
 }
 
 fn conclude(
     b: &Book,
-    down: &[String],
-    restarted: &[String],
+    recovered: &str,
+    unrecovered: bool,
     diverged: Option<String>,
     gaps: &[Value],
 ) -> u8 {
@@ -862,18 +951,7 @@ fn conclude(
             "; watches skipped or reordered revisions: {gaps:?}"
         ));
     }
-    if !restarted.is_empty() {
-        summary.push_str(&format!(
-            "; {} restarted after not serving",
-            restarted.join(", ")
-        ));
-    }
-    if !down.is_empty() {
-        summary.push_str(&format!(
-            "; {} never served a read again after the faults ended",
-            down.join(", ")
-        ));
-    }
+    summary.push_str(recovered);
     let violated = !violations.is_empty()
         || !gaps.is_empty()
         || !b.conflicts.is_empty()
@@ -881,7 +959,7 @@ fn conclude(
         || !b.phantom.is_empty()
         || !b.unparseable.is_empty()
         || diverged.is_some()
-        || !down.is_empty();
+        || unrecovered;
     if violated {
         kit::verdict(kit::VIOLATION, &summary)
     } else if !exhausted.is_empty() || ops == 0 {
@@ -948,6 +1026,33 @@ mod tests {
         let wrong = log(vec![(2, "r0", "4"), (3, "r0", "2")]);
         check_watches(&mut book, &[wrong], 3);
         assert_eq!(book.conflicts.len(), 1);
+    }
+
+    #[test]
+    fn exits_fail_the_run_unless_tolerated() {
+        let r = Recovery {
+            live: vec!["n2".into()],
+            down: vec!["n1".into(), "n3".into()],
+            restarted: vec!["n1".into()],
+            exited: vec!["n1".into()],
+        };
+        let (text, violated) = recovery_text(&r, true);
+        assert!(violated, "n3 is running but not serving: {text}");
+        assert!(text.contains("n1 refused to start"));
+        let r = Recovery {
+            down: vec!["n1".into()],
+            ..r
+        };
+        assert!(!recovery_text(&r, true).1);
+        assert!(recovery_text(&r, false).1);
+        // Three of five refuse to start: the other two cannot serve.
+        let r = Recovery {
+            live: vec![],
+            down: ["n1", "n2", "n3", "n4", "n5"].map(String::from).to_vec(),
+            restarted: vec![],
+            exited: ["n1", "n2", "n3"].map(String::from).to_vec(),
+        };
+        assert!(!recovery_text(&r, true).1);
     }
 
     #[test]

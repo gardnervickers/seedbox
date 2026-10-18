@@ -1,3 +1,4 @@
+# Use it with the -disk scenarios (etcd36-register-disk, etcd37-crash-all-disk, ...).
 # generic-faults.yaml plus silent corruption of n1's data reads and writes
 # (never the filesystem's metadata), in its WAL, snapshots and bbolt database.
 # etcd checksums WAL records but not bbolt pages: corruption on one member must
