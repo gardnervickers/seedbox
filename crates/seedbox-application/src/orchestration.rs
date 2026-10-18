@@ -350,6 +350,14 @@ impl Orchestrator {
                     .iter()
                     .map(|(name, service)| (name.clone(), service.cpu.clone()))
                     .collect(),
+                expected_crashes: &record
+                    .identity
+                    .configuration
+                    .services
+                    .iter()
+                    .filter(|(_, service)| !service.expected_crashes.is_empty())
+                    .map(|(name, service)| (name.clone(), service.expected_crashes.clone()))
+                    .collect(),
                 schedule: &record.identity.configuration.schedule,
                 control: record.identity.configuration.control.as_ref(),
                 check: &record.identity.configuration.check,

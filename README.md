@@ -64,6 +64,10 @@ Set `memoryMiB` on a machine or the oracle to choose its RAM independently.
 Omission uses 1024 MiB; supported sizes are 64–3072 MiB on Apple Silicon and
 64–65536 MiB on Linux x86-64. Preparation checks the image archive’s boot memory
 requirement; applications may need more.
+A crash a machine is designed to have, such as a watchdog's abort, would violate
+the default `seedbox.no_crashing_processes` property; declare it on the machine
+as `expectedCrashes: [{signal: SIGABRT, command: keel-watchdog}]` (the crashing
+thread's name) to count it as an expected pass instead.
 A machine's `volumes` keep their contents across a machine crash. Each one adds its
 `size` (default `1GiB`, from `16MiB`, in whole MiB or GiB such as `size: 4GiB`) to
 the machine's disk, which all of its volumes share and which holds at most 64 GiB.

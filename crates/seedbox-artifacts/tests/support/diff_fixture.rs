@@ -12,6 +12,7 @@ fn fixture() -> sb::record::RunRecord {
             platform: "linux/amd64".into(), entrypoint: None, command: None,
             environment: BTreeMap::new(), working_dir: None, user: None,
             configs: vec![], volumes: vec![], network: "default".into(),
+            expected_crashes: vec![],
         })]), configs: BTreeMap::new(),
         network: config::Network { name: "default".into(), latency_ns: 1_000_000,
             jitter_ns: 0, bandwidth_bps: None, queue_bound_ns: None, links: vec![] },

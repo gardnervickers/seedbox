@@ -26,7 +26,10 @@ through the [property SDK](../crates/seedbox-sdk/). The engine reduces their
 records into a property assessment reported beside the oracle verdict, never
 in place of it: passed, violated, unmet and incomplete stay distinct, and lost
 or malformed evidence never yields a pass. Seedbox adds default properties of
-its own, such as unexpected process deaths and out-of-memory kills.
+its own, such as unexpected process deaths and out-of-memory kills. A machine's
+definition can declare the crashes it is designed to have, by signal and thread
+name; those pass the crash property and stay counted in its result, while every
+other crash still violates it.
 
 ## Generated faults and exploration
 

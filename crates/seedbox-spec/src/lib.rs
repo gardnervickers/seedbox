@@ -101,6 +101,9 @@ pub struct Service {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<VolumeMount>,
     pub network: String,
+    /// Crashes the service's machine is designed to have.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_crashes: Vec<project::ExpectedCrash>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

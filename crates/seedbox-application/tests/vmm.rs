@@ -84,6 +84,7 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
                 },
             ),
         ]),
+        expected_crashes: &BTreeMap::new(),
         schedule: &Schedule {
             timer_jitter_ns: 50_000,
             stop_tolerance_ns: 40_000,
@@ -222,6 +223,38 @@ fn open_ended_world_uses_a_real_scheduler_horizon_on_both_backends() {
             assert_eq!(world.end_on_exit.as_deref(), Some("client-machine"));
             assert_eq!(request.limits.simulated_time_ns, u64::MAX);
         }
+    });
+}
+
+#[test]
+fn expected_crashes_reach_the_world_through_placement() {
+    fixture(|base| {
+        // Without declarations the world document has no key at all.
+        let world = world_json(base).unwrap();
+        assert!(world["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m.get("expected_crashes").is_none()));
+        let crash: seedbox_spec::project::ExpectedCrash = serde_json::from_value(
+            json!({"signal": "SIGABRT", "command": "keel-watchdog", "executable": "libdynamorio.so"}),
+        )
+        .unwrap();
+        let expected = BTreeMap::from([("server".to_owned(), vec![crash])]);
+        let request = ExecutionRequest {
+            expected_crashes: &expected,
+            ..*base
+        };
+        let world = world_json(&request).unwrap();
+        let machines = world["machines"].as_array().unwrap();
+        let machine = |name: &str| machines.iter().find(|m| m["name"] == name).unwrap();
+        assert_eq!(
+            machine("server-machine")["expected_crashes"],
+            json!([{"signal": 6, "command": "keel-watchdog", "executable": "libdynamorio.so"}])
+        );
+        assert!(machine("client-machine").get("expected_crashes").is_none());
+        // The engine reads the same document back.
+        assert_eq!(typed(&world).expected_crashes()[1].len(), 1);
     });
 }
 

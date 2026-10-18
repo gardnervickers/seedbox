@@ -550,6 +550,7 @@ mod tests {
                     .into_iter()
                     .map(|name| (name.into(), Default::default()))
                     .collect(),
+                expected_crashes: &BTreeMap::new(),
                 schedule: &Schedule {
                     timer_jitter_ns: 50_000,
                     stop_tolerance_ns: 40_000,

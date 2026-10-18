@@ -223,6 +223,7 @@ impl Submission {
                     configs: mounts,
                     volumes,
                     network: "default".into(),
+                    expected_crashes: machine.expected_crashes,
                 },
             );
         }
@@ -410,6 +411,7 @@ impl Submission {
                         )
                     })
                     .collect(),
+                expected_crashes: service.expected_crashes.clone(),
             })
         };
         Ok(Self {
@@ -540,6 +542,26 @@ mod tests {
         too_large
             .resolve_project_architecture(Architecture::X86_64)
             .unwrap();
+    }
+
+    #[test]
+    fn expected_crashes_round_trip_through_the_wire_and_are_omitted_when_none() {
+        let spec: SimulationSpec = serde_json::from_value(partial()).unwrap();
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert!(wire["machines"]["app"].get("expectedCrashes").is_none());
+        let mut value = partial();
+        let crashes = serde_json::json!([{"signal": "SIGABRT", "command": "keel-watchdog"}]);
+        value["machines"]["app"]["expectedCrashes"] = crashes.clone();
+        let spec: SimulationSpec = serde_json::from_value(value.clone()).unwrap();
+        let expected = &spec.configuration.services["app"].expected_crashes;
+        assert_eq!(expected[0].signal, project::CrashSignal::Sigabrt);
+        assert!(spec.configuration.services["oracle"]
+            .expected_crashes
+            .is_empty());
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert_eq!(wire["machines"]["app"]["expectedCrashes"], crashes);
+        value["machines"]["app"]["expectedCrashes"][0]["signal"] = "SIGKILL".into();
+        assert!(serde_json::from_value::<SimulationSpec>(value).is_err());
     }
 
     #[test]

@@ -30,23 +30,18 @@ pub fn resolve(
             .images
             .get(name)
             .ok_or_else(|| Error::Integrity(format!("missing resolved launch for {name}")))?;
+        let service = configuration
+            .services
+            .get(name)
+            .ok_or_else(|| Error::Integrity(format!("missing CPU configuration for {name}")))?;
         Ok(Machine {
-            cpu: configuration
-                .services
-                .get(name)
-                .ok_or_else(|| Error::Integrity(format!("missing CPU configuration for {name}")))?
-                .cpu
-                .clone(),
+            cpu: service.cpu.clone(),
+            expected_crashes: service.expected_crashes.clone(),
             image: Some(Image {
-                tag: configuration
-                    .services
-                    .get(name)
-                    .and_then(|service| match &service.source {
-                        seedbox_spec::ImageSource::Registry { reference } => {
-                            Some(reference.clone())
-                        }
-                        _ => None,
-                    }),
+                tag: match &service.source {
+                    seedbox_spec::ImageSource::Registry { reference } => Some(reference.clone()),
+                    _ => None,
+                },
                 digest: format!("sha256:{}", image.manifest.hex()),
             }),
             anonymous_volumes: image.launch.volumes.clone(),
@@ -647,6 +642,40 @@ mod tests {
         let definition = resolve(&configuration, &inputs, 1, Vec::new()).unwrap();
         (temporary, store, definition, boot)
     }
+    #[test]
+    fn expected_crashes_are_inlined_in_resolved_definitions_and_identity() {
+        let (_temporary, store, mut definition, _) = fixture();
+        // Without declarations a resolved machine has no key.
+        let value = serde_json::to_value(&definition).unwrap();
+        assert!(value["oracle"].get("expectedCrashes").is_none());
+        let crash: seedbox_spec::project::ExpectedCrash = serde_json::from_value(
+            serde_json::json!({"signal": "SIGABRT", "command": "keel-watchdog"}),
+        )
+        .unwrap();
+        definition.oracle.expected_crashes = vec![crash.clone()];
+        let saved: Definition =
+            serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&definition).unwrap()).unwrap();
+        assert_eq!(saved.oracle.expected_crashes, std::slice::from_ref(&crash));
+        let configuration = saved.configuration("keel");
+        assert_eq!(
+            configuration.services["oracle"].expected_crashes,
+            std::slice::from_ref(&crash)
+        );
+        // The declaration enters the run identity's configuration.
+        let identity = serde_json::to_value(&configuration).unwrap();
+        assert_eq!(
+            identity["services"]["oracle"]["expected_crashes"][0]["signal"],
+            "SIGABRT"
+        );
+        let inputs = prepared(&saved, &store).unwrap();
+        let resolved = resolve(&configuration, &inputs, saved.seed, Vec::new()).unwrap();
+        assert_eq!(resolved.oracle.expected_crashes, [crash]);
+        // A resolved definition is validated like an authored one.
+        let mut invalid = serde_json::to_value(&saved).unwrap();
+        invalid["oracle"]["expectedCrashes"][0]["executable"] = "/bin/keel".into();
+        assert!(serde_json::from_value::<Definition>(invalid).is_err());
+    }
+
     #[test]
     fn mixed_memory_roundtrips_through_saved_definitions_and_prepared_inputs() {
         let (_temporary, store, mut definition, _) = fixture();

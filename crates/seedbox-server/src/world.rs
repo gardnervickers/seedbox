@@ -523,6 +523,7 @@ mod tests {
             configs: Vec::new(),
             volumes: Vec::new(),
             network: "default".into(),
+            expected_crashes: Vec::new(),
         };
         let mut spec = seedbox_spec::Simulation {
             name: "test".into(),
