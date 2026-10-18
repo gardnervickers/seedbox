@@ -13,7 +13,9 @@
 //!
 //! The oracle creates the S3 bucket; each replica's start script seeds the
 //! view register itself (see `harness/jepsen/delores/start-replica.sh`).
-use crate::checker::models::{verdict_word, RegisterOf, RegisterOp, RegisterRet, STEP_BUDGET};
+use crate::checker::models::{
+    verdict_word, RegisterOf, RegisterOp, RegisterRet, Timed, STEP_BUDGET,
+};
 use crate::kit::{self, http, Rng};
 use serde_json::json;
 use std::{
@@ -103,7 +105,7 @@ fn value_of(body: &[u8]) -> Option<u32> {
     (value != 0).then_some(value)
 }
 
-type KeyHistory = wgl::History<RegisterOp<u32>, RegisterRet<u32>>;
+type KeyHistory = Timed<RegisterOp<u32>, RegisterRet<u32>>;
 
 #[derive(Default)]
 struct Tally {
@@ -355,6 +357,7 @@ pub fn run(args: Args) -> u8 {
                     "nonlinearizable",
                     json!({"key": key, "blocked_on": blocked, "linearized": e.longest_prefix.len()}),
                 );
+                history.print(key);
                 violations.push(key.clone());
             }
             wgl::Verdict::BudgetExhausted(_) => exhausted.push(key.clone()),

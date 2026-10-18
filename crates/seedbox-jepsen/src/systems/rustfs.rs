@@ -23,7 +23,9 @@
 //!
 //! Requests are signed with AWS Signature Version 4 (path-style, region
 //! `us-east-1`, payload hashed) over the kit's HTTP/1.1 client.
-use crate::checker::models::{verdict_word, RegisterOf, RegisterOp, RegisterRet, STEP_BUDGET};
+use crate::checker::models::{
+    verdict_word, RegisterOf, RegisterOp, RegisterRet, Timed, STEP_BUDGET,
+};
 use crate::kit::{self, http, Result, Rng};
 use hmac::{Hmac, Mac};
 use serde_json::json;
@@ -326,7 +328,7 @@ fn register_value(body: &[u8], size: usize) -> Option<u32> {
     (register_body(value, size) == body).then_some(value)
 }
 
-type KeyHistory = wgl::History<RegisterOp<u32>, RegisterRet<u32>>;
+type KeyHistory = Timed<RegisterOp<u32>, RegisterRet<u32>>;
 
 /// What one register operation saw.
 #[derive(Default)]
@@ -612,6 +614,7 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
                     "nonlinearizable",
                     json!({"key": key, "blocked_on": blocked, "linearized": e.longest_prefix.len()}),
                 );
+                history.print(key);
                 violations.push(key.clone());
             }
             wgl::Verdict::BudgetExhausted(_) => exhausted.push(key.clone()),

@@ -155,6 +155,70 @@ impl<V: Clone + Eq + Hash> SequentialModel for QueueOf<V> {
     }
 }
 
+/// A `wgl` history that also keeps each operation's invocation and
+/// completion times (seconds since the oracle started), so a key that fails
+/// the check can be printed against the run's faults.
+pub struct Timed<Op, Ret> {
+    history: wgl::History<Op, Ret>,
+    times: Vec<(f64, Option<f64>)>,
+}
+
+impl<Op: Clone, Ret: Clone> Default for Timed<Op, Ret> {
+    fn default() -> Self {
+        Self {
+            history: wgl::History::new(),
+            times: Vec::new(),
+        }
+    }
+}
+
+impl<Op: Clone + std::fmt::Debug, Ret: Clone + std::fmt::Debug> Timed<Op, Ret> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn invoke(&mut self, op: Op) -> wgl::OpId {
+        self.times.push((crate::kit::now(), None));
+        self.history.invoke(op)
+    }
+
+    pub fn complete(&mut self, id: wgl::OpId, ret: Ret) {
+        self.times[id.index()].1 = Some(crate::kit::now());
+        self.history.complete(id, ret);
+    }
+
+    pub fn fail(&mut self, id: wgl::OpId) {
+        self.times[id.index()].1 = Some(crate::kit::now());
+        self.history.fail(id);
+    }
+
+    pub fn operations(&self) -> &[wgl::Operation<Op, Ret>] {
+        self.history.operations()
+    }
+
+    /// Print every operation as an `H` line tagged with `key`: its index,
+    /// operation, outcome and times.
+    pub fn print(&self, key: &str) {
+        for (i, (operation, (start, end))) in self
+            .history
+            .operations()
+            .iter()
+            .zip(&self.times)
+            .enumerate()
+        {
+            let outcome = match &operation.outcome {
+                wgl::OpOutcome::Completed { ret, .. } => format!("{ret:?}"),
+                wgl::OpOutcome::Failed { .. } => "failed".into(),
+                wgl::OpOutcome::Pending => "pending".into(),
+            };
+            crate::kit::history_line(&serde_json::json!({
+                "key": key, "i": i, "op": format!("{:?}", operation.op),
+                "outcome": outcome, "t0": start, "t1": end,
+            }));
+        }
+    }
+}
+
 /// A verdict as a short word for evidence: linearizable, not-linearizable
 /// or budget-exhausted.
 pub fn verdict_word(verdict: &Verdict) -> &'static str {
