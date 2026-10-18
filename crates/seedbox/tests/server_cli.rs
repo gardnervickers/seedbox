@@ -61,7 +61,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let mut server = cli(root)
-        .args(["serve", "--startup-handshake"])
+        .args(["server", "start", "--foreground", "--startup-handshake"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .guarded_spawn()
@@ -76,7 +76,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
     let mut children: Vec<_> = (0..2)
         .map(|_| {
             cli(root)
-                .args(["get", "simulations", "--json"])
+                .args(["show", "--json"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .guarded_spawn()
@@ -139,41 +139,11 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
     );
     assert!(simulation.spec.seed.is_some());
     assert!(simulation.options.start_paused);
-    let checkpoints = cli(root)
-        .args([
-            "get",
-            "checkpoints",
-            simulation.metadata.id.as_str(),
-            "--json",
-        ])
-        .guarded_output()
-        .unwrap();
-    assert!(
-        checkpoints.status.success(),
-        "{}",
-        String::from_utf8_lossy(&checkpoints.stderr)
-    );
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&checkpoints.stdout).unwrap(),
-        serde_json::json!([])
-    );
-    let missing = cli(root)
-        .args([
-            "describe",
-            "checkpoint",
-            simulation.metadata.id.as_str(),
-            "missing",
-            "--json",
-        ])
-        .guarded_output()
-        .unwrap();
-    assert_eq!(missing.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("not found"));
-
     let described = cli(root)
         .args([
-            "describe",
-            "simulation",
+            "show",
+            "--view",
+            "definition",
             simulation.metadata.id.as_str(),
             "--json",
         ])
@@ -185,13 +155,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
         simulation
     );
     let watched = cli(root)
-        .args([
-            "get",
-            "simulation",
-            simulation.metadata.id.as_str(),
-            "--watch",
-            "--json",
-        ])
+        .args(["show", simulation.metadata.id.as_str(), "--watch", "--json"])
         .guarded_output()
         .unwrap();
     assert!(watched.status.success());
@@ -235,26 +199,20 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
     // prints nothing and exits rather than waiting.
     assert!(logs.stdout.is_empty());
     let playback = cli(root)
-        .args(["playback", simulation.metadata.id.as_str(), "--json"])
+        .args([
+            "show",
+            "--view",
+            "playback",
+            simulation.metadata.id.as_str(),
+            "--json",
+        ])
         .guarded_output()
         .unwrap();
     assert_eq!(playback.status.code(), Some(2));
     assert!(playback.stdout.is_empty());
     assert_eq!(String::from_utf8(playback.stderr).unwrap(), "error: server rejected request (Unavailable): simulation has no active worker control endpoint\n");
-    let deleted = cli(root)
-        .args([
-            "delete",
-            "checkpoint",
-            simulation.metadata.id.as_str(),
-            "missing",
-        ])
-        .guarded_output()
-        .unwrap();
-    assert_eq!(deleted.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&deleted.stderr)
-        .contains("checkpoint missing has not been captured"));
     let exploration = cli(root)
-        .arg("explore")
+        .arg("run")
         .arg(&compose)
         .args(["--count", "3", "--detach", "--json"])
         .guarded_output()
@@ -294,7 +252,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
     for id in [&simulation.metadata.id, &range.source] {
         for _ in 0..2 {
             let deleted = cli(root)
-                .args(["delete", "simulation", id.as_str()])
+                .args(["delete", id.as_str()])
                 .guarded_output()
                 .unwrap();
             assert!(
@@ -311,7 +269,7 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
         .unwrap()
         .items
         .is_empty());
-    let stopped = cli(root).arg("shutdown").guarded_output().unwrap();
+    let stopped = cli(root).args(["server", "stop"]).guarded_output().unwrap();
     assert!(
         stopped.status.success(),
         "{}",
@@ -327,10 +285,93 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
 fn noninteractive_commands_do_not_start_a_server() {
     let temp = tempfile::tempdir().unwrap();
     let result = cli(temp.path())
-        .args(["get", "simulations", "--json"])
+        .args(["show", "--json"])
         .guarded_output()
         .unwrap();
     assert_eq!(result.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&result.stderr).contains("start `seedbox serve`"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("start `seedbox server start`"));
     assert!(!temp.path().join("state/server.sock").exists());
+}
+
+#[test]
+fn background_server_start_and_client_startup_options_share_state() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("explicit-state");
+    let started = cli(root.path())
+        .args(["server", "start", "--full-state", "--state"])
+        .arg(&state)
+        .guarded_output()
+        .unwrap();
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let client = Client::connect_to(&state.join("server.sock")).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let info = runtime.block_on(client.info()).unwrap();
+    let _server = ServerGuard {
+        socket: state.join("server.sock"),
+        pid: info.process_id,
+    };
+    let shown = cli(root.path())
+        .args(["show", "--full-state", "--json", "--state"])
+        .arg(&state)
+        .guarded_output()
+        .unwrap();
+    assert!(
+        shown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&shown.stdout).unwrap(),
+        serde_json::json!([])
+    );
+    assert!(String::from_utf8_lossy(&shown.stderr)
+        .contains("--full-state applies only when starting a server"));
+    assert!(
+        !root.path().join("state/server.sock").exists(),
+        "explicit --state must override SEEDBOX_STATE"
+    );
+    let stopped = cli(root.path())
+        .args(["server", "stop", "--state"])
+        .arg(&state)
+        .guarded_output()
+        .unwrap();
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert!(runtime.block_on(client.info()).is_err());
+}
+
+#[test]
+fn status_reports_a_stopped_server_without_creating_state() {
+    let root = tempfile::tempdir().unwrap();
+    let status = cli(root.path())
+        .args(["server", "status"])
+        .guarded_output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    assert_eq!(status.stdout, b"STOPPED: local server\n");
+    assert!(status.stderr.is_empty());
+    let json = cli(root.path())
+        .args(["server", "status", "--json"])
+        .guarded_output()
+        .unwrap();
+    assert!(json.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&json.stdout).unwrap(),
+        serde_json::json!({"server": null, "capacity": null})
+    );
+    assert!(!root.path().join("state").exists());
 }

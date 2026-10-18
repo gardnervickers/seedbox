@@ -27,3 +27,6 @@ impl Default for BundleTransferQuery {
         }
     }
 }
+
+/// Portable resumable execution state and its complete binary closure.
+pub const CHECKPOINT_CONTENT_TYPE: &str = "application/vnd.seedbox.checkpoint+tar";

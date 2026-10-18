@@ -115,6 +115,9 @@ pub struct Reply {
     /// Step admission is acknowledged immediately. Status becomes false only
     /// after a real round commits (or a later rate command cancels the step).
     pub stepping: bool,
+    /// A one-shot pause remains armed for the next fault effect.
+    #[serde(default)]
+    pub before_next_fault: bool,
     pub error: Option<ControlError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intervention: Option<crate::intervention::Intervention>,

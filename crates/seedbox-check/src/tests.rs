@@ -906,16 +906,9 @@ fn portable_failure_blocks_all_native_work_but_not_outer_prerequisites() {
         ["fmt", "clippy", "shell-discovery"]
     );
 }
-fn workload_fixture() -> Temporary {
-    let t = fixture();
-    fs::create_dir_all(t.0.join("harness/acceptance/workloads")).unwrap();
-    fs::write(t.0.join("harness/acceptance/workloads/example.yaml"), "").unwrap();
-    t
-}
-
 #[test]
 fn portable_stage_keeps_outer_fmt_and_clippy_out() {
-    let t = workload_fixture();
+    let t = fixture();
     let mut c = checks(&t.0);
     let o = options(strings(&["--portable-stage"])).unwrap();
     assert_eq!(coordinate(&mut c, &host(), &o).unwrap(), 0);
@@ -977,8 +970,6 @@ fn test_time_policy_failure_blocks_backend_execution() {
 #[test]
 fn portable_order_is_single_owned() {
     let t = fixture();
-    fs::create_dir_all(t.0.join("harness/acceptance/workloads")).unwrap();
-    fs::write(t.0.join("harness/acceptance/workloads/example.yaml"), "").unwrap();
     let mut c = checks(&t.0);
     c.environment
         .insert("CARGO_TARGET_DIR".into(), "/workspace".into());
@@ -989,8 +980,7 @@ fn portable_order_is_single_owned() {
         [
             "shell-discovery",
             "workspace-feature-build",
-            "workspace-tests",
-            "workload-validation"
+            "workspace-tests"
         ]
     );
     assert!(jobs
@@ -1017,7 +1007,6 @@ fn portable_order_is_single_owned() {
         "test-time-policy",
         "workspace-feature-build",
         "workspace-tests",
-        "workload-validation",
     ];
     assert_eq!(c.timings.len(), labels.len());
     for (row, label) in c.timings.iter().zip(labels) {
@@ -1288,12 +1277,11 @@ fn shell_timing_covers_discovery_and_all_checks_including_failure() {
 fn timing_error_rows_do_not_hide_the_underlying_failure() {
     let t = fixture();
     let mut c = checks(&t.0);
-    let result: Result<(), String> = timed(&mut c, "workload-validation", |_| {
-        Err("discovery failed".into())
-    });
+    let result: Result<(), String> =
+        timed(&mut c, "shell-syntax", |_| Err("discovery failed".into()));
     assert_eq!(result.unwrap_err(), "discovery failed");
     assert_eq!(c.timings.len(), 1);
-    assert!(c.timings[0].starts_with("timing: portable/workload-validation: "));
+    assert!(c.timings[0].starts_with("timing: portable/shell-syntax: "));
     assert!(c.commands.jobs.is_empty());
 }
 

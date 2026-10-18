@@ -26,8 +26,12 @@ The [Driver](../crates/seedbox-driver/src/driver.rs) owns that bound, not the CP
 
 ## Checkpoints exclude their observers
 
-A checkpoint retains execution authority and playback intent, including a fault held before dispatch.
-It does not retain log/event/frame sessions; restore starts fresh observers without releasing the hold.
+A checkpoint file is a self-contained starting point for a new simulation on a fresh server.
+It carries execution state, the input program and required binary assets; its source simulation
+is provenance, never a prerequisite. It retains playback intent, including a fault held before dispatch.
+Capture pauses briefly and restores the source playback rate afterward. `run FILE` resumes
+the saved execution; `run FILE --paused --detach` retains the captured boundary for inspection.
+Checkpoints do not retain log/event/frame sessions; restore starts fresh observers.
 Draining, evicting or resizing observations therefore changes neither continuation nor policy evidence.
 The [capture boundary](internals.md#checkpoint-capture) preserves input cursors rather than replaying events.
 

@@ -11,6 +11,49 @@ const EVENT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_DELIVERIES: usize = 1_000_000;
 
 impl ExecutionService {
+    /// Export an independent resumable checkpoint, including every binary input.
+    pub fn export_checkpoint_bundle(
+        &self,
+        id: &SimulationId,
+        checkpoint: &str,
+        output: impl Write,
+        options: &Options,
+    ) -> Result<(), Error> {
+        let _guard = self
+            .evidence
+            .lock()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
+        let resource = self.checkpoint_definition_observed(id, checkpoint, &mut |_| {
+            if options.cancellation.is_cancelled() {
+                Err(std::io::Error::other("checkpoint export cancelled"))
+            } else {
+                Ok(())
+            }
+        })?;
+        // The public spec serializer folds the authoritative input program
+        // (including recorded external controls) into the resolved definition.
+        // Reading spec.inputs directly would lose those timeline edits.
+        let definition: seedbox_spec::definition::Definition = serde_json::from_value(
+            serde_json::to_value(resource.spec).map_err(|e| Error::Bundle(e.to_string()))?,
+        )
+        .map_err(|e| Error::Bundle(e.to_string()))?;
+        archive::export_checkpoint(&definition, &self.store, output, options)
+            .map_err(|e| Error::Bundle(e.to_string()))
+    }
+
+    /// Restore complete binary inputs without registering or launching a simulation.
+    pub fn import_checkpoint_bundle(
+        &self,
+        input: impl Read,
+        options: &Options,
+    ) -> Result<seedbox_spec::definition::Definition, Error> {
+        let definition = archive::import_checkpoint(input, &self.store, options)
+            .map_err(|e| Error::Bundle(e.to_string()))?;
+        seedbox_application::definition::prepared(&definition, &self.store)
+            .map_err(|e| Error::Bundle(e.to_string()))?;
+        Ok(definition)
+    }
+
     pub fn export_bundle(
         &self,
         id: &SimulationId,

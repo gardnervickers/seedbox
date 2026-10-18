@@ -9,12 +9,13 @@ use seedbox_application::{execution::CancellationToken, Error, Result};
 use std::io::{Read, Seek};
 
 pub(super) fn diagnostics(
+    server: &super::server_args::ServerArgs,
     id: &SimulationId,
     name: Option<&str>,
     max_bytes: u64,
     json: bool,
 ) -> Result<u8> {
-    let client = daemon::connect(None)?;
+    let client = daemon::connect(server)?;
     let token = CancellationToken::default();
     let _signals = Signals::register(&token)?;
     let runtime = runtime()?;

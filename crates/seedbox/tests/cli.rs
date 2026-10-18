@@ -75,7 +75,13 @@ fn long_server_state_path_fails_before_creating_state() {
     let directory = tempfile::tempdir().unwrap();
     let state = directory.path().join("s".repeat(200));
     let output = seedbox(
-        &["serve", "--state", state.to_str().unwrap()],
+        &[
+            "server",
+            "start",
+            "--foreground",
+            "--state",
+            state.to_str().unwrap(),
+        ],
         directory.path(),
     );
     assert_eq!(output.status.code(), Some(2));
@@ -94,10 +100,15 @@ fn explicit_asset_directory_overrides_bundled_driver_without_build_tools() {
     // CARGO_TARGET_TMPDIR shares the binary's filesystem, so linking works.
     let directory = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let root = directory.path().canonicalize().unwrap();
+    fs::write(
+        root.join("seedbox.yaml"),
+        "name: test\noracle: {image: busybox}\n",
+    )
+    .unwrap();
     let binary = root.join("seedbox");
     fs::hard_link(env!("CARGO_BIN_EXE_seedbox"), &binary).unwrap();
     let output = Command::new(&binary)
-        .arg("doctor")
+        .arg("check")
         .current_dir(&root)
         .env_clear()
         .env("HOME", &root)
@@ -121,7 +132,7 @@ fn explicit_asset_directory_overrides_bundled_driver_without_build_tools() {
         "SEEDBOX_MKE2FS",
     ] {
         let output = Command::new(&binary)
-            .arg("doctor")
+            .arg("check")
             .current_dir(&root)
             .env_clear()
             .env("HOME", &root)
@@ -160,7 +171,10 @@ fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch
     let root_help = seedbox(&["--help"], directory.path());
     assert!(root_help.status.success());
     let help = String::from_utf8_lossy(&root_help.stdout);
-    assert!(help.contains("seedbox [RUN OPTIONS] [PROJECT]"), "{help}");
+    assert!(
+        help.contains("seedbox [RUN OPTIONS] [PROJECT | CHECKPOINT]"),
+        "{help}"
+    );
     assert!(!help.contains("COMPOSE"), "{help}");
     assert!(!help.contains("__engine"), "{help}");
     assert!(!help.contains("seedbox-internal-worker-v1"), "{help}");
@@ -246,15 +260,19 @@ fn driver_worker_requires_a_request_without_state_or_external_tools() {
 }
 
 #[test]
-fn validation_cli_reports_structured_output_and_nonzero_errors() {
+fn check_validates_project_before_host_readiness() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("seedbox.yaml");
     let yaml = "name: cli-test\noracle: {image: example/workload:v1}\n";
     fs::write(&source, yaml).unwrap();
-    let success = seedbox(&["validate", "seedbox.yaml", "--json"], directory.path());
-    assert!(success.status.success(), "{}", stderr(&success));
-    let resolved: serde_json::Value = serde_json::from_slice(&success.stdout).unwrap();
-    assert_eq!(resolved["check"]["service"], "oracle");
+    let success = seedbox(&["check", "seedbox.yaml", "--json"], directory.path());
+    assert_eq!(success.status.code(), Some(2));
+    assert!(
+        stderr(&success).contains("driver runtime"),
+        "{}",
+        stderr(&success)
+    );
+    assert!(success.stdout.is_empty());
     fs::write(
         &source,
         yaml.replace(
@@ -263,7 +281,7 @@ fn validation_cli_reports_structured_output_and_nonzero_errors() {
         ),
     )
     .unwrap();
-    let failure = seedbox(&["validate", "seedbox.yaml"], directory.path());
+    let failure = seedbox(&["check", "seedbox.yaml"], directory.path());
     assert_eq!(failure.status.code(), Some(2));
     assert!(stderr(&failure).contains("invalid type: sequence"));
     assert!(!directory.path().join("runs").exists());
@@ -276,17 +294,17 @@ fn project_argument_defaults_to_the_project_directory() {
     let created = seedbox(&["init", "demo"], directory.path());
     assert!(created.status.success());
     assert_eq!(String::from_utf8_lossy(&created.stdout), "CREATED: demo\n");
-    for args in [
-        &["validate"][..],
-        &["validate", "."],
-        &["validate", "seedbox.yaml"],
-    ] {
+    for args in [&["check"][..], &["check", "."], &["check", "seedbox.yaml"]] {
         let output = seedbox(args, &project);
-        assert!(output.status.success(), "{args:?}");
-        assert!(String::from_utf8_lossy(&output.stdout).starts_with("VALID: etcd-demo "));
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(
+            stderr(&output).contains("driver runtime"),
+            "{args:?}: {}",
+            stderr(&output)
+        );
     }
-    let output = seedbox(&["validate", "demo"], directory.path());
-    assert!(output.status.success());
+    let output = seedbox(&["check", "demo"], directory.path());
+    assert!(stderr(&output).contains("driver runtime"));
 }
 
 #[test]
@@ -299,11 +317,11 @@ fn setup_errors_name_the_missing_input_and_the_fix() {
             "error: .: already exists; choose a new directory\n",
         ),
         (
-            &["validate", "nope.yaml"],
+            &["check", "nope.yaml"],
             "error: project file nope.yaml: not found\n",
         ),
         (
-            &["validate"],
+            &["check"],
             "error: no project file found; searched:\n  ./seedbox.yaml\n  ./seedbox.yml\npass the file path directly\n",
         ),
     ];
@@ -312,32 +330,6 @@ fn setup_errors_name_the_missing_input_and_the_fix() {
         assert_eq!(output.status.code(), Some(2), "{args:?}");
         assert_eq!(stderr(&output), expected, "{args:?}");
     }
-
-    fs::write(cwd.join("out.json"), "").unwrap();
-    let output = seedbox(&["prepare", "-o", "out.json"], cwd);
-    assert_eq!(
-        stderr(&output),
-        "error: --output out.json: already exists\n"
-    );
-
-    assert!(seedbox(&["init", "demo"], cwd).status.success());
-    fs::write(cwd.join("blocker"), "").unwrap();
-    let output = seedbox(
-        &[
-            "prepare",
-            "demo",
-            "-o",
-            "new.json",
-            "--state",
-            "blocker/state",
-        ],
-        cwd,
-    );
-    assert!(
-        stderr(&output).starts_with("error: --state blocker/state: "),
-        "{}",
-        stderr(&output)
-    );
 }
 
 #[test]
@@ -351,7 +343,7 @@ fn bad_values_are_usage_errors() {
 #[test]
 fn execution_commands_keep_performance_settings_on_the_server() {
     let directory = tempfile::tempdir().unwrap();
-    for command in ["run", "rerun", "replay", "explore"] {
+    for command in ["run", "replay"] {
         let output = seedbox(&["help", command], directory.path());
         assert!(output.status.success());
         let help = String::from_utf8(output.stdout).unwrap();
@@ -379,9 +371,7 @@ fn legacy_runtime_flags_are_usage_errors_before_any_state_or_preparation() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     fs::write(root.join("existing-input"), b"not a runtime override").unwrap();
-    for command in [
-        "serve", "prepare", "doctor", "run", "explore", "replay", "rerun",
-    ] {
+    for command in ["check", "run", "replay"] {
         let help = seedbox(&["help", command], root);
         assert!(help.status.success());
         let help = String::from_utf8_lossy(&help.stdout);
@@ -396,9 +386,6 @@ fn legacy_runtime_flags_are_usage_errors_before_any_state_or_preparation() {
             assert!(!help.contains(variable), "{command}: {help}");
             for path in ["existing-input", "missing-input"] {
                 let mut args = vec![command];
-                if command == "prepare" {
-                    args.extend(["--output", "prepared.json"]);
-                }
                 args.extend([flag, path]);
                 let output = seedbox(&args, root);
                 assert_eq!(output.status.code(), Some(2), "{command} {flag}");
@@ -417,58 +404,34 @@ fn legacy_runtime_flags_are_usage_errors_before_any_state_or_preparation() {
 }
 
 #[test]
-fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
+fn seed_range_bounds_and_help_are_public_before_runtime_inputs_or_state() {
     let directory = tempfile::tempdir().unwrap();
     assert!(seedbox(&["init", "demo"], directory.path())
         .status
         .success());
     let project = directory.path().join("demo");
     for count in ["0", "4097", "nope"] {
-        let output = seedbox(&["explore", "--count", count], &project);
+        let output = seedbox(&["run", "--count", count], &project);
         assert_eq!(output.status.code(), Some(2));
         assert!(stderr(&output).contains("--count"));
     }
     let overflow = seedbox(
-        &["explore", "--seed", "18446744073709551615", "--count", "2"],
+        &["run", "--seed", "18446744073709551615", "--count", "2"],
         &project,
     );
     assert_eq!(stderr(&overflow), "error: seed range overflows u64\n");
     for flag in ["--workers", "--cpu", "--runtime-assets", "--watchdog-ms"] {
-        let output = seedbox(&["explore", flag, "1"], &project);
+        let output = seedbox(&["run", flag, "1"], &project);
         assert_eq!(output.status.code(), Some(2));
         assert!(stderr(&output).contains("unexpected argument"));
     }
-    let help = seedbox(&["help", "explore"], &project);
+    let help = seedbox(&["help", "run"], &project);
     assert!(help.status.success());
     let text = String::from_utf8_lossy(&help.stdout);
     assert!(text.contains("--count") && text.contains("--detach") && text.contains("--json"));
     assert!(text.contains("--paused"));
     assert!(!text.contains("--workers"));
     assert!(!project.join(".seedbox").exists());
-}
-
-#[test]
-fn bundle_cli_validates_paths_limits_and_positional_inputs() {
-    let directory = tempfile::tempdir().unwrap();
-    for command in ["export", "import"] {
-        let output = seedbox(&[command], directory.path());
-        assert_eq!(output.status.code(), Some(2));
-        assert!(stderr(&output).contains("required arguments"));
-        let output = seedbox(&[command, "k7m2p9qx", "--max-bytes", "0"], directory.path());
-        assert_eq!(output.status.code(), Some(2));
-        assert!(stderr(&output).contains("--max-bytes"));
-        let output = seedbox(
-            &[command, "k7m2p9qx", "--max-bytes", "not-a-number"],
-            directory.path(),
-        );
-        assert_eq!(output.status.code(), Some(2));
-        assert!(stderr(&output).contains("--max-bytes"));
-    }
-    let output = seedbox(&["import", "missing"], directory.path());
-    assert_eq!(
-        stderr(&output),
-        "error: bundle missing: not found; choose a readable regular bundle file\n"
-    );
 }
 
 #[test]
@@ -479,23 +442,23 @@ fn validation_rejects_obsolete_compose_without_creating_state() {
         "services: {app: {image: example/app}}\n",
     )
     .unwrap();
-    let undiscovered = seedbox(&["validate"], directory.path());
+    let undiscovered = seedbox(&["check"], directory.path());
     assert_eq!(undiscovered.status.code(), Some(2));
     assert!(stderr(&undiscovered).contains("no project file found"));
-    let explicit = seedbox(&["validate", "compose.yaml"], directory.path());
+    let explicit = seedbox(&["check", "compose.yaml"], directory.path());
     assert_eq!(explicit.status.code(), Some(2));
     assert!(stderr(&explicit).contains("unknown field `services`"));
     assert!(!directory.path().join(".seedbox").exists());
 }
 
 #[test]
-fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
+fn check_help_ranges_and_missing_inputs_follow_cli_contract() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let help = seedbox(&["help", "doctor"], root);
+    let help = seedbox(&["help", "check"], root);
     assert!(help.status.success());
     let text = String::from_utf8(help.stdout).unwrap();
-    assert!(text.contains("Linux KVM host"));
+    assert!(text.contains("host"));
     assert!(text.contains("--json"), "{text}");
     for flag in [
         "--kernel",
@@ -503,7 +466,6 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
         "--runtime-assets",
         "--mke2fs",
         "--cpu",
-        "--state",
         "--builder",
         "--undo",
         "--memory-mb",
@@ -511,19 +473,24 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     ] {
         assert!(!text.contains(flag), "{text}");
     }
-    assert!(text.contains("Doctor never builds or downloads"));
-    let invalid_timebase = seedbox(&["doctor", "--timebase", "invalid"], root);
+    assert!(text.contains("--json"));
+    let invalid_timebase = seedbox(&["check", "--timebase", "invalid"], root);
     assert_eq!(invalid_timebase.status.code(), Some(2));
     assert!(stderr(&invalid_timebase).contains("--timebase"));
     assert!(!root.join(".seedbox").exists());
 }
 
 #[test]
-fn doctor_reports_missing_driver_inputs_without_downloads() {
+fn check_reports_missing_driver_inputs_without_downloads() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
+    fs::write(
+        root.join("seedbox.yaml"),
+        "name: test\noracle: {image: busybox}\n",
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_seedbox"))
-        .args(["doctor", "--json"])
+        .args(["check", "--json"])
         .current_dir(root)
         .env_clear()
         .env("HOME", root)
@@ -543,9 +510,14 @@ fn doctor_reports_missing_driver_inputs_without_downloads() {
 }
 
 #[test]
-fn doctor_ignored_legacy_environment_executes_no_tools_and_creates_no_state() {
+fn check_ignored_legacy_environment_executes_no_tools_and_creates_no_state() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
+    fs::write(
+        root.join("seedbox.yaml"),
+        "name: test\noracle: {image: busybox}\n",
+    )
+    .unwrap();
     let tools = root.join("tools");
     fs::create_dir(&tools).unwrap();
     let marker = root.join("tool-called");
@@ -564,7 +536,7 @@ fn doctor_ignored_legacy_environment_executes_no_tools_and_creates_no_state() {
     }
     for json in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_seedbox"));
-        command.arg("doctor");
+        command.arg("check");
         if json {
             command.arg("--json");
         }
@@ -604,12 +576,12 @@ fn doctor_ignored_legacy_environment_executes_no_tools_and_creates_no_state() {
 
 #[cfg(not(target_os = "linux"))]
 #[test]
-fn doctor_removed_override_is_rejected_before_host_admission() {
+fn check_removed_override_is_rejected_before_host_admission() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("engine"), b"dev engine").unwrap();
     fs::write(dir.path().join("kernel"), b"dev kernel").unwrap();
     for json in [false, true] {
-        let mut args = vec!["doctor", "--vmm", "engine", "--kernel", "kernel"];
+        let mut args = vec!["check", "--vmm", "engine", "--kernel", "kernel"];
         if json {
             args.push("--json");
         }
@@ -622,19 +594,20 @@ fn doctor_removed_override_is_rejected_before_host_admission() {
 }
 
 #[test]
-fn logs_help_is_portable_and_has_no_runtime_options() {
+fn logs_help_is_portable_and_has_shared_server_options() {
     let tmp = tempfile::tempdir().unwrap();
     let out = seedbox(&["help", "logs"], tmp.path());
     assert!(out.status.success());
     let help = String::from_utf8_lossy(&out.stdout);
     assert!(help.contains("--since") && help.contains("--stream") && help.contains("--follow"));
-    assert!(!help.contains("--kernel") && !help.contains("--state"));
+    assert!(!help.contains("--kernel"));
+    assert!(help.contains("--state"));
 }
 
 #[test]
 fn simulation_parameters_are_world_options_not_flags() {
     let directory = tempfile::tempdir().unwrap();
-    for command in ["run", "prepare", "explore", "replay"] {
+    for command in ["run", "replay"] {
         let help = seedbox(&["help", command], directory.path());
         assert!(help.status.success());
         let help = String::from_utf8_lossy(&help.stdout);
@@ -659,7 +632,7 @@ fn simulation_parameters_are_world_options_not_flags() {
 }
 
 #[test]
-fn run_keeps_server_and_execution_controls_out_of_submission_flags() {
+fn run_rejects_removed_execution_controls() {
     let directory = tempfile::tempdir().unwrap();
     let help = seedbox(&["help", "run"], directory.path());
     assert!(help.status.success());
@@ -681,7 +654,7 @@ fn run_keeps_server_and_execution_controls_out_of_submission_flags() {
 #[test]
 fn timebase_is_no_longer_a_public_mode() {
     let directory = tempfile::tempdir().unwrap();
-    for command in ["run", "prepare", "explore", "doctor", "replay"] {
+    for command in ["run", "check", "replay"] {
         let help = seedbox(&["help", command], directory.path());
         assert!(help.status.success());
         assert!(!String::from_utf8_lossy(&help.stdout).contains("--timebase"));
@@ -698,7 +671,7 @@ fn internal_runtime_modes_are_not_authoring_options() {
     let directory = tempfile::tempdir().unwrap();
     for option in ["page_timer", "deferred_tx", "stop_tolerance"] {
         fs::write(directory.path().join("seedbox.yaml"), format!("name: defaults\noracle: {{image: busybox:1.37.0}}\nsimulator: {{{option}: true}}\n")).unwrap();
-        let output = seedbox(&["validate", "."], directory.path());
+        let output = seedbox(&["check", "."], directory.path());
         assert_eq!(output.status.code(), Some(2));
         assert!(stderr(&output).contains(&format!("unknown field `{option}`")));
         assert!(!directory.path().join(".seedbox").exists());
@@ -713,7 +686,7 @@ fn retired_environment_does_not_override_the_driver_package_during_preparation()
     assert!(seedbox(&["init", "demo"], root).status.success());
     let project = root.join("demo");
     let output = Command::new(env!("CARGO_BIN_EXE_seedbox"))
-        .args(["prepare", "--output", "prepared.json"])
+        .args(["check"])
         .current_dir(&project)
         .env_clear()
         .env("HOME", root)
@@ -749,7 +722,7 @@ fn invalid_relocated_driver_package_is_rejected_without_downloads_or_tools() {
     fs::create_dir_all(&assets).unwrap();
     let archive = assets.join("driver-runtime.tar.gz");
     fs::write(&archive, b"not an archive").unwrap();
-    let output = seedbox(&["prepare", "--output", "prepared.json"], &project);
+    let output = seedbox(&["check"], &project);
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert_eq!(stderr(&output), format!("error: driver runtime {}: invalid gzip header; run cargo xtask build-assets or supply a complete runtime archive\n", archive.display()));
@@ -789,7 +762,10 @@ fn omitted_run_subcommand_accepts_the_same_project_argument() {
 #[test]
 fn playback_validates_its_positional_id_before_starting_a_server() {
     let directory = tempfile::tempdir().unwrap();
-    let output = seedbox(&["playback", "invalid", "--json"], directory.path());
+    let output = seedbox(
+        &["show", "--view", "playback", "invalid", "--json"],
+        directory.path(),
+    );
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert!(stderr(&output).contains("simulation ID must contain eight characters"));
@@ -799,13 +775,19 @@ fn playback_validates_its_positional_id_before_starting_a_server() {
 fn playback_mutations_reject_invalid_rates_and_request_ids_before_connecting() {
     let directory = tempfile::tempdir().unwrap();
     for (args, phrase) in [
-        (vec!["rate", "k7m2p9qx", "1/0"], "rate must be"),
-        (vec!["rate", "k7m2p9qx", "4294967296"], "rate must be"),
+        (vec!["control", "rate", "k7m2p9qx", "1/0"], "rate must be"),
         (
-            vec!["pause", "k7m2p9qx", "--request-id", "bad/id"],
+            vec!["control", "rate", "k7m2p9qx", "4294967296"],
+            "rate must be",
+        ),
+        (
+            vec!["control", "pause", "k7m2p9qx", "--request-id", "bad/id"],
             "request ID must be",
         ),
-        (vec!["playback", "k7m2p9qx", "bad/id"], "request ID must be"),
+        (
+            vec!["control", "receipt", "k7m2p9qx", "bad/id"],
+            "request ID must be",
+        ),
     ] {
         let output = seedbox(&args, directory.path());
         assert_eq!(output.status.code(), Some(2));
@@ -843,11 +825,11 @@ fn observation_flags_are_validated_before_connecting() {
             "--incarnation",
         ),
         (
-            vec!["get", "world", "invalid"],
+            vec!["show", "--view", "world", "invalid"],
             "simulation ID must contain",
         ),
         (
-            vec!["get", "timeline", "invalid"],
+            vec!["show", "--view", "timeline", "invalid"],
             "simulation ID must contain",
         ),
         (
@@ -885,7 +867,7 @@ fn observation_commands_document_following_and_conditions() {
 fn fault_input_errors_are_reported_before_connecting() {
     let directory = tempfile::tempdir().unwrap();
     let cwd = directory.path();
-    let missing = seedbox(&["inject", "k7m2p9qx", "missing.yaml"], cwd);
+    let missing = seedbox(&["control", "inject", "k7m2p9qx", "missing.yaml"], cwd);
     assert_eq!(missing.status.code(), Some(2));
     assert!(missing.stdout.is_empty());
     assert_eq!(
@@ -893,13 +875,13 @@ fn fault_input_errors_are_reported_before_connecting() {
         "error: fault missing.yaml: No such file or directory (os error 2)\n"
     );
     fs::write(cwd.join("invalid.yaml"), "action: nonexistent\n").unwrap();
-    let invalid = seedbox(&["inject", "k7m2p9qx", "invalid.yaml"], cwd);
+    let invalid = seedbox(&["control", "inject", "k7m2p9qx", "invalid.yaml"], cwd);
     assert_eq!(invalid.status.code(), Some(2));
     assert!(invalid.stdout.is_empty());
     assert!(stderr(&invalid)
         .contains("error: fault invalid.yaml: action: unknown variant `nonexistent`"));
     fs::write(cwd.join("empty.yaml"), "").unwrap();
-    let empty = seedbox(&["inject", "k7m2p9qx", "empty.yaml"], cwd);
+    let empty = seedbox(&["control", "inject", "k7m2p9qx", "empty.yaml"], cwd);
     assert_eq!(empty.status.code(), Some(2));
     assert!(empty.stdout.is_empty());
     assert!(
@@ -908,24 +890,12 @@ fn fault_input_errors_are_reported_before_connecting() {
         stderr(&empty)
     );
     fs::write(cwd.join("large.yaml"), vec![b' '; 65537]).unwrap();
-    let large = seedbox(&["inject", "k7m2p9qx", "large.yaml"], cwd);
+    let large = seedbox(&["control", "inject", "k7m2p9qx", "large.yaml"], cwd);
     assert_eq!(large.status.code(), Some(2));
     assert_eq!(
         stderr(&large),
         "error: fault large.yaml: exceeds 65536 bytes\n"
     );
-}
-
-#[test]
-fn offline_artifact_and_server_state_use_distinct_environment_variables() {
-    let directory = tempfile::tempdir().unwrap();
-    let output = seedbox(&["help", "prepare"], directory.path());
-    assert!(output.status.success());
-    let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("SEEDBOX_ARTIFACT_STATE"), "{help}");
-    assert!(!help.contains("SEEDBOX_STATE="), "{help}");
-    let output = seedbox(&["help", "serve"], directory.path());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("SEEDBOX_STATE"));
 }
 
 #[test]
@@ -960,7 +930,7 @@ fn tui_requires_an_interactive_terminal_before_starting_a_server() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         stderr(&output),
-        "error: seedbox tui needs an interactive terminal; use seedbox events or seedbox get from scripts\n"
+        "error: seedbox tui needs an interactive terminal; use seedbox events or seedbox show from scripts\n"
     );
     assert!(!directory.path().join(".local/state/seedbox").exists());
 }
@@ -974,8 +944,12 @@ fn native_project_discovery_prefers_seedbox_yaml_and_validates_oracle() {
     )
     .unwrap();
     fs::write(directory.path().join("seedbox.yaml"), "name: native\nmachines:\n  app: {image: app}\noracle: {image: checker}\nnetwork: {latency: 2ms}\n").unwrap();
-    let output = seedbox(&["validate", ".", "--json"], directory.path());
-    assert!(output.status.success(), "{}", stderr(&output));
+    let output = seedbox(&["check", ".", "--json"], directory.path());
+    assert!(
+        stderr(&output).contains("driver runtime"),
+        "{}",
+        stderr(&output)
+    );
     let output = seedbox(&["run", ".", "--wall-time", "0s"], directory.path());
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("--wall-time"));
@@ -985,12 +959,12 @@ fn native_project_discovery_prefers_seedbox_yaml_and_validates_oracle() {
 #[test]
 fn capacity_help_explains_resident_slots_and_accepts_json() {
     let directory = tempfile::tempdir().unwrap();
-    let output = seedbox(&["get", "capacity", "--help"], directory.path());
+    let output = seedbox(&["server", "status", "--help"], directory.path());
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("resident execution slots"));
+    assert!(stdout.contains("capacity"));
     assert!(stdout.contains("--json"));
-    let output = seedbox(&["get", "capacity", "--unexpected"], directory.path());
+    let output = seedbox(&["server", "status", "--unexpected"], directory.path());
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("--unexpected"));
 }
@@ -998,7 +972,7 @@ fn capacity_help_explains_resident_slots_and_accepts_json() {
 #[test]
 fn machine_workers_help_and_range_on_every_execution_command() {
     let root = tempfile::tempdir().unwrap();
-    for command in ["run", "explore", "rerun", "replay", "branch"] {
+    for command in ["run", "replay"] {
         let help = seedbox(&[command, "--help"], root.path());
         assert!(help.status.success(), "{command}: {}", stderr(&help));
         let text = String::from_utf8_lossy(&help.stdout);
@@ -1028,25 +1002,22 @@ fn machine_workers_help_and_range_on_every_execution_command() {
 #[test]
 fn machine_workers_is_accepted_on_every_execution_command() {
     let root = tempfile::tempdir().unwrap();
-    for command in ["run", "explore", "rerun", "replay", "branch"] {
+    for command in ["run", "replay"] {
         for value in ["1", "4", "64"] {
             let mut args = vec![command];
-            if matches!(command, "run" | "explore") {
+            if command == "run" {
                 args.push("missing.yaml");
             } else {
                 args.push("k7m2p9qx");
-                if command == "branch" {
-                    args.push("checkpoint-request");
-                }
             }
             args.extend(["--machine-workers", value]);
             let output = seedbox(&args, root.path());
             assert_eq!(output.status.code(), Some(2), "{command} {value}");
             assert!(output.stdout.is_empty());
-            let expected = if matches!(command, "run" | "explore") {
+            let expected = if command == "run" {
                 "error: project file missing.yaml: not found\n"
             } else {
-                "error: no local server is running; start `seedbox serve` in another terminal\n"
+                "error: no local server is running; start `seedbox server start` in another terminal\n"
             };
             assert_eq!(stderr(&output), expected, "{command} {value}");
         }
@@ -1054,9 +1025,9 @@ fn machine_workers_is_accepted_on_every_execution_command() {
 }
 
 #[test]
-fn backend_flag_is_typed_and_only_on_the_four_execution_commands() {
+fn backend_flag_is_typed_and_only_on_execution_commands() {
     let root = tempfile::tempdir().unwrap();
-    for command in ["run", "explore", "rerun", "replay"] {
+    for command in ["run", "replay"] {
         let help = seedbox(&[command, "--help"], root.path());
         assert!(help.status.success(), "{command}: {}", stderr(&help));
         let text = String::from_utf8_lossy(&help.stdout);
@@ -1065,7 +1036,7 @@ fn backend_flag_is_typed_and_only_on_the_four_execution_commands() {
                 text.split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" ")
-                    .contains("TCG: Linux x86-64, no KVM"),
+                    .contains("without KVM"),
                 "{text}"
             );
         }
@@ -1081,7 +1052,7 @@ fn backend_flag_is_typed_and_only_on_the_four_execution_commands() {
             stderr(&invalid)
         );
     }
-    for command in ["serve", "prepare", "branch"] {
+    for command in ["init", "show", "checkpoint"] {
         let help = seedbox(&[command, "--help"], root.path());
         assert!(help.status.success());
         assert!(!String::from_utf8_lossy(&help.stdout).contains("--backend"));
@@ -1095,93 +1066,8 @@ mod checkpoint_history;
 #[path = "cli/checkpoint_version.rs"]
 mod checkpoint_version;
 
-// Explicit application acceptance, using the normal release CLI for each guest.
-// Its interactions case covers run/logs/events/wait/replay/shutdown on Driver.
-// Runs after normal assets/release and integration-owned portable coverage;
-// native runs use the shared host lock.
-#[cfg(all(
-    feature = "application-tests",
-    target_os = "linux",
-    target_arch = "x86_64"
-))]
-#[path = "support/driver_preparation.rs"]
-mod driver_preparation_native;
 #[test]
-fn bundle_and_diagnostics_help_errors_and_removed_commands() {
-    let root = tempfile::tempdir().unwrap();
-    for command in ["export", "import", "diagnostics"] {
-        let help = seedbox(&["help", command], root.path());
-        assert!(help.status.success());
-        let text = String::from_utf8_lossy(&help.stdout);
-        assert!(text.contains("--max-bytes") && text.contains("--json"));
-        assert!(!text.contains("--state") && !text.contains("--kernel"));
-        let over = seedbox(
-            &[command, "k7m2p9qx", "--max-bytes", "68719476737"],
-            root.path(),
-        );
-        assert_eq!(over.status.code(), Some(2));
-        assert!(stderr(&over).contains("--max-bytes"));
-    }
-    let help = seedbox(&["help", "export"], root.path());
-    assert!(String::from_utf8_lossy(&help.stdout).contains("SIMULATION-ID.seedbox.tar"));
-    for command in [
-        "inspect",
-        "diff",
-        "retained-pause",
-        "retained-resume",
-        "retained-logs",
-    ] {
-        let output = seedbox(&["help", command], root.path());
-        assert_eq!(output.status.code(), Some(2));
-        assert!(stderr(&output).contains("unrecognized subcommand"));
-    }
-    fs::write(root.path().join("k7m2p9qx.seedbox.tar"), b"existing").unwrap();
-    let existing = seedbox(&["export", "k7m2p9qx"], root.path());
-    assert_eq!(stderr(&existing), "error: --output k7m2p9qx.seedbox.tar: already exists; choose a new file under real directories\n");
-    let parent = seedbox(&["export", "k7m2p9qx", "-o", "missing/out"], root.path());
-    assert_eq!(stderr(&parent), "error: --output missing/out: No such file or directory (os error 2); choose a new file under real directories\n");
-    fs::write(root.path().join("large"), b"12345").unwrap();
-    let large = seedbox(&["import", "large", "--max-bytes", "4"], root.path());
-    assert_eq!(
-        stderr(&large),
-        "error: bundle large: exceeds --max-bytes 4\n"
-    );
-    let directory = seedbox(&["import", "."], root.path());
-    assert_eq!(stderr(&directory), "error: bundle .: not a regular file\n");
-}
-
-#[test]
-fn transfer_symlinks_are_rejected_and_compare_documents_exit_codes() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    fs::write(root.join("source"), b"bundle").unwrap();
-    std::os::unix::fs::symlink("source", root.join("link")).unwrap();
-    let import = seedbox(&["import", "link"], root);
-    assert_eq!(
-        stderr(&import),
-        format!(
-            "error: bundle link: {}; choose a readable regular bundle file\n",
-            std::io::Error::from_raw_os_error(libc::ELOOP)
-        )
-    );
-    std::os::unix::fs::symlink("missing", root.join("destination")).unwrap();
-    let export = seedbox(&["export", "k7m2p9qx", "-o", "destination"], root);
-    assert_eq!(
-        stderr(&export),
-        "error: --output destination: already exists; choose a new file under real directories\n"
-    );
-    std::os::unix::fs::symlink(".", root.join("parent")).unwrap();
-    let parent = seedbox(&["export", "k7m2p9qx", "-o", "parent/output"], root);
-    assert_eq!(parent.status.code(), Some(2));
-    assert!(stderr(&parent).starts_with("error: --output parent/output:"));
-    assert!(!root.join("output").exists());
-    let help = seedbox(&["help", "compare"], root);
-    assert!(String::from_utf8_lossy(&help.stdout).contains("Exit status:"));
-    assert!(String::from_utf8_lossy(&help.stdout).contains("NOT_COMPARABLE"));
-}
-
-#[test]
-fn get_world_prints_machine_and_link_tables() {
+fn show_world_prints_machine_and_link_tables() {
     use seedbox_api::{
         LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState, WorldState,
     };
@@ -1258,7 +1144,7 @@ fn get_world_prints_machine_and_link_tables() {
             return;
         }
     });
-    let output = seedbox(&["get", "world", "k7m2p9qx"], directory.path());
+    let output = seedbox(&["show", "--view", "world", "k7m2p9qx"], directory.path());
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
@@ -1274,4 +1160,183 @@ oracle  n1      2.5ms    500µs   100ppm  12      960    4        cut p1
 simulated time: 1s
 "
     );
+}
+
+#[test]
+fn root_commands_are_the_supported_workflow_without_legacy_aliases() {
+    let root = tempfile::tempdir().unwrap();
+    let output = seedbox(&["__complete", "--", ""], root.path());
+    assert!(output.status.success());
+    let mut commands: Vec<_> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    commands.sort();
+    assert_eq!(
+        commands,
+        [
+            "check",
+            "checkpoint",
+            "compare",
+            "completions",
+            "control",
+            "delete",
+            "events",
+            "help",
+            "init",
+            "logs",
+            "replay",
+            "run",
+            "server",
+            "show",
+            "stop",
+            "tui",
+            "wait"
+        ]
+    );
+    let help = seedbox(&["--help"], root.path());
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    let command_section = help
+        .split("Commands:\n")
+        .nth(1)
+        .unwrap()
+        .split("\n\n")
+        .next()
+        .unwrap();
+    let mut visible: Vec<_> = command_section
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    visible.sort();
+    assert_eq!(visible, commands);
+    for old in [
+        "prepare",
+        "explore",
+        "rerun",
+        "branch",
+        "get",
+        "describe",
+        "playback",
+        "doctor",
+        "validate",
+        "serve",
+        "shutdown",
+        "export",
+        "import",
+        "inspect",
+        "diff",
+        "retained-logs",
+        "retained-pause",
+        "retained-resume",
+        "diagnostics",
+        "pause",
+        "resume",
+        "step",
+        "rate",
+        "inject",
+        "heal",
+    ] {
+        let output = seedbox(&["help", old], root.path());
+        assert_eq!(output.status.code(), Some(2), "{old}");
+        assert!(
+            stderr(&output).contains("unrecognized subcommand"),
+            "{old}: {}",
+            stderr(&output)
+        );
+    }
+    let help = seedbox(&["help", "compare"], root.path());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("NOT_COMPARABLE"));
+}
+
+#[test]
+fn checkpoint_output_is_checked_before_connecting_and_never_overwrites() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("saved.seedbox"), b"existing checkpoint").unwrap();
+    let existing = seedbox(
+        &["checkpoint", "k7m2p9qx", "-o", "saved.seedbox"],
+        root.path(),
+    );
+    assert_eq!(existing.status.code(), Some(2));
+    assert_eq!(
+        stderr(&existing),
+        "error: --output saved.seedbox: already exists; choose a new file under real directories\n"
+    );
+    assert_eq!(
+        fs::read(root.path().join("saved.seedbox")).unwrap(),
+        b"existing checkpoint"
+    );
+    let parent = seedbox(
+        &["checkpoint", "k7m2p9qx", "-o", "missing/out.seedbox"],
+        root.path(),
+    );
+    assert_eq!(parent.status.code(), Some(2));
+    assert_eq!(stderr(&parent), "error: --output missing/out.seedbox: No such file or directory (os error 2); choose a new file under real directories\n");
+    std::os::unix::fs::symlink(".", root.path().join("parent")).unwrap();
+    let linked = seedbox(
+        &["checkpoint", "k7m2p9qx", "-o", "parent/out.seedbox"],
+        root.path(),
+    );
+    assert_eq!(linked.status.code(), Some(2));
+    assert!(stderr(&linked).starts_with("error: --output parent/out.seedbox:"));
+    assert!(!root.path().join("out.seedbox").exists());
+    assert!(!root.path().join(".local/state/seedbox").exists());
+}
+
+#[test]
+fn run_source_and_inspection_choices_are_validated_before_connecting() {
+    let root = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["run", "project.yaml", "--from", "k7m2p9qx"],
+        vec!["run", "--from", "k7m2p9qx", "--count", "2"],
+        vec!["show", "--view", "world"],
+        vec!["show", "k7m2p9qx", "--view", "unknown"],
+        vec!["show", "k7m2p9qx", "--file", "vmm.stderr"],
+    ] {
+        let output = seedbox(&args, root.path());
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(
+            !stderr(&output).contains("no local server"),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
+    assert!(!root.path().join(".local/state/seedbox").exists());
+}
+
+#[test]
+fn every_auto_start_command_exposes_the_explicit_server_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    for command in [
+        vec!["run"],
+        vec!["replay"],
+        vec!["compare"],
+        vec!["show"],
+        vec!["logs"],
+        vec!["events"],
+        vec!["wait"],
+        vec!["tui"],
+        vec!["stop"],
+        vec!["delete"],
+        vec!["checkpoint"],
+        vec!["control", "pause"],
+        vec!["control", "resume"],
+        vec!["control", "step"],
+        vec!["control", "rate"],
+        vec!["control", "inject"],
+        vec!["control", "heal"],
+        vec!["control", "receipt"],
+        vec!["server", "start"],
+    ] {
+        let mut args = command.clone();
+        args.push("--help");
+        let output = seedbox(&args, root.path());
+        assert!(output.status.success(), "{command:?}: {}", stderr(&output));
+        let help = String::from_utf8(output.stdout).unwrap();
+        for flag in ["--state", "--full-state"] {
+            assert!(help.contains(flag), "{command:?} omits {flag}: {help}");
+        }
+    }
 }

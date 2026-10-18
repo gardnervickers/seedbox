@@ -420,37 +420,10 @@ pub fn portable<C: Commands>(checks: &mut Checks<C>) -> Result<(), String> {
             return Ok(());
         }
     }
-    timed(checks, "workload-validation", |checks| {
-        let mut workloads: Vec<_> = fs::read_dir(checks.root.join("harness/acceptance/workloads"))
-            .map_err(|e| format!("discover workloads: {e}"))?
-            .map(|e| e.map(|e| e.path()))
-            .collect::<Result<_, _>>()
-            .map_err(|e| e.to_string())?;
-        workloads.retain(|p| p.extension().is_some_and(|e| e == "yaml"));
-        workloads.sort();
-        if workloads.is_empty() {
-            return Err("workload discovery found no YAML files".into());
-        }
-        for path in workloads {
-            if !checks.step(
-                "workload-validation",
-                vec![
-                    "cargo".into(),
-                    "run".into(),
-                    "--quiet".into(),
-                    "--locked".into(),
-                    "-p".into(),
-                    "seedbox".into(),
-                    "--".into(),
-                    "validate".into(),
-                    path.to_string_lossy().into(),
-                ],
-            ) {
-                break;
-            }
-        }
-        Ok(())
-    })
+    // seedbox-cli's native_acceptance_projects_round_trip_through_submission_json
+    // discovers and validates every workload in the workspace tests above.
+    // The public `check` command also probes the host and is not a portable check.
+    Ok(())
 }
 pub fn machine_suite_runs(suites: &[Suite], environment: &Environment, root: &Path) -> Vec<Job> {
     let mut environment = environment.clone();

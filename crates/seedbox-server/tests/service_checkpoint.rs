@@ -180,6 +180,7 @@ impl ExecutionBackend for Counter {
                 rate: PlaybackRate::Paused,
                 achieved_rate: None,
                 stepping: false,
+                before_next_fault: false,
                 checkpoint,
                 error: None,
                 intervention: None,
