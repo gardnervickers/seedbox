@@ -1,0 +1,34 @@
+# Process pauses below keel-s3dd's watchdog bound: 0.5-10 s against the 12 s the
+# scenarios set (--watchdog-wedge-ms 12000), so no keel-s3dd may crash:
+# seedbox.no_crashing_processes must pass.
+# For delores-kv-register, never touching the in-memory demo sequencer: replicas
+# cut off from S3 and S3 from every replica, SIGKILL and SIGSTOP of a replica or
+# of S3, power loss of S3 (volume kept) or a replica, and wall-clock steps. An
+# S3 server aborting and coming back is a deliberate fault. The oracle's
+# operations run 120 s.
+start: 15s
+end: 110s
+interval: 3s
+targets: [n1, n2, n3, s3]
+faults:
+  - kind: pause_process
+    weight: 2
+    duration: {min: 500ms, max: 10s}
+  - kind: partition
+    weight: 2
+    duration: {min: 1s, max: 8s}
+    from: [s3]
+  - kind: partition
+    weight: 1
+    duration: {min: 1s, max: 8s}
+    from: [n1, n2, n3]
+  - kind: stop
+    weight: 2
+    downtime: {min: 1s, max: 6s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 5s}
+  - kind: clock_skew
+    weight: 1
+    duration: {min: 3s, max: 15s}
+    maxOffset: 30s

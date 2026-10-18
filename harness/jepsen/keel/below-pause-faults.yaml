@@ -1,0 +1,27 @@
+# Process pauses below keel-s3dd's watchdog bound: 0.5-10 s against the 12 s the
+# scenarios set (--watchdog-wedge-ms 12000), so no keel-s3dd may crash:
+# seedbox.no_crashing_processes must pass.
+# Also power loss (volume kept), partitions from the clients, slow disk
+# requests and scheduling perturbation. The oracle's operations run 120 s.
+start: 15s
+end: 110s
+interval: 4s
+faults:
+  - kind: pause_process
+    weight: 3
+    duration: {min: 500ms, max: 10s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 5s}
+  - kind: partition
+    weight: 1
+    duration: {min: 1s, max: 8s}
+  - kind: disk_latency
+    weight: 1
+    duration: {min: 2s, max: 8s}
+    latency: {min: 5ms, max: 100ms}
+    jitter: 50ms
+  - kind: preempt
+    weight: 1
+    duration: {min: 2s, max: 8s}
+    ppm: 20000
