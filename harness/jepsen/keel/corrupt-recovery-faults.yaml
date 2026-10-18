@@ -1,0 +1,21 @@
+# Corrupted data reads that span power failures, so keel-s3dd recovers its
+# log while reads are still being corrupted (the disk keeps the right bytes).
+# This is the shape that made keel before its fix (fix/s3d-durability) treat a
+# frame that failed its checksum as the log's end and truncate acknowledged
+# objects (5frhxmz3); now recovery exits (3) rather than discard a frame, and
+# run-s3dd.sh restarts it until the reads are clean. Pair it with
+# keel-corrupt-reads: no acknowledged object may be lost.
+start: 15s
+end: 70s
+interval: 4s
+faults:
+  - kind: disk_error
+    weight: 2
+    op: read
+    ppm: 50000
+    effect: corrupt
+    scope: data
+    duration: {min: 8s, max: 15s}
+  - kind: crash
+    weight: 2
+    downtime: {min: 500ms, max: 2s}
