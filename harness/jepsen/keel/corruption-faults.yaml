@@ -1,0 +1,27 @@
+# Silent corruption of the server's data reads (never the filesystem's
+# metadata): a selected read completes with one sector of garbage, while the
+# disk itself keeps the right bytes. keel-s3dd checksums its log frames and
+# object blocks, so a corrupted read must fail rather than return other bytes,
+# and since nothing on disk changes, no acknowledged object may be lost, even
+# across the power failures and short (under 2 s) process pauses mixed in (recovery reads the log back through the
+# same corrupting disk). Pair it with keel-corrupt-reads. Before keel's fix
+# (fix/s3d-durability), recovery treated a frame that failed its checksum on
+# read as the log's end (5frhxmz3 lost 3047 acknowledged objects) and a
+# corrupted read wedged the server for good (4avkym5e).
+start: 15s
+end: 70s
+interval: 4s
+faults:
+  - kind: disk_error
+    weight: 3
+    op: read
+    ppm: 20000
+    effect: corrupt
+    scope: data
+    duration: {min: 2s, max: 8s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 4s}
+  - kind: pause_process
+    weight: 1
+    duration: {min: 500ms, max: 1800ms}

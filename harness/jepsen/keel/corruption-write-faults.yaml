@@ -1,0 +1,19 @@
+# Silent corruption of the server's data writes (never the filesystem's
+# metadata): a selected write lands one sector of garbage on disk. One server
+# keeps one copy, so a corrupted object or log frame may be lost; pair this with
+# keel-corrupt-writes, which fails only on bytes no client wrote (a read must
+# return the bytes written or an error) and listings of keys no client wrote.
+start: 15s
+end: 70s
+interval: 4s
+faults:
+  - kind: disk_error
+    weight: 3
+    op: write
+    ppm: 20000
+    effect: corrupt
+    scope: data
+    duration: {min: 2s, max: 8s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 4s}

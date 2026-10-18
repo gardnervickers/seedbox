@@ -431,3 +431,137 @@ pub fn crash_all_repeatedly(
         }
     });
 }
+
+/// One partition between nodes and their sequencer, as applied.
+#[derive(Debug, Clone)]
+pub struct SequencerCut {
+    /// `one-node`, `all-nodes` or `node-and-s3`.
+    pub case: &'static str,
+    pub left: Vec<String>,
+    pub right: Vec<String>,
+    /// Seconds since the oracle started.
+    pub start: f64,
+    pub healed: Option<f64>,
+}
+
+/// A background schedule of network cuts between `nodes` and `sequencer`,
+/// which keeps running with its state (this is not a sequencer kill): one
+/// node from the sequencer, every node from it, or one node from the
+/// sequencer and from one to all but one of `s3s` (all of them when there is
+/// only one). Half the cuts are short (1-4 s, under a node's 5 s sequencer
+/// timeout), half long (10-30 s); each heal is followed by `gap` seconds
+/// without a cut, so recovery after it can be measured. No cut starts that
+/// would not heal `end` seconds after this call. Returns at once; the
+/// schedule runs on its own thread with its own World connection and
+/// records every cut in the returned list.
+pub fn sequencer_cuts(
+    nodes: Vec<String>,
+    s3s: Vec<String>,
+    sequencer: String,
+    gap: (f64, f64),
+    end: f64,
+) -> std::sync::Arc<std::sync::Mutex<Vec<SequencerCut>>> {
+    let cuts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut ctl = match crate::kit::connect_world(None) {
+        Ok(ctl) => ctl,
+        Err(error) => {
+            evidence("nemesis-unavailable", json!({"error": error.0}));
+            return cuts;
+        }
+    };
+    let record = cuts.clone();
+    let start = Instant::now();
+    std::thread::spawn(move || {
+        let mut pace = Sleep;
+        let mut rng = Rng::new(crate::kit::rng::entropy_seed());
+        pace.wait(&mut ctl, rng.uniform(gap.0, gap.1));
+        loop {
+            rng.refresh();
+            let length = if rng.chance(0.5) {
+                rng.uniform(1.0, 4.0)
+            } else {
+                rng.uniform(10.0, 30.0)
+            };
+            if start.elapsed().as_secs_f64() + length + 1.0 > end {
+                return;
+            }
+            let node = rng.choice(&nodes).clone();
+            let (case, left, right) = match rng.below(3) {
+                0 => ("one-node", vec![node], vec![sequencer.clone()]),
+                1 => ("all-nodes", vec![sequencer.clone()], nodes.clone()),
+                _ => {
+                    let count = if s3s.len() > 1 {
+                        rng.range(1, s3s.len() as u64 - 1) as usize
+                    } else {
+                        s3s.len()
+                    };
+                    let mut right = vec![sequencer.clone()];
+                    right.extend(rng.sample(&s3s, count));
+                    ("node-and-s3", vec![node], right)
+                }
+            };
+            let l: Vec<&str> = left.iter().map(String::as_str).collect();
+            let r: Vec<&str> = right.iter().map(String::as_str).collect();
+            let applied = cut(&mut ctl, &l, &r, json!({"case": case, "seconds": length}));
+            let handle = match applied {
+                Ok(handle) => handle,
+                Err(error) => {
+                    evidence("nemesis-failed", json!({"error": error.0}));
+                    return;
+                }
+            };
+            let index = {
+                let mut cuts = record.lock().unwrap();
+                cuts.push(SequencerCut {
+                    case,
+                    left,
+                    right,
+                    start: now(),
+                    healed: None,
+                });
+                cuts.len() - 1
+            };
+            pace.wait(&mut ctl, length);
+            if let Err(error) = heal(&mut ctl, &handle) {
+                evidence("nemesis-failed", json!({"error": error.0}));
+                return;
+            }
+            record.lock().unwrap()[index].healed = Some(now());
+            rng.refresh();
+            pace.wait(&mut ctl, rng.uniform(gap.0, gap.1));
+        }
+    });
+    cuts
+}
+
+/// For each healed cut, the seconds from its heal to the first successful
+/// operation in `oks` (seconds since the oracle started), and the cuts after
+/// which none succeeded within `window` seconds although the run went on
+/// that long.
+pub fn recovery_after_cuts(
+    cuts: &[SequencerCut],
+    oks: &[f64],
+    window: f64,
+    end: f64,
+) -> (Vec<Value>, Vec<Value>) {
+    let mut report = Vec::new();
+    let mut stuck = Vec::new();
+    for cut in cuts {
+        let Some(healed) = cut.healed else { continue };
+        let first = oks
+            .iter()
+            .copied()
+            .filter(|t| *t >= healed)
+            .fold(None, |best: Option<f64>, t| {
+                Some(best.map_or(t, |b| b.min(t)))
+            });
+        let recovered = first.map(|t| t - healed);
+        let item = json!({"case": cut.case, "cut": [cut.left, cut.right], "start": cut.start,
+                          "seconds": healed - cut.start, "recovered_after": recovered});
+        if recovered.is_none_or(|r| r > window) && healed + window <= end {
+            stuck.push(item.clone());
+        }
+        report.push(item);
+    }
+    (report, stuck)
+}

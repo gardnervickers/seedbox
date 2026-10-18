@@ -1,0 +1,27 @@
+# Process pauses above keel-s3dd's watchdog bound: 13-20 s against the 12 s the
+# scenarios set (--watchdog-wedge-ms 12000). keel-s3dd may abort by design on
+# resume when a pause lands mid-tick (KEEL-EMERGENCY envelope wedged); its
+# restart wrapper starts it again and the oracle's data and recovery checks
+# decide the verdict. Pauses dominate, so a sweep sees several.
+# Also partitions from the clients, slow disk requests and scheduling
+# perturbation. Power loss is left to crash-faults.yaml, which keel's
+# visible-before-durable bug makes fail the register workload for now. The oracle's operations run 120 s.
+start: 15s
+end: 110s
+interval: 5s
+faults:
+  - kind: pause_process
+    weight: 5
+    duration: {min: 13s, max: 20s}
+  - kind: partition
+    weight: 1
+    duration: {min: 1s, max: 8s}
+  - kind: disk_latency
+    weight: 1
+    duration: {min: 2s, max: 8s}
+    latency: {min: 5ms, max: 100ms}
+    jitter: 50ms
+  - kind: preempt
+    weight: 1
+    duration: {min: 2s, max: 8s}
+    ppm: 20000

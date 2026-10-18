@@ -1,0 +1,20 @@
+# above-pause-faults.yaml aimed at the S3 server alone: 13-20 s process pauses
+# (past keel-s3dd's 12 s watchdog bound, so it may abort on resume and come
+# back through its wrapper), power loss and partitions from every replica.
+# The replicas are not faulted. An S3 server aborting and coming back is a
+# deliberate fault. The oracle's operations run 120 s.
+start: 15s
+end: 110s
+interval: 4s
+targets: [s3]
+faults:
+  - kind: pause_process
+    weight: 4
+    duration: {min: 13s, max: 20s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 5s}
+  - kind: partition
+    weight: 1
+    duration: {min: 1s, max: 8s}
+    from: [n1, n2, n3]

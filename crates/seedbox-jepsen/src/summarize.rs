@@ -2,7 +2,11 @@
 //! oracle property's status, simulated time and verdict text, and any other
 //! property that did not pass), then a tally by phase, termination reason and
 //! oracle status. An inconclusive oracle verdict still counts as a passed
-//! property, so the verdict text is what tells it apart.
+//! property, so the verdict text is what tells it apart. A crash that is
+//! keel-s3dd's wedge watchdog aborting the process (by design, after a long
+//! process pause) is named as such, and a member whose only failures are
+//! those is tallied apart; whether each followed a pause past the watchdog's
+//! bound is for the member's `seedbox explain` timeline to show.
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -18,6 +22,23 @@ pub struct Row {
     pub verdict: String,
     /// Properties, the oracle's included, whose status is not `passed`.
     pub failing: Vec<String>,
+    /// Every failing property is a keel-s3dd watchdog abort.
+    pub watchdog_only: bool,
+}
+
+/// The failing-property label for a crash that is keel-s3dd's watchdog.
+const WATCHDOG: &str = "seedbox.no_crashing_processes (keel-watchdog abort)";
+
+fn label(property: &Value) -> String {
+    let id = text(&property["id"]);
+    let message = property["example"]["details"]["message"]
+        .as_str()
+        .unwrap_or("");
+    if id == "seedbox.no_crashing_processes" && message.contains("keel-watchdog") {
+        WATCHDOG.into()
+    } else {
+        id
+    }
 }
 
 fn text(value: &Value) -> String {
@@ -38,18 +59,20 @@ pub fn rows(document: &Value) -> Vec<Row> {
             let oracle = properties
                 .iter()
                 .find(|p| !p["id"].as_str().unwrap_or("").starts_with("seedbox."));
+            let failing: Vec<String> = properties
+                .iter()
+                .filter(|p| p["status"].as_str() != Some("passed"))
+                .map(label)
+                .collect();
             Row {
+                watchdog_only: !failing.is_empty() && failing.iter().all(|f| f == WATCHDOG),
+                failing,
                 id: text(&member["metadata"]["id"]),
                 phase: text(&status["phase"]),
                 termination: text(&status["termination"]["reason"]),
                 oracle: oracle.map_or("none".into(), |p| text(&p["status"])),
                 simulated_seconds: status["simulatedTimeNs"].as_f64().unwrap_or(0.0) / 1e9,
                 verdict: oracle.map_or("-".into(), |p| text(&p["example"]["details"]["verdict"])),
-                failing: properties
-                    .iter()
-                    .filter(|p| p["status"].as_str() != Some("passed"))
-                    .map(|p| text(&p["id"]))
-                    .collect(),
             }
         })
         .collect()
@@ -57,10 +80,15 @@ pub fn rows(document: &Value) -> Vec<Row> {
 
 pub fn render(rows: &[Row]) -> String {
     let mut out = String::new();
-    let mut tally: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
+    let mut tally: BTreeMap<(&str, &str, &str, &str), usize> = BTreeMap::new();
     for row in rows {
+        let aborts = if row.watchdog_only {
+            " with only keel-watchdog aborts"
+        } else {
+            ""
+        };
         *tally
-            .entry((&row.phase, &row.termination, &row.oracle))
+            .entry((&row.phase, &row.termination, &row.oracle, aborts))
             .or_default() += 1;
         let verdict: String = row.verdict.chars().take(110).collect();
         out.push_str(&format!(
@@ -72,8 +100,8 @@ pub fn render(rows: &[Row]) -> String {
         }
         out.push('\n');
     }
-    for ((phase, termination, oracle), count) in tally {
-        out.push_str(&format!("{count} {phase} {termination} {oracle}\n"));
+    for ((phase, termination, oracle, aborts), count) in tally {
+        out.push_str(&format!("{count} {phase} {termination} {oracle}{aborts}\n"));
     }
     out
 }
@@ -141,6 +169,29 @@ mod tests {
              1 completed oracleExited passed\n\
              1 completed oracleExited unmet\n"
         );
+    }
+
+    #[test]
+    fn keel_watchdog_aborts_are_named_and_tallied_apart() {
+        let mut aborted = member("dddd", "passed", "ok", "passed");
+        aborted["status"]["properties"]["properties"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "seedbox.no_crashing_processes", "status": "violated",
+                         "example": {"details": {"message": "libdynamorio.so: keel-watchdog: potentially unexpected fatal signal 6."}}}));
+        let mut other = member("eeee", "passed", "ok", "passed");
+        other["status"]["properties"]["properties"]
+            .as_array_mut()
+            .unwrap()
+            .push(
+                json!({"id": "seedbox.no_crashing_processes", "status": "violated",
+                         "example": {"details": {"message": "n1: segfault"}}}),
+            );
+        let rows = rows(&json!({"members": [aborted, other]}));
+        assert!(rows[0].watchdog_only && !rows[1].watchdog_only);
+        let text = render(&rows);
+        assert!(text.contains("1 completed oracleExited passed with only keel-watchdog aborts\n"));
+        assert!(text.contains("eeee passed 121.500 ok [seedbox.no_crashing_processes]"));
     }
 
     #[test]

@@ -1,0 +1,14 @@
+# Power loss of the keel-s3dd server, often (volume kept: page cache and
+# unflushed sectors are lost), and nothing else. Before keel's fix
+# (fix/s3d-durability) the register workloads failed here: keel served a write
+# to readers and conditional checks before syncing it, so a client read (or was
+# refused a CAS by) a write whose PUT had not been acknowledged, power failed,
+# and the value it saw was gone (8w7f6c5j, sggu92mv). Every key's history must
+# be linearizable. The oracle's operations run 120 s.
+start: 15s
+end: 110s
+interval: 4s
+faults:
+  - kind: crash
+    weight: 1
+    downtime: {min: 500ms, max: 3s}

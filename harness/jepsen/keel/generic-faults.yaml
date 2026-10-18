@@ -1,0 +1,27 @@
+# Generic faults for one keel-s3dd server, aimed at nothing in particular:
+# power loss (the volume is kept; page cache and unflushed sectors are lost),
+# process pauses (SIGSTOP), partitions from the clients, slow disk requests and
+# scheduling perturbation. run-s3dd.sh restarts keel-s3dd if it exits, and a
+# rebooted server starts it again by itself. The oracle's writes run 60 s.
+start: 15s
+end: 70s
+interval: 3s
+faults:
+  - kind: crash
+    weight: 2
+    downtime: {min: 1s, max: 5s}
+  - kind: pause_process
+    weight: 2
+    duration: {min: 500ms, max: 6s}
+  - kind: partition
+    weight: 2
+    duration: {min: 1s, max: 8s}
+  - kind: disk_latency
+    weight: 1
+    duration: {min: 2s, max: 8s}
+    latency: {min: 5ms, max: 100ms}
+    jitter: 50ms
+  - kind: preempt
+    weight: 1
+    duration: {min: 2s, max: 8s}
+    ppm: 20000

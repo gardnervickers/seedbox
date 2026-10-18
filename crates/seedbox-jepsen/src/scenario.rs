@@ -1923,6 +1923,360 @@ fn rustfs() -> Vec<Scenario> {
         .collect()
 }
 
+// ------------------------------------------------------------ keel-s3dd
+
+/// The image `harness/jepsen/keel/image/build.sh` builds and tags from a keel
+/// checkout; keel has no public remote, so no scenario can name its context.
+const KEEL_S3DD: &str = "localhost/seedbox-jepsen/keel-s3dd:current";
+
+/// One keel-s3dd server, its store on a volume, restarted by run-s3dd.sh
+/// whenever it exits. The segment log never reclaims space, so the store has
+/// 64 segments of 16 MiB (1 GiB of writes) instead of the default 8. Its
+/// wedge watchdog's bound is 12 s instead of 2 s, so the below-pause profiles
+/// (up to 10 s) cross no bound and the above-pause ones (13-20 s) do.
+fn keel_server(backend: &str, placement: &str) -> Machine {
+    Machine::image(KEEL_S3DD)
+        .comment("run-s3dd.sh restarts keel-s3dd whenever it exits, as a supervisor would.")
+        .entrypoint(&["/bin/sh", "/run-s3dd.sh"])
+        .command(strings(&[
+            "--listen",
+            "0.0.0.0:9000",
+            "--data-dir",
+            "/data",
+            "--access-key",
+            "jepsen",
+            "--secret-key",
+            "jepsen-secret",
+            "--region",
+            "us-east-1",
+            "--io-backend",
+            backend,
+            "--object-placement",
+            placement,
+            "--store-segments",
+            "64",
+            "--watchdog-wedge-ms",
+            "12000",
+        ]))
+        .file("run-s3dd.sh", "/run-s3dd.sh")
+        // The wedge watchdog's abort after a pause past its bound is
+        // designed behavior; any other crash still fails the run.
+        .expected_crash("SIGABRT", "keel-watchdog")
+        .memory(512)
+        .data_sized("/data", "3GiB")
+}
+
+#[allow(clippy::type_complexity)]
+fn keel() -> Vec<Scenario> {
+    let objects: &[&str] = &["--size", "4096"];
+    let register: &[&str] = &["--workload", "cas-register"];
+    // Four small registers for the 60 s scenarios; twelve keep the 120 s
+    // histories' unknown outcomes per key few enough to check.
+    let small: &[&str] = &["--size", "1024", "--keys", "4"];
+    let many: &[&str] = &["--keys", "12"];
+    let crash: &[&str] = &["--crash-all-every", "15"];
+    let reboot: &[&str] = &["--reboot-before-check"];
+    // Long enough for the above-pause profiles' 13-20 s freezes, with load
+    // enough that a freeze often lands while keel-s3dd is mid-tick.
+    let long: &[&str] = &[
+        "--duration",
+        "120",
+        "--clients",
+        "12",
+        "--think-ms",
+        "5",
+        "--size",
+        "16384",
+        // Longer than the longest freeze, so a request outlives it rather
+        // than ending unknown (unknown writes make the register check
+        // exponential).
+        "--timeout",
+        "30",
+    ];
+    let short: &[&str] = &["--duration", "60"];
+    // (suffix, backend, placement, what the variant is)
+    let variants = [
+        (
+            "",
+            "poll",
+            "log",
+            "the poll I/O backend and objects in the segment log",
+        ),
+        (
+            "-uring",
+            "uring",
+            "log",
+            "the io_uring I/O backend and objects in the segment log",
+        ),
+        (
+            "-file",
+            "poll",
+            "file",
+            "the poll I/O backend and one file per object",
+        ),
+    ];
+    let mut specs: Vec<(String, String, &str, &str, Vec<&str>)> = Vec::new();
+    for (suffix, backend, placement, what) in variants {
+        specs.push((
+            format!("keel{suffix}-objects"),
+            format!("One keel-s3dd server with {what}.\nLooking for unknown bugs: S3 PUTs of unique 16 KiB objects from twelve clients for\n120 s with reads of acknowledged objects, then a read-back and a listing of every\nacknowledged object. keel-s3dd acknowledges a write only once it is synced, so\nnothing acknowledged may be lost. Run it without a fault profile for a baseline,\nor with `--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or\n`above-pause-faults.yaml`."),
+            backend, placement, long.to_vec(),
+        ));
+        specs.push((
+            format!("keel{suffix}-register"),
+            format!("One keel-s3dd server with {what}.\nTwelve registers: reads, PUTs, DELETEs and compare-and-set by conditional PUT (a GET,\nthen If-Match on its ETag, or If-None-Match from absent) from twelve clients for 120 s,\nthen a read of each key. Every key's history must be linearizable. Run it with\n`--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or `above-pause-faults.yaml`.\n`crash-faults.yaml` and `latency-crash-faults.yaml` check keel's fix (fix/s3d-durability)\nfor serving writes to readers and conditional checks before they were synced, which\npower loss then undid (8w7f6c5j, sggu92mv)."),
+            backend, placement, [register, many, long].concat(),
+        ));
+        specs.push((
+            format!("keel{suffix}-crash-all"),
+            format!("keel{suffix}-objects under power loss: the server fails about every 15 s (7.5-22.5 s)\nand boots 2 s later, its volume kept (page cache and unflushed sectors are lost). An\nobject acknowledged before a power failure must survive it intact."),
+            backend, placement, [objects, crash, short].concat(),
+        ));
+        specs.push((
+            format!("keel{suffix}-crash-all-register"),
+            format!("keel{suffix}-register under the same power loss: no acknowledged write or\ncompare-and-set may be lost, and every key's history must stay linearizable."),
+            backend, placement, [register, small, crash, short].concat(),
+        ));
+    }
+    specs.push((
+        "keel-eio".into(),
+        "keel-objects under failed disk requests: run it with\n`--fault-profile harness/jepsen/keel/eio-data-faults.yaml`. keel-s3dd wedges for good on\na failed write or sync (fail-stop by design), so the server is power-cycled once the\nfaults end and must then come back with every acknowledged object: a write whose sync\nfailed must never have been acknowledged.".into(),
+        "poll", "log", [objects, reboot, short].concat(),
+    ));
+    specs.push((
+        "keel-eio-register".into(),
+        "keel-register under failed disk requests, power-cycled before the checks like\nkeel-eio: run it with `--fault-profile harness/jepsen/keel/eio-data-faults.yaml`. A\nwedged keel-s3dd answers every write with an ambiguous 500, so a client waits 5 s\nafter each unknown outcome to keep the history checkable.".into(),
+        "poll", "log", [register, small, reboot, &["--unknown-backoff-ms", "5000"], short].concat(),
+    ));
+    specs.push((
+        "keel-corrupt-reads".into(),
+        "keel-objects under silent corruption of data reads: run it with\n`--fault-profile harness/jepsen/keel/corruption-faults.yaml`. The disk keeps the right\nbytes, so no acknowledged object may be lost and no read may return other bytes. A\nread that fails its checksum fails that request; one during recovery makes\nkeel-s3dd exit (3) rather than truncate its log, and run-s3dd.sh restarts it. With\nbuffered I/O a corrupted read can leave a bad page cached, so the server is\npower-cycled once the faults end (a fail-stop operator's restart), and every\nacknowledged object must then read back intact.".into(),
+        "poll", "log", [objects, reboot, short].concat(),
+    ));
+    specs.push((
+        "keel-corrupt-writes".into(),
+        "keel-objects under silent corruption of written data: run it with\n`--fault-profile harness/jepsen/keel/corruption-write-faults.yaml`. One server keeps one\ncopy, so corrupted objects may be lost; but every read must return the bytes written\nor an error, never other bytes, and a listing must hold only keys some client wrote.\nThe server is power-cycled once the faults end; keel-s3dd then refuses to start on a\ncorrupt frame mid-log (exit 3) rather than discard what follows it, which is the\nexpected fail-stop for a corrupted single copy and is reported, not failed.".into(),
+        "poll", "log", [objects, reboot, &["--integrity-only"], short].concat(),
+    ));
+    specs
+        .into_iter()
+        .map(|(name, comment, backend, placement, arguments)| {
+            let mut args = strings(&["keel-s3", "--nodes", "s3"]);
+            args.extend(strings(&arguments));
+            Scenario {
+                name,
+                comment,
+                generated: format!(
+                    "keel-s3dd, one server, --io-backend {backend} --object-placement {placement}"
+                ),
+                machines: vec![("s3".into(), keel_server(backend, placement))],
+                // The register check's search grows with unacknowledged writes.
+                oracle: Machine::program(&args).memory(1024),
+                latency: "1ms".into(),
+            }
+        })
+        .collect()
+}
+
+// ------------------------------------------------------------ delores
+
+/// The image `harness/jepsen/delores/image/build.sh` builds from a delores
+/// checkout with its own `examples/docker-kv/Dockerfile`.
+const DELORES_KV: &str = "localhost/seedbox-jepsen/delores-docker-kv:current";
+
+/// A docker-kv machine with compose's shared environment, pointed at keel-s3dd.
+fn delores_kv(extra: &[(&str, &str)]) -> Machine {
+    let mut machine = Machine::image(DELORES_KV).memory(512);
+    for (key, value) in [
+        ("RUST_LOG", "info"),
+        ("NO_COLOR", "1"),
+        ("S3_ENDPOINT", "http://s3:9000"),
+        ("S3_BUCKET", "delores"),
+        ("AWS_ACCESS_KEY_ID", "jepsen"),
+        ("AWS_SECRET_ACCESS_KEY", "jepsen-secret"),
+        ("AWS_REGION", "us-east-1"),
+        ("VIEW_REGISTER_KEY", "demo/view-register"),
+        ("LOG_PREFIX", "demo"),
+        ("LOG_WINDOW_SIZE", "32"),
+        ("SEQUENCER_ID", "main"),
+        ("SEQUENCER_ENDPOINT", "tcp://sequencer:7100"),
+    ]
+    .into_iter()
+    .chain(extra.iter().copied())
+    {
+        machine = machine.env(key, value);
+    }
+    machine
+}
+
+fn delores() -> Vec<Scenario> {
+    let mut machines = vec![(
+        "s3".to_string(),
+        Machine {
+            files: vec![("../keel/run-s3dd.sh".into(), "/run-s3dd.sh".into())],
+            ..keel_server("poll", "log")
+        },
+    )];
+    machines.push((
+        "sequencer".into(),
+        delores_kv(&[("BIND", "0.0.0.0:7100")])
+            .comment("The in-memory demo sequencer: never fault it (losing it is a liveness test).")
+            .command(strings(&["sequencer"])),
+    ));
+    for (index, replica) in nodes("n", 3).into_iter().enumerate() {
+        let id = index.to_string();
+        machines.push((
+            replica,
+            delores_kv(&[("REPLICA_ID", id.as_str()), ("BIND", "0.0.0.0:7000")])
+                .comment(
+                    "start-replica.sh seeds the view register if no replica has yet, then serves.",
+                )
+                .entrypoint(&["/bin/sh", "/start-replica.sh"])
+                .file("start-replica.sh", "/start-replica.sh"),
+        ));
+    }
+    let comment = "delores's examples/docker-kv over keel-s3dd instead of MinIO: three replicas share\none virtual log through the S3 server, with slots from the in-memory demo sequencer.\nSix clients PUT, DELETE and GET five keys through random replicas for 120 s with no\nretries; then every replica reads every key. Each key's history must be\nlinearizable and the replicas that answer must agree. docker-kv cannot reconfigure\npast a sealed log: an append with an unknown outcome seals it for good\n(delores-atomiclog abandon_after_indeterminate) and every replica, restarted or\nnot, then answers Log(Sealed). So replicas that never answer again are reported,\nnot failed (--expect-unavailable). Run it without a\nprofile for a baseline, or with `--fault-profile harness/jepsen/delores/below-pause-faults.yaml`\nor `above-pause-faults.yaml`, which never fault the sequencer.";
+    let seqcut = "delores-kv-register with the oracle cutting replicas off from the sequencer, which\nkeeps running with its state (no kill): one replica, all three, or one replica from\nthe sequencer and S3, for 1-4 s (under the 5 s sequencer timeout) or 10-30 s, with\n12-20 s between cuts. Safety must hold throughout; the oracle reports how long\nrecovery took after each heal, but since a cut can seal the log for good (see\ndelores-kv-register), resumption is reported, not asserted.";
+    [
+        (
+            "delores-kv-register",
+            comment,
+            &["--expect-unavailable"][..],
+        ),
+        (
+            "delores-kv-seqcut",
+            seqcut,
+            &["--sequencer-cuts", "--expect-unavailable"][..],
+        ),
+    ]
+    .into_iter()
+    .map(|(name, comment, extra)| Scenario {
+        name: name.into(),
+        comment: comment.into(),
+        generated: "delores docker-kv, three replicas, keel-s3dd (poll, log)".into(),
+        machines: machines.clone(),
+        // The register check's search grows with unacknowledged writes.
+        oracle: Machine::program(&strings(
+            &[&["delores", "--duration", "120"], extra].concat(),
+        ))
+        .memory(1024),
+        latency: "1ms".into(),
+    })
+    .collect()
+}
+
+/// The image `harness/jepsen/delores/node-image/build.sh` builds from a
+/// delores checkout with its own `examples/jepsen-node/Dockerfile`.
+const DELORES_NODE: &str = "localhost/seedbox-jepsen/delores-jepsen-node:current";
+
+/// A jepsen-node machine running `command`, configured for three keel-s3dd
+/// acceptors and the demo sequencer, plus `extra` settings.
+fn delores_node(command: &str, extra: &[(&str, &str)]) -> Machine {
+    let mut machine = Machine::image(DELORES_NODE)
+        .command(strings(&[command]))
+        .memory(512);
+    for (key, value) in [
+        ("RUST_LOG", "info"),
+        ("NO_COLOR", "1"),
+        (
+            "S3_ENDPOINTS",
+            "s3-a=http://s3-a:9000,s3-b=http://s3-b:9000,s3-c=http://s3-c:9000",
+        ),
+        ("S3_BUCKET", "delores"),
+        ("AWS_ACCESS_KEY_ID", "jepsen"),
+        ("AWS_SECRET_ACCESS_KEY", "jepsen-secret"),
+        ("SEQUENCER_ENDPOINT", "tcp://sequencer:7100"),
+    ]
+    .into_iter()
+    .chain(extra.iter().copied())
+    {
+        machine = machine.env(key, value);
+    }
+    machine
+}
+
+#[allow(clippy::type_complexity)]
+fn delores_nodes() -> Vec<Scenario> {
+    let machines = |node_env: &[(&str, &str)]| {
+        let mut machines = Vec::new();
+        for s3 in ["s3-a", "s3-b", "s3-c"] {
+            let mut server = keel_server("poll", "log");
+            server.files = vec![("../keel/run-s3dd.sh".into(), "/run-s3dd.sh".into())];
+            // Three nodes' S3 clients need more than the default 64 slots.
+            if let Some(command) = server.command.as_mut() {
+                command.extend(strings(&["--max-connections", "256"]));
+            }
+            machines.push((s3.to_string(), server));
+        }
+        machines.push((
+            "sequencer".into(),
+            delores_node("sequencer", &[("BIND", "0.0.0.0:7100")]).comment(
+                "The in-memory demo sequencer: never fault it (losing it is a liveness test).",
+            ),
+        ));
+        for node in nodes("n", 3) {
+            let mut env = vec![("NODE_ID", node.as_str()), ("BIND", "0.0.0.0:8080")];
+            env.extend(node_env.iter().copied());
+            machines.push((
+                node.clone(),
+                delores_node("node", &env)
+                    .comment("`node` first runs the idempotent `init` (bucket and view register)."),
+            ));
+        }
+        machines
+    };
+    let topology = "Three delores jepsen-nodes, each running SMR over a virtual log whose metadata\nregister is CASPaxos over three keel-s3dd servers (one acceptor and one log-drive\nreplica each; no acceptor processes, the conditional PUT is the primitive), with\nslots from the in-memory demo sequencer.";
+    let seqcut = "The sequencer keeps\nrunning with its state (no kill); a cut separates one node from it, all three, or\none node from it and from one or two S3 servers, for 1-4 s (under the nodes' 5 s\nsequencer timeout) or 10-30 s, with 12-20 s between cuts. Safety must hold\nthroughout; the oracle reports how long recovery took after each heal, and for the\nregisters a second property asks that some request succeeds within 10 s of each\none (list-append only reports it: a cut can seal the log for good).";
+    let run = "Run it without a profile for a baseline, or with\n`--fault-profile harness/jepsen/delores/node-below-pause-faults.yaml` or\n`node-above-pause-faults.yaml`, which never fault the sequencer.";
+    let specs: [(&str, String, &[(&str, &str)], &[&str]); 5] = [
+        (
+            "delores-node-cas",
+            format!("{topology}\nSix clients read, write and compare-and-set five CASPaxos registers\n(/cas-register) through random nodes for 120 s; then every node reads every\nregister. Each register's history must be linearizable and the final reads must\nagree. {run}"),
+            &[],
+            &["--workload", "cas-register"],
+        ),
+        (
+            "delores-node-cas-nopipeline",
+            "delores-node-cas with PAXOS_PIPELINE_PREPARE=false: every operation prepares first,\ntrading a round trip for fewer unknown outcomes under cross-node contention.".into(),
+            &[("PAXOS_PIPELINE_PREPARE", "false")],
+            &["--workload", "cas-register"],
+        ),
+        (
+            "delores-node-append",
+            format!("{topology}\nSix clients run Jepsen's list-append transactions (POST /txn, one log entry each)\nthrough random nodes for 120 s. The history must be strict serializable\n(serializable, with no real-time stale read), and once faults end every node's\nsynced state must hold every acknowledged append, all nodes agreeing. Like\ndocker-kv, the node cannot reconfigure past a sealed log, so nodes that stop\nserving after faults are reported, not failed (--expect-unavailable). {run}"),
+            &[],
+            &["--workload", "list-append", "--expect-unavailable"],
+        ),
+        (
+            "delores-node-cas-seqcut",
+            format!("delores-node-cas with the oracle cutting nodes off from the sequencer. {seqcut}"),
+            &[],
+            &["--workload", "cas-register", "--sequencer-cuts"],
+        ),
+        (
+            "delores-node-append-seqcut",
+            format!("delores-node-append with the oracle cutting nodes off from the sequencer. {seqcut}"),
+            &[],
+            &["--workload", "list-append", "--sequencer-cuts", "--expect-unavailable"],
+        ),
+    ];
+    specs
+        .into_iter()
+        .map(|(name, comment, node_env, arguments)| Scenario {
+            name: name.into(),
+            comment,
+            generated: "delores jepsen-node, three nodes, three keel-s3dd (poll, log)".into(),
+            machines: machines(node_env),
+            // The checks' searches grow with unknown outcomes.
+            oracle: Machine::program(&strings(
+                &[&["delores-node", "--duration", "120"], arguments].concat(),
+            ))
+            .memory(1024),
+            latency: "1ms".into(),
+        })
+        .collect()
+}
+
 /// Every committed scenario, as (path under `harness/jepsen`, contents).
 pub fn all() -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -1939,6 +2293,9 @@ pub fn all() -> Vec<(String, String)> {
         ("galera", galera()),
         ("tigerbeetle", tigerbeetle()),
         ("rustfs", rustfs()),
+        ("keel", keel()),
+        ("delores", delores()),
+        ("delores", delores_nodes()),
     ] {
         for scenario in scenarios {
             out.push((

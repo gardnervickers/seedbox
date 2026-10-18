@@ -9,6 +9,38 @@ use wgl::{SequentialModel, Verdict};
 /// reported as such, never as a pass.
 pub const STEP_BUDGET: u64 = 50_000_000;
 
+/// Memory the search's configuration cache may use per check. The cache
+/// holds up to one configuration per step, each a bitset over the history
+/// plus a model state, so a long history with many unknown outcomes would
+/// otherwise fill a guest's memory long before [`STEP_BUDGET`] ran out.
+pub const SEARCH_MEMORY: u64 = 640 << 20;
+
+/// The step budget for a history of `operations`: [`STEP_BUDGET`], or less
+/// when that many cached configurations would exceed [`SEARCH_MEMORY`], so
+/// the search reports budget exhaustion instead of the oracle being killed.
+pub fn step_budget(operations: usize) -> u64 {
+    let per_configuration = operations as u64 / 8 + 64;
+    (SEARCH_MEMORY / per_configuration).min(STEP_BUDGET)
+}
+
+/// Check one key's register history with [`step_budget`], first recording
+/// which key is being checked and how large its history is.
+pub fn check_register<V: Clone + Eq + std::hash::Hash>(
+    key: &str,
+    operations: &[wgl::Operation<RegisterOp<V>, RegisterRet<V>>],
+) -> Verdict {
+    let pending = operations
+        .iter()
+        .filter(|o| matches!(o.outcome, wgl::OpOutcome::Pending))
+        .count();
+    let budget = step_budget(operations.len());
+    crate::kit::evidence(
+        "checking",
+        serde_json::json!({"key": key, "ops": operations.len(), "pending": pending, "budget": budget}),
+    );
+    wgl::check_history(&RegisterOf::<V>::default(), operations, budget)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RegisterOp<V> {
     Read,
@@ -155,6 +187,70 @@ impl<V: Clone + Eq + Hash> SequentialModel for QueueOf<V> {
     }
 }
 
+/// A `wgl` history that also keeps each operation's invocation and
+/// completion times (seconds since the oracle started), so a key that fails
+/// the check can be printed against the run's faults.
+pub struct Timed<Op, Ret> {
+    history: wgl::History<Op, Ret>,
+    times: Vec<(f64, Option<f64>)>,
+}
+
+impl<Op: Clone, Ret: Clone> Default for Timed<Op, Ret> {
+    fn default() -> Self {
+        Self {
+            history: wgl::History::new(),
+            times: Vec::new(),
+        }
+    }
+}
+
+impl<Op: Clone + std::fmt::Debug, Ret: Clone + std::fmt::Debug> Timed<Op, Ret> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn invoke(&mut self, op: Op) -> wgl::OpId {
+        self.times.push((crate::kit::now(), None));
+        self.history.invoke(op)
+    }
+
+    pub fn complete(&mut self, id: wgl::OpId, ret: Ret) {
+        self.times[id.index()].1 = Some(crate::kit::now());
+        self.history.complete(id, ret);
+    }
+
+    pub fn fail(&mut self, id: wgl::OpId) {
+        self.times[id.index()].1 = Some(crate::kit::now());
+        self.history.fail(id);
+    }
+
+    pub fn operations(&self) -> &[wgl::Operation<Op, Ret>] {
+        self.history.operations()
+    }
+
+    /// Print every operation as an `H` line tagged with `key`: its index,
+    /// operation, outcome and times.
+    pub fn print(&self, key: &str) {
+        for (i, (operation, (start, end))) in self
+            .history
+            .operations()
+            .iter()
+            .zip(&self.times)
+            .enumerate()
+        {
+            let outcome = match &operation.outcome {
+                wgl::OpOutcome::Completed { ret, .. } => format!("{ret:?}"),
+                wgl::OpOutcome::Failed { .. } => "failed".into(),
+                wgl::OpOutcome::Pending => "pending".into(),
+            };
+            crate::kit::history_line(&serde_json::json!({
+                "key": key, "i": i, "op": format!("{:?}", operation.op),
+                "outcome": outcome, "t0": start, "t1": end,
+            }));
+        }
+    }
+}
+
 /// A verdict as a short word for evidence: linearizable, not-linearizable
 /// or budget-exhausted.
 pub fn verdict_word(verdict: &Verdict) -> &'static str {
@@ -253,6 +349,28 @@ mod tests {
         let r = h.invoke(RegisterOp::Read);
         h.complete(r, RegisterRet::Value(Some(3)));
         assert_eq!(verdict(&model, &h), "not-linearizable");
+    }
+
+    #[test]
+    fn long_histories_get_a_budget_that_fits_in_memory() {
+        let budget = step_budget(4_000);
+        assert!(budget < step_budget(100) && step_budget(100) <= STEP_BUDGET);
+        assert!(budget * (4_000 / 8 + 64) <= SEARCH_MEMORY);
+        // A wedged server's shape: many distinct unknown writes, then a read
+        // of the value before them. The search must stop on its budget.
+        let mut h = History::new();
+        let w = h.invoke(RegisterOp::Write(0u32));
+        h.complete(w, RegisterRet::Wrote);
+        for value in 1..=40 {
+            let _ = h.invoke(RegisterOp::Write(value));
+        }
+        let r = h.invoke(RegisterOp::Read);
+        h.complete(r, RegisterRet::Value(Some(1000)));
+        let verdict = check_history(&RegisterOf::<u32>::default(), h.operations(), 200_000);
+        assert!(matches!(
+            verdict,
+            Verdict::BudgetExhausted(_) | Verdict::NotLinearizable(_)
+        ));
     }
 
     #[test]
