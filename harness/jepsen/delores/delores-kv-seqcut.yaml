@@ -20,6 +20,9 @@ machines:
       data:
         target: /data
         size: 3GiB
+    expectedCrashes:
+    - signal: SIGABRT
+      command: "keel-watchdog"
   sequencer:
     # The in-memory demo sequencer: never fault it (losing it is a liveness test).
     image: localhost/seedbox-jepsen/delores-docker-kv:current

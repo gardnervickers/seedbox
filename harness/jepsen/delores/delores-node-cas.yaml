@@ -24,6 +24,9 @@ machines:
       data:
         target: /data
         size: 3GiB
+    expectedCrashes:
+    - signal: SIGABRT
+      command: "keel-watchdog"
   s3-b:
     # run-s3dd.sh restarts keel-s3dd whenever it exits, as a supervisor would.
     image: localhost/seedbox-jepsen/keel-s3dd:current
@@ -37,6 +40,9 @@ machines:
       data:
         target: /data
         size: 3GiB
+    expectedCrashes:
+    - signal: SIGABRT
+      command: "keel-watchdog"
   s3-c:
     # run-s3dd.sh restarts keel-s3dd whenever it exits, as a supervisor would.
     image: localhost/seedbox-jepsen/keel-s3dd:current
@@ -50,6 +56,9 @@ machines:
       data:
         target: /data
         size: 3GiB
+    expectedCrashes:
+    - signal: SIGABRT
+      command: "keel-watchdog"
   sequencer:
     # The in-memory demo sequencer: never fault it (losing it is a liveness test).
     image: localhost/seedbox-jepsen/delores-jepsen-node:current

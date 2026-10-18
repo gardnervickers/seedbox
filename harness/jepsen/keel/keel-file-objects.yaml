@@ -22,6 +22,9 @@ machines:
       data:
         target: /data
         size: 3GiB
+    expectedCrashes:
+    - signal: SIGABRT
+      command: "keel-watchdog"
 oracle:
   build:
     context: ../../..

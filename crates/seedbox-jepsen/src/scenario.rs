@@ -1959,6 +1959,9 @@ fn keel_server(backend: &str, placement: &str) -> Machine {
             "12000",
         ]))
         .file("run-s3dd.sh", "/run-s3dd.sh")
+        // The wedge watchdog's abort after a pause past its bound is
+        // designed behavior; any other crash still fails the run.
+        .expected_crash("SIGABRT", "keel-watchdog")
         .memory(512)
         .data_sized("/data", "3GiB")
 }
