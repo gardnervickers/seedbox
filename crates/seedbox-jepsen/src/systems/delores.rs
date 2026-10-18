@@ -214,7 +214,15 @@ fn setup(args: &Args) -> Result<(), String> {
     let keys = (args.access_key.as_str(), args.secret_key.as_str());
     let bucket = format!("/{}", args.bucket);
     loop {
-        match super::rustfs::signed_request(&args.s3, args.s3_port, keys, "PUT", &bucket, timeout) {
+        match super::rustfs::signed_request(
+            &args.s3,
+            args.s3_port,
+            keys,
+            "PUT",
+            &bucket,
+            &[],
+            timeout,
+        ) {
             Ok(200 | 409) => break,
             Ok(status) if Instant::now() > deadline => {
                 return Err(format!("bucket creation failed: HTTP {status}"))

@@ -95,6 +95,12 @@ pub struct Args {
     /// succeed again (a separate liveness property).
     #[arg(long, default_value_t = 10.0)]
     pub liveness_window: f64,
+    /// Threads per S3 server that PUT 64 KiB objects into a separate `load`
+    /// bucket throughout, besides the nodes' own traffic, so keel-s3dd's
+    /// shard is often mid-tick when a fault freezes it (another tenant on
+    /// the same servers). 0 adds none.
+    #[arg(long, default_value_t = 0)]
+    pub s3_load: usize,
     /// The deployment cannot reconfigure past a sealed log (no new segment
     /// after an indeterminate append seals it), so nodes that stop serving
     /// after faults are expected: report them and keep checking safety on
@@ -223,6 +229,9 @@ pub fn run(args: Args) -> u8 {
     seedbox_sdk::setup_complete(
         json!({"nodes": args.nodes, "workload": format!("{:?}", args.workload)}),
     );
+    if args.s3_load > 0 {
+        s3_load(&args);
+    }
     if args.sequencer_cuts {
         if !args.expect_unavailable {
             seedbox_sdk::declare(RESUMES, seedbox_sdk::Kind::Always);
@@ -239,6 +248,50 @@ pub fn run(args: Args) -> u8 {
         Workload::CasRegister => registers(Arc::new(args)),
         Workload::ListAppend => list_append(Arc::new(args)),
     }
+}
+
+/// Start `--s3-load` threads per S3 server writing 64 KiB objects into a
+/// `load` bucket until the operations end; their outcomes are not checked.
+fn s3_load(args: &Args) {
+    let end = Instant::now() + Duration::from_secs(args.duration);
+    let keys = ("jepsen", "jepsen-secret");
+    let body = vec![b'x'; 64 << 10];
+    let mut puts = 0u64;
+    for s3 in &args.s3 {
+        let _ = super::rustfs::signed_request(
+            s3,
+            9000,
+            keys,
+            "PUT",
+            "/load",
+            &[],
+            Duration::from_secs(5),
+        );
+        for thread in 0..args.s3_load {
+            let (s3, body) = (s3.clone(), body.clone());
+            std::thread::spawn(move || {
+                let mut i = 0u64;
+                while Instant::now() < end {
+                    i += 1;
+                    let path = format!("/load/t{thread}-{}", i % 64);
+                    let _ = super::rustfs::signed_request(
+                        &s3,
+                        9000,
+                        keys,
+                        "PUT",
+                        &path,
+                        &body,
+                        Duration::from_secs(10),
+                    );
+                }
+            });
+        }
+        puts += 1;
+    }
+    kit::evidence(
+        "s3-load",
+        json!({"servers": puts, "threads_per_server": args.s3_load}),
+    );
 }
 
 // ------------------------------------------------------------ cas-register

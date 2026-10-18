@@ -2261,15 +2261,15 @@ fn delores_nodes() -> Vec<Scenario> {
         ),
         (
             "delores-node-cas-busy",
-            "delores-node-cas with sixteen clients and no pause between requests, for\n`node-above-pause-s3-faults.yaml`: the busier the S3 servers, the more often a\n13-20 s pause lands while keel-s3dd is mid-tick and its watchdog aborts it.".into(),
+            "delores-node-cas with sixteen clients and no pause between requests, plus two threads\nper S3 server writing 64 KiB objects to a separate bucket (--s3-load), for\n`node-above-pause-s3-faults.yaml`: the busier the S3 servers, the more often a 13-20 s\npause lands while keel-s3dd is mid-tick and its watchdog aborts it.".into(),
             &[],
-            &["--workload", "cas-register", "--clients", "16", "--think-ms", "0"],
+            &["--workload", "cas-register", "--clients", "16", "--think-ms", "0", "--s3-load", "2"],
         ),
         (
             "delores-node-append-busy",
             "delores-node-append with sixteen clients and no pause between requests, for\n`node-above-pause-s3-faults.yaml` (see delores-node-cas-busy).".into(),
             &[],
-            &["--workload", "list-append", "--expect-unavailable", "--clients", "16", "--think-ms", "0"],
+            &["--workload", "list-append", "--expect-unavailable", "--clients", "16", "--think-ms", "0", "--s3-load", "2"],
         ),
     ];
     specs
