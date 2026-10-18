@@ -465,11 +465,18 @@ impl Catalogue {
             | InputSource::Prepared { simulation }
             | InputSource::Checkpoint { simulation, .. } => Some(simulation),
         };
-        if reference.is_some_and(|id| self.entries.get(id).is_some_and(|entry| entry.deleting)) {
-            return Err(Error::Invalid("source simulation is being deleted".into()));
-        }
-        let referenced_backend =
-            reference.and_then(|source| self.entries[source].resource.options.backend);
+        let referenced_backend = if let Some(source) = reference {
+            let entry = self
+                .entries
+                .get(source)
+                .ok_or_else(|| Error::NotFound(source.clone()))?;
+            if entry.deleting {
+                return Err(Error::Invalid("source simulation is being deleted".into()));
+            }
+            entry.resource.options.backend
+        } else {
+            None
+        };
         let parent = match &spec.inputs {
             InputSource::Resolved { definition } => {
                 definition
