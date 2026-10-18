@@ -1,11 +1,5 @@
-#![cfg(unix)]
-//! Actual Linux guest service acceptance. Opt-in separately for each backend;
-//! inputs are statically linked helper + fixture initramfs from guest.nix.
-#[path = "support/epoch.rs"]
-mod epoch;
-#[path = "support/prepared_application.rs"]
-mod prepared;
-use seedbox_machine::{
+//! Shared guest-service protocol scenarios; each backend owns its native entrypoints.
+use crate::{
     clock::Clock,
     machine::{Machine, RunContext, StopReason, Timestamp},
     pv,
@@ -14,8 +8,6 @@ use seedbox_machine::{
 use seedbox_test_time::{GuestProgress, HangGuard};
 use std::{
     fmt::Debug,
-    fs,
-    path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
@@ -154,7 +146,7 @@ where
         );
         self.events.extend(staged);
         if let StopReason::Exited { reason, .. } = reason {
-            assert_eq!(reason, seedbox_machine::machine::ExitReason::Shutdown);
+            assert_eq!(reason, crate::machine::ExitReason::Shutdown);
         }
         self.exited = matches!(reason, StopReason::Exited { .. });
         self.clock.set(upto.as_nanos());
@@ -219,7 +211,7 @@ where
         self.until(|payload| matches!(payload, pv::Response::CommandAcknowledged { id: actual, result } if *actual == id && *result == expected));
     }
 }
-fn applications<M: Machine<Context = ()>>(machine: M)
+pub fn applications<M: Machine<Context = ()>>(machine: M)
 where
     M::Error: Debug,
 {
@@ -276,7 +268,7 @@ where
         2
     );
 }
-fn shutdown<M: Machine<Context = ()>>(machine: M)
+pub fn shutdown<M: Machine<Context = ()>>(machine: M)
 where
     M::Error: Debug,
 {
@@ -322,60 +314,4 @@ where
         payload: pv::Request::Shutdown,
     });
     session.accept_zero();
-}
-
-fn input(name: &str) -> PathBuf {
-    std::env::var_os(name)
-        .unwrap_or_else(|| panic!("set {name}"))
-        .into()
-}
-fn tcg() -> seedbox_machine_tcg::machine::tcg::TcgMachine {
-    let definition = prepared::definition(
-        fs::read(input("SEEDBOX_TCG_SERVICE_INITRD")).unwrap(),
-        256 << 20,
-    );
-    let mut backend = seedbox_machine_tcg::machine::tcg::Factory::new(
-        &input("SEEDBOX_TCG_QEMU"),
-        &input("SEEDBOX_TCG_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
-    )
-    .unwrap();
-    backend.create(&definition).unwrap()
-}
-#[test]
-#[ignore = "requires patched QEMU and SEEDBOX_TCG_SERVICE_INITRD static Linux helper+fixture"]
-fn tcg_native_application_controls_logs_and_outcome() {
-    applications(tcg());
-}
-#[test]
-#[ignore = "requires patched QEMU and SEEDBOX_TCG_SERVICE_INITRD static Linux helper+fixture"]
-fn tcg_native_shutdown_preserves_graceful_cleanup() {
-    shutdown(tcg());
-}
-
-#[cfg(seedbox_pv)]
-fn pv() -> seedbox_machine_pv::machine::pv::PVMachine {
-    let definition = prepared::definition(
-        fs::read(input("SEEDBOX_PV_SERVICE_INITRD")).unwrap(),
-        128 << 20,
-    );
-    let mut backend = seedbox_machine_pv::machine::pv::Factory::new(
-        &input("SEEDBOX_PV_WORKER"),
-        &input("SEEDBOX_PV_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
-    )
-    .unwrap();
-    backend.create(&definition).unwrap()
-}
-#[cfg(seedbox_pv)]
-#[test]
-#[ignore = "requires native PV hypervisor, worker/kernel and SEEDBOX_PV_SERVICE_INITRD static helper+fixture"]
-fn pv_native_application_controls_logs_and_outcome() {
-    applications(pv());
-}
-#[cfg(seedbox_pv)]
-#[test]
-#[ignore = "requires native PV hypervisor, worker/kernel and SEEDBOX_PV_SERVICE_INITRD static helper+fixture"]
-fn pv_native_shutdown_preserves_graceful_cleanup() {
-    shutdown(pv());
 }

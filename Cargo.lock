@@ -1982,8 +1982,12 @@ dependencies = [
 name = "seedbox-control"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "seedbox-test",
+ "seedbox-test-time",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1997,11 +2001,13 @@ dependencies = [
  "seedbox-machine",
  "seedbox-machine-pv",
  "seedbox-machine-tcg",
+ "seedbox-test",
  "seedbox-test-time",
  "serde",
  "serde_json",
  "sha2",
  "tar",
+ "tempfile",
 ]
 
 [[package]]
@@ -2050,6 +2056,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "seedbox-control",
+ "seedbox-test",
  "serde",
  "serde_json",
 ]
@@ -2155,17 +2162,10 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "libc",
- "seedbox-artifacts",
- "seedbox-driver",
  "seedbox-exec",
- "seedbox-machine",
- "seedbox-machine-pv",
- "seedbox-machine-tcg",
  "seedbox-test-time",
- "serde",
  "serde_json",
  "sha2",
- "tar",
  "tempfile",
 ]
 

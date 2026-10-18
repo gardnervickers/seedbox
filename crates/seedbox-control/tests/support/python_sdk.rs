@@ -25,18 +25,19 @@ pub struct Sdk {
 impl Sdk {
     pub fn new() -> Self {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut child = Command::new("python3")
-            .args(["-B", "-u"])
-            .arg(root.join("crates/seedbox-test/tests/support/python_sdk.py"))
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("PYTHONPATH", root.join("python"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .process_group(0)
-            .spawn()
-            .expect("start production Python SDK adapter (nix develop supplies python3)");
+        let mut child = seedbox_test::process::spawn(
+            Command::new("python3")
+                .args(["-B", "-u"])
+                .arg(root.join("crates/seedbox-control/tests/support/python_sdk.py"))
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("PYTHONPATH", root.join("python"))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .process_group(0),
+        )
+        .expect("start production Python SDK adapter (nix develop supplies python3)");
         let input = child.stdin.take().expect("adapter stdin");
         let output = child.stdout.take().expect("adapter stdout");
         // Install RAII ownership before any fallible fcntl or pipe exchange.

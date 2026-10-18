@@ -27,15 +27,3 @@ fn tcg_native_control_pending_reply_snapshot_delivers_once() {
         .unwrap()
     });
 }
-#[cfg(seedbox_pv)]
-#[test]
-#[ignore = "requires native PV hypervisor, worker/kernel and SEEDBOX_PV_CONTROL_INITRD"]
-fn pv_native_control_round_trip_disconnect_and_application_restart() {
-    control::round_trip(control::pv());
-}
-#[cfg(seedbox_pv)]
-#[test]
-#[ignore = "requires native PV hypervisor, worker/kernel and SEEDBOX_PV_CONTROL_INITRD"]
-fn pv_native_control_late_reply_after_reboot_and_crash_is_discarded() {
-    control::late_reply_after_reset(control::pv());
-}

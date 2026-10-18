@@ -8,7 +8,7 @@
 //! Driver, or at the simulated limit. The host wall-time bound only diagnoses a
 //! hang; it never shapes simulation results.
 //!
-//! Explicit and ignored: `cargo test -p seedbox-machine --test etcd_acceptance
+//! Explicit and ignored: `cargo test -p seedbox-driver --test etcd_acceptance
 //! -- --ignored`. Inputs:
 //! - `SEEDBOX_ETCD_BACKEND`: `tcg` or `pv`, with that backend's usual inputs
 //!   (`SEEDBOX_TCG_QEMU`/`SEEDBOX_TCG_ASSETS` or

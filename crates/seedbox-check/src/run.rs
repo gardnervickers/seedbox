@@ -474,18 +474,33 @@ pub fn machine_suite_runs(suites: &[Suite], environment: &Environment, root: &Pa
             (backend, "--lib", "", None),
             (backend, "--test", "native_machine", None),
             ("seedbox-driver", "--test", "native_driver", Some(selector)),
-            ("seedbox-test", "--test", terminal, None),
+            (
+                if suite == Suite::MachineTcg {
+                    "seedbox-driver"
+                } else {
+                    backend
+                },
+                "--test",
+                terminal,
+                None,
+            ),
         ];
         if suite == Suite::MachinePv {
-            selections.push(("seedbox-test", "--test", "native_pv_driver", None));
+            selections.push(("seedbox-driver", "--test", "native_pv_driver", None));
+            selections.push(("seedbox-driver", "--test", "pv_instructions", None));
         }
-        for target in [
+        selections.push((
+            "seedbox-driver",
+            "--test",
             "driver_guest_services",
+            Some(selector),
+        ));
+        for target in [
             "guest_services",
             "prepared_application",
             "simulation_control",
         ] {
-            selections.push(("seedbox-test", "--test", target, Some(selector)));
+            selections.push((backend, "--test", target, Some(selector)));
         }
         for (package, kind, target, filter) in selections {
             let mut args = words(&["cargo", "test", "-p", package, "--locked", kind]);

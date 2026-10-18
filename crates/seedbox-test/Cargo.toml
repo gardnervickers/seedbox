@@ -14,14 +14,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 seedbox-test-time.workspace = true
-seedbox-artifacts.workspace = true
-seedbox-machine = { workspace = true, features = ["test-support"] }
-seedbox-machine-pv = { workspace = true, features = ["test-support"] }
-seedbox-machine-tcg = { workspace = true, features = ["test-support"] }
-seedbox-driver.workspace = true
-serde.workspace = true
 sha2.workspace = true
-tar.workspace = true
 tempfile.workspace = true
 libc.workspace = true
 hex.workspace = true

@@ -5,20 +5,21 @@ use std::{path::PathBuf, process::Command};
 fn protocol_has_no_execution_dependency_edges() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     for (manifest, protocol) in [("Cargo.toml", "seedbox-engine-protocol")] {
-        let output = Command::new(env!("CARGO"))
-            .current_dir(&root)
-            .args([
-                "metadata",
-                "--no-deps",
-                "--locked",
-                "--offline",
-                "--format-version",
-                "1",
-                "--manifest-path",
-            ])
-            .arg(root.join(manifest))
-            .output()
-            .unwrap();
+        let output = seedbox_test::process::output(
+            Command::new(env!("CARGO"))
+                .current_dir(&root)
+                .args([
+                    "metadata",
+                    "--no-deps",
+                    "--locked",
+                    "--offline",
+                    "--format-version",
+                    "1",
+                    "--manifest-path",
+                ])
+                .arg(root.join(manifest)),
+        )
+        .unwrap();
         assert!(
             output.status.success(),
             "{manifest}: {}",

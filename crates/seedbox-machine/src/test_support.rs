@@ -11,6 +11,7 @@ pub mod assets;
 pub mod disk_scenario;
 pub mod factory_definition;
 pub mod guest_service_snapshot_tests;
+pub mod guest_services;
 pub mod kernel_terminal_tests;
 pub mod network_scenario;
 pub mod prepared_application;

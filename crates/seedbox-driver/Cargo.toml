@@ -18,8 +18,11 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+seedbox-test.workspace = true
+tempfile.workspace = true
 seedbox-test-time.workspace = true
 seedbox-machine = { workspace = true, features = ["test-support"] }
+seedbox-machine-pv = { workspace = true, features = ["test-support"] }
 # Native TCG scenarios run under the backend's test run watchdog.
 seedbox-machine-tcg = { workspace = true, features = ["test-support"] }
 
