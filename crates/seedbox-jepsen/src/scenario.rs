@@ -1922,6 +1922,11 @@ fn keel() -> Vec<Scenario> {
         "5",
         "--size",
         "16384",
+        // Longer than the longest freeze, so a request outlives it rather
+        // than ending unknown (unknown writes make the register check
+        // exponential).
+        "--timeout",
+        "30",
     ];
     let short: &[&str] = &["--duration", "60"];
     // (suffix, backend, placement, what the variant is)
