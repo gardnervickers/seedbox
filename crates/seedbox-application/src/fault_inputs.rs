@@ -1,7 +1,7 @@
 //! Pure input-program validation and fault target selection.
 
 use crate::{Error, Result};
-use seedbox_engine_protocol::world_config::{LinkConfig, NetworkConfig};
+use seedbox_driver::driver::faults::ActionTargets;
 
 /// Validate a client's schedule before preparing or starting a simulation.
 /// Service and machine names coincide in the current one-service-per-machine ABI.
@@ -17,10 +17,8 @@ pub fn validate_input_program(
     if program.is_empty() {
         return Ok(());
     }
-    let faults = configured_faults(configuration)?;
     for input in program {
-        faults
-            .validate_action_shape(&input.action)
+        fault_action_targets(configuration, &input.action)
             .map_err(|error| Error::Setup(format!("program {}: {error}", input.key)))?;
     }
     Ok(())
@@ -31,41 +29,10 @@ pub fn validate_input_program(
 pub fn fault_action_targets(
     configuration: &crate::config::Simulation,
     action: &seedbox_control::Action,
-) -> Result<seedbox_engine_core::faults::ActionTargets> {
-    configured_faults(configuration)?
-        .action_targets(action)
-        .map_err(Error::Setup)
-}
-
-fn configured_faults(
-    configuration: &crate::config::Simulation,
-) -> Result<seedbox_engine_core::faults::Faults> {
+) -> Result<ActionTargets> {
     let names: Vec<_> = configuration.services.keys().cloned().collect();
-    let network = NetworkConfig {
-        latency_ns: configuration.network.latency_ns,
-        jitter_ns: configuration.network.jitter_ns,
-        bandwidth_bps: configuration.network.bandwidth_bps,
-        queue_bound_ns: configuration.network.queue_bound_ns,
-        links: configuration
-            .network
-            .links
-            .iter()
-            .map(|link| LinkConfig {
-                from: link.from.clone(),
-                to: link.to.clone(),
-                latency_ns: link.latency_ns,
-                jitter_ns: link.jitter_ns,
-                loss_ppm: link.loss_ppm,
-                bandwidth_bps: link.bandwidth_bps,
-                queue_bound_ns: link.queue_bound_ns,
-            })
-            .collect(),
-    };
-    let links = seedbox_engine_core::links::Links::from_network(0, &names, &network)
-        .map_err(Error::Setup)?;
-    let faults = seedbox_engine_core::faults::Faults::with_plans(Vec::new(), names, links)
-        .map_err(Error::Setup)?;
-    Ok(faults)
+    seedbox_driver::driver::faults::action_targets(action, &names, configuration.network.latency_ns)
+        .map_err(Error::Setup)
 }
 
 #[cfg(test)]

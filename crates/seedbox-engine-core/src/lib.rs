@@ -1,15 +1,12 @@
 //! Shared deterministic policies and guest-memory protocols, independent of CPU backends.
 //! Platform adapters supply committed events and actual transmitted bytes.
 pub mod connections;
-pub mod control;
-pub mod faults;
 pub mod links;
 pub mod log_index;
 pub mod network_counters;
 pub use seedbox_engine_protocol::output_layout;
 pub mod rng;
 pub use seedbox_engine_protocol::trace;
-pub mod triggers;
 
 pub mod network_faults;
 

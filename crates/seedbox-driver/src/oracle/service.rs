@@ -2,6 +2,8 @@
 //! timeline; returning a plan never confirms its effect. Facts, command IDs and
 //! first terminal-transition times must come from that owner, including changes
 //! made outside this service. Machine snapshots alone do not snapshot this state.
+pub(crate) mod targets;
+
 use super::{
     handles::{Change, ExecutionPlan, HandleTarget, Handles},
     triggers::{TriggerAction, Triggers},
@@ -903,6 +905,11 @@ impl Service {
         let deadline = now
             .checked_add(deadline_ns)
             .ok_or_else(|| OperationError::invalid("effect deadline overflow"))?;
+        let compiled = command.compile_targets(
+            |target| adapter.resolve(target),
+            |target| adapter.network_member(target),
+            || adapter.network_floor(),
+        )?;
         let (subject, effect, handle, healing) = match command {
             Command::Spawn { machine } => {
                 adapter.reserve_spawn(&machine)?;
@@ -938,15 +945,13 @@ impl Service {
                 self.prepare_heal(adapter, mode, plan)?
             }
             Command::Shape {
-                from,
-                to,
                 policy,
                 network_faults,
+                ..
             } => {
-                policy
-                    .validate_shape(adapter.network_floor()?, &network_faults)
-                    .map_err(OperationError::invalid)?;
-                let (from, to) = Self::partition_sides(adapter, &from, &to)?;
+                let (from, to) = compiled
+                    .sides
+                    .ok_or_else(|| Failure::from("missing compiled shape targets"))?;
                 let plan = self.reserve_handle(
                     HandleTarget::DirectedLinks {
                         from: from.clone(),
@@ -963,15 +968,6 @@ impl Service {
                 )
             }
             Command::DropConnection { connection } => {
-                Operation::DropConnection {
-                    connection: connection.clone(),
-                }
-                .validate()?;
-                let from = adapter.network_member(&Target::Machine(connection.from.clone()))?;
-                let to = adapter.network_member(&Target::Machine(connection.to.clone()))?;
-                if from == to {
-                    return Err(OperationError::invalid("connection endpoints must differ").into());
-                }
                 let plan = self.reserve_handle(
                     HandleTarget::Connection(connection.clone()),
                     Change::Select,
@@ -999,8 +995,10 @@ impl Service {
                     false,
                 )
             }
-            Command::Throttle { target, config } => {
-                let facts = adapter.resolve(&target)?;
+            Command::Throttle { config, .. } => {
+                let facts = compiled
+                    .machine
+                    .ok_or_else(|| Failure::from("missing compiled machine target"))?;
                 let plan = self.reserve_handle(
                     HandleTarget::Machine(facts.name.clone()),
                     Change::Execution(config),
@@ -1013,11 +1011,10 @@ impl Service {
                     false,
                 )
             }
-            Command::StepRealtime {
-                target,
-                nanoseconds,
-            } => {
-                let facts = adapter.resolve(&target)?;
+            Command::StepRealtime { nanoseconds, .. } => {
+                let facts = compiled
+                    .machine
+                    .ok_or_else(|| Failure::from("missing compiled machine target"))?;
                 Self::step_state(mode, &facts)?;
                 // Draw only after admission checks, at this barrier.
                 let offset = match nanoseconds {
@@ -1036,8 +1033,10 @@ impl Service {
                     false,
                 )
             }
-            Command::Drift { target, ppb } => {
-                let facts = adapter.resolve(&target)?;
+            Command::Drift { ppb, .. } => {
+                let facts = compiled
+                    .machine
+                    .ok_or_else(|| Failure::from("missing compiled machine target"))?;
                 // A machine runs at one rate. Like a refused throttle, a
                 // refused duplicate consumes its handle number; it draws no value.
                 if self.handles.drifting(&facts.name) {
@@ -1070,8 +1069,10 @@ impl Service {
                     false,
                 )
             }
-            Command::Partition { left, right } => {
-                let (left, right) = Self::partition_sides(adapter, &left, &right)?;
+            Command::Partition { .. } => {
+                let (left, right) = compiled
+                    .sides
+                    .ok_or_else(|| Failure::from("missing compiled partition targets"))?;
                 let plan = self.reserve_handle(
                     HandleTarget::Links {
                         left: left.clone(),
@@ -1087,8 +1088,12 @@ impl Service {
                     false,
                 )
             }
-            Command::Effect { target, effect } => (
-                Subject::Machine(adapter.resolve(&target)?),
+            Command::Effect { effect, .. } => (
+                Subject::Machine(
+                    compiled
+                        .machine
+                        .ok_or_else(|| Failure::from("missing compiled effect target"))?,
+                ),
                 effect,
                 None,
                 false,
@@ -1248,25 +1253,7 @@ impl Service {
         left: &[Target],
         right: &[Target],
     ) -> Result<(Vec<String>, Vec<String>), OperationError> {
-        if left.is_empty() || right.is_empty() {
-            return Err(OperationError::invalid("partition sides must be nonempty"));
-        }
-        let resolve = |side: &[Target]| {
-            side.iter()
-                .map(|target| adapter.network_member(target))
-                .collect::<Result<Vec<_>, _>>()
-        };
-        let (mut left, mut right) = (resolve(left)?, resolve(right)?);
-        let mut all: Vec<&String> = left.iter().chain(&right).collect();
-        all.sort();
-        if all.windows(2).any(|pair| pair[0] == pair[1]) {
-            return Err(OperationError::invalid(
-                "partition sides must be disjoint with unique machines",
-            ));
-        }
-        left.sort();
-        right.sort();
-        Ok((left, right))
+        targets::sides(left, right, |target| adapter.network_member(target))
     }
     /// Realtime steps are guest commands and share the process-command state
     /// rules, applied before any seeded draw.

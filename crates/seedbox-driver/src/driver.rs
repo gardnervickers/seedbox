@@ -31,6 +31,10 @@ pub use crate::persistence::{CodecError, DecodeLimits, SnapshotReference};
 pub use checkpoint::{Checkpoint, CheckpointMapError};
 mod control;
 mod controller;
+// TODO: Re-evaluate: the service needs a pure compilation seam in the executing
+// owner; keeping it in application or engine-core would duplicate Driver policy.
+// This exports no scheduler, lifecycle or admission-state setters.
+pub mod faults;
 pub use controller::ControllerSetup;
 mod event;
 mod observation;

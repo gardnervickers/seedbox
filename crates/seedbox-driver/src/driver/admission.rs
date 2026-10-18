@@ -384,99 +384,23 @@ where
         now: Timestamp,
     ) -> Result<InputAdmission, Error<M::Error>> {
         use crate::oracle::{
-            service::{Amount, Command, Effect},
-            ErrorCode, OperationError, Target as Wire, PROCESS_EFFECT_TIMEOUT_NS,
+            service::Command, ErrorCode, OperationError, PROCESS_EFFECT_TIMEOUT_NS,
         };
-        use crate::pv::ApplicationCommand as App;
-        let wire = |target: &Target| match target {
-            Target::Machine(id) => Wire::Key(control::Control::source(*id)),
-            Target::Name(name) => Wire::Machine(name.clone()),
-        };
-        let effect = |target: &Target, effect| Command::Effect {
-            target: wire(target),
-            effect,
-        };
-        let command = match action {
-            Action::Pause(target) => Ok(effect(target, Effect::Pause)),
-            Action::Resume(target) => Ok(effect(target, Effect::Resume)),
-            Action::Crash(target) => Ok(effect(target, Effect::Crash)),
-            Action::Reboot(target) => Ok(effect(target, Effect::Reboot)),
-            Action::Shutdown(target) => Ok(effect(target, Effect::Shutdown)),
-            Action::Stop { target, .. } => Ok(effect(target, Effect::Process(App::Stop))),
-            Action::Restart { target, .. } => Ok(effect(target, Effect::Process(App::Start))),
-            Action::PauseProcess { target, .. } => Ok(effect(target, Effect::Process(App::Pause))),
-            Action::ResumeProcess { target, .. } => {
-                Ok(effect(target, Effect::Process(App::Resume)))
+        let command = action.command(|input| {
+            let id = match inputs.get(input) {
+                Some(LiveInput::Admitted { record_id, .. }) => *record_id,
+                Some(LiveInput::Handle(owned)) => Some(owned.record_id),
+                _ => None,
+            };
+            match id.filter(|&id| control.service.input_record_active(id)) {
+                Some(record_id) => Ok(Command::HealRecord { record_id }),
+                None => Err(OperationError {
+                    code: ErrorCode::InvalidState,
+                    message: format!("input {input} owns no active handle"),
+                    handle: None,
+                }),
             }
-            Action::Throttle { target, config } => Ok(Command::Throttle {
-                target: wire(target),
-                config: *config,
-            }),
-            Action::Heal(HealTarget::Handle(handle)) => Ok(Command::Heal {
-                handle: handle.0.clone(),
-            }),
-            Action::Heal(HealTarget::Input(input)) => {
-                let id = match inputs.get(input) {
-                    Some(LiveInput::Admitted { record_id, .. }) => *record_id,
-                    Some(LiveInput::Handle(owned)) => Some(owned.record_id),
-                    _ => None,
-                };
-                match id.filter(|&id| control.service.input_record_active(id)) {
-                    Some(record_id) => Ok(Command::HealRecord { record_id }),
-                    None => Err(OperationError {
-                        code: ErrorCode::InvalidState,
-                        message: format!("input {input} owns no active handle"),
-                        handle: None,
-                    }),
-                }
-            }
-            Action::Spawn { name } => Ok(Command::Spawn {
-                machine: name.clone(),
-            }),
-            Action::Partition { left, right } => Ok(Command::Partition {
-                left: left.iter().map(wire).collect(),
-                right: right.iter().map(wire).collect(),
-            }),
-            Action::Shape {
-                from,
-                to,
-                policy,
-                network_faults,
-            } => Ok(Command::Shape {
-                from: from.iter().map(wire).collect(),
-                to: to.iter().map(wire).collect(),
-                policy: *policy,
-                network_faults: *network_faults,
-            }),
-            Action::DropConnection { connection } => Ok(Command::DropConnection {
-                connection: connection.clone(),
-            }),
-            Action::DriftBounded {
-                target,
-                max_rate_ppb,
-            } => Ok(Command::Drift {
-                target: wire(target),
-                ppb: Amount::Seeded(*max_rate_ppb),
-            }),
-            Action::StepRealtimeBounded {
-                target,
-                max_offset_ns,
-            } => Ok(Command::StepRealtime {
-                target: wire(target),
-                nanoseconds: Amount::Seeded(*max_offset_ns),
-            }),
-            Action::Drift { target, rate } => Ok(Command::Drift {
-                target: wire(target),
-                ppb: Amount::Exact(i64::from(rate.ppb())),
-            }),
-            Action::StepRealtime {
-                target,
-                nanoseconds,
-            } => Ok(Command::StepRealtime {
-                target: wire(target),
-                nanoseconds: Amount::Exact(nanoseconds.get()),
-            }),
-        };
+        });
         let deadline = match action.deadline() {
             Some(deadline) => u64::try_from(deadline.as_nanos())
                 .map_err(|_| Error::Control("validated input deadline overflow".into()))?,
