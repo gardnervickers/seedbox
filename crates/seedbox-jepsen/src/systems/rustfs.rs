@@ -12,7 +12,14 @@
 //! a unique value, DELETE writes "absent", GET reads, from clients spread over
 //! the nodes, and every key ends with a read once faults stop. Each key's
 //! history must be linearizable ([`RegisterOf`]); a PUT or DELETE without a
-//! 2xx reply may or may not have taken effect.
+//! 2xx reply may or may not have taken effect, unless it was never sent or
+//! was refused as malformed or unauthenticated. `--workload cas-register`
+//! adds compare-and-set: a GET, then a PUT conditional on the ETag it
+//! returned (`If-Match`) or, from absent, `If-None-Match: *`; 412 (or 404 for
+//! `If-Match`) is a definite failure.
+//!
+//! The same oracle runs against keel-s3dd (the `keel-s3` subcommand), one
+//! server or several.
 //!
 //! Requests are signed with AWS Signature Version 4 (path-style, region
 //! `us-east-1`, payload hashed) over the kit's HTTP/1.1 client.
@@ -34,6 +41,17 @@ pub enum Workload {
     Objects,
     /// A few overwritten keys, each checked for linearizability.
     Register,
+    /// The register workload plus compare-and-set by conditional PUT
+    /// (If-Match on a read's ETag, If-None-Match for a create).
+    CasRegister,
+}
+
+fn workload_name(workload: Workload) -> &'static str {
+    match workload {
+        Workload::Objects => "objects",
+        Workload::Register => "register",
+        Workload::CasRegister => "cas-register",
+    }
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -86,6 +104,17 @@ pub struct Args {
     /// listing again; one that never does fails the run.
     #[arg(long, default_value_t = 120)]
     pub recover: u64,
+    /// Power-cycle every server after the quiet period, before the checks:
+    /// a server that stops serving after an I/O error by design (fail-stop)
+    /// must then recover from its disk with every acknowledged write.
+    #[arg(long)]
+    pub reboot_before_check: bool,
+    /// Corruption of a server's only copy may destroy data: report lost,
+    /// unreadable and unlisted acknowledged objects, and servers that never
+    /// recover, without failing on them; fail only on bytes no client wrote
+    /// and listings of keys no client wrote.
+    #[arg(long)]
+    pub integrity_only: bool,
 }
 
 /// What one S3 request came back with.
@@ -94,26 +123,57 @@ enum Reply {
     Unreachable(String),
 }
 
+/// One S3 exchange in full, telling a request that never left (no
+/// connection: it cannot have taken effect) from one whose answer was lost.
+enum Exchange {
+    /// Status, body and `ETag` header.
+    Answered(u16, Vec<u8>, Option<String>),
+    NotSent(String),
+    Lost(String),
+}
+
 struct S3 {
     args: Args,
 }
 
 impl S3 {
     fn request(&self, node: &str, method: &str, path: &str, body: &[u8]) -> Reply {
-        match self.exchange(node, method, path, body) {
-            Ok((status, data)) => Reply::Status(status, data),
-            Err(error) => Reply::Unreachable(error.0),
+        match self.send(node, method, path, body, &[]) {
+            Exchange::Answered(status, data, _) => Reply::Status(status, data),
+            Exchange::NotSent(error) | Exchange::Lost(error) => Reply::Unreachable(error),
         }
     }
 
-    fn exchange(
+    /// One request with `extra` unsigned headers (conditions such as
+    /// `If-Match`; SigV4 lets a request carry headers it does not sign).
+    fn send(
         &self,
         node: &str,
         method: &str,
         path: &str,
         body: &[u8],
-    ) -> Result<(u16, Vec<u8>)> {
+        extra: &[(&str, &str)],
+    ) -> Exchange {
         let timeout = Duration::from_secs(self.args.timeout);
+        let stream = match http::connect(node, self.args.port, timeout) {
+            Ok(stream) => stream,
+            Err(error) => return Exchange::NotSent(error.0),
+        };
+        match self.exchange(stream, node, method, path, body, extra) {
+            Ok((status, data, etag)) => Exchange::Answered(status, data, etag),
+            Err(error) => Exchange::Lost(error.0),
+        }
+    }
+
+    fn exchange(
+        &self,
+        mut stream: std::net::TcpStream,
+        node: &str,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        extra: &[(&str, &str)],
+    ) -> Result<(u16, Vec<u8>, Option<String>)> {
         let host = format!("{node}:{}", self.args.port);
         let headers = sign(
             (&self.args.access_key, &self.args.secret_key),
@@ -123,9 +183,11 @@ impl S3 {
             body,
             SystemTime::now(),
         );
-        let mut stream = http::connect(node, self.args.port, timeout)?;
         let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n", body.len());
         for (name, value) in &headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        for (name, value) in extra {
             head.push_str(&format!("{name}: {value}\r\n"));
         }
         head.push_str("\r\n");
@@ -137,7 +199,7 @@ impl S3 {
         let head = http::read_head(&mut reader)?;
         let mut data = Vec::new();
         http::Body::new(reader, &head).read_to_end(&mut data)?;
-        Ok((head.status, data))
+        Ok((head.status, data, head.header("etag").map(str::to_owned)))
     }
 }
 
@@ -235,46 +297,93 @@ fn register_value(body: &[u8], size: usize) -> Option<u32> {
 
 type KeyHistory = wgl::History<RegisterOp<u32>, RegisterRet<u32>>;
 
+/// What one register operation saw.
+#[derive(Default)]
+struct Observed {
+    /// A read's value (0 for absent) and the `ETag` it came with.
+    read: Option<(u32, Option<String>)>,
+    /// A description of bytes no client wrote, if a read saw some.
+    unwritten: Option<String>,
+}
+
 /// One register operation on `key` through `node`, recorded in `history`.
-/// Returns a description of bytes no client wrote, if a read saw some.
+/// A compare-and-set is a conditional PUT: from absent, `If-None-Match: *`;
+/// from a value, `If-Match` with the `etag` a read of that value returned
+/// (every write's body is unique, so its ETag names it).
 fn register_op(
     s3: &S3,
     args: &Args,
     path: &str,
     node: &str,
     op: RegisterOp<u32>,
+    etag: Option<&str>,
     history: &Mutex<KeyHistory>,
-) -> Option<String> {
+) -> Observed {
     let id = history.lock().unwrap().invoke(op.clone());
-    let (method, body) = match op {
-        RegisterOp::Read => ("GET", Vec::new()),
-        RegisterOp::Write(0) => ("DELETE", Vec::new()),
-        RegisterOp::Write(value) => ("PUT", register_body(value, args.size)),
-        RegisterOp::Cas(..) => unreachable!("S3 has no compare-and-set here"),
+    let (method, body, condition) = match op {
+        RegisterOp::Read => ("GET", Vec::new(), None),
+        RegisterOp::Write(0) => ("DELETE", Vec::new(), None),
+        RegisterOp::Write(value) => ("PUT", register_body(value, args.size), None),
+        RegisterOp::Cas(0, to) => (
+            "PUT",
+            register_body(to, args.size),
+            Some(("If-None-Match", "*")),
+        ),
+        RegisterOp::Cas(_, to) => (
+            "PUT",
+            register_body(to, args.size),
+            Some(("If-Match", etag.unwrap_or("\"\""))),
+        ),
     };
-    let reply = s3.request(node, method, path, &body);
+    let extra: Vec<(&str, &str)> = condition.into_iter().collect();
+    let reply = s3.send(node, method, path, &body, &extra);
     let mut history = history.lock().unwrap();
-    match (method, reply) {
-        ("GET", Reply::Status(200, data)) => match register_value(&data, args.size) {
-            Some(value) => history.complete(id, RegisterRet::Value(Some(value))),
-            None => {
-                // Not linearizable with any write; the checker flags it too.
-                history.complete(id, RegisterRet::Value(Some(u32::MAX)));
-                return Some(format!(
-                    "{node} returned {} bytes no client wrote: {:?}",
-                    data.len(),
-                    String::from_utf8_lossy(&data[..data.len().min(32)])
-                ));
+    let mut observed = Observed::default();
+    match (&op, reply) {
+        (RegisterOp::Read, Exchange::Answered(200, data, etag)) => {
+            match register_value(&data, args.size) {
+                Some(value) => {
+                    history.complete(id, RegisterRet::Value(Some(value)));
+                    observed.read = Some((value, etag));
+                }
+                None => {
+                    // Not linearizable with any write; the checker flags it too.
+                    history.complete(id, RegisterRet::Value(Some(u32::MAX)));
+                    observed.unwritten = Some(format!(
+                        "{node} returned {} bytes no client wrote: {:?}",
+                        data.len(),
+                        String::from_utf8_lossy(&data[..data.len().min(32)])
+                    ));
+                }
             }
-        },
-        ("GET", Reply::Status(404, _)) => history.complete(id, RegisterRet::Value(Some(0))),
+        }
+        (RegisterOp::Read, Exchange::Answered(404, ..)) => {
+            history.complete(id, RegisterRet::Value(Some(0)));
+            observed.read = Some((0, None));
+        }
         // A failed read has no effect.
-        ("GET", _) => history.fail(id),
-        ("PUT" | "DELETE", Reply::Status(200 | 204, _)) => history.complete(id, RegisterRet::Wrote),
+        (RegisterOp::Read, _) => history.fail(id),
+        (RegisterOp::Write(_), Exchange::Answered(200 | 204, ..)) => {
+            history.complete(id, RegisterRet::Wrote)
+        }
+        (RegisterOp::Cas(..), Exchange::Answered(200, ..)) => {
+            history.complete(id, RegisterRet::Cas(true))
+        }
+        // The condition did not hold: the key held another value, or (for
+        // If-Match, answered 404) none.
+        (RegisterOp::Cas(..), Exchange::Answered(412, ..)) => {
+            history.complete(id, RegisterRet::Cas(false))
+        }
+        (RegisterOp::Cas(from, _), Exchange::Answered(404, ..)) if *from != 0 => {
+            history.complete(id, RegisterRet::Cas(false))
+        }
+        // Refused before it could take effect: never sent, or rejected as a
+        // malformed or unauthenticated request.
+        (_, Exchange::NotSent(_) | Exchange::Answered(400 | 403, ..)) => history.fail(id),
         // Anything else may or may not have taken effect: leave it pending.
         _ => {}
     }
-    None
+    observed
 }
 
 fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
@@ -282,6 +391,8 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     let histories: Arc<Vec<Mutex<KeyHistory>>> =
         Arc::new(keys.iter().map(|_| Mutex::new(KeyHistory::new())).collect());
     let unwritten = Arc::new(Mutex::new(Vec::<String>::new()));
+    // Reads whose value came without an ETag, so no CAS could follow them.
+    let no_etag = Arc::new(Mutex::new(0u64));
     // Every register starts absent: write that before the clients start, so
     // the model's initial state (no value) is never observed.
     for history in histories.iter() {
@@ -292,17 +403,18 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     let seed = kit::rng::entropy_seed();
     kit::evidence(
         "start",
-        json!({"workload": "register", "keys": args.keys, "rng_seed": seed}),
+        json!({"workload": workload_name(args.workload), "keys": args.keys, "rng_seed": seed}),
     );
     let start = Instant::now();
     let workers: Vec<_> = (0..args.clients)
         .map(|client| {
-            let (s3, args, keys, histories, unwritten) = (
+            let (s3, args, keys, histories, unwritten, no_etag) = (
                 s3.clone(),
                 args.clone(),
                 keys.clone(),
                 histories.clone(),
                 unwritten.clone(),
+                no_etag.clone(),
             );
             std::thread::spawn(move || {
                 let mut rng = Rng::stream(seed, client as u64);
@@ -310,22 +422,70 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
                 while start.elapsed() < Duration::from_secs(args.duration) {
                     let k = rng.below(keys.len() as u64) as usize;
                     let node = rng.choice(&args.nodes).clone();
-                    let op = match rng.weighted(&[5.0, 4.0, 1.0]) {
-                        0 => RegisterOp::Read,
-                        1 => {
-                            // Unique per client: client in the low bits.
-                            let value = next * args.clients as u32 + client as u32 + 1;
-                            next += 1;
-                            RegisterOp::Write(value)
-                        }
-                        _ => RegisterOp::Write(0),
+                    // Read, write, delete and (conditional writes only)
+                    // compare-and-set.
+                    let weights: &[f64] = match args.workload {
+                        Workload::CasRegister => &[3.0, 2.0, 1.0, 4.0],
+                        _ => &[5.0, 4.0, 1.0],
                     };
-                    if let Some(bad) = register_op(&s3, &args, &keys[k], &node, op, &histories[k]) {
-                        unwritten
-                            .lock()
-                            .unwrap()
-                            .push(format!("{}: {bad}", keys[k]));
+                    // Unique per client: client in the low bits.
+                    let value = next * args.clients as u32 + client as u32 + 1;
+                    let record = |observed: Observed| {
+                        if let Some(bad) = &observed.unwritten {
+                            unwritten
+                                .lock()
+                                .unwrap()
+                                .push(format!("{}: {bad}", keys[k]));
+                        }
+                        observed.read
+                    };
+                    let op = match rng.weighted(weights) {
+                        0 => RegisterOp::Read,
+                        1 => RegisterOp::Write(value),
+                        2 => RegisterOp::Write(0),
+                        _ => {
+                            // Read the current value and its ETag first.
+                            let read = record(register_op(
+                                &s3,
+                                &args,
+                                &keys[k],
+                                &node,
+                                RegisterOp::Read,
+                                None,
+                                &histories[k],
+                            ));
+                            match read {
+                                Some((from, etag)) if from == 0 || etag.is_some() => {
+                                    record(register_op(
+                                        &s3,
+                                        &args,
+                                        &keys[k],
+                                        &node,
+                                        RegisterOp::Cas(from, value),
+                                        etag.as_deref(),
+                                        &histories[k],
+                                    ));
+                                    next += 1;
+                                }
+                                Some(_) => *no_etag.lock().unwrap() += 1,
+                                None => {}
+                            }
+                            std::thread::sleep(Duration::from_millis(args.think_ms));
+                            continue;
+                        }
+                    };
+                    if matches!(op, RegisterOp::Write(v) if v != 0) {
+                        next += 1;
                     }
+                    record(register_op(
+                        &s3,
+                        &args,
+                        &keys[k],
+                        &node,
+                        op,
+                        None,
+                        &histories[k],
+                    ));
                     std::thread::sleep(Duration::from_millis(args.think_ms));
                 }
             })
@@ -335,14 +495,15 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
         let _ = worker.join();
     }
     kit::pause(args.quiet as f64);
+    reboot_before_check(args);
     let (live, down) = recover(&s3, args, bucket);
     // A final read of every key, retried on other nodes until one answers.
     for (k, key) in keys.iter().enumerate().filter(|_| !live.is_empty()) {
         'key: for attempt in 0..3u64 {
             for node in &live {
-                if let Some(bad) =
-                    register_op(&s3, args, key, node, RegisterOp::Read, &histories[k])
-                {
+                let observed =
+                    register_op(&s3, args, key, node, RegisterOp::Read, None, &histories[k]);
+                if let Some(bad) = observed.unwritten {
                     unwritten
                         .lock()
                         .unwrap()
@@ -374,10 +535,28 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
                 .iter()
                 .filter(|o| matches!(o.outcome, wgl::OpOutcome::Pending))
                 .count();
-            json!({"ops": ops.len(), "pending": pending})
+            // Compare-and-sets by outcome: applied, refused (the condition
+            // did not hold), other.
+            let cas = |want: Option<bool>| {
+                ops.iter()
+                    .filter(|o| matches!(o.op, RegisterOp::Cas(..)))
+                    .filter(|o| match (&o.outcome, want) {
+                        (wgl::OpOutcome::Completed { ret, .. }, Some(want)) => {
+                            *ret == RegisterRet::Cas(want)
+                        }
+                        (wgl::OpOutcome::Completed { .. }, None) => false,
+                        (_, want) => want.is_none(),
+                    })
+                    .count()
+            };
+            json!({"ops": ops.len(), "pending": pending,
+                   "cas": [cas(Some(true)), cas(Some(false)), cas(None)]})
         })
         .collect();
-    kit::evidence("histories", json!({"keys": sizes}));
+    kit::evidence(
+        "histories",
+        json!({"keys": sizes, "reads_without_etag": *no_etag.lock().unwrap()}),
+    );
     let mut violations = Vec::new();
     let mut exhausted = Vec::new();
     let mut counts = json!({});
@@ -420,12 +599,36 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
         unwritten.len(),
         unrecovered(&down)
     );
-    if !violations.is_empty() || !unwritten.is_empty() || !down.is_empty() {
+    let lost = !violations.is_empty() || !down.is_empty();
+    if !unwritten.is_empty() || (lost && !args.integrity_only) {
         kit::verdict(kit::VIOLATION, &summary)
-    } else if !exhausted.is_empty() {
+    } else if lost || !exhausted.is_empty() {
         kit::verdict(kit::INCONCLUSIVE, &summary)
     } else {
         kit::verdict(kit::OK, &summary)
+    }
+}
+
+/// With `--reboot-before-check`, power-fail every server together and boot
+/// them a second later.
+fn reboot_before_check(args: &Args) {
+    if !args.reboot_before_check {
+        return;
+    }
+    let nodes: Vec<&str> = args.nodes.iter().map(String::as_str).collect();
+    match kit::connect_world(None) {
+        Ok(mut ctl) => {
+            if let Err(error) = crate::nemesis::crash_all(
+                &mut ctl,
+                &mut crate::nemesis::Sleep,
+                &nodes,
+                1.0,
+                json!({"before_check": true}),
+            ) {
+                kit::evidence("nemesis-failed", json!({"error": error.0}));
+            }
+        }
+        Err(error) => kit::evidence("nemesis-unavailable", json!({"error": error.0})),
     }
 }
 
@@ -629,7 +832,7 @@ pub fn run(args: Args) -> u8 {
     }
     match args.workload {
         Workload::Objects => objects(s3, &args, &bucket),
-        Workload::Register => register(s3, &args, &bucket),
+        Workload::Register | Workload::CasRegister => register(s3, &args, &bucket),
     }
 }
 
@@ -703,6 +906,7 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     };
     // The fault profile ends before the writes do; let reboots and healing finish.
     kit::pause(args.quiet as f64);
+    reboot_before_check(args);
     let (live, down) = recover(&s3, args, bucket);
     // Read back every acknowledged object, from the first node that answers.
     let mut missing = Vec::new();
@@ -812,15 +1016,12 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
         phantom.len(),
         unrecovered(&down)
     );
-    if !missing.is_empty()
-        || !down.is_empty()
-        || !corrupt.is_empty()
-        || !stale.is_empty()
-        || !unlisted.is_empty()
-        || !phantom.is_empty()
-    {
+    // Reads during the run that returned bytes no client wrote.
+    let wrong = stale.iter().any(|s| s["read"] == "different bytes");
+    let lost = !missing.is_empty() || !down.is_empty() || !stale.is_empty() || !unlisted.is_empty();
+    if !corrupt.is_empty() || !phantom.is_empty() || wrong || (lost && !args.integrity_only) {
         kit::verdict(kit::VIOLATION, &summary)
-    } else if !unreadable.is_empty() || unlistable > 0 || acknowledged.is_empty() {
+    } else if lost || !unreadable.is_empty() || unlistable > 0 || acknowledged.is_empty() {
         kit::verdict(kit::INCONCLUSIVE, &summary)
     } else {
         kit::verdict(kit::OK, &summary)
