@@ -553,17 +553,18 @@ fn postgres18() -> Vec<Scenario> {
         (
             "pg18-failover-sync",
             "PostgreSQL 18.6 primary (pg1) with a synchronous streaming standby (pg2,\n\
-          synchronous_standby_names='*', synchronous_commit=on, streaming delayed 50 ms): 30 s into 75 s of SERIALIZABLE\n\
-          list-append the primary is power-failed for good and the standby promoted\n\
-          (pg_promote), and every client moves to it. Every acknowledged commit must survive\n\
-          the promotion, and no read on the promoted standby may be stale.",
+             synchronous_standby_names='*', synchronous_commit=on; streaming delayed 50 ms):\n\
+             during 75 s of SERIALIZABLE list-append the standby's machine is frozen at 27 s,\n\
+             the primary is power-failed for good at 30 s, and the standby is resumed and\n\
+             promoted (pg_promote); every client moves to it. Every acknowledged commit must\n\
+             survive the promotion, and no read on the promoted standby may be stale.",
             true,
         ),
         (
             "pg18-failover-async",
-            "Negative control for pg18-failover-sync: the standby is asynchronous, so commits\n\
-          acknowledged by the primary but not yet streamed are expected to be lost when it\n\
-          fails over.",
+            "Negative control for pg18-failover-sync: the standby is asynchronous, so the\n\
+             commits the primary acknowledges while the standby is frozen are expected to be\n\
+             lost when it fails over.",
             false,
         ),
     ] {
@@ -592,6 +593,8 @@ fn postgres18() -> Vec<Scenario> {
             "30",
             "--replication-delay-ms",
             "50",
+            "--standby-stall",
+            "3",
             "--min-commit-rate",
             "0.1",
         ];

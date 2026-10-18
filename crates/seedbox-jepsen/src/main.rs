@@ -146,7 +146,9 @@ fn check_of(command: &Command) -> Option<&'static str> {
     Some(match command {
         Command::Nats(_) => "nats: acknowledged messages survive",
         Command::Etcd(_) => "etcd: lock-protected updates are not lost",
-        Command::Postgres(_) => "postgres: transactions meet their isolation level",
+        Command::Postgres(_) => {
+            "postgres: transactions meet their isolation level, acknowledged commits survive and the server recovers"
+        }
         Command::Kafka(_) => "kafka: the queue's checks hold",
         Command::Mysql(_) => "mysql: transactions meet their isolation level",
         Command::Galera(_) => "galera: transactions meet their isolation level",

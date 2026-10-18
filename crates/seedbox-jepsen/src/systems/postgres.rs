@@ -28,7 +28,8 @@
 //! the server must answer again within `--recover` seconds, or the run fails.
 //! With `--standby`, the server streams to a standby; at `--failover-at` the
 //! primary is power-failed and left down (fenced), the standby is promoted,
-//! and every client moves to it: every acknowledged commit must survive the
+//! and every client moves to it (`--standby-stall` freezes the standby just
+//! before): every acknowledged commit must survive the
 //! promotion and no read on the promoted standby may be stale. A value that
 //! is not an integer (a corrupted row) reads as -1, which no one appended,
 //! so the checker reports it as garbage.
@@ -107,6 +108,12 @@ pub struct Args {
     /// commit as soon as its client does); 0 adds nothing.
     #[arg(long, default_value_t = 0)]
     pub replication_delay_ms: u64,
+    /// With --standby: freeze the standby's machine this many seconds before
+    /// the failover and resume it right after the primary fails, so that it
+    /// is behind whatever the primary acknowledged meanwhile (a synchronous
+    /// primary acknowledges nothing while its standby is frozen); 0 never does.
+    #[arg(long, default_value_t = 0.0, value_parser = non_negative)]
+    pub standby_stall: f64,
     /// With --standby: the standby must be a synchronous one before the
     /// workload starts (`sync_state = 'sync'` on the primary).
     #[arg(long)]
@@ -575,17 +582,31 @@ fn fail_over(run: Arc<Run>, standby: String) -> Option<thread::JoinHandle<()>> {
     Some(thread::spawn(move || {
         let args = &run.args;
         let mut pace = nemesis::Sleep;
+        let stall = args.standby_stall.min(args.failover_at);
         nemesis::Pace::wait(
             &mut pace,
             &mut ctl,
-            args.failover_at - run.started.elapsed().as_secs_f64(),
+            args.failover_at - stall - run.started.elapsed().as_secs_f64(),
         );
-        if let Err(error) = nemesis::step(&mut ctl, "crash", &[args.host.as_str()]) {
-            evidence(
-                "failover-failed",
-                json!({"step": "crash", "error": error.0}),
-            );
-            return;
+        let mut steps: Vec<(&str, &str)> = Vec::new();
+        if stall > 0.0 {
+            steps.push(("pause", standby.as_str()));
+        }
+        steps.push(("crash", args.host.as_str()));
+        if stall > 0.0 {
+            steps.push(("resume", standby.as_str()));
+        }
+        for (i, (action, target)) in steps.into_iter().enumerate() {
+            if action == "crash" && stall > 0.0 {
+                nemesis::Pace::wait(&mut pace, &mut ctl, stall);
+            }
+            if let Err(error) = nemesis::step(&mut ctl, action, &[target]) {
+                evidence(
+                    "failover-failed",
+                    json!({"step": action, "i": i, "error": error.0}),
+                );
+                return;
+            }
         }
         let deadline = Instant::now() + Duration::from_secs_f64(args.ready_timeout);
         loop {
@@ -629,7 +650,7 @@ pub fn run(args: Args) -> u8 {
                "min_commit_rate": args.min_commit_rate, "crash_every": args.crash_every,
                "crash_down": args.crash_down, "recover": args.recover, "standby": args.standby,
                "failover_at": args.failover_at, "expect_sync": args.expect_sync,
-               "replication_delay_ms": args.replication_delay_ms,
+               "replication_delay_ms": args.replication_delay_ms, "standby_stall": args.standby_stall,
                "seed": args.seed, "label": args.label}),
     );
     let mut pg = match serving(&args.host, args.port, args.ready_timeout) {
