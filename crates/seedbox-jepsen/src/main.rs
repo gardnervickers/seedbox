@@ -53,6 +53,8 @@ enum Command {
     Rustfs(systems::rustfs::Args),
     /// Run the S3 object-store oracle against keel-s3dd (guest).
     KeelS3(systems::rustfs::Args),
+    /// Run the delores docker-kv register oracle (guest).
+    Delores(systems::delores::Args),
     /// Run the TigerBeetle oracle (guest).
     Tigerbeetle(systems::tigerbeetle::Args),
     /// Run a TigerBeetle replica's node agent (guest).
@@ -173,6 +175,9 @@ fn check_of(command: &Command) -> Option<&'static str> {
         Command::Mysql(_) => "mysql: transactions meet their isolation level",
         Command::Galera(_) => "galera: transactions meet their isolation level",
         Command::Rustfs(_) => "rustfs: acknowledged objects survive and every server recovers",
+        Command::Delores(_) => {
+            "delores: register histories are linearizable and every replica recovers and converges"
+        }
         Command::KeelS3(_) => {
             "keel-s3dd: acknowledged objects survive, registers are linearizable and the server recovers"
         }
@@ -202,6 +207,7 @@ fn main() -> ExitCode {
         Command::Mysql(args) => systems::mysql::run(args),
         Command::Galera(args) => systems::galera::run(args),
         Command::Rustfs(args) | Command::KeelS3(args) => systems::rustfs::run(args),
+        Command::Delores(args) => systems::delores::run(args),
         Command::Tigerbeetle(args) => systems::tigerbeetle::run(args),
         Command::TbNode(args) => systems::tigerbeetle_node::run(args),
         Command::TbWorker(args) => systems::tigerbeetle::worker(args),

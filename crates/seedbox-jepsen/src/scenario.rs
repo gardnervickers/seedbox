@@ -1989,6 +1989,74 @@ fn keel() -> Vec<Scenario> {
         .collect()
 }
 
+// ------------------------------------------------------------ delores
+
+/// The image `harness/jepsen/delores/image/build.sh` builds from a delores
+/// checkout with its own `examples/docker-kv/Dockerfile`.
+const DELORES_KV: &str = "localhost/seedbox-jepsen/delores-docker-kv:current";
+
+/// A docker-kv machine with compose's shared environment, pointed at keel-s3dd.
+fn delores_kv(extra: &[(&str, &str)]) -> Machine {
+    let mut machine = Machine::image(DELORES_KV).memory(512);
+    for (key, value) in [
+        ("RUST_LOG", "info"),
+        ("NO_COLOR", "1"),
+        ("S3_ENDPOINT", "http://s3:9000"),
+        ("S3_BUCKET", "delores"),
+        ("AWS_ACCESS_KEY_ID", "jepsen"),
+        ("AWS_SECRET_ACCESS_KEY", "jepsen-secret"),
+        ("AWS_REGION", "us-east-1"),
+        ("VIEW_REGISTER_KEY", "demo/view-register"),
+        ("LOG_PREFIX", "demo"),
+        ("LOG_WINDOW_SIZE", "32"),
+        ("SEQUENCER_ID", "main"),
+        ("SEQUENCER_ENDPOINT", "tcp://sequencer:7100"),
+    ]
+    .into_iter()
+    .chain(extra.iter().copied())
+    {
+        machine = machine.env(key, value);
+    }
+    machine
+}
+
+fn delores() -> Vec<Scenario> {
+    let mut machines = vec![(
+        "s3".to_string(),
+        Machine {
+            files: vec![("../keel/run-s3dd.sh".into(), "/run-s3dd.sh".into())],
+            ..keel_server("poll", "log")
+        },
+    )];
+    machines.push((
+        "sequencer".into(),
+        delores_kv(&[("BIND", "0.0.0.0:7100")])
+            .comment("The in-memory demo sequencer: never fault it (losing it is a liveness test).")
+            .command(strings(&["sequencer"])),
+    ));
+    for (index, replica) in nodes("n", 3).into_iter().enumerate() {
+        let id = index.to_string();
+        machines.push((
+            replica,
+            delores_kv(&[("REPLICA_ID", id.as_str()), ("BIND", "0.0.0.0:7000")])
+                .comment(
+                    "start-replica.sh seeds the view register if no replica has yet, then serves.",
+                )
+                .entrypoint(&["/bin/sh", "/start-replica.sh"])
+                .file("start-replica.sh", "/start-replica.sh"),
+        ));
+    }
+    vec![Scenario {
+        name: "delores-kv-register".into(),
+        comment: "delores's examples/docker-kv over keel-s3dd instead of MinIO: three replicas share\none virtual log through the S3 server, with slots from the in-memory demo sequencer.\nSix clients PUT, DELETE and GET five keys through random replicas for 60 s with no\nretries; then every replica reads every key. Each key's history must be\nlinearizable, every replica must answer again and all must agree. Run it without a\nprofile for a baseline, or with `--fault-profile harness/jepsen/delores/faults.yaml`,\nwhich never faults the sequencer.".into(),
+        generated: "delores docker-kv, three replicas, keel-s3dd (poll, log)".into(),
+        machines,
+        // The register check's search grows with unacknowledged writes.
+        oracle: Machine::program(&strings(&["delores"])).memory(1024),
+        latency: "1ms".into(),
+    }]
+}
+
 /// Every committed scenario, as (path under `harness/jepsen`, contents).
 pub fn all() -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -2006,6 +2074,7 @@ pub fn all() -> Vec<(String, String)> {
         ("tigerbeetle", tigerbeetle()),
         ("rustfs", rustfs()),
         ("keel", keel()),
+        ("delores", delores()),
     ] {
         for scenario in scenarios {
             out.push((

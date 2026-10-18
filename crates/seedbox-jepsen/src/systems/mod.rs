@@ -1,4 +1,5 @@
 //! The reproduced systems: one oracle each, plus the etcd lock client.
+pub mod delores;
 pub mod etcd;
 pub mod etcd_append;
 pub mod etcd_client;
