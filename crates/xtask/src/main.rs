@@ -5,6 +5,7 @@ use std::{
     process::{Command, Stdio},
 };
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+mod assets;
 mod runtime;
 
 // Spawns and executable writes go through the process-wide seedbox_exec scope
@@ -190,7 +191,7 @@ fn build(root: &Path) -> Result<PathBuf> {
     })
 }
 
-fn publish(root: &Path, build_assets: impl FnOnce(&Path) -> Result<()>) -> Result<PathBuf> {
+fn asset_lock(root: &Path) -> Result<fs::File> {
     let directory = root.join("build");
     fs::create_dir_all(&directory)?;
     let lock = fs::OpenOptions::new()
@@ -203,11 +204,22 @@ fn publish(root: &Path, build_assets: impl FnOnce(&Path) -> Result<()>) -> Resul
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
         return Err(io::Error::last_os_error().into());
     }
+    Ok(lock)
+}
+
+fn publish(root: &Path, build_assets: impl FnOnce(&Path) -> Result<()>) -> Result<PathBuf> {
+    let _lock = asset_lock(root)?;
+    let directory = root.join("build");
     let pending = tempfile::Builder::new()
         .prefix(".assets-")
         .tempdir_in(&directory)?;
     build_assets(pending.path())?;
     fs::write(pending.path().join("architecture"), env::consts::ARCH)?;
+    let current = directory.join("assets");
+    // A missing or damaged previous bundle must not prevent its replacement.
+    if assets::equal(pending.path(), &current).unwrap_or(false) {
+        return Ok(current.canonicalize()?);
+    }
     let retained = pending.keep();
     let pointer = directory.join(".assets-next");
     if pointer.symlink_metadata().is_ok() {
@@ -220,14 +232,48 @@ fn publish(root: &Path, build_assets: impl FnOnce(&Path) -> Result<()>) -> Resul
     fs::rename(pointer, directory.join("assets"))?;
     Ok(retained)
 }
-fn main() -> Result<()> {
-    if env::args().skip(1).collect::<Vec<_>>() != ["build-assets"] {
-        return Err("usage: cargo xtask build-assets".into());
+
+fn clean_assets(root: &Path) -> Result<()> {
+    let _lock = asset_lock(root)?;
+    let directory = root.join("build");
+    // Fail closed if the current publication cannot be resolved.
+    let current = directory.join("assets").canonicalize()?;
+    for entry in fs::read_dir(&directory)? {
+        let entry = entry?;
+        if entry.file_name().as_bytes().starts_with(b".assets-")
+            && entry.file_type()?.is_dir()
+            && entry.path().canonicalize()? != current
+        {
+            fs::remove_dir_all(entry.path())?;
+        }
     }
+    Ok(())
+}
+
+fn build_cli(
+    root: &Path,
+    args: &[std::ffi::OsString],
+    prepare: impl FnOnce() -> Result<PathBuf>,
+) -> Result<()> {
+    prepare()?;
+    run(command("cargo", root).arg("build").args(args))
+}
+
+fn main() -> Result<()> {
+    let args: Vec<_> = env::args_os().skip(1).collect();
+    let usage = "usage: cargo xtask build [CARGO BUILD OPTIONS] | build-assets | clean-assets\nclean-assets removes old generations; stop all Cargo builds before running it";
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    println!("{}", build(&root)?.display());
+    match args.split_first() {
+        Some((action, rest)) if action == "build-assets" && rest.is_empty() => {
+            println!("{}", build(&root)?.display());
+        }
+        Some((action, rest)) if action == "build" => build_cli(&root, rest, || build(&root))?,
+        Some((action, rest)) if action == "clean-assets" && rest.is_empty() => clean_assets(&root)?,
+        Some((action, rest)) if action == "--help" && rest.is_empty() => println!("{usage}"),
+        _ => return Err(usage.into()),
+    }
     Ok(())
 }
 
@@ -303,6 +349,112 @@ mod tests {
         let error = build(root.path()).unwrap_err().to_string();
         assert!(error.contains("git submodule update --init --recursive vendor/dynamorio"));
         assert!(!root.path().join("build").exists());
+    }
+
+    #[test]
+    fn unchanged_assets_keep_the_publication_and_its_timestamps() {
+        let root = tempfile::tempdir().unwrap();
+        let write = |out: &Path, time| -> Result<()> {
+            fs::write(out.join("kernel"), b"kernel")?;
+            assets::tests::archive(&out.join("driver-runtime.tar.gz"), b"init", 0o755, time);
+            Ok(())
+        };
+        let first = publish(root.path(), |out| write(out, 1)).unwrap();
+        let pointer = root.path().join("build/assets");
+        let modified = pointer.symlink_metadata().unwrap().modified().unwrap();
+        let archive = fs::read(first.join("driver-runtime.tar.gz")).unwrap();
+        let second = publish(root.path(), |out| write(out, 2)).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            pointer.symlink_metadata().unwrap().modified().unwrap(),
+            modified
+        );
+        assert_eq!(
+            fs::read(first.join("driver-runtime.tar.gz")).unwrap(),
+            archive
+        );
+        assert_eq!(fs::read_dir(root.path().join("build")).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn added_removed_and_changed_files_publish_new_generations() {
+        let root = tempfile::tempdir().unwrap();
+        let mut previous = PathBuf::new();
+        for files in [
+            vec![("kernel", "a")],
+            vec![("kernel", "a"), ("extra", "b")],
+            vec![("kernel", "a")],
+            vec![("kernel", "b")],
+        ] {
+            let next = publish(root.path(), |out| {
+                for (name, bytes) in files {
+                    fs::write(out.join(name), bytes)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert_ne!(next, previous);
+            previous = next;
+        }
+    }
+
+    #[test]
+    fn cleanup_preserves_current_generation_unrelated_directories_and_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let first = publish(root.path(), |out| Ok(fs::write(out.join("kernel"), b"a")?)).unwrap();
+        let current = publish(root.path(), |out| Ok(fs::write(out.join("kernel"), b"b")?)).unwrap();
+        let unrelated = root.path().join("build/other");
+        fs::create_dir(&unrelated).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let link = root.path().join("build/.assets-external");
+        symlink(external.path(), &link).unwrap();
+        clean_assets(root.path()).unwrap();
+        assert!(!first.exists());
+        assert!(current.exists());
+        assert!(unrelated.exists());
+        assert!(link.symlink_metadata().unwrap().is_symlink());
+        assert_eq!(
+            root.path().join("build/assets").canonicalize().unwrap(),
+            current
+        );
+    }
+
+    #[test]
+    fn failed_preparation_never_reaches_cargo() {
+        let root = tempfile::tempdir().unwrap();
+        let error = build_cli(root.path(), &[], || Err("preparation failed".into())).unwrap_err();
+        assert_eq!(error.to_string(), "preparation failed");
+    }
+
+    #[test]
+    fn build_prepares_before_cargo_and_forwards_build_options() {
+        let root = tempfile::tempdir().unwrap();
+        let _guard = seedbox_test_time::HangGuard::new(
+            "xtask Cargo build fixture",
+            std::time::Duration::from_secs(60),
+        );
+        build_cli(
+            root.path(),
+            &["--release".into(), "--target-dir".into(), "output".into(), "--offline".into()],
+            || {
+                // Cargo can only build the fixture after preparation creates it.
+                fs::write(root.path().join("Cargo.toml"), "[package]\nname = 'asset-build-fixture'\nversion = '0.0.0'\nedition = '2024'\n")?;
+                fs::create_dir(root.path().join("src"))?;
+                fs::write(root.path().join("src/main.rs"), "fn main() {}")?;
+                Ok(root.path().to_owned())
+            },
+        ).unwrap();
+        assert!(root
+            .path()
+            .join("output/release/asset-build-fixture")
+            .is_file());
+        // Cargo errors must also propagate out of the wrapper.
+        assert!(
+            build_cli(root.path(), &["--invalid-build-option".into()], || Ok(root
+                .path()
+                .to_owned()))
+            .is_err()
+        );
     }
 
     #[test]
