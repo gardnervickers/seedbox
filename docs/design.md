@@ -132,11 +132,10 @@ Linux test inputs are described in [internals](internals.md#reference-tcg-machin
 | `seedbox-application` | Configuration, image preparation, orchestration |
 | `seedbox-artifacts` | Retained records, content storage, comparison, portable archives |
 | `seedbox-engine-protocol` | Private worker transport and evidence formats |
-| `seedbox-engine-core` | Shared scheduling, faults, devices, deterministic policies |
+| `seedbox-engine-core` | Shared deterministic fault, link, trigger and counter policies |
 | `seedbox-driver` | Sole service coordinator, time and control policy |
 | `seedbox-machine` | Isolated Machine contract |
 | `seedbox-machine-pv`, `seedbox-machine-tcg` | Native CPU/device leaves |
-| `seedbox-vmm`, `seedbox-arm64` | Independent low-level fixture workspaces; never service executors |
 
 The application library does not depend on the server or CLI. The engine core
 has no hypervisor dependency. Backend adapters perform architecture-specific

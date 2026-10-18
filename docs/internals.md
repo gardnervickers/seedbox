@@ -413,8 +413,7 @@ counter frequency rather than measure the host.
 
 A guest must never observe time beyond the boundary the VMM has permitted.
 
-Code: [x86 clock](../kernel/seedbox.c), [ARM clock](../kernel-arm64/seedbox.c),
-[seedbox-machine x86 clock](../crates/seedbox-machine/guest/kernel/x86_64/seedbox.c).
+Code: [x86 clock](../crates/seedbox-machine/guest/kernel/x86_64/seedbox.c), [ARM clock](../crates/seedbox-machine/guest/kernel/arm64/seedbox.c).
 
 ## Progress from translated blocks
 
@@ -443,8 +442,7 @@ guest code is not covered: the patched kernel reaches these instructions only
 behind CPUID checks and boots with `random.trust_cpu=off`, and the supervisor
 and translator do not use them.
 
-Code: [progress client](../guest/progress/progress.c),
-[seedbox-machine progress client](../crates/seedbox-machine/guest/progress/progress.c).
+Code: [progress client](../crates/seedbox-machine/guest/progress/progress.c).
 
 ## Progress inside kernel polling
 
@@ -455,15 +453,13 @@ bounded PV clock read after that hint, allowing the guest CPU to stop at a time
 bound without allocating, acquiring another lock, scheduling or enabling
 interrupts. Interrupt delivery stays deferred until the guest permits it.
 
-Each hook charges a 100 ns read and is inactive before PV activation.
-This covers the patched kernel `cpu_relax`/`rep_nop` paths. It does not cover
-arbitrary assembly `PAUSE`, early decompression, the vDSO, or every ARM kernel
-polling loop. Application polling is handled by binary instrumentation.
-The `seedbox-machine` x86 kernel patches the same sites; its shared PV ABI 3
-read, like every ABI 3 clock read on both architectures, charges 1 ns instead.
+Each hook is inactive before PV activation and charges one shared PV ABI 3
+clock read (1 ns, like every ABI 3 read on both architectures). This covers the
+patched kernel `cpu_relax`/`rep_nop` paths. It does not cover arbitrary assembly
+`PAUSE`, early decompression, the vDSO, or ARM kernel polling loops. Application
+polling is handled by binary instrumentation.
 
-Code: [kernel clock](../kernel/seedbox.c), [patch sites](../kernel/apply.py),
-[seedbox-machine patch sites](../crates/seedbox-machine/guest/kernel/x86_64/apply.py).
+Code: [kernel clock](../crates/seedbox-machine/guest/kernel/x86_64/seedbox.c), [patch sites](../crates/seedbox-machine/guest/kernel/x86_64/apply.py).
 
 ## Observation without guest progress
 
@@ -478,7 +474,8 @@ The same distinction applies to backend maintenance exits, such as the ARM
 debug-register unlock bypass. An exit visible to the hypervisor is not
 automatically an event that belongs in the simulated world.
 
-Code: [x86 PV execution](../crates/seedbox-vmm/src/machine/pv.rs), [ARM machine](../crates/seedbox-arm64/src/machine.rs).
+Code: [PV worker](../crates/seedbox-machine-pv/src/machine/pv/worker/),
+[execution evidence](../crates/seedbox-machine/src/machine/execution_evidence.rs).
 
 ## Software exclusive reservations
 
@@ -500,7 +497,7 @@ Faults must reconstruct the original application registers and instruction
 pointer. Internal retries cannot count as application progress. Application wait
 hints are rewritten so host wakeups cannot change charged loop counts.
 
-Code: [translator patch](../guest/progress/dynamorio-exclusives.patch), [ARM kernel patches](../kernel-arm64/apply.py), [assembly fixtures](../guest/progress/fixtures/).
+Code: [translator patch](../crates/seedbox-machine/guest/progress/dynamorio-exclusives.patch), [ARM kernel patches](../crates/seedbox-machine/guest/kernel/arm64/apply.py).
 
 ## Interrupt delivery at an idle rendezvous
 
@@ -512,10 +509,10 @@ eventual application output looks identical.
 The patched idle path unmasks interrupts before reaching the PV idle exit, when
 the VMM has not yet asserted the interrupt for that rendezvous. It can assert
 the line at the stopped boundary. The kernel restores the caller's mask on
-return. Both ARM backends use this path instead of exposing KVM's handling of
-`WFI`, ARM's wait-for-interrupt instruction.
+return. The ARM PV path uses this instead of exposing the hypervisor's handling
+of `WFI`, ARM's wait-for-interrupt instruction.
 
-Code: [ARM kernel](../kernel-arm64/seedbox.c), [deferred interrupt test](../crates/seedbox-arm64/tests/review_deferred_bound.rs).
+Code: [ARM kernel](../crates/seedbox-machine/guest/kernel/arm64/seedbox.c).
 
 ## Canonical saved vector state
 
@@ -532,16 +529,9 @@ absent YMM component and marks a present all-zero YMM component absent. Nonzero
 values and other components remain unchanged. The guest itself writes one
 representation; full-state comparison continues to inspect the actual bytes.
 
-The live vCPU digest applies the same YMM normalization to a local copy of
-`KVM_GET_XSAVE`'s standard-format buffer. Host FPU save/restore can report zero
-YMM state as present or absent even when guest RAM, register values and execution
-agree. Nonzero YMM values, other components and all guest RAM still participate
-in full-state comparison. Reading the digest never writes the vCPU; checkpoints
-continue to save and restore the raw KVM state.
-
 This does not cover direct application XSAVE or every signal-frame save path.
 
-Code: [normalizer](../crates/seedbox-vmm/src/xsave.rs), [KVM restore tests](../crates/seedbox-vmm/tests/xsave.rs).
+Code: [kernel patch](../crates/seedbox-machine/guest/kernel/x86_64/apply.py).
 
 ## Independent random streams
 
@@ -569,8 +559,7 @@ and machine-local sequence before routing them. A failure prevents the round
 from committing. Worker completion order must not change results. An idle
 machine must advance to its assigned wake time before delivering inputs.
 
-Code: [round contract](../crates/seedbox-engine-core/src/window/mod.rs),
-[world adapter](../crates/seedbox-engine-core/src/world_windowed.rs).
+Code: [Driver](../crates/seedbox-driver/src/driver.rs).
 
 ## Fault ordering and replay
 
@@ -591,7 +580,7 @@ remain observations; replay executes the oracle rather than injecting its events
 again.
 
 Code: [input program](../crates/seedbox-engine-core/src/input_program.rs),
-[coordinator](../crates/seedbox-engine-core/src/world.rs).
+[Driver](../crates/seedbox-driver/src/driver.rs).
 
 ## Fault discovery and previews
 
@@ -680,11 +669,9 @@ and stop bounds before their effects are published.
 
 Restoring a snapshot restores guest random-generator state too. A branch that
 changes entropy must update the guest's generator as well as the host's streams.
-The x86 PV page carries an entropy generation consumed by kernel hooks.
 
-Code: [world](../crates/seedbox-engine-core/src/world.rs),
-[ARM checkpoint adapter](../crates/seedbox-arm64/src/application/world/checkpoint.rs),
-[x86 entropy hooks](../kernel/apply.py).
+Code: [Driver checkpoints](../crates/seedbox-driver/src/driver/checkpoint.rs),
+[PV snapshots](../crates/seedbox-machine-pv/src/machine/pv/worker/snapshot.rs).
 
 ## Device completion and disk state
 
@@ -692,17 +679,15 @@ Virtio devices mutate guest RAM as well as host state. Payload, status, and
 used-ring writes must retain their order, and the x86 dirty journal must include
 every write. A malformed later request does not undo earlier completed requests.
 Interrupt and queue-cursor timing on error therefore affects observable state.
-The shared device models have backend-specific validation profiles; sharing
-code does not make those profiles identical.
 
 The disk model separates stable and volatile writes. Flush and FUA affect what
 is stable; a crash applies the configured survival policy to volatile state.
 Restarting an application process is different from crashing its machine and disk.
 
-Code: [block](../crates/seedbox-engine-core/src/virtio_block.rs),
-[console](../crates/seedbox-engine-core/src/virtio_console.rs),
-[network](../crates/seedbox-engine-core/src/virtio_network.rs),
-[disk](../crates/seedbox-engine-core/src/disk.rs).
+Code: [PV block](../crates/seedbox-machine-pv/src/machine/pv/worker/block.rs),
+[PV console](../crates/seedbox-machine-pv/src/machine/pv/worker/console.rs),
+[PV network](../crates/seedbox-machine-pv/src/machine/pv/worker/net.rs),
+[disk policy](../crates/seedbox-engine-core/src/disk.rs).
 
 ## Connection-scoped faults
 
@@ -759,11 +744,8 @@ bash harness/check.sh --help      # Individual suites and requirements.
 Portable checks run before hardware suites and compile hardware test features.
 The runner reports missing host requirements before building. Reports are written
 under `target/check-reports/`; they are local output, not documentation.
-The VMM and ARM backends have separate Cargo workspaces and lockfiles; use the
-root Cargo aliases when building them directly. ARM guest fixtures read
-`SEEDBOX_ARM64_KERNEL` and `SEEDBOX_ARM64_INITRD`; the Rust coordinator
-[policy](../crates/seedbox-check/src/policy.rs) defines their
-checkout defaults and the other suite requirements.
+The Rust coordinator [policy](../crates/seedbox-check/src/policy.rs) defines
+each suite's requirements and inputs.
 
 Unit tests live beside their component under `src/`. Integration tests live in
 the owning crate's `tests/` and exercise public boundaries. Give each scenario
@@ -812,24 +794,22 @@ prints raw bytes; its JSON document contains the descriptor and lossless hex byt
 It is distinct from time-filtered application `logs ID`.
 
 Checkpoint definitions include captured binary state independently of the source.
-Projection validates the frozen intervention history against the captured consumed
-input prefix, including admissions and rejections, before merging external
-overrides. Only the pending suffix can change: the cursor, consumed prefix,
-assigned fault IDs and captured world state cannot. Effects scheduled for later
-by already-admitted inputs remain consumed; oracle calls are not reinjected.
+Import validates each captured input-program cursor, including admissions and
+rejections, before publishing. The cursor, consumed prefix, assigned fault IDs
+and captured world state cannot change; oracle calls are not reinjected.
 Unavailable captures remain explicit receipts, not fabricated checkpoints.
 
 Server comparison uses complete resolved execution definitions plus ordered
-external overrides. It ignores only image reference provenance, descriptive
-EngineDescriptor version/platform/backend/timebase fields, and HVF host release
-and CPU features. Actual architecture/backend, runtime asset digests, engine launch
-kind/owner-pipe/live-observation settings, clock, policies, configuration, overrides
-and checkpoint state/cursor/assets still participate. Original records are not
+external overrides. It ignores only image reference provenance and descriptive
+EngineDescriptor version/platform/backend/timebase fields. Actual
+architecture/backend, runtime asset digests, engine launch kind/owner-pipe/live-observation
+settings, clock, policies, configuration, overrides and checkpoint
+state/cursor/assets still participate. Original records are not
 rewritten. Compatible inputs still need actual witness/full-state/fault evidence;
 missing evidence yields NOT_COMPARABLE and differing results yield MISMATCH.
 
 Code: [archives](../crates/seedbox-artifacts/src/archive.rs),
-[checkpoint projection](../crates/seedbox-artifacts/src/checkpoint.rs),
+[checkpoint validation](../crates/seedbox-artifacts/src/checkpoint.rs),
 [server bundles](../crates/seedbox-server/src/execution/bundles.rs),
 [comparison](../crates/seedbox-server/src/execution.rs),
 [client transfers](../crates/seedbox-client/src/transfers.rs).

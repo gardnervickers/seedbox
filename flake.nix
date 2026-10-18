@@ -24,25 +24,15 @@
       shell = system:
         let
           pkgs = import nixpkgs { inherit system; };
-          filesystemTools = (import ./nix/runtime.nix { inherit pkgs; }).filesystemTools;
+          filesystemTools = (import ./nix/filesystem-tools.nix { inherit pkgs; }).filesystemTools;
           tcgQemu = import ./nix/tcg.nix { inherit pkgs; };
           tcgLinux = import ./nix/tcg-linux.nix { inherit pkgs; };
           checker = import ./nix/seedbox-check.nix { inherit pkgs; };
           linuxEnvironment = {
-            SEEDBOX_STATIC_CC = "${pkgs.pkgsStatic.stdenv.cc}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc";
             SEEDBOX_IP = "${pkgs.iproute2}/bin/ip";
             SEEDBOX_TC = "${pkgs.iproute2}/bin/tc";
-            # Only the low-level guest/build-initramfs.sh fixture uses BusyBox.
-            SEEDBOX_BUSYBOX = "${pkgs.pkgsStatic.busybox}/bin/busybox";
             SEEDBOX_MKE2FS = "${filesystemTools.bin}/bin/mke2fs";
-            SEEDBOX_E2FSPROGS_SOURCE = "${pkgs.pkgsStatic.e2fsprogs.src}";
-            SEEDBOX_MUSL_SOURCE = "${pkgs.pkgsStatic.stdenv.cc.libc.src}";
           };
-          kernelTools = with pkgs; [
-            stdenv.cc pkgsStatic.stdenv.cc binutils curl python3 gnumake
-            bc bison flex perl git xz util-linux
-          ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isx86_64
-            (with pkgs; [ pkg-config elfutils elfutils.dev openssl.dev ]);
         in {
           default = pkgs.mkShell ({
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
@@ -61,9 +51,6 @@
               elfutils elfutils.dev openssl.dev pkgsStatic.stdenv.cc iproute2 go util-linux patchelf
             ];
           } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux linuxEnvironment);
-        } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-          # Asset builds need neither Cargo/Rust nor a nested container engine.
-          assets = pkgs.mkShell ({ packages = kernelTools; } // linuxEnvironment);
         };
     in {
       devShells = nixpkgs.lib.genAttrs systems shell;
@@ -141,15 +128,13 @@
             '';
           };
           # Name outputs explicitly so selecting helpers never imports the kernel recipe.
-          inherit (import ./nix/runtime.nix { inherit pkgs; }) runtimeAssets runtimeArchive runtimeSources;
-          inherit (import ./nix/kernels.nix { inherit pkgs; }) guestKernel guestKernelArchive guestKernelSources;
           tcgKernel = import ./nix/tcg-kernel.nix { inherit pkgs; };
           machineTcgAssets = machineTcg.assets;
           machineTcgTestFixtures = machineTcg.testFixtures;
           # These executables run INSIDE the configured Linux guest. TCG always
           # needs x86-64, including when its QEMU host is AArch64.
-          machineGuestFormatter = (import ./nix/runtime.nix { inherit pkgs; }).filesystemTools.bin;
-          machineGuestFormatterX86 = (import ./nix/runtime.nix {
+          machineGuestFormatter = (import ./nix/filesystem-tools.nix { inherit pkgs; }).filesystemTools.bin;
+          machineGuestFormatterX86 = (import ./nix/filesystem-tools.nix {
             pkgs = if pkgs.stdenv.hostPlatform.isx86_64 then pkgs else pkgs.pkgsCross.gnu64;
           }).filesystemTools.bin;
         } // pkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.isAarch64 || pkgs.stdenv.hostPlatform.isx86_64) {

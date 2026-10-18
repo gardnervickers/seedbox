@@ -28,9 +28,8 @@ Open review-ready PRs as non-drafts; reviews and merges go through the user.
   `nix develop`. Linux uses Nix directly; Mac uses a Docker-compatible Linux
   builder with a persistent Nix store. Outputs live together under `build/`;
   `build/assets` changes atomically after a successful asset build.
-  Cargo embeds prepared `build/assets` by default; explicit `SEEDBOX_BUILD_HELPERS`
-  and `SEEDBOX_BUILD_KERNEL` override those inputs.
-  Complete builds embed the architecture-matched kernel in the executable. Runtime commands never run
+  Cargo embeds the prepared Driver runtime (`build/assets/driver-runtime.tar.gz`)
+  by default; an explicit `SEEDBOX_BUILD_DRIVER_RUNTIME` overrides it. Runtime commands never run
   Nix, Cargo or asset builders. Replay uses retained inputs. CLI lookup owns
   environment access; library callers supply paths and cancellation explicitly.
 - Application images are built/pulled/exported using Bollard through the user's
@@ -38,18 +37,8 @@ Open review-ready PRs as non-drafts; reviews and merges go through the user.
   supply an explicit client. The engine owns build caching; `ocirender` merges
   exported image layers as archives without extracting guest paths on the host.
   Preparation never starts application containers. Replay never contacts the engine.
-- `crates/seedbox-vmm` is Linux-only and deliberately **not** a workspace member.
-  It is its own workspace with its own `Cargo.lock`, because cargo unifies
-  dependency features across one build. The public CLI and application do not
-  link its legacy simulator; service execution uses Driver with native Machine
-  leaves. Standalone low-level fixtures keep a separate lockfile and identity. Build
-  and test those from the repository root with the aliases in `.cargo/config.toml`:
-  `cargo build-vmm` and `cargo test-vmm`. Both already pass `--locked`; adding
-  it again is an error. It builds into `crates/seedbox-vmm/target`. Public
-  runtime commands never invoke Cargo or search for a separate VMM by default.
-  Don't set a global
-  `target-dir` in `.cargo/config.toml`: cargo applies it by current directory,
-  so it would also move standalone crate builds and break their scripts.
+- Don't set a global `target-dir` in `.cargo/config.toml`: cargo applies it by
+  current directory, so it would also move unrelated crate builds.
 - Keep Cargo target directories private per agent; they are build outputs,
   not a shared cache. Preserve the build-only `SEEDBOX_BUILD_ROOT` checkout
   invalidation. `seedbox-spec` uses the same watcher as engine/control so API
@@ -60,29 +49,27 @@ Open review-ready PRs as non-drafts; reviews and merges go through the user.
   `publish` from `[workspace.package]`. Put a dependency used by two or more
   workspace crates in `[workspace.dependencies]`. Commit both lockfiles.
 - Historical experiments and evidence are preserved at commit `788fc43`;
-  the earlier standalone prototypes are at `bc07f35`. Keep new runtime work
+  the earlier standalone prototypes are at `bc07f35`. The retired standalone
+  VMM/ARM fixture engines, their world fixtures and root guest inputs
+  (`kernel/`, `kernel-arm64/`, `guest/`) were last present at `a993fa29`. Keep new runtime work
   in the current crates, guest inputs and harness rather than reviving old
   prototypes. `tools/mac-tcg/` retains the experimental local Mac runner,
   its own pinned Nix shell and portable tests; it is not a production backend.
-- `harness/` holds YAML acceptance scenarios with guest Python drivers, portable
-  checks, and the batch runner for low-level world fixtures. Application
-  acceptance uses `seedbox run` / `seedbox replay` directly; do not add a host
-  scenario runner. `kernel/` and `guest/` hold guest build inputs.
+- `harness/` holds YAML acceptance workloads, their guest Python drivers and image sources, and the
+  check entry points. Application acceptance uses `seedbox run` / `seedbox replay`
+  directly; do not add a host scenario runner. Guest build inputs (kernels,
+  progress client, guest init) live in `crates/seedbox-machine/guest/` and
+  `crates/seedbox-machine/src/pv/`.
 
 ## Crate and test boundaries
 
-`seedbox-engine-protocol` owns worker launch/configuration, the private shared
+`seedbox-engine-protocol` owns Driver request/report wire types, the private shared
 host-wait clock transport, and retained evidence formats. It has no CPU backend, scheduler or device policy. `seedbox-artifacts`
 owns offline records, content storage, logs, comparison and bundles; it depends
 on protocol types, never engine-core, a hypervisor, Bollard or Tokio. The
 application crate reexports retained APIs and owns parsing, preparation,
 orchestration, shared fault-input validation and Driver request/report adaptation. Native modules own
-host admission and launching. Standalone workspaces have protocol wrappers with
-canonical source links, just like their engine-core and control wrappers.
-
-Construct real worlds through `World::new(WorldInputs { ... })`; keep coordinator
-bookkeeping private. Use read-only evidence accessors and guarded lifecycle
-commits instead of exposing mutable coordinator fields.
+host admission and launching.
 
 Unit tests live alongside their component under `src/`; integration tests live
 in the owning crate's `tests/` and exercise public boundaries or interactions.
@@ -90,71 +77,16 @@ Give each scenario one owner. Keep format and offline artifact tests out of the
 application crate unless they specifically exercise application composition.
 Hardware tests remain feature-controlled and compiled by portable checks.
 
-## Shared engine policies, queues and transport
+## Shared engine policies
 
 Service execution uses `seedbox-driver` with the native PV/TCG Machine leaves.
-The standalone world fixtures and shared policies below are not alternate service
-executors; keep their independent CPU and ownership coverage without reconnecting
-them to CLI, daemon, preparation or retained-worker dispatch.
+The Driver owns scheduling, routing, lifecycle and snapshots.
 
-`crates/seedbox-engine-core` owns deterministic RNG, disk, links, connection,
-trigger, fault, control and network-counter policies, plus bounded split-ring
-validation/completion, modern virtio MMIO register transitions and console/block/network models. It has no CPU backend or
-UART dependency. Adapters pass actual transmitted bytes to its management framer;
-legacy PC divisor-register writes remain in `seedbox-vmm/src/management_uart.rs`.
-Keep mechanical policy moves separate from behavioral changes.
-
-Queue adapters supply the guest physical RAM base and retain their existing
-length, direction and diagnostic policy. ARM queue field names and serialization
-order remain part of retained state evidence. KVM console and block completion
-feed every used-ring write to their existing dirty-range journals; do not drop
-or reorder those entries. The shared MMIO transport serves ARM devices and KVM
-console/block/network; its adapter identities and common register contract are
-defined in `crates/seedbox-engine-core/src/virtio_mmio.rs`. Preserve error
-precedence, cursor resets and the
-explicit ARM state projection. Adapters handle typed Notify/Reset effects and
-retain model-reset ownership. The shared console owns handshake, backlogs, counters
-and queue processing; adapters supply GPA base, dirty callbacks and event projection.
-Preserve partial-error mutation and IRQ timing in `virtio_console.rs`.
-The shared block model owns request decoding, disk effects and DMA, with shared
-descriptor admission and completed-prefix semantics in `virtio_block.rs`. Use explicit disk
-and statistics accessors in platform callers.
-The shared network model owns packet DMA, backlogs and counters; use the common
-admission and completed-prefix contract in `virtio_network.rs`.
-The x86 PV watchdog (`machine/pv.rs`) is a diagnostic: it interrupts a run
-with no exit to report where the guest is and resumes it, and must never
-publish a plan, inject an interrupt or adopt guest time at that landing.
-The shared world coordinator owns scheduling, routing, control/trigger/fault
-ordering, lifecycle policy and world snapshots. Machine adapters embed its single
-`MachineState` and supply stopped execution and physical lifecycle operations.
-Keep hard limits exact, including owed I/O; preserve the lifecycle commit sites
-relative to fallible architecture actions. See `docs/internals.md`.
-ARM uses this same coordinator through stopped, stamped worker primitives; no
-second world scheduler belongs in the worker. Cold run/replay require no snapshot.
-Standalone x86 world fixtures use the windowed scheduler (`window/`,
-`world_windowed.rs`, [docs/internals.md](docs/internals.md)):
-the coordinator applies control, trigger and fault boundaries, lifecycle,
-forks and checkpoints between rounds, on the calling thread, from committed
-state in a fixed order. Standalone arm64 fixtures use the same windowed
-scheduler (`application/world.rs`), serially or on a pool; the legacy loop
-(`world::simulate`) has no backend caller and stays only for its tests. Worker
-count is a performance setting.
-A failed crash transaction poisons the retained World and terminates owned worker
-transports; retries must fail before any worker activity.
-
-The standalone backends compile the canonical sources through their in-workspace
-`engine-core` packages, with distinct package names just like their control
-packages. Each `src` link points to the canonical directory; its build script
-watches that whole directory, including new modules. The canonical packages and
-the VMM wrappers share one build script, `crates/seedbox-engine-core/build.rs`,
-which resolves the canonical source through the wrapper's link. Build scripts track the automatic build-only `SEEDBOX_BUILD_ROOT` from `.cargo/config.toml`
-to invalidate a reused target when switching checkouts, even if source timestamps
-predate the cache. Run Cargo from the checkout root for caching; missing or unrelated
-config safely forces a source rebuild on every invocation, including older checkouts.
-The application `build-runtime.rs` uses the same invalidation and embeds explicitly
-supplied guest inputs. The executable build script owns native signing. Keep inherited package and
-dependency keys aligned across workspaces. Portable tests import
-the canonical crate; do not restore sibling source inclusion for these policies.
+`crates/seedbox-engine-core` owns pure deterministic policies the Driver,
+server and application share: RNG streams, disk fault models, links,
+connection selection, triggers, faults, control validation, input programs,
+log indexes and network counters. It has no CPU backend, scheduler or device
+model. Keep mechanical policy moves separate from behavioral changes.
 
 ## Determinism
 
@@ -164,13 +96,12 @@ the canonical crate; do not restore sibling source inclusion for these policies.
   stamp the source tree, Git revision, build flags or compiled binaries, and
   don't add compiler wrappers, reproducible-build checks, or formatting
   exceptions (`#[rustfmt::skip]`, `rustfmt.toml`) to keep engine bytes stable.
-  Reformatting, moving code and changing build flags are ordinary changes;
-  run `cargo fmt` on the VMM like any other crate.
+  Reformatting, moving code and changing build flags are ordinary changes.
 - The linked CLI uses the root lockfile and the explicit `driver-world-v1`
   contract for service execution. Its retained Driver request owns the concrete
   factory inventory; native PV workers and monitor/anchor entries retain their
-  separate ownership protocols. No missing descriptor selects a standalone
-  simulator. Platform/version metadata never gates development replay.
+  separate ownership protocols. Platform/version metadata never gates
+  development replay.
 
 ## Checks
 
@@ -198,9 +129,8 @@ bash harness/check.sh linux           # Linux KVM host
 bash harness/check.sh mac             # Apple Silicon
 ```
 
-Suites are named, never auto-detected: `portable`, `linux-kvm`,
-`linux-guests`, `linux-oci`, `linux-apps`, `linux-pause`, `mac-hvf`,
-`mac-guests`, `mac-apps`, `machine-tcg`, `machine-pv-x86`, plus the `linux`
+Suites are named, never auto-detected: `portable`, `linux-oci`, `linux-apps`,
+`linux-pause`, `mac-apps`, `machine-tcg`, `machine-pv-x86`, plus the `linux`
 and `mac` groups. The machine suites require explicit crate-owned fixture inputs
 from `machineTcgAssets` / `machineTcgTestFixtures` or the corresponding
 `machinePv*` flake packages. TCG needs no KVM; x86 PV requires `/dev/kvm`. `portable` compiles
@@ -217,10 +147,9 @@ back to Cargo. Outside that environment a missing tool exits 2 with
 See `crates/seedbox-check/src/` for suite requirements, discovery
 and fixture inputs. `harness/acceptance.sh portable` is a compatibility entry for
 the same Rust-owned portable stage, without the outer fmt/clippy checks.
-Keep VMM engine tests compiled by default; conditional `ignore` attributes enable
-hardware execution through features. Other feature-gated tests must be built by
-the portable `--no-run` checks. Add no per-test registration lists. The runner
-builds as the current user and signs disposable HVF test copies. Workers use
+Hardware tests are gated by Cargo features and must be built by the portable
+`--no-run` checks. Add no per-test registration lists. The runner builds as the
+current user. Workers use
 normal host scheduling; Seedbox does not reserve cores or pin CPUs. Check other revisions in a Git worktree;
 do not stamp Git revisions or checkout cleanliness in the runner.
 
@@ -426,10 +355,6 @@ compatibility requirement; do not add legacy readers, aliases or migration shims
   (see `docs/internals.md`).
   `.github/workflows/pv-tests.yml` runs its checks on GitHub-hosted Ubuntu
   x86-64 runners.
-- `crates/seedbox-vmm` builds only on Linux x86-64, so a Mac pre-check covers
-  none of it. A VMM change needs `cargo build-vmm` and
-  `cargo test-vmm --features kvm-tests` on a Linux KVM host. Without the
-  feature, KVM tests compile but remain ignored.
 
 If no local server is running, an interactive client asks before starting one.
 The server stays running for subsequent commands. Noninteractive callers must

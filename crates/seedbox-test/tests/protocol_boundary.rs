@@ -2,13 +2,9 @@
 //! normal/dev/build/optional/target-specific machine or Driver dependency.
 use std::{path::PathBuf, process::Command};
 #[test]
-fn canonical_and_standalone_protocols_have_no_execution_dependency_edges() {
+fn protocol_has_no_execution_dependency_edges() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for (manifest, protocol) in [
-        ("Cargo.toml", "seedbox-engine-protocol"),
-        ("crates/seedbox-vmm/Cargo.toml", "seedbox-vmm-protocol"),
-        ("crates/seedbox-arm64/Cargo.toml", "seedbox-arm64-protocol"),
-    ] {
+    for (manifest, protocol) in [("Cargo.toml", "seedbox-engine-protocol")] {
         let output = Command::new(env!("CARGO"))
             .current_dir(&root)
             .args([
@@ -43,9 +39,7 @@ fn canonical_and_standalone_protocols_have_no_execution_dependency_edges() {
                     "seedbox-machine-pv",
                     "seedbox-machine-tcg",
                     "seedbox-driver",
-                    "seedbox-engine-core",
-                    "seedbox-vmm-engine-core",
-                    "seedbox-arm64-engine-core"
+                    "seedbox-engine-core"
                 ]
                 .contains(&name),
                 "{protocol} has forbidden execution dependency {dependency}"

@@ -30,7 +30,7 @@ replay command; it should print `MATCH: <sim-id>`. The etcd example runs three
 members and a short consistency check with eight writers and 20 writes per
 writer. Allow extra time for the initial image downloads and build.
 
-The build embeds the Driver runtime, guest kernel, and helpers. `doctor` checks
+The build embeds the Driver runtime: guest kernels, init, progress client and helpers. `doctor` checks
 the local runtime inputs and host access before any application images are prepared.
 Running Seedbox does not invoke Nix or a compiler. Docker or Podman prepares
 application images.

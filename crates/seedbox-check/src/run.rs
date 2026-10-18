@@ -56,7 +56,7 @@ fn help() {
     for s in SUITES {
         println!("  {:16} {}", s.name(), s.description());
     }
-    println!("groups:\n  linux             linux-kvm linux-oci linux-apps\n  mac               mac-hvf mac-apps\n\nUse inside the pinned nix develop environment. Cold shell realization provisions\ntools; checker invocation never builds its own executable.");
+    println!("groups:\n  linux             linux-oci linux-apps\n  mac               mac-apps\n\nUse inside the pinned nix develop environment. Cold shell realization provisions\ntools; checker invocation never builds its own executable.");
 }
 pub fn arguments(args: Vec<std::ffi::OsString>) -> Result<Vec<String>, String> {
     args.into_iter()
@@ -243,7 +243,7 @@ pub fn observe<C: Commands>(checks: &mut Checks<C>, suites: &[Suite]) -> Result<
     {
         sockets.push(path.into());
     }
-    if host.system == "Darwin" && suites.contains(&Suite::MacHvf) {
+    if host.system == "Darwin" && suites.contains(&Suite::MacApps) {
         host.mac_major = observation(
             checks,
             "mac-version",
@@ -285,15 +285,6 @@ pub fn observe<C: Commands>(checks: &mut Checks<C>, suites: &[Suite]) -> Result<
     }
     Ok(host)
 }
-fn portable_backends(host: &Host) -> Vec<(&'static str, &'static str)> {
-    let mut backends = Vec::new();
-    if host.system == "Linux" && host.machine == "x86_64" {
-        backends.push(("vmm", "test-vmm"));
-    }
-    backends.push(("arm64", "test-arm64"));
-    backends
-}
-
 pub fn coordinate<C: Commands>(
     checks: &mut Checks<C>,
     host: &Host,
@@ -341,35 +332,8 @@ pub fn coordinate<C: Commands>(
                 "warnings",
             ]),
         );
-        // Root workspace clippy does not select the standalone backends' test
-        // targets. Match portable backend availability and their private
-        // targets without executing any hardware tests.
-        for (backend, _) in portable_backends(host) {
-            let manifest = format!("crates/seedbox-{backend}/Cargo.toml");
-            let target = format!("crates/seedbox-{backend}/target");
-            let mut job = checks.job(
-                &format!("{backend}-clippy"),
-                words(&[
-                    "cargo",
-                    "clippy",
-                    "--release",
-                    "--locked",
-                    "--manifest-path",
-                    &manifest,
-                    "--target-dir",
-                    &target,
-                    "--all-targets",
-                    "--all-features",
-                    "--",
-                    "-D",
-                    "warnings",
-                ]),
-            );
-            job.environment.remove("CARGO_TARGET_DIR");
-            checks.run(job);
-        }
     }
-    portable(checks, host)?;
+    portable(checks)?;
     if checks.failed || options.suites == [Suite::Portable] {
         return Ok(u8::from(checks.failed));
     }
@@ -394,7 +358,7 @@ pub fn coordinate<C: Commands>(
     native(checks, host, &options.suites)?;
     Ok(u8::from(checks.failed))
 }
-pub fn portable<C: Commands>(checks: &mut Checks<C>, host: &Host) -> Result<(), String> {
+pub fn portable<C: Commands>(checks: &mut Checks<C>) -> Result<(), String> {
     // One logical span includes Git discovery, every shell check and failures.
     if !timed(checks, "shell-syntax", |checks| {
         let mut job = checks.job(
@@ -435,26 +399,6 @@ pub fn portable<C: Commands>(checks: &mut Checks<C>, host: &Host) -> Result<(), 
     })? {
         return Ok(());
     }
-    for (name, alias) in portable_backends(host) {
-        for (suffix, args) in [
-            (
-                "feature-build",
-                vec!["cargo", alias, "--all-features", "--no-run"],
-            ),
-            ("tests", vec!["cargo", alias]),
-        ] {
-            let label = format!("{name}-{suffix}");
-            if !timed(checks, &label, |checks| {
-                let mut job = checks.job(&label, words(&args));
-                job.environment.remove("CARGO_TARGET_DIR");
-                Ok(checks.run(job).is_some())
-            })? {
-                return Ok(());
-            }
-        }
-    }
-    // Kernel inputs and ARM report comparison live in Rust integration tests,
-    // run by workspace-tests (xtask and seedbox-test respectively).
     for (name, args) in [
         (
             "workspace-feature-build",
@@ -624,7 +568,6 @@ pub fn cargo_tests<C: Commands>(
     mut command: Vec<String>,
     features: &[String],
     prefix: Option<&[String]>,
-    sign: bool,
     engine_requires_root: bool,
 ) -> Result<(), String> {
     let mut env = checks.environment.clone();
@@ -644,30 +587,7 @@ pub fn cargo_tests<C: Commands>(
     if artifacts.is_empty() {
         return Err(format!("{package}: Cargo produced no test executables"));
     }
-    let temporary = Temporary::in_directory(&std::env::temp_dir(), "seedbox-native-tests-")
-        .map_err(|e| e.to_string())?;
-    for (index, (mut binary, target)) in artifacts.into_iter().enumerate() {
-        if sign {
-            let copy = temporary.0.join(format!(
-                "{index}-{}",
-                binary
-                    .file_name()
-                    .ok_or("test executable has no filename")?
-                    .to_string_lossy()
-            ));
-            fs::copy(&binary, &copy).map_err(|e| format!("copy {}: {e}", binary.display()))?;
-            if !checks.step(
-                &format!("sign-{target}"),
-                vec![
-                    "bash".into(),
-                    "crates/seedbox-arm64/codesign.sh".into(),
-                    copy.to_string_lossy().into(),
-                ],
-            ) {
-                continue;
-            }
-            binary = copy;
-        }
+    for (binary, target) in artifacts {
         // Native fixtures create Unix sockets beneath TMPDIR. Own a short
         // scratch root rather than inheriting a potentially long Nix build path;
         // keep it alive until the test process (including sudo) has exited.
@@ -685,8 +605,6 @@ pub fn cargo_tests<C: Commands>(
             || (package == "seedbox-application"
                 && features.iter().any(|f| f == "oci-tests")
                 && engine_requires_root)
-            || (["seedbox-arm64", "seedbox-vmm"].contains(&package)
-                && features.iter().any(|f| f == "kvm-tests"))
         {
             command = privileged(prefix, command, &env);
         }
@@ -743,17 +661,6 @@ fn native<C: Commands>(
         "SEEDBOX_TEST_REPORT_DIR".into(),
         report_path.to_string_lossy().into(),
     );
-    checks.environment.insert(
-        "SEEDBOX_ARM64_REPORT_DIR".into(),
-        report_path.join("arm64").to_string_lossy().into(),
-    );
-    for (key, default) in FIXTURES {
-        if let Some(path) = available_file(&checks.root, &checks.environment, key, default) {
-            checks
-                .environment
-                .insert(key.into(), path.to_string_lossy().into());
-        }
-    }
     if suites
         .iter()
         .any(|s| matches!(s, Suite::LinuxApps | Suite::LinuxPause | Suite::MacApps))
@@ -767,10 +674,7 @@ fn native<C: Commands>(
             return Ok(());
         };
         let assets = PathBuf::from(output.trim());
-        if !assets.is_absolute()
-            || !assets.join("kernel").is_file()
-            || !assets.join("runtime.tar.gz").is_file()
-        {
+        if !assets.is_absolute() || !assets.join("driver-runtime.tar.gz").is_file() {
             return Err("asset build did not return its absolute complete output directory".into());
         }
         let mut build = checks.job(
@@ -786,12 +690,11 @@ fn native<C: Commands>(
             ]),
         );
         build.environment.insert(
-            "SEEDBOX_BUILD_KERNEL".into(),
-            assets.join("kernel").to_string_lossy().into(),
-        );
-        build.environment.insert(
-            "SEEDBOX_BUILD_HELPERS".into(),
-            assets.join("runtime.tar.gz").to_string_lossy().into(),
+            "SEEDBOX_BUILD_DRIVER_RUNTIME".into(),
+            assets
+                .join("driver-runtime.tar.gz")
+                .to_string_lossy()
+                .into(),
         );
         // Honor the workspace cache setting, but freeze the exact executable
         // Cargo actually built, not a potentially stale target/release path.
@@ -802,58 +705,43 @@ fn native<C: Commands>(
         let executable = release_cli_artifact(&compiled)?;
         let complete = report_path.join("application-build");
         fs::create_dir(&complete).map_err(|e| e.to_string())?;
-        for name in ["kernel", "runtime.tar.gz"] {
-            fs::copy(assets.join(name), complete.join(name)).map_err(|e| e.to_string())?;
-        }
+        fs::copy(
+            assets.join("driver-runtime.tar.gz"),
+            complete.join("driver-runtime.tar.gz"),
+        )
+        .map_err(|e| e.to_string())?;
         fs::copy(executable, complete.join("seedbox")).map_err(|e| e.to_string())?;
         select_build(&mut checks.environment, &complete)?;
     }
-    let mut packages = vec![("seedbox-arm64", words(&["cargo", "test-arm64"]))];
-    if host.system == "Linux" && host.machine == "x86_64" {
-        packages.push(("seedbox-vmm", words(&["cargo", "test-vmm"])));
-    }
     for package in ["seedbox", "seedbox-application"] {
-        packages.push((
-            package,
-            vec![
-                "cargo".into(),
-                "test".into(),
-                "-p".into(),
-                package.into(),
-                "--locked".into(),
-            ],
-        ));
-    }
-    for (package, mut command) in packages {
-        let features = features_for(package, &host.machine, suites);
+        let mut command = words(&["cargo", "test", "-p", package, "--locked"]);
+        let features = features_for(package, suites);
         if features.is_empty() {
             continue;
         }
-        if ["seedbox", "seedbox-application"].contains(&package) {
-            let mut job = checks.job(
-                "test-targets",
-                words(&[
-                    "cargo",
-                    "metadata",
-                    "--no-deps",
-                    "--format-version=1",
-                    "--locked",
-                ]),
-            );
-            job.capture = true;
-            let Some(output) = checks.run(job) else {
-                return Ok(());
-            };
-            let metadata = serde_json::from_str(&output).map_err(|e| e.to_string())?;
-            let targets = feature_test_targets(&metadata, package, &features)?;
-            if targets.is_empty() {
-                return Err(format!(
-                    "{package}: no integration targets require {features:?}"
-                ));
-            }
-            for target in targets {
-                command.extend(["--test".into(), target]);
-            }
+        let mut job = checks.job(
+            "test-targets",
+            words(&[
+                "cargo",
+                "metadata",
+                "--no-deps",
+                "--format-version=1",
+                "--locked",
+            ]),
+        );
+        job.capture = true;
+        let Some(output) = checks.run(job) else {
+            return Ok(());
+        };
+        let metadata = serde_json::from_str(&output).map_err(|e| e.to_string())?;
+        let targets = feature_test_targets(&metadata, package, &features)?;
+        if targets.is_empty() {
+            return Err(format!(
+                "{package}: no integration targets require {features:?}"
+            ));
+        }
+        for target in targets {
+            command.extend(["--test".into(), target]);
         }
         let engine_requires_root = host.engine_needs_root(&checks.environment);
         cargo_tests(
@@ -862,7 +750,6 @@ fn native<C: Commands>(
             command,
             &features,
             host.root_prefix.as_deref(),
-            package == "seedbox-arm64" && features.iter().any(|f| f == "hvf-tests"),
             engine_requires_root,
         )?;
     }

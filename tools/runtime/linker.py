@@ -12,7 +12,7 @@ args = [arg for arg in sys.argv[1:] if arg != "--seedbox-sign-hvf"]
 subprocess.run([os.environ.get('CC', 'cc'), *args], check=True)
 if sign_hvf:
     output = args[args.index('-o') + 1]
-    entitlement = Path(__file__).resolve().parents[2] / 'crates/seedbox-arm64/entitlements.plist'
+    entitlement = Path(__file__).resolve().parents[2] / 'crates/seedbox-machine/hvf.entitlements.plist'
     signed = subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--entitlements', str(entitlement), output], stderr=subprocess.PIPE)
     if signed.returncode:
         sys.stderr.buffer.write(signed.stderr)

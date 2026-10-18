@@ -10,26 +10,18 @@ pub enum Suite {
     Portable,
     MachineTcg,
     MachinePv,
-    LinuxKvm,
-    LinuxGuests,
     LinuxOci,
     LinuxApps,
     LinuxPause,
-    MacHvf,
-    MacGuests,
     MacApps,
 }
-pub const SUITES: [Suite; 11] = [
+pub const SUITES: [Suite; 7] = [
     Suite::Portable,
     Suite::MachineTcg,
     Suite::MachinePv,
-    Suite::LinuxKvm,
-    Suite::LinuxGuests,
     Suite::LinuxOci,
     Suite::LinuxApps,
     Suite::LinuxPause,
-    Suite::MacHvf,
-    Suite::MacGuests,
     Suite::MacApps,
 ];
 impl Suite {
@@ -38,13 +30,9 @@ impl Suite {
             Self::Portable => "portable",
             Self::MachineTcg => "machine-tcg",
             Self::MachinePv => "machine-pv-x86",
-            Self::LinuxKvm => "linux-kvm",
-            Self::LinuxGuests => "linux-guests",
             Self::LinuxOci => "linux-oci",
             Self::LinuxApps => "linux-apps",
             Self::LinuxPause => "linux-pause",
-            Self::MacHvf => "mac-hvf",
-            Self::MacGuests => "mac-guests",
             Self::MacApps => "mac-apps",
         }
     }
@@ -53,14 +41,10 @@ impl Suite {
         Self::Portable=>"Any host: fmt, clippy, discovered portable tests and workload validation.",
         Self::MachineTcg=>"Linux x86-64, explicit machineTcgAssets/test fixtures and patched QEMU; no KVM.",
         Self::MachinePv=>"Linux x86-64, KVM, native PV worker and explicit machinePvAssets/test fixtures.",
-        Self::LinuxKvm=>"Linux x86-64 or ARM64 KVM primitives; no root required.",
-        Self::LinuxGuests=>"Linux KVM with architecture-matched kernel and initrd fixtures.",
         Self::LinuxOci=>"Linux x86-64 with a Docker-compatible engine; no KVM required.",
         Self::LinuxApps=>"Linux x86-64 KVM, root, engine and Nix guest builds; server application acceptance.",
         Self::LinuxPause=>"Linux x86-64 KVM, root, engine and guest builds; server pause/resume rerun.",
-        Self::MacHvf=>"Apple Silicon macOS 15+, Hypervisor.framework and codesign.",
-        Self::MacGuests=>"mac-hvf with ARM kernel and initrd fixtures.",
-        Self::MacApps=>"mac-hvf with engine and guest builds; server application acceptance."
+        Self::MacApps=>"Apple Silicon macOS 15+, Hypervisor.framework, codesign, engine and guest builds; server application acceptance."
     }
     }
 }
@@ -68,8 +52,8 @@ pub fn expand(names: &[String]) -> Result<Vec<Suite>, String> {
     let mut chosen = BTreeSet::from([Suite::Portable]);
     for name in names {
         match name.as_str() {
-            "linux" => chosen.extend([Suite::LinuxKvm, Suite::LinuxOci, Suite::LinuxApps]),
-            "mac" => chosen.extend([Suite::MacHvf, Suite::MacApps]),
+            "linux" => chosen.extend([Suite::LinuxOci, Suite::LinuxApps]),
+            "mac" => chosen.extend([Suite::MacApps]),
             _ => {
                 chosen.insert(
                     SUITES
@@ -80,12 +64,6 @@ pub fn expand(names: &[String]) -> Result<Vec<Suite>, String> {
                 );
             }
         }
-    }
-    if chosen.contains(&Suite::LinuxGuests) {
-        chosen.insert(Suite::LinuxKvm);
-    }
-    if chosen.contains(&Suite::MacGuests) || chosen.contains(&Suite::MacApps) {
-        chosen.insert(Suite::MacHvf);
     }
     Ok(SUITES.into_iter().filter(|s| chosen.contains(s)).collect())
 }
@@ -161,19 +139,6 @@ pub fn socket_candidates(env: &Environment) -> Vec<PathBuf> {
         paths.push(Path::new(dir).join("podman/podman.sock"));
     }
     paths
-}
-pub const FIXTURES: [(&str, &str); 4] = [
-    ("SEEDBOX_TEST_KERNEL", "artifacts/bzImage"),
-    ("SEEDBOX_TEST_INITRD", "artifacts/entropy-fork.cpio"),
-    ("SEEDBOX_ARM64_KERNEL", "artifacts/arm64-hres/Image"),
-    ("SEEDBOX_ARM64_INITRD", "artifacts/arm64-hres/init.cpio"),
-];
-pub fn available_file(root: &Path, env: &Environment, key: &str, default: &str) -> Option<PathBuf> {
-    let path = env
-        .get(key)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join(default));
-    path.canonicalize().ok().filter(|p| p.is_file())
 }
 pub fn executable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
@@ -323,14 +288,11 @@ pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -
         );
         return missing;
     }
-    let mut guest_keys = Vec::new();
     if suite.name().starts_with("linux-") {
         if !linux {
             return vec!["requires Linux".into()];
         }
-        if !matches!(suite, Suite::LinuxKvm | Suite::LinuxGuests) {
-            need(x86, "requires Linux x86-64".into());
-        }
+        need(x86, "requires Linux x86-64".into());
         if suite != Suite::LinuxOci {
             need(kvm, kvm_reason);
         }
@@ -339,15 +301,6 @@ pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -
                 host.root_prefix.is_some(),
                 "requires root or passwordless sudo".into(),
             );
-        }
-        if suite == Suite::LinuxKvm {
-            need(
-                host.machine == "x86_64" || host.arm(),
-                "requires Linux x86-64 or ARM64".into(),
-            );
-        }
-        if suite == Suite::LinuxGuests {
-            guest_keys.extend(if x86 { vec![0, 1] } else { vec![2, 3] });
         }
         if suite == Suite::LinuxOci {
             need(
@@ -366,29 +319,15 @@ pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -
         if host.system != "Darwin" || !host.arm() {
             return vec!["requires macOS on Apple Silicon".into()];
         }
-        if suite == Suite::MacHvf {
-            need(host.mac_major >= 15, "requires macOS 15+".into());
-            need(
-                host.hvf,
-                "Hypervisor.framework unavailable (sysctl kern.hv_support)".into(),
-            );
-            need(host.tools.contains("codesign"), "codesign not found".into());
-        }
-        if suite == Suite::MacGuests {
-            guest_keys.extend([2, 3]);
-        }
-        if suite == Suite::MacApps {
-            need(
-                host.engine(env),
-                "no Docker-compatible engine (set DOCKER_HOST, or install Docker or Podman)".into(),
-            );
-        }
-    }
-    for index in guest_keys {
-        let (key, default) = FIXTURES[index];
+        need(host.mac_major >= 15, "requires macOS 15+".into());
         need(
-            available_file(root, env, key, default).is_some(),
-            format!("set {key} (default {default} is missing)"),
+            host.hvf,
+            "Hypervisor.framework unavailable (sysctl kern.hv_support)".into(),
+        );
+        need(host.tools.contains("codesign"), "codesign not found".into());
+        need(
+            host.engine(env),
+            "no Docker-compatible engine (set DOCKER_HOST, or install Docker or Podman)".into(),
         );
     }
     if matches!(suite, Suite::LinuxApps | Suite::LinuxPause | Suite::MacApps) {
@@ -396,7 +335,7 @@ pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -
     }
     missing
 }
-pub fn features_for(package: &str, machine: &str, suites: &[Suite]) -> Vec<String> {
+pub fn features_for(package: &str, suites: &[Suite]) -> Vec<String> {
     let pairs: &[(Suite, &str)] = match package {
         "seedbox-application" => &[(Suite::LinuxOci, "oci-tests")],
         "seedbox" => &[
@@ -404,16 +343,6 @@ pub fn features_for(package: &str, machine: &str, suites: &[Suite]) -> Vec<Strin
             (Suite::LinuxApps, "etcd-prep-tests"),
             (Suite::MacApps, "application-tests"),
             (Suite::LinuxPause, "retained-run-tests"),
-        ],
-        "seedbox-vmm" if machine == "x86_64" => &[
-            (Suite::LinuxKvm, "kvm-tests"),
-            (Suite::LinuxGuests, "guest-tests"),
-        ],
-        "seedbox-arm64" if matches!(machine, "arm64" | "aarch64") => &[
-            (Suite::LinuxKvm, "kvm-tests"),
-            (Suite::MacHvf, "hvf-tests"),
-            (Suite::LinuxGuests, "guest-tests"),
-            (Suite::MacGuests, "guest-tests"),
         ],
         _ => &[],
     };
@@ -492,13 +421,8 @@ pub fn privileged(
     let mut result = prefix.to_vec();
     for (key, value) in env {
         if key.starts_with("SEEDBOX_TEST_")
-            || key.starts_with("SEEDBOX_ARM64_")
             || [
-                "SEEDBOX_KERNEL",
-                "SEEDBOX_RUNTIME_ASSETS",
-                "SEEDBOX_BUSYBOX",
                 "SEEDBOX_MKE2FS",
-                "SEEDBOX_STATIC_CC",
                 "DOCKER_HOST",
                 "SEEDBOX_ASSET_DIR",
                 "TMPDIR",
@@ -513,27 +437,19 @@ pub fn privileged(
 }
 pub fn select_build(env: &mut Environment, directory: &Path) -> Result<(), String> {
     if !directory.is_absolute()
-        || !["seedbox", "kernel", "runtime.tar.gz"]
+        || !["seedbox", "driver-runtime.tar.gz"]
             .iter()
             .all(|n| directory.join(n).is_file())
     {
-        return Err("complete build did not return its executable and guest inputs".into());
+        return Err("complete build did not return its executable and Driver runtime".into());
     }
-    for key in [
-        "SEEDBOX_ASSET_DIR",
-        "SEEDBOX_BUILD_HELPERS",
-        "SEEDBOX_GUEST_INIT",
-        "SEEDBOX_MKE2FS",
-        "SEEDBOX_VMM",
-    ] {
+    // The complete build embeds its runtime; ambient overrides must not replace it.
+    for key in ["SEEDBOX_ASSET_DIR", "SEEDBOX_MKE2FS"] {
         env.remove(key);
     }
-    for (key, name) in [
-        ("SEEDBOX_TEST_CLI", "seedbox"),
-        ("SEEDBOX_KERNEL", "kernel"),
-        ("SEEDBOX_RUNTIME_ASSETS", "runtime.tar.gz"),
-    ] {
-        env.insert(key.into(), directory.join(name).to_string_lossy().into());
-    }
+    env.insert(
+        "SEEDBOX_TEST_CLI".into(),
+        directory.join("seedbox").to_string_lossy().into(),
+    );
     Ok(())
 }

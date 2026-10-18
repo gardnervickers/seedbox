@@ -85,8 +85,6 @@ impl Fixture {
         let assets = self.checkout.join("build/assets");
         fs::create_dir_all(&assets).unwrap();
         fs::write(assets.join("architecture"), format!("{architecture}\n")).unwrap();
-        fs::write(assets.join("runtime.tar.gz"), b"prepared helpers").unwrap();
-        fs::write(assets.join("kernel"), b"prepared kernel").unwrap();
         fs::write(
             assets.join("driver-runtime.tar.gz"),
             b"prepared driver runtime",
@@ -95,19 +93,17 @@ impl Fixture {
         assets
     }
 
-    fn explicit(&mut self, prefix: &str) -> (PathBuf, PathBuf) {
-        let helpers = self
+    fn explicit(&mut self, prefix: &str) -> PathBuf {
+        let runtime = self
             .directory
             .path()
-            .join(format!("{prefix}-helpers.tar.gz"));
-        let kernel = self.directory.path().join(format!("{prefix}-kernel"));
-        fs::write(&helpers, format!("{prefix} helpers")).unwrap();
-        fs::write(&kernel, format!("{prefix} kernel")).unwrap();
-        self.environment
-            .insert("SEEDBOX_BUILD_HELPERS".into(), helpers.clone().into());
-        self.environment
-            .insert("SEEDBOX_BUILD_KERNEL".into(), kernel.clone().into());
-        (helpers, kernel)
+            .join(format!("{prefix}-driver-runtime.tar.gz"));
+        fs::write(&runtime, format!("{prefix} driver runtime")).unwrap();
+        self.environment.insert(
+            "SEEDBOX_BUILD_DRIVER_RUNTIME".into(),
+            runtime.clone().into(),
+        );
+        runtime
     }
 
     fn run(&self) -> Output {
@@ -118,12 +114,11 @@ impl Fixture {
             30,
         );
         assert!(!self.marker.exists(), "{}", diagnostic(&result));
-        assert!(!self.output.join("compose-init").exists());
         result
     }
 
     fn embedded(&self) -> String {
-        fs::read_to_string(self.output.join("guest-helpers.rs")).unwrap()
+        fs::read_to_string(self.output.join("driver-runtime.rs")).unwrap()
     }
 
     fn embeds(&self, path: &Path) {
@@ -136,7 +131,7 @@ impl Fixture {
 #[test]
 fn release_build_script_never_invokes_guest_builders() {
     let mut fixture = Fixture::new();
-    let (helpers, kernel) = fixture.explicit("explicit");
+    let runtime = fixture.explicit("explicit");
     for (os, arch) in [("linux", "x86_64"), ("macos", "aarch64")] {
         fixture
             .environment
@@ -151,8 +146,7 @@ fn release_build_script_never_invokes_guest_builders() {
             diagnostic(&output)
         );
         assert!(!String::from_utf8_lossy(&output.stdout).contains("SEEDBOX_RELEASE_ASSETS"));
-        fixture.embeds(&helpers);
-        fixture.embeds(&kernel);
+        fixture.embeds(&runtime);
     }
     let directory = fixture.directory.path().to_owned();
     let compiler_artifact = directory.join("build-script");
@@ -171,19 +165,17 @@ fn prepared_checkout_assets_are_embedded() {
     let assets = fixture.prepared("aarch64");
     let output = fixture.run();
     assert!(output.status.success(), "{}", diagnostic(&output));
-    fixture.embeds(&assets.join("runtime.tar.gz"));
-    fixture.embeds(&assets.join("kernel"));
+    fixture.embeds(&assets.join("driver-runtime.tar.gz"));
 }
 
 #[test]
 fn explicit_assets_override_prepared_checkout_assets() {
     let mut fixture = Fixture::new();
     let assets = fixture.prepared("aarch64");
-    let (helpers, kernel) = fixture.explicit("override");
+    let runtime = fixture.explicit("override");
     let output = fixture.run();
     assert!(output.status.success(), "{}", diagnostic(&output));
-    fixture.embeds(&helpers);
-    fixture.embeds(&kernel);
+    fixture.embeds(&runtime);
     assert!(!fixture
         .embedded()
         .contains(assets.canonicalize().unwrap().to_str().unwrap()));
@@ -207,14 +199,14 @@ fn prepared_assets_for_another_architecture_are_rejected() {
         "{stderr}"
     );
     assert!(stderr.contains("cargo xtask build-assets"), "{stderr}");
-    assert!(!fixture.output.join("guest-helpers.rs").exists());
+    assert!(!fixture.output.join("driver-runtime.rs").exists());
 }
 
 #[test]
-fn missing_release_helpers_explain_the_explicit_build() {
+fn missing_release_runtime_explains_the_explicit_build() {
     let mut fixture = Fixture::new();
     fixture.environment.insert(
-        "SEEDBOX_BUILD_HELPERS".into(),
+        "SEEDBOX_BUILD_DRIVER_RUNTIME".into(),
         fixture.directory.path().join("missing.tar.gz").into(),
     );
     let output = fixture.run();
@@ -225,10 +217,10 @@ fn missing_release_helpers_explain_the_explicit_build() {
 }
 
 #[test]
-fn ambient_cached_helpers_are_never_embedded() {
+fn ambient_cached_runtime_is_never_embedded() {
     let mut fixture = Fixture::new();
     let cache = fixture.directory.path().join("ambient-cache");
-    let stale = cache.join("aarch64/runtime.tar.gz");
+    let stale = cache.join("aarch64/driver-runtime.tar.gz");
     fs::create_dir_all(stale.parent().unwrap()).unwrap();
     fs::write(stale, b"stale archive").unwrap();
     fixture
@@ -238,6 +230,6 @@ fn ambient_cached_helpers_are_never_embedded() {
     assert!(output.status.success(), "{}", diagnostic(&output));
     assert_eq!(
         fixture.embedded(),
-        "pub static EMBEDDED: Option<&[u8]> = None;\npub static EMBEDDED_KERNEL: Option<&[u8]> = None;\n"
+        "pub static EMBEDDED: Option<&[u8]> = None;\n"
     );
 }

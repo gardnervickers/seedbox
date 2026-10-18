@@ -50,8 +50,6 @@ impl Fixture {
         let assets = self.root.join("build/assets");
         fs::create_dir_all(&assets).unwrap();
         fs::write(assets.join("architecture"), std::env::consts::ARCH).unwrap();
-        fs::write(assets.join("kernel"), b"legacy kernel fixture").unwrap();
-        fs::write(assets.join("runtime.tar.gz"), b"legacy helper fixture").unwrap();
         assets
     }
 }
@@ -67,9 +65,6 @@ fn source_only_checkouts_allow_portable_builds_without_guest_inputs_or_builders(
         fs::read_to_string(fixture.output.join("driver-runtime.rs")).unwrap(),
         "pub static EMBEDDED: Option<&[u8]> = None;\n"
     );
-    let helpers = fs::read_to_string(fixture.output.join("guest-helpers.rs")).unwrap();
-    assert!(helpers.contains("EMBEDDED: Option<&[u8]> = None"));
-    assert!(helpers.contains("EMBEDDED_KERNEL: Option<&[u8]> = None"));
     assert!(!fixture.root.join("build").exists());
 }
 #[test]

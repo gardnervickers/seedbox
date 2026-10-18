@@ -44,25 +44,6 @@ fn command(program: &str, root: &Path) -> Command {
     command
 }
 fn linux(root: &Path, output: &Path) -> Result<()> {
-    let kernel = capture(command("nix", root).args([
-        "build",
-        "--no-link",
-        "--print-out-paths",
-        ".#guestKernel",
-    ]))?;
-    let runtime = capture(command("nix", root).args([
-        "build",
-        "--no-link",
-        "--print-out-paths",
-        ".#runtimeArchive",
-    ]))?;
-    let image = match env::consts::ARCH {
-        "x86_64" => "bzImage",
-        "aarch64" => "Image",
-        arch => return Err(format!("unsupported architecture {arch}").into()),
-    };
-    fs::copy(Path::new(&kernel).join(image), output.join("kernel"))?;
-    fs::copy(runtime, output.join("runtime.tar.gz"))?;
     runtime::guest(root, &output.join("driver"), env::consts::ARCH)?;
     Ok(())
 }
@@ -130,10 +111,6 @@ fn mac(root: &Path, output: &Path) -> Result<()> {
  cd /source
  export NIX_CONFIG="experimental-features = nix-command flakes
 sandbox = false"
- kernel=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#guestKernel)
- runtime=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#runtimeArchive)
- cp "$kernel/Image" /output/kernel
- cp "$runtime" /output/runtime.tar.gz
  pv=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#machinePvAssets)
  tcg=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#machineTcgAssets)
  formatter=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#machineGuestFormatter)

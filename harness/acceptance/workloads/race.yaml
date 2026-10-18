@@ -2,8 +2,8 @@ name: race
 machines: {}
 oracle:
   build:
-    context: "../../../guest"
-    dockerfile: acceptance-race.Dockerfile
+    context: "../images/race"
+    dockerfile: Dockerfile
   files:
   - source: "../driver/race.py"
     target: "/race.py"

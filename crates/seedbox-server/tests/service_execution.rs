@@ -269,6 +269,9 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
         };
         let attempt = root.join(name);
         std::fs::create_dir(&attempt).unwrap();
+        // Published attempts always carry an explicit (here empty) override journal.
+        seedbox_artifacts::interventions::Journal::initialize(&attempt.join("interventions.json"))
+            .unwrap();
         seedbox_artifacts::record::write_record(&attempt, &record).unwrap();
         let (resource, _) = manager.submit(request).unwrap();
         let id = resource.metadata.id;

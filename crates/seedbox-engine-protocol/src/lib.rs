@@ -7,7 +7,6 @@ pub mod host_clock;
 pub mod host_control;
 pub mod input_program;
 pub mod intervention;
-pub mod launch;
 pub mod log_index;
 pub mod network_counters;
 pub mod observation;

@@ -208,7 +208,7 @@ fn test_etcd_smoke_target_is_discovered_only_by_oci_linux_apps_feature() {
         (vec!["machine-pv-x86", "machine-tcg"], vec![]),
         (vec!["mac-apps"], vec![]),
     ] {
-        let features = features_for("seedbox", "x86_64", &suites(&names));
+        let features = features_for("seedbox", &suites(&names));
         assert_eq!(
             feature_test_targets(&metadata, "seedbox", &features).unwrap(),
             strings(&expected)
@@ -236,99 +236,41 @@ fn test_groups_and_implied_suites_expand_in_documented_order() {
     for (names, expected) in [
         (
             &["linux"][..],
-            vec![
-                Suite::Portable,
-                Suite::LinuxKvm,
-                Suite::LinuxOci,
-                Suite::LinuxApps,
-            ],
+            vec![Suite::Portable, Suite::LinuxOci, Suite::LinuxApps],
         ),
-        (
-            &["mac"][..],
-            vec![Suite::Portable, Suite::MacHvf, Suite::MacApps],
-        ),
-        (
-            &["linux-guests"][..],
-            vec![Suite::Portable, Suite::LinuxKvm, Suite::LinuxGuests],
-        ),
-        (
-            &["mac-apps"][..],
-            vec![Suite::Portable, Suite::MacHvf, Suite::MacApps],
-        ),
+        (&["mac"][..], vec![Suite::Portable, Suite::MacApps]),
+        (&["mac-apps"][..], vec![Suite::Portable, Suite::MacApps]),
     ] {
         assert_eq!(suites(names), expected);
     }
     assert_eq!(
-        suites(&["linux-apps", "portable", "linux-kvm", "linux-apps"]),
-        suites(&["linux-kvm", "linux-apps"])
+        suites(&["linux-apps", "portable", "linux-oci", "linux-apps"]),
+        suites(&["linux-oci", "linux-apps"])
     );
+    for retired in ["linux-kvm", "linux-guests", "mac-hvf", "mac-guests"] {
+        assert!(expand(&strings(&[retired])).is_err(), "{retired}");
+    }
 }
 #[test]
 fn test_features_follow_suites_not_host_probes() {
-    for (package, machine, names, expected) in [
+    for (package, names, expected) in [
         (
             "seedbox",
-            "x86_64",
             vec!["linux-apps"],
             vec!["application-tests", "etcd-prep-tests"],
         ),
+        ("seedbox", vec!["mac-apps"], vec!["application-tests"]),
+        ("seedbox", vec!["machine-pv-x86", "machine-tcg"], vec![]),
         (
             "seedbox",
-            "arm64",
-            vec!["mac-apps"],
-            vec!["application-tests"],
-        ),
-        (
-            "seedbox",
-            "x86_64",
-            vec!["machine-pv-x86", "machine-tcg"],
-            vec![],
-        ),
-        (
-            "seedbox-vmm",
-            "x86_64",
-            vec!["linux-kvm"],
-            vec!["kvm-tests"],
-        ),
-        (
-            "seedbox-vmm",
-            "x86_64",
-            vec!["linux-guests"],
-            vec!["kvm-tests", "guest-tests"],
-        ),
-        (
-            "seedbox",
-            "x86_64",
             vec!["linux-oci", "linux-pause"],
             vec!["retained-run-tests"],
         ),
-        (
-            "seedbox-application",
-            "x86_64",
-            vec!["linux-oci"],
-            vec!["oci-tests"],
-        ),
-        ("seedbox-arm64", "x86_64", vec!["linux"], vec![]),
-        (
-            "seedbox-arm64",
-            "aarch64",
-            vec!["linux-guests"],
-            vec!["kvm-tests", "guest-tests"],
-        ),
-        (
-            "seedbox-arm64",
-            "arm64",
-            vec!["mac-guests"],
-            vec!["hvf-tests", "guest-tests"],
-        ),
-        ("seedbox-vmm", "arm64", vec!["mac"], vec![]),
+        ("seedbox-application", vec!["linux-oci"], vec!["oci-tests"]),
     ] {
-        assert_eq!(
-            features_for(package, machine, &suites(&names)),
-            strings(&expected)
-        );
+        assert_eq!(features_for(package, &suites(&names)), strings(&expected));
     }
-    assert!(features_for("seedbox-driver", "arm64", &suites(&["mac"])).is_empty());
+    assert!(features_for("seedbox-driver", &suites(&["mac"])).is_empty());
 }
 #[test]
 fn test_hardware_targets_follow_cargo_declarations() {
@@ -351,13 +293,6 @@ fn test_hardware_targets_follow_cargo_declarations() {
         .is_empty());
 }
 #[test]
-fn test_kvm_suite_needs_no_root() {
-    let t = fixture();
-    let mut h = host();
-    h.root_prefix = None;
-    assert!(requirements(Suite::LinuxKvm, &h, &Environment::new(), &t.0).is_empty());
-}
-#[test]
 fn test_apps_suite_reports_missing_root() {
     let t = fixture();
     let mut h = host();
@@ -366,21 +301,6 @@ fn test_apps_suite_reports_missing_root() {
         requirements(Suite::LinuxApps, &h, &Environment::new(), &t.0)
             .contains(&"requires root or passwordless sudo".into())
     );
-}
-#[test]
-fn test_guest_suite_requires_its_inputs() {
-    let t = fixture();
-    assert!(!requirements(Suite::LinuxGuests, &host(), &Environment::new(), &t.0).is_empty());
-    let mut e = Environment::new();
-    for (key, _) in FIXTURES {
-        let p = t.0.join(key);
-        fs::write(&p, "").unwrap();
-        e.insert(key.into(), p.to_string_lossy().into());
-    }
-    assert!(requirements(Suite::LinuxGuests, &host(), &e, &t.0).is_empty());
-    let mut h = host();
-    h.machine = "aarch64".into();
-    assert!(requirements(Suite::LinuxGuests, &h, &e, &t.0).is_empty());
 }
 #[test]
 fn test_oci_suite_needs_an_engine_but_no_kvm_or_root() {
@@ -442,27 +362,26 @@ fn test_x86_only_suites_refuse_arm_linux() {
     h.machine = "aarch64".into();
     assert!(requirements(Suite::LinuxOci, &h, &Environment::new(), &t.0)
         .contains(&"requires Linux x86-64".into()));
-    assert!(requirements(Suite::LinuxKvm, &h, &Environment::new(), &t.0).is_empty());
 }
 #[test]
 fn test_platform_mismatch_is_unavailable() {
     let t = fixture();
     let h = host();
     assert_eq!(
-        requirements(Suite::MacHvf, &h, &Environment::new(), &t.0),
+        requirements(Suite::MacApps, &h, &Environment::new(), &t.0),
         ["requires macOS on Apple Silicon"]
     );
     let mut mac = h;
     mac.system = "Darwin".into();
     mac.machine = "arm64".into();
     assert_eq!(
-        requirements(Suite::LinuxKvm, &mac, &Environment::new(), &t.0),
+        requirements(Suite::LinuxApps, &mac, &Environment::new(), &t.0),
         ["requires Linux"]
     );
     assert!(requirements(Suite::Portable, &mac, &Environment::new(), &t.0).is_empty());
 }
 #[test]
-fn test_mac_hvf_requirements() {
+fn test_mac_apps_requirements() {
     let t = fixture();
     let mut h = host();
     h.system = "Darwin".into();
@@ -470,10 +389,10 @@ fn test_mac_hvf_requirements() {
     h.mac_major = 15;
     h.hvf = true;
     h.tools.insert("codesign".into());
-    assert!(requirements(Suite::MacHvf, &h, &Environment::new(), &t.0).is_empty());
+    assert!(requirements(Suite::MacApps, &h, &Environment::new(), &t.0).is_empty());
     h.mac_major = 14;
     assert_eq!(
-        requirements(Suite::MacHvf, &h, &Environment::new(), &t.0),
+        requirements(Suite::MacApps, &h, &Environment::new(), &t.0),
         ["requires macOS 15+"]
     );
 }
@@ -495,35 +414,21 @@ fn test_build_admission_needs_tools_not_cached_assets() {
 fn test_complete_build_replaces_ambient_runtime_overrides() {
     let t = fixture();
     let mut e = Environment::new();
-    for key in [
-        "SEEDBOX_ASSET_DIR",
-        "SEEDBOX_BUILD_HELPERS",
-        "SEEDBOX_GUEST_INIT",
-        "SEEDBOX_MKE2FS",
-        "SEEDBOX_VMM",
-        "SEEDBOX_KERNEL",
-        "SEEDBOX_RUNTIME_ASSETS",
-    ] {
+    for key in ["SEEDBOX_ASSET_DIR", "SEEDBOX_MKE2FS"] {
         e.insert(key.into(), "/stale".into());
     }
     assert!(select_build(&mut e, &t.0).is_err());
-    for name in ["seedbox", "kernel", "runtime.tar.gz"] {
+    for name in ["seedbox", "driver-runtime.tar.gz"] {
         fs::write(t.0.join(name), "").unwrap();
     }
     select_build(&mut e, &t.0).unwrap();
-    assert_eq!(e.len(), 3);
-    for (key, name) in [
-        ("SEEDBOX_TEST_CLI", "seedbox"),
-        ("SEEDBOX_KERNEL", "kernel"),
-        ("SEEDBOX_RUNTIME_ASSETS", "runtime.tar.gz"),
-    ] {
-        assert_eq!(e[key], t.0.join(name).to_str().unwrap());
-    }
+    assert_eq!(e.len(), 1);
+    assert_eq!(e["SEEDBOX_TEST_CLI"], t.0.join("seedbox").to_str().unwrap());
 }
 #[test]
 fn test_privileged_execution_forwards_asset_directory_and_engine() {
     let e = env(&[
-        ("SEEDBOX_RUNTIME_ASSETS", "/assets"),
+        ("SEEDBOX_MKE2FS", "/formatter"),
         ("SEEDBOX_ASSET_DIR", "/slot"),
         ("DOCKER_HOST", "unix:///engine"),
         ("GH_TOKEN", "fixture"),
@@ -541,7 +446,7 @@ fn test_privileged_execution_forwards_asset_directory_and_engine() {
             "env",
             "DOCKER_HOST=unix:///engine",
             "SEEDBOX_ASSET_DIR=/slot",
-            "SEEDBOX_RUNTIME_ASSETS=/assets",
+            "SEEDBOX_MKE2FS=/formatter",
             "/test"
         ])
     );
@@ -552,7 +457,7 @@ fn test_unmet_selected_suite_fails_before_any_build() {
     let mut h = host();
     h.system = "Darwin".into();
     h.machine = "arm64".into();
-    for args in [strings(&["--list", "mac-hvf"]), strings(&["mac-hvf"])] {
+    for args in [strings(&["--list", "mac-apps"]), strings(&["mac-apps"])] {
         let mut c = checks(&t.0);
         assert_eq!(coordinate(&mut c, &h, &options(args).unwrap()).unwrap(), 2);
         assert!(c.commands.jobs.is_empty());
@@ -581,40 +486,6 @@ fn test_discovers_all_test_artifacts_and_ignores_build_outputs() {
             ("/new/test-b".into(), "new-b".into())
         ]
     );
-}
-#[test]
-fn test_signed_copies_are_executed_after_build_and_signing() {
-    let t = fixture();
-    let p = t.0.join("test-binary");
-    fs::write(&p, "fixture binary").unwrap();
-    let mut c = checks(&t.0);
-    c.environment
-        .insert("CARGO_TARGET_DIR".into(), "/workspace-cache".into());
-    c.commands.replies.push_back(Outcome {
-        code: 0,
-        stdout: artifact(&p, "new-hardware", true),
-    });
-    cargo_tests(
-        &mut c,
-        "seedbox-arm64",
-        strings(&["cargo", "test-arm64"]),
-        &strings(&["hvf-tests"]),
-        None,
-        true,
-        false,
-    )
-    .unwrap();
-    let jobs = &c.commands.jobs;
-    assert_eq!(jobs.len(), 3);
-    assert!(!jobs[0].environment.contains_key("CARGO_TARGET_DIR"));
-    let signed = jobs[1].args.last().unwrap();
-    assert_ne!(signed, p.to_str().unwrap());
-    assert_eq!(
-        jobs[2].args,
-        vec![signed.clone(), "--test-threads=1".into()]
-    );
-    assert_eq!(fs::read_to_string(p).unwrap(), "fixture binary");
-    assert!(!std::path::Path::new(signed).exists());
 }
 #[test]
 fn native_tests_own_short_scratch_through_privileged_and_direct_execution() {
@@ -671,7 +542,6 @@ fn native_tests_own_short_scratch_through_privileged_and_direct_execution() {
             strings(&["cargo", "test", "-p", "seedbox"]),
             &strings(&["application-tests"]),
             prefix.as_deref(),
-            false,
             false,
         )
         .unwrap();
@@ -854,7 +724,7 @@ fn test_service_release_build_uses_the_target_the_service_tests_read() {
 #[test]
 fn test_unselected_machine_suites_have_no_runs() {
     assert!(machine_suite_runs(
-        &suites(&["linux-kvm"]),
+        &suites(&["linux-oci"]),
         &Environment::new(),
         std::path::Path::new("/fixture")
     )
@@ -914,14 +784,12 @@ fn portable_failure_blocks_all_native_work_but_not_outer_prerequisites() {
             stdout: String::new(),
         },
         Outcome::default(),
-        Outcome::default(),
-        Outcome::default(),
         Outcome {
             code: 1,
             stdout: String::new(),
         },
     ]);
-    let o = options(strings(&["linux-kvm"])).unwrap();
+    let o = options(strings(&["linux-oci"])).unwrap();
     assert_eq!(coordinate(&mut c, &host(), &o).unwrap(), 1);
     assert_eq!(
         c.commands
@@ -929,16 +797,10 @@ fn portable_failure_blocks_all_native_work_but_not_outer_prerequisites() {
             .iter()
             .map(|j| j.name.as_str())
             .collect::<Vec<_>>(),
-        [
-            "fmt",
-            "clippy",
-            "vmm-clippy",
-            "arm64-clippy",
-            "shell-discovery"
-        ]
+        ["fmt", "clippy", "shell-discovery"]
     );
 }
-fn standalone_clippy_fixture() -> Temporary {
+fn workload_fixture() -> Temporary {
     let t = fixture();
     fs::create_dir_all(t.0.join("harness/acceptance/workloads")).unwrap();
     fs::write(t.0.join("harness/acceptance/workloads/example.yaml"), "").unwrap();
@@ -946,76 +808,8 @@ fn standalone_clippy_fixture() -> Temporary {
 }
 
 #[test]
-fn standalone_outer_clippy_covers_host_backends_with_exact_args_and_private_targets() {
-    for (system, machine, expected) in [
-        ("Linux", "x86_64", vec!["vmm", "arm64"]),
-        ("Linux", "aarch64", vec!["arm64"]),
-        ("Darwin", "aarch64", vec!["arm64"]),
-        ("Darwin", "x86_64", vec!["arm64"]),
-    ] {
-        let t = standalone_clippy_fixture();
-        let caller = env(&[
-            ("CARGO_TARGET_DIR", "/agent-root-target"),
-            ("CARGO_INCREMENTAL", "1"),
-        ]);
-        let mut c = Checks::new(Spy::default(), t.0.clone(), caller.clone());
-        let mut h = host();
-        h.system = system.into();
-        h.machine = machine.into();
-        assert_eq!(
-            coordinate(&mut c, &h, &options(vec![]).unwrap()).unwrap(),
-            0
-        );
-        let standalone: Vec<_> = c
-            .commands
-            .jobs
-            .iter()
-            .filter(|job| job.name.ends_with("-clippy"))
-            .collect();
-        assert_eq!(standalone.len(), expected.len(), "{system}/{machine}");
-        for (job, backend) in standalone.iter().zip(expected) {
-            assert_eq!(job.name, format!("{backend}-clippy"));
-            assert_eq!(
-                job.args,
-                strings(&[
-                    "cargo",
-                    "clippy",
-                    "--release",
-                    "--locked",
-                    "--manifest-path",
-                    &format!("crates/seedbox-{backend}/Cargo.toml"),
-                    "--target-dir",
-                    &format!("crates/seedbox-{backend}/target"),
-                    "--all-targets",
-                    "--all-features",
-                    "--",
-                    "-D",
-                    "warnings",
-                ])
-            );
-            assert!(!job.environment.contains_key("CARGO_TARGET_DIR"));
-            assert_eq!(job.environment["CARGO_INCREMENTAL"], "0");
-            assert_eq!(job.cwd, t.0);
-        }
-        let workspace = c
-            .commands
-            .jobs
-            .iter()
-            .find(|job| job.name == "clippy")
-            .unwrap();
-        assert_eq!(
-            workspace.environment["CARGO_TARGET_DIR"],
-            "/agent-root-target"
-        );
-        assert_eq!(c.environment["CARGO_TARGET_DIR"], "/agent-root-target");
-        assert_eq!(c.environment["CARGO_INCREMENTAL"], "0");
-        assert_eq!(caller["CARGO_INCREMENTAL"], "1");
-    }
-}
-
-#[test]
-fn portable_stage_keeps_all_outer_clippy_out_of_the_backend_stage() {
-    let t = standalone_clippy_fixture();
+fn portable_stage_keeps_outer_fmt_and_clippy_out() {
+    let t = workload_fixture();
     let mut c = checks(&t.0);
     let o = options(strings(&["--portable-stage"])).unwrap();
     assert_eq!(coordinate(&mut c, &host(), &o).unwrap(), 0);
@@ -1028,55 +822,7 @@ fn portable_stage_keeps_all_outer_clippy_out_of_the_backend_stage() {
         .commands
         .jobs
         .iter()
-        .any(|job| job.name == "vmm-feature-build"));
-    assert!(c
-        .commands
-        .jobs
-        .iter()
-        .any(|job| job.name == "arm64-feature-build"));
-}
-
-#[test]
-fn standalone_clippy_failure_is_retained_and_blocks_native_execution() {
-    let t = standalone_clippy_fixture();
-    let mut c = checks(&t.0);
-    c.commands.replies.extend([
-        Outcome::default(), // fmt
-        Outcome::default(), // workspace clippy
-        Outcome {
-            code: 1,
-            stdout: String::new(),
-        }, // VMM clippy
-    ]);
-    let o = options(strings(&["linux-kvm"])).unwrap();
-    assert_eq!(coordinate(&mut c, &host(), &o).unwrap(), 1);
-    assert!(c.commands.jobs.iter().any(|job| job.name == "arm64-clippy"));
-    assert!(c
-        .commands
-        .jobs
-        .iter()
-        .any(|job| job.name == "workspace-tests"));
-    assert_eq!(
-        c.commands
-            .jobs
-            .iter()
-            .map(|job| job.name.as_str())
-            .collect::<Vec<_>>(),
-        [
-            "fmt",
-            "clippy",
-            "vmm-clippy",
-            "arm64-clippy",
-            "shell-discovery",
-            "vmm-feature-build",
-            "vmm-tests",
-            "arm64-feature-build",
-            "arm64-tests",
-            "workspace-feature-build",
-            "workspace-tests",
-            "workload-validation"
-        ]
-    );
+        .any(|job| job.name == "workspace-feature-build"));
 }
 
 #[test]
@@ -1094,41 +840,10 @@ fn empty_native_selection_and_empty_artifacts_are_errors() {
         strings(&["cargo", "test"]),
         &[],
         None,
-        false,
         false
     )
     .unwrap_err()
     .contains("no test executables"));
-}
-#[test]
-fn failed_signing_never_executes_the_copy() {
-    let t = fixture();
-    let p = t.0.join("binary");
-    fs::write(&p, "original").unwrap();
-    let mut c = checks(&t.0);
-    c.commands.replies.extend([
-        Outcome {
-            code: 0,
-            stdout: artifact(&p, "test", true),
-        },
-        Outcome {
-            code: 1,
-            stdout: String::new(),
-        },
-    ]);
-    cargo_tests(
-        &mut c,
-        "seedbox-arm64",
-        strings(&["cargo", "test-arm64"]),
-        &strings(&["hvf-tests"]),
-        None,
-        true,
-        false,
-    )
-    .unwrap();
-    assert_eq!(c.commands.jobs.len(), 2);
-    assert!(c.failed);
-    assert_eq!(fs::read_to_string(p).unwrap(), "original");
 }
 #[test]
 fn test_time_policy_failure_blocks_backend_execution() {
@@ -1141,7 +856,7 @@ fn test_time_policy_failure_blocks_backend_execution() {
     )
     .unwrap();
     let mut c = checks(&t.0);
-    portable(&mut c, &host()).unwrap();
+    portable(&mut c).unwrap();
     assert!(c.failed);
     assert_eq!(
         c.commands
@@ -1154,41 +869,30 @@ fn test_time_policy_failure_blocks_backend_execution() {
     assert_eq!(c.timings.len(), 2);
 }
 #[test]
-fn portable_order_is_single_owned_and_preserves_standalone_isolation() {
+fn portable_order_is_single_owned() {
     let t = fixture();
     fs::create_dir_all(t.0.join("harness/acceptance/workloads")).unwrap();
     fs::write(t.0.join("harness/acceptance/workloads/example.yaml"), "").unwrap();
     let mut c = checks(&t.0);
     c.environment
         .insert("CARGO_TARGET_DIR".into(), "/workspace".into());
-    portable(&mut c, &host()).unwrap();
+    portable(&mut c).unwrap();
     let jobs = &c.commands.jobs;
     assert_eq!(
         jobs.iter().map(|j| j.name.as_str()).collect::<Vec<_>>(),
         [
             "shell-discovery",
-            "vmm-feature-build",
-            "vmm-tests",
-            "arm64-feature-build",
-            "arm64-tests",
             "workspace-feature-build",
             "workspace-tests",
             "workload-validation"
         ]
     );
-    for job in jobs
-        .iter()
-        .filter(|j| j.args.iter().any(|s| s == "test-vmm" || s == "test-arm64"))
-    {
-        assert!(!job.environment.contains_key("CARGO_TARGET_DIR"));
-        assert!(!job.args.contains(&"--locked".into()));
-    }
     assert!(jobs
         .iter()
         .filter(|j| j.name.starts_with("workspace"))
         .all(|j| j.environment.contains_key("CARGO_TARGET_DIR")));
     assert_eq!(
-        jobs[5].args,
+        jobs[1].args,
         strings(&[
             "cargo",
             "test",
@@ -1199,16 +903,12 @@ fn portable_order_is_single_owned_and_preserves_standalone_isolation() {
         ])
     );
     assert_eq!(
-        jobs[6].args,
+        jobs[2].args,
         strings(&["cargo", "test", "--workspace", "--locked"])
     );
     let labels = [
         "shell-syntax",
         "test-time-policy",
-        "vmm-feature-build",
-        "vmm-tests",
-        "arm64-feature-build",
-        "arm64-tests",
         "workspace-feature-build",
         "workspace-tests",
         "workload-validation",
@@ -1455,7 +1155,7 @@ fn shell_timing_covers_discovery_and_all_checks_including_failure() {
             stdout: String::new(),
         },
     ]);
-    portable(&mut c, &host()).unwrap();
+    portable(&mut c).unwrap();
     assert!(c.failed);
     assert_eq!(
         c.commands
@@ -1474,7 +1174,7 @@ fn shell_timing_covers_discovery_and_all_checks_including_failure() {
         code: 1,
         stdout: String::new(),
     });
-    portable(&mut failed, &host()).unwrap();
+    portable(&mut failed).unwrap();
     assert_eq!(failed.commands.jobs.len(), 1);
     assert_eq!(failed.timings.len(), 1);
 }
@@ -1652,7 +1352,6 @@ fn oci_artifacts_follow_actual_package_feature_and_socket_permissions() {
                 ]),
                 &strings(&["oci-tests"]),
                 h.root_prefix.as_deref(),
-                false,
                 requires_root,
             )
             .unwrap();
@@ -1701,7 +1400,6 @@ fn oci_artifacts_follow_actual_package_feature_and_socket_permissions() {
         strings(&["cargo", "test"]),
         &strings(&["unrelated-feature"]),
         Some(&strings(&["sudo", "-n", "env"])),
-        false,
         true,
     )
     .unwrap();
@@ -1798,7 +1496,7 @@ fn scan_only_policy_mode_is_explicit_and_cannot_select_other_work() {
     assert!(!options(vec![]).unwrap().test_time_policy);
     for other in [
         "portable",
-        "linux-kvm",
+        "linux-apps",
         "--list",
         "--portable-stage",
         "--probe-linux",

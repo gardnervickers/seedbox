@@ -97,11 +97,11 @@ fn check_includes_standalone_workspaces_and_external_gated_helpers() {
             "fn hidden(){std::thread::sleep(delay);}",
         ),
         (
-            "crates/seedbox-vmm/src/main.rs",
+            "crates/b/src/main.rs",
             "#[cfg(test)] fn check(){std::thread::sleep(delay);}",
         ),
         (
-            "crates/seedbox-arm64/tests/case.rs",
+            "crates/c/tests/case.rs",
             "fn helper(){std::thread::sleep(delay);}",
         ),
         ("crates/a/target/generated.rs", "not Rust"),

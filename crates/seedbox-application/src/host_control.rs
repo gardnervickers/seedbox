@@ -1,69 +1,12 @@
-//! Pause the host's whole world without sending an in-guest control request.
+//! Host-control endpoint ownership and the server's worker control client.
 
-use crate::{Error, Result};
-use seedbox_engine_protocol::host_control::{MAX_DATAGRAM, PAUSE, PAUSED, RESUME, RUNNING};
-use std::{fs, os::unix::net::UnixDatagram, path::Path, time::Duration};
+use crate::Result;
+use std::{fs, path::Path, time::Duration};
 
 const REFERENCE: &str = "host-control";
 
 mod client;
 pub use client::{Client, ClientError};
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum Status {
-    Paused,
-    Resumed,
-}
-
-/// Request a slice-boundary pause or resume and wait for the engine's acknowledgement.
-/// Repeated requests are idempotent. Concurrent requests apply in receive order.
-pub fn set_paused(run: &Path, paused: bool) -> Result<Status> {
-    let failure = |detail: &str| {
-        Error::Setup(format!(
-            "host control {}: {detail}; use an executing run/replay with a host-control engine and the same user (or root)",
-            run.display()
-        ))
-    };
-    let reference = fs::read_to_string(run.join("output").join(REFERENCE))
-        .map_err(|_| failure("not available"))?;
-    // Short private paths also work when the run directory exceeds sun_path's limit.
-    let directory = tempfile::Builder::new()
-        .prefix("seedbox-control-")
-        .tempdir_in("/tmp")
-        .map_err(|e| failure(&format!("cannot create reply directory: {e}")))?;
-    let socket = UnixDatagram::bind(directory.path().join("reply"))
-        .map_err(|e| failure(&format!("cannot bind reply socket: {e}")))?;
-    socket
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| failure(&e.to_string()))?;
-    socket
-        .connect(reference.trim())
-        .map_err(|_| failure("not available"))?;
-    // A full datagram queue during boot must not block the controlling CLI.
-    socket
-        .set_nonblocking(true)
-        .map_err(|e| failure(&e.to_string()))?;
-    socket
-        .send(if paused { PAUSE } else { RESUME })
-        .map_err(|_| failure("not available or request queue full"))?;
-    socket
-        .set_nonblocking(false)
-        .map_err(|e| failure(&e.to_string()))?;
-    let mut reply = [0; MAX_DATAGRAM];
-    let size = socket.recv(&mut reply).map_err(|_| {
-        failure("no boundary acknowledgement within 5s (request may still take effect)")
-    })?;
-    let expected = if paused { PAUSED } else { RUNNING };
-    if &reply[..size] != expected {
-        return Err(failure("invalid boundary acknowledgement"));
-    }
-    Ok(if paused {
-        Status::Paused
-    } else {
-        Status::Resumed
-    })
-}
 
 /// Own the live endpoint locator for exactly one executor child lifetime.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -119,6 +62,7 @@ impl Drop for Endpoint {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixDatagram;
 
     #[test]
     fn endpoint_cleanup_removes_its_locator_and_private_socket_directory() {

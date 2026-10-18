@@ -876,17 +876,6 @@ impl Faults {
             }
         }
     }
-    /// Readiness is the reserved success id0; process commands wait for it.
-    /// Historical readiness survives crashes and prevents a reboot from
-    /// changing the initial boot/execution stage back to booting.
-    pub(crate) fn initial_applications_ready(&self) -> bool {
-        self.names.iter().all(|name| {
-            self.readiness
-                .iter()
-                .any(|row| row.get("machine").and_then(Value::as_str) == Some(name.as_str()))
-        })
-    }
-
     pub fn management_ready(&mut self, m: usize, time: u64, latency: u64) -> Result<(), String> {
         if m >= self.names.len() || self.ready[m] {
             return Err("duplicate/unknown management readiness".into());
