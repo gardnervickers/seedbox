@@ -610,9 +610,13 @@ pub fn run(args: Args) -> u8 {
     evidence("nemesis", json!({"faults": faults}));
     let mut down = Vec::new();
     if args.recover > 0 {
-        // A fault profile for these scenarios ends before the workload does.
-        // (The SDK's `quiet` needs a second control connection, which waits
-        // forever behind this oracle's open one.)
+        if let Some(ctl) = ctl.as_mut() {
+            // No generated fault may start while the cluster recovers.
+            match ctl.quiet((args.recover + 600) as f64) {
+                Ok(until) => evidence("quiet", json!({"until_ns": until})),
+                Err(error) => evidence("quiet-failed", json!({"error": error.0})),
+            }
+        }
         down = recover(&mut server, &mut history, &args, &brokers);
     }
     server.serve(&mut history, 5.0);
