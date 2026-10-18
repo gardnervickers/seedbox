@@ -1954,12 +1954,12 @@ fn keel() -> Vec<Scenario> {
     for (suffix, backend, placement, what) in variants {
         specs.push((
             format!("keel{suffix}-objects"),
-            format!("One keel-s3dd server with {what}.\nLooking for unknown bugs: S3 PUTs of unique 16 KiB objects from twelve clients for\n120 s with reads of acknowledged objects, then a read-back and a listing of every\nacknowledged object. keel-s3dd acknowledges a write only once it is synced, so\nnothing acknowledged may be lost. Run it without a fault profile for a baseline,\nor with `--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or\n`above-pause-faults.yaml`."),
+            format!("One keel-s3dd server with {what}.\nLooking for unknown bugs: S3 PUTs of unique 16 KiB objects from twelve clients for\n120 s with reads of acknowledged objects, then a read-back and a listing of every\nacknowledged object. keel-s3dd acknowledges a write only once it is synced, so\nnothing acknowledged may be lost. Run it without a fault profile for a baseline,\nor with `--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or\n`above-pause-faults.yaml`. Known failing with `corruption-faults.yaml` until keel\nstops truncating its log after a corrupted read during recovery (5frhxmz3)."),
             backend, placement, long.to_vec(),
         ));
         specs.push((
             format!("keel{suffix}-register"),
-            format!("One keel-s3dd server with {what}.\nTwelve registers: reads, PUTs, DELETEs and compare-and-set by conditional PUT (a GET,\nthen If-Match on its ETag, or If-None-Match from absent) from twelve clients for 120 s,\nthen a read of each key. Every key's history must be linearizable. Run it with\n`--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or `above-pause-faults.yaml`."),
+            format!("One keel-s3dd server with {what}.\nTwelve registers: reads, PUTs, DELETEs and compare-and-set by conditional PUT (a GET,\nthen If-Match on its ETag, or If-None-Match from absent) from twelve clients for 120 s,\nthen a read of each key. Every key's history must be linearizable. Run it with\n`--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or `above-pause-faults.yaml`.\nKnown failing with `crash-faults.yaml` until keel stops serving writes to readers\nand conditional checks before they are synced (power loss then undoes a value a\nclient saw; 8w7f6c5j, sggu92mv)."),
             backend, placement, [register, many, long].concat(),
         ));
         specs.push((
@@ -2065,11 +2065,19 @@ fn delores() -> Vec<Scenario> {
                 .file("start-replica.sh", "/start-replica.sh"),
         ));
     }
-    let comment = "delores's examples/docker-kv over keel-s3dd instead of MinIO: three replicas share\none virtual log through the S3 server, with slots from the in-memory demo sequencer.\nSix clients PUT, DELETE and GET five keys through random replicas for 120 s with no\nretries; then every replica reads every key. Each key's history must be\nlinearizable, every replica must answer again and all must agree. Run it without a\nprofile for a baseline, or with `--fault-profile harness/jepsen/delores/below-pause-faults.yaml`\nor `above-pause-faults.yaml`, which never fault the sequencer.";
-    let seqcut = "delores-kv-register with the oracle cutting replicas off from the sequencer, which\nkeeps running with its state (no kill): one replica, all three, or one replica from\nthe sequencer and S3, for 1-4 s (under the 5 s sequencer timeout) or 10-30 s, with\n12-20 s between cuts. Safety must hold throughout, and a second property asks that\nsome operation succeeds within 10 s of each heal; the oracle reports how long\nrecovery took after each one.";
+    let comment = "delores's examples/docker-kv over keel-s3dd instead of MinIO: three replicas share\none virtual log through the S3 server, with slots from the in-memory demo sequencer.\nSix clients PUT, DELETE and GET five keys through random replicas for 120 s with no\nretries; then every replica reads every key. Each key's history must be\nlinearizable and the replicas that answer must agree. docker-kv cannot reconfigure\npast a sealed log: an append with an unknown outcome seals it for good\n(delores-atomiclog abandon_after_indeterminate) and every replica, restarted or\nnot, then answers Log(Sealed). So replicas that never answer again are reported,\nnot failed (--expect-unavailable). Run it without a\nprofile for a baseline, or with `--fault-profile harness/jepsen/delores/below-pause-faults.yaml`\nor `above-pause-faults.yaml`, which never fault the sequencer.";
+    let seqcut = "delores-kv-register with the oracle cutting replicas off from the sequencer, which\nkeeps running with its state (no kill): one replica, all three, or one replica from\nthe sequencer and S3, for 1-4 s (under the 5 s sequencer timeout) or 10-30 s, with\n12-20 s between cuts. Safety must hold throughout; the oracle reports how long\nrecovery took after each heal, but since a cut can seal the log for good (see\ndelores-kv-register), resumption is reported, not asserted.";
     [
-        ("delores-kv-register", comment, &[][..]),
-        ("delores-kv-seqcut", seqcut, &["--sequencer-cuts"][..]),
+        (
+            "delores-kv-register",
+            comment,
+            &["--expect-unavailable"][..],
+        ),
+        (
+            "delores-kv-seqcut",
+            seqcut,
+            &["--sequencer-cuts", "--expect-unavailable"][..],
+        ),
     ]
     .into_iter()
     .map(|(name, comment, extra)| Scenario {
@@ -2148,7 +2156,7 @@ fn delores_nodes() -> Vec<Scenario> {
         machines
     };
     let topology = "Three delores jepsen-nodes, each running SMR over a virtual log whose metadata\nregister is CASPaxos over three keel-s3dd servers (one acceptor and one log-drive\nreplica each; no acceptor processes, the conditional PUT is the primitive), with\nslots from the in-memory demo sequencer.";
-    let seqcut = "The sequencer keeps\nrunning with its state (no kill); a cut separates one node from it, all three, or\none node from it and from one or two S3 servers, for 1-4 s (under the nodes' 5 s\nsequencer timeout) or 10-30 s, with 12-20 s between cuts. Safety must hold\nthroughout, and a second property asks that some request succeeds within 10 s of\neach heal; the oracle reports how long recovery took after each one.";
+    let seqcut = "The sequencer keeps\nrunning with its state (no kill); a cut separates one node from it, all three, or\none node from it and from one or two S3 servers, for 1-4 s (under the nodes' 5 s\nsequencer timeout) or 10-30 s, with 12-20 s between cuts. Safety must hold\nthroughout; the oracle reports how long recovery took after each heal, and for the\nregisters a second property asks that some request succeeds within 10 s of each\none (list-append only reports it: a cut can seal the log for good).";
     let run = "Run it without a profile for a baseline, or with\n`--fault-profile harness/jepsen/delores/node-below-pause-faults.yaml` or\n`node-above-pause-faults.yaml`, which never fault the sequencer.";
     let specs: [(&str, String, &[(&str, &str)], &[&str]); 5] = [
         (
@@ -2165,9 +2173,9 @@ fn delores_nodes() -> Vec<Scenario> {
         ),
         (
             "delores-node-append",
-            format!("{topology}\nSix clients run Jepsen's list-append transactions (POST /txn, one log entry each)\nthrough random nodes for 120 s. The history must be strict serializable\n(serializable, with no real-time stale read), and once faults end every node's\nsynced state must hold every acknowledged append, all nodes agreeing. {run}"),
+            format!("{topology}\nSix clients run Jepsen's list-append transactions (POST /txn, one log entry each)\nthrough random nodes for 120 s. The history must be strict serializable\n(serializable, with no real-time stale read), and once faults end every node's\nsynced state must hold every acknowledged append, all nodes agreeing. Like\ndocker-kv, the node cannot reconfigure past a sealed log, so nodes that stop\nserving after faults are reported, not failed (--expect-unavailable). {run}"),
             &[],
-            &["--workload", "list-append"],
+            &["--workload", "list-append", "--expect-unavailable"],
         ),
         (
             "delores-node-cas-seqcut",
@@ -2179,7 +2187,7 @@ fn delores_nodes() -> Vec<Scenario> {
             "delores-node-append-seqcut",
             format!("delores-node-append with the oracle cutting nodes off from the sequencer. {seqcut}"),
             &[],
-            &["--workload", "list-append", "--sequencer-cuts"],
+            &["--workload", "list-append", "--sequencer-cuts", "--expect-unavailable"],
         ),
     ];
     specs

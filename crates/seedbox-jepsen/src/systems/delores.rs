@@ -77,6 +77,13 @@ pub struct Args {
     /// succeed again (a separate liveness property).
     #[arg(long, default_value_t = 10.0)]
     pub liveness_window: f64,
+    /// The deployment cannot reconfigure past a sealed log (no new segment
+    /// after an indeterminate append seals it), so nodes that stop serving
+    /// after faults are expected: report them and keep checking safety on
+    /// what completed, but assert neither that every node answers again nor
+    /// the sequencer-heal liveness property.
+    #[arg(long)]
+    pub expect_unavailable: bool,
 }
 
 /// The liveness property `--sequencer-cuts` evaluates.
@@ -264,7 +271,9 @@ pub fn run(args: Args) -> u8 {
     }
     seedbox_sdk::setup_complete(json!({"replicas": args.replicas, "keys": args.keys}));
     let cuts = args.sequencer_cuts.then(|| {
-        seedbox_sdk::declare(RESUMES, seedbox_sdk::Kind::Always);
+        if !args.expect_unavailable {
+            seedbox_sdk::declare(RESUMES, seedbox_sdk::Kind::Always);
+        }
         crate::nemesis::sequencer_cuts(
             args.replicas.clone(),
             vec![args.s3.clone()],
@@ -325,11 +334,13 @@ pub fn run(args: Args) -> u8 {
         let (report, stuck) =
             crate::nemesis::recovery_after_cuts(&cuts, &oks, args.liveness_window, kit::now());
         kit::evidence("sequencer-cuts", json!({"cuts": report, "stuck": stuck}));
-        seedbox_sdk::always(
-            RESUMES,
-            stuck.is_empty(),
-            json!({"cuts": report.len(), "stuck": stuck.len(), "window": args.liveness_window}),
-        );
+        if !args.expect_unavailable {
+            seedbox_sdk::always(
+                RESUMES,
+                stuck.is_empty(),
+                json!({"cuts": report.len(), "stuck": stuck.len(), "window": args.liveness_window}),
+            );
+        }
     }
     {
         let t = tally.lock().unwrap();
@@ -430,8 +441,8 @@ pub fn run(args: Args) -> u8 {
             )
         }
     );
-    if !violations.is_empty() || !divergent.is_empty() || !unwritten.is_empty() || !down.is_empty()
-    {
+    let down_fails = !down.is_empty() && !args.expect_unavailable;
+    if !violations.is_empty() || !divergent.is_empty() || !unwritten.is_empty() || down_fails {
         kit::verdict(kit::VIOLATION, &summary)
     } else if !exhausted.is_empty() || acknowledged == 0 {
         kit::verdict(kit::INCONCLUSIVE, &summary)

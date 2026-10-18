@@ -97,6 +97,13 @@ pub struct Args {
     /// succeed again (a separate liveness property).
     #[arg(long, default_value_t = 10.0)]
     pub liveness_window: f64,
+    /// The deployment cannot reconfigure past a sealed log (no new segment
+    /// after an indeterminate append seals it), so nodes that stop serving
+    /// after faults are expected: report them and keep checking safety on
+    /// what completed, but assert neither that every node answers again nor
+    /// the sequencer-heal liveness property.
+    #[arg(long)]
+    pub expect_unavailable: bool,
 }
 
 /// The liveness property `--sequencer-cuts` evaluates.
@@ -117,11 +124,13 @@ fn report_cuts(args: &Args) {
     let (report, stuck) =
         crate::nemesis::recovery_after_cuts(&cuts, &oks, args.liveness_window, kit::now());
     kit::evidence("sequencer-cuts", json!({"cuts": report, "stuck": stuck}));
-    seedbox_sdk::always(
-        RESUMES,
-        stuck.is_empty(),
-        json!({"cuts": report.len(), "stuck": stuck.len(), "window": args.liveness_window}),
-    );
+    if !args.expect_unavailable {
+        seedbox_sdk::always(
+            RESUMES,
+            stuck.is_empty(),
+            json!({"cuts": report.len(), "stuck": stuck.len(), "window": args.liveness_window}),
+        );
+    }
 }
 
 /// One request's outcome.
@@ -217,7 +226,9 @@ pub fn run(args: Args) -> u8 {
         json!({"nodes": args.nodes, "workload": format!("{:?}", args.workload)}),
     );
     if args.sequencer_cuts {
-        seedbox_sdk::declare(RESUMES, seedbox_sdk::Kind::Always);
+        if !args.expect_unavailable {
+            seedbox_sdk::declare(RESUMES, seedbox_sdk::Kind::Always);
+        }
         let _ = CUTS.set(crate::nemesis::sequencer_cuts(
             args.nodes.clone(),
             args.s3.clone(),
@@ -446,7 +457,10 @@ fn registers(args: Arc<Args>) -> u8 {
         divergent.len(),
         never_answered(&down)
     );
-    if !violations.is_empty() || !divergent.is_empty() || !down.is_empty() {
+    if !violations.is_empty()
+        || !divergent.is_empty()
+        || (!down.is_empty() && !args.expect_unavailable)
+    {
         kit::verdict(kit::VIOLATION, &summary)
     } else if !exhausted.is_empty() || acknowledged == 0 {
         kit::verdict(kit::INCONCLUSIVE, &summary)
@@ -692,7 +706,7 @@ fn list_append(args: Arc<Args>) -> u8 {
         json!(result.txns),
         never_answered(&down)
     );
-    if !valid || divergent || !down.is_empty() {
+    if !valid || divergent || (!down.is_empty() && !args.expect_unavailable) {
         kit::verdict(kit::VIOLATION, &summary)
     } else if committed == 0 {
         kit::verdict(kit::INCONCLUSIVE, &summary)

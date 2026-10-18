@@ -3,8 +3,9 @@
 # resume when a pause lands mid-tick (KEEL-EMERGENCY envelope wedged); its
 # restart wrapper starts it again and the oracle's data and recovery checks
 # decide the verdict. Pauses dominate, so a sweep sees several.
-# Also power loss (volume kept), partitions from the clients, slow disk
-# requests and scheduling perturbation. The oracle's operations run 120 s.
+# Also partitions from the clients, slow disk requests and scheduling
+# perturbation. Power loss is left to crash-faults.yaml, which keel's
+# visible-before-durable bug makes fail the register workload for now. The oracle's operations run 120 s.
 start: 15s
 end: 110s
 interval: 5s
@@ -12,9 +13,6 @@ faults:
   - kind: pause_process
     weight: 5
     duration: {min: 13s, max: 20s}
-  - kind: crash
-    weight: 1
-    downtime: {min: 1s, max: 5s}
   - kind: partition
     weight: 1
     duration: {min: 1s, max: 8s}

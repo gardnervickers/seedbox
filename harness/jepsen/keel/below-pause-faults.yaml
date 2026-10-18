@@ -1,8 +1,9 @@
 # Process pauses below keel-s3dd's watchdog bound: 0.5-10 s against the 12 s the
 # scenarios set (--watchdog-wedge-ms 12000), so no keel-s3dd may crash:
 # seedbox.no_crashing_processes must pass.
-# Also power loss (volume kept), partitions from the clients, slow disk
-# requests and scheduling perturbation. The oracle's operations run 120 s.
+# Also partitions from the clients, slow disk requests and scheduling
+# perturbation. Power loss is left to crash-faults.yaml, which keel's
+# visible-before-durable bug makes fail the register workload for now. The oracle's operations run 120 s.
 start: 15s
 end: 110s
 interval: 4s
@@ -10,9 +11,6 @@ faults:
   - kind: pause_process
     weight: 3
     duration: {min: 500ms, max: 10s}
-  - kind: crash
-    weight: 1
-    downtime: {min: 1s, max: 5s}
   - kind: partition
     weight: 1
     duration: {min: 1s, max: 8s}

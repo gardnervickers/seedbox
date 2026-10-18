@@ -1,0 +1,14 @@
+# Power loss of the keel-s3dd server, often (volume kept: page cache and
+# unflushed sectors are lost), and nothing else. Known failing for the register
+# workloads until keel stops serving a write to readers and conditional checks
+# before it is synced: a client reads (or is refused a CAS by) a write whose PUT
+# has not been acknowledged, power fails, and the value it saw is gone
+# (8w7f6c5j, sggu92mv). The objects workload, which reads only acknowledged
+# objects, must pass. The oracle's operations run 120 s.
+start: 15s
+end: 110s
+interval: 4s
+faults:
+  - kind: crash
+    weight: 1
+    downtime: {min: 500ms, max: 3s}
