@@ -1,0 +1,18 @@
+# Corrupted data reads only (one sector of garbage per selected read, never the
+# filesystem's metadata; the disk itself stays intact), with power loss so that
+# reads go to the disk. A checksum or WAL CRC failure must surface as an error,
+# and the server must work again once the corruption ends.
+start: 15s
+end: 78s
+interval: 4s
+faults:
+  - kind: disk_error
+    weight: 3
+    op: read
+    ppm: 50000
+    effect: corrupt
+    scope: data
+    duration: {min: 2s, max: 8s}
+  - kind: crash
+    weight: 2
+    downtime: {min: 1s, max: 4s}

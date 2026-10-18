@@ -156,7 +156,9 @@ fn check_of(command: &Command) -> Option<&'static str> {
         Command::EtcdRegister(_) => {
             "etcd: register histories are linearizable and every member recovers"
         }
-        Command::Postgres(_) => "postgres: transactions meet their isolation level",
+        Command::Postgres(_) => {
+            "postgres: transactions meet their isolation level, acknowledged commits survive and the server recovers"
+        }
         Command::Kafka(_) => "kafka: the queue's checks hold",
         Command::Mysql(_) => "mysql: transactions meet their isolation level",
         Command::Galera(_) => "galera: transactions meet their isolation level",

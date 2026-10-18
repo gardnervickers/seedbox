@@ -1,0 +1,23 @@
+# Silent corruption of the server's data reads and writes (one sector of
+# garbage per selected request, never the filesystem's metadata), with power
+# loss so that corrupted writes are read back from disk after the page cache is
+# gone. PostgreSQL 18 enables data checksums by default and checks WAL records
+# with CRCs, so it should report errors or refuse to start, never return wrong
+# data for an acknowledged row. (pg_xact and other SLRU pages carry no checksum.)
+start: 15s
+end: 78s
+interval: 4s
+faults:
+  - kind: disk_error
+    weight: 3
+    op: any
+    ppm: 20000
+    effect: corrupt
+    scope: data
+    duration: {min: 2s, max: 8s}
+  - kind: crash
+    weight: 2
+    downtime: {min: 1s, max: 4s}
+  - kind: pause_process
+    weight: 1
+    duration: {min: 500ms, max: 4s}

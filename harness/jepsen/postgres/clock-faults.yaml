@@ -1,0 +1,17 @@
+# Wall-clock steps of up to a minute either way on the server, with a few
+# process pauses and power failures. PostgreSQL orders transactions by XID and
+# snapshots, not timestamps, so a stepped clock must not change any result.
+start: 15s
+end: 78s
+interval: 4s
+faults:
+  - kind: clock_skew
+    weight: 4
+    duration: {min: 3s, max: 15s}
+    maxOffset: 60s
+  - kind: pause_process
+    weight: 1
+    duration: {min: 500ms, max: 4s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 4s}
