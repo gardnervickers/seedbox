@@ -962,7 +962,10 @@ pub fn decide(
     let counts = json!(result.counts);
     let types = json!(result.txns);
     let lost = durability.lost.unwrap_or(0);
-    let tail = format!("lost {lost} stale {}", durability.stale);
+    let tail = match durability.lost {
+        Some(lost) => format!("lost {lost} stale {}", durability.stale),
+        None => format!("lost unknown (no final read) stale {}", durability.stale),
+    };
     if !result.valid || lost > 0 || durability.stale > 0 {
         let word = if result.valid { "valid" } else { "INVALID" };
         let prefix = if lost > 0 || durability.stale > 0 {
