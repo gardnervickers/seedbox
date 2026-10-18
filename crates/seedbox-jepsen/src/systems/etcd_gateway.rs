@@ -43,6 +43,8 @@ pub struct Event {
     pub mod_revision: i64,
     pub create_revision: i64,
     pub lease: Value,
+    /// The value, decoded from base64 (empty for a delete).
+    pub value: String,
 }
 
 impl Event {
@@ -114,6 +116,7 @@ impl Watch {
                     mod_revision: number(&kv["mod_revision"]),
                     create_revision: number(&kv["create_revision"]),
                     lease: kv["lease"].clone(),
+                    value: unb64(kv["value"].as_str().unwrap_or("")),
                 });
             }
         }

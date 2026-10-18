@@ -18,19 +18,25 @@
 //! names a revision of its key: two that name the same revision with
 //! different values mean members applied different histories. And for
 //! linearizable operations, a revision lower than one a completed operation
-//! on the same key already saw is a stale read or a lost write.
+//! on the same key already saw is a stale read or a lost write. A watch of
+//! every key on each member, resumed from the next revision whenever its
+//! stream breaks, must see every revision exactly once and in order (every
+//! revision is a register write), with the same values.
 //!
 //! Once the writes end, every member has to serve a linearizable read again
 //! within `--recover` seconds (a member that dies for good fails the run),
 //! every key gets a final read, and every member's `HashKV` at a common
 //! revision has to agree.
-use super::etcd_gateway::{b64, number, unb64, CLIENT_PORT};
+use super::etcd_gateway::{b64, number, unb64, Watch, CLIENT_PORT};
 use crate::checker::models::{verdict_word, RegisterOf, RegisterOp, RegisterRet, STEP_BUDGET};
 use crate::kit::{self, http, Rng};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -70,6 +76,10 @@ pub struct Args {
     pub timeout: f64,
     #[arg(long, value_enum, default_value_t = Reads::Linearizable)]
     pub reads: Reads,
+    /// Seconds after the final reads that each member's watch has to catch
+    /// up to the last revision; 0 runs no watchers.
+    #[arg(long, default_value_t = 30)]
+    pub watch: u64,
     /// Power-fail every member together about this often during the
     /// operations, in seconds; 0 never does.
     #[arg(long, default_value_t = 0.0)]
@@ -527,6 +537,95 @@ pub(crate) fn compare_hashes(live: &[String]) -> (Option<String>, Value) {
     }
 }
 
+/// What one member's watch of every register key saw: each event's
+/// revision, key and value, reconnecting from the next revision whenever
+/// the stream breaks.
+struct WatchLog {
+    member: String,
+    events: Vec<(i64, String, String)>,
+    reconnects: u64,
+}
+
+/// Watch the register keys on `member` from revision 1 until `target` (0
+/// while unknown) is reached or `deadline` (0 while unknown, else seconds
+/// on the oracle clock) passes.
+fn watcher(member: String, target: Arc<AtomicI64>, deadline: Arc<AtomicI64>) -> WatchLog {
+    let mut log = WatchLog {
+        member: member.clone(),
+        events: Vec::new(),
+        reconnects: 0,
+    };
+    let done = |last: i64| {
+        let t = target.load(Ordering::SeqCst);
+        let d = deadline.load(Ordering::SeqCst);
+        (t > 0 && last >= t) || (d > 0 && kit::now() as i64 >= d)
+    };
+    loop {
+        let last = log.events.last().map_or(0, |e| e.0);
+        if done(last) {
+            return log;
+        }
+        let mut watch = match Watch::open(&member, "r", "s", Some(last + 1), 5.0) {
+            Ok(watch) => watch,
+            Err(_) => {
+                log.reconnects += 1;
+                kit::pause(1.0);
+                continue;
+            }
+        };
+        // Ends with an error when the stream breaks or idles for 5 s.
+        let _ = watch.read_until(|w| done(w.events.last().map_or(last, |e| e.mod_revision)));
+        log.reconnects += 1;
+        log.events.extend(
+            watch
+                .events
+                .into_iter()
+                .map(|e| (e.mod_revision, e.key, e.value)),
+        );
+    }
+}
+
+/// Check every watch against the book: each must see every revision from 2
+/// to the last one it saw exactly once and in order (every revision is a
+/// register write), with the value the writers and readers saw.
+fn check_watches(b: &mut Book, logs: &[WatchLog], target: i64) -> (Vec<Value>, Value) {
+    let mut problems = Vec::new();
+    let mut summary = serde_json::Map::new();
+    for log in logs {
+        let mut expected = 2;
+        let mut gaps = 0;
+        for (revision, key, value) in &log.events {
+            if *revision != expected {
+                gaps += 1;
+                if problems.len() < 10 {
+                    problems.push(json!({"member": log.member, "expected": expected, "saw": revision, "key": key}));
+                }
+            }
+            expected = revision + 1;
+            let parsed = key.strip_prefix('r').and_then(|k| k.parse::<usize>().ok());
+            match parsed {
+                Some(k) if k < b.keys.len() => {
+                    let seen = value.parse::<u8>().ok();
+                    if seen.is_none() {
+                        b.unparseable
+                            .push(json!({"key": key, "text": value, "watch": log.member}));
+                    }
+                    b.version(k, *revision, seen, format!("watch via {}", log.member));
+                }
+                _ => problems
+                    .push(json!({"member": log.member, "unknown_key": key, "revision": revision})),
+            }
+        }
+        let last = log.events.last().map_or(0, |e| e.0);
+        summary.insert(
+            log.member.clone(),
+            json!({"events": log.events.len(), "last": last, "gaps": gaps,
+                   "reconnects": log.reconnects, "caught_up": last >= target}),
+        );
+    }
+    (problems, Value::Object(summary))
+}
+
 pub fn run(args: Args) -> u8 {
     kit::start_clock();
     // The cluster forms once a quorum is up; wait for every member.
@@ -564,6 +663,17 @@ pub fn run(args: Args) -> u8 {
         );
     }
     let book = Arc::new(Mutex::new(Book::new(args.keys)));
+    let target = Arc::new(AtomicI64::new(0));
+    let deadline = Arc::new(AtomicI64::new(0));
+    let watchers: Vec<_> = args
+        .members
+        .iter()
+        .filter(|_| args.watch > 0)
+        .map(|member| {
+            let (member, target, deadline) = (member.clone(), target.clone(), deadline.clone());
+            std::thread::spawn(move || watcher(member, target, deadline))
+        })
+        .collect();
     let start = Instant::now();
     let workers: Vec<_> = (0..args.clients)
         .map(|client| {
@@ -651,12 +761,33 @@ pub fn run(args: Args) -> u8 {
         }
     }
     let (diverged, hashes) = compare_hashes(&live);
+    let last = hashes["revisions"]
+        .as_object()
+        .into_iter()
+        .flat_map(|m| m.values())
+        .filter_map(Value::as_i64)
+        .max()
+        .unwrap_or(0);
     kit::evidence("hashkv", hashes);
-    let book = book.lock().unwrap();
-    conclude(&book, &down, &restarted, diverged)
+    deadline.store(kit::now() as i64 + args.watch as i64, Ordering::SeqCst);
+    target.store(last.max(1), Ordering::SeqCst);
+    let logs: Vec<WatchLog> = watchers.into_iter().filter_map(|w| w.join().ok()).collect();
+    let mut book = book.lock().unwrap();
+    let (gaps, watches) = check_watches(&mut book, &logs, last);
+    kit::evidence(
+        "watches",
+        json!({"target": last, "members": watches, "gaps": gaps}),
+    );
+    conclude(&book, &down, &restarted, diverged, &gaps)
 }
 
-fn conclude(b: &Book, down: &[String], restarted: &[String], diverged: Option<String>) -> u8 {
+fn conclude(
+    b: &Book,
+    down: &[String],
+    restarted: &[String],
+    diverged: Option<String>,
+    gaps: &[Value],
+) -> u8 {
     let (mut ops, mut pending) = (0, 0);
     for log in &b.keys {
         let operations = log.history.operations();
@@ -726,6 +857,11 @@ fn conclude(b: &Book, down: &[String], restarted: &[String], diverged: Option<St
     if let Some(diverged) = &diverged {
         summary.push_str(&format!("; {diverged}"));
     }
+    if !gaps.is_empty() {
+        summary.push_str(&format!(
+            "; watches skipped or reordered revisions: {gaps:?}"
+        ));
+    }
     if !restarted.is_empty() {
         summary.push_str(&format!(
             "; {} restarted after not serving",
@@ -739,6 +875,7 @@ fn conclude(b: &Book, down: &[String], restarted: &[String], diverged: Option<St
         ));
     }
     let violated = !violations.is_empty()
+        || !gaps.is_empty()
         || !b.conflicts.is_empty()
         || !b.stale.is_empty()
         || !b.phantom.is_empty()
@@ -789,6 +926,28 @@ mod tests {
             decode(&json!({"value": b64("garbage")})),
             Err("garbage".into())
         );
+    }
+
+    #[test]
+    fn watches_must_see_every_revision_once() {
+        let mut book = Book::new(1);
+        book.version(0, 3, Some(1), "write".into());
+        let log = |events: Vec<(i64, &str, &str)>| WatchLog {
+            member: "n1".into(),
+            events: events
+                .into_iter()
+                .map(|(r, k, v)| (r, k.into(), v.into()))
+                .collect(),
+            reconnects: 0,
+        };
+        let good = log(vec![(2, "r0", "4"), (3, "r0", "1")]);
+        assert!(check_watches(&mut book, &[good], 3).0.is_empty());
+        assert!(book.conflicts.is_empty());
+        let skipped = log(vec![(3, "r0", "1")]);
+        assert_eq!(check_watches(&mut book, &[skipped], 3).0.len(), 1);
+        let wrong = log(vec![(2, "r0", "4"), (3, "r0", "2")]);
+        check_watches(&mut book, &[wrong], 3);
+        assert_eq!(book.conflicts.len(), 1);
     }
 
     #[test]
