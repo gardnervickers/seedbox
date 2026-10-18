@@ -20,7 +20,7 @@ oracle:
   build:
     context: ../../..
     dockerfile: crates/seedbox-jepsen/guest.Dockerfile
-  entrypoint: ["/jepsen/seedbox-jepsen", "keel-s3", "--nodes", "s3", "--workload", "cas-register", "--keys", "4", "--size", "1024", "--crash-all-every", "15", "--duration", "60"]
+  entrypoint: ["/jepsen/seedbox-jepsen", "keel-s3", "--nodes", "s3", "--workload", "cas-register", "--size", "1024", "--keys", "4", "--crash-all-every", "15", "--duration", "60"]
   memoryMiB: 1024
 network:
   latency: 1ms

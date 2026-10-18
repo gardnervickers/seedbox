@@ -1904,9 +1904,11 @@ fn keel_server(backend: &str, placement: &str) -> Machine {
 #[allow(clippy::type_complexity)]
 fn keel() -> Vec<Scenario> {
     let objects: &[&str] = &["--size", "4096"];
-    let register: &[&str] = &["--workload", "cas-register", "--keys", "4"];
-    // Small objects for the 60 s scenarios.
-    let small: &[&str] = &["--size", "1024"];
+    let register: &[&str] = &["--workload", "cas-register"];
+    // Four small registers for the 60 s scenarios; twelve keep the 120 s
+    // histories' unknown outcomes per key few enough to check.
+    let small: &[&str] = &["--size", "1024", "--keys", "4"];
+    let many: &[&str] = &["--keys", "12"];
     let crash: &[&str] = &["--crash-all-every", "15"];
     let reboot: &[&str] = &["--reboot-before-check"];
     // Long enough for the above-pause profiles' 13-20 s freezes, with load
@@ -1952,8 +1954,8 @@ fn keel() -> Vec<Scenario> {
         ));
         specs.push((
             format!("keel{suffix}-register"),
-            format!("One keel-s3dd server with {what}.\nFour registers: reads, PUTs, DELETEs and compare-and-set by conditional PUT (a GET,\nthen If-Match on its ETag, or If-None-Match from absent) from twelve clients for 120 s,\nthen a read of each key. Every key's history must be linearizable. Run it with\n`--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or `above-pause-faults.yaml`."),
-            backend, placement, [register, long].concat(),
+            format!("One keel-s3dd server with {what}.\nTwelve registers: reads, PUTs, DELETEs and compare-and-set by conditional PUT (a GET,\nthen If-Match on its ETag, or If-None-Match from absent) from twelve clients for 120 s,\nthen a read of each key. Every key's history must be linearizable. Run it with\n`--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or `above-pause-faults.yaml`."),
+            backend, placement, [register, many, long].concat(),
         ));
         specs.push((
             format!("keel{suffix}-crash-all"),

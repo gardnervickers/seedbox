@@ -1,5 +1,5 @@
 # One keel-s3dd server with the poll I/O backend and objects in the segment log.
-# Four registers: reads, PUTs, DELETEs and compare-and-set by conditional PUT (a GET,
+# Twelve registers: reads, PUTs, DELETEs and compare-and-set by conditional PUT (a GET,
 # then If-Match on its ETag, or If-None-Match from absent) from twelve clients for 120 s,
 # then a read of each key. Every key's history must be linearizable. Run it with
 # `--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or `above-pause-faults.yaml`.
@@ -23,7 +23,7 @@ oracle:
   build:
     context: ../../..
     dockerfile: crates/seedbox-jepsen/guest.Dockerfile
-  entrypoint: ["/jepsen/seedbox-jepsen", "keel-s3", "--nodes", "s3", "--workload", "cas-register", "--keys", "4", "--duration", "120", "--clients", "12", "--think-ms", "5", "--size", "16384"]
+  entrypoint: ["/jepsen/seedbox-jepsen", "keel-s3", "--nodes", "s3", "--workload", "cas-register", "--keys", "12", "--duration", "120", "--clients", "12", "--think-ms", "5", "--size", "16384"]
   memoryMiB: 1024
 network:
   latency: 1ms
