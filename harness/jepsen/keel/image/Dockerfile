@@ -9,7 +9,7 @@ FROM docker.io/library/rust:1.96.1-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba722
 WORKDIR /src
 COPY . .
 RUN cargo build --release --locked -p keel-s3dd \
-    && cp target/release/keel-s3dd /keel-s3dd
+    && cp target/release/keel-s3dd /keel-s3dd && rm -rf target
 
 FROM docker.io/library/debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 COPY --from=builder /keel-s3dd /usr/local/bin/keel-s3dd
