@@ -402,8 +402,9 @@ const ETCD_CURRENT: [(&str, &str); 2] = [
     ("3.7.2", "gcr.io/etcd-development/etcd:v3.7.2@sha256:7c6c239825d00e3f6328a69caafd54be92063acf0c2ce78b8394699f52b75dc3"),
 ];
 
-/// Five members of a current etcd release, data on a volume, default settings.
-fn etcd_members(version: &str) -> Vec<(String, Machine)> {
+/// Five members of a current etcd release, data on a volume, default settings
+/// plus `extra` flags.
+fn etcd_members(version: &str, extra: &[&str]) -> Vec<(String, Machine)> {
     let members = nodes("n", 5);
     let cluster: Vec<String> = members
         .iter()
@@ -413,19 +414,21 @@ fn etcd_members(version: &str) -> Vec<(String, Machine)> {
     members
         .iter()
         .map(|member| {
+            let mut command = vec![
+                format!("--name={member}"),
+                "--data-dir=/var/lib/etcd/data".into(),
+                "--listen-client-urls=http://0.0.0.0:2379".into(),
+                format!("--advertise-client-urls=http://{member}:2379"),
+                "--listen-peer-urls=http://0.0.0.0:2380".into(),
+                format!("--initial-advertise-peer-urls=http://{member}:2380"),
+                format!("--initial-cluster={cluster}"),
+                "--initial-cluster-state=new".into(),
+                "--log-level=info".into(),
+            ];
+            command.extend(strings(extra));
             let server = Machine::image(lookup(&ETCD_CURRENT, version))
                 .entrypoint(&["/usr/local/bin/etcd"])
-                .command(vec![
-                    format!("--name={member}"),
-                    "--data-dir=/var/lib/etcd/data".into(),
-                    "--listen-client-urls=http://0.0.0.0:2379".into(),
-                    format!("--advertise-client-urls=http://{member}:2379"),
-                    "--listen-peer-urls=http://0.0.0.0:2380".into(),
-                    format!("--initial-advertise-peer-urls=http://{member}:2380"),
-                    format!("--initial-cluster={cluster}"),
-                    "--initial-cluster-state=new".into(),
-                    "--log-level=info".into(),
-                ])
+                .command(command)
                 // The image's working directory, `/var/lib/etcd/`, has a
                 // trailing slash, which Seedbox rejects as unnormalized.
                 .workdir("/var/lib/etcd")
@@ -438,8 +441,9 @@ fn etcd_members(version: &str) -> Vec<(String, Machine)> {
 
 #[allow(clippy::type_complexity)]
 fn etcd_current() -> Vec<Scenario> {
-    // (name, comment, version, oracle arguments)
-    let mut specs: Vec<(String, String, &str, Vec<&str>)> = Vec::new();
+    // (name, comment, version, oracle arguments, member flags)
+    let mut specs: Vec<(String, String, &str, Vec<&str>, &[&str])> = Vec::new();
+    let snapshots: &[&str] = &["--snapshot-count=300", "--snapshot-catchup-entries=100"];
     let register = "etcd-register";
     for (version, short) in [("3.6.15", "36"), ("3.7.2", "37")] {
         specs.push((
@@ -447,33 +451,44 @@ fn etcd_current() -> Vec<Scenario> {
             format!("etcd {version}, looking for unknown bugs with Jepsen's register workload: ten\nclients read, write and compare-and-set four keys at a time (each retired after\n200 operations) through random members for 60 s, with linearizable reads. Every\nkey's history must be linearizable, no two members may apply different values at\none revision, every member must serve reads again once faults end, and the\nmembers' HashKV must agree. Run it with `--fault-profile` and one of this\ndirectory's profiles."),
             version,
             vec![register],
+            &[],
+        ));
+        specs.push((
+            format!("etcd{short}-register-snapshot"),
+            format!("etcd{short}-register with a snapshot every 300 entries and only 100 entries kept for\nslow followers, so a member that was down or cut off for a second or two catches\nup from a snapshot the leader sends rather than from the log."),
+            version,
+            vec![register],
+            snapshots,
         ));
         specs.push((
             format!("etcd{short}-register-serializable"),
             format!("etcd{short}-register with serializable reads, which may be stale by design: they\nstay out of the linearizability check (writes, compare-and-sets and final reads\nstill take part) but must return a value some write could have produced, at a\nrevision no member gave another value."),
             version,
             vec![register, "--reads", "serializable"],
+            &[],
         ));
         specs.push((
             format!("etcd{short}-crash-all"),
             format!("etcd{short}-register under coordinated power loss: every member fails together\nabout every 15 s (7.5-22.5 s) and reboots 2 s later. etcd syncs its WAL before\nacknowledging, so no acknowledged write may be lost and every member must come\nback. Combine with a fault profile for more."),
             version,
             vec![register, "--crash-all-every", "15"],
+            &[],
         ));
         specs.push((
             format!("etcd{short}-append"),
             format!("etcd {version} with Jepsen's list-append workload: ten clients run transactions\nof up to four reads and appends over eight keys at a time for 60 s, each a\nsnapshot txn and then a txn guarded on the snapshot's mod revisions. The history\nmust be serializable (Elle-style check), every member must serve reads again once\nfaults end, and the members' HashKV must agree. Run it with `--fault-profile`."),
             version,
             vec!["etcd-append"],
+            &[],
         ));
     }
     specs
         .into_iter()
-        .map(|(name, comment, version, arguments)| Scenario {
+        .map(|(name, comment, version, arguments, flags)| Scenario {
             name,
             comment,
             generated: format!("etcd {version}, five members"),
-            machines: etcd_members(version),
+            machines: etcd_members(version, flags),
             // The linearizability search grows with unacknowledged writes.
             oracle: Machine::program(&strings(&arguments)).memory(1024),
             latency: "1ms".into(),
