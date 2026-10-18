@@ -399,7 +399,13 @@ impl Run {
                 Ok(Outcome::Fail(code, broken)) => ("fail", None, Some(code), broken),
                 Err(error) => ("info", None, Some(error), true),
             };
+            // A server reporting corruption fails fast; back off so that a
+            // corrupt page does not flood the history (and the log budget).
+            let corrupt = kind == "fail" && error.as_deref().is_some_and(|e| e.starts_with("XX"));
             self.record(json!(process), kind, &ops, value, t0, now_us(), error);
+            if corrupt {
+                kit::pause(0.2);
+            }
             if broken {
                 pg = None;
                 process += self.args.clients;
@@ -407,8 +413,11 @@ impl Run {
         }
     }
 
-    fn final_read(&self) -> Option<Vec<Mop>> {
+    /// Read every touched key in one transaction, retrying; the last error
+    /// when no attempt succeeds.
+    fn final_read(&self) -> Result<Vec<Mop>, PgError> {
         let keys: Vec<i64> = self.keys.lock().unwrap().touched.iter().copied().collect();
+        let mut last = PgError::Indeterminate("no attempt".into());
         for attempt in 0..10 {
             let read = (|| -> Result<Vec<Mop>, PgError> {
                 let mut pg = Pg::connect(&self.host(), self.args.port, 30.0)?;
@@ -425,17 +434,18 @@ impl Run {
                 Ok(value)
             })();
             match read {
-                Ok(value) => return Some(value),
+                Ok(value) => return Ok(value),
                 Err(error) => {
                     evidence(
                         "final-read-error",
                         json!({"attempt": attempt, "error": error.to_string()}),
                     );
+                    last = error;
                     kit::pause(1.0);
                 }
             }
         }
-        None
+        Err(last)
     }
 }
 
@@ -476,7 +486,7 @@ pub fn report(txns: &[TxnOp], model: &str, examples: usize) -> Result<elle::Chec
 }
 
 /// Connect to `host` and run `SELECT 1`, retrying until `seconds` pass.
-fn serving(host: &str, port: u16, seconds: f64) -> Result<Pg, String> {
+fn serving(host: &str, port: u16, seconds: f64) -> Result<Pg, PgError> {
     let deadline = Instant::now() + Duration::from_secs_f64(seconds);
     loop {
         let attempt = Pg::connect(host, port, 10.0).and_then(|mut pg| {
@@ -485,10 +495,16 @@ fn serving(host: &str, port: u16, seconds: f64) -> Result<Pg, String> {
         });
         match attempt {
             Ok(pg) => return Ok(pg),
-            Err(error) if Instant::now() > deadline => return Err(error.to_string()),
+            Err(error) if Instant::now() > deadline => return Err(error),
             Err(_) => kit::pause(0.5),
         }
     }
+}
+
+/// A server error in SQLSTATE class XX (data_corrupted, index_corrupted,
+/// ...): the server detected corruption and refused rather than answer.
+fn reports_corruption(error: &PgError) -> bool {
+    matches!(error, PgError::Server { code, .. } if code.starts_with("XX"))
 }
 
 /// The first column of the first row, if any.
@@ -772,24 +788,52 @@ pub fn run(args: Args) -> u8 {
     }
     let host = run.host();
     let waited = Instant::now();
-    if let Err(error) = serving(&host, args.port, args.recover) {
-        evidence(
-            "unrecovered",
-            json!({"host": host, "waited": waited.elapsed().as_secs_f64(), "last": error}),
-        );
-        return verdict(
-            kit::VIOLATION,
-            &format!(
-                "unrecovered: {host} did not answer within {} s after the workload: {error}",
-                args.recover
-            ),
-        );
+    // Why there is no final read, when there is none.
+    let mut unread = None;
+    match serving(&host, args.port, args.recover) {
+        Ok(_) => evidence(
+            "recovered",
+            json!({"host": host, "after": waited.elapsed().as_secs_f64()}),
+        ),
+        // Detected corruption is a fail-stop, not a failure to recover; the
+        // history so far is still checked.
+        Err(error) if reports_corruption(&error) => {
+            evidence(
+                "corruption-reported",
+                json!({"host": host, "after": waited.elapsed().as_secs_f64(), "error": error.to_string()}),
+            );
+            unread = Some(format!("fail-stop: {host} reports corruption ({error})"));
+        }
+        Err(error) => {
+            evidence(
+                "unrecovered",
+                json!({"host": host, "waited": waited.elapsed().as_secs_f64(), "last": error.to_string()}),
+            );
+            return verdict(
+                kit::VIOLATION,
+                &format!(
+                    "unrecovered: {host} did not answer within {} s after the workload: {error}",
+                    args.recover
+                ),
+            );
+        }
     }
-    evidence(
-        "recovered",
-        json!({"host": host, "after": waited.elapsed().as_secs_f64()}),
-    );
-    let final_read = run.final_read();
+    let final_read = match unread {
+        Some(_) => None,
+        None => match run.final_read() {
+            Ok(value) => Some(value),
+            Err(error) if reports_corruption(&error) => {
+                unread = Some(format!(
+                    "fail-stop: the final read reports corruption ({error})"
+                ));
+                None
+            }
+            Err(error) => {
+                unread = Some(format!("the final read failed ({error})"));
+                None
+            }
+        },
+    };
     if let Some(value) = &final_read {
         let t = now_us();
         run.record(json!("final"), "ok", value, Some(value.clone()), t, t, None);
@@ -810,6 +854,7 @@ pub fn run(args: Args) -> u8 {
     let (code, text) = decide(
         &result,
         durability,
+        unread.as_deref(),
         progress,
         args.isolation.name(),
         args.min_commit_rate,
@@ -884,10 +929,12 @@ fn progress(txns: &[TxnOp], clients: usize, seconds: f64) -> kit::Progress {
 /// or a stale read is a violation however little the clients did; a clean
 /// history is valid only when they committed something, reached `min_rate`
 /// commits per client-second and the final read succeeded, and is otherwise
-/// inconclusive.
+/// inconclusive (`unread` says why there is no final read: a server that
+/// reports corruption fails stop, which is allowed).
 pub fn decide(
     result: &elle::Checked,
     durability: Durability,
+    unread: Option<&str>,
     progress: kit::Progress,
     isolation: &str,
     min_rate: f64,
@@ -916,7 +963,7 @@ pub fn decide(
             "{shortfall}; history valid {isolation} checked as {model}"
         ))
     } else if durability.lost.is_none() {
-        Some("the final read failed".to_string())
+        Some(unread.unwrap_or("the final read failed").to_string())
     } else {
         None
     };
@@ -960,7 +1007,14 @@ pub fn recheck(text: &str, model: &str) -> Result<(u8, Value), String> {
         stale: stale.len(),
     };
     let isolation = config["isolation"].as_str().unwrap_or("serializable");
-    let (code, verdict) = decide(&result, durability, progress, isolation, MIN_COMMIT_RATE);
+    let (code, verdict) = decide(
+        &result,
+        durability,
+        None,
+        progress,
+        isolation,
+        MIN_COMMIT_RATE,
+    );
     let mut out = result.to_json();
     out["verdict"] = verdict.into();
     out["lost"] = json!(lost);
@@ -1097,6 +1151,7 @@ mod tests {
         decide(
             &result,
             durability(txns, finals.as_deref(), 1),
+            None,
             progress(txns, clients, seconds),
             "serializable",
             min,
@@ -1282,6 +1337,38 @@ mod tests {
             .unwrap()
             .counts
             .contains_key("garbage"));
+    }
+
+    #[test]
+    fn detected_corruption_is_a_fail_stop_not_a_violation() {
+        let corrupt = PgError::Server {
+            code: "XX001".into(),
+            message: "invalid page in block 0 of relation \"global/1260\"".into(),
+        };
+        assert!(reports_corruption(&corrupt));
+        assert!(!reports_corruption(&PgError::Server {
+            code: "40001".into(),
+            message: String::new()
+        }));
+        assert!(!reports_corruption(&PgError::Indeterminate(
+            "pg: timeout".into()
+        )));
+        let txns = history(300, 0, false);
+        let result = elle::check(&txns, "serializable").unwrap();
+        let reason = format!("fail-stop: pg reports corruption ({corrupt})");
+        let (code, text) = decide(
+            &result,
+            durability(&txns, None, 1),
+            Some(&reason),
+            progress(&txns, 20, 15.0),
+            "serializable",
+            MIN_COMMIT_RATE,
+        );
+        assert_eq!(code, kit::INCONCLUSIVE);
+        assert!(
+            text.starts_with("fail-stop: pg reports corruption (XX001: invalid page"),
+            "{text}"
+        );
     }
 
     #[test]
