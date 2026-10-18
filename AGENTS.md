@@ -1,381 +1,64 @@
 # Working on Seedbox
 
-Read [README.md](README.md) first. [Design](docs/design.md) describes the
-architecture; [internals](docs/internals.md) explains the tricky mechanisms.
+Start with [README.md](README.md); [design](docs/design.md) and
+[internals](docs/internals.md) cover non-obvious execution constraints.
 
-## Pull requests
+## Scope and review
 
-Changes that touch the user interface must include screenshots in the PR
-showing what changed. This includes TUI screens and user-facing CLI output.
-Capture and inspect the changed interface; include before/after views when they
-help explain the change. Label fixture or test-rendered screenshots clearly.
-Keep PR descriptions short.
-Open review-ready PRs as non-drafts; reviews and merges go through the user.
+- There is no backward-compatibility requirement: replace obsolete formats/APIs;
+  do not add migration shims, qualification lists or provenance gates.
+- CLI and `seedbox.yaml` interface changes need Gardner's approval; internal APIs
+  have no separate approval/freeze process.
+- Keep PRs short and review-ready/non-draft; reviews and merges go through the user.
+  UI changes, including CLI output, need captured/inspected screenshots; label fixtures.
 
-## Workspace
+## Code boundaries
 
-- `crates/seedbox` is the default executable package: `cargo run -- <command>` runs the CLI.
-  `crates/seedbox-cli` owns command parsing, process environment and CLI output.
-  `crates/seedbox-application` owns configuration, preparation and orchestration.
-  `seedbox-api` and `seedbox-spec` own transport-independent public types;
-  `seedbox-client` owns the local HTTP client; `seedbox-server` owns the catalogue,
-  resource lifecycle and execution service. Keep the application library independent
-  of the server and CLI. Native worker dispatch remains in the executable.
-  Use `target/release/seedbox` for guest runs;
-  the bundled engine uses the CLI build profile.
-- Build guest inputs with `cargo xtask build-assets`, then the complete CLI with
-  `cargo build --release`, inside
-  `nix develop`. Linux uses Nix directly; Mac uses a Docker-compatible Linux
-  builder with a persistent Nix store. Outputs live together under `build/`;
-  `build/assets` changes atomically after a successful asset build.
-  Cargo embeds the prepared Driver runtime (`build/assets/driver-runtime.tar.gz`)
-  by default; an explicit `SEEDBOX_BUILD_DRIVER_RUNTIME` overrides it. Runtime commands never run
-  Nix, Cargo or asset builders. Replay uses retained inputs. CLI lookup owns
-  environment access; library callers supply paths and cancellation explicitly.
-- Application images are built/pulled/exported using Bollard through the user's
-  Docker-compatible engine socket. The CLI resolves connections; library callers
-  supply an explicit client. The engine owns build caching; `ocirender` merges
-  exported image layers as archives without extracting guest paths on the host.
-  Preparation never starts application containers. Replay never contacts the engine.
-- Don't set a global `target-dir` in `.cargo/config.toml`: cargo applies it by
-  current directory, so it would also move unrelated crate builds.
-- Keep Cargo target directories private per agent; they are build outputs,
-  not a shared cache. Preserve the build-only `SEEDBOX_BUILD_ROOT` checkout
-  invalidation. `seedbox-spec` uses the same watcher as engine/control so API
-  metadata follows checkout changes, including newer-to-older type layouts.
-  Checkouts predating a package's watcher need isolated target directories;
-  Cargo's relative dep-info alone does not make cross-worktree reuse safe.
-- New crates go in `crates/<name>/` and inherit `version`, `edition` and
-  `publish` from `[workspace.package]`. Put a dependency used by two or more
-  workspace crates in `[workspace.dependencies]`. Commit both lockfiles.
-- Historical experiments and evidence are preserved at commit `788fc43`;
-  the earlier standalone prototypes are at `bc07f35`. The retired standalone
-  VMM/ARM fixture engines, their world fixtures and root guest inputs
-  (`kernel/`, `kernel-arm64/`, `guest/`) were last present at `a993fa29`. Keep new runtime work
-  in the current crates, guest inputs and harness rather than reviving old
-  prototypes. `tools/mac-tcg/` retains the experimental local Mac runner,
-  its own pinned Nix shell and portable tests; it is not a production backend.
-- `harness/` holds YAML acceptance workloads, their guest Python drivers and image sources, and the
-  check entry points. Application acceptance uses `seedbox run` / `seedbox replay`
-  directly; do not add a host scenario runner. Guest build inputs (kernels,
-  progress client, guest init) live in `crates/seedbox-machine/guest/` and
-  `crates/seedbox-machine/src/pv/`.
+- `seedbox-server` owns resource lifetimes; only `seedbox-driver` coordinates service
+  execution. `seedbox-machine` owns the contract/guest inputs; PV/TCG crates own leaves.
+- `seedbox-cli` owns arguments, environment and output; libraries take explicit inputs.
+  `seedbox` owns native worker dispatch/signing. Keep application independent of server/CLI.
+- `seedbox-engine-core` owns deterministic policies, not scheduling/devices;
+  `seedbox-engine-protocol` owns wire/evidence types, not policy. `seedbox-artifacts`
+  owns offline data; keep it independent of core, hypervisors, Bollard and Tokio.
+- New crates inherit workspace version/edition/publish; shared dependencies belong
+  in `[workspace.dependencies]`. Update `Cargo.lock` for dependency changes.
 
-## Crate and test boundaries
+## Runtime and determinism
 
-`seedbox-engine-protocol` owns Driver request/report wire types, the private shared
-host-wait clock transport, and retained evidence formats. It has no CPU backend, scheduler or device policy. `seedbox-artifacts`
-owns offline records, content storage, logs, comparison and bundles; it depends
-on protocol types, never engine-core, a hypervisor, Bollard or Tokio. The
-application crate reexports retained APIs and owns parsing, preparation,
-orchestration, shared fault-input validation and Driver request/report adaptation. Native modules own
-host admission and launching.
+- Build inside `nix develop`; README owns the build sequence. Runtime lookup never
+  builds. Replay consumes retained inputs without the image engine or source project.
+- Image preparation never starts application containers or extracts guest paths onto
+  the host; see `crates/seedbox-application/src/oci.rs` and its archive renderer.
+- Keep Cargo targets private per agent; never configure a global target-dir.
+  Preserve build-only `SEEDBOX_BUILD_ROOT` checkout invalidation in build scripts.
+- Check witnesses, replay MATCH and independent fresh runs. Worker counts/watchdogs
+  cannot change results. Do not stamp source/build identity, wrap compilers or add
+  formatting exceptions to stabilize engine bytes.
+- Keep automatic progress application-independent. Host interruptions/maintenance
+  cannot advance guest time or ARM reservation epochs; see internals.
+- Definitions have one architecture and independent binary ownership, not a prior
+  simulation-ID dependency. Oracle observations are not replay override inputs.
+  Host execution limits are request options, not definition fields; see
+  `crates/seedbox-spec/src/project.rs` and its sibling `definition.rs`.
+- The catalogue/scratch are session-scoped; never reload old catalogues or delete
+  unrelated offline data. Imports are non-idempotent; do not retry uncertain uploads.
 
-Unit tests live alongside their component under `src/`; integration tests live
-in the owning crate's `tests/` and exercise public boundaries or interactions.
-Give each scenario one owner. Keep format and offline artifact tests out of the
-application crate unless they specifically exercise application composition.
-Hardware tests remain feature-controlled and compiled by portable checks.
+## Tests and CLI
 
-## Shared engine policies
-
-Service execution uses `seedbox-driver` with the native PV/TCG Machine leaves.
-The Driver owns scheduling, routing, lifecycle and snapshots.
-
-`crates/seedbox-engine-core` owns pure deterministic policies the Driver,
-server and application share: RNG streams, disk fault models, links,
-connection selection, triggers, faults, control validation, input programs,
-log indexes and network counters. It has no CPU backend, scheduler or device
-model. Keep mechanical policy moves separate from behavioral changes.
-
-## Determinism
-
-- A run's witness and a `seedbox replay` MATCH are how determinism is checked.
-  Server-owned performance settings (watchdog interval and machine workers) must never change results.
-- Determinism is about results, not source or build bytes. Don't hash or
-  stamp the source tree, Git revision, build flags or compiled binaries, and
-  don't add compiler wrappers, reproducible-build checks, or formatting
-  exceptions (`#[rustfmt::skip]`, `rustfmt.toml`) to keep engine bytes stable.
-  Reformatting, moving code and changing build flags are ordinary changes.
-- The linked CLI uses the root lockfile and the explicit `driver-world-v1`
-  contract for service execution. Its retained Driver request owns the concrete
-  factory inventory; native PV workers and monitor/anchor entries retain their
-  separate ownership protocols. Platform/version metadata never gates
-  development replay.
-
-## Checks
-
-Check runs disable Cargo incremental compilation to bound build output; the dev shell's normal incremental edit loop is unchanged.
-
-### Test time and ordering
-
-Tests never sleep; wait on a signal to establish readiness or ordering.
-Use generous real-time timeouts (tens of seconds) only to bound waiting for a
-positive event: HangGuard, Tokio timeouts and socket timeouts are all fine.
-Never assert on elapsed host time or infer ordering from a timed absence.
-The portable checker rejects host sleep calls in test code; no annotations or exemptions.
-Before handing off a test change, run `nix develop -c seedbox-check --test-time-policy` (~2s).
-`seedbox-test-time` is a dev-dependency; `seedbox-machine` may also enable it as an
-optional dependency only through `test-support`, leaving its default runtime
-dependency graph unchanged.
-
-Engine changes need relevant native hardware checks as well as portable tests.
-
-Run the suites for your platform inside `nix develop` before committing:
-
-```sh
-bash harness/check.sh                 # portable
-bash harness/check.sh linux           # Linux KVM host
-bash harness/check.sh mac             # Apple Silicon
-```
-
-Suites are named, never auto-detected: `portable`, `linux-oci`, `linux-apps`,
-`linux-pause`, `mac-apps`, `machine-tcg`, `machine-pv-x86`, plus the `linux`
-and `mac` groups. The machine suites require explicit crate-owned fixture inputs
-from `machineTcgAssets` / `machineTcgTestFixtures` or the corresponding
-`machinePv*` flake packages. TCG needs no KVM; x86 PV requires `/dev/kvm`. `portable` compiles
-every feature-gated test with `--no-run` and executes only portable tests; it
-opens no KVM/HVF device and needs no root or registry access. It always runs
-first and must pass before hardware execution. A named suite whose host
-requirements are missing exits 2 before any build. `--list` checks requirements
-without building. The pinned development shell provisions the compiled Rust
-checker automatically; cold shell realization may build development tools before
-the checker is invoked. Checker wrappers never compile/download a tool or fall
-back to Cargo. Outside that environment a missing tool exits 2 with
-`nix develop` guidance; no manual tool installation is needed.
-
-See `crates/seedbox-check/src/` for suite requirements, discovery
-and fixture inputs. `harness/acceptance.sh portable` is a compatibility entry for
-the same Rust-owned portable stage, without the outer fmt/clippy checks.
-Hardware tests are gated by Cargo features and must be built by the portable
-`--no-run` checks. Add no per-test registration lists. The runner builds as the
-current user. Workers use
-normal host scheduling; Seedbox does not reserve cores or pin CPUs. Check other revisions in a Git worktree;
-do not stamp Git revisions or checkout cleanliness in the runner.
-
-## Native project and resolved simulation definitions
-
-The current authoring format is `seedbox.yaml`, with `machines` and a dedicated
-`oracle`. Keep network latency and PV block budget optional; advanced behavior
-belongs in the oracle/control API. Do not add execution wall-time or simulated-time
-limits to either definition. Host timeouts are request options (`--wall-time`).
-The server resolves omitted defaults and image references before execution.
-Resolved definitions inline structured settings and reference binary content by
-hash, with one simulation-wide architecture. Provenance annotations are not
-ownership. Do not introduce dependencies on a prior simulation ID for replay.
-TUI edits use one working copy; saves and submissions freeze independent snapshots.
-Use one deterministic override timeline for unchanged and edited runs; oracle calls
-are generated by the oracle and must not be replayed a second time as overrides.
-See `crates/seedbox-spec/src/project.rs`. Earlier Compose details below describe the legacy
-reader and must not expand the native authoring surface.
-
-## CLI
-
-The CLI lives in `crates/seedbox-cli/src/`:
-
-- `lib.rs`: process entry, argument definitions and one function per command.
-- `output.rs`: status lines, `key: value` fields and their value formats.
-- `defaults.rs`: how each runtime input is found when no flag is given.
-- `backends.rs`: platform backend selection and guest-asset lookup.
-- `diagnostics.rs`: completed server-owned raw console/management/worker evidence.
-- `bundles.rs`: server export/import and atomic no-clobber output publication.
-- `signals.rs`: cancellation.
-- `simulations.rs`: server-client commands and durable control receipts.
-- `observe.rs`: read-only observation (`logs`, `events`, `get world`, `get timeline`, `wait`).
-- `faults.rs`: bounded YAML/JSON fault input before connecting to the server.
-- `playback_args.rs`: positional playback-control arguments and rate validation.
-
-`crates/seedbox/src/main.rs` dispatches the private retained worker before calling
-`seedbox_cli::main()`. Its `engine_worker.rs`, native dependencies and executable
-signing stay in `seedbox`. The dedicated CLI library is the public process
-arguments/environment/output boundary; application and server libraries keep
-explicit inputs rather than parsing process arguments or reading CLI environment.
-
-Follow these rules when you change the CLI, and update this section if you
-deliberately change one.
-
-### Arguments
-
-- Required flags are a last resort. Every runtime input needs a sensible
-  default or a search, so `seedbox run` works with no arguments on a set-up
-  host. The only required inputs are those with no possible default (`init
-  DIRECTORY`, `prepare --output`, `compare BASELINE SIMULATION`, `import BUNDLE`).
-- A command's main object is positional: the project path (default `.`,
-  and a directory resolves to its `seedbox.yaml`), a simulation ID, or an import bundle file.
-  `run`, `explore`, `rerun` and `replay` submit through the server; clients never
-  launch execution directly. `replay ID` reruns then compares; `rerun ID` reports
-  the oracle verdict. `export ID` saves a completed resolved resource; `import BUNDLE`
-  registers a fresh independent completed resource without executing it. Imports
-  are non-idempotent; never automatically retry an uncertain upload.
-- Flags are long kebab-case. Don't add short flags except `-o`/`-h`/`-V`.
-  Boolean flags are presence-only (`--json`, `--detach`).
-- A choice from a fixed set uses `#[derive(ValueEnum)]` with a doc comment on
-  each variant. Never use string matching followed by `unreachable!`.
-- Validate ranges and formats in a `value_parser`, so a bad value is a
-  clap usage error that names the flag, not a runtime error later.
-- Reuse the shared `#[derive(Args)]` groups (`ComposeArg`,
-  `StateArg`, `RuntimeInputs`) instead of redeclaring flags.
-  When several commands need a new option, add a group.
-- Environment variables (`env = "SEEDBOX_<NAME>"`) say where things are: paths
-  and state directory. Never back a parameter that changes results (seed,
-  memory, full-state, faults, schedule) with an environment variable; it would
-  change a run's identity without appearing on the command line.
-
-The legacy runtime override flags `--vmm`, `--kernel`, `--runtime-assets`,
-`--guest-init` and `--mke2fs` are removed. The CLI does not read their corresponding
-`SEEDBOX_*` variables; supplying a removed flag is a clap usage error (exit 2).
-Do not restore those bindings to select an executor. Build scripts retain the
-environment names they need as build inputs. `SEEDBOX_ASSET_DIR` remains the
-complete Driver-package relocation, with a host-architecture subdirectory.
-
-### Defaults for a new input
-
-1. Declare it as `Option<PathBuf>` with `env = "SEEDBOX_<NAME>"` in the
-   relevant group.
-2. Add a resolver in `defaults.rs` that returns `existing("--flag", path)` for
-   an explicit value and otherwise searches in a fixed, documented order.
-3. On failure, return `missing(what, &searched, fix)`, which lists every
-   location tried and one way to fix it.
-4. Resolve it in `RuntimeInputs::backends` or earlier, before any slow work
-   (image pulls and builds). Fail fast. `run` and `explore` check immutable runtime
-   inputs and backend host admission before
-   preparation.
-5. Document the default in CLI help.
-
-### Help text
-
-- Every argument and subcommand has a doc comment. Write it as a short phrase
-  starting with a capital letter and ending with a period. A subcommand's line
-  is imperative ("Run ...", "Show ...") and names any host requirement in
-  parentheses: "(Linux KVM host, root)".
-- When clap can't show a default (an `Option` with a computed default), end the
-  doc with `[default: ...]` in clap's format.
-- Group flags under the existing `next_help_heading` sections: the default
-  options, "Runtime inputs", and "Performance (never changes results)". A flag
-  takes the heading of the group declared before it, so flatten
-  general-purpose groups (`StateArg`) before `RuntimeInputs`.
-- `run`, `replay` and `compare` show `EXIT_CODES` in `after_help`.
-- Check the result with `cargo run -- help <command>`.
-
-### Output
-
-- Resource lists and `get` print compact tables by default. `describe` and
-  `playback` print full YAML. `--json` preserves structured documents without
-  a status-line prefix.
-- stdout carries results only. A command prints one status line
-  `WORD: detail`, where `WORD` is the SCREAMING_SNAKE_CASE serde name
-  produced by `word()` (`PASS`, `MATCH`, `VALID`, `CREATED`, ...). Any
-  further lines are lowercase `key: value` (`replay: MATCH`, `error: ...`).
-  Print both through `cli::output` rather than `println!`.
-- `logs ID MACHINE` writes selected application bytes to stdout with no decoration
-  or added newlines. Omission diagnostics go to stderr; `--json` emits
-  newline-delimited records with stream, time, incarnation and byte arrays.
-  `events ID` also emits newline-delimited records. Both print retained history
-  and exit; `--follow` keeps streaming until completion, like `kubectl logs`.
-  Logs keep bounded history in a shared 64 MiB server budget and events in their
-  own 16 MiB budget, for completed simulations too. Observation commands never
-  block by default; `wait ID --for CONDITION` is the explicit way to block.
-  `diagnostics ID [NAME]` lists completed raw evidence or streams the exact retained
-  file bytes. Its `--json` prints one metadata or lossless hex-payload document.
-  Diagnostic names are allowlisted record keys, never client host paths.
-- `run` and `rerun` print `OUTCOME: simulation-id`; detached submission prints
-  `CREATED: simulation-id`. `replay` and `compare` print
-  `MATCH|MISMATCH|NOT_COMPARABLE: simulation-id`. Exactly one status line is
-  printed. Comparison does not change the stored oracle verdict. Scripts should
-  prefer `--json` and resource metadata instead of relying on host run paths.
-- Apart from live streaming commands, `--json` prints exactly one pretty JSON document to stdout and nothing else.
-  Its field names come from the library's serde types; don't rename them in
-  the CLI.
-- Progress and diagnostics go to stderr: lowercase, plain text, no colour,
-  no emoji.
-
-### Errors and exit status
-
-- CLI code returns `seedbox_application::Error`. It never panics, calls `unwrap`, or calls
-  `process::exit`. `main` prints `error: <message>` and exits 2.
-- Use `Error::Setup` for a problem the user can fix (a missing file, a missing
-  tool, the wrong host, a permission). It prints without a category prefix.
-  Its message starts lowercase, names the path, flag or value involved, and
-  says how to fix it: `project file /x/seedbox.yaml: not found`, or `guest assets missing;
-  run cargo xtask build-assets`.
-- Never let a bare `io::Error` from a user-supplied path or a spawned program
-  reach the user. Check the path first (`existing`), or add context as
-  `WorkerLaunch::spawn` (`worker_process.rs`) and `host::msr_error` do.
-- Exit codes are a fixed contract (`EXIT_CODES` and the acceptance scripts): 0 PASS/MATCH, 1 FAIL/MISMATCH/DIFFERENT, 2
-  ERROR/NOT_COMPARABLE/usage/setup, 3 INCOMPLETE, 124 TIMEOUT. Don't change
-  what a code means. A new code must be added to all four places.
-
-### Tests and docs
-
-- Every new flag, default and error path that the test build can reach gets a
-  case in `crates/seedbox/tests/cli.rs`. Those tests run `CARGO_BIN_EXE_seedbox`
-  through `seedbox_with`, which clears the environment (so no `SEEDBOX_*`,
-  `CARGO*` or `SUDO_USER` leaks in) and sets `HOME` and `PATH` explicitly.
-  Check exact stderr for setup errors. Usage errors come from clap, so checking
-  for the key phrase is enough.
-- Pure resolution logic gets unit tests in `defaults.rs`.
-- When behaviour changes, update CLI help and any affected examples. Keep the
-  root README quickstart and the generated project quickstart in
-  `crates/seedbox-application/templates/README.md` accurate.
-
-`doctor` checks KVM device access and the guest
-kernel/VMM/runtime inputs. By default it selects the native Driver PV package,
-validates its inputs, and probes with its guest kernel. `SEEDBOX_ASSET_DIR`
-relocates the selected backend's package; it does not select legacy mode.
-There are no kernel/VMM override flags or runtime environment bindings. Runtime
-resolution is lookup-only and must never invoke a compiler or launch the worker.
-Success reports
-only the exact cleaned-up probe observations; the library does
-not read arguments/environment or print. It creates no state/run and never prepares
-images or executes guests. Compatibility readiness is not replay qualification.
-
-## Current stage
-
-Obsolete formats, APIs and CLI commands are replaced outright. There is no backward
-compatibility requirement; do not add legacy readers, aliases or migration shims.
-
-- Seedbox is under heavy development. Don't add pins, allowlists,
-  qualification lists, admission policies, provenance markers or similar
-  gates; #142 and #143 removed the engine, kernel, CPU and host-policy pins.
-  When a test depends on such a check, change or drop the test. Text elsewhere
-  about qualification or re-pinning is historical.
-- Current Driver runs replay using their retained runtime inputs. Backwards
-  compatibility with legacy execution profiles and contracts is not required;
-  do not add migration, compatibility shims or a second executor for old runs.
-  Legacy runs may fail with ordinary errors. To compare across engine changes,
-  make a fresh run and check its witness against the old run's.
-- There is one engine mode: PV time with automatic application progress
-  from binary instrumentation (`docs/internals.md`). Do not require
-  application-specific flags or environment overrides to make replay succeed.
-  ARM uses guest-epoch software exclusive reservations; host interruptions and
-  backend maintenance must not advance their epoch. Keep the shared PV word,
-  kernel EL0 return hook and translator commit checks aligned. The Driver's
-  x86 kernel polling through `cpu_relax` makes bounded PV progress; other
-  kernel polling and raw assembly retry loops remain outside that coverage
-  (see `docs/internals.md`).
-  `.github/workflows/pv-tests.yml` runs its checks on GitHub-hosted Ubuntu
-  x86-64 runners.
-
-If no local server is running, an interactive client asks before starting one.
-The server stays running for subsequent commands. Noninteractive callers must
-start `seedbox serve` explicitly. Use `seedbox shutdown` to stop the server and
-its active work gracefully.
-
-The running server uses an in-memory catalogue. Execution files are session-scoped
-under `state/sessions/session-*`; shutdown removes them after workers finish,
-and startup reclaims abandoned sessions while holding the server lock. Never
-load an old catalogue or delete unrelated offline run data.
-
-The simulation input program is separate from application configuration and host playback.
-See `docs/internals.md` for authored keys, due-time admission, same-time ordering,
-checkpoint cursor ownership and API-owned timeline presentation. Future inputs never
-reserve engine fault IDs; clients never reconstruct an execution spec to edit a timeline.
-
-## Documentation
-
-Keep public documentation in README.md, docs/design.md, and docs/internals.md.
-README covers getting started; design covers architecture and principles;
-internals explains mechanisms whose ordering or state is easy to get wrong.
-Use short, factual sections and link to the owning code. Do not commit run
-reports, implementation diaries, or duplicate command references. Use CLI help
-for options. The template README is the quickstart generated by `seedbox init`.
+- Tests never sleep or infer order from elapsed time/timed absence. Use positive
+  signals and generous wait timeouts; no test-time annotations or exemptions.
+- Unit tests stay beside components; public-boundary tests stay in their owning
+  crate's `tests/`. Give each scenario one owner; share backend-neutral scenarios.
+- Run portable checks in `nix develop`; engine changes also need relevant native
+  suites. Portable compiles native cases without running them. Missing requirements
+  are blockers. Suite discovery/policy lives in `crates/seedbox-check/src/`.
+- CLI conventions live in `crates/seedbox-cli/src/`: reuse clap argument groups,
+  validate before preparation, and keep computed defaults in `defaults.rs`.
+  Environment selects paths/state, never result-changing inputs.
+- Use `output.rs` for status/fields; stdout carries results, stderr plain diagnostics.
+  Nonstreaming JSON is one library-shaped document. Raw logs/diagnostics preserve bytes.
+- CLI returns contextual errors, never panics/unwrap/exit. Preserve exit codes in
+  `EXIT_CODES` and tests; cover reachable flags/defaults/errors in `crates/seedbox/tests/cli.rs`.
+- Keep help/examples and both quickstarts accurate. Public docs describe only tricky
+  current mechanisms in short sections; do not commit run reports or process diaries.
