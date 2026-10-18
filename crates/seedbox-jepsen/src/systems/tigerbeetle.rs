@@ -1219,10 +1219,10 @@ fn mixed(shared: Arc<Shared>, mode: Mode) -> u8 {
             return verdict(kit::INCONCLUSIVE, &format!("final heal failed: {error}"));
         }
     }
-    let upgraded = match &args.await_release {
-        Some(release) => Some(await_release(&shared, &watch, release)),
-        None => None,
-    };
+    let upgraded = args
+        .await_release
+        .as_ref()
+        .map(|release| await_release(&shared, &watch, release));
     let (transfers, accounts) = match final_reads(&shared) {
         Ok(models) => models,
         Err(error) => {
@@ -1712,14 +1712,14 @@ fn poll_agents(shared: &Shared, watch: &Mutex<Watch>) {
                 exit["at"].to_string(),
                 exit["what"].as_str().unwrap_or("").to_string(),
             );
-            if !watch.exits.contains_key(&key) {
+            if let std::collections::btree_map::Entry::Vacant(slot) = watch.exits.entry(key) {
                 evidence(
                     "replica-exit",
                     json!({"node": node, "code": exit["code"], "signal": exit["signal"],
                            "release": exit["release"], "panic": Watch::panic_lines(&exit),
                            "tail": exit["tail"]}),
                 );
-                watch.exits.insert(key, exit);
+                slot.insert(exit);
             }
         }
     }
@@ -2303,13 +2303,13 @@ fn sessions(shared: Arc<Shared>) -> u8 {
     let mut evictions = Vec::new();
     let reap = |open: &mut Vec<Session>, deaths: &mut BTreeMap<usize, Value>, phase: &str| {
         for s in open.iter_mut() {
-            if !deaths.contains_key(&s.number) {
+            if let std::collections::btree_map::Entry::Vacant(slot) = deaths.entry(s.number) {
                 if let Some(exit) = s.exited() {
                     evidence(
                         "session-died",
                         json!({"session": s.number, "phase": phase, "exit": exit}),
                     );
-                    deaths.insert(s.number, exit);
+                    slot.insert(exit);
                 }
             }
         }

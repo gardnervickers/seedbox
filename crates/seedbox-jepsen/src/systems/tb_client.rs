@@ -266,7 +266,9 @@ fn reply16(operation: u8, reply: &[u8]) -> Vec<u8> {
         return reply.to_vec();
     }
     reply
-        .chunks_exact(16)
+        .as_chunks::<16>()
+        .0
+        .iter()
         .enumerate()
         .filter_map(|(index, result)| {
             let status = u32::from_le_bytes(result[8..12].try_into().unwrap());
