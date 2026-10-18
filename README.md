@@ -18,8 +18,7 @@ or Podman. Mac execution and replay still need hardware verification.
 
 ```sh
 nix develop
-cargo xtask build-assets
-cargo build --release
+cargo xtask build --release
 ./target/release/seedbox doctor
 ./target/release/seedbox init ~/seedbox-quickstart --template etcd
 ./target/release/seedbox run ~/seedbox-quickstart
@@ -36,6 +35,15 @@ The build embeds the runtime: guest kernels, init, progress client and helpers.
 images are prepared. Running Seedbox does not invoke Nix or a compiler. Docker
 or Podman prepares application images; replay uses retained inputs without the
 image engine or source project.
+
+`cargo xtask build` prepares assets, then forwards its options to `cargo build`.
+Linux builds assets with Nix directly; Mac uses Docker or Podman for guest inputs
+and native Nix for host tools. Unchanged bundles reuse the existing `build/assets`
+publication. To prepare assets without compiling the CLI, use
+`cargo xtask build-assets`; ordinary Cargo commands consume those prepared assets.
+Changed bundles retain the previous generation for concurrent builds. With all
+Cargo builds stopped, `cargo xtask clean-assets` removes old generations while
+keeping the current bundle. Already-built executables contain their own assets.
 
 To use a separate complete runtime package, set `SEEDBOX_ASSET_DIR` to the
 directory containing its host-architecture subdirectory (for example,
