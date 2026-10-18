@@ -1861,6 +1861,134 @@ fn rustfs() -> Vec<Scenario> {
         .collect()
 }
 
+// ------------------------------------------------------------ keel-s3dd
+
+/// The image `harness/jepsen/keel/image/build.sh` builds and tags from a keel
+/// checkout; keel has no public remote, so no scenario can name its context.
+const KEEL_S3DD: &str = "localhost/seedbox-jepsen/keel-s3dd:current";
+
+/// One keel-s3dd server, its store on a volume, restarted by run-s3dd.sh
+/// whenever it exits. The segment log never reclaims space, so the store has
+/// 32 segments of 16 MiB (512 MiB of writes) instead of the default 8.
+fn keel_server(backend: &str, placement: &str) -> Machine {
+    Machine::image(KEEL_S3DD)
+        .comment("run-s3dd.sh restarts keel-s3dd whenever it exits, as a supervisor would.")
+        .entrypoint(&["/bin/sh", "/run-s3dd.sh"])
+        .command(strings(&[
+            "--listen",
+            "0.0.0.0:9000",
+            "--data-dir",
+            "/data",
+            "--access-key",
+            "jepsen",
+            "--secret-key",
+            "jepsen-secret",
+            "--region",
+            "us-east-1",
+            "--io-backend",
+            backend,
+            "--object-placement",
+            placement,
+            "--store-segments",
+            "32",
+        ]))
+        .file("run-s3dd.sh", "/run-s3dd.sh")
+        .memory(512)
+        .data_sized("/data", "2GiB")
+}
+
+#[allow(clippy::type_complexity)]
+fn keel() -> Vec<Scenario> {
+    let objects: &[&str] = &["--size", "4096"];
+    let register: &[&str] = &[
+        "--workload",
+        "cas-register",
+        "--size",
+        "1024",
+        "--keys",
+        "4",
+    ];
+    let crash: &[&str] = &["--crash-all-every", "15"];
+    let reboot: &[&str] = &["--reboot-before-check"];
+    // (suffix, backend, placement, what the variant is)
+    let variants = [
+        (
+            "",
+            "poll",
+            "log",
+            "the poll I/O backend and objects in the segment log",
+        ),
+        (
+            "-uring",
+            "uring",
+            "log",
+            "the io_uring I/O backend and objects in the segment log",
+        ),
+        (
+            "-file",
+            "poll",
+            "file",
+            "the poll I/O backend and one file per object",
+        ),
+    ];
+    let mut specs: Vec<(String, String, &str, &str, Vec<&str>)> = Vec::new();
+    for (suffix, backend, placement, what) in variants {
+        specs.push((
+            format!("keel{suffix}-objects"),
+            format!("One keel-s3dd server with {what}.\nLooking for unknown bugs: S3 PUTs of unique 4 KiB objects from four clients for\n60 s with reads of acknowledged objects, then a read-back and a listing of every\nacknowledged object. keel-s3dd acknowledges a write only once it is synced, so\nnothing acknowledged may be lost. Run it without a fault profile for a baseline,\nor with `--fault-profile harness/jepsen/keel/generic-faults.yaml`."),
+            backend, placement, objects.to_vec(),
+        ));
+        specs.push((
+            format!("keel{suffix}-register"),
+            format!("One keel-s3dd server with {what}.\nFour registers: reads, PUTs, DELETEs and compare-and-set by conditional PUT (a GET,\nthen If-Match on its ETag, or If-None-Match from absent) from four clients for 60 s,\nthen a read of each key. Every key's history must be linearizable. Run it with\n`--fault-profile harness/jepsen/keel/generic-faults.yaml`."),
+            backend, placement, register.to_vec(),
+        ));
+        specs.push((
+            format!("keel{suffix}-crash-all"),
+            format!("keel{suffix}-objects under power loss: the server fails about every 15 s (7.5-22.5 s)\nand boots 2 s later, its volume kept (page cache and unflushed sectors are lost). An\nobject acknowledged before a power failure must survive it intact."),
+            backend, placement, [objects, crash].concat(),
+        ));
+        specs.push((
+            format!("keel{suffix}-crash-all-register"),
+            format!("keel{suffix}-register under the same power loss: no acknowledged write or\ncompare-and-set may be lost, and every key's history must stay linearizable."),
+            backend, placement, [register, crash].concat(),
+        ));
+    }
+    specs.push((
+        "keel-eio".into(),
+        "keel-objects under failed disk requests: run it with\n`--fault-profile harness/jepsen/keel/eio-data-faults.yaml`. keel-s3dd wedges for good on\na failed write or sync (fail-stop by design), so the server is power-cycled once the\nfaults end and must then come back with every acknowledged object: a write whose sync\nfailed must never have been acknowledged.".into(),
+        "poll", "log", [objects, reboot].concat(),
+    ));
+    specs.push((
+        "keel-eio-register".into(),
+        "keel-register under failed disk requests, power-cycled before the checks like\nkeel-eio: run it with `--fault-profile harness/jepsen/keel/eio-data-faults.yaml`.".into(),
+        "poll", "log", [register, reboot].concat(),
+    ));
+    specs.push((
+        "keel-corrupt-writes".into(),
+        "keel-objects under silent corruption of written data: run it with\n`--fault-profile harness/jepsen/keel/corruption-write-faults.yaml`. One server keeps one\ncopy, so corrupted objects may be lost; but every read must return the bytes written\nor an error, never other bytes, and a listing must hold only keys some client wrote.\nThe server is power-cycled once the faults end.".into(),
+        "poll", "log", [objects, reboot, &["--integrity-only"]].concat(),
+    ));
+    specs
+        .into_iter()
+        .map(|(name, comment, backend, placement, arguments)| {
+            let mut args = strings(&["keel-s3", "--nodes", "s3", "--duration", "60"]);
+            args.extend(strings(&arguments));
+            Scenario {
+                name,
+                comment,
+                generated: format!(
+                    "keel-s3dd, one server, --io-backend {backend} --object-placement {placement}"
+                ),
+                machines: vec![("s3".into(), keel_server(backend, placement))],
+                // The register check's search grows with unacknowledged writes.
+                oracle: Machine::program(&args).memory(1024),
+                latency: "1ms".into(),
+            }
+        })
+        .collect()
+}
+
 /// Every committed scenario, as (path under `harness/jepsen`, contents).
 pub fn all() -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -1877,6 +2005,7 @@ pub fn all() -> Vec<(String, String)> {
         ("galera", galera()),
         ("tigerbeetle", tigerbeetle()),
         ("rustfs", rustfs()),
+        ("keel", keel()),
     ] {
         for scenario in scenarios {
             out.push((

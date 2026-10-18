@@ -1,0 +1,24 @@
+# Silent corruption of the server's data reads (never the filesystem's
+# metadata): a selected read completes with one sector of garbage, while the
+# disk itself keeps the right bytes. keel-s3dd checksums its log frames and
+# object blocks, so a corrupted read must fail rather than return other bytes,
+# and since nothing on disk changes, no acknowledged object may be lost, even
+# across the power failures mixed in (recovery reads the log back through the
+# same corrupting disk). Pair it with keel-objects or keel-register.
+start: 15s
+end: 70s
+interval: 4s
+faults:
+  - kind: disk_error
+    weight: 3
+    op: read
+    ppm: 20000
+    effect: corrupt
+    scope: data
+    duration: {min: 2s, max: 8s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 4s}
+  - kind: pause_process
+    weight: 1
+    duration: {min: 500ms, max: 4s}

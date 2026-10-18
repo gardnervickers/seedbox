@@ -1,0 +1,22 @@
+# Failed disk reads and writes (EIO) on the server, restricted to requests
+# clear of ext4's metadata (an unscoped error also fails the journal and leaves
+# the filesystem unusable), with power loss and process pauses. keel-s3dd
+# wedges for good on a failed write or sync (fail-stop by design); pair this
+# with keel-eio or keel-eio-register, which power-cycle the server once the
+# faults end. A write whose sync failed must never have been acknowledged.
+start: 15s
+end: 70s
+interval: 4s
+faults:
+  - kind: disk_error
+    weight: 3
+    op: any
+    ppm: 50000
+    scope: data
+    duration: {min: 2s, max: 8s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 4s}
+  - kind: pause_process
+    weight: 1
+    duration: {min: 500ms, max: 4s}
