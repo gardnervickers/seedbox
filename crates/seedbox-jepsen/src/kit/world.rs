@@ -110,6 +110,16 @@ impl Ctl {
         Ok(())
     }
 
+    /// Start no generated fault for `seconds` of simulated time (natively a
+    /// no-op); returns when the quiet period ends, in simulated nanoseconds.
+    pub fn quiet(&mut self, seconds: f64) -> Result<Option<u64>> {
+        let duration = Duration::from_millis((seconds.max(0.0) * 1000.0).round() as u64);
+        match &mut self.backend {
+            Backend::Seedbox(world) => Ok(Some(world.quiet(duration)?)),
+            Backend::Native(_) => Ok(None),
+        }
+    }
+
     /// SIGKILL the application (natively: kill the container).
     pub fn stop(&mut self, target: &str) -> Result<()> {
         match &mut self.backend {

@@ -1,5 +1,5 @@
 # Coordinated power loss on Kafka 4.3.1 with the default flush settings: during the queue
-# workload every node fails together about every 20 s and reboots 2 s later. Kafka
+# workload every node fails together about every 15 s (7.5-22.5 s) and reboots 2 s later. Kafka
 # acknowledges acks=all writes once the in-sync replicas have them in memory and leaves
 # flushing to the OS, so losing acknowledged records here is documented behaviour; the
 # flush control is kafka4-crash-all-flush.
@@ -81,7 +81,7 @@ oracle:
   build:
     context: ../../..
     dockerfile: crates/seedbox-jepsen/guest.Dockerfile
-  entrypoint: ["/jepsen/seedbox-jepsen", "kafka", "--workload", "queue", "--nemesis", "crash-all", "--brokers", "n1,n2,n3", "--duration", "45", "--recover", "120", "--crash-all-every", "20"]
+  entrypoint: ["/jepsen/seedbox-jepsen", "kafka", "--workload", "queue", "--nemesis", "crash-all", "--brokers", "n1,n2,n3", "--duration", "45", "--recover", "120", "--crash-all-every", "15"]
   memoryMiB: 512
 network:
   latency: 1ms

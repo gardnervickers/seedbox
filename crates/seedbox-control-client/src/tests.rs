@@ -75,6 +75,24 @@ fn requests_are_one_compact_line_with_ids_from_one() {
 }
 
 #[test]
+fn quiet_returns_the_end_of_the_quiet_period() {
+    let (until, seen) = session(
+        |request| Some(reply(request, json!({"quiet_until_ns": 90_000_000_000u64}))),
+        |world| world.quiet(Duration::from_secs(30)).unwrap(),
+    );
+    assert_eq!(until, 90_000_000_000);
+    assert_eq!(
+        seen,
+        ["{\"version\":1,\"id\":1,\"op\":\"quiet\",\"duration_ns\":30000000000}\n"]
+    );
+    let (error, _) = session(
+        |request| Some(reply(request, json!({}))),
+        |world| world.quiet(Duration::from_secs(1)).unwrap_err(),
+    );
+    assert!(matches!(error, Error::Protocol(_)), "{error:?}");
+}
+
+#[test]
 fn every_operation_matches_the_python_wire_shape() {
     let (_, seen) = session(
         |request| {
