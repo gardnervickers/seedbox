@@ -54,7 +54,7 @@ The shared [store](../crates/seedbox-machine/src/machine/disk.rs) completes requ
 Host interruption can clear a hardware reservation without any guest write, making raw store-exclusive failure nondeterministic.
 Translation retains address/value/size/guest epoch and retries physical monitor loss inside the exclusive pair.
 Guest boundaries advance the epoch; watchdog and maintenance exits do not. Value equality alone misses ABA.
-The [translator](../crates/seedbox-machine/guest/progress/dynamorio-exclusives.patch) and kernel return hook assume one guest CPU.
+The [translator](https://github.com/gardnervickers/dynamorio/blob/108a0c133744f500a375dfc284c6ecab1ad24d66/core/arch/aarchxx/mangle.c) and kernel return hook assume one guest CPU.
 
 ## ARM idle rendezvous
 

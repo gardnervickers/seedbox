@@ -3,15 +3,10 @@ pkgs.stdenv.mkDerivation {
   pname = "seedbox-dynamorio";
   version = "11.3.0-1";
   src = pkgs.fetchurl {
-    url = "https://github.com/DynamoRIO/dynamorio/archive/refs/tags/release_11.3.0-1.tar.gz";
-    hash = "sha256-aj7BN0bravXAY72wVB37ZbTJvS+hZTxC61RAMiBDLsI=";
+    # Seedbox backports on release_11.3.0-1, applied as four ordered commits.
+    url = "https://github.com/gardnervickers/dynamorio/archive/108a0c133744f500a375dfc284c6ecab1ad24d66.tar.gz";
+    hash = "sha256-CpGReIBec2OeBMCDSE67+A6BKwYWPzPElk3iUAHs6AI=";
   };
-  patches = [
-    ./guest/progress/dynamorio-exclusives.patch
-    ./guest/progress/dynamorio-sigreturn.patch
-    ./guest/progress/dynamorio-synch-signal.patch
-    ./guest/progress/dynamorio-execute-only.patch
-  ];
   # BUILD_EXT configures every extension, including drsyms whose bundled
   # elfutils submodule is absent from the release source tarball. We build
   # only drreg and its drmgr/drcontainers dependencies.
