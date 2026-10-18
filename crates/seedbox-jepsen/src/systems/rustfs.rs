@@ -117,6 +117,12 @@ pub struct Args {
     /// and listings of keys no client wrote.
     #[arg(long)]
     pub integrity_only: bool,
+    /// Register workloads: after a write or compare-and-set whose outcome is
+    /// unknown, the client waits this many milliseconds, so a server that
+    /// answers every write with an ambiguous 500 (one wedged after an I/O
+    /// error) leaves a history the checker can still search.
+    #[arg(long, default_value_t = 0)]
+    pub unknown_backoff_ms: u64,
 }
 
 /// What one S3 request came back with.
@@ -337,6 +343,8 @@ struct Observed {
     read: Option<(u32, Option<String>)>,
     /// A description of bytes no client wrote, if a read saw some.
     unwritten: Option<String>,
+    /// A write or compare-and-set whose outcome is unknown.
+    unknown: bool,
 }
 
 /// One register operation on `key` through `node`, recorded in `history`.
@@ -414,7 +422,7 @@ fn register_op(
         // malformed or unauthenticated request.
         (_, Exchange::NotSent(_) | Exchange::Answered(400 | 403, ..)) => history.fail(id),
         // Anything else may or may not have taken effect: leave it pending.
-        _ => {}
+        _ => observed.unknown = true,
     }
     observed
 }
@@ -469,6 +477,9 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
                                 .lock()
                                 .unwrap()
                                 .push(format!("{}: {bad}", keys[k]));
+                        }
+                        if observed.unknown && args.unknown_backoff_ms > 0 {
+                            std::thread::sleep(Duration::from_millis(args.unknown_backoff_ms));
                         }
                         observed.read
                     };

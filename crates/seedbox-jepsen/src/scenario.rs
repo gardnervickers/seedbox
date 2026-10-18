@@ -1961,8 +1961,8 @@ fn keel() -> Vec<Scenario> {
     ));
     specs.push((
         "keel-eio-register".into(),
-        "keel-register under failed disk requests, power-cycled before the checks like\nkeel-eio: run it with `--fault-profile harness/jepsen/keel/eio-data-faults.yaml`.".into(),
-        "poll", "log", [register, reboot].concat(),
+        "keel-register under failed disk requests, power-cycled before the checks like\nkeel-eio: run it with `--fault-profile harness/jepsen/keel/eio-data-faults.yaml`. A\nwedged keel-s3dd answers every write with an ambiguous 500, so a client waits 1 s\nafter each unknown outcome to keep the history checkable.".into(),
+        "poll", "log", [register, reboot, &["--unknown-backoff-ms", "1000"]].concat(),
     ));
     specs.push((
         "keel-corrupt-writes".into(),
