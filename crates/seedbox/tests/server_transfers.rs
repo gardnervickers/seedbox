@@ -1,4 +1,4 @@
-//! Public CLI/client/server bundle interaction; the native execution path is
+//! Public show/compare commands over client-imported fixtures; native execution is
 //! deliberately unavailable for this catalogue-only fixture.
 use seedbox_api::*;
 use seedbox_application::{definition, store::ContentStore};
@@ -150,11 +150,11 @@ fn success(output: Output) -> Output {
 }
 
 #[test]
-fn cli_bundle_roundtrip_diagnostics_and_json_without_execution() {
+fn show_diagnostics_and_compare_imported_fixtures_without_execution() {
     let root = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
     bundle(root.path());
     let mut server = command(root.path())
-        .args(["serve", "--startup-handshake"])
+        .args(["server", "start", "--foreground", "--startup-handshake"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .guarded_spawn()
@@ -174,46 +174,67 @@ fn cli_bundle_roundtrip_diagnostics_and_json_without_execution() {
         .enable_all()
         .build()
         .unwrap();
-    let imported = success(run(root.path(), &["import", "fixture.tar", "--json"]));
-    assert!(imported.stderr.is_empty());
-    let simulation: Simulation = serde_json::from_slice(&imported.stdout).unwrap();
+    // Bundles remain a transport API; the public CLI exposes portable checkpoints.
+    let source =
+        tokio::fs::File::from_std(fs::File::open(root.path().join("fixture.tar")).unwrap());
+    let simulation = rt
+        .block_on(client.import_bundle(source, BUNDLE_MAX_BYTES, || false))
+        .unwrap();
     assert_eq!(simulation.status.phase, Phase::Completed);
     let id = simulation.metadata.id.as_str();
-    let exported = success(run(root.path(), &["export", id]));
-    assert_eq!(
-        exported.stdout,
-        format!("EXPORTED: {id}.seedbox.tar\n").as_bytes()
-    );
-    let receipt = success(run(
-        root.path(),
-        &["export", id, "-o", "second.tar", "--json"],
-    ));
-    let receipt: serde_json::Value = serde_json::from_slice(&receipt.stdout).unwrap();
-    assert_eq!(receipt["simulation"], id);
-    assert_eq!(
-        receipt["sizeBytes"],
-        fs::metadata(root.path().join("second.tar")).unwrap().len()
-    );
-    let imported_again = success(run(
-        root.path(),
-        &["import", &format!("{id}.seedbox.tar"), "--json"],
-    ));
-    let second: Simulation = serde_json::from_slice(&imported_again.stdout).unwrap();
+    let mut exported = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
+    rt.block_on(client.export_bundle(
+        &simulation.metadata.id,
+        &mut exported,
+        BUNDLE_MAX_BYTES,
+        || false,
+    ))
+    .unwrap();
+    let second = rt
+        .block_on(client.import_bundle(exported, BUNDLE_MAX_BYTES, || false))
+        .unwrap();
     assert_ne!(simulation.metadata.id, second.metadata.id);
+    let explicit_state = root.path().join("server");
+    let state = explicit_state.to_str().unwrap();
+    let inline_state = format!("--state={state}");
+    for words in [
+        vec!["--state", state, "show", ""],
+        vec!["show", "--state", state, ""],
+        vec!["show", inline_state.as_str(), ""],
+        vec!["run", "--state", state, "--from", ""],
+    ] {
+        let completed = command(root.path())
+            .env("SEEDBOX_STATE", root.path().join("wrong-server"))
+            .args(["__complete", "--"])
+            .args(&words)
+            .guarded_output()
+            .unwrap();
+        assert!(completed.status.success());
+        assert!(completed.stderr.is_empty());
+        assert!(
+            String::from_utf8_lossy(&completed.stdout)
+                .lines()
+                .any(|candidate| candidate == id),
+            "{words:?}"
+        );
+    }
     let comparison = success(run(
         root.path(),
         &["compare", id, second.metadata.id.as_str(), "--json"],
     ));
     let comparison: SimulationComparison = serde_json::from_slice(&comparison.stdout).unwrap();
     assert_eq!(comparison.status, ComparisonStatus::Match);
-    let metadata = success(run(root.path(), &["diagnostics", id, "--json"]));
+    let metadata = success(run(
+        root.path(),
+        &["show", id, "--view", "diagnostics", "--json"],
+    ));
     let metadata: DiagnosticFiles = serde_json::from_slice(&metadata.stdout).unwrap();
     assert_eq!(metadata.files.len(), 5);
     assert_eq!(
         metadata.omissions["vmm.stderr"],
         "truncated at retention limit"
     );
-    let table = success(run(root.path(), &["diagnostics", id]));
+    let table = success(run(root.path(), &["show", id, "--view", "diagnostics"]));
     assert!(String::from_utf8_lossy(&table.stdout).contains("machines/oracle.console"));
     for name in [
         "machines/oracle.console",
@@ -222,10 +243,24 @@ fn cli_bundle_roundtrip_diagnostics_and_json_without_execution() {
         "vmm.stdout",
         "vmm.stderr",
     ] {
-        let raw = success(run(root.path(), &["diagnostics", id, name]));
+        let raw = success(run(
+            root.path(),
+            &["show", id, "--view", "diagnostics", "--file", name],
+        ));
         assert_eq!(raw.stdout, RAW);
         assert!(String::from_utf8_lossy(&raw.stderr).contains("omission:"));
-        let json = success(run(root.path(), &["diagnostics", id, name, "--json"]));
+        let json = success(run(
+            root.path(),
+            &[
+                "show",
+                id,
+                "--view",
+                "diagnostics",
+                "--file",
+                name,
+                "--json",
+            ],
+        ));
         assert!(json.stderr.is_empty());
         let document: DiagnosticDocument = serde_json::from_slice(&json.stdout).unwrap();
         let mut pretty = serde_json::to_vec_pretty(&document).unwrap();
@@ -245,7 +280,10 @@ fn cli_bundle_roundtrip_diagnostics_and_json_without_execution() {
         );
     }
     for name in ["missing", "../../etc/passwd", "/etc/passwd"] {
-        let rejected = run(root.path(), &["diagnostics", id, name]);
+        let rejected = run(
+            root.path(),
+            &["show", id, "--view", "diagnostics", "--file", name],
+        );
         assert_eq!(rejected.status.code(), Some(2));
         assert!(rejected.stdout.is_empty());
         assert!(String::from_utf8_lossy(&rejected.stderr).contains("choose an exact name"));
@@ -268,56 +306,24 @@ fn cli_bundle_roundtrip_diagnostics_and_json_without_execution() {
     }
     let diagnostic_limit = run(
         root.path(),
-        &["diagnostics", id, "vmm.stdout", "--max-bytes", "1"],
+        &[
+            "show",
+            id,
+            "--view",
+            "diagnostics",
+            "--file",
+            "vmm.stdout",
+            "--max-bytes",
+            "1",
+        ],
     );
     assert_eq!(diagnostic_limit.status.code(), Some(2));
     assert!(diagnostic_limit.stdout.is_empty());
     assert!(String::from_utf8_lossy(&diagnostic_limit.stderr).contains("wire byte limit"));
-    let limited = run(
-        root.path(),
-        &["export", id, "-o", "limited.tar", "--max-bytes", "1"],
-    );
-    assert_eq!(limited.status.code(), Some(2));
-    assert!(!root.path().join("limited.tar").exists());
-    assert!(!fs::read_dir(root.path()).unwrap().any(|e| e
-        .unwrap()
-        .file_name()
-        .to_string_lossy()
-        .starts_with(".seedbox-export-")));
-    // Shared parent cleanup is conservative, but export and JSON stdout still succeed.
-    use std::os::unix::fs::PermissionsExt;
-    fs::create_dir(root.path().join("shared")).unwrap();
-    fs::set_permissions(
-        root.path().join("shared"),
-        fs::Permissions::from_mode(0o777),
-    )
-    .unwrap();
-    let shared = success(run(
-        root.path(),
-        &["export", id, "-o", "shared/result.tar", "--json"],
-    ));
-    let shared_receipt: serde_json::Value = serde_json::from_slice(&shared.stdout).unwrap();
-    assert_eq!(shared_receipt["output"], "shared/result.tar");
-    let warning = String::from_utf8(shared.stderr).unwrap();
-
-    assert!(
-        warning.starts_with("export staging cleanup skipped for "),
-        "{warning}"
-    );
-    assert!(warning.contains("output parent is shared or its ACL cannot be verified"));
-    let retained: Vec<_> = fs::read_dir(root.path().join("shared"))
-        .unwrap()
-        .filter_map(|entry| {
-            let entry = entry.unwrap();
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".seedbox-export-")
-                .then_some(entry.path())
-        })
-        .collect();
-    assert_eq!(retained.len(), 1);
-    assert!(fs::read_dir(&retained[0]).unwrap().next().is_none());
+    let mut limited = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
+    assert!(rt
+        .block_on(client.export_bundle(&simulation.metadata.id, &mut limited, 1, || false))
+        .is_err());
     assert!(rt.block_on(client.capacity()).unwrap().occupying.is_empty());
     assert_eq!(rt.block_on(client.list(None)).unwrap().items.len(), 2);
 }
@@ -427,7 +433,7 @@ fn diagnostics_metadata_stall_exits_promptly_on_sigint_without_stdout() {
         }
     });
     let mut child = command(root.path())
-        .args(["diagnostics", "k7m2p9qx", "--json"])
+        .args(["show", "k7m2p9qx", "--view", "diagnostics", "--json"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .guarded_spawn()

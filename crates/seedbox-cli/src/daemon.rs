@@ -145,6 +145,99 @@ pub(super) fn state_directory(explicit: Option<PathBuf>) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Explicit startup shares the same options and readiness protocol as clients.
+pub(super) fn start(
+    options: &crate::server_args::ServerArgs,
+    foreground: bool,
+    startup_handshake: bool,
+) -> Result<u8> {
+    if foreground || startup_handshake {
+        serve(options.state.clone(), options.inputs(), startup_handshake)
+    } else {
+        startup::background(options)?;
+        super::output::status("STARTED", "local server");
+        Ok(0)
+    }
+}
+
+/// Inspect an existing server without automatically starting it.
+pub(super) fn status(options: &crate::server_args::ServerArgs, json: bool) -> Result<u8> {
+    let root = state_directory(options.state.clone())?;
+    let socket = root.join("server.sock");
+    if !startup::listening(&socket)? {
+        if json {
+            super::output::json(&serde_json::json!({ "server": null, "capacity": null }))?;
+        } else {
+            super::output::status("STOPPED", "local server");
+        }
+        return Ok(0);
+    }
+    let client = seedbox_client::Client::connect_to(&socket).map_err(setup)?;
+    let runtime = super::simulations::runtime()?;
+    runtime.block_on(async {
+        let info = client.info().await.map_err(setup)?;
+        let capacity = client.capacity().await.map_err(setup)?;
+        if json {
+            super::output::json(&serde_json::json!({ "server": info, "capacity": capacity }))?;
+        } else {
+            super::output::status("RUNNING", "local server");
+            super::output::field("process", info.process_id);
+            super::output::field("slots", capacity.slots);
+            super::output::field("occupied", capacity.occupying.len());
+            super::output::field("queued", capacity.queued.len());
+            super::output::field("paused", capacity.paused);
+            capacity_tables(&capacity)?;
+        }
+        Ok(0)
+    })
+}
+
+fn capacity_tables(capacity: &seedbox_api::ExecutionCapacity) -> Result<()> {
+    let occupants = capacity
+        .occupying
+        .iter()
+        .map(|o| {
+            [
+                o.simulation.to_string(),
+                o.phase
+                    .as_ref()
+                    .map(super::output::word)
+                    .unwrap_or_else(|| "cleanup".into()),
+                o.stage
+                    .as_ref()
+                    .map(super::output::word)
+                    .unwrap_or_else(|| "-".into()),
+                o.paused.to_string(),
+                o.guest_memory_bytes
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "-".into()),
+            ]
+        })
+        .collect();
+    super::output::table(
+        [
+            "SIMULATION",
+            "PHASE",
+            "STAGE",
+            "PAUSED",
+            "GUEST RAM (BYTES)",
+        ],
+        occupants,
+    )?;
+    let queued = capacity
+        .queued
+        .iter()
+        .map(|q| {
+            [
+                q.simulation.to_string(),
+                super::simulations::queue_reason(q.reason).into(),
+            ]
+        })
+        .collect();
+    super::output::table(["QUEUED", "REASON"], queued)?;
+    Ok(())
+}
+
 pub(super) fn serve(
     state: Option<PathBuf>,
     inputs: RuntimeInputs,

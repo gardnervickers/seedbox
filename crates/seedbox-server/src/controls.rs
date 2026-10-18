@@ -229,6 +229,7 @@ mod tests {
                             rate: PlaybackRate::Unlimited,
                             achieved_rate: None,
                             stepping: false,
+                            before_next_fault: false,
                             checkpoint: None,
                             error: None,
                             detail: None,

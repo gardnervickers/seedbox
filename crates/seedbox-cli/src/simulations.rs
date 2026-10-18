@@ -1,5 +1,6 @@
 //! Simulation presentation and interaction through the public client API.
 
+use super::server_args::ServerArgs;
 use super::{daemon, defaults, output, ProjectArg, MAC};
 use futures_util::StreamExt;
 use seedbox_api::{
@@ -10,78 +11,30 @@ use seedbox_application::{execution::CancellationToken, Error, Result};
 use seedbox_client::Client;
 use std::{io::Read, time::Duration};
 
-pub(super) fn capacity(json: bool) -> Result<u8> {
-    let client = daemon::connect(None)?;
-    runtime()?.block_on(async {
-        let capacity = client.capacity().await.map_err(client_error)?;
-        if json {
-            output::json(&capacity)?;
-        } else {
-            output::field("slots", capacity.slots);
-            output::field("occupied", capacity.occupying.len());
-            output::field("paused", capacity.paused);
-            let occupants = capacity
-                .occupying
-                .iter()
-                .map(|o| {
-                    [
-                        o.simulation.to_string(),
-                        o.phase
-                            .as_ref()
-                            .map(output::word)
-                            .unwrap_or_else(|| "cleanup".into()),
-                        o.stage
-                            .as_ref()
-                            .map(output::word)
-                            .unwrap_or_else(|| "-".into()),
-                        o.paused.to_string(),
-                        o.guest_memory_bytes
-                            .map(|n| n.to_string())
-                            .unwrap_or_else(|| "-".into()),
-                    ]
-                })
-                .collect();
-            output::table(
-                [
-                    "SIMULATION",
-                    "PHASE",
-                    "STAGE",
-                    "PAUSED",
-                    "GUEST RAM (BYTES)",
-                ],
-                occupants,
-            )?;
-            let queued = capacity
-                .queued
-                .iter()
-                .map(|q| [q.simulation.to_string(), queue_reason(q.reason).into()])
-                .collect();
-            output::table(["QUEUED", "REASON"], queued)?;
-        }
-        Ok(0)
-    })
-}
-
-fn queue_reason(reason: seedbox_api::QueueReason) -> &'static str {
+pub(super) fn queue_reason(reason: seedbox_api::QueueReason) -> &'static str {
     match reason {
         seedbox_api::QueueReason::ResidentCapacity => "resident slots occupied; stop or delete an occupant to free capacity (pause retains RAM)",
         seedbox_api::QueueReason::AwaitingDispatch => "awaiting dispatch to an available slot",
     }
 }
 
-pub(super) fn tui(id: Option<SimulationId>) -> Result<u8> {
+pub(super) fn tui(server: &ServerArgs, id: Option<SimulationId>) -> Result<u8> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(Error::Setup(
-            "seedbox tui needs an interactive terminal; use seedbox events or seedbox get from scripts".into(),
+            "seedbox tui needs an interactive terminal; use seedbox events or seedbox show from scripts".into(),
         ));
     }
-    let client = daemon::connect(None)?;
+    let client = daemon::connect(server)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
-        seedbox_tui::run(client, id, daemon::state_directory(None)?.join("timelines"))
-            .await
-            .map_err(|e| Error::Setup(format!("terminal: {e}")))
+        seedbox_tui::run(
+            client,
+            id,
+            daemon::state_directory(server.state.clone())?.join("timelines"),
+        )
+        .await
+        .map_err(|e| Error::Setup(format!("terminal: {e}")))
     })?;
     Ok(0)
 }
@@ -189,6 +142,7 @@ fn select_backend(
 }
 
 pub(super) fn run(
+    server: &ServerArgs,
     project: &ProjectArg,
     seed: Option<u64>,
     paused: bool,
@@ -201,6 +155,7 @@ pub(super) fn run(
     let (spec, metadata) = load_spec(project, seed)?;
     let backend = Some(select_backend(&spec, selection.backend)?);
     submit(
+        server,
         spec,
         seedbox_api::ExecutionOptions {
             backend,
@@ -214,7 +169,42 @@ pub(super) fn run(
     )
 }
 
+pub(super) fn run_checkpoint(
+    server: &ServerArgs,
+    path: &std::path::Path,
+    paused: bool,
+    detach: bool,
+    json: bool,
+    selection: super::BackendSelection,
+) -> Result<u8> {
+    let definition = super::bundles::load_checkpoint(server, path)?;
+    let metadata = seedbox_spec::definition::Metadata {
+        name: path
+            .file_stem()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        ..Default::default()
+    };
+    let spec = SimulationSpec::resolved(definition).map_err(Error::Setup)?;
+    let backend = Some(select_backend(&spec, selection.backend)?);
+    submit(
+        server,
+        spec,
+        seedbox_api::ExecutionOptions {
+            backend,
+            start_paused: paused,
+            wall_time_ns: selection.wall_time,
+            machine_workers: selection.machine_workers,
+        },
+        metadata,
+        detach,
+        json,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn explore(
+    server: &ServerArgs,
     project: &ProjectArg,
     seed: Option<u64>,
     count: u32,
@@ -246,7 +236,7 @@ pub(super) fn explore(
         spec,
         count,
     };
-    let client = daemon::connect(None)?;
+    let client = daemon::connect(server)?;
     let cancellation = CancellationToken::default();
     let _signals = super::signals::Signals::interrupt(&cancellation)?;
     runtime()?.block_on(async {
@@ -302,8 +292,8 @@ pub(super) fn explore(
     })
 }
 
-pub(super) fn seed_range(id: &SimulationId, json: bool) -> Result<u8> {
-    let client = daemon::connect(None)?;
+pub(super) fn seed_range(server: &ServerArgs, id: &SimulationId, json: bool) -> Result<u8> {
+    let client = daemon::connect(server)?;
     let mut range = runtime()?
         .block_on(client.seed_range(id))
         .map_err(client_error)?;
@@ -356,8 +346,8 @@ pub(super) fn seed_range(id: &SimulationId, json: bool) -> Result<u8> {
     Ok(0)
 }
 
-pub(super) fn stop_seeds(id: &SimulationId) -> Result<u8> {
-    let client = daemon::connect(None)?;
+pub(super) fn stop_seeds(server: &ServerArgs, id: &SimulationId) -> Result<u8> {
+    let client = daemon::connect(server)?;
     let range = runtime()?
         .block_on(client.stop_seeds(id))
         .map_err(client_error)?;
@@ -366,11 +356,12 @@ pub(super) fn stop_seeds(id: &SimulationId) -> Result<u8> {
 }
 
 pub(super) fn compare(
+    server: &ServerArgs,
     baseline: &SimulationId,
     simulation: &SimulationId,
     json: bool,
 ) -> Result<u8> {
-    let client = daemon::connect(None)?;
+    let client = daemon::connect(server)?;
     let comparison = runtime()?
         .block_on(client.compare(baseline, simulation))
         .map_err(client_error)?;
@@ -391,13 +382,14 @@ fn report_comparison(comparison: &seedbox_api::SimulationComparison, json: bool)
 }
 
 pub(super) fn replay(
+    server: &ServerArgs,
     id: &SimulationId,
     json: bool,
     selection: super::BackendSelection,
 ) -> Result<u8> {
     let wall_time_ns = selection.wall_time;
     let machine_workers = selection.machine_workers;
-    let client = daemon::connect(None)?;
+    let client = daemon::connect(server)?;
     let resource = runtime()?
         .block_on(client.describe(id))
         .map_err(client_error)?;
@@ -409,6 +401,7 @@ pub(super) fn replay(
     let metadata = resource_metadata(&resource);
     let backend = Some(select_backend(&resource.spec, selection.backend)?);
     submit_with_comparison(
+        server,
         resource.spec,
         seedbox_api::ExecutionOptions {
             backend,
@@ -424,14 +417,16 @@ pub(super) fn replay(
 }
 
 pub(super) fn rerun(
+    server: &ServerArgs,
     id: &SimulationId,
+    paused: bool,
     detach: bool,
     json: bool,
     selection: super::BackendSelection,
 ) -> Result<u8> {
     let wall_time_ns = selection.wall_time;
     let machine_workers = selection.machine_workers;
-    let client = daemon::connect(None)?;
+    let client = daemon::connect(server)?;
     let resource = runtime()?
         .block_on(client.describe(id))
         .map_err(client_error)?;
@@ -443,10 +438,11 @@ pub(super) fn rerun(
     let metadata = resource_metadata(&resource);
     let backend = Some(select_backend(&resource.spec, selection.backend)?);
     submit(
+        server,
         resource.spec,
         seedbox_api::ExecutionOptions {
             backend,
-            start_paused: false,
+            start_paused: paused,
             wall_time_ns,
             machine_workers,
         },
@@ -456,33 +452,6 @@ pub(super) fn rerun(
     )
 }
 
-pub(super) fn branch(
-    id: &SimulationId,
-    checkpoint: String,
-    detach: bool,
-    json: bool,
-    wall_time_ns: Option<u64>,
-    machine_workers: Option<u32>,
-) -> Result<u8> {
-    let client = daemon::connect(None)?;
-    let resource = runtime()?
-        .block_on(client.checkpoint_definition(id, &checkpoint))
-        .map_err(client_error)?;
-    let metadata = resource_metadata(&resource);
-    let backend = Some(select_backend(&resource.spec, None)?);
-    submit(
-        resource.spec,
-        seedbox_api::ExecutionOptions {
-            backend,
-            start_paused: false,
-            wall_time_ns,
-            machine_workers,
-        },
-        metadata,
-        detach,
-        json,
-    )
-}
 fn resource_metadata(resource: &Simulation) -> seedbox_spec::definition::Metadata {
     let mut annotations = resource.metadata.annotations.clone();
     annotations.insert("derived-from".into(), resource.metadata.id.to_string());
@@ -493,16 +462,18 @@ fn resource_metadata(resource: &Simulation) -> seedbox_spec::definition::Metadat
     }
 }
 fn submit(
+    server: &ServerArgs,
     spec: SimulationSpec,
     options: seedbox_api::ExecutionOptions,
     metadata: seedbox_spec::definition::Metadata,
     detach: bool,
     json: bool,
 ) -> Result<u8> {
-    submit_with_comparison(spec, options, metadata, detach, json, None)
+    submit_with_comparison(server, spec, options, metadata, detach, json, None)
 }
 
 fn submit_with_comparison(
+    server: &ServerArgs,
     spec: SimulationSpec,
     options: seedbox_api::ExecutionOptions,
     metadata: seedbox_spec::definition::Metadata,
@@ -516,7 +487,7 @@ fn submit_with_comparison(
         request_id: Client::request_id().map_err(client_error)?,
         spec,
     };
-    let client = daemon::connect(None)?;
+    let client = daemon::connect(server)?;
     let cancellation = CancellationToken::default();
     let _signals = super::signals::Signals::interrupt(&cancellation)?;
     runtime()?.block_on(async {
@@ -541,7 +512,7 @@ fn submit_with_comparison(
                     },
                     Some(Ok(_)) => {},
                     Some(Err(error)) => return Err(client_error(error)),
-                    None => return Err(Error::Setup("simulation watch ended without final status; use seedbox describe simulation to reconnect".into())),
+                    None => return Err(Error::Setup("simulation watch ended without final status; use seedbox show to reconnect".into())),
                 },
                 _ = tokio::time::sleep(Duration::from_millis(50)) => {
                     if cancellation.is_cancelled() && !stop_sent {
@@ -554,8 +525,8 @@ fn submit_with_comparison(
     })
 }
 
-pub(super) fn watch(id: &SimulationId, json: bool) -> Result<u8> {
-    let client = daemon::connect(None)?;
+pub(super) fn watch(server: &ServerArgs, id: &SimulationId, json: bool) -> Result<u8> {
+    let client = daemon::connect(server)?;
     let cancellation = CancellationToken::default();
     let _signals = super::signals::Signals::interrupt(&cancellation)?;
     runtime()?.block_on(async {
@@ -588,8 +559,8 @@ pub(super) fn watch(id: &SimulationId, json: bool) -> Result<u8> {
     })
 }
 
-pub(super) fn list(json: bool) -> Result<u8> {
-    let client = daemon::connect(None)?;
+pub(super) fn list(server: &ServerArgs, json: bool) -> Result<u8> {
+    let client = daemon::connect(server)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
         let mut items = vec![];
@@ -617,8 +588,8 @@ pub(super) fn list(json: bool) -> Result<u8> {
     })
 }
 
-pub(super) fn delete(id: &SimulationId) -> Result<u8> {
-    let client = daemon::connect(None)?;
+pub(super) fn delete(server: &ServerArgs, id: &SimulationId) -> Result<u8> {
+    let client = daemon::connect(server)?;
     runtime()?
         .block_on(client.delete(id))
         .map_err(client_error)?;
@@ -626,53 +597,8 @@ pub(super) fn delete(id: &SimulationId) -> Result<u8> {
     Ok(0)
 }
 
-pub(super) fn delete_checkpoint(id: &SimulationId, name: &str) -> Result<u8> {
-    let client = daemon::connect(None)?;
-    runtime()?
-        .block_on(client.delete_checkpoint(id, name))
-        .map_err(client_error)?;
-    output::status("DELETED", format!("{id}/{name}"));
-    Ok(0)
-}
-
-pub(super) fn checkpoints(id: &SimulationId, name: Option<&str>, json: bool) -> Result<u8> {
-    let client = daemon::connect(None)?;
-    runtime()?.block_on(async {
-        client.info().await.map_err(client_error)?;
-        if let Some(name) = name {
-            let receipt = client.checkpoint(id, name).await.map_err(client_error)?;
-            if json {
-                output::json(&receipt)?;
-            } else {
-                output::yaml(&receipt)?;
-            }
-        } else {
-            let mut receipts = client.checkpoints(id).await.map_err(client_error)?;
-            if json {
-                output::json(&receipts)?;
-            } else {
-                receipts.sort_by_key(|receipt| {
-                    let time = match &receipt.state {
-                        seedbox_api::ControlState::Acknowledged {
-                            checkpoint: Some(checkpoint),
-                            ..
-                        } => Some(checkpoint.position.simulated_time_ns),
-                        _ => None,
-                    };
-                    (std::cmp::Reverse(time), receipt.request.request_id.clone())
-                });
-                output::table(
-                    ["NAME", "STATE", "SIM-TIME", "BOUNDARY"],
-                    receipts.iter().map(checkpoint_row).collect(),
-                )?;
-            }
-        }
-        Ok(0)
-    })
-}
-
-pub(super) fn get(id: &SimulationId, json: bool) -> Result<u8> {
-    let client = daemon::connect(None)?;
+pub(super) fn get(server: &ServerArgs, id: &SimulationId, json: bool) -> Result<u8> {
+    let client = daemon::connect(server)?;
     let resource = runtime()?
         .block_on(client.describe(id))
         .map_err(client_error)?;
@@ -689,7 +615,7 @@ pub(super) fn get(id: &SimulationId, json: bool) -> Result<u8> {
                 output::field(
                     "capacity",
                     format!(
-                        "{}/{} occupied, {} paused; seedbox get capacity lists occupants",
+                        "{}/{} occupied, {} paused; seedbox server status shows capacity",
                         capacity.occupying.len(),
                         capacity.slots,
                         capacity.paused
@@ -783,35 +709,8 @@ fn age(seconds: u128) -> String {
     }
 }
 
-fn checkpoint_row(receipt: &seedbox_api::ControlReceipt) -> [String; 4] {
-    use seedbox_api::ControlState;
-    let (state, position) = match &receipt.state {
-        ControlState::Accepted => ("accepted".into(), None),
-        ControlState::Acknowledged {
-            error: Some(error), ..
-        } => (format!("error/{error:?}"), None),
-        ControlState::Acknowledged {
-            checkpoint: Some(checkpoint),
-            ..
-        } => (output::word(&checkpoint.state), Some(&checkpoint.position)),
-        ControlState::Acknowledged { .. } => ("acknowledged".into(), None),
-        ControlState::Unsupported => ("unsupported".into(), None),
-        ControlState::Interrupted => ("interrupted".into(), None),
-    };
-    [
-        receipt.request.request_id.clone(),
-        state,
-        position
-            .map(|p| format!("{:.3}s", p.simulated_time_ns as f64 / 1_000_000_000.0))
-            .unwrap_or_else(|| "-".into()),
-        position
-            .map(|p| p.boundary_index.to_string())
-            .unwrap_or_else(|| "-".into()),
-    ]
-}
-
-pub(super) fn describe(id: &SimulationId, json: bool) -> Result<u8> {
-    let client = daemon::connect(None)?;
+pub(super) fn describe(server: &ServerArgs, id: &SimulationId, json: bool) -> Result<u8> {
+    let client = daemon::connect(server)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
         let resource = client.describe(id).await.map_err(client_error)?;
@@ -824,8 +723,8 @@ pub(super) fn describe(id: &SimulationId, json: bool) -> Result<u8> {
     })
 }
 
-pub(super) fn stop(id: &SimulationId) -> Result<u8> {
-    let client = daemon::connect(None)?;
+pub(super) fn stop(server: &ServerArgs, id: &SimulationId) -> Result<u8> {
+    let client = daemon::connect(server)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
         let resource = client.stop(id).await.map_err(client_error)?;
@@ -841,8 +740,13 @@ pub(super) fn stop(id: &SimulationId) -> Result<u8> {
     })
 }
 
-pub(super) fn playback(id: &SimulationId, request_id: Option<&str>, json: bool) -> Result<u8> {
-    let client = daemon::connect(None)?;
+pub(super) fn playback(
+    server: &ServerArgs,
+    id: &SimulationId,
+    request_id: Option<&str>,
+    json: bool,
+) -> Result<u8> {
+    let client = daemon::connect(server)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
         if let Some(request_id) = request_id {
@@ -868,11 +772,12 @@ pub(super) fn playback(id: &SimulationId, request_id: Option<&str>, json: bool) 
 }
 
 pub(super) fn mutate_control(
+    server: &ServerArgs,
     mutation: super::playback_args::Mutation,
     command: seedbox_api::ControlCommand,
 ) -> Result<u8> {
     use seedbox_api::{ControlRequest, ControlState};
-    let client = daemon::connect(None)?;
+    let client = daemon::connect(server)?;
     let request_id = match mutation.request_id {
         Some(id) => id,
         None => Client::request_id().map_err(client_error)?,

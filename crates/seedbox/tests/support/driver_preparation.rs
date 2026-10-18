@@ -31,11 +31,14 @@ impl Service {
             .prefix("efd-")
             .tempdir_in("/tmp")
             .unwrap();
-        let target = std::env::var_os("CARGO_TARGET_DIR")
+        let binary = std::env::var_os("SEEDBOX_TEST_CLI")
             .map(PathBuf::from)
-            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
-        let binary = target
-            .join("release/seedbox")
+            .unwrap_or_else(|| {
+                std::env::var_os("CARGO_TARGET_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+                    .join("release/seedbox")
+            })
             .canonicalize()
             .expect("normal cargo xtask build-assets and cargo build --release first");
         let docker = std::env::var_os("DOCKER_HOST")
@@ -64,7 +67,7 @@ impl Service {
         let log = fs::File::create(this.path().join("server.log")).unwrap();
         let child = this
             .command()
-            .arg("serve")
+            .args(["server", "start", "--foreground"])
             .stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
             .stderr(log)
@@ -96,6 +99,9 @@ impl Service {
                 .env_clear()
                 .env("DOCKER_HOST", &self.docker)
                 .env("PATH", "");
+        } else {
+            // Removed overrides must not select or launch a legacy runtime.
+            command.env("SEEDBOX_MKE2FS", self.path().join("unused-legacy-mke2fs"));
         }
         if let Some(directory) = &self.asset_directory {
             command.env("SEEDBOX_ASSET_DIR", directory);
@@ -115,7 +121,7 @@ impl Service {
             // Retain the actual public resource error before Drop tears it down.
             let diagnostic = self
                 .command()
-                .args(["get", "simulations", "--json"])
+                .args(["show", "--json"])
                 .guarded_output()
                 .unwrap();
             fs::write(
@@ -159,7 +165,7 @@ impl Service {
         id
     }
     fn assert_profile(&self, id: &str) {
-        let output = self.cli(&["describe", "simulation", id, "--json"]);
+        let output = self.cli(&["show", "--view", "definition", id, "--json"]);
         let run: seedbox_api::Simulation = serde_json::from_slice(&output.stdout).unwrap();
         let seedbox_api::InputSource::Resolved { definition } = &run.spec.inputs else {
             panic!("completed ordinary run must retain a resolved definition")
@@ -221,7 +227,8 @@ impl Service {
         // not by equality of preparation metadata or a canned executor report.
         assert_eq!(original.len(), 64);
         let output = self.cli(&[
-            "rerun",
+            "run",
+            "--from",
             id,
             "--backend",
             self.backend,
@@ -339,12 +346,6 @@ fn ordinary_nix_environment_with_relocated_sdk_selects_driver() {
     inherited_shell_example(true);
 }
 fn inherited_shell_example(relocate_sdk: bool) {
-    let formatter = std::env::var_os("SEEDBOX_MKE2FS")
-        .expect("this proof must run in the ordinary project nix develop shell");
-    eprintln!(
-        "ordinary nix shell keeps SEEDBOX_MKE2FS={} and inherited PATH/runtime environment",
-        PathBuf::from(formatter).display()
-    );
     existing_example_service(Service::start("pv", true, relocate_sdk));
 }
 fn existing_example(backend: &'static str) {
@@ -421,7 +422,7 @@ fn normal_driver_tcg_explore_records_every_seed_backend() {
         "oracle":{"image":"docker.io/library/python:3.13-alpine", "command":["python3","-c","print('RANGE_BACKEND_OK')"]}
     })).unwrap()).unwrap();
     let output = service.cli(&[
-        "explore",
+        "run",
         project.to_str().unwrap(),
         "--backend",
         "tcg",

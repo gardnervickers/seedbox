@@ -92,9 +92,12 @@ fn compare(
     if result.is_err() {
         for (side, id) in [("baseline", baseline), ("repeated", repeated)] {
             for (kind, args) in [
-                ("definition", vec!["describe", "simulation", id, "--json"]),
-                ("world", vec!["get", "world", id, "--json"]),
-                ("timeline", vec!["get", "timeline", id, "--json"]),
+                (
+                    "definition",
+                    vec!["show", "--view", "definition", id, "--json"],
+                ),
+                ("world", vec!["show", "--view", "world", id, "--json"]),
+                ("timeline", vec!["show", "--view", "timeline", id, "--json"]),
                 ("logs", vec!["logs", id, "--tail", "100"]),
             ] {
                 if let Err(error) = invoke(
@@ -166,7 +169,7 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
                 &directory,
                 state,
                 "describe-first",
-                &["describe", "simulation", first, "--json"],
+                &["show", "--view", "definition", first, "--json"],
             )?;
             let resource: seedbox_api::Simulation = serde_json::from_str(&described)
                 .map_err(|error| format!("describe first: {error}"))?;
@@ -196,7 +199,7 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
                 &directory,
                 state,
                 "rerun",
-                &["rerun", first, "--wall-time", "30m"],
+                &["run", "--from", first, "--wall-time", "30m"],
             )?;
             compare(
                 Path::new(&cli),
@@ -229,7 +232,13 @@ impl Server {
     fn start(cli: &Path, state: &Path) -> Result<Self, String> {
         let mut server = Self(
             Command::new(cli)
-                .args(["serve", "--startup-handshake", "--full-state"])
+                .args([
+                    "server",
+                    "start",
+                    "--foreground",
+                    "--startup-handshake",
+                    "--full-state",
+                ])
                 .env("SEEDBOX_STATE", state)
                 .stdout(Stdio::piped())
                 .guarded_spawn()
@@ -298,3 +307,8 @@ impl Drop for Server {
         self.0.wait().expect("reap owned application server");
     }
 }
+
+// Native CLI interactions share this discovered application acceptance target.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[path = "support/driver_preparation.rs"]
+mod driver_preparation_native;

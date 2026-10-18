@@ -305,26 +305,63 @@ struct ExportReceipt<'a> {
     size_bytes: u64,
 }
 
-pub(super) fn export(
+/// Recognize the archive header rather than requiring a particular file suffix.
+pub(super) fn is_checkpoint(path: &Path) -> Result<bool> {
+    use std::io::Read;
+    if path.is_dir() || !path.exists() {
+        return Ok(false);
+    }
+    use std::os::unix::fs::OpenOptionsExt;
+    // Project documents may be symlinks. Only the actual archive load applies
+    // the stricter regular-file/no-follow transfer contract.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| Error::Setup(format!("{}: {e}", path.display())))?;
+    if !file
+        .metadata()
+        .map_err(|e| Error::Setup(format!("{}: {e}", path.display())))?
+        .is_file()
+    {
+        return Ok(false);
+    }
+    let mut header = [0; 16];
+    let count = file
+        .read(&mut header)
+        .map_err(|e| Error::Setup(format!("{}: {e}", path.display())))?;
+    Ok(count == header.len() && &header == b"simulation.json\0")
+}
+
+pub(super) fn checkpoint(
+    server: &super::server_args::ServerArgs,
     id: &SimulationId,
-    path: Option<PathBuf>,
-    max_bytes: u64,
+    path: PathBuf,
     json: bool,
 ) -> Result<u8> {
-    let destination =
-        Destination::new(path.unwrap_or_else(|| PathBuf::from(format!("{id}.seedbox.tar"))))?;
+    let destination = Destination::new(path)?;
     let token = CancellationToken::default();
     let _signals = Signals::register(&token)?;
-    let client = daemon::connect(None)?;
+    let client = daemon::connect(server)?;
     let mut file = tokio::fs::File::from_std(
         destination
             .file
             .try_clone()
             .map_err(|e| path_error(&destination.path, e))?,
     );
-    let size = runtime()?
-        .block_on(client.export_bundle(id, &mut file, max_bytes, || token.is_cancelled()))
-        .map_err(client_error)?;
+    let size = runtime()?.block_on(async {
+        let captured = capture(&client, id, &token).await?;
+        client
+            .export_checkpoint_bundle(
+                id,
+                &captured.request.request_id,
+                &mut file,
+                seedbox_api::BUNDLE_MAX_BYTES,
+                || token.is_cancelled(),
+            )
+            .await
+            .map_err(client_error)
+    })?;
     if token.is_cancelled() {
         return Err(client_error(seedbox_client::Error::Cancelled));
     }
@@ -336,12 +373,153 @@ pub(super) fn export(
             size_bytes: size,
         })?;
     } else {
-        output::status("EXPORTED", destination.path.display());
+        output::status("CHECKPOINTED", destination.path.display());
     }
     Ok(0)
 }
 
-pub(super) fn import(path: &Path, max_bytes: u64, json: bool) -> Result<u8> {
+/// Temporarily pause at a committed boundary and restore the caller's pacing.
+async fn capture(
+    client: &seedbox_client::Client,
+    id: &SimulationId,
+    token: &CancellationToken,
+) -> Result<seedbox_api::ControlReceipt> {
+    use seedbox_api::{ControlCommand, ControlState, PlaybackRate};
+    let original = client.playback(id).await.map_err(client_error)?.state;
+    if original.terminal {
+        return Err(Error::Setup(format!(
+            "simulation {id} has completed; capture a checkpoint while it is running"
+        )));
+    }
+    if !original.application_ready {
+        return Err(Error::Setup(format!("simulation {id} applications are not ready; use seedbox wait {id} --for machine/NAME=ready for each machine, then retry checkpoint")));
+    }
+    if original.stepping {
+        return Err(Error::Setup(format!(
+            "simulation {id} is stepping; wait for the step to finish, then retry checkpoint"
+        )));
+    }
+    let resume = original.rate != PlaybackRate::Paused;
+    let captured = async {
+        if resume {
+            control(
+                client,
+                id,
+                ControlCommand::SetRate {
+                    rate: PlaybackRate::Paused,
+                },
+                Some(token),
+            )
+            .await?;
+        }
+        control(client, id, ControlCommand::Checkpoint, Some(token)).await
+    }
+    .await;
+    // Restore host pacing even after a rejected capture, lost response or
+    // cancellation. Capture is immutable once acknowledged, so the source
+    // may keep running while the file is exported.
+    if resume {
+        let restoration = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            control(
+                client,
+                id,
+                if original.before_next_fault {
+                    ControlCommand::PauseBeforeNextFault {
+                        rate: original.rate,
+                    }
+                } else {
+                    ControlCommand::SetRate {
+                        rate: original.rate,
+                    }
+                },
+                None,
+            ),
+        )
+        .await
+        .map_err(|_| {
+            Error::Setup(format!(
+                "simulation {id}: restoring playback timed out; use seedbox control resume {id}"
+            ))
+        })
+        .and_then(|result| result);
+        if let Err(error) = restoration {
+            if captured.is_ok() {
+                return Err(error);
+            }
+            eprintln!("playback restoration: {error}");
+        }
+    }
+    let captured = captured?;
+    let ControlState::Acknowledged {
+        checkpoint: Some(_),
+        ..
+    } = captured.state
+    else {
+        return Err(Error::Setup(
+            "checkpoint capture returned no saved state".into(),
+        ));
+    };
+    Ok(captured)
+}
+
+/// Wait for durable acknowledgement, including deferred checkpoint capture.
+async fn control(
+    client: &seedbox_client::Client,
+    id: &SimulationId,
+    command: seedbox_api::ControlCommand,
+    cancellation: Option<&CancellationToken>,
+) -> Result<seedbox_api::ControlReceipt> {
+    use seedbox_api::{CheckpointState, ControlRequest, ControlState};
+    let request = ControlRequest {
+        request_id: seedbox_client::Client::request_id().map_err(client_error)?,
+        command,
+    };
+    eprintln!("request: {}", request.request_id);
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(client_error(seedbox_client::Error::Cancelled));
+    }
+    let mut receipt = client
+        .request_control(id, &request)
+        .await
+        .map_err(client_error)?;
+    loop {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err(client_error(seedbox_client::Error::Cancelled));
+        }
+        match &receipt.state {
+            ControlState::Accepted => {}
+            ControlState::Acknowledged {
+                error: None,
+                checkpoint: Some(checkpoint),
+                ..
+            } if checkpoint.state == CheckpointState::Requested => {}
+            ControlState::Acknowledged {
+                error: None,
+                checkpoint,
+                ..
+            } if checkpoint
+                .as_ref()
+                .is_none_or(|capture| capture.state == CheckpointState::Captured) =>
+            {
+                return Ok(receipt)
+            }
+            state => {
+                return Err(Error::Setup(format!(
+                    "checkpoint control failed: {}",
+                    serde_json::to_string(state)?
+                )))
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        receipt = client
+            .control_receipt(id, &request.request_id)
+            .await
+            .map_err(client_error)?;
+    }
+}
+
+fn open_checkpoint(path: &Path) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -349,7 +527,7 @@ pub(super) fn import(path: &Path, max_bytes: u64, json: bool) -> Result<u8> {
         .open(path)
         .map_err(|e| {
             Error::Setup(format!(
-                "bundle {}: {}; choose a readable regular bundle file",
+                "checkpoint {}: {}; choose a readable regular checkpoint file",
                 path.display(),
                 if e.kind() == std::io::ErrorKind::NotFound {
                     "not found".into()
@@ -360,41 +538,243 @@ pub(super) fn import(path: &Path, max_bytes: u64, json: bool) -> Result<u8> {
         })?;
     let metadata = file
         .metadata()
-        .map_err(|e| Error::Setup(format!("bundle {}: {e}", path.display())))?;
+        .map_err(|e| Error::Setup(format!("checkpoint {}: {e}", path.display())))?;
     if !metadata.is_file() {
         return Err(Error::Setup(format!(
-            "bundle {}: not a regular file",
+            "checkpoint {}: not a regular file",
             path.display()
         )));
     }
-    if metadata.len() > max_bytes {
+    if metadata.len() > seedbox_api::BUNDLE_MAX_BYTES {
         return Err(Error::Setup(format!(
-            "bundle {}: exceeds --max-bytes {max_bytes}",
-            path.display()
+            "checkpoint {}: exceeds {} bytes",
+            path.display(),
+            seedbox_api::BUNDLE_MAX_BYTES
         )));
     }
+    Ok(file)
+}
+
+/// Upload all captured inputs before submitting a new simulation. No source ID
+/// or original-server content cache participates in this operation.
+pub(super) fn load_checkpoint(
+    server: &super::server_args::ServerArgs,
+    path: &Path,
+) -> Result<seedbox_spec::definition::Definition> {
+    let file = open_checkpoint(path)?;
     let token = CancellationToken::default();
     let _signals = Signals::register(&token)?;
-    let client = daemon::connect(None)?;
-    let simulation = runtime()?
-        .block_on(
-            client.import_bundle(tokio::fs::File::from_std(file), max_bytes, || {
-                token.is_cancelled()
-            }),
-        )
-        .map_err(client_error)?;
-    if json {
-        output::json(&simulation)?;
-    } else {
-        output::status("IMPORTED", simulation.metadata.id);
-    }
-    Ok(0)
+    let client = daemon::connect(server)?;
+    runtime()?
+        .block_on(client.import_checkpoint_bundle(
+            tokio::fs::File::from_std(file),
+            seedbox_api::BUNDLE_MAX_BYTES,
+            || token.is_cancelled(),
+        ))
+        .map_err(client_error)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+    #[tokio::test]
+    async fn capture_restores_playback_after_success_rejection_and_cancellation() {
+        use seedbox_api::{
+            CheckpointState, ControlCommand, ControlReceipt, ControlRequest, ControlState,
+            PlaybackObservation, PlaybackRate, PlaybackStatus,
+        };
+        use std::{num::NonZeroU32, time::Duration};
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let limited = PlaybackRate::Limited {
+            numerator: NonZeroU32::new(1).unwrap(),
+            denominator: NonZeroU32::new(10).unwrap(),
+        };
+        for (rate, armed) in [
+            (PlaybackRate::Paused, false),
+            (PlaybackRate::Unlimited, false),
+            (limited, false),
+            (PlaybackRate::Unlimited, true),
+            (limited, true),
+        ] {
+            for outcome in ["captured", "deferred", "rejected", "cancelled", "not-ready"] {
+                let directory = tempfile::tempdir().unwrap();
+                let socket = directory.path().join("api.sock");
+                let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+                let token = CancellationToken::default();
+                let server_token = token.clone();
+                let server = tokio::spawn(async move {
+                    let mut status = PlaybackStatus {
+                        position: Default::default(),
+                        rate,
+                        achieved_rate: None,
+                        stepping: false,
+                        before_next_fault: armed,
+                        terminal: false,
+                        application_ready: outcome != "not-ready",
+                    };
+                    let requests = if outcome == "not-ready" {
+                        1
+                    } else {
+                        2 + usize::from(rate != PlaybackRate::Paused) * 2
+                            + usize::from(outcome == "deferred")
+                    };
+                    let mut commands = Vec::new();
+                    let mut pending: Option<ControlReceipt> = None;
+                    for _ in 0..requests {
+                        let (connection, _) = listener.accept().await.unwrap();
+                        let mut connection = BufReader::new(connection);
+                        let mut first = String::new();
+                        connection.read_line(&mut first).await.unwrap();
+                        let mut length = 0;
+                        loop {
+                            let mut header = String::new();
+                            connection.read_line(&mut header).await.unwrap();
+                            if header == "\r\n" {
+                                break;
+                            }
+                            if let Some(value) =
+                                header.to_ascii_lowercase().strip_prefix("content-length:")
+                            {
+                                length = value.trim().parse::<usize>().unwrap();
+                            }
+                        }
+                        let mut body = vec![0; length];
+                        connection.read_exact(&mut body).await.unwrap();
+                        let response = if first.contains("/playback ") {
+                            serde_json::to_vec(&PlaybackObservation {
+                                state: status.clone(),
+                                age_ns: 0,
+                            })
+                            .unwrap()
+                        } else if first.starts_with("GET ") {
+                            let mut receipt = pending.take().unwrap();
+                            if let ControlState::Acknowledged {
+                                checkpoint: Some(checkpoint),
+                                ..
+                            } = &mut receipt.state
+                            {
+                                checkpoint.state = CheckpointState::Captured;
+                            }
+                            serde_json::to_vec(&receipt).unwrap()
+                        } else {
+                            let request: ControlRequest = serde_json::from_slice(&body).unwrap();
+                            commands.push(request.command.clone());
+                            let mut checkpoint = None;
+                            let rejected = request.command == ControlCommand::Checkpoint
+                                && outcome == "rejected";
+                            match request.command {
+                                ControlCommand::SetRate { rate } => {
+                                    status.rate = rate;
+                                    status.before_next_fault = false;
+                                }
+                                ControlCommand::PauseBeforeNextFault { rate } => {
+                                    status.rate = rate;
+                                    status.before_next_fault = true;
+                                }
+                                ControlCommand::Checkpoint => {
+                                    assert_eq!(status.rate, PlaybackRate::Paused);
+                                    checkpoint = Some(seedbox_api::CheckpointStatus {
+                                        request_id: request.request_id.clone(),
+                                        position: Default::default(),
+                                        state: if outcome == "deferred" {
+                                            CheckpointState::Requested
+                                        } else {
+                                            CheckpointState::Captured
+                                        },
+                                    });
+                                    if outcome == "cancelled" {
+                                        server_token.cancel();
+                                    }
+                                }
+                                _ => panic!("unexpected command"),
+                            }
+                            let receipt = ControlReceipt {
+                                request,
+                                revision: 1,
+                                state: if rejected {
+                                    ControlState::Unsupported
+                                } else {
+                                    ControlState::Acknowledged {
+                                        status: status.clone(),
+                                        error: None,
+                                        intervention: None,
+                                        detail: None,
+                                        checkpoint,
+                                    }
+                                },
+                            };
+                            pending = Some(receipt.clone());
+                            serde_json::to_vec(&receipt).unwrap()
+                        };
+                        let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len());
+                        connection
+                            .get_mut()
+                            .write_all(header.as_bytes())
+                            .await
+                            .unwrap();
+                        connection.get_mut().write_all(&response).await.unwrap();
+                    }
+                    assert_eq!(status.rate, rate);
+                    assert_eq!(status.before_next_fault, armed);
+                    commands
+                });
+                let client = seedbox_client::Client::connect_to(&socket).unwrap();
+                let result = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    capture(&client, &"abcdefgh".parse().unwrap(), &token),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    result.is_ok(),
+                    matches!(outcome, "captured" | "deferred"),
+                    "{outcome}: {result:?}"
+                );
+                let commands = tokio::time::timeout(Duration::from_secs(30), server)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if outcome == "not-ready" {
+                    assert!(commands.is_empty());
+                    assert!(result.unwrap_err().to_string().contains("seedbox wait"));
+                } else if rate == PlaybackRate::Paused {
+                    assert_eq!(commands, vec![ControlCommand::Checkpoint]);
+                } else {
+                    assert_eq!(
+                        commands,
+                        vec![
+                            ControlCommand::SetRate {
+                                rate: PlaybackRate::Paused
+                            },
+                            ControlCommand::Checkpoint,
+                            if armed {
+                                ControlCommand::PauseBeforeNextFault { rate }
+                            } else {
+                                ControlCommand::SetRate { rate }
+                            }
+                        ]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn checkpoint_detection_uses_content_and_preserves_symlink_projects() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("seedbox.yaml");
+        std::fs::write(&project, b"machines: {}\noracle: {}\n").unwrap();
+        let link = directory.path().join("project-link");
+        std::os::unix::fs::symlink(&project, &link).unwrap();
+        assert!(!is_checkpoint(&project).unwrap());
+        assert!(!is_checkpoint(&link).unwrap());
+        assert!(!is_checkpoint(directory.path()).unwrap());
+        let checkpoint = directory.path().join("saved-without-an-extension");
+        std::fs::write(&checkpoint, b"simulation.json\0rest of archive").unwrap();
+        assert!(is_checkpoint(&checkpoint).unwrap());
+    }
+
     #[test]
     fn destination_never_replaces_files_or_symlinks_and_pins_parent() {
         let directory = tempfile::tempdir().unwrap();

@@ -202,6 +202,7 @@ fn fixture(store: &ContentStore, checkpoint: bool) -> Snapshot {
                     rate: PlaybackRate::Paused,
                     achieved_rate: None,
                     stepping: false,
+                    before_next_fault: false,
                     terminal: false,
                     application_ready: true,
                 },
@@ -222,6 +223,58 @@ fn encode(snapshot: &Snapshot, store: &ContentStore) -> Vec<u8> {
     let mut bytes = Vec::new();
     archive::export(snapshot, store, &mut bytes, &Options::default()).unwrap();
     bytes
+}
+
+#[test]
+fn standalone_checkpoint_restores_inputs_on_empty_server_without_source_resource() {
+    let source = tempfile::tempdir().unwrap();
+    let (_, original, store) = service(source.path());
+    let snapshot = fixture(&store, true);
+    let imported = original
+        .import_bundle(encode(&snapshot, &store).as_slice(), &Options::default())
+        .unwrap();
+    let expected = snapshot.checkpoints["capture"].clone();
+    let mut bytes = Vec::new();
+    original
+        .export_checkpoint_bundle(
+            &imported.metadata.id,
+            "capture",
+            &mut bytes,
+            &Options::default(),
+        )
+        .unwrap();
+    drop(original);
+    drop(store);
+    drop(source);
+    let destination = tempfile::tempdir().unwrap();
+    let (manager, execution, store) = service(destination.path());
+    let definition = execution
+        .import_checkpoint_bundle(bytes.as_slice(), &Options::default())
+        .unwrap();
+    assert_eq!(definition, expected);
+    assert_eq!(
+        manager
+            .read(|catalogue| Ok(catalogue.list().count()))
+            .unwrap(),
+        0
+    );
+    let seedbox_spec::definition::Start::Checkpoint { assets, .. } = &definition.start else {
+        unreachable!()
+    };
+    let digest = assets["ram"]
+        .0
+        .strip_prefix("sha256:")
+        .unwrap()
+        .to_owned()
+        .try_into()
+        .unwrap();
+    assert_eq!(store.read(&digest).unwrap(), b"retained checkpoint RAM");
+    let mut request = support::resolved_request("new-from-file");
+    request.spec = SimulationSpec::resolved(definition).unwrap();
+    let new_run = manager.submit(request).unwrap().0;
+    assert_ne!(new_run.metadata.id, imported.metadata.id);
+    assert!(new_run.metadata.parent.is_none());
+    assert_eq!(new_run.status.phase, Phase::Queued);
 }
 
 #[test]
@@ -367,10 +420,39 @@ fn driver_closures_without_a_record_roundtrip_into_a_fresh_store() {
     let mut objects = vec![checkpoint_object.clone(), factory.clone()];
     objects.sort();
     closure["objects"] = serde_json::to_value(objects).unwrap();
+    let mut checkpoint_bytes = Vec::new();
+    archive::export_checkpoint(
+        checkpoint,
+        &store,
+        &mut checkpoint_bytes,
+        &Options::default(),
+    )
+    .unwrap();
+    let checkpoint_expected = checkpoint.clone();
     let bytes = encode(&snapshot, &store);
     drop(store);
     drop(source);
 
+    let standalone = tempfile::tempdir().unwrap();
+    let (manager, checkpoint_service, checkpoint_store) = service(standalone.path());
+    let restored = checkpoint_service
+        .import_checkpoint_bundle(checkpoint_bytes.as_slice(), &Options::default())
+        .unwrap();
+    assert_eq!(restored, checkpoint_expected);
+    assert_eq!(
+        manager
+            .read(|catalogue| Ok(catalogue.list().count()))
+            .unwrap(),
+        0
+    );
+    for digest in [
+        &checkpoint_manifest,
+        &checkpoint_object,
+        &checkpoint_executable,
+        &factory,
+    ] {
+        checkpoint_store.verify(digest).unwrap();
+    }
     let destination = tempfile::tempdir().unwrap();
     let (_, execution, store) = service(destination.path());
     let imported = execution
@@ -784,6 +866,33 @@ async fn http_transfers_binary_spools_and_imports_without_enqueuing_work() {
     );
     let split = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
     let imported: seedbox_api::Simulation = serde_json::from_slice(&response[split..]).unwrap();
+    let client = seedbox_client::Client::connect_to(&socket).unwrap();
+    let mut checkpoint_file = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
+    client
+        .export_checkpoint_bundle(
+            &imported.metadata.id,
+            "capture",
+            &mut checkpoint_file,
+            BUNDLE_MAX_BYTES,
+            || false,
+        )
+        .await
+        .unwrap();
+    let restored = client
+        .import_checkpoint_bundle(checkpoint_file, BUNDLE_MAX_BYTES, || false)
+        .await
+        .unwrap();
+    assert!(matches!(
+        restored.start,
+        seedbox_spec::definition::Start::Checkpoint { .. }
+    ));
+    assert_eq!(
+        manager
+            .read(|catalogue| Ok(catalogue.list().count()))
+            .unwrap(),
+        1
+    );
+
     assert_eq!(imported.status.phase, Phase::Completed);
     assert!(work.try_recv().is_err());
     let response = request(
@@ -837,6 +946,13 @@ fn export_captures_owned_native_checkpoint_files_and_preserves_consumed_override
     let mut catalogue = Catalogue::in_memory();
     let mut request = support::resolved_request("native-source");
     request.spec = fixture.simulation.spec.clone();
+    let pending = ProgramInput {
+        key: "pending-after-capture".into(),
+        at_ns: 100,
+        action: serde_json::json!({"action":"pause_process", "machine":"oracle"}),
+        timeout_ns: 500,
+    };
+    request.spec.program.push(pending.clone());
     let mut simulation = catalogue.submit(request).unwrap().0;
     let id = simulation.metadata.id.clone();
     for phase in [Phase::Preparing, Phase::Running] {
@@ -889,6 +1005,18 @@ fn export_captures_owned_native_checkpoint_files_and_preserves_consumed_override
     )
     .unwrap();
     std::fs::write(source.path().join("inputs").join(format!("{id}.json")), serde_json::to_vec(&serde_json::json!({"checkpoint":null,"prepared":record.identity.inputs,"interventions":null,"attempt":std::path::absolute(&attempt).unwrap()})).unwrap()).unwrap();
+    // The live API's authoritative program may be newer than the stored
+    // resolved definition. A standalone checkpoint must carry that suffix.
+    let mut checkpoint_bytes = Vec::new();
+    execution
+        .export_checkpoint_bundle(&id, "capture", &mut checkpoint_bytes, &Options::default())
+        .unwrap();
+    let portable_checkpoint =
+        archive::import_checkpoint(checkpoint_bytes.as_slice(), &store, &Options::default())
+            .unwrap();
+    assert_eq!(portable_checkpoint.overrides.len(), 1);
+    assert_eq!(portable_checkpoint.overrides[0].id, pending.key);
+    assert_eq!(portable_checkpoint.overrides[0].action, pending.action);
     let mut bytes = Vec::new();
     execution
         .export_bundle(&id, &mut bytes, &Options::default())

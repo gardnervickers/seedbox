@@ -208,6 +208,7 @@ fn held_crash_partition_and_same_time_order_survive_binary_capture_one_and_four_
                 .error,
                 None
             );
+            assert!(source.status(2).unwrap().before_next_fault);
             assert!(source.authored_next().unwrap());
             source_observed.drain();
             let held = source.playback().unwrap();

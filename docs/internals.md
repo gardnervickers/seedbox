@@ -65,8 +65,8 @@ The gitlink selects its source; [the Nix recipe](../crates/seedbox-machine/dynam
 applies packaging adjustments and builds the launcher, core, drreg and dependencies.
 The progress client still uses the matching release SDK.
 
-Follow the [README setup](../README.md#try-it) after cloning or switching Seedbox
-revisions. `inputs.self.submodules` includes gitlinks for flake consumers, but
+Follow the [README setup](../README.md#get-your-first-pass-and-match) after
+cloning or switching Seedbox revisions. `inputs.self.submodules` includes gitlinks for flake consumers, but
 Nix can lock a clean parent before noticing edits confined to a submodule.
 From the checkout root, obtain a URL-encoded reference and build live DR edits:
 `seedbox_flake=$(bash tools/dev-flake.sh) && nix build "$seedbox_flake#machinePvAssets"`.
@@ -124,3 +124,13 @@ A complete import upload may publish after disconnect; retries are not idempoten
 Downloads publish by atomic no-clobber link; staging cleanup unlinks only its exclusively created payload.
 Directory removal also requires proven ownership, safe parent permissions and absent ACLs; unprovable parents retain it.
 The [transfer code](../crates/seedbox-client/src/transfers.rs) does not treat stat/remove as atomic against same-UID mutation.
+
+## Build asset publication
+
+`cargo xtask build` prepares assets, then forwards its options to `cargo build`.
+Linux uses Nix directly; Mac uses Docker or Podman for guest inputs and native Nix
+for host tools. `cargo xtask build-assets` prepares assets without compiling the CLI.
+Unchanged bundles reuse `build/assets`; changed bundles retain the previous generation
+for concurrent builds. With all Cargo builds stopped, `cargo xtask clean-assets`
+removes old generations while keeping the current bundle. Built executables embed
+their own assets. See [xtask](../crates/xtask/src/main.rs).

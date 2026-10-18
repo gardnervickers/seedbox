@@ -2,7 +2,7 @@
 
 use clap::{CommandFactory, ValueEnum};
 use seedbox_application::{Error, Result};
-use std::{io::Write, time::Duration};
+use std::{io::Write, path::PathBuf, time::Duration};
 
 #[derive(Clone, Copy, ValueEnum)]
 pub(super) enum Shell {
@@ -42,8 +42,12 @@ pub(super) fn complete(words: &[String]) -> Result<u8> {
     let mut positionals = Vec::new();
     let mut value_arg: Option<&clap::Arg> = None;
     let mut options = true;
+    let mut state = None;
     for word in previous {
-        if value_arg.take().is_some() {
+        if let Some(arg) = value_arg.take() {
+            if arg.get_long() == Some("state") {
+                state = Some(PathBuf::from(word));
+            }
             continue;
         }
         if options && word == "--" {
@@ -61,6 +65,9 @@ pub(super) fn complete(words: &[String]) -> Result<u8> {
                         .get_short()
                         .is_some_and(|short| name == format!("-{short}"))
             }) {
+                if inline && arg.get_long() == Some("state") {
+                    state = word.split_once('=').map(|(_, value)| PathBuf::from(value));
+                }
                 if !inline && arg.get_num_args().is_some_and(|range| range.takes_values()) {
                     value_arg = Some(arg);
                 }
@@ -80,6 +87,9 @@ pub(super) fn complete(words: &[String]) -> Result<u8> {
     let mut candidates = Vec::new();
     if let Some(arg) = value_arg {
         values(arg, &mut candidates);
+        if path == ["run"] && arg.get_long() == Some("from") {
+            candidates.extend(dynamic_resource(Resource::Simulations, state.clone()));
+        }
     } else if options && prefix.starts_with('-') {
         for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
             if let Some(long) = arg.get_long() {
@@ -98,7 +108,7 @@ pub(super) fn complete(words: &[String]) -> Result<u8> {
         if let Some(arg) = command.get_positionals().nth(positionals.len()) {
             values(arg, &mut candidates);
         }
-        candidates.extend(dynamic(&path, &positionals));
+        candidates.extend(dynamic(&path, &positionals, state));
     }
     candidates.retain(|candidate| {
         candidate.starts_with(prefix) && !candidate.chars().any(|c| c.is_control())
@@ -132,22 +142,26 @@ fn resource<'a>(path: &[&str], positionals: &[&'a str]) -> Option<Resource<'a>> 
         (["logs"], [id]) => Some(Resource::Machines(id)),
         (["compare"], [] | [_]) => Some(Resource::Simulations),
         (
-            ["rerun" | "replay" | "branch" | "stop" | "logs" | "events" | "playback" | "inject"
-            | "heal" | "pause" | "resume" | "step" | "checkpoint" | "rate" | "tui" | "export"
-            | "diagnostics"],
+            ["replay" | "stop" | "delete" | "show" | "logs" | "events" | "wait" | "checkpoint"
+            | "tui"],
             [],
         )
-        | (["get", "simulation" | "simulations" | "checkpoints"], [])
-        | (["describe" | "delete", "simulation" | "checkpoint"], []) => Some(Resource::Simulations),
+        | (["control", "pause" | "resume" | "step" | "rate" | "inject" | "heal" | "receipt"], []) => {
+            Some(Resource::Simulations)
+        }
         _ => None,
     }
 }
 
-fn dynamic(path: &[&str], positionals: &[&str]) -> Vec<String> {
+fn dynamic(path: &[&str], positionals: &[&str], state: Option<PathBuf>) -> Vec<String> {
     let Some(resource) = resource(path, positionals) else {
         return Vec::new();
     };
-    let Ok(root) = super::daemon::state_directory(None) else {
+    dynamic_resource(resource, state)
+}
+
+fn dynamic_resource(resource: Resource<'_>, state: Option<PathBuf>) -> Vec<String> {
+    let Ok(root) = super::daemon::state_directory(state) else {
         return Vec::new();
     };
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
@@ -242,10 +256,7 @@ mod tests {
             resource(&["compare"], &["abc"]),
             Some(Resource::Simulations)
         );
-        assert_eq!(
-            resource(&["describe", "simulation"], &[]),
-            Some(Resource::Simulations)
-        );
-        assert_eq!(resource(&["delete", "checkpoint"], &["abc"]), None);
+        assert_eq!(resource(&["show"], &[]), Some(Resource::Simulations));
+        assert_eq!(resource(&["delete"], &["abc"]), None);
     }
 }

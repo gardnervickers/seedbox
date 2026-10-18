@@ -135,14 +135,10 @@ fn retained_driver_acquires_only_recorded_runtime_and_owns_it_until_executor_dro
     assert_eq!(digest, ContentDigest::of(&fs::read(&archive).unwrap()));
     let session = root.path().join("actual-session");
     fs::create_dir(&session).unwrap();
-    let super::super::Command::Serve {
-        inputs: arguments, ..
-    } = super::super::Cli::try_parse_from(["seedbox", "serve"])
+    let arguments = super::super::Cli::try_parse_from(["seedbox", "server", "start"])
         .unwrap()
-        .command
-    else {
-        panic!("serve parser")
-    };
+        .server
+        .inputs();
     let provider = NativeBackends {
         inputs: arguments,
         environment: vec![],

@@ -288,7 +288,7 @@ fn draw_at(frame: &mut Frame, app: &App, now: Instant) {
             Paragraph::new(Line::from(vec![
                 Span::styled(" ◌ lost the local server ", Style::new().fg(AMBER).bold()),
                 Span::styled(
-                    "· retrying every second · showing the last state seen · start it with `seedbox serve`",
+                    "· retrying every second · showing the last state seen · start it with `seedbox server start`",
                     Style::new().fg(Color::Rgb(255, 208, 138)),
                 ),
             ]))
@@ -3068,7 +3068,7 @@ fn catalogue(frame: &mut Frame, app: &App, area: Rect) {
             if app.connected {
                 "  no simulations yet; start one with `seedbox run --detach`"
             } else {
-                "  the local server is unreachable; start it with `seedbox serve`"
+                "  the local server is unreachable; start it with `seedbox server start`"
             },
             Style::new().fg(DIM),
         ));
@@ -3626,6 +3626,7 @@ mod tests {
                 rate: PlaybackRate::Unlimited,
                 achieved_rate: None,
                 stepping: false,
+                before_next_fault: false,
                 terminal: false,
                 application_ready: true,
             },
@@ -3957,6 +3958,7 @@ mod tests {
                 rate: PlaybackRate::Unlimited,
                 achieved_rate: None,
                 stepping: false,
+                before_next_fault: false,
                 terminal: true,
                 application_ready: true,
             },
@@ -4021,6 +4023,7 @@ mod tests {
                 rate: PlaybackRate::Unlimited,
                 achieved_rate: None,
                 stepping: false,
+                before_next_fault: false,
                 terminal: true,
                 application_ready: true,
             },
@@ -4175,6 +4178,8 @@ mod tests {
         let text = render_at(&app, 120, 30);
         assert!(text.contains("lost the local server"));
         assert!(text.contains("server unreachable"));
+        assert!(text.contains("seedbox server start"));
+        println!("BEGIN FIXTURE disconnected-server (TestBackend, NOT LIVE)\n{text}END FIXTURE disconnected-server");
         assert!(!text.contains("no simulations yet"));
         app.apply(Update::Connection(true));
         let text = render_at(&app, 120, 30);
@@ -4240,6 +4245,7 @@ mod tests {
                         rate,
                         achieved_rate: None,
                         stepping: false,
+                        before_next_fault: false,
                         terminal: false,
                         application_ready: true,
                     },

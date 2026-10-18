@@ -10,6 +10,9 @@ pub struct PlaybackStatus {
     #[serde(default)]
     pub achieved_rate: Option<RateMeasurement>,
     pub stepping: bool,
+    /// A one-shot pause remains armed for the next fault effect.
+    #[serde(default)]
+    pub before_next_fault: bool,
     pub terminal: bool,
     /// All initial applications have reported readiness at a committed boundary.
     #[serde(default)]
