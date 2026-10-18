@@ -86,6 +86,11 @@ pub struct Args {
     /// node, all of them, or one node from it and from some S3 servers.
     #[arg(long)]
     pub sequencer_cuts: bool,
+    /// Cut one node off from one other machine (an S3 server, the sequencer
+    /// or another node) about this often, in seconds, for 1-20 s, overlapping
+    /// and asymmetric; 0 never does.
+    #[arg(long, default_value_t = 0.0)]
+    pub chaos_cuts: f64,
     #[arg(long, default_value = "sequencer")]
     pub sequencer: String,
     /// The S3 servers, for cuts that also separate a node from some of them.
@@ -231,6 +236,18 @@ pub fn run(args: Args) -> u8 {
     );
     if args.s3_load > 0 {
         s3_load(&args);
+    }
+    if args.chaos_cuts > 0.0 {
+        let mut peers = args.s3.clone();
+        peers.push(args.sequencer.clone());
+        peers.extend(args.nodes.iter().cloned());
+        crate::nemesis::chaos_cuts(
+            args.nodes.clone(),
+            peers,
+            args.chaos_cuts,
+            (1.0, 20.0),
+            args.duration as f64,
+        );
     }
     if args.sequencer_cuts {
         if !args.expect_unavailable {
