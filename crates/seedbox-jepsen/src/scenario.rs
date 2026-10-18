@@ -2019,12 +2019,12 @@ fn keel() -> Vec<Scenario> {
     for (suffix, backend, placement, what) in variants {
         specs.push((
             format!("keel{suffix}-objects"),
-            format!("One keel-s3dd server with {what}.\nLooking for unknown bugs: S3 PUTs of unique 16 KiB objects from twelve clients for\n120 s with reads of acknowledged objects, then a read-back and a listing of every\nacknowledged object. keel-s3dd acknowledges a write only once it is synced, so\nnothing acknowledged may be lost. Run it without a fault profile for a baseline,\nor with `--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or\n`above-pause-faults.yaml`. Known failing with `corruption-faults.yaml` until keel\nstops truncating its log after a corrupted read during recovery (5frhxmz3)."),
+            format!("One keel-s3dd server with {what}.\nLooking for unknown bugs: S3 PUTs of unique 16 KiB objects from twelve clients for\n120 s with reads of acknowledged objects, then a read-back and a listing of every\nacknowledged object. keel-s3dd acknowledges a write only once it is synced, so\nnothing acknowledged may be lost. Run it without a fault profile for a baseline,\nor with `--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or\n`above-pause-faults.yaml`."),
             backend, placement, long.to_vec(),
         ));
         specs.push((
             format!("keel{suffix}-register"),
-            format!("One keel-s3dd server with {what}.\nTwelve registers: reads, PUTs, DELETEs and compare-and-set by conditional PUT (a GET,\nthen If-Match on its ETag, or If-None-Match from absent) from twelve clients for 120 s,\nthen a read of each key. Every key's history must be linearizable. Run it with\n`--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or `above-pause-faults.yaml`.\nKnown failing with `crash-faults.yaml` until keel stops serving writes to readers\nand conditional checks before they are synced (power loss then undoes a value a\nclient saw; 8w7f6c5j, sggu92mv)."),
+            format!("One keel-s3dd server with {what}.\nTwelve registers: reads, PUTs, DELETEs and compare-and-set by conditional PUT (a GET,\nthen If-Match on its ETag, or If-None-Match from absent) from twelve clients for 120 s,\nthen a read of each key. Every key's history must be linearizable. Run it with\n`--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or `above-pause-faults.yaml`.\n`crash-faults.yaml` and `latency-crash-faults.yaml` check keel's fix (fix/s3d-durability)\nfor serving writes to readers and conditional checks before they were synced, which\npower loss then undid (8w7f6c5j, sggu92mv)."),
             backend, placement, [register, many, long].concat(),
         ));
         specs.push((
@@ -2047,6 +2047,11 @@ fn keel() -> Vec<Scenario> {
         "keel-eio-register".into(),
         "keel-register under failed disk requests, power-cycled before the checks like\nkeel-eio: run it with `--fault-profile harness/jepsen/keel/eio-data-faults.yaml`. A\nwedged keel-s3dd answers every write with an ambiguous 500, so a client waits 5 s\nafter each unknown outcome to keep the history checkable.".into(),
         "poll", "log", [register, small, reboot, &["--unknown-backoff-ms", "5000"], short].concat(),
+    ));
+    specs.push((
+        "keel-corrupt-reads".into(),
+        "keel-objects under silent corruption of data reads: run it with\n`--fault-profile harness/jepsen/keel/corruption-faults.yaml`. The disk keeps the right\nbytes, so no acknowledged object may be lost and no read may return other bytes. A\nread that fails its checksum fails that request; one during recovery makes\nkeel-s3dd exit (3) rather than truncate its log, and run-s3dd.sh restarts it. With\nbuffered I/O a corrupted read can leave a bad page cached, so the server is\npower-cycled once the faults end (a fail-stop operator's restart), and every\nacknowledged object must then read back intact.".into(),
+        "poll", "log", [objects, reboot, short].concat(),
     ));
     specs.push((
         "keel-corrupt-writes".into(),

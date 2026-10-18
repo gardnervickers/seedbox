@@ -4,10 +4,10 @@
 # object blocks, so a corrupted read must fail rather than return other bytes,
 # and since nothing on disk changes, no acknowledged object may be lost, even
 # across the power failures and short (under 2 s) process pauses mixed in (recovery reads the log back through the
-# same corrupting disk). Pair it with keel-objects or keel-register. Known
-# failing until keel stops treating a frame that fails its checksum on read
-# during recovery as the log's end (5frhxmz3 lost 3047 acknowledged objects),
-# and stops wedging for good on a corrupted read (4avkym5e).
+# same corrupting disk). Pair it with keel-corrupt-reads. Before keel's fix
+# (fix/s3d-durability), recovery treated a frame that failed its checksum on
+# read as the log's end (5frhxmz3 lost 3047 acknowledged objects) and a
+# corrupted read wedged the server for good (4avkym5e).
 start: 15s
 end: 70s
 interval: 4s
