@@ -1,11 +1,56 @@
 use super::*;
+
+fn pmu_cpuid(version: u8) -> kvm_cpuid_entry2 {
+    kvm_cpuid_entry2 {
+        function: 0xa,
+        eax: 0x0730_0400 | u32::from(version),
+        ebx: 0x7f,
+        edx: 0x603,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn pmu_disable_capability_requires_explicit_disable() {
+    for version in [0, 2, 5] {
+        assert_eq!(
+            pmu_needs_disable(KVM_PMU_CAP_DISABLE as i32, &[pmu_cpuid(version)]),
+            Ok(true)
+        );
+    }
+}
+
+#[test]
+fn absent_pmu_disable_capability_accepts_only_no_vpmu() {
+    // Non-version EAX bits do not advertise a PMU when the version is zero.
+    assert_eq!(pmu_needs_disable(0, &[pmu_cpuid(0)]), Ok(false));
+    assert_eq!(pmu_needs_disable(2, &[pmu_cpuid(0)]), Ok(false));
+    for version in [1, 2, 5, 255] {
+        assert_eq!(
+            pmu_needs_disable(0, &[pmu_cpuid(version)]),
+            Err("PV KVM cannot disable the guest PMU".into())
+        );
+    }
+    assert!(pmu_needs_disable(0, &[]).is_err());
+    assert!(pmu_needs_disable(0, &[pmu_cpuid(0), pmu_cpuid(2)]).is_err());
+}
+
+#[test]
+fn guest_pmu_cpuid_is_identical_with_disabled_or_absent_vpmu() {
+    let disabled = guest_cpuid(CpuId::from_entries(&[pmu_cpuid(5)]).unwrap());
+    let absent = guest_cpuid(CpuId::from_entries(&[pmu_cpuid(0)]).unwrap());
+    assert_eq!(disabled, absent);
+    let entry = &disabled.as_slice()[0];
+    assert_eq!([entry.eax, entry.ebx, entry.ecx, entry.edx], [0; 4]);
+}
+
 /// Every feature the guest must not use to reach host time, entropy,
 /// counters, waits or hypervisor interfaces is absent from guest CPUID.
 #[test]
 #[ignore = "requires /dev/kvm on an x86-64 PV host"]
 fn pv_guest_cpuid_hides_host_sensitive_features() {
     let kvm = Kvm::new().unwrap();
-    let cpuid = guest_cpuid(&kvm).unwrap();
+    let cpuid = guest_cpuid(kvm.get_supported_cpuid(KVM_MAX_CPUID_ENTRIES).unwrap());
     let mut seen = 0;
     for entry in cpuid.as_slice() {
         let registers = [entry.eax, entry.ebx, entry.ecx, entry.edx];

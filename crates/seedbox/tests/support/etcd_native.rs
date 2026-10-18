@@ -99,9 +99,7 @@ impl Cli {
                 &words(&["get", "simulations", "--json"]),
             )
             .await?;
-        let resources: seedbox_api::SimulationList =
-            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-        for summary in resources.items {
+        for summary in parse_resource_summaries(&bytes)? {
             let id = summary.metadata.id;
             let resource = self
                 .describe(guard, &format!("failure-{id}"), id.as_str())
@@ -170,6 +168,12 @@ impl Cli {
         )?;
         Ok(completed)
     }
+}
+
+// The CLI flattens catalogue pages into a bare array, not the API's
+// SimulationList page object. Each array element is a summary object.
+fn parse_resource_summaries(bytes: &[u8]) -> Result<Vec<seedbox_api::SimulationSummary>> {
+    serde_json::from_slice(bytes).map_err(|e| e.to_string())
 }
 
 fn words(args: &[&str]) -> Vec<OsString> {
@@ -427,6 +431,25 @@ pub fn run(backend: Backend) {
 mod tests {
     use super::*;
     use std::{collections::BTreeMap, ffi::OsStr};
+
+    #[test]
+    fn failure_resources_parse_current_cli_summary_array() {
+        let bytes = serde_json::to_vec(&serde_json::json!([{
+            "metadata": {
+                "id": "23456789",
+                "revision": 1,
+                "createdAtUnixMs": 0
+            },
+            "status": seedbox_api::SimulationStatus::default(),
+            "oracle": "oracle"
+        }]))
+        .unwrap();
+        let resources = parse_resource_summaries(&bytes).unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].metadata.id.as_str(), "23456789");
+        assert!(parse_resource_summaries(b"[]").unwrap().is_empty());
+        assert!(parse_resource_summaries(b"{}").is_err());
+    }
 
     #[test]
     fn normal_cli_command_clears_legacy_bootstrap_overrides() {

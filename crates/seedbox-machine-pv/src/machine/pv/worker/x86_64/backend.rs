@@ -110,11 +110,7 @@ fn from_raw<T>(bytes: &[u8], what: &str) -> Result<T> {
 /// monitor/wait, performance counters, hypervisor leaves or host topology.
 /// TSC_ADJUST is hidden too: KVM changes it when host TSC adjustments (such as
 /// a host suspend) shift the guest TSC, and Linux rereads it while idle.
-fn guest_cpuid(kvm: &Kvm) -> Result<CpuId> {
-    let mut cpuid = checked(
-        "KVM_GET_SUPPORTED_CPUID",
-        kvm.get_supported_cpuid(KVM_MAX_CPUID_ENTRIES),
-    )?;
+fn guest_cpuid(mut cpuid: CpuId) -> CpuId {
     for entry in cpuid.as_mut_slice() {
         match (entry.function, entry.index) {
             (1, _) => {
@@ -162,7 +158,25 @@ fn guest_cpuid(kvm: &Kvm) -> Result<CpuId> {
             _ => (),
         }
     }
-    Ok(cpuid)
+    cpuid
+}
+
+/// Without the disable capability, only an explicit architectural PMU version
+/// of zero proves KVM has no vPMU. Missing CPUID evidence fails closed. Always
+/// inspect KVM's supported CPUID, not our masked guest CPUID: hiding the feature
+/// alone would leave host performance counters accessible through MSRs/RDPMC.
+fn pmu_needs_disable(capability: i32, supported_cpuid: &[kvm_cpuid_entry2]) -> Result<bool> {
+    if capability & KVM_PMU_CAP_DISABLE as i32 != 0 {
+        return Ok(true);
+    }
+    let mut pmu_leaves = supported_cpuid.iter().filter(|entry| entry.function == 0xa);
+    if pmu_leaves.next().is_some_and(|entry| entry.eax & 0xff == 0)
+        && pmu_leaves.all(|entry| entry.eax & 0xff == 0)
+    {
+        Ok(false)
+    } else {
+        Err("PV KVM cannot disable the guest PMU".into())
+    }
 }
 
 /// MSRs that are host-owned rather than guest state: the TSC family, the
@@ -256,18 +270,25 @@ impl Backend for Native {
             return Err("PV KVM immediate exit capability required".into());
         }
         let vm = checked("KVM_CREATE_VM", kvm.create_vm())?;
-        // Host performance counters are not guest time sources: no vPMU.
-        if vm.check_extension_raw(KVM_CAP_PMU_CAPABILITY.into()) & KVM_PMU_CAP_DISABLE as i32 == 0 {
-            return Err("PV KVM cannot disable the guest PMU".into());
-        }
-        checked(
-            "disable guest PMU",
-            vm.enable_cap(&kvm_enable_cap {
-                cap: KVM_CAP_PMU_CAPABILITY,
-                args: [KVM_PMU_CAP_DISABLE.into(), 0, 0, 0],
-                ..Default::default()
-            }),
+        let supported_cpuid = checked(
+            "KVM_GET_SUPPORTED_CPUID",
+            kvm.get_supported_cpuid(KVM_MAX_CPUID_ENTRIES),
         )?;
+        // Host performance counters are not guest time sources: no vPMU.
+        // KVM with its PMU disabled globally may offer no disable capability.
+        if pmu_needs_disable(
+            vm.check_extension_raw(KVM_CAP_PMU_CAPABILITY.into()),
+            supported_cpuid.as_slice(),
+        )? {
+            checked(
+                "disable guest PMU",
+                vm.enable_cap(&kvm_enable_cap {
+                    cap: KVM_CAP_PMU_CAPABILITY,
+                    args: [KVM_PMU_CAP_DISABLE.into(), 0, 0, 0],
+                    ..Default::default()
+                }),
+            )?;
+        }
         // Required by VMX; harmless on SVM. Reserved from every RAM segment.
         checked("KVM_SET_TSS_ADDR", vm.set_tss_address(0xfffb_d000))?;
         // KVM reserves three TSS pages and one identity-map page; both are
@@ -317,7 +338,10 @@ impl Backend for Native {
                 ..Default::default()
             }),
         )?;
-        checked("KVM_SET_CPUID2", cpu.set_cpuid2(&guest_cpuid(&kvm)?))?;
+        checked(
+            "KVM_SET_CPUID2",
+            cpu.set_cpuid2(&guest_cpuid(supported_cpuid)),
+        )?;
         let msrs = msr_list(&kvm, &cpu)?;
         Ok(Self {
             cpu,
