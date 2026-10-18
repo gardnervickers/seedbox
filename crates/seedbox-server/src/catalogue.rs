@@ -468,8 +468,6 @@ impl Catalogue {
         if reference.is_some_and(|id| self.entries.get(id).is_some_and(|entry| entry.deleting)) {
             return Err(Error::Invalid("source simulation is being deleted".into()));
         }
-        let referenced_backend =
-            reference.and_then(|source| self.entries[source].resource.options.backend);
         let parent = match &spec.inputs {
             InputSource::Resolved { definition } => {
                 definition
@@ -576,24 +574,6 @@ impl Catalogue {
                 spec = seedbox_api::SimulationSpec::resolved(definition).map_err(Error::Invalid)?;
             }
         }
-        let recorded_backend = match &spec.inputs {
-            InputSource::Resolved { definition } => definition
-                .runtime
-                .driver_backend()
-                .map_err(Error::Invalid)?,
-            _ => referenced_backend,
-        };
-        if recorded_backend
-            .zip(request.options.backend)
-            .is_some_and(|(recorded, requested)| recorded != requested)
-        {
-            return Err(Error::Invalid(
-                "requested backend differs from retained backend".into(),
-            ));
-        }
-        let backend = recorded_backend
-            .or(request.options.backend)
-            .unwrap_or_default();
         let created_at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
@@ -621,7 +601,6 @@ impl Catalogue {
             spec,
         );
         resource.options = request.options.clone();
-        resource.options.backend = Some(backend);
         let entry = Entry {
             request,
             imported_checkpoints: None,

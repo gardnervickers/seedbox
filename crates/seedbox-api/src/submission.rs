@@ -34,15 +34,18 @@ pub struct Submission {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Simulator {
-    #[serde(rename = "blocksPerProgressCall")]
-    pub progress_budget: seedbox_spec::progress::ProgressBudget,
+    #[serde(skip_serializing_if = "project::CpuBackend::is_pv")]
+    pub backend: project::CpuBackend,
+    pub blocks_per_progress_call: std::num::NonZeroU32,
     /// Expose world controls to the oracle process.
     pub oracle_control: bool,
 }
 impl Default for Simulator {
     fn default() -> Self {
         Self {
-            progress_budget: project::SimulatorDefaults::default().progress_budget,
+            backend: project::CpuBackend::Pv,
+            blocks_per_progress_call: project::SimulatorDefaults::default()
+                .blocks_per_progress_call,
             oracle_control: true,
         }
     }
@@ -259,7 +262,8 @@ impl Submission {
             configs,
             network,
             simulator: project::SimulatorDefaults {
-                progress_budget: self.simulator.progress_budget,
+                backend: self.simulator.backend,
+                blocks_per_progress_call: self.simulator.blocks_per_progress_call,
             },
             schedule: Default::default(),
             control: self
@@ -437,7 +441,8 @@ impl Submission {
                     .collect(),
             },
             simulator: Simulator {
-                progress_budget: config.simulator.progress_budget,
+                backend: config.simulator.backend,
+                blocks_per_progress_call: config.simulator.blocks_per_progress_call,
                 oracle_control: config.control.is_some(),
             },
             overrides: spec
@@ -493,6 +498,29 @@ mod tests {
         })
     }
     #[test]
+    fn cpu_selection_round_trips_through_partial_submission_without_host_options() {
+        let mut value = partial();
+        value["simulator"] = serde_json::json!({"backend":"tcg"});
+        let spec: SimulationSpec = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            spec.configuration.simulator.backend,
+            project::CpuBackend::Tcg
+        );
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert_eq!(wire["simulator"]["backend"], "tcg");
+        let again: SimulationSpec = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            again.configuration.simulator.backend,
+            project::CpuBackend::Tcg
+        );
+        let defaults: SimulationSpec = serde_json::from_value(partial()).unwrap();
+        assert_eq!(
+            defaults.configuration.simulator.backend,
+            project::CpuBackend::Pv
+        );
+    }
+
+    #[test]
     fn partial_submissions_preserve_machine_memory_until_server_architecture_is_known() {
         let mut raw = partial();
         raw["machines"]["app"]["memoryMiB"] = 2048.into();
@@ -523,7 +551,10 @@ mod tests {
             .services
             .values()
             .all(|s| s.platform.is_empty()));
-        assert_eq!(spec.configuration.simulator.progress_budget.get(), 10_000);
+        assert_eq!(
+            spec.configuration.simulator.blocks_per_progress_call.get(),
+            10_000
+        );
         assert_eq!(spec.configuration.network.latency_ns, 1_000_000);
         let wire = serde_json::to_value(&spec).unwrap();
         for private in [

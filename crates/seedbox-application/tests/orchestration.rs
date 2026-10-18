@@ -119,16 +119,9 @@ impl Fixture {
     }
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("seedbox.yaml");
-        fs::write(
-            &source,
-            "name: test\nmachines: {}\noracle: {image: example/workload:v1}\n",
-        )
-        .unwrap();
-        let mut simulation = config::load(&source, &BTreeMap::new()).unwrap();
-        simulation.seed = Some(1009);
-        simulation.limits.simulated_time_ns = 10_000_000_000;
-        simulation.limits.wall_time_ns = 10_000_000_000;
+        let source = directory.path().join("compose.yaml");
+        fs::write(&source, "name: test\nservices:\n  workload: {image: example/workload:v1}\nx-seedbox:\n  version: 1\n  seed: 1009\n  limits: {simulated_time: 10s, wall_time: 10s}\n  check: {service: workload}\n").unwrap();
+        let simulation = config::load(&source, &BTreeMap::new()).unwrap();
         let store = ContentStore::new(directory.path().join("store"));
         let kernel = store.put(b"fixture kernel").unwrap();
         let engine = store.put(b"fixture engine").unwrap();
@@ -145,10 +138,10 @@ impl Fixture {
             machine_memory_mb: BTreeMap::from([("workload".into(), 512)]),
             wall_clock_epoch: None,
             profile: profile.clone(),
-            placement: BTreeMap::from([("oracle".into(), "oracle".into())]),
-            guests: BTreeMap::from([("oracle".into(), guest)]),
+            placement: BTreeMap::from([("workload".into(), "workload".into())]),
+            guests: BTreeMap::from([("workload".into(), guest)]),
             images: BTreeMap::from([(
-                "oracle".into(),
+                "workload".into(),
                 PreparedImage {
                     manifest,
                     config,
@@ -178,7 +171,7 @@ impl Fixture {
                 simulated_time_ns: None,
                 reason: StopReason::Completed,
                 workload_exit: Some(WorkloadExit {
-                    service: "oracle".into(),
+                    service: "workload".into(),
                     code: 0,
                 }),
                 witness: Some(ContentDigest::of(b"witness")),
@@ -271,7 +264,7 @@ fn witness_fault_history_and_full_state_comparisons_are_distinct() {
     assert_eq!(replay.full_state_matches, None);
     fixture.backend.report.witness = first.record.report.as_ref().unwrap().witness.clone();
     fixture.backend.report.full_state = Some(BTreeMap::from([(
-        "oracle".into(),
+        "workload".into(),
         ContentDigest::of(b"state"),
     )]));
     let with_state = fixture.run();
@@ -286,7 +279,7 @@ fn witness_fault_history_and_full_state_comparisons_are_distinct() {
     fixture.backend.report.faults.push(FaultEvent {
         requested_at_ns: 1,
         applied_at_ns: 2,
-        service: "oracle".into(),
+        service: "workload".into(),
         action: "restart".into(),
         detail: "test".into(),
     });
@@ -306,7 +299,7 @@ mod page_evidence_tests {
         let raw = serde_json::json!({
             "report_version": 1, "seed": 1009, "outcome": "end_machine_exited",
             "world_witness": ContentDigest::of(b"world"),
-            "machines": [{"name": "oracle", "state": "Exited(0)", "time_ns": 100, "infrastructure_error": false,
+            "machines": [{"name": "workload", "state": "Exited(0)", "time_ns": 100, "infrastructure_error": false,
                 "guest_exit_code": 0, "witness": ContentDigest::of(b"machine"),
                 "state_digest": ContentDigest::of(b"state"),
                 "state_digest_parts": {"ram": ContentDigest::of(b"RAM"), "regs": ContentDigest::of(b"regs"), "events": "none"}}]
@@ -318,7 +311,7 @@ mod page_evidence_tests {
     fn update(f: &mut Fixture, raw: &serde_json::Value, pages: Vec<u8>) {
         let digest: ContentDigest =
             serde_json::from_value(raw["machines"][0]["state_digest"].clone()).unwrap();
-        f.backend.report.full_state = Some(BTreeMap::from([("oracle".into(), digest)]));
+        f.backend.report.full_state = Some(BTreeMap::from([("workload".into(), digest)]));
         f.backend.report.witness =
             Some(serde_json::from_value(raw["world_witness"].clone()).unwrap());
         // Portable synthetic stopped captures in the current retained format.
@@ -337,17 +330,17 @@ mod page_evidence_tests {
         let capture = seedbox_application::evidence::StateCapture {
             boot: 0,
             disposition: seedbox_application::evidence::StateDisposition::Exited { code: 0 },
-            digest: f.backend.report.full_state.as_ref().unwrap()["oracle"].clone(),
+            digest: f.backend.report.full_state.as_ref().unwrap()["workload"].clone(),
             parts,
             regions: vec![seedbox_application::evidence::RamRegion {
                 base: 0,
                 length: 512 * 1024 * 1024,
             }],
-            page_log: "machines/oracle.pages".into(),
+            page_log: "machines/workload.pages".into(),
         };
         let state = seedbox_application::evidence::StateReport {
             version: 1,
-            machines: BTreeMap::from([("oracle".into(), capture)]),
+            machines: BTreeMap::from([("workload".into(), capture)]),
         };
         f.backend.extra_logs.insert(
             seedbox_application::evidence::STATE_REPORT.into(),
@@ -355,16 +348,16 @@ mod page_evidence_tests {
         );
         f.backend
             .extra_logs
-            .insert("machines/oracle.pages".into(), pages);
+            .insert("machines/workload.pages".into(), pages);
     }
 
     #[test]
     fn full_state_replay_adds_page_evidence_without_changing_verdicts_or_old_json_fields() {
         let (mut f, mut raw) = full_state_fixture();
         let first = f.run();
-        assert!(first.record.logs.contains_key("machines/oracle.pages"));
+        assert!(first.record.logs.contains_key("machines/workload.pages"));
         assert_eq!(
-            fs::metadata(first.directory.join("output/machines/oracle.pages"))
+            fs::metadata(first.directory.join("output/machines/workload.pages"))
                 .unwrap()
                 .len(),
             1024 * 1024
@@ -389,8 +382,8 @@ mod page_evidence_tests {
         assert_eq!(comparison.full_state_matches, Some(false));
         let report = comparison.ram_pages.as_ref().unwrap();
         assert!(report.limitations.is_empty());
-        assert_eq!(report.machines["oracle"].differing_pfns, 1);
-        assert_eq!(report.machines["oracle"].first_pfns, [3]);
+        assert_eq!(report.machines["workload"].differing_pfns, 1);
+        assert_eq!(report.machines["workload"].first_pfns, [3]);
         let new = serde_json::to_value(comparison).unwrap();
         for field in old.as_object().unwrap().keys() {
             assert!(new.get(field).is_some());
@@ -413,7 +406,7 @@ fn requested_full_state_requires_a_digest_for_every_machine() {
     fixture.backend.report.full_state = Some(BTreeMap::new());
     assert_eq!(fixture.run().record.outcome, Outcome::Error);
     fixture.backend.report.full_state = Some(BTreeMap::from([(
-        "oracle".into(),
+        "workload".into(),
         ContentDigest::of(b"state"),
     )]));
     assert_eq!(fixture.run().record.outcome, Outcome::Pass);
@@ -455,7 +448,7 @@ fn limits_cancellation_and_missing_completion_cannot_pass() {
         .workload_exit
         .as_mut()
         .unwrap()
-        .service = "oracle".into();
+        .service = "workload".into();
     fixture.backend.report.witness = None;
     assert_eq!(fixture.run().record.outcome, Outcome::Error);
 }
@@ -594,7 +587,7 @@ fn unexpected_panic_leaves_an_inspectable_incomplete_attempt() {
 fn corruption_missing_artifacts_and_profile_drift_prevent_execution() {
     let fixture = Fixture::new();
     let first = fixture.run();
-    let digest = &fixture.preparer.inputs.images["oracle"].layers[0];
+    let digest = &fixture.preparer.inputs.images["workload"].layers[0];
     let path = fixture
         .directory
         .path()
@@ -673,7 +666,7 @@ fn seed_kernel_build_and_configuration_changes_create_new_identities() {
     fixture
         .simulation
         .services
-        .get_mut("oracle")
+        .get_mut("workload")
         .unwrap()
         .environment
         .insert("VARIABLE".into(), Some("new".into()));
@@ -740,16 +733,16 @@ fn co_located_services_use_one_machine_state_digest_and_complete_placement() {
     let mut fixture = Fixture::new();
     fixture.simulation.services.insert(
         "redis".into(),
-        fixture.simulation.services["oracle"].clone(),
+        fixture.simulation.services["workload"].clone(),
     );
     fixture.preparer.inputs.images.insert(
         "redis".into(),
-        fixture.preparer.inputs.images["oracle"].clone(),
+        fixture.preparer.inputs.images["workload"].clone(),
     );
-    let guest = fixture.preparer.inputs.guests.remove("oracle").unwrap();
+    let guest = fixture.preparer.inputs.guests.remove("workload").unwrap();
     fixture.preparer.inputs.guests.insert("vm0".into(), guest);
     fixture.preparer.inputs.placement = BTreeMap::from([
-        ("oracle".into(), "vm0".into()),
+        ("workload".into(), "vm0".into()),
         ("redis".into(), "vm0".into()),
     ]);
     fixture.backend.profile.witness_mode = WitnessMode::FullState;
@@ -860,7 +853,7 @@ fn fault_comparison_uses_acknowledged_effect_time_and_rejects_invalid_acknowledg
     fixture.backend.report.faults.push(FaultEvent {
         requested_at_ns: 10,
         applied_at_ns: 20,
-        service: "oracle".into(),
+        service: "workload".into(),
         action: "stop".into(),
         detail: "guest acknowledged".into(),
     });
@@ -967,7 +960,7 @@ fn machine_lifecycle_effects_pass_and_replay_with_their_service() {
         fixture.backend.report.faults.push(FaultEvent {
             requested_at_ns: i as u64 + 1,
             applied_at_ns: i as u64 + 1,
-            service: "oracle".into(),
+            service: "workload".into(),
             action: (*action).into(),
             detail: "machine lifecycle".into(),
         });
@@ -1478,10 +1471,10 @@ fn timed_indexes_survive_success_backend_error_cancellation_and_retention_omissi
         }
         f.backend
             .extra_logs
-            .insert("machines/oracle.console".into(), vec![0, 255, 10]);
+            .insert("machines/workload.console".into(), vec![0, 255, 10]);
         f.backend
             .extra_logs
-            .insert("machines/oracle.console.chunks".into(), index.clone());
+            .insert("machines/workload.console.chunks".into(), index.clone());
         if omit {
             f.orchestrator = f.orchestrator.with_log_policy(LogPolicy {
                 max_file_bytes: 4,
@@ -1505,15 +1498,15 @@ fn timed_indexes_survive_success_backend_error_cancellation_and_retention_omissi
             assert!(run
                 .record
                 .omitted_logs
-                .contains_key("machines/oracle.console.chunks"));
+                .contains_key("machines/workload.console.chunks"));
             assert!(reader.report.chunks.is_empty());
             assert!(reader
                 .report
                 .omissions
-                .contains_key("machines/oracle.console.chunks"));
+                .contains_key("machines/workload.console.chunks"));
         } else {
             assert_eq!(
-                run.record.logs["machines/oracle.console.chunks"],
+                run.record.logs["machines/workload.console.chunks"],
                 ContentDigest::of(&index)
             );
             let mut bytes = Vec::new();
@@ -2359,7 +2352,7 @@ fn interactive_history_is_sealed_as_portable_overrides_and_replays_without_journ
                 at_ns: 100,
                 deadline_ns: 200,
                 action: seedbox_control::Action::Stop {
-                    machine: "oracle".into(),
+                    machine: "workload".into(),
                 },
             },
         }],
@@ -2496,26 +2489,13 @@ mod admission_ordering {
         }
         let root = tempfile::tempdir().unwrap();
         let prepare = Prepare(AtomicUsize::new(0));
-        let simulation = config::parse(
-            "name: host-refusal\nmachines: {}\noracle: {image: fixture:synthetic}\n",
-            &root.path().join("seedbox.yaml"),
-            &BTreeMap::new(),
-        )
-        .unwrap();
+        let simulation=config::parse("name: host-refusal\nservices:\n  app: {image: fixture:synthetic}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n",&root.path().join("compose.yaml"),&BTreeMap::new()).unwrap();
         let orchestrator = Orchestrator::new(
             ContentStore::new(root.path().join("objects")),
             root.path().join("runs"),
         );
         let error = orchestrator
-            .run(
-                &simulation,
-                RunOptions {
-                    seed: Some(1),
-                    ..Default::default()
-                },
-                &prepare,
-                &Refused,
-            )
+            .run(&simulation, RunOptions::default(), &prepare, &Refused)
             .unwrap_err()
             .to_string();
         assert!(error.contains("EACCES (13)"));

@@ -67,7 +67,7 @@ fn execution_backend_label(
         if profile
             .driver_backend()
             .map_err(seedbox_application::Error::Setup)?
-            == Some(seedbox_spec::backend::CpuBackend::Tcg)
+            == Some(seedbox_spec::project::CpuBackend::Tcg)
         {
             "TCG"
         } else if cfg!(target_os = "macos") {

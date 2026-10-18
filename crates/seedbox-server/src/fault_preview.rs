@@ -266,8 +266,8 @@ mod tests {
 
     fn fixture() -> (seedbox_spec::Simulation, WorldState) {
         let configuration = seedbox_application::config::parse(
-            "name: test\nmachines:\n  n1:\n    image: example/n1\n  n2:\n    image: example/n2\noracle:\n  image: example/oracle\n",
-            std::path::Path::new("/project/seedbox.yaml"), &Default::default(),
+            "name: test\nservices:\n  n1:\n    image: example/n1\n  n2:\n    image: example/n2\n  oracle:\n    image: example/oracle\n",
+            std::path::Path::new("/project/compose.yaml"), &Default::default(),
         ).unwrap();
         let world =
             crate::world::Tracker::new("abcdefgh".parse().unwrap(), &configuration).snapshot();

@@ -39,7 +39,7 @@ pub fn resolve_launch(service: &Service, image: &ImageDefaults) -> Result<Launch
         .or(image.entrypoint.as_ref())
         .cloned()
         .unwrap_or_default();
-    // An explicit entrypoint overrides the image CMD,
+    // Compose ignores image CMD when a non-null entrypoint override is present,
     // including an explicitly empty override. A service command still applies.
     let command = service.command.as_ref().or_else(|| {
         if service.entrypoint.is_none() {

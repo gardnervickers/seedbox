@@ -54,8 +54,7 @@ fn machine(iterations: u64, instrumented: bool) -> PVMachine {
         let runtime =
             FilesystemArchive::new(fs::read(input("SEEDBOX_PV_PROGRESS_RUNTIME")).unwrap())
                 .unwrap();
-        let prefix =
-            super::factory::runtime_prefix(seedbox_spec::progress::ProgressBudget::MACHINE_DEFAULT);
+        let prefix = super::factory::runtime_prefix();
         boot_derived(&with_runtime(&app, &runtime, &prefix).unwrap(), &bootstrap).unwrap()
     } else {
         crate::application::boot_archive(&app, &bootstrap).unwrap()

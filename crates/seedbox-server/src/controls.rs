@@ -153,8 +153,8 @@ mod tests {
         let mut simulations = Vec::new();
         for (name, malformed) in [("broken", true), ("healthy", false)] {
             let configuration = seedbox_application::config::parse(
-                "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
-                std::path::Path::new("/project/seedbox.yaml"),
+                "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
+                std::path::Path::new("/project/compose.yaml"),
                 &Default::default(),
             )
             .unwrap();

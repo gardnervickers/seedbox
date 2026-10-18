@@ -529,7 +529,7 @@ mod tests {
                 links: Vec::new(),
             },
             simulator: Simulator {
-                progress_budget: std::num::NonZeroU32::new(10_000).unwrap().into(),
+                blocks_per_progress_call: std::num::NonZeroU32::new(10_000).unwrap(),
                 schedule: Default::default(),
                 disk: Default::default(),
                 oracle_control: false,

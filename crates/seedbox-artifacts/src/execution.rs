@@ -19,8 +19,8 @@ pub struct ExecutionProfile {
 }
 
 impl ExecutionProfile {
-    pub fn driver_backend(&self) -> Result<Option<seedbox_spec::backend::CpuBackend>, String> {
-        seedbox_spec::backend::CpuBackend::from_recorded_name(&self.backend)
+    pub fn driver_backend(&self) -> Result<Option<seedbox_spec::project::CpuBackend>, String> {
+        seedbox_spec::project::CpuBackend::from_recorded_name(&self.backend)
     }
 }
 

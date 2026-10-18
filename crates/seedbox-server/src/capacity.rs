@@ -85,8 +85,8 @@ mod tests {
 
     fn resource(id: &str) -> Simulation {
         let configuration = seedbox_application::config::parse(
-            "name: capacity\nmachines: {}\noracle:\n  image: example/oracle\n",
-            Path::new("/project/seedbox.yaml"),
+            "name: capacity\nservices:\n  oracle:\n    image: example/oracle\n",
+            Path::new("/project/compose.yaml"),
             &Default::default(),
         )
         .unwrap();

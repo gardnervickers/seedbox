@@ -129,7 +129,7 @@ fn inventory(root: &Path) -> Inventory {
         formatter: None,
         environments: Default::default(),
         boot_archives: Default::default(),
-        progress_budget: std::num::NonZeroU32::new(32).unwrap().into(),
+        blocks_per_progress_call: std::num::NonZeroU32::new(32).unwrap(),
         epoch_seconds: 1234,
     }
 }

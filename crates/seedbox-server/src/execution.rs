@@ -51,7 +51,6 @@ pub trait BackendProvider: Send + Sync + 'static {
     fn project(
         &self,
         configuration: &Simulation,
-        backend: seedbox_spec::backend::CpuBackend,
         store: &ContentStore,
         cancellation: &CancellationToken,
     ) -> seedbox_application::Result<Backends>;
@@ -580,19 +579,19 @@ impl ExecutionService {
         cancellation: &CancellationToken,
         preparation_expired: Arc<AtomicBool>,
     ) -> seedbox_application::Result<Run> {
+        let mut resolved_spec = spec.clone();
+        resolved_spec
+            .resolve_project_architecture(
+                seedbox_driver_execution::driver_world::platform::Host::current()
+                    .project_architecture(spec.configuration.simulator.backend),
+            )
+            .map_err(seedbox_application::Error::Setup)?;
+        let spec = &resolved_spec;
         let options = self
             .manager
             .describe(id)
             .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?
             .options;
-        let mut resolved_spec = spec.clone();
-        resolved_spec
-            .resolve_project_architecture(
-                seedbox_driver_execution::driver_world::platform::Host::current()
-                    .project_architecture(options.backend.unwrap_or_default()),
-            )
-            .map_err(seedbox_application::Error::Setup)?;
-        let spec = &resolved_spec;
         let program = crate::catalogue::resolve_program(spec)
             .map_err(|error| seedbox_application::Error::Setup(error.to_string()))?;
         let budget = crate::preparation_budget::Budget::start(
@@ -619,7 +618,6 @@ impl ExecutionService {
             InputSource::Project => {
                 let backends = self.backends.project(
                     &spec.configuration,
-                    options.backend.unwrap_or_default(),
                     &self.store,
                     &budget.cancellation,
                 )?;
@@ -892,7 +890,6 @@ mod tests {
         fn project(
             &self,
             _: &Simulation,
-            _: seedbox_spec::backend::CpuBackend,
             _: &ContentStore,
             cancellation: &CancellationToken,
         ) -> seedbox_application::Result<Backends> {
@@ -944,8 +941,8 @@ mod tests {
         ));
         let client = seedbox_client::Client::connect_to(&socket).unwrap();
         let mut configuration = seedbox_application::config::parse(
-            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
-            Path::new("/project/seedbox.yaml"),
+            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
+            Path::new("/project/compose.yaml"),
             &Default::default(),
         )
         .unwrap();
@@ -1050,7 +1047,6 @@ mod tests {
             fn project(
                 &self,
                 _: &Simulation,
-                _: seedbox_spec::backend::CpuBackend,
                 _: &ContentStore,
                 _: &CancellationToken,
             ) -> seedbox_application::Result<Backends> {
@@ -1157,8 +1153,8 @@ mod tests {
         let manager =
             Manager::new(catalogue::Catalogue::open(&directory.path().join("catalogue")).unwrap());
         let configuration = seedbox_application::config::parse(
-            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
-            Path::new("/project/seedbox.yaml"),
+            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
+            Path::new("/project/compose.yaml"),
             &Default::default(),
         )
         .unwrap();
@@ -1224,8 +1220,8 @@ mod tests {
             .unwrap(),
         );
         let configuration = seedbox_application::config::parse(
-            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
-            Path::new("/project/seedbox.yaml"),
+            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
+            Path::new("/project/compose.yaml"),
             &Default::default(),
         )
         .unwrap();
@@ -1322,8 +1318,8 @@ mod tests {
             .unwrap(),
         );
         let configuration = seedbox_application::config::parse(
-            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
-            Path::new("/project/seedbox.yaml"),
+            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
+            Path::new("/project/compose.yaml"),
             &Default::default(),
         )
         .unwrap();
@@ -1424,8 +1420,8 @@ mod tests {
         .unwrap();
         service.preparation_limit = Duration::from_millis(10);
         let mut configuration = seedbox_application::config::parse(
-            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
-            Path::new("/project/seedbox.yaml"),
+            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
+            Path::new("/project/compose.yaml"),
             &Default::default(),
         )
         .unwrap();

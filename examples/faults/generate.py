@@ -6,12 +6,14 @@ import shutil
 
 HERE = Path(__file__).resolve().parent
 
-def generate(destination, *, batch=32):
+def generate(destination, seed=1009, *, batch=32):
     if type(batch) is not int or not 1 <= batch <= 32:
         raise ValueError("batch must be between 1 and 32")
+    if not 0 <= seed <= 2**64 - 1:
+        raise ValueError("seed must be an unsigned64-bit integer")
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    base = (HERE / "seedbox.yaml").read_text()
+    base = (HERE / "compose.yaml").read_text().replace("  seed: 1009", f"  seed: {seed}")
     for variant in ("fixed", "broken", "broken-no-faults"):
         project = destination / variant
         project.mkdir()  # Never overwrite a prior project or its run inputs.
@@ -30,7 +32,7 @@ def generate(destination, *, batch=32):
             # the full acceptance matrix remain unchanged.
             text = text.replace('"server:7000"]', f'"server:7000", --batch, "{batch}"]')
             text = text.replace('"client:7001"', f'"client:7001", --batch, "{batch}"')
-        (project / "seedbox.yaml").write_text(text)
+        (project / "compose.yaml").write_text(text)
         (project / ".gitignore").write_text(".seedbox/\n")
         (project / "workload" / ".dockerignore").write_text("__pycache__\n*.pyc\n.git\n.seedbox\n")
     return destination
@@ -89,7 +91,7 @@ def focused_projects(projects):
     for name, program in (("early-request", EARLY_SCENARIO), ("readiness-cutoff", CUTOFF_SCENARIO)):
         destination = projects / name
         shutil.copytree(projects / "fixed", destination)
-        compose = destination / "seedbox.yaml"
+        compose = destination / "compose.yaml"
         text = compose.read_text().replace("name: synthetic-fault-fixed", "name: synthetic-fault-" + name)
         server = '    command: [server, --listen, "0.0.0.0:7000", --state, /data/kv.log]\n'
         assert text.count(server) == 1, "missing canonical server command"
@@ -103,7 +105,7 @@ def focused_projects(projects):
 def control_project(projects, name="control-cases", scenario="control_scenario.py"):
     destination = Path(projects) / name
     shutil.copytree(Path(projects) / "fixed", destination)
-    compose = destination / "seedbox.yaml"
+    compose = destination / "compose.yaml"
     text = compose.read_text().replace("name: synthetic-fault-fixed", "name: synthetic-fault-" + name)
     server = '    command: [server, --listen, "0.0.0.0:7000", --state, /data/kv.log]'
     assert text.count(server) == 1
@@ -115,5 +117,6 @@ def control_project(projects, name="control-cases", scenario="control_scenario.p
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination")
+    parser.add_argument("--seed", type=int, default=1009)
     args = parser.parse_args()
-    print(generate(args.destination))
+    print(generate(args.destination, args.seed))

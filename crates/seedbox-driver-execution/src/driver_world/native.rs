@@ -320,7 +320,7 @@ impl Factory {
         let inner = match inventory {
             Inventory::Pv {
                 epoch_seconds,
-                progress_budget,
+                blocks_per_progress_call,
                 policy,
                 ..
             } => {
@@ -340,7 +340,7 @@ impl Factory {
                     Ok::<FactoryKind, String>(FactoryKind::Pv(
                         factory
                             .with_scratch_root(scratch_root)
-                            .with_progress_budget(*progress_budget),
+                            .with_blocks_per_progress_call(*blocks_per_progress_call),
                     ))
                 }
                 #[cfg(not(any(

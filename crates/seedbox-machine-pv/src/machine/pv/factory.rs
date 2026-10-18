@@ -22,7 +22,7 @@ pub struct Factory {
     formatter: Option<Vec<u8>>,
     scratch_root: Option<PathBuf>,
     policy: Option<BackendPolicy>,
-    progress_budget: seedbox_spec::progress::ProgressBudget,
+    blocks_per_progress_call: std::num::NonZeroU32,
 }
 impl Factory {
     /// Load and validate the explicit offline-built guest asset directory once.
@@ -81,7 +81,7 @@ impl Factory {
             formatter,
             scratch_root: None,
             policy: None,
-            progress_budget: seedbox_spec::progress::ProgressBudget::MACHINE_DEFAULT,
+            blocks_per_progress_call: std::num::NonZeroU32::new(32).expect("nonzero default"),
         })
     }
     /// Select exact named backend semantics for subsequently created machines.
@@ -107,11 +107,8 @@ impl Factory {
     /// this performs no guest work and changes no already-created machine.
     // TODO: Re-evaluate: the service owns one resolved PV budget in its factory
     // inventory; a required definition field would churn unrelated Driver codecs.
-    pub fn with_progress_budget(
-        mut self,
-        budget: impl Into<seedbox_spec::progress::ProgressBudget>,
-    ) -> Self {
-        self.progress_budget = budget.into();
+    pub fn with_blocks_per_progress_call(mut self, budget: std::num::NonZeroU32) -> Self {
+        self.blocks_per_progress_call = budget;
         self
     }
     /// Place subsequently created machines' private host files under `root`.
@@ -185,7 +182,7 @@ impl Factory {
         let derived = with_runtime(
             &definition.application,
             &self.runtime,
-            &runtime_prefix(self.progress_budget),
+            &runtime_prefix_with_budget(self.blocks_per_progress_call),
         )
         .map_err(io::Error::other)?;
         let initrd = match environment {
@@ -295,14 +292,24 @@ mod guest {
     }
 }
 /// Mandatory translator launch prefix for every prepared application.
-pub(super) fn runtime_prefix(budget: seedbox_spec::progress::ProgressBudget) -> Vec<String> {
+pub(super) fn runtime_prefix() -> Vec<String> {
     let mut prefix = vec!["/seedbox/progress/bin64/drrun"];
     prefix.extend_from_slice(guest::LAUNCHER_OPTIONS);
     prefix.extend(["-opt_speed", "-disable_traces"]);
     prefix.extend_from_slice(guest::TRANSLATOR_OPTIONS);
-    prefix.extend(["-c", "/seedbox/progress/libseedbox_progress.so"]);
-    let mut prefix: Vec<String> = prefix.into_iter().map(str::to_owned).collect();
-    prefix.extend(budget.translator_arguments());
+    prefix.extend([
+        "-c",
+        "/seedbox/progress/libseedbox_progress.so",
+        "--blocks-per-progress-call",
+        "32",
+        "--",
+    ]);
+    prefix.into_iter().map(str::to_owned).collect()
+}
+fn runtime_prefix_with_budget(budget: std::num::NonZeroU32) -> Vec<String> {
+    let mut prefix = runtime_prefix();
+    let position = prefix.len() - 2; // Existing suffix: --blocks-per-progress-call VALUE --.
+    prefix[position] = budget.get().to_string();
     prefix
 }
 fn validate_runtime(bytes: &[u8]) -> io::Result<()> {

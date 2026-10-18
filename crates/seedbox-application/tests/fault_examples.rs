@@ -13,20 +13,20 @@ fn python_projects_share_client_and_use_a_dedicated_runtime_controller() {
         .unwrap()
         .success());
     let fixed = seedbox_application::config::load(
-        &destination.join("fixed/seedbox.yaml"),
+        &destination.join("fixed/compose.yaml"),
         &BTreeMap::new(),
     )
     .unwrap();
     let broken = seedbox_application::config::load(
-        &destination.join("broken/seedbox.yaml"),
+        &destination.join("broken/compose.yaml"),
         &BTreeMap::new(),
     )
     .unwrap();
     assert_eq!(fixed.services.len(), 3);
-    assert_eq!(fixed.control.as_ref().unwrap().service, "oracle");
-    assert_eq!(fixed.check.service, "oracle");
+    assert_eq!(fixed.control.as_ref().unwrap().service, "scenario");
+    assert_eq!(fixed.check.service, "scenario");
     assert_eq!(fixed.seed, broken.seed);
-    for name in ["client", "oracle"] {
+    for name in ["client", "scenario"] {
         assert_eq!(fixed.services[name].command, broken.services[name].command);
     }
     assert!(!fixed.services["server"]
@@ -41,11 +41,11 @@ fn python_projects_share_client_and_use_a_dedicated_runtime_controller() {
         .contains(&"--broken".into()));
     assert_eq!(fixed.schedule.stop_tolerance_ns, 0);
     let no_faults = seedbox_application::config::load(
-        &destination.join("broken-no-faults/seedbox.yaml"),
+        &destination.join("broken-no-faults/compose.yaml"),
         &BTreeMap::new(),
     )
     .unwrap();
-    assert!(no_faults.services["oracle"]
+    assert!(no_faults.services["scenario"]
         .command
         .as_ref()
         .unwrap()

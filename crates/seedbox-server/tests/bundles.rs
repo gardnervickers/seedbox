@@ -19,7 +19,6 @@ impl BackendProvider for NeverExecute {
     fn project(
         &self,
         _: &seedbox_application::config::Simulation,
-        _: seedbox_spec::backend::CpuBackend,
         _: &ContentStore,
         _: &CancellationToken,
     ) -> seedbox_application::Result<Backends> {

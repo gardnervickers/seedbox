@@ -260,8 +260,8 @@ mod tests {
                 seed: Some(123),
                 inputs: InputSource::Project,
                 configuration: seedbox_application::config::parse(
-                    "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
-                    Path::new("/project/seedbox.yaml"),
+                    "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
+                    Path::new("/project/compose.yaml"),
                     &Default::default(),
                 )
                 .unwrap(),

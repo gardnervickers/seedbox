@@ -21,7 +21,7 @@ fn fixture_simulation(oracle: &str) -> seedbox_spec::Simulation {
     use seedbox_spec::*;
     Simulation {
         name: "fixture".into(),
-        source: "/fixture/seedbox.yaml".into(),
+        source: "/fixture/compose.yaml".into(),
         services: Default::default(),
         configs: Default::default(),
         network: Network {

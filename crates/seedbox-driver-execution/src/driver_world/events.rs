@@ -9,8 +9,8 @@ use seedbox_driver::driver::{
 use seedbox_engine_protocol::{
     application_log,
     driver_world::State,
-    fault_status::FaultStatus,
     observation::{self, Kind, MachineTransition},
+    report::RowStatus,
 };
 use seedbox_machine::pv::{ApplicationCommand, CommandResult, Response, Stream};
 use serde_json::{json, Value};
@@ -315,7 +315,7 @@ impl Publisher {
                 }
             }
             EventKind::FaultAdmitted(record) => {
-                self.fault(state, names, record, FaultStatus::Requested, None, at)?
+                self.fault(state, names, record, RowStatus::Requested, None, at)?
             }
             EventKind::FaultSettled {
                 record,
@@ -324,9 +324,9 @@ impl Publisher {
                 ..
             } => {
                 let row = match status {
-                    SettlementStatus::Applied => FaultStatus::Applied,
-                    SettlementStatus::Unavailable => FaultStatus::Unavailable,
-                    SettlementStatus::Rejected | SettlementStatus::Failed => FaultStatus::Failed,
+                    SettlementStatus::Applied => RowStatus::Applied,
+                    SettlementStatus::Unavailable => RowStatus::Unavailable,
+                    SettlementStatus::Rejected | SettlementStatus::Failed => RowStatus::Failed,
                 };
                 self.fault(
                     state,
@@ -361,7 +361,7 @@ impl Publisher {
         state: &mut State,
         names: &BTreeMap<MachineId, String>,
         record: &FaultRecord,
-        status: FaultStatus,
+        status: RowStatus,
         applied_time_ns: Option<u64>,
         at: u64,
     ) -> Result<()> {

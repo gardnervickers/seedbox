@@ -183,14 +183,10 @@ fn non_oracle_legacy_controller_refuses_before_retaining_engine_or_preparing_ima
     simulation.control = Some(crate::config::Control {
         service: "other".into(),
     });
-    let error = DriverExecutor::for_preparation(
-        &simulation,
-        crate::execution::WitnessMode::Exits,
-        Default::default(),
-    )
-    .err()
-    .unwrap()
-    .to_string();
+    let error = DriverExecutor::for_preparation(&simulation, crate::execution::WitnessMode::Exits)
+        .err()
+        .unwrap()
+        .to_string();
     assert!(
         error.contains("controller must also be the check service"),
         "{error}"

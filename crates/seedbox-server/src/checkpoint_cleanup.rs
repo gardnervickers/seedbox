@@ -342,7 +342,7 @@ mod tests {
                         },
                     },
                 )]),
-                progress_budget: NonZeroU32::new(32).unwrap().into(),
+                blocks_per_progress_call: NonZeroU32::new(32).unwrap(),
                 epoch_seconds: 0,
             },
             driver: artifact("driver"),

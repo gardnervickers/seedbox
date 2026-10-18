@@ -1,9 +1,9 @@
-//! Native seedbox.yaml parsing without builds, registry access, or execution.
+//! Strict Compose subset parsing, without builds, registry access, or execution.
 
 mod native_project;
 
 use crate::{invalid, Error, Result};
-use serde_yaml_ng::Value;
+use serde_yaml_ng::{Mapping, Value};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -11,7 +11,8 @@ use std::{
 
 pub use seedbox_artifacts::config::*;
 
-/// Load explicit native project inputs; no process environment is read.
+/// Environment passthrough reads only the caller's map. The library never reads
+/// process environment or `.env` files, making programmatic calls reproducible.
 pub fn load(path: &Path, environment: &BTreeMap<String, String>) -> Result<Simulation> {
     let source = path.canonicalize()?;
     parse(&std::fs::read_to_string(&source)?, &source, environment)
@@ -40,12 +41,573 @@ pub fn load_for_architecture(
 pub fn parse_for_architecture(
     yaml: &str,
     source: &Path,
-    _host: &BTreeMap<String, String>,
+    host: &BTreeMap<String, String>,
     architecture: crate::guest::Architecture,
 ) -> Result<Simulation> {
     let doc: Value = serde_yaml_ng::from_str(yaml)?;
     reject_tags(&doc, "$")?;
-    native_project::parse(doc, source, architecture)
+    if doc.get("machines").is_some() || doc.get("oracle").is_some() {
+        return native_project::parse(doc, source, architecture);
+    }
+    let top = fields(
+        &doc,
+        "$",
+        &[
+            "name",
+            "services",
+            "configs",
+            "volumes",
+            "networks",
+            "x-seedbox",
+        ],
+    )?;
+    let base = source.parent().unwrap_or(Path::new("."));
+    let name = match top.get("name") {
+        Some(value) => text(value, "$.name")?,
+        None => base
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("simulation")
+            .into(),
+    };
+    if name.is_empty()
+        || !name.as_bytes()[0].is_ascii_alphanumeric()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
+    {
+        return invalid("$.name", "expected a lowercase Compose project name");
+    }
+    let mut configs = BTreeMap::new();
+    for (key, value) in entries(top.get("configs"), "$.configs")? {
+        if !identifier(&key) {
+            return invalid("$.configs", format!("invalid config name {key:?}"));
+        }
+        let p = format!("$.configs.{key}");
+        let cfg = fields(value, &p, &["file"])?;
+        configs.insert(
+            key,
+            local_path(get(cfg, "file"), &format!("{p}.file"), base, false)?,
+        );
+    }
+    let mut volumes = BTreeMap::new();
+    for (key, value) in entries(top.get("volumes"), "$.volumes")? {
+        if !identifier(&key) {
+            return invalid("$.volumes", format!("invalid volume name {key:?}"));
+        }
+        empty_options(value, &format!("$.volumes.{key}"))?;
+        // The service that mounts it, once one does.
+        volumes.insert(key, None::<String>);
+    }
+    let network_name = if let Some(networks) = top.get("networks") {
+        let nets = entries(Some(networks), "$.networks")?;
+        if nets.len() != 1 {
+            return invalid("$.networks", "exactly one private network is supported");
+        }
+        let (key, options) = &nets[0];
+        if !identifier(key) {
+            return invalid("$.networks", "invalid network name");
+        }
+        empty_options(options, &format!("$.networks.{key}"))?;
+        key.clone()
+    } else {
+        "default".into()
+    };
+    let raw_services = entries(Some(get(top, "services")), "$.services")?;
+    if raw_services.is_empty() || raw_services.len() > 254 {
+        return invalid("$.services", "expected 1 to 254 services");
+    }
+    let mut services = BTreeMap::new();
+    for (key, value) in raw_services {
+        let p = format!("$.services.{key}");
+        if !dns_label(&key) {
+            return invalid(
+                &p,
+                "service names must be lowercase DNS labels (1 to 63 characters)",
+            );
+        }
+        let svc = fields(
+            value,
+            &p,
+            &[
+                "image",
+                "build",
+                "platform",
+                "entrypoint",
+                "command",
+                "environment",
+                "working_dir",
+                "user",
+                "configs",
+                "volumes",
+                "networks",
+            ],
+        )?;
+        let image_source =
+            match (svc.get("image"), svc.get("build")) {
+                (Some(image), None) => {
+                    let reference = text(image, &format!("{p}.image"))?;
+                    if reference.chars().any(char::is_whitespace) || reference.contains("://") {
+                        return invalid(
+                            &format!("{p}.image"),
+                            "expected a registry image reference without a transport prefix",
+                        );
+                    }
+                    ImageSource::Registry { reference }
+                }
+                (None, Some(build)) => {
+                    let (context, dockerfile) = if build.is_string() {
+                        let context = local_path(build, &format!("{p}.build"), base, true)?;
+                        let dockerfile = local_path(
+                            &Value::String("Dockerfile".into()),
+                            &format!("{p}.build.dockerfile"),
+                            &context,
+                            false,
+                        )?;
+                        (context, dockerfile)
+                    } else {
+                        let b = fields(build, &format!("{p}.build"), &["context", "dockerfile"])?;
+                        let context = local_path(
+                            b.get("context").unwrap_or(&Value::String(".".into())),
+                            &format!("{p}.build.context"),
+                            base,
+                            true,
+                        )?;
+                        let dockerfile = local_path(
+                            b.get("dockerfile")
+                                .unwrap_or(&Value::String("Dockerfile".into())),
+                            &format!("{p}.build.dockerfile"),
+                            &context,
+                            false,
+                        )?;
+                        (context, dockerfile)
+                    };
+                    ImageSource::Build {
+                        context,
+                        dockerfile,
+                    }
+                }
+                _ => return invalid(
+                    &p,
+                    "specify exactly one of image or build; pull/build precedence is unsupported",
+                ),
+            };
+        let platform = optional_text(svc.get("platform"), &format!("{p}.platform"))?
+            .unwrap_or(architecture.platform().into());
+        if platform != architecture.platform() {
+            return invalid(
+                &format!("{p}.platform"),
+                format!("only {} is supported", architecture.platform()),
+            );
+        }
+        let nets = match svc.get("networks") {
+            None => vec!["default".into()],
+            Some(Value::Sequence(nets)) => nets
+                .iter()
+                .map(|n| text(n, &format!("{p}.networks")))
+                .collect::<Result<Vec<_>>>()?,
+            Some(v) => entries(Some(v), &format!("{p}.networks"))?
+                .into_iter()
+                .map(|(name, opts)| {
+                    empty_options(opts, &format!("{p}.networks.{name}"))?;
+                    Ok(name)
+                })
+                .collect::<Result<Vec<_>>>()?,
+        };
+        if nets != [network_name.clone()] {
+            return invalid(
+                &format!("{p}.networks"),
+                format!("must attach to the one declared network {network_name:?}"),
+            );
+        }
+        let mut mounts: Vec<ConfigMount> = Vec::new();
+        if let Some(raw) = svc.get("configs") {
+            let list = sequence(raw, &format!("{p}.configs"))?;
+            for (i, item) in list.iter().enumerate() {
+                let cp = format!("{p}.configs[{i}]");
+                let (source, target) = if item.is_string() {
+                    let name = text(item, &cp)?;
+                    (name.clone(), format!("/{name}"))
+                } else {
+                    let mount = fields(item, &cp, &["source", "target"])?;
+                    let source = text(get(mount, "source"), &format!("{cp}.source"))?;
+                    let target = optional_text(mount.get("target"), &format!("{cp}.target"))?
+                        .unwrap_or(format!("/{source}"));
+                    (source, target)
+                };
+                if !configs.contains_key(&source) {
+                    return invalid(&cp, format!("unknown config {source:?}"));
+                }
+                guest_path(&target, &format!("{cp}.target"))?;
+                if target == "/" || mounts.iter().any(|m| m.target == target) {
+                    return invalid(&cp, "config target must be a unique file path");
+                }
+                mounts.push(ConfigMount { source, target });
+            }
+        }
+        let mut volume_mounts: Vec<VolumeMount> = Vec::new();
+        if let Some(raw) = svc.get("volumes") {
+            for (i, item) in sequence(raw, &format!("{p}.volumes"))?.iter().enumerate() {
+                let vp = format!("{p}.volumes[{i}]");
+                let (source, target) = if item.is_string() {
+                    let short = text(item, &vp)?;
+                    match short.split(':').collect::<Vec<_>>()[..] {
+                        [source, target] => (source.to_owned(), target.to_owned()),
+                        _ => {
+                            return invalid(
+                                &vp,
+                                "expected NAME:/path; access modes and bind mounts are unsupported",
+                            )
+                        }
+                    }
+                } else {
+                    let mount = fields(item, &vp, &["type", "source", "target"])?;
+                    if text(get(mount, "type"), &format!("{vp}.type"))? != "volume" {
+                        return invalid(&format!("{vp}.type"), "only named volumes are supported");
+                    }
+                    (
+                        text(get(mount, "source"), &format!("{vp}.source"))?,
+                        text(get(mount, "target"), &format!("{vp}.target"))?,
+                    )
+                };
+                match volumes.get_mut(&source) {
+                    None => return invalid(&vp, format!("unknown volume {source:?}; declare it under top-level volumes")),
+                    Some(Some(user)) => return invalid(&vp, format!("volume {source:?} is already mounted by service {user:?}; each volume lives on one machine's disk")),
+                    Some(owner) => *owner = Some(key.clone()),
+                }
+                guest_path(&target, &format!("{vp}.target"))?;
+                if target == "/" || volume_mounts.iter().any(|m| m.target == target) {
+                    return invalid(&vp, "volume target must be a unique directory other than /");
+                }
+                if mounts
+                    .iter()
+                    .any(|m| m.target == target || m.target.starts_with(&format!("{target}/")))
+                {
+                    return invalid(&vp, "volume target overlaps a config mount");
+                }
+                volume_mounts.push(VolumeMount { source, target });
+            }
+        }
+        let working_dir = optional_text(svc.get("working_dir"), &format!("{p}.working_dir"))?;
+        if let Some(dir) = &working_dir {
+            guest_path(dir, &format!("{p}.working_dir"))?;
+        }
+        services.insert(
+            key,
+            Service {
+                memory_mb: None,
+                source: image_source,
+                platform,
+                entrypoint: command(svc.get("entrypoint"), &format!("{p}.entrypoint"))?,
+                command: command(svc.get("command"), &format!("{p}.command"))?,
+                environment: resolve_environment(
+                    svc.get("environment"),
+                    &format!("{p}.environment"),
+                    host,
+                )?,
+                working_dir,
+                user: optional_text(svc.get("user"), &format!("{p}.user"))?,
+                configs: mounts,
+                volumes: volume_mounts,
+                network: network_name.clone(),
+            },
+        );
+    }
+    let empty = Value::Mapping(Mapping::new());
+    let ext = fields(
+        top.get("x-seedbox").unwrap_or(&empty),
+        "$.x-seedbox",
+        &[
+            "version",
+            "seed",
+            "wall_clock_epoch",
+            "limits",
+            "network",
+            "schedule",
+            "faults",
+            "control",
+            "check",
+            "machine",
+            "disk",
+        ],
+    )?;
+    if ext.get("version").is_some_and(|v| v.as_u64() != Some(1)) {
+        return invalid("$.x-seedbox.version", "expected version 1");
+    }
+    let lim = fields(
+        ext.get("limits").unwrap_or(&empty),
+        "$.x-seedbox.limits",
+        &["simulated_time", "wall_time"],
+    )?;
+    let limits = Limits {
+        simulated_time_ns: lim
+            .get("simulated_time")
+            .map(|v| duration(v, "$.x-seedbox.limits.simulated_time", false))
+            .transpose()?
+            .unwrap_or(60_000_000_000),
+        wall_time_ns: lim
+            .get("wall_time")
+            .map(|v| duration(v, "$.x-seedbox.limits.wall_time", false))
+            .transpose()?
+            .unwrap_or(600_000_000_000),
+    };
+    let mut network = Network {
+        name: network_name,
+        latency_ns: 1_000_000,
+        jitter_ns: 0,
+        bandwidth_bps: None,
+        queue_bound_ns: None,
+        links: Vec::new(),
+    };
+    if let Some(raw) = ext.get("network") {
+        let net = fields(
+            raw,
+            "$.x-seedbox.network",
+            &["latency", "jitter", "links", "bandwidth_bps", "queue_bound"],
+        )?;
+        if let Some(v) = net.get("latency") {
+            network.latency_ns = duration(v, "$.x-seedbox.network.latency", false)?;
+        }
+        if let Some(v) = net.get("jitter") {
+            network.jitter_ns = duration(v, "$.x-seedbox.network.jitter", true)?;
+        }
+        (network.bandwidth_bps, network.queue_bound_ns) = bandwidth(net, "$.x-seedbox.network")?;
+    }
+    if network.jitter_ns >= network.latency_ns {
+        return invalid("$.x-seedbox.network.jitter", "must be less than latency");
+    }
+    if let Some(raw) = ext.get("network").and_then(|v| v.get("links")) {
+        let mut pairs = std::collections::BTreeSet::new();
+        for (i, raw) in sequence(raw, "$.x-seedbox.network.links")?
+            .iter()
+            .enumerate()
+        {
+            let p = format!("$.x-seedbox.network.links[{i}]");
+            let entry = fields(
+                raw,
+                &p,
+                &[
+                    "from",
+                    "to",
+                    "latency",
+                    "jitter",
+                    "loss_ppm",
+                    "bandwidth_bps",
+                    "queue_bound",
+                ],
+            )?;
+            let from = text(get(entry, "from"), &format!("{p}.from"))?;
+            let to = text(get(entry, "to"), &format!("{p}.to"))?;
+            for (key, name) in [("from", &from), ("to", &to)] {
+                if !services.contains_key(name) {
+                    return invalid(&format!("{p}.{key}"), "unknown service");
+                }
+            }
+            if !pairs.insert((from.clone(), to.clone())) {
+                return invalid(&p, "duplicate directed pair");
+            }
+            let latency_ns = duration(get(entry, "latency"), &format!("{p}.latency"), false)?;
+            let jitter_ns = entry
+                .get("jitter")
+                .map(|v| duration(v, &format!("{p}.jitter"), true))
+                .transpose()?
+                .unwrap_or(0);
+            let loss_ppm = entry
+                .get("loss_ppm")
+                .map(|v| {
+                    v.as_u64().filter(|n| *n <= 1_000_000).ok_or_else(|| {
+                        validation(
+                            &format!("{p}.loss_ppm"),
+                            "expected an integer in [0, 1000000]",
+                        )
+                    })
+                })
+                .transpose()?
+                .unwrap_or(0);
+            if latency_ns < network.latency_ns {
+                return invalid(&format!("{p}.latency"), "must be at least global latency");
+            }
+            if jitter_ns >= latency_ns {
+                return invalid(&format!("{p}.jitter"), "must be less than latency");
+            }
+            if latency_ns
+                .checked_add(jitter_ns)
+                .is_none_or(|n| n > 3_600_000_000_000)
+            {
+                return invalid(&p, "latency + jitter must not exceed one hour");
+            }
+            let (bandwidth_bps, queue_bound_ns) = bandwidth(entry, &p)?;
+            network.links.push(Link {
+                from,
+                to,
+                latency_ns,
+                jitter_ns,
+                loss_ppm,
+                bandwidth_bps,
+                queue_bound_ns,
+            });
+        }
+    }
+    let mut schedule = Schedule::default();
+    if let Some(raw) = ext.get("schedule") {
+        let options = fields(raw, "$.x-seedbox.schedule", &["timer_jitter"])?;
+        if let Some(v) = options.get("timer_jitter") {
+            schedule.timer_jitter_ns = duration(v, "$.x-seedbox.schedule.timer_jitter", true)?;
+        }
+    }
+    let mut machine = MachineOptions::default();
+    if let Some(raw) = ext.get("machine") {
+        let options = fields(raw, "$.x-seedbox.machine", &["memory_mb"])?;
+        if let Some(v) = options.get("memory_mb") {
+            machine.memory_mb =
+                v.as_u64()
+                    .filter(|n| (64..=65536).contains(n))
+                    .ok_or_else(|| {
+                        validation(
+                            "$.x-seedbox.machine.memory_mb",
+                            "expected an integer in [64, 65536]",
+                        )
+                    })? as u32;
+        }
+    }
+    let mut disk = DiskOptions::default();
+    if let Some(raw) = ext.get("disk") {
+        let options = fields(raw, "$.x-seedbox.disk", &["torn_writes"])?;
+        if let Some(v) = options.get("torn_writes") {
+            disk.torn_writes = boolean(v, "$.x-seedbox.disk.torn_writes")?;
+        }
+    }
+    reject_static_faults(ext.get("faults"))?;
+    let control = ext
+        .get("control")
+        .map(|raw| {
+            let options = fields(raw, "$.x-seedbox.control", &["service"])?;
+            let service = text(get(options, "service"), "$.x-seedbox.control.service")?;
+            if !services.contains_key(&service) {
+                return invalid("$.x-seedbox.control.service", "unknown controller service");
+            }
+            Ok(Control { service })
+        })
+        .transpose()?;
+    let raw_check = fields(
+        ext.get("check").unwrap_or(&empty),
+        "$.x-seedbox.check",
+        &["service"],
+    )?;
+    let check_service = raw_check
+        .get("service")
+        .map(|v| text(v, "$.x-seedbox.check.service"))
+        .transpose()?
+        .or_else(|| services.contains_key("oracle").then(|| "oracle".to_owned()))
+        .or_else(|| {
+            (services.len() == 1)
+                .then(|| services.keys().next().cloned())
+                .flatten()
+        })
+        .ok_or_else(|| {
+            validation(
+                "$.x-seedbox.check.service",
+                "select the workload oracle machine; no unique default is available",
+            )
+        })?;
+    if !services.contains_key(&check_service) {
+        return invalid(
+            "$.x-seedbox.check.service",
+            format!("unknown service {check_service:?}"),
+        );
+    }
+    if control.as_ref().is_some_and(|c| c.service != check_service) {
+        return invalid(
+            "$.x-seedbox.control.service",
+            "controller must also be the check service",
+        );
+    }
+    let exit_code = 0;
+    let seed = ext
+        .get("seed")
+        .map(|v| {
+            v.as_u64().ok_or_else(|| {
+                validation("$.x-seedbox.seed", "expected an unsigned 64-bit integer")
+            })
+        })
+        .transpose()?;
+    let wall_clock_epoch = ext
+        .get("wall_clock_epoch")
+        .map(|v| {
+            v.as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| *n >= crate::guest::MIN_WALL_CLOCK_EPOCH)
+                .ok_or_else(|| {
+                    validation(
+                        "$.x-seedbox.wall_clock_epoch",
+                        &format!(
+                            "expected Unix seconds in [{}, {}]",
+                            crate::guest::MIN_WALL_CLOCK_EPOCH,
+                            u32::MAX
+                        ),
+                    )
+                })
+        })
+        .transpose()?;
+    Ok(Simulation {
+        name,
+        source: source.to_owned(),
+        services,
+        configs,
+        network,
+        simulator: Default::default(),
+        schedule,
+        control,
+        limits,
+        check: Check {
+            service: check_service,
+            exit_code,
+        },
+        seed,
+        wall_clock_epoch,
+        machine,
+        disk,
+    })
+}
+
+fn boolean(value: &Value, path: &str) -> Result<bool> {
+    value
+        .as_bool()
+        .ok_or_else(|| validation(path, "expected true or false"))
+}
+
+fn bandwidth(fields: &Mapping, path: &str) -> Result<(Option<u64>, Option<u64>)> {
+    let rate = fields
+        .get("bandwidth_bps")
+        .map(|v| {
+            v.as_u64().filter(|n| *n > 0).ok_or_else(|| {
+                validation(
+                    &format!("{path}.bandwidth_bps"),
+                    "expected a positive integer in bits per second",
+                )
+            })
+        })
+        .transpose()?;
+    let bound = fields
+        .get("queue_bound")
+        .map(|v| duration(v, &format!("{path}.queue_bound"), true))
+        .transpose()?;
+    if bound.is_some() && rate.is_none() {
+        return invalid(&format!("{path}.queue_bound"), "requires bandwidth_bps");
+    }
+    Ok((rate, bound))
+}
+
+fn reject_static_faults(raw: Option<&Value>) -> Result<()> {
+    if let Some(raw) = raw {
+        if !sequence(raw, "$.x-seedbox.faults")?.is_empty() {
+            return invalid(
+                "$.x-seedbox.faults",
+                "static schedules are unsupported; use the in-world control RPC API",
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validation(path: &str, message: &str) -> Error {
@@ -77,15 +639,158 @@ fn reject_tags(value: &Value, path: &str) -> Result<()> {
     Ok(())
 }
 
+fn get<'a>(map: &'a Mapping, key: &str) -> &'a Value {
+    map.get(key).unwrap_or(&Value::Null)
+}
+
+fn fields<'a>(value: &'a Value, path: &str, allowed: &[&str]) -> Result<&'a Mapping> {
+    let map = value
+        .as_mapping()
+        .ok_or_else(|| validation(path, "expected a mapping"))?;
+    for key in map.keys() {
+        let key = key
+            .as_str()
+            .ok_or_else(|| validation(path, "mapping keys must be strings"))?;
+        if !allowed.contains(&key) {
+            return invalid(&format!("{path}.{key}"), "unsupported field");
+        }
+    }
+    Ok(map)
+}
+
+fn entries<'a>(value: Option<&'a Value>, path: &str) -> Result<Vec<(String, &'a Value)>> {
+    let Some(value) = value else {
+        return Ok(vec![]);
+    };
+    let map = value
+        .as_mapping()
+        .ok_or_else(|| validation(path, "expected a mapping"))?;
+    map.iter()
+        .map(|(k, v)| {
+            Ok((
+                k.as_str()
+                    .ok_or_else(|| validation(path, "mapping keys must be strings"))?
+                    .into(),
+                v,
+            ))
+        })
+        .collect()
+}
+
+fn sequence<'a>(value: &'a Value, path: &str) -> Result<&'a Vec<Value>> {
+    value
+        .as_sequence()
+        .ok_or_else(|| validation(path, "expected a list"))
+}
+
+fn empty_options(value: &Value, path: &str) -> Result<()> {
+    if !value.is_null() {
+        fields(value, path, &[])?;
+    }
+    Ok(())
+}
+
 fn text(value: &Value, path: &str) -> Result<String> {
-    let text = value
-        .as_str()
-        .ok_or_else(|| validation(path, "expected a string"))?
-        .to_owned();
+    let text = literal(value, path)?;
     if text.is_empty() {
         return invalid(path, "expected a nonempty string");
     }
     Ok(text)
+}
+
+fn literal(value: &Value, path: &str) -> Result<String> {
+    let raw = value
+        .as_str()
+        .ok_or_else(|| validation(path, "expected a string (quote numbers and booleans)"))?;
+    if raw.contains('\0') {
+        return invalid(path, "NUL is not allowed");
+    }
+    let mut result = String::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '$' {
+            if chars.peek() == Some(&'$') {
+                chars.next();
+            } else if chars
+                .peek()
+                .is_some_and(|c| *c == '{' || *c == '_' || c.is_ascii_alphabetic())
+            {
+                return invalid(
+                    path,
+                    "Compose interpolation is unsupported; use literal values or $$",
+                );
+            }
+        }
+        result.push(c);
+    }
+    Ok(result)
+}
+
+fn optional_text(value: Option<&Value>, path: &str) -> Result<Option<String>> {
+    value.map(|v| text(v, path)).transpose()
+}
+
+fn command(value: Option<&Value>, path: &str) -> Result<Option<Vec<String>>> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(_)) => shell_words::split(&literal(value.unwrap(), path)?)
+            .map(Some)
+            .map_err(|e| validation(path, &e.to_string())),
+        Some(value) => sequence(value, path)?
+            .iter()
+            .enumerate()
+            .map(|(i, v)| literal(v, &format!("{path}[{i}]")))
+            .collect::<Result<Vec<_>>>()
+            .map(Some),
+    }
+}
+
+fn resolve_environment(
+    value: Option<&Value>,
+    path: &str,
+    host: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, Option<String>>> {
+    let mut result = BTreeMap::new();
+    let pairs = match value {
+        None => vec![],
+        Some(Value::Sequence(list)) => list
+            .iter()
+            .map(|v| {
+                let item = text(v, path)?;
+                Ok(match item.split_once('=') {
+                    Some((k, v)) => (k.into(), Some(v.into())),
+                    None => (item, None),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(v) => entries(Some(v), path)?
+            .into_iter()
+            .map(|(key, val)| {
+                let val = if val.is_null() {
+                    None
+                } else {
+                    Some(literal(val, &format!("{path}.{key}"))?)
+                };
+                Ok((key, val))
+            })
+            .collect::<Result<Vec<_>>>()?,
+    };
+    for (key, val) in pairs {
+        if key.is_empty()
+            || !(key.as_bytes()[0].is_ascii_alphabetic() || key.starts_with('_'))
+            || !key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        {
+            return invalid(path, format!("invalid environment name {key:?}"));
+        }
+        let resolved = val.or_else(|| host.get(&key).cloned());
+        if resolved.as_ref().is_some_and(|v| v.contains('\0')) {
+            return invalid(path, "environment value contains NUL");
+        }
+        if result.insert(key.clone(), resolved).is_some() {
+            return invalid(path, format!("duplicate environment variable {key:?}"));
+        }
+    }
+    Ok(result)
 }
 
 fn identifier(s: &str) -> bool {

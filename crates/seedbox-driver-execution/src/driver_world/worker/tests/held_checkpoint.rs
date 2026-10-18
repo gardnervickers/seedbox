@@ -3,8 +3,8 @@
 use super::*;
 use seedbox_driver::driver::{FaultRecord, PlaybackRate};
 use seedbox_engine_protocol::{
-    fault_status::FaultStatus,
     observation::{Kind, Observation},
+    report::RowStatus,
 };
 use std::os::unix::net::UnixDatagram;
 
@@ -62,7 +62,7 @@ impl Observed {
             .filter_map(|record| match &record.kind {
                 Kind::FaultChanged {
                     id,
-                    status: FaultStatus::Applied,
+                    status: RowStatus::Applied,
                     ..
                 } => Some(*id),
                 _ => None,

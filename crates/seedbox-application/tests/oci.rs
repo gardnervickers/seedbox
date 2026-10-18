@@ -7,7 +7,7 @@ use serde_json::json;
 use std::{collections::BTreeMap, fs, path::Path};
 
 fn simulation(image: &str) -> config::Simulation {
-    config::parse(&format!("name: image-test\nmachines: {{}}\noracle:\n  image: {image}\n  entrypoint: [/bin/sh]\n  command: [-c, 'exit 0']\n"), Path::new("/fixture/seedbox.yaml"), &BTreeMap::new()).unwrap()
+    config::parse(&format!("name: image-test\nservices:\n  app:\n    image: {image}\n    entrypoint: [/bin/sh]\n    command: [-c, 'exit 0']\nx-seedbox:\n  version: 1\n  limits: {{simulated_time: 1s, wall_time: 1m}}\n  check: {{service: app}}\n"), Path::new("/fixture/compose.yaml"), &BTreeMap::new()).unwrap()
 }
 
 fn blob(raw: &Path, data: &[u8], media: &str) -> serde_json::Value {
@@ -34,10 +34,7 @@ fn metadata_verifies_platform_descriptors_and_retains_original_manifest() {
         serde_json::to_vec(&json!({"schemaVersion":2,"config":config,"layers":[layer]})).unwrap();
     fs::write(raw.join("manifest.json"), &manifest).unwrap();
     let store = ContentStore::new(raw.join("store"));
-    let service = simulation("example:test")
-        .services
-        .remove("oracle")
-        .unwrap();
+    let service = simulation("example:test").services.remove("app").unwrap();
     let imported = import_metadata(raw, &service, &store).unwrap();
     assert_eq!(imported.manifest, ContentDigest::of(&manifest));
     assert_eq!(
@@ -74,7 +71,7 @@ fn foreign_platform_and_image_lifecycle_hooks_fail_before_execution() {
         .unwrap();
         assert!(import_metadata(
             raw,
-            &simulation("example:test").services["oracle"],
+            &simulation("example:test").services["app"],
             &ContentStore::new(raw.join("store"))
         )
         .is_err());

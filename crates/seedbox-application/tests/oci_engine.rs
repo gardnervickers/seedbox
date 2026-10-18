@@ -71,7 +71,7 @@ fn registry_images_export_the_expected_files() {
         ),
     ] {
         let image = import(
-            &simulation(reference).services["oracle"],
+            &simulation(reference).services["app"],
             &directory.path().join(name),
             &store,
         );
@@ -157,7 +157,7 @@ fn build_honors_ignore_whiteouts_and_launch_metadata() {
     fs::write(context.join(".dockerignore"), "ignored\n").unwrap();
     fs::write(context.join("ignored"), "must not upload").unwrap();
     fs::write(context.join("resolver"), "image-owned resolver\n").unwrap();
-    let mut service = simulation("unused:test").services.remove("oracle").unwrap();
+    let mut service = simulation("unused:test").services.remove("app").unwrap();
     service.source = config::ImageSource::Build {
         context: context.clone(),
         dockerfile: context.join("Dockerfile"),
@@ -193,5 +193,5 @@ fn build_honors_ignore_whiteouts_and_launch_metadata() {
     assert_eq!(image.image.launch.environment["MESSAGE"], "hello");
 }
 fn simulation(image: &str) -> config::Simulation {
-    config::parse(&format!("name: image-test\nmachines: {{}}\noracle:\n  image: {image}\n  entrypoint: [/bin/sh]\n  command: [-c, 'exit 0']\n"), Path::new("/fixture/seedbox.yaml"), &BTreeMap::new()).unwrap()
+    config::parse(&format!("name: image-test\nservices:\n  app:\n    image: {image}\n    entrypoint: [/bin/sh]\n    command: [-c, 'exit 0']\nx-seedbox:\n  version: 1\n  limits: {{simulated_time: 1s, wall_time: 1m}}\n  check: {{service: app}}\n"), Path::new("/fixture/compose.yaml"), &BTreeMap::new()).unwrap()
 }

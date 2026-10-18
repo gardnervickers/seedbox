@@ -477,7 +477,7 @@ mod tests {
         };
         let mut spec = seedbox_spec::Simulation {
             name: "test".into(),
-            source: "/project/seedbox.yaml".into(),
+            source: "/project/compose.yaml".into(),
             services: ["a", "b", "oracle"]
                 .into_iter()
                 .map(|name| (name.to_owned(), service(name)))

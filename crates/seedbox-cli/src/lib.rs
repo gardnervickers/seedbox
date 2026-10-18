@@ -43,10 +43,10 @@ Exit status:
 #[command(
     name = "seedbox",
     version = seedbox_application::engine::SIMULATOR_VERSION,
-    override_usage = "seedbox [RUN OPTIONS] [PROJECT]\n       seedbox <COMMAND>",
+    override_usage = "seedbox [RUN OPTIONS] [COMPOSE]\n       seedbox <COMMAND>",
     after_help = "Run is the default: seedbox seedbox.yaml. See `seedbox help run` for run options.",
-    about = "Deterministic simulation of applications on real Linux machines",
-    long_about = "Deterministic simulation of applications on real Linux machines.\n\n\
+    about = "Deterministic simulation of Compose applications on real Linux machines",
+    long_about = "Deterministic simulation of Compose applications on real Linux machines.\n\n\
                   A seed plus the retained inputs regenerate the same execution. \
                   `run` and `replay` support Linux x86-64 KVM (KVM device access) \
                   or native HVF on Apple Silicon Mac."
@@ -94,10 +94,10 @@ enum Command {
         #[arg(long, value_enum, default_value_t = TemplateArg::Etcd)]
         template: TemplateArg,
     },
-    /// Check native project inputs, without images or guests.
+    /// Check Compose services and directed network policies, without images or guests.
     Validate {
         #[command(flatten)]
-        project: ProjectArg,
+        compose: ComposeArg,
         /// Print the resolved configuration as JSON (includes environment values).
         #[arg(long)]
         json: bool,
@@ -114,7 +114,7 @@ enum Command {
     /// Resolve images and build guest artifacts, without running.
     Prepare {
         #[command(flatten)]
-        project: ProjectArg,
+        compose: ComposeArg,
         /// Write the prepared-inputs JSON here; must not exist.
         #[arg(long, short)]
         output: PathBuf,
@@ -129,7 +129,7 @@ enum Command {
         #[command(flatten)]
         backend: BackendArgs,
         #[command(flatten)]
-        project: ProjectArg,
+        compose: ComposeArg,
         /// Simulation seed [default: project seed, otherwise allocated once by the server].
         #[arg(long)]
         seed: Option<u64>,
@@ -249,7 +249,7 @@ enum Command {
         #[command(flatten)]
         backend: BackendArgs,
         #[command(flatten)]
-        project: ProjectArg,
+        compose: ComposeArg,
         /// First simulation seed [default: project seed, otherwise allocated by the server].
         #[arg(long)]
         seed: Option<u64>,
@@ -428,15 +428,15 @@ fn tcg_refusal() -> Error {
 const MAC: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 
 #[derive(Args)]
-struct ProjectArg {
+struct ComposeArg {
     /// Seedbox project file, or a directory containing seedbox.yaml.
     #[arg(default_value = ".", value_name = "PROJECT")]
-    project: PathBuf,
+    compose: PathBuf,
 }
 
-impl ProjectArg {
+impl ComposeArg {
     fn load(&self) -> Result<config::Simulation> {
-        let path = defaults::project_file(&self.project)?;
+        let path = defaults::compose_file(&self.compose)?;
         let architecture = if MAC {
             seedbox_application::guest::Architecture::Arm64
         } else {
@@ -460,7 +460,7 @@ struct BackendArgs {
     backend: Option<BackendArg>,
 }
 struct BackendSelection {
-    backend: Option<seedbox_spec::backend::CpuBackend>,
+    backend: Option<seedbox_spec::project::CpuBackend>,
     wall_time: Option<u64>,
     machine_workers: Option<u32>,
 }
@@ -468,8 +468,8 @@ impl BackendArgs {
     fn selection(self, execution: ExecutionArgs) -> BackendSelection {
         BackendSelection {
             backend: self.backend.map(|backend| match backend {
-                BackendArg::Pv => seedbox_spec::backend::CpuBackend::Pv,
-                BackendArg::Tcg => seedbox_spec::backend::CpuBackend::Tcg,
+                BackendArg::Pv => seedbox_spec::project::CpuBackend::Pv,
+                BackendArg::Tcg => seedbox_spec::project::CpuBackend::Tcg,
             }),
             wall_time: execution.wall_time,
             machine_workers: execution.machine_workers,
@@ -547,35 +547,24 @@ impl RuntimeInputs {
         seedbox_driver_execution::driver_world::platform::Host::current().runs_driver()
     }
 
-    /// Resolve every input and build the matching preparer and executor.
-    fn backends(
+    fn driver_backends(
         &self,
         _store: &ContentStore,
         simulation: &config::Simulation,
-        cpu_backend: seedbox_spec::backend::CpuBackend,
         cancellation: &CancellationToken,
         scratch: &Path,
+        engine: &Path,
+        witness: WitnessMode,
     ) -> Result<(Preparer, Executor)> {
-        let engine = defaults::engine()?;
-        if !self.use_driver() {
-            return Err(tcg_refusal());
-        }
-        let witness = if self.full_state {
-            WitnessMode::FullState
-        } else {
-            WitnessMode::Exits
-        };
         let executor = seedbox_driver_execution::driver_world::DriverExecutor::for_preparation(
-            simulation,
-            witness,
-            cpu_backend,
+            simulation, witness,
         )?;
-        let (backend, runtime_backend) = match cpu_backend {
-            seedbox_spec::backend::CpuBackend::Pv => (
+        let (backend, runtime_backend) = match simulation.simulator.backend {
+            seedbox_spec::project::CpuBackend::Pv => (
                 seedbox_driver_execution::driver_world::DriverBackend::Pv,
                 seedbox_driver_execution::runtime_assets::Backend::Pv,
             ),
-            seedbox_spec::backend::CpuBackend::Tcg => (
+            seedbox_spec::project::CpuBackend::Tcg => (
                 seedbox_driver_execution::driver_world::DriverBackend::Tcg,
                 seedbox_driver_execution::runtime_assets::Backend::Tcg,
             ),
@@ -604,6 +593,26 @@ impl RuntimeInputs {
             },
             Executor(Box::new(executor.with_runtime(selected)?)),
         ))
+    }
+
+    /// Resolve every input and build the matching preparer and executor.
+    fn backends(
+        &self,
+        store: &ContentStore,
+        simulation: &config::Simulation,
+        cancellation: &CancellationToken,
+        scratch: &Path,
+    ) -> Result<(Preparer, Executor)> {
+        let engine = defaults::engine()?;
+        if !self.use_driver() {
+            return Err(tcg_refusal());
+        }
+        let witness = if self.full_state {
+            WitnessMode::FullState
+        } else {
+            WitnessMode::Exits
+        };
+        self.driver_backends(store, simulation, cancellation, scratch, &engine, witness)
     }
 }
 
@@ -682,24 +691,24 @@ fn run(cli: Cli) -> Result<u8> {
             directory,
             template,
         } => init(&directory, template),
-        Command::Validate { project, json } => validate(&project, json),
+        Command::Validate { compose, json } => validate(&compose, json),
         Command::Doctor { json } => doctor(json),
         Command::Prepare {
-            project,
+            compose,
             output,
             state,
             inputs,
-        } => prepare(&project, &output, &state, &inputs),
+        } => prepare(&compose, &output, &state, &inputs),
         Command::Run {
             backend,
-            project,
+            compose,
             seed,
             paused,
             detach,
             json,
             execution,
         } => simulations::run(
-            &project,
+            &compose,
             seed,
             paused,
             detach,
@@ -777,7 +786,7 @@ fn run(cli: Cli) -> Result<u8> {
         } => simulations::playback(&id, request_id.as_deref(), json),
         Command::Explore {
             backend,
-            project,
+            compose,
             seed,
             count,
             paused,
@@ -785,7 +794,7 @@ fn run(cli: Cli) -> Result<u8> {
             json,
             execution,
         } => simulations::explore(
-            &project,
+            &compose,
             seed,
             count,
             paused,
@@ -862,8 +871,8 @@ fn init(directory: &Path, template: TemplateArg) -> Result<u8> {
     Ok(0)
 }
 
-fn validate(project: &ProjectArg, json: bool) -> Result<u8> {
-    let simulation = project.load()?;
+fn validate(compose: &ComposeArg, json: bool) -> Result<u8> {
+    let simulation = compose.load()?;
     if json {
         output::json(&simulation)?;
     } else {
@@ -902,7 +911,7 @@ fn doctor(json: bool) -> Result<u8> {
 }
 
 fn prepare(
-    project: &ProjectArg,
+    compose: &ComposeArg,
     output: &Path,
     state: &StateArg,
     inputs: &RuntimeInputs,
@@ -913,18 +922,12 @@ fn prepare(
             output.display()
         )));
     }
-    let simulation = project.load()?;
+    let simulation = compose.load()?;
     let (store, _) = state.open()?;
     let cancellation = CancellationToken::default();
     let _signals = Signals::register(&cancellation)?;
     let scratch = tempfile::tempdir()?;
-    let (preparer, _) = inputs.backends(
-        &store,
-        &simulation,
-        Default::default(),
-        &cancellation,
-        scratch.path(),
-    )?;
+    let (preparer, _) = inputs.backends(&store, &simulation, &cancellation, scratch.path())?;
     if cancellation.is_cancelled() {
         return Err(Error::PreparationCancelled);
     }

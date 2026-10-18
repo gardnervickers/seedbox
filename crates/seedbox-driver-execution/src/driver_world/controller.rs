@@ -87,7 +87,7 @@ mod tests {
             formatter: None,
             environments: Default::default(),
             boot_archives: Default::default(),
-            progress_budget: std::num::NonZeroU32::new(1).unwrap().into(),
+            blocks_per_progress_call: std::num::NonZeroU32::new(1).unwrap(),
             epoch_seconds: 0,
         }
     }

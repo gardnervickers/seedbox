@@ -4,7 +4,7 @@ fn fixture() -> sb::record::RunRecord {
     use std::collections::BTreeMap;
     let digest = ContentDigest::of(b"fixture");
     let configuration = config::Simulation {
-        name: "diff".into(), source: "/fixture/seedbox.yaml".into(),
+        name: "diff".into(), source: "/fixture/compose.yaml".into(),
         services: BTreeMap::from([("workload".into(), config::Service {
             memory_mb: None,
             source: config::ImageSource::Registry { reference: "fixture:v1".into() },

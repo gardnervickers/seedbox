@@ -190,9 +190,6 @@ impl SimulationSpec {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionOptions {
-    /// CPU executor for fresh projects. Retained definitions own their backend.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend: Option<seedbox_spec::backend::CpuBackend>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub start_paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -361,27 +358,6 @@ impl Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cpu_backend_round_trips_only_as_a_request_option() {
-        let options: ExecutionOptions =
-            serde_json::from_value(serde_json::json!({"backend":"tcg"})).unwrap();
-        assert_eq!(
-            options.backend,
-            Some(seedbox_spec::backend::CpuBackend::Tcg)
-        );
-        assert_eq!(serde_json::to_value(&options).unwrap()["backend"], "tcg");
-        assert_eq!(ExecutionOptions::default().backend, None);
-        for field in ["backend", "simulator"] {
-            let mut spec = serde_json::json!({"oracle":{"image":"example/oracle"}});
-            spec[field] = if field == "backend" {
-                serde_json::json!("tcg")
-            } else {
-                serde_json::json!({"backend":"tcg"})
-            };
-            assert!(serde_json::from_value::<SimulationSpec>(spec).is_err());
-        }
-    }
 
     #[test]
     fn resubmission_ignores_server_fields_but_rejects_unknown_spec_fields() {

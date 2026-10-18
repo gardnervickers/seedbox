@@ -59,7 +59,7 @@ pub enum Kind {
         id: u32,
         action: String,
         machine: Option<String>,
-        status: crate::fault_status::FaultStatus,
+        status: crate::report::RowStatus,
         applied_time_ns: Option<u64>,
         /// The admitted plan's action, so observers can tell which links or
         /// machines it affects. Absent from workers that predate it.

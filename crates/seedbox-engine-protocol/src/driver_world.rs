@@ -8,7 +8,10 @@ use crate::{
     input_program::{InputAdmission, InputRejection, TimedInput},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU32,
+};
 
 mod environment;
 pub use environment::{Environment, GuestLimits, NamedVolume};
@@ -77,8 +80,7 @@ pub enum Inventory {
         /// Missing in older retained worlds; those import the current boot.
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         boot_archives: BTreeMap<String, Artifact>,
-        #[serde(rename = "blocks_per_progress_call")]
-        progress_budget: seedbox_spec::progress::ProgressBudget,
+        blocks_per_progress_call: NonZeroU32,
         epoch_seconds: u32,
     },
     Tcg {

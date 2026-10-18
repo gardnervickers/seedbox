@@ -6,59 +6,6 @@ use seedbox_server::catalogue::{Catalogue, Error};
 use support::request;
 
 #[test]
-fn cpu_backend_is_request_owned_and_retained_inputs_reject_conflicts() {
-    use seedbox_api::InputSource;
-    use seedbox_spec::backend::CpuBackend;
-    let mut catalogue = Catalogue::in_memory();
-    let mut fresh = request();
-    fresh.options.backend = Some(CpuBackend::Tcg);
-    let (mut source, _) = catalogue.submit(fresh.clone()).unwrap();
-    assert_eq!(source.options.backend, Some(CpuBackend::Tcg));
-    assert!(serde_json::to_value(&source.spec).unwrap()["simulator"]
-        .get("backend")
-        .is_none());
-    assert_eq!(catalogue.submit(fresh).unwrap().0, source);
-    source.status.phase = Phase::Completed;
-    let source = catalogue.update(source).unwrap();
-    let mut retained = request();
-    retained.request_id = "retained-backend".into();
-    retained.spec = source.spec.clone();
-    retained.spec.inputs = InputSource::Retained {
-        simulation: source.metadata.id,
-    };
-    retained.options.backend = Some(CpuBackend::Pv);
-    assert!(
-        matches!(catalogue.submit(retained.clone()), Err(Error::Invalid(message)) if message.contains("retained backend"))
-    );
-    retained.options.backend = None;
-    assert_eq!(
-        catalogue.submit(retained).unwrap().0.options.backend,
-        Some(CpuBackend::Tcg)
-    );
-    for (tag, cpu, other) in [
-        ("driver-pv", CpuBackend::Pv, CpuBackend::Tcg),
-        ("driver-tcg", CpuBackend::Tcg, CpuBackend::Pv),
-    ] {
-        let mut resolved = support::resolved_request(tag);
-        let InputSource::Resolved { definition } = &mut resolved.spec.inputs else {
-            panic!("resolved fixture")
-        };
-        definition.runtime.execution["backend"] = tag.into();
-        definition.runtime.execution["semantic_parameters"]["engine"] =
-            serde_json::json!({"kind":"driver-world-v1", "engine_backend":tag});
-        resolved.options.backend = Some(other);
-        assert!(
-            matches!(catalogue.submit(resolved.clone()), Err(Error::Invalid(message)) if message.contains("retained backend"))
-        );
-        resolved.options.backend = None;
-        assert_eq!(
-            catalogue.submit(resolved).unwrap().0.options.backend,
-            Some(cpu)
-        );
-    }
-}
-
-#[test]
 fn accepted_submission_and_request_identity_survive_restart() {
     let temp = tempfile::tempdir().unwrap();
     let directory = temp.path().join("catalogue");
