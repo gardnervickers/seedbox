@@ -1,0 +1,14 @@
+# Power loss of the S3 server alone, often (volume kept), for
+# delores-kv-register. A replica's S3 requests in flight at a power failure
+# are left on half-open connections; docker-kv's S3 client must time them out
+# (it once waited forever, 2y553dxr; fixed in delores 15c0f1a), so a replica
+# that never answers again here, with no Log(Sealed), is a hang. The oracle's
+# operations run 120 s.
+start: 15s
+end: 110s
+interval: 4s
+targets: [s3]
+faults:
+  - kind: crash
+    weight: 1
+    downtime: {min: 500ms, max: 2s}
