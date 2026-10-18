@@ -2,6 +2,7 @@
 
 mod backends;
 mod bundles;
+mod campaigns;
 mod completions;
 mod daemon;
 mod defaults;
@@ -35,9 +36,10 @@ use std::{
 const EXIT_CODES: &str = "\
 Exit status:
   0    PASS, or a replay/compare MATCH
-  1    FAIL, replay MISMATCH, or compare MISMATCH
+  1    FAIL (the oracle failed or a guest property was violated),
+       replay MISMATCH, or compare MISMATCH
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
-  3    INCOMPLETE (cancelled or otherwise incomplete)
+  3    INCOMPLETE (cancelled, otherwise incomplete, or property evidence lost)
        A cancelled or incomplete replay reports 2 (NOT_COMPARABLE)
   124  TIMEOUT";
 
@@ -86,6 +88,11 @@ enum Command {
         state: Option<PathBuf>,
         #[command(flatten)]
         inputs: RuntimeInputs,
+        /// Simulations to execute at once.
+        #[arg(long, default_value_t = std::num::NonZeroUsize::MIN.saturating_add(1), help_heading = "Performance (never changes results)")]
+        capacity: std::num::NonZeroUsize,
+        #[command(flatten)]
+        performance: Performance,
     },
     /// Create a self-contained example project.
     Init {
@@ -144,6 +151,8 @@ enum Command {
         #[arg(long)]
         json: bool,
         #[command(flatten)]
+        faults: FaultProfileArg,
+        #[command(flatten)]
         execution: ExecutionArgs,
     },
     /// Compare deterministic results of two completed simulations.
@@ -195,10 +204,11 @@ enum Command {
         #[command(subcommand)]
         resource: ResourceArg,
     },
-    /// Request that a simulation stop.
+    /// Request that a simulation or campaign stop.
     Stop {
-        /// Short simulation ID.
-        id: seedbox_api::SimulationId,
+        /// Short simulation ID or campaign ID.
+        #[arg(value_parser = stop_target)]
+        id: StopTarget,
         /// Stop every simulation in the seed range started by this ID.
         #[arg(long)]
         all_seeds: bool,
@@ -263,7 +273,130 @@ enum Command {
         #[arg(long)]
         json: bool,
         #[command(flatten)]
+        faults: FaultProfileArg,
+        #[command(flatten)]
         execution: ExecutionArgs,
+    },
+    /// Run a guided campaign: seed-sweep roots, then branches from members
+    /// that showed new behaviour, reseeded at their captured anchors.
+    #[command(after_help = EXIT_CODES)]
+    Campaign {
+        #[command(flatten)]
+        compose: ComposeArg,
+        /// First root's seed; later roots take the next seeds [default: project seed, otherwise 1].
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Seed of the planner's own choices [default: the first root's seed].
+        #[arg(long)]
+        planner_seed: Option<u64>,
+        /// Member simulations to run in total.
+        #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u32).range(1..=4096))]
+        budget: u32,
+        /// Members per generation; each generation is planned from all earlier results.
+        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u32).range(1..=64))]
+        batch: u32,
+        /// Share of later generations spent on fresh roots, per mille.
+        #[arg(long, default_value_t = 250, value_parser = clap::value_parser!(u32).range(0..=1000))]
+        fresh_share: u32,
+        /// Members kept as branch sources; each keeps its anchor captures on disk.
+        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u32).range(1..=1024))]
+        corpus: u32,
+        /// Candidate anchor time every root declares, such as 2s; repeatable. Each
+        /// capture holds every machine's memory [default: 2s and 8s within the time limit].
+        #[arg(long = "anchor", value_name = "DURATION", value_parser = wall_time)]
+        anchors: Vec<u64>,
+        /// Split a property's findings by this detail field; repeatable.
+        #[arg(long, value_name = "FIELD")]
+        group_by: Vec<String>,
+        /// Export findings here [default: the state directory's findings/CAMPAIGN].
+        #[arg(long, value_name = "DIR")]
+        findings_dir: Option<PathBuf>,
+        /// Label findings new or observed again against this earlier findings directory.
+        #[arg(long, value_name = "DIR")]
+        baseline: Option<PathBuf>,
+        /// Return after the server accepts the campaign.
+        #[arg(long)]
+        detach: bool,
+        /// Print one campaign document as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        faults: FaultProfileArg,
+        /// Stop each member after this much active host time [default: unlimited].
+        #[arg(long, value_parser = wall_time)]
+        wall_time: Option<u64>,
+    },
+    /// Shrink a failed simulation's external inputs, rerunning its oracle on every probe.
+    Shrink {
+        /// Completed, failed simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Simulations the shrink may run.
+        #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..=1024))]
+        max_probes: u32,
+        /// Seeds each probe may fail under, run at once: the source's, then derived ones that vary timing but no input. 1 keeps the exact timing.
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..=8))]
+        seeds: u32,
+        /// Shrink a branched simulation from its start checkpoint, keeping what it consumed: only inputs after the branch point are candidates, and derived seeds vary its reseed.
+        #[arg(long)]
+        from_checkpoint: bool,
+        /// Property whose violation must persist [default: the oracle failure, otherwise the first violation].
+        #[arg(long)]
+        property: Option<String>,
+        /// Return after the server accepts the shrink.
+        #[arg(long)]
+        detach: bool,
+        /// Print one shrink document as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Stop each probe after this much active host time [default: unlimited].
+        #[arg(long, value_parser = wall_time)]
+        wall_time: Option<u64>,
+    },
+    /// Analyse what a failed simulation's failure depends on, by rerunning it with its later randomness or one fault changed.
+    Analyze {
+        /// Completed, failed simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Runs per arm, each under its own derived seeds.
+        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u32).range(1..=64))]
+        samples: u32,
+        /// Times, evenly spaced before the source ended, from which every later draw varies.
+        #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u32).range(0..=32))]
+        times: u32,
+        /// Also rerun without each external fault, one at a time.
+        #[arg(long)]
+        faults: bool,
+        /// Property whose violation counts [default: the oracle failure, otherwise the first violation].
+        #[arg(long)]
+        property: Option<String>,
+        /// Return after the server accepts the analysis.
+        #[arg(long)]
+        detach: bool,
+        /// Print one analysis document as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Stop each run after this much active host time [default: unlimited].
+        #[arg(long, value_parser = wall_time)]
+        wall_time: Option<u64>,
+    },
+    /// Run a command in a machine at a moment of a completed simulation, by rerunning it to that moment.
+    #[command(after_help = EXEC_HELP)]
+    Exec {
+        /// Completed simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Machine to run the command in.
+        machine: String,
+        /// Simulated time at which the command runs, such as 12s.
+        #[arg(long, value_parser = sim_time)]
+        at: u64,
+        /// Keep the rerun going after the command exits, rather than stopping it.
+        #[arg(long)]
+        keep: bool,
+        /// Stop the rerun after this much active host time [default: unlimited].
+        #[arg(long, value_parser = wall_time)]
+        wall_time: Option<u64>,
+        /// The command and its arguments, after `--`.
+        #[arg(last = true, required = true)]
+        argv: Vec<String>,
     },
     /// Rerun a simulation through the server and compare its retained results.
     #[command(after_help = EXIT_CODES)]
@@ -333,7 +466,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show completed simulation raw diagnostics, distinct from timed application logs.
+    /// Show a completed simulation's failure timeline: inputs, faults, triggers, lifecycle, choices and property evidence in simulated-time order, with what the evidence omits.
+    Explain {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Show only these kinds of entry; repeatable [default: all].
+        #[arg(long, value_enum)]
+        kind: Vec<observe::ExplainKind>,
+        /// Show only entries on this machine, and those on none.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Print the explanation document as JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show completed simulation raw diagnostics and guest out-of-memory kills, distinct from timed application logs.
     Diagnostics {
         /// Short simulation ID.
         id: seedbox_api::SimulationId,
@@ -431,10 +578,39 @@ impl ComposeArg {
 }
 
 #[derive(Args)]
-struct ExecutionArgs {
+struct FaultProfileArg {
+    /// Generate faults from this YAML profile with the simulation's seed; the
+    /// generated faults join its program, and rerun and replay keep them.
+    #[arg(long, value_name = "FILE")]
+    fault_profile: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub(super) struct ExecutionArgs {
     /// Stop after this much active host time, excluding explicit pauses [default: unlimited].
     #[arg(long, value_parser = wall_time)]
-    wall_time: Option<u64>,
+    pub(super) wall_time: Option<u64>,
+    /// Capture a checkpoint named anchor-KEY when the anchor input KEY is
+    /// reached; repeatable. Captures never change results (Apple Silicon only).
+    #[arg(long = "capture-anchor", value_name = "KEY")]
+    pub(super) capture_anchors: Vec<String>,
+}
+
+/// What `stop` stops: a simulation or a campaign.
+#[derive(Clone, Debug)]
+enum StopTarget {
+    Simulation(seedbox_api::SimulationId),
+    Campaign(String),
+}
+
+fn stop_target(value: &str) -> std::result::Result<StopTarget, String> {
+    if value.starts_with("campaign-") {
+        return Ok(StopTarget::Campaign(value.into()));
+    }
+    value
+        .parse()
+        .map(StopTarget::Simulation)
+        .map_err(|e: seedbox_api::InvalidSimulationId| e.to_string())
 }
 
 fn wall_time(value: &str) -> std::result::Result<u64, String> {
@@ -445,6 +621,17 @@ fn wall_time(value: &str) -> std::result::Result<u64, String> {
 fn sim_time(value: &str) -> std::result::Result<u64, String> {
     config::duration_ns(value).map_err(|error| error.to_string())
 }
+
+const EXEC_HELP: &str =
+    "The rerun starts fresh from the source's definition and inputs, so it is the
+source up to --at; the command then runs beside the application, under the
+same translator, and must exist in the machine's image. Its output goes to
+stdout; the rerun's ID and the command's exit go to stderr.
+
+Exit status:
+  0    the command exited 0
+  1    the command exited nonzero or was killed
+  2    it never ran (not found, or the rerun ended first), or a usage or setup error";
 
 const WAIT_HELP: &str = "Conditions:
   completed                    the simulation has completed, for any reason
@@ -508,6 +695,51 @@ struct RuntimeInputs {
     /// Also record and compare every machine's RAM and registers (also retains per-page hashes).
     #[arg(long)]
     full_state: bool,
+}
+
+/// Server-owned host settings recorded with each run; they never change results.
+#[derive(Args, Clone, Copy, Debug, Default)]
+#[command(next_help_heading = "Performance (never changes results)")]
+struct Performance {
+    /// Machine threads per simulation; raise it when a run's machines could use spare cores, as when memory limits how many simulations run at once [default: 1].
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..=seedbox_engine_protocol::launch::MAX_MACHINE_WORKERS as u64))]
+    machine_workers: Option<u64>,
+    /// Host CPU milliseconds a Linux KVM run may go without an exit before the PV watchdog reports where it is [default: 20].
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    #[arg(long, value_name = "MS", value_parser = clap::value_parser!(u64).range(1..=60000))]
+    watchdog_ms: Option<u64>,
+    /// Restore checkpoints by mapping their RAM, loaded as the guest touches it, without first hashing each file whole (Apple Silicon).
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[arg(long)]
+    lazy_restore: bool,
+}
+
+impl Performance {
+    /// Record these settings on every run `executor` performs.
+    fn apply(&self, executor: Executor) -> Result<Executor> {
+        Ok(match executor {
+            Executor::Linux(mut executor) => {
+                if let Some(workers) = self.machine_workers {
+                    executor = executor.with_machine_workers(workers as usize)?;
+                }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                if let Some(milliseconds) = self.watchdog_ms {
+                    executor = executor.with_watchdog_ms(milliseconds)?;
+                }
+                Executor::Linux(executor)
+            }
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            Executor::Mac(mut executor) => {
+                if let Some(workers) = self.machine_workers {
+                    executor = executor.with_machine_workers(workers as usize)?;
+                }
+                if self.lazy_restore {
+                    executor = executor.with_lazy_restore();
+                }
+                Executor::Mac(executor)
+            }
+        })
+    }
 }
 
 impl RuntimeInputs {
@@ -631,8 +863,10 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Serve {
             state,
             inputs,
+            performance,
             startup_handshake,
-        } => daemon::serve(state, inputs, startup_handshake),
+            capacity,
+        } => daemon::serve(state, inputs, performance, startup_handshake, capacity),
         Command::Inject { mutation, action } => faults::inject(mutation, &action),
         Command::Heal { mutation, handle } => simulations::mutate_control(
             mutation,
@@ -680,21 +914,25 @@ fn run(cli: Cli) -> Result<u8> {
             paused,
             detach,
             json,
+            faults,
             execution,
-        } => simulations::run(&compose, seed, paused, detach, json, execution.wall_time),
+        } => {
+            let profile = faults::profile(faults.fault_profile.as_deref())?;
+            simulations::run(&compose, seed, paused, detach, json, profile, &execution)
+        }
         Command::Branch {
             id,
             checkpoint,
             detach,
             json,
             execution,
-        } => simulations::branch(&id, checkpoint, detach, json, execution.wall_time),
+        } => simulations::branch(&id, checkpoint, detach, json, &execution),
         Command::Rerun {
             id,
             detach,
             json,
             execution,
-        } => simulations::rerun(&id, detach, json, execution.wall_time),
+        } => simulations::rerun(&id, detach, json, &execution),
         Command::Compare {
             baseline,
             simulation,
@@ -716,6 +954,38 @@ fn run(cli: Cli) -> Result<u8> {
             CollectionArg::Checkpoints { id, json } => simulations::checkpoints(&id, None, json),
             CollectionArg::World { id, json } => observe::world(&id, json),
             CollectionArg::Timeline { id, json } => observe::timeline(&id, json),
+            CollectionArg::Properties { id, json } => observe::properties(&id, json),
+            CollectionArg::Campaigns { json } => campaigns::list(json),
+            CollectionArg::Campaign { id, json } => campaigns::get(&id, json),
+            CollectionArg::Findings {
+                id,
+                property,
+                machine,
+                fault,
+                from,
+                to,
+                ancestor,
+                preceded_by,
+                within,
+                offset,
+                limit,
+                json,
+            } => campaigns::findings(
+                &id,
+                seedbox_api::FindingQuery {
+                    property,
+                    machine,
+                    fault,
+                    from_ns: from,
+                    to_ns: to,
+                    ancestor,
+                    preceded_by,
+                    within_ns: within,
+                    offset,
+                    limit: Some(limit),
+                },
+                json,
+            ),
         },
         Command::Describe { resource } => match resource {
             ResourceArg::Simulation { id, json } => simulations::describe(&id, json),
@@ -723,13 +993,127 @@ fn run(cli: Cli) -> Result<u8> {
                 simulations::checkpoints(&id, Some(&name), json)
             }
         },
-        Command::Stop { id, all_seeds } => {
-            if all_seeds {
-                simulations::stop_seeds(&id)
-            } else {
-                simulations::stop(&id)
-            }
-        }
+        Command::Stop { id, all_seeds } => match id {
+            StopTarget::Campaign(id) if all_seeds => Err(Error::Setup(format!(
+                "--all-seeds stops a seed range; {id} is a campaign"
+            ))),
+            StopTarget::Campaign(id) => campaigns::stop(&id),
+            StopTarget::Simulation(id) if all_seeds => simulations::stop_seeds(&id),
+            StopTarget::Simulation(id) => simulations::stop(&id),
+        },
+        Command::Campaign {
+            compose,
+            seed,
+            planner_seed,
+            budget,
+            batch,
+            fresh_share,
+            corpus,
+            anchors,
+            group_by,
+            findings_dir,
+            baseline,
+            detach,
+            json,
+            faults,
+            wall_time,
+        } => campaigns::campaign(
+            &compose,
+            campaigns::Settings {
+                seed,
+                planner_seed,
+                budget,
+                batch,
+                fresh_permille: fresh_share,
+                corpus,
+                anchors,
+                group_by,
+                findings_dir,
+                baseline,
+                options: seedbox_api::ExecutionOptions {
+                    capture_anchors: Vec::new(),
+                    start_paused: false,
+                    wall_time_ns: wall_time,
+                },
+                fault_profile: faults::profile(faults.fault_profile.as_deref())?,
+            },
+            detach,
+            json,
+        ),
+        Command::Shrink {
+            id,
+            max_probes,
+            seeds,
+            from_checkpoint,
+            property,
+            detach,
+            json,
+            wall_time,
+        } => campaigns::shrink(
+            &id,
+            seedbox_api::ShrinkRequest {
+                request_id: String::new(),
+                max_probes,
+                property,
+                seeds,
+                from_checkpoint,
+                options: seedbox_api::ExecutionOptions {
+                    capture_anchors: Vec::new(),
+                    start_paused: false,
+                    wall_time_ns: wall_time,
+                },
+            },
+            detach,
+            json,
+        ),
+        Command::Analyze {
+            id,
+            samples,
+            times,
+            faults,
+            property,
+            detach,
+            json,
+            wall_time,
+        } => campaigns::analyze(
+            &id,
+            seedbox_api::AnalysisRequest {
+                request_id: String::new(),
+                samples,
+                times,
+                faults,
+                property,
+                options: seedbox_api::ExecutionOptions {
+                    capture_anchors: Vec::new(),
+                    start_paused: false,
+                    wall_time_ns: wall_time,
+                },
+            },
+            detach,
+            json,
+        ),
+        Command::Exec {
+            id,
+            machine,
+            at,
+            keep,
+            wall_time,
+            argv,
+        } => observe::exec(
+            &id,
+            seedbox_api::ExecRequest {
+                request_id: String::new(),
+                machine,
+                at_ns: at,
+                argv,
+                options: seedbox_api::ExecutionOptions {
+                    capture_anchors: Vec::new(),
+                    start_paused: false,
+                    wall_time_ns: wall_time,
+                },
+            },
+            keep,
+        ),
         Command::Events { id, follow } => observe::events(&id, follow),
         Command::Wait {
             id,
@@ -750,15 +1134,20 @@ fn run(cli: Cli) -> Result<u8> {
             paused,
             detach,
             json,
+            faults,
             execution,
         } => simulations::explore(
             &compose,
             seed,
             count,
-            paused,
+            seedbox_api::ExecutionOptions {
+                capture_anchors: execution.capture_anchors.clone(),
+                start_paused: paused,
+                wall_time_ns: execution.wall_time,
+            },
             detach,
             json,
-            execution.wall_time,
+            faults::profile(faults.fault_profile.as_deref())?,
         ),
         Command::Delete {
             resource: DeleteArg::Simulation { id },
@@ -782,6 +1171,12 @@ fn run(cli: Cli) -> Result<u8> {
             transfer,
             json,
         } => bundles::import(&bundle, transfer.max_bytes, json),
+        Command::Explain {
+            id,
+            kind,
+            machine,
+            json,
+        } => observe::explain(&id, &kind, machine.as_deref(), json),
         Command::Diagnostics {
             id,
             name,
@@ -978,6 +1373,66 @@ enum CollectionArg {
         /// Short simulation ID.
         id: seedbox_api::SimulationId,
         /// Print the world document as JSON instead of tables.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List a simulation's guest properties and how each was judged.
+    Properties {
+        /// Short simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Print the property assessment as JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List campaigns on the server.
+    Campaigns {
+        /// Print JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a campaign's members, assessment and findings.
+    Campaign {
+        /// Campaign ID.
+        id: String,
+        /// Print the campaign document as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Query a campaign's violations by property, machine, fault, time and ancestry.
+    Findings {
+        /// Campaign ID.
+        id: String,
+        /// Only this property.
+        #[arg(long)]
+        property: Option<String>,
+        /// Only failures on this machine, or after faults on it.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Only members where this fault action applied.
+        #[arg(long)]
+        fault: Option<String>,
+        /// Only failures at or after this simulated time.
+        #[arg(long, value_parser = wall_time)]
+        from: Option<u64>,
+        /// Only failures at or before this simulated time.
+        #[arg(long, value_parser = wall_time)]
+        to: Option<u64>,
+        /// Only descendants of this member ordinal.
+        #[arg(long)]
+        ancestor: Option<u32>,
+        /// Only failures preceded by this fault action.
+        #[arg(long)]
+        preceded_by: Option<String>,
+        /// How long before a failure --preceded-by looks [default: unlimited].
+        #[arg(long, value_parser = wall_time)]
+        within: Option<u64>,
+        /// Skip this many matches.
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+        /// Matches per page.
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+        /// Print the page as JSON.
         #[arg(long)]
         json: bool,
     },

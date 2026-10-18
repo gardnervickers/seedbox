@@ -1,4 +1,4 @@
-{ pkgs }:
+{ pkgs, dynamorioSource ? null }:
 let
   inherit (pkgs) lib;
   inputs = builtins.fromJSON (builtins.readFile ../tools/runtime/inputs.json);
@@ -18,7 +18,7 @@ let
       else flag
     ) old.configureFlags;
   });
-  progress = import ./progress.nix { inherit pkgs; };
+  progress = import ./progress.nix { inherit pkgs dynamorioSource; };
   runtimeAssets = pkgs.runCommand "seedbox-guest-assets" {
     nativeBuildInputs = with pkgs; [ pkgsStatic.stdenv.cc binutils python3 ];
     SEEDBOX_STATIC_CC = "${pkgs.pkgsStatic.stdenv.cc}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc";

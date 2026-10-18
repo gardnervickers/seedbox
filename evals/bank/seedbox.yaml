@@ -1,0 +1,16 @@
+name: bank-eval
+machines:
+  bank:
+    build:
+      context: ../..
+      dockerfile: evals/bank/Dockerfile
+    entrypoint: [/bank-server]
+    environment:
+      BANK_BUG: "1"
+oracle:
+  build:
+    context: ../..
+    dockerfile: evals/bank/Dockerfile
+  entrypoint: [/bank-oracle]
+network:
+  latency: 1ms

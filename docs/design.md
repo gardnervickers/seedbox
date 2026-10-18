@@ -18,7 +18,40 @@ logic belongs in the oracle. The oracle can use the guest control API; the TUI
 can inject faults through the server API.
 
 The authoring schema is defined in [seedbox-spec](../crates/seedbox-spec/src/project.rs).
-The [Python control client](../python/seedbox/) provides the guest API.
+The guest control API has a [Python client](../python/seedbox/) and a
+[Rust client](../crates/seedbox-control-client/).
+
+Guest programs, the oracle included, can also declare and evaluate properties
+through the [property SDK](../crates/seedbox-sdk/). The engine reduces their
+records into a property assessment reported beside the oracle verdict, never
+in place of it: passed, violated, unmet and incomplete stay distinct, and lost
+or malformed evidence never yields a pass. Seedbox adds default properties of
+its own, such as unexpected process deaths and out-of-memory kills. A machine's
+definition can declare the crashes it is designed to have, by signal and thread
+name; those pass the crash property and stay counted in its result, while every
+other crash still violates it.
+
+## Generated faults and exploration
+
+A fault profile is a request option. A seeded sampler turns it into ordinary
+keyed fault overrides in the resolved definition, so a generated schedule is
+retained like an authored one and replay never samples it again. The oracle
+can declare quiet periods that suppress generated starts while their heals,
+resumes and reboots still run.
+
+Branching builds on the same inputs. Anchors mark times where a run may be
+captured and continued with a new seed; structured choices let a guest ask the
+engine to pick among alternatives; typed triggers apply a fault when an SDK
+event, lifecycle transition, connection frame or block request matches. Cold
+execution and continuation from a capture must agree.
+
+A campaign is a server-run search over such runs. The planner in
+[seedbox-explore](../crates/seedbox-explore/) is passive: it plans generations
+from a campaign seed and folds member feedback in ordinal order, so worker
+count and completion order never change a plan. Findings export to bundles
+that replay in a fresh server. Shrinking, counterfactual analysis and commands
+in recorded runs work on derived simulations and leave the original intact.
+[Internals](internals.md) describes each mechanism.
 
 ## Clients and server
 
@@ -34,8 +67,15 @@ another client can control the same simulation without implementing that policy.
 Application logs contain application output. Events describe simulator activity.
 Both use bounded in-memory buffers: 64 MiB shared for application logs and 16 MiB
 for events, including completed and imported simulations. Eviction is visible as
-delivery gaps. `diagnostics ID` exposes completed raw console/management streams,
-chunk indexes and worker output separately, by exact retained name and digest.
+delivery gaps. Each round, a worker publishes at most 8192 records and 4 MiB of
+output per machine and counts the rest as a machine gap, which depends only on
+execution. Between rounds the worker waits for the server to accept each log and
+event datagram, which delays only wall time. If the server accepts none for two
+seconds, the worker stops waiting until it accepts one again; datagrams lost
+meanwhile become source gaps, which differ between runs. Frame batches for
+visualization never wait. `diagnostics ID` exposes completed raw
+console/management streams, chunk indexes and worker output separately, by exact
+retained name and digest, and lists the guest kernel's out-of-memory kills.
 
 ## Definitions and execution state
 
@@ -64,6 +104,10 @@ A checkpoint branch resolves its inputs independently of the imported source.
 Import is not idempotent or resumable; a full upload may be accepted after the client
 disconnects. Export is completed-only, and files are published without overwriting
 an existing destination. Catalogue persistence and cache pruning are separate concerns.
+
+Deleting a simulation reclaims the cache objects it owned that no remaining
+resource references: captured checkpoint state, imported binaries and edited boot
+archives. Reusable inputs (kernels, prepared images and guests) are never owned.
 
 ## Deterministic execution
 
@@ -95,6 +139,11 @@ may differ. Logs and events are observations, not instructions to inject again.
 | `seedbox-engine-protocol` | Private worker transport and evidence formats |
 | `seedbox-engine-core` | Shared scheduling, faults, devices, deterministic policies |
 | `seedbox-vmm`, `seedbox-arm64` | Native machine execution |
+| `seedbox-control`, `seedbox-control-client` | Guest control schema and Rust client |
+| `seedbox-sdk` | Guest property SDK |
+| `seedbox-explore` | Fault sampling, campaign planning, shrinking and counterfactual policy |
+| `seedbox-check` | History checkers for guest oracles |
+| `seedbox-bench` | Search-strategy comparison on evaluation workloads |
 
 The application library does not depend on the server or CLI. The engine core
 has no hypervisor dependency. Backend adapters perform architecture-specific

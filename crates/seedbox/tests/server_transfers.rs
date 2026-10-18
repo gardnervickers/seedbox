@@ -61,6 +61,7 @@ fn bundle(path: &Path) {
         )]),
         outcome: Outcome::Pass,
         report: Some(ExecutionReport {
+            choices: None,
             host_wait_ns: 0,
             simulated_time_ns: Some(25),
             reason: StopReason::Completed,
@@ -72,6 +73,7 @@ fn bundle(path: &Path) {
             full_state: None,
             faults: Vec::new(),
             detail: None,
+            properties: None,
         }),
         error: None,
         logs: BTreeMap::from([
@@ -323,6 +325,7 @@ fn request() -> SubmitRequest {
         metadata: Default::default(),
         options: Default::default(),
         request_id: "submit-123".into(),
+        fault_profile: None,
         spec: SimulationSpec {
             program: Vec::new(),
             start_paused: false,

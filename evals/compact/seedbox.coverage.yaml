@@ -1,0 +1,22 @@
+# The buggy variant with edge coverage on the server: campaigns can guide by
+# new edges and hit counts as well as by property outcomes and states.
+name: compact-eval-coverage
+machines:
+  store:
+    build:
+      context: ../..
+      dockerfile: evals/compact/Dockerfile
+    entrypoint: [/compact-server]
+    environment:
+      SEEDBOX_COVERAGE: "1"
+      COMPACT_BUG: "1"
+    volumes:
+      data:
+        target: /data
+oracle:
+  build:
+    context: ../..
+    dockerfile: evals/compact/Dockerfile
+  entrypoint: [/compact-oracle]
+network:
+  latency: 1ms

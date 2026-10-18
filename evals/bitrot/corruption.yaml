@@ -1,0 +1,18 @@
+# Crash the store often while its data reads are silently corrupted, so a
+# restart's replay of the log reads garbled sectors. Data scope spares the
+# filesystem's metadata, so the disk always mounts.
+start: 1s
+end: 18s
+interval: 1500ms
+faults:
+  - kind: disk_error
+    weight: 2
+    op: read
+    ppm: 500000
+    effect: corrupt
+    scope: data
+    duration: {min: 2s, max: 6s}
+    targets: [kv]
+  - kind: crash
+    weight: 2
+    downtime: {min: 200ms, max: 800ms}

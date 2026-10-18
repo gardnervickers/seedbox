@@ -297,6 +297,12 @@ pub struct ExecutionReport {
     pub full_state: Option<BTreeMap<String, ContentDigest>>,
     pub faults: Vec<FaultEvent>,
     pub detail: Option<String>,
+    /// Reduced guest property evidence; absent when the run produced none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<seedbox_engine_protocol::property::Ledger>,
+    /// Answered structured choices; absent when the run made none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choices: Option<seedbox_engine_protocol::choice::ChoiceEvidence>,
 }
 
 #[cfg(test)]

@@ -285,7 +285,7 @@ fn hvf_checkpoint_continues_an_entered_guest() {
     original
         .snapshot()
         .unwrap()
-        .write_checkpoint(&mut bytes)
+        .write_checkpoint(&mut bytes, 0)
         .unwrap();
     original.run_until(20, || {}).unwrap();
     let expected = original.application_evidence(true).unwrap();
@@ -371,7 +371,7 @@ fn hvf_checkpoint_receipt_restores_in_a_new_worker_generation() {
         };
         let mut sequence = 0;
         let mut call = |operation| {
-            write_message(
+            send(
                 &mut client,
                 &Request {
                     sequence,
@@ -380,20 +380,33 @@ fn hvf_checkpoint_receipt_restores_in_a_new_worker_generation() {
                 },
             )
             .unwrap();
-            let response = read_message::<Response>(&mut client).unwrap().unwrap();
+            let response = receive::<Response>(&mut client).unwrap().unwrap();
             assert_eq!(response.sequence, sequence);
             assert_eq!(response.after.as_ref(), Some(&identity));
             assert!(!matches!(response.answer, Answer::Error(_)), "{response:?}");
             sequence += 1;
             response
         };
-        call(Operation::Boot(boot.clone()));
+        if generation == 1 {
+            call(Operation::Boot(boot.clone()));
+        } else {
+            // A restore boots the world's first incarnation, whose launch
+            // entropy and barrier differ from a rebooted machine's; the
+            // replacement takes the boot the checkpoint was captured under.
+            call(Operation::Boot(Boot {
+                seed: 99,
+                command_line: "seedbox.barrier=1".into(),
+                ..boot.clone()
+            }));
+        }
         if generation == 1 {
             call(Operation::SeedProgressJitter { seed: 123 });
             call(Operation::Advance {
                 hard_limit: 10,
                 early_slack: 0,
                 observe_console: false,
+                then: Vec::new(),
+                ahead: Vec::new(),
             });
             let response = call(Operation::Snapshot {
                 artifact: root.join("checkpoint"),
@@ -413,6 +426,8 @@ fn hvf_checkpoint_receipt_restores_in_a_new_worker_generation() {
             hard_limit: 20,
             early_slack: 0,
             observe_console: false,
+            then: Vec::new(),
+            ahead: Vec::new(),
         });
         let Answer::Evidence(evidence) = call(Operation::Evidence {
             full_state: true,

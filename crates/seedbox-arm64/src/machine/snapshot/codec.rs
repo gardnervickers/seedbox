@@ -5,8 +5,19 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 
-const MAGIC: &[u8; 8] = b"SBXARM01";
+const MAGIC: &[u8; 8] = b"SBXARM02";
 const MAX_METADATA: u64 = 64 << 20;
+/// RAM data starts at a multiple of this file offset (the host page size), so
+/// a lazy restore can map it; a zero padding section before it gets there.
+pub(crate) const RAM_ALIGN: u64 = crate::PAGE_SIZE as u64;
+
+/// How a restore took the RAM section.
+enum Ram {
+    /// Read and verified.
+    Bytes(Vec<u8>),
+    /// Left in the file at this offset, for the caller to map; unverified.
+    Mapped(u64),
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,16 +115,28 @@ fn read_vec(reader: &mut impl Read, length: u64) -> Result<Vec<u8>> {
 }
 
 impl Snapshot {
-    pub fn write_checkpoint(&self, mut writer: impl Write) -> Result<()> {
-        let devices = self.application.as_ref().map(|d| Devices {
-            net: d.net.snapshot(),
-            console: d.console.snapshot(),
-            block: d.block.as_ref().map(application::virtio::Virtio::snapshot),
-            events: d.events.clone(),
-            exit: d.exit,
-            barrier: d.barrier,
-            entropy: d.entropy.clone(),
-        });
+    /// Write the checkpoint stream; `start` is its offset in the file, so
+    /// the RAM section's data lands on a RAM_ALIGN boundary.
+    pub fn write_checkpoint(&self, mut writer: impl Write, start: u64) -> Result<()> {
+        let devices = self
+            .application
+            .as_ref()
+            .map(|d| {
+                Ok::<_, String>(Devices {
+                    net: d.net.snapshot()?,
+                    console: d.console.snapshot()?,
+                    block: d
+                        .block
+                        .as_ref()
+                        .map(application::virtio::Virtio::snapshot)
+                        .transpose()?,
+                    events: d.events.clone(),
+                    exit: d.exit,
+                    barrier: d.barrier,
+                    entropy: d.entropy.clone(),
+                })
+            })
+            .transpose()?;
         let metadata = serde_json::to_vec(&Metadata {
             state: self.clone(),
             devices,
@@ -123,11 +146,21 @@ impl Snapshot {
             return Err("ARM checkpoint metadata exceeds size limit".into());
         }
         writer.write_all(MAGIC).map_err(io_error)?;
-        for data in [&metadata[..], &self.ram[..]] {
-            write_section(&mut writer, data.len() as u64, |out| {
-                out.write_all(data).map_err(io_error)
-            })?;
-        }
+        write_section(&mut writer, metadata.len() as u64, |out| {
+            out.write_all(&metadata).map_err(io_error)
+        })?;
+        // Magic, metadata section, then the padding and RAM section headers
+        // and the padding digest before the RAM data.
+        let before = start + 8 + 8 + metadata.len() as u64 + 32 + 8 + 32 + 8;
+        let padding = (RAM_ALIGN - before % RAM_ALIGN) % RAM_ALIGN;
+        write_section(&mut writer, padding, |out| {
+            std::io::copy(&mut std::io::repeat(0).take(padding), out)
+                .map(drop)
+                .map_err(io_error)
+        })?;
+        write_section(&mut writer, self.ram.len() as u64, |out| {
+            out.write_all(&self.ram).map_err(io_error)
+        })?;
         if let Some(disk) = self
             .application
             .as_ref()
@@ -158,9 +191,73 @@ impl Write for Counter {
 }
 
 impl<B: Backend> Machine<B> {
+    /// The boot identity a checkpoint stream was captured under, read without
+    /// a machine, so a restore can build its replacement from the same boot.
+    pub fn checkpoint_boot_identity(mut reader: impl Read) -> Result<application::BootIdentity> {
+        if &bytes::<8>(&mut reader)? != MAGIC {
+            return Err("unsupported ARM checkpoint format".into());
+        }
+        let metadata: Metadata = read_section(&mut reader, MAX_METADATA, |input, length| {
+            serde_json::from_slice(&read_vec(input, length)?)
+                .map_err(|e| format!("decode ARM checkpoint: {e}"))
+        })?;
+        Ok(metadata.state.boot_identity)
+    }
     /// Consume a fresh replacement. Verification finishes before touching the
     /// native VM; any error drops the replacement and leaves the source intact.
-    pub fn restore_checkpoint(self, mut reader: impl Read) -> Result<Self> {
+    pub fn restore_checkpoint(self, reader: impl Read) -> Result<Self> {
+        let (machine, state, ram) = self.read_checkpoint(reader, |input, length| {
+            let mut hashed = HashIo {
+                io: (input as &mut dyn Read).take(length),
+                hash: Sha256::new(),
+            };
+            let data = read_vec(&mut hashed, length)?;
+            let digest: [u8; 32] = hashed.hash.finalize().into();
+            if digest != bytes::<32>(input)? {
+                return Err("ARM checkpoint section checksum mismatch".into());
+            }
+            Ok(Ram::Bytes(data))
+        })?;
+        let Ram::Bytes(bytes) = ram else {
+            unreachable!("the reader returned bytes")
+        };
+        let mut state = state;
+        state.ram = Arc::new(bytes);
+        machine.restore_snapshot(&state)
+    }
+
+    /// As `restore_checkpoint`, but guest RAM becomes a private mapping of
+    /// the checkpoint file's RAM section: pages load when the guest first
+    /// touches them and guest writes stay private. The RAM section's
+    /// checksum is not verified, since that would read every page; the
+    /// metadata and disk sections are.
+    pub fn restore_checkpoint_lazy(self, file: &mut std::fs::File) -> Result<Self> {
+        use std::io::{Seek, SeekFrom};
+        let (mut machine, state, ram) = self.read_checkpoint(&mut *file, |input, length| {
+            let offset = input.stream_position().map_err(io_error)?;
+            if offset % RAM_ALIGN != 0 {
+                return Err("ARM checkpoint RAM is not page aligned".into());
+            }
+            input
+                .seek(SeekFrom::Current((length + 32) as i64))
+                .map_err(io_error)?;
+            Ok(Ram::Mapped(offset))
+        })?;
+        let Ram::Mapped(offset) = ram else {
+            unreachable!("the reader returned an offset")
+        };
+        machine.map_ram_from(file, offset)?;
+        machine.restore_snapshot_without_ram(&state)
+    }
+
+    /// Parse a checkpoint stream into the replacement's state, taking the RAM
+    /// section through `ram` (given the reader positioned at its data and its
+    /// length, it must consume the data and the digest).
+    fn read_checkpoint<R: Read>(
+        self,
+        mut reader: R,
+        ram: impl FnOnce(&mut R, u64) -> Result<Ram>,
+    ) -> Result<(Self, Snapshot, Ram)> {
         if &bytes::<8>(&mut reader)? != MAGIC {
             return Err("unsupported ARM checkpoint format".into());
         }
@@ -168,23 +265,42 @@ impl<B: Backend> Machine<B> {
             serde_json::from_slice(&read_vec(input, length)?)
                 .map_err(|e| format!("decode ARM checkpoint: {e}"))
         })?;
-        if metadata.state.boot_identity != self.boot_identity
+        if !metadata
+            .state
+            .boot_identity
+            .same_inputs(&self.boot_identity)
             || metadata.state.kernel_hash != self.kernel_hash
             || metadata.state.initrd_hash != self.initrd_hash
             || metadata.state.page.len() != self.page.len()
         {
-            return Err("ARM checkpoint boot inputs mismatch".into());
+            let field = if !metadata
+                .state
+                .boot_identity
+                .same_inputs(&self.boot_identity)
+            {
+                format!(
+                    "boot layout {:?} != {:?}",
+                    metadata.state.boot_identity, self.boot_identity
+                )
+            } else if metadata.state.kernel_hash != self.kernel_hash {
+                "kernel".into()
+            } else if metadata.state.initrd_hash != self.initrd_hash {
+                "initrd".into()
+            } else {
+                "PV page size".into()
+            };
+            return Err(format!("ARM checkpoint boot inputs mismatch: {field}"));
         }
-        metadata.state.ram = Arc::new(read_section(
-            &mut reader,
-            self.ram.len() as u64,
-            |input, length| {
-                if length != self.ram.len() as u64 {
-                    return Err("ARM checkpoint RAM size mismatch".into());
-                }
-                read_vec(input, length)
-            },
-        )?);
+        read_section(&mut reader, RAM_ALIGN, |input, length| {
+            std::io::copy(&mut input.take(length), &mut std::io::sink())
+                .map(drop)
+                .map_err(io_error)
+        })?;
+        let length = u64::from_le_bytes(bytes(&mut reader)?);
+        if length != self.ram.len() as u64 {
+            return Err("ARM checkpoint RAM size mismatch".into());
+        }
+        let ram = ram(&mut reader, length)?;
         metadata.state.application = match (self.application.clone(), metadata.devices) {
             (None, None) => None,
             (Some(base), Some(saved)) => {
@@ -222,6 +338,6 @@ impl<B: Backend> Machine<B> {
         if reader.read(&mut [0]).map_err(io_error)? != 0 {
             return Err("ARM checkpoint has trailing data".into());
         }
-        self.restore_snapshot(&metadata.state)
+        Ok((self, metadata.state, ram))
     }
 }

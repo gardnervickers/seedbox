@@ -12,6 +12,7 @@ fn fixture() -> sb::record::RunRecord {
             platform: "linux/amd64".into(), entrypoint: None, command: None,
             environment: BTreeMap::new(), working_dir: None, user: None,
             configs: vec![], volumes: vec![], network: "default".into(),
+            expected_crashes: vec![],
         })]), configs: BTreeMap::new(),
         network: config::Network { name: "default".into(), latency_ns: 1_000_000,
             jitter_ns: 0, bandwidth_bps: None, queue_bound_ns: None, links: vec![] },
@@ -19,7 +20,7 @@ fn fixture() -> sb::record::RunRecord {
         limits: config::Limits { simulated_time_ns: 1_000_000_000, wall_time_ns: 60_000_000_000 },
         check: config::Check { service: "workload".into(), exit_code: 0 },
         seed: Some(0), wall_clock_epoch: None,
-        machine: config::MachineOptions::default(), disk: config::DiskOptions::default(),
+        machine: config::MachineOptions::default(), disk: config::DiskOptions::default(), progress_client: Default::default(),
     };
     let identity = RunIdentity {
         program: Vec::new(),
@@ -53,6 +54,7 @@ fn fixture() -> sb::record::RunRecord {
         omitted_logs: BTreeMap::new(),
         outcome: Outcome::Pass,
         report: Some(ExecutionReport {
+            choices: None,
             host_wait_ns: 0,
             simulated_time_ns: None,
             reason: StopReason::Completed,
@@ -64,6 +66,7 @@ fn fixture() -> sb::record::RunRecord {
             full_state: None,
             faults: vec![],
             detail: None,
+            properties: None,
         }),
         error: None,
         logs: BTreeMap::new(),

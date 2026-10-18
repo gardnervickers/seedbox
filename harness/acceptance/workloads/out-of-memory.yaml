@@ -1,0 +1,27 @@
+name: out-of-memory
+machines:
+  app:
+    image: docker.io/library/python:3.13-alpine
+    memoryMiB: 384
+    entrypoint:
+    - python3
+    - "/scenario/out_of_memory.py"
+    - app
+    files:
+    - source: "../driver/out_of_memory.py"
+      target: "/scenario/out_of_memory.py"
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint:
+  - python3
+  - "/scenario/out_of_memory.py"
+  - oracle
+  files:
+  - source: "../driver/out_of_memory.py"
+    target: "/scenario/out_of_memory.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms

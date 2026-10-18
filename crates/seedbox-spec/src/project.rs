@@ -14,6 +14,44 @@ pub struct Project {
     pub oracle: Machine,
     #[serde(default)]
     pub network: NetworkDefaults,
+    #[serde(default, skip_serializing_if = "Engine::is_default")]
+    pub engine: Engine,
+}
+
+/// Simulation-wide engine choices that change results.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Engine {
+    #[serde(default)]
+    pub progress_client: ProgressClient,
+}
+
+impl Engine {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The build of the guest progress instrumentation that runs applications
+/// (guest/progress). Both charge the same instructions at the same points;
+/// they differ in how much translator work and memory each translated block
+/// costs, which the translator's own charged syscalls make visible in
+/// simulated time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProgressClient {
+    /// The established client.
+    #[default]
+    Standard,
+    /// Cheaper instrumentation: short-lived processes start about 2.5 times
+    /// faster under the translator (arm64 only).
+    Lean,
+}
+
+impl ProgressClient {
+    pub fn is_standard(&self) -> bool {
+        *self == Self::Standard
+    }
 }
 
 /// Launch inputs shared by application machines and the oracle.
@@ -44,6 +82,10 @@ pub struct Machine {
     pub user: Option<String>,
     pub files: Vec<InitialFile>,
     pub volumes: BTreeMap<String, Volume>,
+    /// Crashes this machine is designed to have, which pass the default
+    /// `seedbox.no_crashing_processes` property instead of violating it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub expected_crashes: Vec<ExpectedCrash>,
 }
 
 #[derive(Deserialize)]
@@ -65,6 +107,8 @@ struct MachineFields {
     files: Vec<InitialFile>,
     #[serde(default)]
     volumes: BTreeMap<String, Volume>,
+    #[serde(default)]
+    expected_crashes: Vec<ExpectedCrash>,
 }
 
 impl TryFrom<MachineFields> for Machine {
@@ -81,6 +125,7 @@ impl TryFrom<MachineFields> for Machine {
                 "image must be a nonempty registry reference without a transport prefix".into(),
             );
         }
+        ExpectedCrash::check_all(&fields.expected_crashes)?;
         Ok(Self {
             memory_mib: fields.memory_mib,
             cpu: fields.cpu,
@@ -93,7 +138,162 @@ impl TryFrom<MachineFields> for Machine {
             user: fields.user,
             files: fields.files,
             volumes: fields.volumes,
+            expected_crashes: fields.expected_crashes,
         })
+    }
+}
+
+/// A crash a machine is designed to have, such as a watchdog that aborts a
+/// stalled process for a supervisor to restart. It matches only the guest
+/// kernel's fatal-signal report (`print-fatal-signals`) of `signal` from a
+/// thread whose command name is `command` and, when given, whose executable's
+/// file name is `executable`. A matching crash passes
+/// `seedbox.no_crashing_processes` and is reported as a pass with the
+/// declaration that matched; every other crash, and every out-of-memory
+/// kill, is reported exactly as without the declaration.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "ExpectedCrashFields"
+)]
+pub struct ExpectedCrash {
+    pub signal: CrashSignal,
+    /// The crashing thread's command name as the kernel prints it (its
+    /// `comm`, at most 15 bytes; a thread name set with `prctl` or
+    /// `pthread_setname_np`).
+    pub command: String,
+    /// The file name, without a directory, of the crashing process's
+    /// executable; omission matches any. Under the binary translator this is
+    /// the translator's loader, `libdynamorio.so`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExpectedCrashFields {
+    signal: CrashSignal,
+    command: String,
+    executable: Option<String>,
+}
+
+/// Expected crashes one machine may declare.
+pub const MAX_EXPECTED_CRASHES: usize = 16;
+/// A thread's command name holds at most this many bytes.
+pub const MAX_COMMAND_BYTES: usize = 15;
+/// An executable's file name holds at most this many bytes.
+pub const MAX_EXECUTABLE_BYTES: usize = 255;
+
+/// 1..=max printable ASCII bytes: what a kernel line carries unescaped.
+fn printable(text: &str, max: usize) -> bool {
+    !text.is_empty() && text.len() <= max && text.bytes().all(|b| (0x20..0x7f).contains(&b))
+}
+
+impl TryFrom<ExpectedCrashFields> for ExpectedCrash {
+    type Error = String;
+
+    fn try_from(fields: ExpectedCrashFields) -> Result<Self, Self::Error> {
+        if !printable(&fields.command, MAX_COMMAND_BYTES) {
+            return Err(format!(
+                "expected crash command {:?} must be 1 to {MAX_COMMAND_BYTES} printable ASCII bytes, the thread name the kernel reports",
+                fields.command
+            ));
+        }
+        if let Some(executable) = &fields.executable {
+            if !printable(executable, MAX_EXECUTABLE_BYTES) || executable.contains('/') {
+                return Err(format!(
+                    "expected crash executable {executable:?} must be a file name without a directory, 1 to {MAX_EXECUTABLE_BYTES} printable ASCII bytes"
+                ));
+            }
+        }
+        Ok(Self {
+            signal: fields.signal,
+            command: fields.command,
+            executable: fields.executable,
+        })
+    }
+}
+
+impl ExpectedCrash {
+    /// Check one machine's declarations as a whole: bounded, none repeated.
+    pub fn check_all(expected: &[Self]) -> Result<(), String> {
+        if expected.len() > MAX_EXPECTED_CRASHES {
+            return Err(format!(
+                "expectedCrashes: at most {MAX_EXPECTED_CRASHES} per machine"
+            ));
+        }
+        for (i, crash) in expected.iter().enumerate() {
+            if expected[..i].contains(crash) {
+                return Err(format!(
+                    "expectedCrashes: {} in {:?} is declared twice",
+                    crash.signal.name(),
+                    crash.command
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A signal the kernel reports as a crash: one whose default action dumps
+/// core. SIGKILL and SIGTERM are never reported, so they cannot be expected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum CrashSignal {
+    /// Quit from the keyboard (3).
+    Sigquit,
+    /// Illegal instruction (4).
+    Sigill,
+    /// Trace or breakpoint trap (5).
+    Sigtrap,
+    /// Abort, as from `abort()` (6).
+    Sigabrt,
+    /// Bus error (7).
+    Sigbus,
+    /// Arithmetic exception (8).
+    Sigfpe,
+    /// Invalid memory reference (11).
+    Sigsegv,
+    /// CPU time limit exceeded (24).
+    Sigxcpu,
+    /// File size limit exceeded (25).
+    Sigxfsz,
+    /// Bad system call (31).
+    Sigsys,
+}
+
+impl CrashSignal {
+    /// The signal's number, the same on x86-64 and arm64 Linux.
+    pub fn number(self) -> i32 {
+        match self {
+            Self::Sigquit => 3,
+            Self::Sigill => 4,
+            Self::Sigtrap => 5,
+            Self::Sigabrt => 6,
+            Self::Sigbus => 7,
+            Self::Sigfpe => 8,
+            Self::Sigsegv => 11,
+            Self::Sigxcpu => 24,
+            Self::Sigxfsz => 25,
+            Self::Sigsys => 31,
+        }
+    }
+
+    /// The name as authored, such as `SIGABRT`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Sigquit => "SIGQUIT",
+            Self::Sigill => "SIGILL",
+            Self::Sigtrap => "SIGTRAP",
+            Self::Sigabrt => "SIGABRT",
+            Self::Sigbus => "SIGBUS",
+            Self::Sigfpe => "SIGFPE",
+            Self::Sigsegv => "SIGSEGV",
+            Self::Sigxcpu => "SIGXCPU",
+            Self::Sigxfsz => "SIGXFSZ",
+            Self::Sigsys => "SIGSYS",
+        }
     }
 }
 
@@ -122,6 +322,45 @@ pub struct InitialFile {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Volume {
     pub target: String,
+    /// Space the volume adds to its machine's retained disk, authored with a
+    /// binary unit (`size: 4GiB`, `size: 512MiB`); omission uses
+    /// [`DEFAULT_VOLUME_BYTES`].
+    #[serde(
+        default,
+        rename = "size",
+        skip_serializing_if = "Option::is_none",
+        with = "volume_size"
+    )]
+    pub size_bytes: Option<u64>,
+}
+
+/// A volume's size when none is given.
+pub const DEFAULT_VOLUME_BYTES: u64 = 1 << 30;
+/// The smallest volume; ext4 needs room for its journal and metadata.
+pub const MIN_VOLUME_BYTES: u64 = 16 << 20;
+/// The largest retained disk of one machine, which holds all its volumes.
+/// Written sectors live in the simulator's memory, so this also bounds what
+/// one machine's disk can cost the host.
+pub const MAX_MACHINE_DISK_BYTES: u64 = 64 << 30;
+
+/// The size of the retained disk that holds a machine's volumes: the sum of
+/// their sizes, `None` taking the default. A machine's volumes share one
+/// filesystem on this disk.
+pub fn machine_disk_bytes(sizes: impl IntoIterator<Item = Option<u64>>) -> Result<u64, String> {
+    let mut total = 0u64;
+    for size in sizes {
+        let size = size.unwrap_or(DEFAULT_VOLUME_BYTES);
+        volume_size::check(size)?;
+        total = total.saturating_add(size);
+    }
+    if total > MAX_MACHINE_DISK_BYTES {
+        return Err(format!(
+            "volume sizes total {}, above the {} limit for one machine",
+            volume_size::format(total),
+            volume_size::format(MAX_MACHINE_DISK_BYTES)
+        ));
+    }
+    Ok(total)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,6 +528,105 @@ pub mod frequency {
     }
 }
 
+/// A volume size as a whole number of MiB or GiB (`4GiB`, `1536MiB`),
+/// within `MIN_VOLUME_BYTES..=MAX_MACHINE_DISK_BYTES`.
+pub mod volume_size {
+    use serde::{de::Error, Deserializer, Serializer};
+
+    const UNITS: [(&str, u64); 2] = [("GiB", 1 << 30), ("MiB", 1 << 20)];
+
+    pub fn serialize<S: Serializer>(bytes: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error> {
+        match bytes {
+            Some(bytes) => serializer.serialize_str(&format(*bytes)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<u64>, D::Error> {
+        struct Size;
+        impl serde::de::Visitor<'_> for Size {
+            type Value = Option<u64>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a size such as 4GiB")
+            }
+            fn visit_str<E: Error>(self, raw: &str) -> Result<Self::Value, E> {
+                parse(raw).map(Some).map_err(E::custom)
+            }
+            // A bare number has no unit; name the field and the expected form.
+            fn visit_u64<E: Error>(self, raw: u64) -> Result<Self::Value, E> {
+                self.visit_str(&raw.to_string())
+            }
+            fn visit_i64<E: Error>(self, raw: i64) -> Result<Self::Value, E> {
+                self.visit_str(&raw.to_string())
+            }
+            fn visit_f64<E: Error>(self, raw: f64) -> Result<Self::Value, E> {
+                self.visit_str(&raw.to_string())
+            }
+            /// An explicit null is the same as omission.
+            fn visit_unit<E: Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+        }
+        deserializer.deserialize_any(Size)
+    }
+
+    /// The largest unit that divides the size exactly; bytes when none does.
+    pub fn format(bytes: u64) -> String {
+        UNITS
+            .iter()
+            .find(|(_, scale)| bytes.is_multiple_of(*scale))
+            .map(|(unit, scale)| format!("{}{unit}", bytes / scale))
+            .unwrap_or_else(|| format!("{bytes}B"))
+    }
+
+    fn range() -> String {
+        format!(
+            "from {} to {}",
+            format(super::MIN_VOLUME_BYTES),
+            format(super::MAX_MACHINE_DISK_BYTES)
+        )
+    }
+
+    /// A size within the volume range and a whole number of MiB.
+    pub fn check(bytes: u64) -> Result<(), String> {
+        if bytes.is_multiple_of(1 << 20)
+            && (super::MIN_VOLUME_BYTES..=super::MAX_MACHINE_DISK_BYTES).contains(&bytes)
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "volume size {} must be a whole number of MiB {}",
+                format(bytes),
+                range()
+            ))
+        }
+    }
+
+    pub fn parse(raw: &str) -> Result<u64, String> {
+        let invalid = || {
+            format!(
+                "size {raw:?}: expected a whole number of MiB or GiB such as 4GiB or 512MiB, {}",
+                range()
+            )
+        };
+        let digits = raw.bytes().take_while(u8::is_ascii_digit).count();
+        let (number, unit) = raw.split_at(digits);
+        let scale = UNITS
+            .iter()
+            .find(|(name, _)| *name == unit)
+            .map(|(_, scale)| *scale)
+            .ok_or_else(invalid)?;
+        number
+            .parse::<u64>()
+            .ok()
+            .and_then(|n| n.checked_mul(scale))
+            .filter(|bytes| check(*bytes).is_ok())
+            .ok_or_else(invalid)
+    }
+}
+
 /// A whole percentage string from 0% to 100%, or a bare 0.
 pub mod percent {
     use serde::{de::Error, Deserialize, Deserializer, Serializer};
@@ -353,6 +691,97 @@ mod tests {
     }
 
     #[test]
+    fn expected_crashes_are_explicit_per_machine_declarations() {
+        let project: Project = serde_yaml_ng::from_str(
+            "name: keel\nmachines:\n  s3:\n    image: keel\n    expectedCrashes:\n    - signal: SIGABRT\n      command: keel-watchdog\n    - {signal: SIGSEGV, command: keel-s3dd, executable: libdynamorio.so}\noracle: {image: oracle}\n",
+        )
+        .unwrap();
+        let expected = &project.machines["s3"].expected_crashes;
+        assert_eq!(expected.len(), 2);
+        assert_eq!(expected[0].signal, CrashSignal::Sigabrt);
+        assert_eq!(expected[0].signal.number(), 6);
+        assert_eq!(expected[0].command, "keel-watchdog");
+        assert_eq!(expected[0].executable, None);
+        assert_eq!(expected[1].signal.number(), 11);
+        assert_eq!(expected[1].executable.as_deref(), Some("libdynamorio.so"));
+        assert!(project.oracle.expected_crashes.is_empty());
+        // Declarations serialize as authored; machines without any omit the key.
+        let value = serde_json::to_value(&project).unwrap();
+        assert_eq!(
+            value["machines"]["s3"]["expectedCrashes"][0],
+            serde_json::json!({"signal": "SIGABRT", "command": "keel-watchdog"})
+        );
+        assert!(value["oracle"].get("expectedCrashes").is_none());
+        assert_eq!(serde_json::from_value::<Project>(value).unwrap(), project);
+    }
+
+    #[test]
+    fn expected_crashes_reject_vague_or_impossible_declarations() {
+        let parse = |crashes: &str| {
+            serde_yaml_ng::from_str::<Machine>(&format!(
+                "{{image: keel, expectedCrashes: {crashes}}}"
+            ))
+            .map_err(|e| e.to_string())
+        };
+        assert!(parse("[]").unwrap().expected_crashes.is_empty());
+        for (bad, error) in [
+            // Signals the kernel never reports as crashes, numbers and wildcards.
+            ("[{signal: SIGKILL, command: x}]", "unknown variant `SIGKILL`"),
+            ("[{signal: SIGTERM, command: x}]", "unknown variant `SIGTERM`"),
+            ("[{signal: 6, command: x}]", "expected one of `SIGQUIT`"),
+            ("[{signal: sigabrt, command: x}]", "unknown variant `sigabrt`"),
+            ("[{signal: '*', command: x}]", "unknown variant `*`"),
+            // Both the signal and the command are required.
+            ("[{signal: SIGABRT}]", "missing field `command`"),
+            ("[{command: keel-watchdog}]", "missing field `signal`"),
+            (
+                "[{signal: SIGABRT, command: ''}]",
+                "expected crash command \"\" must be 1 to 15 printable ASCII bytes",
+            ),
+            (
+                "[{signal: SIGABRT, command: keel-watchdog-thread}]",
+                "expected crash command \"keel-watchdog-thread\" must be 1 to 15",
+            ),
+            (
+                "[{signal: SIGABRT, command: \"keel\\twatch\"}]",
+                "must be 1 to 15 printable ASCII bytes",
+            ),
+            (
+                "[{signal: SIGABRT, command: x, executable: /usr/bin/keel}]",
+                "expected crash executable \"/usr/bin/keel\" must be a file name without a directory",
+            ),
+            (
+                "[{signal: SIGABRT, command: x, executable: ''}]",
+                "must be a file name without a directory",
+            ),
+            ("[{signal: SIGABRT, command: x, pid: 1}]", "unknown field `pid`"),
+            (
+                "[{signal: SIGABRT, command: x}, {signal: SIGABRT, command: x}]",
+                "expectedCrashes: SIGABRT in \"x\" is declared twice",
+            ),
+            ("{signal: SIGABRT, command: x}", "expected a sequence"),
+        ] {
+            let message = parse(bad).unwrap_err();
+            assert!(message.contains(error), "{bad}: {message}");
+        }
+        let many = (0..=MAX_EXPECTED_CRASHES)
+            .map(|i| format!("{{signal: SIGABRT, command: t{i}}}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(parse(&format!("[{many}]"))
+            .unwrap_err()
+            .contains("expectedCrashes: at most 16 per machine"));
+        // The same thread may be expected to crash with different signals.
+        assert_eq!(
+            parse("[{signal: SIGABRT, command: x}, {signal: SIGSEGV, command: x}]")
+                .unwrap()
+                .expected_crashes
+                .len(),
+            2
+        );
+    }
+
+    #[test]
     fn runtime_options_and_advanced_knobs_are_not_authoring_inputs() {
         for extra in [
             "limits: {wallTime: 5m}",
@@ -378,6 +807,40 @@ mod tests {
             "name: test\noracle: {image: oracle}\nsimulator: {instructionsPerProgressCall: 7}\n"
         )
         .is_err());
+    }
+
+    #[test]
+    fn progress_client_defaults_to_standard_and_is_omitted_when_standard() {
+        let parse = |extra: &str| {
+            serde_yaml_ng::from_str::<Project>(&format!(
+                "name: test\noracle: {{image: oracle}}\n{extra}"
+            ))
+        };
+        assert_eq!(
+            parse("").unwrap().engine.progress_client,
+            ProgressClient::Standard
+        );
+        assert_eq!(
+            parse("engine: {}\n").unwrap().engine.progress_client,
+            ProgressClient::Standard
+        );
+        let lean = parse("engine: {progressClient: lean}\n").unwrap();
+        assert_eq!(lean.engine.progress_client, ProgressClient::Lean);
+        assert!(serde_yaml_ng::to_string(&lean)
+            .unwrap()
+            .contains("progressClient: lean"));
+        let standard = parse("engine: {progressClient: standard}\n").unwrap();
+        assert!(!serde_yaml_ng::to_string(&standard)
+            .unwrap()
+            .contains("engine"));
+        for bad in [
+            "engine: {progressClient: Lean}\n",
+            "engine: {progressClient: ''}\n",
+            "engine: {progressClient: lean, budget: 1}\n",
+            "engine: lean\n",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -451,6 +914,87 @@ mod tests {
         let value = serde_json::to_value(&jitter).unwrap();
         assert_eq!(value, serde_json::json!({"speed": "2GHz", "jitter": "5%"}));
         assert_eq!(serde_json::from_value::<Cpu>(value).unwrap(), jitter);
+    }
+
+    #[test]
+    fn volume_size_is_an_optional_binary_size() {
+        let parse = |yaml: &str| serde_yaml_ng::from_str::<Volume>(yaml);
+        assert_eq!(parse("target: /data").unwrap().size_bytes, None);
+        assert_eq!(
+            parse("{target: /data, size: null}").unwrap().size_bytes,
+            None
+        );
+        for (text, bytes) in [
+            ("4GiB", 4u64 << 30),
+            ("1536MiB", 1536 << 20),
+            ("16MiB", 16 << 20),
+            ("64GiB", 64 << 30),
+            ("0004GiB", 4 << 30),
+        ] {
+            assert_eq!(
+                parse(&format!("{{target: /data, size: {text}}}"))
+                    .unwrap()
+                    .size_bytes,
+                Some(bytes),
+                "{text}"
+            );
+        }
+        for bad in [
+            "4GB", "4gib", "4 GiB", "1.5GiB", "4096", "4096KiB", "15MiB", "65GiB", "0MiB", "-1GiB",
+            "GiB", "''", "1TiB",
+        ] {
+            let error = parse(&format!("{{target: /data, size: {bad}}}"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("expected a whole number of MiB or GiB such as 4GiB or 512MiB, from 16MiB to 64GiB"),
+                "{bad}: {error}"
+            );
+        }
+        assert!(parse("{target: /data, size: true}")
+            .unwrap_err()
+            .to_string()
+            .contains("expected a size such as 4GiB"));
+        // Sizes serialize in the largest exact unit and round-trip; omission stays omitted.
+        for (bytes, text) in [(4u64 << 30, "4GiB"), (1536 << 20, "1536MiB")] {
+            let volume = Volume {
+                target: "/data".into(),
+                size_bytes: Some(bytes),
+            };
+            let value = serde_json::to_value(&volume).unwrap();
+            assert_eq!(value, serde_json::json!({"target": "/data", "size": text}));
+            assert_eq!(serde_json::from_value::<Volume>(value).unwrap(), volume);
+        }
+        let omitted = Volume {
+            target: "/data".into(),
+            size_bytes: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&omitted).unwrap(),
+            serde_json::json!({"target": "/data"})
+        );
+    }
+
+    #[test]
+    fn a_machine_disk_holds_the_sum_of_its_volume_sizes() {
+        assert_eq!(machine_disk_bytes([]), Ok(0));
+        assert_eq!(machine_disk_bytes([None]), Ok(DEFAULT_VOLUME_BYTES));
+        assert_eq!(
+            machine_disk_bytes([Some(3 << 30), None]),
+            Ok(4 << 30),
+            "an omitted size takes the 1GiB default"
+        );
+        assert_eq!(machine_disk_bytes([Some(32 << 30); 2]), Ok(64 << 30));
+        assert_eq!(
+            machine_disk_bytes([Some(32 << 30), Some(32 << 30), Some(16 << 20)]),
+            Err("volume sizes total 65552MiB, above the 64GiB limit for one machine".into())
+        );
+        assert_eq!(
+            machine_disk_bytes([Some(u64::MAX)]),
+            Err("volume size 18446744073709551615B must be a whole number of MiB from 16MiB to 64GiB".into())
+        );
+        assert!(machine_disk_bytes([Some((1 << 30) + 512)]).is_err());
+        assert!(machine_disk_bytes([Some(0)]).is_err());
     }
 
     #[test]

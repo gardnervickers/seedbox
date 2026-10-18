@@ -1,0 +1,16 @@
+# Generic faults for the NATS JetStream queue workload: power loss of one
+# server at a time, process pauses and partitions, aimed at nothing in
+# particular. A rebooted server starts nats-server again by itself.
+start: 12s
+end: 70s
+interval: 3s
+faults:
+  - kind: crash
+    weight: 2
+    downtime: {min: 1s, max: 6s}
+  - kind: pause_process
+    weight: 2
+    duration: {min: 500ms, max: 8s}
+  - kind: partition
+    weight: 2
+    duration: {min: 1s, max: 8s}

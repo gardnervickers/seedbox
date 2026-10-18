@@ -4,10 +4,11 @@ use super::{daemon, defaults, output, ComposeArg, MAC};
 use futures_util::StreamExt;
 use seedbox_api::{
     ExecutionTermination, InputSource, Phase, Simulation, SimulationDocument, SimulationId,
-    SimulationSpec, SubmitRequest,
+    SimulationSpec, SubmitRequest, TestVerdict,
 };
 use seedbox_application::{execution::CancellationToken, Error, Result};
 use seedbox_client::Client;
+use seedbox_spec::fault_profile::FaultProfile;
 use std::{io::Read, time::Duration};
 
 pub(super) fn capacity(json: bool) -> Result<u8> {
@@ -86,7 +87,7 @@ pub(super) fn tui(id: Option<SimulationId>) -> Result<u8> {
     Ok(0)
 }
 
-fn load_spec(
+pub(super) fn load_spec(
     compose: &ComposeArg,
     seed: Option<u64>,
 ) -> Result<(SimulationSpec, seedbox_spec::definition::Metadata)> {
@@ -166,14 +167,17 @@ pub(super) fn run(
     paused: bool,
     detach: bool,
     json: bool,
-    wall_time_ns: Option<u64>,
+    fault_profile: Option<FaultProfile>,
+    execution: &super::ExecutionArgs,
 ) -> Result<u8> {
     let (spec, metadata) = load_spec(compose, seed)?;
-    submit(
+    submit_with_profile(
+        fault_profile,
         spec,
         seedbox_api::ExecutionOptions {
+            capture_anchors: execution.capture_anchors.clone(),
             start_paused: paused,
-            wall_time_ns,
+            wall_time_ns: execution.wall_time,
         },
         metadata,
         detach,
@@ -185,10 +189,10 @@ pub(super) fn explore(
     compose: &ComposeArg,
     seed: Option<u64>,
     count: u32,
-    paused: bool,
+    options: seedbox_api::ExecutionOptions,
     detach: bool,
     json: bool,
-    wall_time_ns: Option<u64>,
+    fault_profile: Option<FaultProfile>,
 ) -> Result<u8> {
     let (spec, metadata) = load_spec(compose, seed)?;
     if spec
@@ -200,14 +204,12 @@ pub(super) fn explore(
     }
     super::defaults::warn_dirty_build();
     let request = seedbox_api::SeedRangeRequest {
-        options: seedbox_api::ExecutionOptions {
-            start_paused: paused,
-            wall_time_ns,
-        },
+        options,
         metadata,
         request_id: Client::request_id().map_err(client_error)?,
         spec,
         count,
+        fault_profile,
     };
     let client = daemon::connect(None)?;
     let cancellation = CancellationToken::default();
@@ -367,6 +369,7 @@ pub(super) fn replay(id: &SimulationId, json: bool, wall_time_ns: Option<u64>) -
     submit_with_comparison(
         resource.spec,
         seedbox_api::ExecutionOptions {
+            capture_anchors: Default::default(),
             start_paused: false,
             wall_time_ns,
         },
@@ -381,7 +384,7 @@ pub(super) fn rerun(
     id: &SimulationId,
     detach: bool,
     json: bool,
-    wall_time_ns: Option<u64>,
+    execution: &super::ExecutionArgs,
 ) -> Result<u8> {
     let client = daemon::connect(None)?;
     let resource = runtime()?
@@ -396,8 +399,9 @@ pub(super) fn rerun(
     submit(
         resource.spec,
         seedbox_api::ExecutionOptions {
+            capture_anchors: execution.capture_anchors.clone(),
             start_paused: false,
-            wall_time_ns,
+            wall_time_ns: execution.wall_time,
         },
         metadata,
         detach,
@@ -410,7 +414,7 @@ pub(super) fn branch(
     checkpoint: String,
     detach: bool,
     json: bool,
-    wall_time_ns: Option<u64>,
+    execution: &super::ExecutionArgs,
 ) -> Result<u8> {
     let client = daemon::connect(None)?;
     let resource = runtime()?
@@ -420,8 +424,9 @@ pub(super) fn branch(
     submit(
         resource.spec,
         seedbox_api::ExecutionOptions {
+            capture_anchors: execution.capture_anchors.clone(),
             start_paused: false,
-            wall_time_ns,
+            wall_time_ns: execution.wall_time,
         },
         metadata,
         detach,
@@ -444,10 +449,33 @@ fn submit(
     detach: bool,
     json: bool,
 ) -> Result<u8> {
-    submit_with_comparison(spec, options, metadata, detach, json, None)
+    submit_with_profile(None, spec, options, metadata, detach, json)
+}
+
+fn submit_with_profile(
+    fault_profile: Option<FaultProfile>,
+    spec: SimulationSpec,
+    options: seedbox_api::ExecutionOptions,
+    metadata: seedbox_spec::definition::Metadata,
+    detach: bool,
+    json: bool,
+) -> Result<u8> {
+    submit_request(fault_profile, spec, options, metadata, detach, json, None)
 }
 
 fn submit_with_comparison(
+    spec: SimulationSpec,
+    options: seedbox_api::ExecutionOptions,
+    metadata: seedbox_spec::definition::Metadata,
+    detach: bool,
+    json: bool,
+    baseline: Option<&SimulationId>,
+) -> Result<u8> {
+    submit_request(None, spec, options, metadata, detach, json, baseline)
+}
+
+fn submit_request(
+    fault_profile: Option<FaultProfile>,
     spec: SimulationSpec,
     options: seedbox_api::ExecutionOptions,
     metadata: seedbox_spec::definition::Metadata,
@@ -460,6 +488,7 @@ fn submit_with_comparison(
         options,
         metadata,
         request_id: Client::request_id().map_err(client_error)?,
+        fault_profile,
         spec,
     };
     let client = daemon::connect(None)?;
@@ -856,10 +885,12 @@ pub(super) fn mutate_control(
 }
 
 fn status_outcome(status: &seedbox_api::SimulationStatus) -> (&'static str, u8) {
-    match status.oracle_exit_code {
-        Some(0) => ("PASS", 0),
-        Some(_) => ("FAIL", 1),
-        None => match status.termination {
+    match status.verdict() {
+        TestVerdict::Passed => ("PASS", 0),
+        TestVerdict::Failed => ("FAIL", 1),
+        // A passing oracle whose property evidence was lost.
+        _ if status.oracle_exit_code.is_some() => ("INCOMPLETE", 3),
+        _ => match status.termination {
             Some(ExecutionTermination::Error { .. }) => ("ERROR", 2),
             Some(
                 ExecutionTermination::SimulatedTimeLimit
@@ -877,11 +908,57 @@ fn report(resource: &Simulation, json: bool) -> Result<u8> {
         output::json(resource)?;
     } else {
         output::status(word, &resource.metadata.id);
+        if let Some(assessment) = &resource.status.properties {
+            property_fields(assessment);
+        }
     }
     if let Some(ExecutionTermination::Error { message }) = &resource.status.termination {
         eprintln!("execution: {message}");
     }
     Ok(code)
+}
+
+/// One summary field, then each violated property and each evidence error.
+pub(super) fn property_fields(assessment: &seedbox_api::PropertyAssessment) {
+    use seedbox_engine_protocol::property::PropertyStatus;
+    output::field(
+        "properties",
+        format!(
+            "{} ({} violated, {} unmet, {} total)",
+            output::word(&assessment.status).to_lowercase(),
+            assessment.violated,
+            assessment.unmet,
+            assessment.properties.len()
+        ),
+    );
+    for property in &assessment.properties {
+        if property.status == PropertyStatus::Violated {
+            output::field("violated", &property.id);
+        }
+    }
+    // Repeated errors print once with their count, in first-seen order.
+    let mut errors: Vec<(&str, usize)> = Vec::new();
+    for error in &assessment.errors {
+        match errors.iter_mut().find(|(text, _)| *text == error.error) {
+            Some((_, count)) => *count += 1,
+            None => errors.push((&error.error, 1)),
+        }
+    }
+    for (error, count) in errors {
+        match count {
+            1 => output::field("evidence", error),
+            count => output::field("evidence", format!("{error} ({count} times)")),
+        }
+    }
+    if assessment.error_count > assessment.errors.len() as u64 {
+        output::field(
+            "evidence",
+            format!(
+                "{} more errors omitted",
+                assessment.error_count - assessment.errors.len() as u64
+            ),
+        );
+    }
 }
 
 pub(super) fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -901,10 +978,13 @@ mod tests {
 
     #[test]
     fn native_acceptance_projects_round_trip_through_submission_json() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../harness/acceptance/workloads");
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../harness/acceptance");
         let mut tested = 0;
-        for entry in std::fs::read_dir(root).unwrap() {
+        let entries = ["workloads", "long"]
+            .into_iter()
+            .flat_map(|tier| std::fs::read_dir(root.join(tier)).unwrap());
+        for entry in entries {
             let path = entry.unwrap().path();
             if path.extension().and_then(|v| v.to_str()) != Some("yaml") {
                 continue;

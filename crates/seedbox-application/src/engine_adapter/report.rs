@@ -33,17 +33,32 @@ fn validate_input_admissions(
     program: &[seedbox_engine_protocol::input_program::TimedInput],
     admissions: &[seedbox_engine_protocol::input_program::InputAdmission],
     rejections: &[seedbox_engine_protocol::input_program::InputRejection],
+    branches: &[seedbox_engine_protocol::input_program::BranchReceipt],
+    armed: &[seedbox_engine_protocol::input_program::ArmReceipt],
     duration_ns: u64,
 ) -> Result<Vec<Plan>> {
+    use seedbox_engine_protocol::input_program::InputAction;
     seedbox_engine_protocol::input_program::validate_program(program, duration_ns)
         .map_err(Error::Integrity)?;
-    if admissions.len() + rejections.len() > program.len() {
+    let consumed = admissions.len() + rejections.len() + branches.len() + armed.len();
+    if consumed > program.len() {
         return Err(correlation_mismatch());
     }
     let mut admitted = admissions.iter().peekable();
     let mut rejected = rejections.iter().peekable();
+    let mut branched = branches.iter();
+    let mut armed = armed.iter();
+    let mut previous_trigger = 0;
     let mut previous = 0;
-    for input in program.iter().take(admissions.len() + rejections.len()) {
+    for input in program.iter().take(consumed) {
+        if let InputAction::Branch(action) = &input.action {
+            let receipt = branched.next().ok_or_else(correlation_mismatch)?;
+            if receipt.key != input.key || receipt.at_ns != input.at_ns || &receipt.action != action
+            {
+                return Err(correlation_mismatch());
+            }
+            continue;
+        }
         if rejected.peek().is_some_and(|r| r.key == input.key) {
             let row = rejected.next().ok_or_else(correlation_mismatch)?;
             if row.at_ns != input.at_ns || row.reason.is_empty() {
@@ -51,11 +66,18 @@ fn validate_input_admissions(
             }
             continue;
         }
+        if let InputAction::Rule(_) = &input.action {
+            let receipt = armed.next().ok_or_else(correlation_mismatch)?;
+            receipt
+                .validate(input, &mut previous_trigger)
+                .map_err(|_| correlation_mismatch())?;
+            continue;
+        }
         let row = admitted.next().ok_or_else(correlation_mismatch)?;
         let plan = &row.plan;
         if input.key != row.key
             || input.at_ns != plan.at_ns
-            || input.action != plan.action
+            || input.action.fault() != Some(&plan.action)
             || plan.id <= previous
             || input.at_ns.checked_add(input.timeout_ns) != Some(plan.deadline_ns)
         {
@@ -74,9 +96,12 @@ fn validate_program_cutoff(
 ) -> Result<()> {
     if evidence.outcome != RunOutcome::FaultFailed {
         let program = external_program(request)?;
-        if let Some(next) =
-            program.get(evidence.input_admissions.len() + evidence.input_rejections.len())
-        {
+        if let Some(next) = program.get(
+            evidence.input_admissions.len()
+                + evidence.input_rejections.len()
+                + evidence.input_branches.len()
+                + evidence.input_armed.len(),
+        ) {
             let committed = scheduler
                 .get("committed_ns")
                 .and_then(Value::as_u64)
@@ -606,6 +631,13 @@ impl HistoryCheck<'_> {
                 }
                 return Ok(None);
             }
+            // Quiet changes no machine; it answers at admission.
+            Operation::Quiet { .. } => {
+                if response && e != Some(a) {
+                    return Err(bad());
+                }
+                return Ok(None);
+            }
         };
         Ok(Some(action))
     }
@@ -689,16 +721,52 @@ pub(super) fn validate_triggers(
     records: Option<&[TriggerRecord]>,
     history: &[ControlRecord],
     request: &ExecutionRequest<'_>,
+    program: &[seedbox_engine_protocol::input_program::TimedInput],
+    armed: &[seedbox_engine_protocol::input_program::ArmReceipt],
 ) -> Result<Vec<Plan>> {
     let bad = invalid_trigger_evidence;
     if records.is_some_and(|r| r.is_empty() || r.len() > MAX_TRIGGERS) {
         return Err(bad());
     }
     let records = records.unwrap_or_default();
-    let latency = control_latency(request)?;
-    let cancellations = correlate_trigger_requests(records, history, request)?;
+    if records
+        .iter()
+        .enumerate()
+        .any(|(i, r)| r.id as usize != i + 1)
+    {
+        return Err(bad());
+    }
+    let (typed, marker): (Vec<_>, Vec<_>) = records.iter().partition(|r| r.selector.is_some());
+    if request.control.is_none() && !marker.is_empty() {
+        return Err(Error::Integrity("unexpected control transcript".into()));
+    }
+    let latency = if marker.is_empty() {
+        0
+    } else {
+        control_latency(request)?
+    };
+    let cancellations = correlate_trigger_requests(&marker, history, request)?;
+    correlate_typed_triggers(&typed, program, armed)?;
+    // Typed effects follow their match by the engine's causal lookahead,
+    // one positive value per run that no link latency undercuts.
+    let lookahead = typed
+        .iter()
+        .find_map(|r| {
+            Some(
+                r.effect_at_ns?
+                    .checked_sub(r.matched_at_ns?)?
+                    .checked_sub(r.delay_ns),
+            )
+        })
+        .map(|d| d.filter(|d| *d > 0 && *d <= request.network.latency_ns))
+        .map_or(Ok(0), |d| d.ok_or_else(bad))?;
     let mut plans = Vec::new();
     for r in records {
+        let latency = if r.selector.is_some() {
+            lookahead
+        } else {
+            latency
+        };
         if let Some(plan) = trigger_fault(r, &cancellations, latency, request)? {
             plans.push(plan);
         }
@@ -710,10 +778,105 @@ pub(super) fn validate_triggers(
     Ok(plans)
 }
 
+/// Answered choices are bounded, select one of their alternatives, and name
+/// only choice inputs that could select them.
+fn validate_choices(
+    choices: Option<&seedbox_engine_protocol::choice::ChoiceEvidence>,
+    program: &[seedbox_engine_protocol::input_program::TimedInput],
+    request: &ExecutionRequest<'_>,
+) -> Result<()> {
+    use seedbox_engine_protocol::input_program::{InputAction, RuleAction};
+    use seedbox_engine_protocol::property::MAX_CHOICE_ALTERNATIVES;
+    let bad = || Error::Integrity("invalid choice evidence".into());
+    let Some(choices) = choices else {
+        return Ok(());
+    };
+    if choices.records.len() > seedbox_engine_protocol::choice::MAX_CHOICES
+        || (choices.records.is_empty() && choices.untracked == 0)
+    {
+        return Err(bad());
+    }
+    let mut used = BTreeSet::new();
+    for r in &choices.records {
+        if !request.prepared.guests.contains_key(&r.machine)
+            || r.occurrence == 0
+            || r.alternatives == 0
+            || r.alternatives > MAX_CHOICE_ALTERNATIVES
+            || r.selected >= r.alternatives
+            || r.chosen.is_empty()
+            || r.reply_at_ns < r.requested_at_ns
+        {
+            return Err(bad());
+        }
+        if let Some(key) = &r.input_key {
+            let input = program.iter().find(|i| &i.key == key).ok_or_else(bad)?;
+            let InputAction::Rule(RuleAction::Choice(o)) = &input.action else {
+                return Err(bad());
+            };
+            if !used.insert(key)
+                || o.machine != r.machine
+                || o.site != r.site
+                || o.occurrence != r.occurrence
+                || o.select != r.selected
+                || o.incarnation.is_some_and(|i| i != r.incarnation)
+                || o.session.is_some_and(|s| s != r.session)
+                || input.at_ns > r.requested_at_ns
+            {
+                return Err(bad());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Each typed trigger was armed by its input's receipt, exactly as authored.
+fn correlate_typed_triggers(
+    typed: &[&TriggerRecord],
+    program: &[seedbox_engine_protocol::input_program::TimedInput],
+    armed: &[seedbox_engine_protocol::input_program::ArmReceipt],
+) -> Result<()> {
+    use seedbox_engine_protocol::input_program::{InputAction, RuleAction};
+    let bad = invalid_trigger_evidence;
+    let armed: Vec<_> = armed.iter().filter(|r| r.trigger_id.is_some()).collect();
+    if typed.len() != armed.len() {
+        return Err(bad());
+    }
+    for (r, receipt) in typed.iter().zip(armed) {
+        let input = program
+            .iter()
+            .find(|input| input.key == receipt.key)
+            .ok_or_else(bad)?;
+        let InputAction::Rule(RuleAction::Trigger(spec)) = &input.action else {
+            return Err(bad());
+        };
+        let deadline = match spec.within_ns {
+            Some(within) => receipt.at_ns.checked_add(within),
+            None => Some(u64::MAX),
+        };
+        if Some(r.id) != receipt.trigger_id
+            || r.key.as_ref() != Some(&receipt.key)
+            || r.armed_at_ns != receipt.at_ns
+            || input.at_ns != receipt.at_ns
+            || r.selector.as_ref() != Some(&spec.when)
+            || r.nth != spec.nth
+            || r.delay_ns != spec.delay_ns
+            || r.action != spec.then
+            || Some(r.match_deadline_ns) != deadline
+            || !r.marker.is_empty()
+            || r.prefix != 0
+            || r.resets != 0
+            || r.cancelled_at_ns.is_some()
+        {
+            return Err(bad());
+        }
+    }
+    Ok(())
+}
+
 /// Match each accepted arm request to its record in order, and collect the
 /// time each trigger was cancelled.
 fn correlate_trigger_requests(
-    records: &[TriggerRecord],
+    records: &[&TriggerRecord],
     history: &[ControlRecord],
     request: &ExecutionRequest<'_>,
 ) -> Result<BTreeMap<u32, u64>> {
@@ -750,8 +913,7 @@ fn correlate_trigger_requests(
         let result = |key: &str| row.result().and_then(|r| r.get(key));
         match call.operation {
             Operation::CancelTrigger { trigger_id } => {
-                if trigger_id == 0
-                    || trigger_id as usize > arms
+                if !records[..arms].iter().any(|r| r.id == trigger_id)
                     || cancellations.insert(trigger_id, at).is_some()
                 {
                     return Err(bad());
@@ -765,8 +927,7 @@ fn correlate_trigger_requests(
             } => {
                 let r = records.get(arms).ok_or_else(bad)?;
                 arms += 1;
-                if r.id as usize != arms
-                    || result("trigger_id").and_then(Value::as_u64) != Some(u64::from(r.id))
+                if result("trigger_id").and_then(Value::as_u64) != Some(u64::from(r.id))
                     || r.source != resolve(&source, false)?
                     || r.marker != marker
                     || marker.is_empty()
@@ -828,22 +989,35 @@ fn trigger_fault(
     let bad = invalid_trigger_evidence;
     let limit = request.limits.simulated_time_ns;
     let matched = r.matched_at_ns.is_some();
+    // A typed trigger completes on its nth occurrence; a marker on its last byte.
+    let typed = r.selector.is_some();
+    let complete = if typed {
+        r.seen == r.nth
+    } else {
+        r.prefix == r.marker.len()
+    };
+    let unbounded = typed && r.match_deadline_ns == u64::MAX;
     if r.prefix > r.marker.len()
         || r.seen < r.prefix as u64
-        || r.match_deadline_ns
-            .checked_add(latency)
-            .and_then(|d| d.checked_add(PROCESS_EFFECT_TIMEOUT_NS))
-            .is_none()
+        || (typed && r.seen > r.nth)
+        || (!unbounded
+            && r.match_deadline_ns
+                .checked_add(latency)
+                .and_then(|d| d.checked_add(PROCESS_EFFECT_TIMEOUT_NS))
+                .is_none())
         || r.effect_at_ns.is_some() != matched
-        || (matched && r.prefix != r.marker.len())
-        || (!matched && r.prefix == r.marker.len())
+        || matched != complete
         || r.cancelled_at_ns != cancellations.get(&r.id).copied()
         || (r.status != TriggerStatus::Rejected && r.rejection_reason.is_some())
     {
         return Err(bad());
     }
     if let Some(m) = r.matched_at_ns {
-        if m < r.armed_at_ns || m >= r.match_deadline_ns || m.checked_add(latency) != r.effect_at_ns
+        if m < r.armed_at_ns
+            || m >= r.match_deadline_ns
+            || m.checked_add(latency)
+                .and_then(|e| e.checked_add(r.delay_ns))
+                != r.effect_at_ns
         {
             return Err(bad());
         }
@@ -993,6 +1167,8 @@ pub(super) fn checked_report(
     request: &ExecutionRequest<'_>,
 ) -> Result<ExecutionReport> {
     let world_witness = ContentDigest::try_from(raw.world_witness.clone())?;
+    let properties = raw.properties.clone();
+    let choices = raw.choices.clone();
     for machine in machines {
         ContentDigest::try_from(machine.witness.clone())?;
         machine
@@ -1054,20 +1230,25 @@ pub(super) fn checked_report(
                 .collect::<Result<BTreeMap<_, _>>>()?,
         ),
     };
-    if request.control.is_none()
-        && (!raw.control_history.is_empty()
-            || raw.control_latency_ns != 0
-            || raw.triggers.is_some())
+    if request.control.is_none() && (!raw.control_history.is_empty() || raw.control_latency_ns != 0)
     {
         return Err(Error::Integrity("unexpected control transcript".into()));
     }
     let program = external_program(request)?;
-    let mut external_plans =
-        validate_triggers(raw.triggers.as_deref(), &raw.control_history, request)?;
+    let mut external_plans = validate_triggers(
+        raw.triggers.as_deref(),
+        &raw.control_history,
+        request,
+        &program,
+        &raw.input_armed,
+    )?;
+    validate_choices(raw.choices.as_ref(), &program, request)?;
     let scheduled = validate_input_admissions(
         &program,
         &raw.input_admissions,
         &raw.input_rejections,
+        &raw.input_branches,
+        &raw.input_armed,
         request.limits.simulated_time_ns,
     )?;
     external_plans.extend(scheduled.iter().cloned());
@@ -1151,6 +1332,8 @@ pub(super) fn checked_report(
             infrastructure_error
                 .map(|machine| format!("machine {} failed in guest bootstrap or VMM", machine.name))
         }),
+        properties,
+        choices,
     })
 }
 
@@ -1317,6 +1500,52 @@ impl FaultCheck<'_> {
 }
 
 #[cfg(test)]
+mod typed_trigger_tests {
+    use super::*;
+    use seedbox_engine_protocol::input_program::{ArmReceipt, TimedInput};
+
+    #[test]
+    fn typed_trigger_records_must_match_their_input_and_receipt() {
+        let program: Vec<TimedInput> = vec![serde_json::from_value(serde_json::json!({
+            "key": "kill",
+            "at_ns": 5,
+            "action": {
+                "action": "trigger",
+                "when": {"on": "event", "name": "commit"},
+                "nth": 2,
+                "within_ns": 100,
+                "then": {"action": "crash", "machine": "db"},
+            },
+        }))
+        .unwrap()];
+        let mut triggers = seedbox_engine_core::triggers::Triggers::default();
+        let seedbox_engine_protocol::input_program::InputAction::Rule(
+            seedbox_engine_protocol::input_program::RuleAction::Trigger(spec),
+        ) = &program[0].action
+        else {
+            panic!("not a trigger");
+        };
+        triggers.arm_typed("kill", spec, 5).unwrap();
+        let record = triggers.records[0].clone();
+        let receipt = ArmReceipt {
+            key: "kill".into(),
+            at_ns: 5,
+            trigger_id: Some(1),
+        };
+        correlate_typed_triggers(&[&record], &program, std::slice::from_ref(&receipt)).unwrap();
+        assert!(correlate_typed_triggers(&[&record], &program, &[]).is_err());
+        let mut tampered = [record.clone(), record.clone(), record.clone()];
+        tampered[0].nth = 3;
+        tampered[1].match_deadline_ns = u64::MAX;
+        tampered[2].key = Some("other".into());
+        for bad in &tampered {
+            let receipts = std::slice::from_ref(&receipt);
+            assert!(correlate_typed_triggers(&[bad], &program, receipts).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn input_admissions_are_an_exact_prefix_with_runtime_ids() {
@@ -1329,7 +1558,8 @@ mod tests {
                 at_ns: 10 + i,
                 action: Action::Stop {
                     machine: "a".into(),
-                },
+                }
+                .into(),
             })
             .collect();
         let admissions: Vec<_> = program
@@ -1342,19 +1572,19 @@ mod tests {
                     id: 2 + i as u32 * 3,
                     at_ns: input.at_ns,
                     deadline_ns: input.at_ns + PROCESS_EFFECT_TIMEOUT_NS,
-                    action: input.action.clone(),
+                    action: input.action.fault().expect("a fault input").clone(),
                 },
             })
             .collect();
         assert_eq!(
-            validate_input_admissions(&program, &admissions, &[], 100)
+            validate_input_admissions(&program, &admissions, &[], &[], &[], 100)
                 .unwrap()
                 .iter()
                 .map(|p| p.id)
                 .collect::<Vec<_>>(),
             [2, 5]
         );
-        assert!(validate_input_admissions(&program, &[], &[], 100)
+        assert!(validate_input_admissions(&program, &[], &[], &[], &[], 100)
             .unwrap()
             .is_empty());
         for field in 0..5 {
@@ -1370,7 +1600,7 @@ mod tests {
                     }
                 }
             }
-            assert!(validate_input_admissions(&program, &bad, &[], 100).is_err());
+            assert!(validate_input_admissions(&program, &bad, &[], &[], &[], 100).is_err());
         }
     }
     use super::*;
@@ -1384,7 +1614,8 @@ mod tests {
             timeout_ns: 37,
             action: seedbox_control::Action::Heal {
                 handle: "cut".into(),
-            },
+            }
+            .into(),
         };
         let program = [input("missing"), input("valid")];
         let admissions = [InputAdmission {
@@ -1393,7 +1624,7 @@ mod tests {
                 id: 1,
                 at_ns: 10,
                 deadline_ns: 47,
-                action: program[1].action.clone(),
+                action: program[1].action.fault().expect("a fault input").clone(),
             },
         }];
         let mut rejections = [InputRejection {
@@ -1402,13 +1633,24 @@ mod tests {
             reason: "heal of inactive handle".into(),
         }];
         assert_eq!(
-            super::validate_input_admissions(&program, &admissions, &rejections, 100).unwrap()[0]
+            super::validate_input_admissions(&program, &admissions, &rejections, &[], &[], 100)
+                .unwrap()[0]
                 .id,
             1
         );
         rejections[0].at_ns += 1;
-        assert!(super::validate_input_admissions(&program, &admissions, &rejections, 100).is_err());
-        assert!(super::validate_input_admissions(&program, &admissions, &[], 100).is_err());
+        assert!(super::validate_input_admissions(
+            &program,
+            &admissions,
+            &rejections,
+            &[],
+            &[],
+            100
+        )
+        .is_err());
+        assert!(
+            super::validate_input_admissions(&program, &admissions, &[], &[], &[], 100).is_err()
+        );
     }
 
     #[test]

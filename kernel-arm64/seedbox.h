@@ -10,4 +10,10 @@ void seedbox_idle(void);
 void notrace seedbox_cpu_relax(void);
 struct pt_regs;
 void seedbox_syscall_progress(struct pt_regs *regs, int scno);
+/* Branch entropy from the PV page; seedbox_take_entropy lives in random.c. */
+u64 seedbox_entropy_gen(void);
+void seedbox_read_entropy(u8 entropy[32]);
+void seedbox_take_entropy(void);
+/* The current tick interrupted a progress charge: user time. */
+bool seedbox_user_tick(void);
 #endif

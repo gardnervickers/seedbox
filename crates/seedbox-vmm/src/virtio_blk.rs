@@ -20,12 +20,12 @@ pub(crate) struct Snapshot {
 }
 
 impl VirtioBlk {
-    pub(crate) fn snapshot(&self) -> Snapshot {
-        Snapshot {
-            model: self.model.snapshot(),
+    pub(crate) fn snapshot(&self) -> Result<Snapshot, String> {
+        Ok(Snapshot {
+            model: self.model.snapshot()?,
             transport: self.transport.snapshot(),
             dirty: self.dirty.clone(),
-        }
+        })
     }
     pub(crate) fn from_snapshot(snapshot: Snapshot, disk: Disk) -> Result<Self, String> {
         let device = Self::new(disk);
@@ -60,6 +60,13 @@ impl VirtioBlk {
     pub fn stats(&self) -> &Stats {
         self.model.stats()
     }
+    /// Start or end injected disk errors; ending returns their counts.
+    pub fn set_errors(
+        &mut self,
+        errors: Option<seedbox_engine_core::virtio_block::InjectedErrors>,
+    ) -> Option<seedbox_engine_core::virtio_block::ErrorCounts> {
+        self.model.set_errors(errors)
+    }
     fn config(&self, off: u64) -> u8 {
         match off {
             0..=7 => self.disk().capacity().to_le_bytes()[off as usize],
@@ -80,11 +87,15 @@ impl VirtioBlk {
         }
     }
     pub fn write(&mut self, m: &mut [u8], off: u64, v: u32) -> Result<Notified, String> {
-        match self.transport.write(off, v)? {
+        let effect = self.transport.write(off, v)?;
+        self.model.queue_changed(&self.transport);
+        match effect {
+            // x86 injects no disk latency, so every request completes at
+            // notify and its time never matters.
             Effect::Notify(_) => {
                 let dirty = &mut self.dirty;
                 self.model
-                    .notify(&mut self.transport, m, 0, |a, n| dirty.push((a, n)))
+                    .notify(&mut self.transport, m, 0, 0, |a, n| dirty.push((a, n)))
             }
             // The transport reset has completed; disk, stats and dirty journal survive.
             Effect::Reset | Effect::None => Ok(Notified::default()),

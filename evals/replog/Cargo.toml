@@ -1,0 +1,15 @@
+[package]
+name = "seedbox-eval-replog"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Built in its own image, outside the Seedbox workspace.
+[workspace]
+
+[dependencies]
+seedbox-sdk = { path = "../../crates/seedbox-sdk" }
+serde_json = "1"
+
+[profile.release]
+debug = 1

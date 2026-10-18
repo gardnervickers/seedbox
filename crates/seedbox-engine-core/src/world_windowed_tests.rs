@@ -860,34 +860,45 @@ fn adapter_observations_are_rejected_before_effects_are_consumed() {
 
 #[test]
 fn a_failed_crash_terminates_every_worker_and_poisons_the_world() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("observer");
-    let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
-    receiver.set_nonblocking(true).unwrap();
-    let mut w = world(&["a", "b"])
-        .with_observations(Some(crate::observation::Publisher::connect(&path).unwrap()));
-    plan(
-        &mut w,
-        5,
-        Action::Crash {
-            machine: "a".into(),
-        },
-    );
-    w.factory.lock().unwrap().push("fail/timer".into());
-    let error = run(&mut w, 30, None).unwrap_err();
-    assert!(error.contains("timer"), "{error}");
-    assert!(w.failure.is_some());
-    let terminations = trace(&w)
-        .iter()
-        .filter(|x| x.contains(":terminate:"))
-        .count();
-    assert_eq!(terminations, 3);
-    assert!(run(&mut w, 30, None).unwrap_err().contains("terminal"));
-    let mut bytes = [0; seedbox_engine_protocol::observation::MAX_DATAGRAM_BYTES];
-    assert_eq!(
-        receiver.recv(&mut bytes).unwrap_err().kind(),
-        std::io::ErrorKind::WouldBlock
-    );
+    // The crash transaction runs between rounds on the calling thread, so a
+    // pool of any size, even larger than the world, fails it the same way.
+    for workers in [0, 1, 2, 8] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observer");
+        let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let mut w = world(&["a", "b"])
+            .with_observations(Some(crate::observation::Publisher::connect(&path).unwrap()));
+        plan(
+            &mut w,
+            5,
+            Action::Crash {
+                machine: "a".into(),
+            },
+        );
+        w.factory.lock().unwrap().push("fail/timer".into());
+        let error = run_with(&mut w, 30, None, workers, Duration::ZERO).unwrap_err();
+        assert!(error.contains("timer"), "workers {workers}: {error}");
+        assert!(w.failure.is_some());
+        let terminations = trace(&w)
+            .iter()
+            .filter(|x| x.contains(":terminate:"))
+            .count();
+        assert_eq!(terminations, 3, "workers {workers}");
+        // A retry fails before any worker activity, whatever its pool.
+        let before = trace(&w).len();
+        for retry in [0, 2] {
+            assert!(run_with(&mut w, 30, None, retry, Duration::ZERO)
+                .unwrap_err()
+                .contains("terminal"));
+        }
+        assert_eq!(trace(&w).len(), before, "workers {workers}");
+        let mut bytes = [0; seedbox_engine_protocol::observation::MAX_DATAGRAM_BYTES];
+        assert_eq!(
+            receiver.recv(&mut bytes).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 }
 
 /// The legacy receipts' world: pause, crash, resume and reboot faults, a
@@ -999,7 +1010,17 @@ fn receipt(w: &World<Mock>, outcome: &str) -> Value {
 fn worker_count_and_completion_order_never_change_a_world_with_faults_and_control() {
     for variant in 0..8u64 {
         let mut reference = None;
-        for (workers, skew) in [(0, 0), (1, 0), (2, 0), (3, 0), (3, 2_000), (2, 2_000)] {
+        // More workers than machines leave threads idle in every round.
+        for (workers, skew) in [
+            (0, 0),
+            (1, 0),
+            (2, 0),
+            (3, 0),
+            (3, 2_000),
+            (2, 2_000),
+            (8, 0),
+            (8, 2_000),
+        ] {
             let mut w = scenario(variant);
             let (outcome, evidence) =
                 run_with(&mut w, 160, Some("a"), workers, Duration::from_micros(skew)).unwrap();
@@ -1025,6 +1046,110 @@ fn worker_count_and_completion_order_never_change_a_world_with_faults_and_contro
                 ),
             }
         }
+    }
+}
+
+/// Capturing at any legal interactive boundary must not perturb the world, and
+/// restoring that capture must reproduce the remaining effect ledger: owed I/O,
+/// queued serial input and frames, a console trigger matched only in part,
+/// future pause/crash/resume/reboot faults and an undelivered control reply.
+#[test]
+fn checkpoint_at_every_boundary_is_transparent_and_restores_the_remaining_ledger() {
+    let run = Run {
+        duration: 160,
+        end_on: Some("a"),
+        fork: None,
+        checkpoint: None,
+        require_barrier: false,
+    };
+    let build = |variant| {
+        let mut w = scenario(variant);
+        // "AB" spans two console bytes four time units apart: a partial match
+        // is pending at every boundary between them.
+        w.control
+            .triggers
+            .arm("a".into(), b"AB".to_vec(), 0, 200, partition("pair"))
+            .unwrap();
+        let mut b = Step::new(6, Stop::Control);
+        b.console = Some(b'B');
+        let steps = &mut w.machines[0].steps;
+        let at = steps.iter().position(|s| s.at > 6).unwrap();
+        steps.insert(at, b);
+        w
+    };
+    let without_traces = |mut receipt: Value| {
+        receipt.as_object_mut().unwrap().remove("traces");
+        receipt
+    };
+    for variant in 0..4u64 {
+        let mut w = build(variant);
+        let (outcome, _) = simulate(&mut w, &run, Duration::ZERO, &mut |_, _| Ok(())).unwrap();
+        let reference = receipt(&w, outcome.as_str());
+        assert_eq!(
+            w.control.triggers.records[1].status, "fired",
+            "variant {variant}"
+        );
+        let boundaries = w.boundaries;
+        let mut captured = Vec::new();
+        for target in 0..boundaries {
+            let mut w = build(variant);
+            let mut selected = None;
+            let (outcome, _) =
+                simulate(&mut w, &run, Duration::ZERO, &mut |boundary, admission| {
+                    if selected.is_none()
+                        && boundary.position.boundary_index >= target
+                        && admission.request_checkpoint().is_ok()
+                    {
+                        selected = Some(boundary.position);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            if outcome != RunOutcome::Checkpoint {
+                continue;
+            }
+            let at = selected.unwrap();
+            if captured.last() == Some(&at.boundary_index) {
+                continue;
+            }
+            // The mock cannot save unpaid I/O cost (x86 snapshots carry it).
+            let snapshot = match WorldSnapshot::take_checkpoint(&mut w) {
+                Err(error) if error == "owed I/O" => continue,
+                result => result.unwrap(),
+            };
+            captured.push(at.boundary_index);
+            let snapshot: WorldSnapshot<Mock> =
+                serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+            let prefix = trace(&w).len();
+            let (outcome, evidence) =
+                simulate(&mut w, &run, Duration::ZERO, &mut |_, _| Ok(())).unwrap();
+            assert_eq!(
+                receipt(&w, outcome.as_str()),
+                reference,
+                "variant {variant}: capture at {at:?} changed the run"
+            );
+            let continuation = trace(&w)[prefix..].to_vec();
+            let ledger = without_traces(receipt(&w, outcome.as_str()));
+            snapshot.restore_checkpoint(&mut w).unwrap();
+            w.factory.lock().unwrap().clear();
+            let (restored, restored_evidence) =
+                simulate(&mut w, &run, Duration::ZERO, &mut |_, _| Ok(())).unwrap();
+            assert_eq!(
+                trace(&w),
+                continuation,
+                "variant {variant}: restore at {at:?}"
+            );
+            assert_eq!(
+                without_traces(receipt(&w, restored.as_str())),
+                ledger,
+                "variant {variant}: restore at {at:?}"
+            );
+            assert_eq!(
+                restored_evidence["effects_digest"], evidence["effects_digest"],
+                "variant {variant}: restore at {at:?}"
+            );
+        }
+        assert!(captured.len() >= 5, "{captured:?} of {boundaries}");
     }
 }
 
@@ -1965,13 +2090,13 @@ fn input_program_ids_follow_actual_admission_across_live_inputs_and_worker_count
                     timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
                     key: "early".into(),
                     at_ns: 2,
-                    action: partition("early"),
+                    action: partition("early").into(),
                 },
                 TimedInput {
                     timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
                     key: "late".into(),
                     at_ns: 20,
-                    action: partition("late"),
+                    action: partition("late").into(),
                 },
             ],
             30,
@@ -2064,7 +2189,7 @@ fn input_program_equal_time_order_follows_guest_then_trigger_and_drains_dependen
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
                 key: "cut".into(),
                 at_ns: 50,
-                action: partition("program"),
+                action: partition("program").into(),
             },
             TimedInput {
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
@@ -2072,7 +2197,8 @@ fn input_program_equal_time_order_follows_guest_then_trigger_and_drains_dependen
                 at_ns: 50,
                 action: Action::Heal {
                     handle: "program".into(),
-                },
+                }
+                .into(),
             },
         ],
         120,
@@ -2104,7 +2230,7 @@ fn input_program_checkpoint_restores_consumed_prefix_and_pending_suffix_once() {
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
                 key: "cut".into(),
                 at_ns: 10,
-                action: partition("program"),
+                action: partition("program").into(),
             },
             TimedInput {
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
@@ -2112,7 +2238,8 @@ fn input_program_checkpoint_restores_consumed_prefix_and_pending_suffix_once() {
                 at_ns: 20,
                 action: Action::Heal {
                     handle: "program".into(),
-                },
+                }
+                .into(),
             },
         ],
         30,
@@ -2158,13 +2285,14 @@ fn input_program_state_rejection_is_evidence_and_does_not_poison_edited_suffix()
                 at_ns: 10,
                 action: Action::Heal {
                     handle: "missing".into(),
-                },
+                }
+                .into(),
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
             },
             crate::input_program::TimedInput {
                 key: "valid".into(),
                 at_ns: 10,
-                action: partition("valid"),
+                action: partition("valid").into(),
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
             },
         ],
@@ -2259,7 +2387,7 @@ fn initially_paused_program_holds_launch_boundary_effect_until_resume() {
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
                 key: "first".into(),
                 at_ns: 0,
-                action: partition("first"),
+                action: partition("first").into(),
             }],
             20,
             0,
@@ -2369,7 +2497,7 @@ fn live_override_uses_effective_time_and_repeats_through_timed_program() {
         key: record.request_id,
         at_ns: record.plan.at_ns,
         timeout_ns: record.plan.deadline_ns - record.plan.at_ns,
-        action: record.plan.action,
+        action: record.plan.action.into(),
     };
     for workers in [0, 2, 4] {
         let mut replay = setup();
@@ -2397,8 +2525,8 @@ fn checkpoint_edit_replaces_pending_suffix_and_preserves_consumed_identity() {
         action,
         timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
     };
-    let first = input("cut", 10, partition("cut"));
-    let removed = input("removed", 20, partition("removed"));
+    let first = input("cut", 10, partition("cut").into());
+    let removed = input("removed", 20, partition("removed").into());
     let mut w = world(&["a", "b"]);
     w.early = 0;
     w.arm_input_program(vec![first.clone(), removed], 50, 0)
@@ -2416,7 +2544,8 @@ fn checkpoint_edit_replaces_pending_suffix_and_preserves_consumed_identity() {
                 30,
                 Action::Heal {
                     handle: "cut".into(),
-                },
+                }
+                .into(),
             ),
         ])
         .unwrap();
@@ -2462,7 +2591,7 @@ fn edited_duplicate_handle_is_rejected_and_future_actions_after_oracle_exit_stay
             .map(|(key, at_ns)| TimedInput {
                 key: key.into(),
                 at_ns,
-                action: partition("same"),
+                action: partition("same").into(),
                 timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
             })
             .collect(),
@@ -2490,7 +2619,7 @@ fn checkpoint_continuation_schedules_edited_inputs_before_the_first_resumed_roun
         action,
         timeout_ns: 100,
     };
-    let first = input("consumed", 0, partition("consumed"));
+    let first = input("consumed", 0, partition("consumed").into());
     let mut w = world(&["a", "b"]);
     w.early = 0;
     w.arm_input_program(vec![first.clone()], 50, 0).unwrap();
@@ -2529,9 +2658,10 @@ fn checkpoint_continuation_schedules_edited_inputs_before_the_first_resumed_roun
                 at,
                 Action::Heal {
                     handle: "consumed".into(),
-                },
+                }
+                .into(),
             ),
-            input("inside-next-round", at + 1, partition("new")),
+            input("inside-next-round", at + 1, partition("new").into()),
         ])
         .unwrap();
         run_with(&mut w, 50, None, workers, Duration::ZERO).unwrap();
@@ -2546,4 +2676,1038 @@ fn checkpoint_continuation_schedules_edited_inputs_before_the_first_resumed_roun
         assert_eq!(w.faults.log[1].applied_at_ns, Some(at));
         assert_eq!(w.faults.log[2].applied_at_ns, Some(at + 1));
     }
+}
+
+fn property_line(session: u32, seq: u64, record: Value) -> Vec<u8> {
+    let hex: String = serde_json::to_vec(&record)
+        .unwrap()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("SBX_PROP1 {session} {seq} {hex}").into_bytes()
+}
+
+fn property_steps(w: &mut World<Mock>) {
+    let assert = |id: &str, condition: bool| json!({"assert": {"id": id, "kind": "always", "condition": condition}});
+    // Equal times on both machines: absorb order is machine index, then
+    // channel order, regardless of which worker finishes first.
+    for (m, at, seq, condition) in [(1, 5, 1, true), (0, 5, 1, true), (0, 30, 2, false)] {
+        let mut step = Step::new(at, Stop::Control);
+        step.properties = vec![property_line(1, seq, assert("p", condition))];
+        w.machines[m].steps.push_back(step);
+    }
+    let mut step = Step::new(30, Stop::Control);
+    step.properties = vec![b"SBX_PROP1 1 2 zz".to_vec()];
+    w.machines[1].steps.push_back(step);
+}
+
+#[test]
+fn property_frames_reduce_in_commit_order_across_worker_counts_and_checkpoints() {
+    use seedbox_engine_protocol::property::{AssessmentStatus, PropertyStatus};
+    let mut reference = None;
+    for workers in [0, 1, 2] {
+        let mut w = world(&["a", "b"]);
+        property_steps(&mut w);
+        run_with(&mut w, 100, None, workers, Duration::from_micros(10)).unwrap();
+        let ledger = w.properties().clone();
+        let p = &ledger.properties["p"];
+        assert_eq!((p.passes, p.failures), (2, 1));
+        assert_eq!(p.status(), PropertyStatus::Violated);
+        let first_pass = &p.first_pass.as_ref().unwrap().origin;
+        assert_eq!((first_pass.machine.as_str(), first_pass.time_ns), ("a", 5));
+        assert_eq!(p.first_failure.as_ref().unwrap().origin.time_ns, 30);
+        assert_eq!(ledger.error_count, 1, "{:?}", ledger.errors);
+        assert_eq!(ledger.errors[0].origin.as_ref().unwrap().machine, "b");
+        assert_eq!(ledger.assessment().status, AssessmentStatus::Violated);
+        assert!(w.machines.iter().all(|m| m.committed_properties.is_empty()));
+        match &reference {
+            None => reference = Some(ledger),
+            Some(reference) => assert_eq!(&ledger, reference, "workers {workers}"),
+        }
+    }
+
+    // A checkpoint between records carries the reduced state and sequencing.
+    let mut w = world(&["a", "b"]);
+    property_steps(&mut w);
+    assert_eq!(
+        segment(&mut w, 100, None, None, Some(20), true).unwrap(),
+        "checkpoint"
+    );
+    let snapshot = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+    assert_eq!(w.properties().records, 2);
+    run(&mut w, 100, None).unwrap();
+    let continued = w.properties().clone();
+    snapshot.restore(&mut w).unwrap();
+    assert_eq!(w.properties().records, 2);
+    run(&mut w, 100, None).unwrap();
+    assert_eq!(w.properties(), &continued);
+    assert_eq!(Some(continued), reference);
+}
+
+#[test]
+fn expected_crashes_reduce_per_machine_across_worker_counts_and_checkpoints() {
+    use seedbox_engine_protocol::property::{
+        AssessmentStatus, ExpectedCrash, PropertyStatus, DEFAULT_NO_CRASH,
+    };
+    let abort = "libdynamorio.so: keel-watchdog: potentially unexpected fatal signal 6.";
+    let steps = |w: &mut World<Mock>| {
+        // Only machine a declares the abort; b reports the same line at 30.
+        w.expected_crashes[0] = vec![ExpectedCrash {
+            signal: 6,
+            command: "keel-watchdog".into(),
+            executable: None,
+        }];
+        for (m, at) in [(0, 10), (1, 30)] {
+            let mut step = Step::new(at, Stop::Control);
+            step.properties = vec![property_line(0, 1, json!({"kernel": {"message": abort}}))];
+            w.machines[m].steps.push_back(step);
+        }
+    };
+    let mut reference = None;
+    for workers in [0, 1, 2] {
+        let mut w = world(&["a", "b"]);
+        steps(&mut w);
+        run_with(&mut w, 100, None, workers, Duration::from_micros(10)).unwrap();
+        let ledger = w.properties().clone();
+        let p = &ledger.properties[DEFAULT_NO_CRASH];
+        assert_eq!((p.passes, p.failures), (1, 1));
+        assert_eq!(p.status(), PropertyStatus::Violated);
+        let expected = p.first_pass.as_ref().unwrap();
+        assert_eq!(expected.origin.machine, "a");
+        assert_eq!(expected.details.as_ref().unwrap()["expected"]["signal"], 6);
+        assert_eq!(p.first_failure.as_ref().unwrap().origin.machine, "b");
+        assert_eq!(ledger.assessment().status, AssessmentStatus::Violated);
+        match &reference {
+            None => reference = Some(ledger),
+            Some(reference) => assert_eq!(&ledger, reference, "workers {workers}"),
+        }
+    }
+    // Expectations are configuration: a restored checkpoint keeps the world's.
+    let mut w = world(&["a", "b"]);
+    steps(&mut w);
+    assert_eq!(
+        segment(&mut w, 100, None, None, Some(20), true).unwrap(),
+        "checkpoint"
+    );
+    let snapshot = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+    snapshot.restore(&mut w).unwrap();
+    run(&mut w, 100, None).unwrap();
+    assert_eq!(Some(w.properties().clone()), reference);
+}
+
+#[test]
+fn disk_errors_apply_at_their_boundary_survive_reboot_and_record_heal_counts() {
+    let mut reference = None;
+    for workers in [0, 1, 2] {
+        let mut w = world(&["a", "b"]);
+        for (at, action) in [
+            (
+                10,
+                json!({"action":"disk_error","handle":"d","machine":"b","op":"write","ppm":250000}),
+            ),
+            (20, json!({"action":"crash","machine":"b"})),
+            (25, json!({"action":"reboot","machine":"b"})),
+            (30, json!({"action":"heal","handle":"d"})),
+            (31, json!({"action":"heal","handle":"d"})),
+        ] {
+            let mut action = action;
+            action["id"] = json!(0);
+            action["at_ns"] = json!(at);
+            action["deadline_ns"] = json!(at);
+            w.faults
+                .append(serde_json::from_value(action).unwrap())
+                .unwrap();
+        }
+        for at in [5, 15, 27, 35] {
+            w.machines[1].steps.push_back(Step::new(at, Stop::Sent));
+        }
+        run_with(&mut w, 60, None, workers, Duration::from_micros(3)).unwrap();
+        let changes: Vec<String> = machine_trace(&w, "b")
+            .into_iter()
+            .filter(|line| line.contains(":disk_errors/"))
+            .collect();
+        // The rebooted incarnation takes the active errors on again.
+        assert_eq!(
+            changes,
+            [
+                "b:disk_errors/on:10",
+                "b:disk_errors/on:20",
+                "b:disk_errors/off:30"
+            ]
+        );
+        let statuses: Vec<_> = w.faults.log.iter().map(|row| row.status).collect();
+        assert_eq!(&statuses[..4], [RowStatus::Applied; 4]);
+        // Healing an unknown handle fails like any other heal.
+        assert_eq!(statuses[4], RowStatus::Failed);
+        assert_eq!(
+            w.faults.log[3].disk_error_counts,
+            Some(crate::virtio_block::ErrorCounts {
+                matched: 3,
+                failed: 2
+            })
+        );
+        assert!(w.faults.log[0].detail.contains("op=write; ppm=250000"));
+        let observed = (changes, w.faults.log.clone());
+        match &reference {
+            None => reference = Some(observed),
+            Some(want) => assert_eq!(&observed, want),
+        }
+    }
+}
+
+#[test]
+fn disk_latency_and_preempt_survive_reboot_and_heal() {
+    let mut reference = None;
+    for workers in [0, 1, 2] {
+        let mut w = world(&["a", "b"]);
+        for (at, action) in [
+            (
+                10,
+                json!({"action":"disk_latency","handle":"slow","machine":"b","latency_ns":5000}),
+            ),
+            (
+                11,
+                json!({"action":"preempt","handle":"noise","machine":"b","ppm":20000}),
+            ),
+            (20, json!({"action":"crash","machine":"b"})),
+            (25, json!({"action":"reboot","machine":"b"})),
+            (30, json!({"action":"heal","handle":"slow"})),
+            (32, json!({"action":"heal","handle":"noise"})),
+        ] {
+            let mut action = action;
+            action["id"] = json!(0);
+            action["at_ns"] = json!(at);
+            action["deadline_ns"] = json!(at);
+            w.faults
+                .append(serde_json::from_value(action).unwrap())
+                .unwrap();
+        }
+        for at in [5, 15, 27, 35] {
+            w.machines[1].steps.push_back(Step::new(at, Stop::Sent));
+        }
+        run_with(&mut w, 60, None, workers, Duration::from_micros(3)).unwrap();
+        let changes: Vec<String> = machine_trace(&w, "b")
+            .into_iter()
+            .filter(|line| line.contains(":disk_latency/") || line.contains(":preempt/"))
+            .collect();
+        // The rebooted incarnation takes both on again.
+        assert_eq!(
+            changes,
+            [
+                "b:disk_latency/on:10",
+                "b:preempt/on:11",
+                "b:disk_latency/on:20",
+                "b:preempt/on:20",
+                "b:disk_latency/off:30",
+                "b:preempt/off:32"
+            ]
+        );
+        let statuses: Vec<_> = w.faults.log.iter().map(|row| row.status).collect();
+        assert_eq!(statuses, [RowStatus::Applied; 6]);
+        assert_eq!(
+            w.faults.log[4].disk_latency_counts,
+            Some(crate::virtio_block::LatencyCounts {
+                delayed: 4,
+                deepest: 2
+            })
+        );
+        assert!(w.faults.log[1].detail.contains("ppm=20000"));
+        let observed = (changes, w.faults.log.clone());
+        match &reference {
+            None => reference = Some(observed),
+            Some(want) => assert_eq!(&observed, want),
+        }
+    }
+}
+
+#[test]
+fn quiet_requests_extend_the_quiet_period_from_their_admission() {
+    let mut w = world(&["a", "b"]);
+    configure_control(&mut w);
+    w.control
+        .request(
+            0,
+            0,
+            b"SBX_RPC1 1 1 {\"version\":1,\"id\":1,\"op\":\"quiet\",\"duration_ns\":500}",
+            0,
+        )
+        .unwrap();
+    run(&mut w, 2_000, None).unwrap();
+    let response = &w.control.log[0]["response"];
+    let admitted = response["admitted_at_ns"].as_u64().unwrap();
+    assert_eq!(w.control.quiet_until(), admitted + 500);
+    assert_eq!(response["result"]["quiet_until_ns"], admitted + 500);
+}
+
+fn branch_program(reseed: bool) -> Vec<crate::input_program::TimedInput> {
+    use crate::input_program::{BranchAction, InputAction, TimedInput};
+    let input = |key: &str, at_ns: u64, action: InputAction| TimedInput {
+        key: key.into(),
+        at_ns,
+        action,
+        timeout_ns: 1_000,
+    };
+    let fault = |value: Value| InputAction::Fault(serde_json::from_value(value).unwrap());
+    let mut program = vec![
+        input(
+            "lossy",
+            10,
+            fault(
+                json!({"action":"shape","handle":"lossy","from":["a"],"to":["b"],"latency_ns":10,"jitter_ns":5,"loss_ppm":500_000}),
+            ),
+        ),
+        input("anchor", 40, InputAction::Branch(BranchAction::Anchor {})),
+    ];
+    if reseed {
+        program.push(input(
+            "child",
+            40,
+            InputAction::Branch(BranchAction::Reseed {
+                seed: 9,
+                identity: "child".into(),
+            }),
+        ));
+    }
+    program.extend([
+        input("crash", 40, fault(json!({"action":"crash","machine":"b"}))),
+        input(
+            "reboot",
+            50,
+            fault(json!({"action":"reboot","machine":"b"})),
+        ),
+    ]);
+    program
+}
+
+fn branch_world(reseed: bool) -> World<Mock> {
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    w.arm_input_program(branch_program(reseed), u64::MAX, 0)
+        .unwrap();
+    let mut frame = vec![0; 60];
+    frame[5] = 1;
+    frame[12..14].copy_from_slice(&[8, 0]);
+    for at in (5..90).step_by(2) {
+        let mut step = Step::new(at, Stop::Sent);
+        step.frames = vec![frame.clone()];
+        w.machines[0].steps.push_back(step);
+    }
+    w
+}
+
+/// Everything a branch may diverge in: fault evidence, network state, the
+/// receiving machine's history and the seed later draws derive from.
+fn branch_outcome(w: &World<Mock>) -> (Value, Value, Vec<String>, u64, Option<String>, usize) {
+    (
+        serde_json::to_value(w.faults.log.iter().map(|r| r.json()).collect::<Vec<_>>()).unwrap(),
+        serde_json::to_value(w.network_snapshot()).unwrap(),
+        machine_trace(w, "b"),
+        w.run_seed,
+        w.branch_identity.clone(),
+        w.input_program.branches().len(),
+    )
+}
+
+#[test]
+fn a_reseed_at_an_anchor_is_identical_cold_continued_and_restored() {
+    for workers in [0, 1, 2] {
+        let mut cold = branch_world(true);
+        run_with(&mut cold, 100, None, workers, Duration::from_micros(3)).unwrap();
+        let reference = branch_outcome(&cold);
+        assert_eq!(
+            (reference.3, reference.4.as_deref(), reference.5),
+            (9, Some("child"), 2)
+        );
+        assert!(machine_trace(&cold, "b")
+            .iter()
+            .any(|l| l.contains("reseed-guest")));
+
+        // Stop at the anchor, capture, and continue in the same process.
+        let mut warm = branch_world(true);
+        warm.set_anchor_captures(["anchor".to_string()]);
+        let (outcome, _) =
+            run_with(&mut warm, 100, None, workers, Duration::from_micros(3)).unwrap();
+        assert_eq!(outcome, "checkpoint");
+        assert_eq!(warm.take_captured_anchor().as_deref(), Some("anchor"));
+        // The capture sits after the anchor and before the reseed.
+        assert_eq!((warm.run_seed, warm.input_program.branches().len()), (2, 1));
+        let snapshot = WorldSnapshot::take_checkpoint(&mut warm).unwrap();
+        warm.set_anchor_captures([]);
+        run_with(&mut warm, 100, None, workers, Duration::from_micros(3)).unwrap();
+        assert_eq!(
+            branch_outcome(&warm),
+            reference,
+            "continued, workers {workers}"
+        );
+
+        // Restore the capture and continue again.
+        snapshot.restore(&mut warm).unwrap();
+        warm.factory.lock().unwrap().clear();
+        run_with(&mut warm, 100, None, workers, Duration::from_micros(3)).unwrap();
+        let restored = branch_outcome(&warm);
+        assert_eq!(
+            (
+                &restored.0,
+                &restored.1,
+                restored.3,
+                &restored.4,
+                restored.5
+            ),
+            (
+                &reference.0,
+                &reference.1,
+                reference.3,
+                &reference.4,
+                reference.5
+            ),
+            "restored, workers {workers}"
+        );
+        // The restored machine trace starts at the capture.
+        assert!(
+            reference.2.ends_with(&restored.2),
+            "restored trace, workers {workers}"
+        );
+    }
+}
+
+#[test]
+fn a_reseed_changes_future_draws_and_an_anchor_alone_changes_nothing_semantic() {
+    let mut parent = branch_world(false);
+    run(&mut parent, 100, None).unwrap();
+    let mut child = branch_world(true);
+    run(&mut child, 100, None).unwrap();
+    // Loss decisions after the anchor draw from the child's stream.
+    assert_ne!(
+        serde_json::to_value(parent.network_snapshot()).unwrap(),
+        serde_json::to_value(child.network_snapshot()).unwrap()
+    );
+    assert_eq!(
+        (parent.run_seed, parent.input_program.branches().len()),
+        (2, 1)
+    );
+    // A capture at the parent's anchor changes nothing it reports.
+    let mut captured = branch_world(false);
+    captured.set_anchor_captures(["anchor".to_string()]);
+    assert_eq!(run(&mut captured, 100, None).unwrap(), "checkpoint");
+    captured.set_anchor_captures([]);
+    run(&mut captured, 100, None).unwrap();
+    assert_eq!(branch_outcome(&captured), branch_outcome(&parent));
+}
+
+fn trigger_world() -> World<Mock> {
+    use crate::input_program::TimedInput;
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    let rule = |key: &str, value: Value| TimedInput {
+        key: key.into(),
+        at_ns: 0,
+        action: serde_json::from_value(value).unwrap(),
+        timeout_ns: 1_000,
+    };
+    let program = vec![
+        rule(
+            "after-commits",
+            json!({"action":"trigger","when":{"on":"event","name":"commit","machine":"a"},"nth":2,"then":{"action":"crash","machine":"b"}}),
+        ),
+        rule(
+            "revive",
+            json!({"action":"trigger","when":{"on":"lifecycle","machine":"b","transition":"crashed"},"delay_ns":15,"then":{"action":"reboot","machine":"b"}}),
+        ),
+        rule(
+            "never",
+            json!({"action":"trigger","when":{"on":"assertion","property":"p","holds":false},"within_ns":50,"then":{"action":"crash","machine":"a"}}),
+        ),
+        rule(
+            "third-frame",
+            json!({"action":"trigger","when":{"on":"frame","from":"a","to":"b"},"nth":3,"then":{"action":"partition","handle":"cut","left":["a"],"right":["b"]}}),
+        ),
+    ];
+    w.arm_input_program(program, u64::MAX, 0).unwrap();
+    let sdk = |seq: u64, record: Value| {
+        let hex: String = serde_json::to_vec(&record)
+            .unwrap()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("SBX_PROP1 1 {seq} {hex}").into_bytes()
+    };
+    let mut frame = vec![0; 60];
+    frame[5] = 1;
+    frame[12..14].copy_from_slice(&[8, 0]);
+    let mut seq = 0;
+    for at in (4..90).step_by(3) {
+        let mut step = Step::new(at, Stop::Sent);
+        step.frames = vec![frame.clone()];
+        if [10, 19, 28].contains(&at) {
+            seq += 1;
+            step.properties = vec![sdk(seq, json!({"event":{"name":"commit"}}))];
+        }
+        if at == 25 {
+            seq += 1;
+            step.properties = vec![sdk(
+                seq,
+                json!({"assert":{"id":"p","kind":"always","condition":true}}),
+            )];
+        }
+        w.machines[0].steps.push_back(step);
+    }
+    w
+}
+
+fn trigger_outcome(w: &World<Mock>) -> (Value, Value, Vec<String>) {
+    (
+        w.control.triggers.evidence().unwrap().unwrap(),
+        serde_json::to_value(w.faults.log.iter().map(|r| r.json()).collect::<Vec<_>>()).unwrap(),
+        machine_trace(w, "b"),
+    )
+}
+
+#[test]
+fn typed_triggers_match_committed_occurrences_identically_cold_and_restored() {
+    let mut reference = None;
+    for workers in [0, 1, 2] {
+        let mut cold = trigger_world();
+        run_with(&mut cold, 100, None, workers, Duration::from_micros(3)).unwrap();
+        let outcome = trigger_outcome(&cold);
+        assert_eq!(reference.get_or_insert_with(|| outcome.clone()), &outcome);
+    }
+    let reference = reference.unwrap();
+    let records: Vec<seedbox_control::TriggerRecord> =
+        serde_json::from_value(reference.0.clone()).unwrap();
+    let summary: Vec<_> = records
+        .iter()
+        .map(|r| {
+            (
+                r.key.clone().unwrap(),
+                r.status.as_str(),
+                r.seen,
+                r.matched_at_ns,
+                r.effect_at_ns,
+                r.fault_id,
+            )
+        })
+        .collect();
+    // The second commit at 19 crashes b one lookahead later; the crash at 29
+    // matches the reboot rule, which waits its delay. A passing assertion
+    // never matches a failing-only rule, which expires.
+    assert_eq!(
+        summary,
+        [
+            (
+                "after-commits".into(),
+                "fired",
+                2,
+                Some(19),
+                Some(29),
+                Some(2)
+            ),
+            ("revive".into(), "fired", 1, Some(29), Some(54), Some(3)),
+            ("never".into(), "expired", 0, None, None, None),
+            (
+                "third-frame".into(),
+                "fired",
+                3,
+                Some(10),
+                Some(20),
+                Some(1)
+            ),
+        ]
+    );
+    assert_eq!(
+        cold_statuses(&reference.1),
+        [
+            ("partition", "applied"),
+            ("crash", "applied"),
+            ("reboot", "applied")
+        ]
+    );
+
+    // A checkpoint between a match and its effect keeps the pending effect.
+    let mut warm = trigger_world();
+    assert_eq!(
+        segment(&mut warm, 100, None, None, Some(25), true).unwrap(),
+        "checkpoint"
+    );
+    assert_eq!(warm.control.triggers.records[0].status, "matched");
+    let saved = WorldSnapshot::take_checkpoint(&mut warm).unwrap();
+    for _ in 0..2 {
+        saved.restore_checkpoint(&mut warm).unwrap();
+        segment(&mut warm, 100, None, None, None, true).unwrap();
+        let restored = trigger_outcome(&warm);
+        assert_eq!((&restored.0, &restored.1), (&reference.0, &reference.1));
+    }
+}
+
+fn cold_statuses(log: &Value) -> Vec<(&str, &str)> {
+    log.as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["request"]["action"].as_str().unwrap(),
+                row["status"].as_str().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn typed_trigger_receipts_publish_each_status_change_once_and_link_their_fault() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("observations");
+    let receiver = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+    // Frame batches would fill a small datagram buffer; drain it meanwhile.
+    receiver
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    let drain = std::thread::spawn(move || {
+        let mut bytes = [0; seedbox_engine_protocol::observation::MAX_DATAGRAM_BYTES];
+        let mut kinds = Vec::new();
+        while let Ok(count) = receiver.recv(&mut bytes) {
+            let observed: seedbox_engine_protocol::observation::Observation =
+                serde_json::from_slice(&bytes[..count]).unwrap();
+            kinds.push(observed.kind);
+        }
+        kinds
+    });
+    let mut w = trigger_world()
+        .with_observations(Some(crate::observation::Publisher::connect(&path).unwrap()));
+    run(&mut w, 100, None).unwrap();
+    w.finish("duration", 100, &None).unwrap();
+    let mut receipts: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    let mut linked = BTreeMap::new();
+    for kind in drain.join().unwrap() {
+        match kind {
+            ObservationKind::TriggerChanged {
+                input_key, status, ..
+            } => receipts.entry(input_key).or_default().push(status.as_str()),
+            ObservationKind::FaultChanged {
+                id,
+                input_key: Some(key),
+                ..
+            } => {
+                linked.insert(id, key);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        receipts,
+        BTreeMap::from([
+            ("after-commits".into(), vec!["armed", "matched", "fired"]),
+            ("never".into(), vec!["armed", "expired"]),
+            ("revive".into(), vec!["armed", "matched", "fired"]),
+            ("third-frame".into(), vec!["armed", "matched", "fired"]),
+        ])
+    );
+    // A triggered fault carries its trigger's input key for presentation.
+    assert_eq!(
+        linked,
+        BTreeMap::from([
+            (1, "third-frame".to_string()),
+            (2, "after-commits".to_string()),
+            (3, "revive".to_string()),
+        ])
+    );
+}
+
+fn held_world(exit_a_at: Option<u64>) -> World<Mock> {
+    use crate::input_program::TimedInput;
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    w.arm_input_program(
+        vec![TimedInput {
+            key: "hold-write".into(),
+            at_ns: 0,
+            action: serde_json::from_value(json!({"action":"trigger","when":{"on":"block_request","machine":"b","op":"write"},"nth":2,"then":{"action":"crash","machine":"b"}})).unwrap(),
+            timeout_ns: 1_000,
+        }],
+        u64::MAX,
+        0,
+    )
+    .unwrap();
+    for (at, kind) in [(10, 1), (14, 0), (20, 1), (26, 1)] {
+        let mut step = Step::new(at, Stop::Control);
+        step.block = Some(kind);
+        w.machines[1].steps.push_back(step);
+    }
+    if let Some(at) = exit_a_at {
+        w.machines[0].steps.push_back(Step::new(at, Stop::Exited));
+    }
+    w
+}
+
+fn held_outcome(w: &World<Mock>) -> (Value, Value, Value) {
+    (
+        w.control.triggers.evidence().unwrap().unwrap(),
+        serde_json::to_value(w.faults.log.iter().map(|r| r.json()).collect::<Vec<_>>()).unwrap(),
+        json!(w.incarnations),
+    )
+}
+
+#[test]
+fn a_held_block_request_suspends_its_machine_and_crashes_it_one_lookahead_later() {
+    let mut reference = None;
+    for workers in [0, 1, 2] {
+        let mut w = held_world(None);
+        run_with(&mut w, 100, None, workers, Duration::from_micros(3)).unwrap();
+        let outcome = held_outcome(&w);
+        assert_eq!(reference.get_or_insert_with(|| outcome.clone()), &outcome);
+    }
+    let (triggers, faults, incarnations) = reference.unwrap();
+    // The second write at 20 is held; its crash follows at 30. The machine
+    // never runs again in that incarnation, so the write at 26 never happens.
+    assert_eq!(triggers[0]["status"], "fired");
+    assert_eq!(
+        (&triggers[0]["matched_at_ns"], &triggers[0]["effect_at_ns"]),
+        (&json!(20), &json!(30))
+    );
+    assert_eq!(cold_statuses(&faults), [("crash", "applied")]);
+    assert_eq!(faults[0]["applied_at_ns"], 30);
+    assert_eq!(incarnations[1][0]["held_request_trigger"], 1);
+    assert_eq!(incarnations[1][0]["time_ns"], 20);
+
+    // A checkpoint before the hold carries the device's count with it.
+    let mut warm = held_world(None);
+    assert_eq!(
+        segment(&mut warm, 100, None, None, Some(15), true).unwrap(),
+        "checkpoint"
+    );
+    assert_eq!(warm.machines[1].hold.unwrap().seen, 1);
+    let saved = WorldSnapshot::take_checkpoint(&mut warm).unwrap();
+    saved.restore_checkpoint(&mut warm).unwrap();
+    segment(&mut warm, 100, None, None, None, true).unwrap();
+    assert_eq!(
+        (held_outcome(&warm).0, held_outcome(&warm).1),
+        (triggers, faults)
+    );
+
+    // No checkpoint can contain the unresolved hold.
+    let mut held = held_world(None);
+    let error = segment(&mut held, 100, None, None, Some(25), true).unwrap_err();
+    assert!(error.contains("unresolved block request"), "{error}");
+}
+
+#[test]
+fn an_oracle_exit_before_the_held_crash_cuts_it_off_with_both_times() {
+    let mut w = held_world(Some(22));
+    assert_eq!(run(&mut w, 100, Some("a")).unwrap(), "end_machine_exited");
+    w.finish("end_machine_exited", 100, &Some("a".into()))
+        .unwrap();
+    let records = &w.control.triggers.records;
+    assert_eq!(records[0].status, "cut_off");
+    assert_eq!(
+        (records[0].matched_at_ns, records[0].effect_at_ns),
+        (Some(20), Some(30))
+    );
+    assert!(w.faults.log.is_empty());
+}
+
+fn choice_world(program: Vec<crate::input_program::TimedInput>) -> World<Mock> {
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    w.arm_input_program(program, u64::MAX, 0).unwrap();
+    let sdk = |seq: u64, record: Value| {
+        let hex: String = serde_json::to_vec(&record)
+            .unwrap()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("SBX_PROP1 1 {seq} {hex}").into_bytes()
+    };
+    for (seq, at) in [(1, 10), (2, 40)] {
+        let mut step = Step::new(at, Stop::Control);
+        step.properties = vec![sdk(
+            seq,
+            json!({"choice":{"site":"pick","alternatives":["x","y","z","w"]}}),
+        )];
+        w.machines[0].steps.push_back(step);
+    }
+    w
+}
+
+fn choice_outcome(w: &World<Mock>) -> (Value, Vec<String>) {
+    (
+        serde_json::to_value(w.choices.evidence()).unwrap(),
+        machine_trace(w, "a")
+            .into_iter()
+            .filter(|line| line.contains("control/"))
+            .collect(),
+    )
+}
+
+#[test]
+fn choices_reply_one_lookahead_later_identically_cold_and_restored() {
+    let mut reference = None;
+    for workers in [0, 1, 2] {
+        let mut w = choice_world(Vec::new());
+        run_with(&mut w, 100, None, workers, Duration::from_micros(3)).unwrap();
+        let outcome = choice_outcome(&w);
+        assert_eq!(reference.get_or_insert_with(|| outcome.clone()), &outcome);
+    }
+    let (evidence, replies) = reference.unwrap();
+    let records = evidence["records"].as_array().unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        (&records[1]["occurrence"], &records[1]["reply_at_ns"]),
+        (&json!(2), &json!(50))
+    );
+    // Each reply reaches the asking machine at its reply time.
+    assert_eq!(replies.len(), 2);
+    assert!(replies[0].starts_with("a:control/SBX_SDK1 1 {\"choice\""));
+    assert!(replies[0].ends_with(":20"), "{}", replies[0]);
+
+    // A checkpoint between a request and its reply keeps the queued reply.
+    let mut warm = choice_world(Vec::new());
+    assert_eq!(
+        segment(&mut warm, 100, None, None, Some(15), true).unwrap(),
+        "checkpoint"
+    );
+    let saved = WorldSnapshot::take_checkpoint(&mut warm).unwrap();
+    saved.restore_checkpoint(&mut warm).unwrap();
+    segment(&mut warm, 100, None, None, None, true).unwrap();
+    assert_eq!(choice_outcome(&warm).0, evidence);
+}
+
+#[test]
+fn a_choice_input_selects_its_occurrence_and_a_reseed_redraws_the_rest() {
+    use crate::input_program::{BranchAction, InputAction, TimedInput};
+    let force = TimedInput {
+        key: "force".into(),
+        at_ns: 1,
+        action: serde_json::from_value(
+            json!({"action":"choice","machine":"a","site":"pick","occurrence":2,"select":3}),
+        )
+        .unwrap(),
+        timeout_ns: 1_000,
+    };
+    let mut w = choice_world(vec![force]);
+    run(&mut w, 100, None).unwrap();
+    let records = &w.choices.evidence().unwrap().records;
+    assert_eq!((records[1].selected, records[1].chosen.as_str()), (3, "w"));
+    assert_eq!(records[1].input_key.as_deref(), Some("force"));
+    assert!(records[0].input_key.is_none());
+
+    // Draws follow the branch: reseeding changes a later choice's stream.
+    let drawn = |seed: u64| {
+        let branch = |key: &str, action: BranchAction| TimedInput {
+            key: key.into(),
+            at_ns: 20,
+            action: InputAction::Branch(action),
+            timeout_ns: 1_000,
+        };
+        let mut w = choice_world(vec![
+            branch("anchor", BranchAction::Anchor {}),
+            branch(
+                "child",
+                BranchAction::Reseed {
+                    seed,
+                    identity: format!("child-{seed}"),
+                },
+            ),
+        ]);
+        run(&mut w, 100, None).unwrap();
+        let records = &w.choices.evidence().unwrap().records;
+        (records[0].selected, records[1].selected)
+    };
+    let outcomes: Vec<_> = (0..12).map(drawn).collect();
+    assert!(outcomes.iter().all(|o| o.0 == outcomes[0].0));
+    assert!(outcomes.iter().any(|o| o.1 != outcomes[0].1));
+}
+
+#[test]
+fn a_teardown_trigger_follows_the_effect_it_undoes() {
+    use crate::input_program::TimedInput;
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    let rule = |key: &str, value: Value| TimedInput {
+        key: key.into(),
+        at_ns: 0,
+        action: serde_json::from_value(value).unwrap(),
+        timeout_ns: 1_000,
+    };
+    w.arm_input_program(
+        vec![
+            rule(
+                "crash-on-compaction",
+                json!({"action":"trigger","when":{"on":"state","name":"phase","value":"compacting","machine":"a"},"delay_ns":5,"then":{"action":"crash","machine":"b"}}),
+            ),
+            rule(
+                "reboot-after",
+                json!({"action":"trigger","when":{"on":"fired","trigger":"crash-on-compaction"},"delay_ns":20,"then":{"action":"reboot","machine":"b"}}),
+            ),
+        ],
+        u64::MAX,
+        0,
+    )
+    .unwrap();
+    let sdk = |seq: u64, record: Value| {
+        let hex: String = serde_json::to_vec(&record)
+            .unwrap()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("SBX_PROP1 1 {seq} {hex}").into_bytes()
+    };
+    for (seq, (at, value)) in [(8, "serving"), (12, "compacting")].into_iter().enumerate() {
+        let mut step = Step::new(at, Stop::Control);
+        step.properties = vec![sdk(
+            seq as u64 + 1,
+            json!({"state":{"name":"phase","value":value}}),
+        )];
+        w.machines[0].steps.push_back(step);
+    }
+    run(&mut w, 100, None).unwrap();
+    let records = &w.control.triggers.records;
+    // Matched at 12, crashed at 12 + 10 + 5; the reboot follows that fire.
+    assert_eq!(
+        (records[0].matched_at_ns, records[0].effect_at_ns),
+        (Some(12), Some(27))
+    );
+    assert_eq!(
+        (records[1].matched_at_ns, records[1].effect_at_ns),
+        (Some(27), Some(57))
+    );
+    assert_eq!(
+        cold_statuses(
+            &serde_json::to_value(w.faults.log.iter().map(|r| r.json()).collect::<Vec<_>>())
+                .unwrap()
+        ),
+        [("crash", "applied"), ("reboot", "applied")]
+    );
+}
+
+/// Bursts both ways: each send's frames arrive 1 ns apart (the FIFO link
+/// clock), interleaved with the receiver's own sends, a control stop and a
+/// halt, so chains both run to the slice end and stop short.
+fn bursts(early: u64) -> World<Mock> {
+    let mut w = world(&["a", "b"]);
+    w.early = early;
+    let frame = |to: u8, tag: u8| {
+        let mut frame = vec![tag; 60];
+        frame[..6].copy_from_slice(&[0, 0, 0, 0, 0, to]);
+        frame
+    };
+    for (n, at) in [(0u8, 2u64), (1, 9), (2, 23), (3, 24), (4, 41)] {
+        let mut send = Step::new(at, Stop::Sent);
+        send.frames = (0..5 + n).map(|i| frame(1, n * 16 + i)).collect();
+        w.machines[0].steps.push_back(send);
+    }
+    w.machines[0].steps.push_back(Step::new(70, Stop::Exited));
+    let mut reply = Step::new(15, Stop::Sent);
+    reply.frames.push(frame(0, 0xee));
+    let mut control = Step::new(36, Stop::Control);
+    control.effects.push((0, true));
+    w.machines[1].steps.extend([
+        Step::new(12, Stop::Reached),
+        reply,
+        control,
+        Step::new(52, Stop::Halted),
+    ]);
+    w.machines[1].timer = 58;
+    w
+}
+
+#[test]
+fn chained_slices_request_exactly_what_separate_slices_would() {
+    for early in [0, 3] {
+        let mut reference = None;
+        for (chain, workers) in [(0, 0), (1, 0), (2, 1), (5, 0), (1024, 0), (1024, 2)] {
+            let mut w = bursts(early);
+            configure_control(&mut w);
+            for m in &mut w.machines {
+                m.chain = chain;
+            }
+            let (outcome, evidence) =
+                run_with(&mut w, 90, Some("a"), workers, Duration::ZERO).unwrap();
+            assert!(w.machines.iter().all(|m| m.planned.is_empty()));
+            // With delivery slack the next 1 ns-spaced frame is already due
+            // when a slice reaches a frame, so the loop delivers it itself.
+            let replayed: usize = w.machines.iter().map(|m| m.replayed).sum();
+            assert_eq!(
+                chain == 0 || early > 0,
+                replayed == 0,
+                "early {early}, chain {chain}"
+            );
+            let got = (receipt(&w, outcome), evidence["effects_digest"].clone());
+            match &reference {
+                None => reference = Some(got),
+                Some(want) => assert_eq!(want, &got, "early {early}, chain {chain}"),
+            }
+        }
+        let (receipt, _) = reference.unwrap();
+        // Every burst frame arrived, at its own nanosecond.
+        let frames = receipt["traces"][1]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|line| line.as_str().unwrap().contains(":frame:"))
+            .count();
+        assert_eq!(frames, 5 + 6 + 7 + 8 + 9, "early {early}");
+    }
+}
+
+#[test]
+fn chained_slices_leave_the_fault_and_control_world_unchanged() {
+    for variant in 0..8u64 {
+        let mut reference = None;
+        for chain in [0, 1, 3, 1024] {
+            let mut w = scenario(variant);
+            for m in &mut w.machines {
+                m.chain = chain;
+            }
+            let (outcome, evidence) = run_with(&mut w, 160, Some("a"), 0, Duration::ZERO).unwrap();
+            let got = (receipt(&w, outcome), evidence["effects_digest"].clone());
+            match &reference {
+                None => reference = Some(got),
+                Some(want) => assert_eq!(want, &got, "variant {variant}, chain {chain}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn flush_and_summary_replies_follow_the_sessions_committed_records() {
+    let mut w = world(&["a", "b"]);
+    w.early = 0;
+    w.arm_input_program(Vec::new(), u64::MAX, 0).unwrap();
+    let sdk = |seq: u64, record: Value| {
+        let hex: String = serde_json::to_vec(&record)
+            .unwrap()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("SBX_PROP1 1 {seq} {hex}").into_bytes()
+    };
+    let mut step = Step::new(10, Stop::Control);
+    step.properties = vec![
+        sdk(
+            1,
+            json!({"assert":{"id":"p","kind":"always","condition":true}}),
+        ),
+        sdk(2, json!({"flush":{}})),
+    ];
+    w.machines[0].steps.push_back(step);
+    let mut step = Step::new(40, Stop::Control);
+    step.properties = vec![sdk(3, json!({"summary":{}}))];
+    w.machines[0].steps.push_back(step);
+    run_with(&mut w, 100, None, 0, Duration::from_micros(3)).unwrap();
+    let replies: Vec<String> = machine_trace(&w, "a")
+        .into_iter()
+        .filter(|line| line.contains("control/"))
+        .collect();
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    // One lookahead after each request, like a choice's reply.
+    assert!(replies[0].starts_with("a:control/SBX_SDK1 1 {\"flush\":{\"seq\":2}}"));
+    assert!(replies[0].ends_with(":20"), "{}", replies[0]);
+    assert!(replies[1].contains("\"summary\""), "{}", replies[1]);
+    assert!(
+        replies[1].contains("\"p\":{\"failures\":0,\"passes\":1}"),
+        "{}",
+        replies[1]
+    );
+    assert!(replies[1].ends_with(":50"), "{}", replies[1]);
+    // Neither request is a property evaluation or an evidence error.
+    assert_eq!(w.properties.records, 3);
+    assert!(w.properties.errors.is_empty(), "{:?}", w.properties.errors);
 }

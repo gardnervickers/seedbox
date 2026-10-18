@@ -376,6 +376,8 @@ mod tests {
     fn observed_status_requires_actual_world_evidence() {
         let entry = entry();
         let mut world = WorldState {
+            choice_inputs: Default::default(),
+            triggers: Default::default(),
             override_rejections: Default::default(),
             simulation: "k7m2p9qx".parse().unwrap(),
             revision: 1,
@@ -387,6 +389,7 @@ mod tests {
         assert_eq!(observed_effect(&entry, None).0, "recorded");
         assert_eq!(observed_effect(&entry, Some(&world)).0, "upcoming");
         world.faults.push(seedbox_api::FaultState {
+            counts: None,
             input_key: None,
             id: 1,
             action: "heal".into(),

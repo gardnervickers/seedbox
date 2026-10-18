@@ -4,7 +4,7 @@
 use seedbox_api::{
     ApplicationCondition, ApplicationState, EventKind, FaultAction, FaultState, FaultStatus, Frame,
     FrameFate, LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState,
-    MachineTransition, SimulationId, WorldState,
+    MachineTransition, OutOfMemoryKill, SimulationId, WorldState, MAX_OUT_OF_MEMORY_KILLS,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,6 +20,8 @@ pub(crate) struct Tracker {
     machines: BTreeMap<String, MachineState>,
     faults: BTreeMap<u32, FaultState>,
     override_rejections: BTreeMap<String, String>,
+    triggers: BTreeMap<String, seedbox_api::TriggerState>,
+    choice_inputs: BTreeMap<String, seedbox_api::ChoiceInputState>,
     counters: BTreeMap<Pair, LinkCounters>,
     /// Active partition and shape handles, with the fault that set them.
     partitions: BTreeMap<String, (u32, BTreeSet<Pair>)>,
@@ -69,6 +71,8 @@ impl Tracker {
             machines: BTreeMap::new(),
             faults: BTreeMap::new(),
             override_rejections: BTreeMap::new(),
+            triggers: BTreeMap::new(),
+            choice_inputs: BTreeMap::new(),
             counters: BTreeMap::new(),
             partitions: BTreeMap::new(),
             shapes: BTreeMap::new(),
@@ -101,6 +105,7 @@ impl Tracker {
                     last_transition_at_ns: None,
                     condition_since_ns: None,
                     application: ApplicationState::default(),
+                    out_of_memory_kills: Vec::new(),
                 },
             );
         }
@@ -116,6 +121,14 @@ impl Tracker {
             } => {
                 self.override_rejections
                     .insert(input_key.clone(), reason.clone());
+            }
+            EventKind::ChoiceChanged { input_key, choice } => {
+                self.choice_inputs.insert(input_key.clone(), choice.clone());
+                self.revision += 1;
+            }
+            EventKind::TriggerChanged { input_key, trigger } => {
+                self.triggers.insert(input_key.clone(), trigger.clone());
+                self.revision += 1;
             }
             EventKind::MachineReady {
                 machine,
@@ -149,6 +162,21 @@ impl Tracker {
                 self.process_effects.remove(machine);
                 self.machine_pauses.remove(machine);
                 self.before_pause.remove(machine);
+            }
+            EventKind::OutOfMemoryKill {
+                machine,
+                incarnation,
+                process,
+            } => {
+                let kills = &mut self.machine(machine).out_of_memory_kills;
+                if kills.len() == MAX_OUT_OF_MEMORY_KILLS {
+                    kills.remove(0);
+                }
+                kills.push(OutOfMemoryKill {
+                    incarnation: *incarnation,
+                    simulated_time_ns: time,
+                    process: process.clone(),
+                });
             }
             EventKind::MachineLifecycle {
                 machine,
@@ -214,6 +242,7 @@ impl Tracker {
                 }
             }
             EventKind::FaultChanged {
+                counts,
                 id,
                 action,
                 machine,
@@ -226,6 +255,7 @@ impl Tracker {
                     self.machine(machine);
                 }
                 let fault = self.faults.entry(*id).or_insert_with(|| FaultState {
+                    counts: None,
                     id: *id,
                     action: action.clone(),
                     machine: machine.clone(),
@@ -240,6 +270,9 @@ impl Tracker {
                 }
                 fault.status = *status;
                 fault.applied_time_ns = *applied_time_ns;
+                if counts.is_some() {
+                    fault.counts = counts.as_deref().cloned();
+                }
                 if plan.is_some() {
                     fault.plan = plan.as_deref().cloned();
                 }
@@ -283,6 +316,9 @@ impl Tracker {
                     self.process_effects.remove(machine);
                 }
             }
+            // A debugging probe runs beside the application and changes no
+            // world state.
+            FaultAction::Exec { .. } => {}
             FaultAction::Pause { machine } => {
                 self.machine_pauses.insert(machine.clone(), id);
             }
@@ -330,6 +366,9 @@ impl Tracker {
             FaultAction::ClockSkew { handle, .. }
             | FaultAction::ClockDrift { handle, .. }
             | FaultAction::Throttle { handle, .. }
+            | FaultAction::DiskError { handle, .. }
+            | FaultAction::DiskLatency { handle, .. }
+            | FaultAction::Preempt { handle, .. }
             | FaultAction::DropConnection { handle, .. } => {
                 self.healable.insert(handle.clone(), id);
             }
@@ -433,6 +472,8 @@ impl Tracker {
             .chain(self.machine_pauses.values().copied())
             .collect();
         WorldState {
+            triggers: self.triggers.clone(),
+            choice_inputs: self.choice_inputs.clone(),
             override_rejections: self.override_rejections.clone(),
             simulation: self.simulation.clone(),
             revision: self.revision,
@@ -482,6 +523,7 @@ mod tests {
             configs: Vec::new(),
             volumes: Vec::new(),
             network: "default".into(),
+            expected_crashes: Vec::new(),
         };
         let mut spec = seedbox_spec::Simulation {
             name: "test".into(),
@@ -513,6 +555,7 @@ mod tests {
             wall_clock_epoch: None,
             machine: Default::default(),
             disk: Default::default(),
+            progress_client: Default::default(),
         };
         spec.network.links.push(seedbox_spec::Link {
             from: "a".into(),
@@ -536,6 +579,7 @@ mod tests {
 
     fn fault(id: u32, status: FaultStatus, plan: FaultAction) -> EventKind {
         EventKind::FaultChanged {
+            counts: None,
             id,
             action: plan_name(&plan),
             machine: None,
@@ -753,6 +797,67 @@ mod tests {
     }
 
     #[test]
+    fn out_of_memory_kills_survive_exit_and_reboot_and_stay_bounded() {
+        let mut t = tracker();
+        let kill = |incarnation| EventKind::OutOfMemoryKill {
+            machine: "a".into(),
+            incarnation,
+            process: Some(seedbox_api::OutOfMemoryProcess {
+                pid: 77,
+                command: "memhog".into(),
+                total_vm_kib: 300_000,
+                anon_rss_kib: 250_000,
+                file_rss_kib: 900,
+                shmem_rss_kib: 0,
+            }),
+        };
+        let before = t.snapshot().revision;
+        t.event(10, &kill(0));
+        assert!(t.snapshot().revision > before);
+        t.event(
+            10,
+            &EventKind::MachineExited {
+                machine: "a".into(),
+                incarnation: 0,
+                code: 137,
+            },
+        );
+        let machine = &t.snapshot().machines[0];
+        assert_eq!(machine.out_of_memory_kills.len(), 1);
+        assert_eq!(machine.out_of_memory_kills[0].simulated_time_ns, 10);
+        assert_eq!(
+            machine.exited_out_of_memory(),
+            machine.out_of_memory_kills.last()
+        );
+        t.event(
+            20,
+            &EventKind::MachineLifecycle {
+                machine: "a".into(),
+                incarnation: 1,
+                transition: MachineTransition::Rebooted,
+            },
+        );
+        t.event(
+            30,
+            &EventKind::MachineExited {
+                machine: "a".into(),
+                incarnation: 1,
+                code: 137,
+            },
+        );
+        // The earlier incarnation's kill is retained but explains no later exit.
+        let machine = &t.snapshot().machines[0];
+        assert_eq!(machine.out_of_memory_kills.len(), 1);
+        assert_eq!(machine.exited_out_of_memory(), None);
+        for _ in 0..MAX_OUT_OF_MEMORY_KILLS {
+            t.event(40, &kill(1));
+        }
+        let kills = &t.snapshot().machines[0].out_of_memory_kills;
+        assert_eq!(kills.len(), MAX_OUT_OF_MEMORY_KILLS);
+        assert!(kills.iter().all(|kill| kill.incarnation == 1));
+    }
+
+    #[test]
     fn rejected_override_is_observable_without_inventing_a_fault_id() {
         let mut tracker = tracker();
         let before = tracker.snapshot().revision;
@@ -808,6 +913,7 @@ mod tests {
             t.faults.insert(
                 id,
                 FaultState {
+                    counts: None,
                     id,
                     action: plan.name().into(),
                     machine: Some("a".into()),

@@ -75,10 +75,50 @@ speed draw at boot or a time fork; only authored progress jitter consumes its
 own RNG stream. Snapshots retain charges and jitter continuation, and reboot
 reapplies active throttle faults.
 
+Some syscalls are not application work at full price. On ARM the PV clock
+disables the vDSO, so `clock_gettime`, `clock_getres` and `gettimeofday`
+are syscalls; they cost only the clock read they make, as x86 vDSO reads do
+through RDTSC emulation. The translator also makes syscalls for itself:
+suspending threads to flush rewritten code, returning from its signal
+handler and waiting on futexes. Its syscall stubs put a fixed mark in a
+register the syscall leaves unused (x7 on ARM, rbx on x86), and the kernel
+charges a marked syscall a tenth of a syscall. x86 counts whole syscalls, so
+every tenth marked syscall counts as one. A JVM makes millions of these while
+it starts, about ten times its own progress calls, and at full price they
+dominated simulated startup time. Both architectures build the translator
+core from source to apply the mark.
+
 Instrumentation must leave the application's registers and comparison flags
 intact. On ARM, the client uses arithmetic that leaves those flags alone and a
 branch that tests the sign bit directly (`TBZ`). DynamoRIO's drreg extension
-manages the temporary registers.
+manages the temporary registers, conservatively, and the charge puts the
+application's value back before the next application instruction. drreg would
+otherwise restore it lazily, at the next application read, and a register that
+straight-line code no longer reads can still be read on a fault path: HotSpot's
+implicit null checks deoptimize through handlers that save such registers, and a
+budget left there corrupted the heap.
+
+A simulation can choose the lean ARM client instead
+(`engine: {progressClient: lean}`, resolved into `simulator.progressClient`).
+It charges the same blocks, points and amounts and leaves through the dispatcher
+the same way, but it saves one fixed scratch register to its own TLS slot instead
+of using drreg, and a charge that crosses the budget branches to one shared slow
+path, emitted at start-up, instead of a clean call emitted into every block.
+drreg's per-block liveness analysis and those clean calls cost more than running
+the code: a shell started four times slower than under the bare translator, and
+2.4 times faster with the lean client. No application instruction runs while the
+register holds the budget. The charge's instructions have no translation, so the
+translator never relocates a thread there; when it reports such a thread's state
+from a recreated block, the client's restore-state event puts the register back,
+but a translation from stored tables cannot. Translated code and the client's
+own memory are smaller, so the translator commits less memory, and those commits
+are marked syscalls: simulated times differ slightly from the standard client.
+Preparation packages the chosen client at the path the guest supervisor runs, so
+neither the supervisor nor its launch recipe depends on the choice, and a
+standard machine's boot archive is byte-for-byte the one it was before the
+choice existed: the exit witness records guest PCs, so even a rebuilt supervisor
+changes it. A lean archive also carries a marker file, and preparing a
+definition checks that its `simulator.progressClient` names the archive's client.
 
 Guest signals arrive only at progress calls, so when the ARM translator
 synchronizes all threads, for example to flush code a JIT has rewritten, it
@@ -100,9 +140,35 @@ write protection and self-modifying-code sandboxing. In the observed Kafka
 startup, that mode grew a broker's memory to about 2 GB and it was killed;
 with application-driven invalidation, it used about 250 MB and kept starting.
 
+A flush stops all threads. JITs invalidate a range one cache line at a time,
+so a translator patch joins each thread's consecutive lines into one pending
+range and flushes it at that thread's next `DSB`, which architecturally
+completes the invalidations, or at its next other entry to the translator. A
+JVM startup otherwise stopped all threads about 19,000 times. While the
+flushing thread waits for another thread's flush, it must not be redirected:
+that abandoned its own flush, and before a syscall it skipped the syscall.
+
+Flushes still race a JVM creating a process.
+Translator patches keep a thread that is forking in place (redirecting it skipped
+the `fork`), count a thread waiting in `vfork` as stopped (it cannot take the
+suspend signal until its child execs, which may wait for the flush), and requeue
+signals that arrive while a thread is suspended, since it may resume into a
+blocking syscall and never reach the translator's pending-signal delivery.
+A signal that interrupts a thread waiting for such a flush is delayed until the
+thread re-enters the code cache: running the handler at once abandoned the wait
+while the thread still looked parked, so later flushes redirected it from a
+stale context (JFR sampling and `tgkill` crashed compiled Java code this way).
+A thread starting a stop-all-threads lets threads already waiting for one go
+first: forking also stops all threads, and a JIT thread flushing after every
+code write otherwise retook the lock each time and the fork never ran.
+Minimal reproducers are in [`tools/jvm-fuzz/repros`](../tools/jvm-fuzz/repros).
+
 Code: [progress client](../guest/progress/progress.c),
+[lean client](../guest/progress/progress-lean.c),
 [x86 syscall charge](../kernel/seedbox.c), [ARM syscall charge](../kernel-arm64/seedbox.c),
-[vector context patch](../guest/progress/dynamorio-cleancall-simd.patch).
+the vector context and translator syscall mark commits in the ARM DynamoRIO
+fork (the `dynamorio-arm` flake input, [`nix/dynamorio.nix`](../nix/dynamorio.nix)),
+and the [x86 syscall mark patch](../guest/progress/dynamorio-x86-translator-syscalls.patch).
 
 On x86 a charge can span several scheduling boundaries. Its unpaid time is
 retained with the machine and drained while the vCPU is stopped, before guest
@@ -113,6 +179,28 @@ The TUI shows each machine's configured nominal speed by default. While
 throttled it shows the effective nominal speed after backend rounding and
 clamping; healing restores that machine's configured speed. The fault's
 recorded input keeps the original request.
+
+## User CPU time
+
+Linux samples CPU time per tick: a tick that interrupts user mode is user time,
+anything else is system time. Guest time advances only in the kernel, so every
+tick interrupts it, and without a correction translated compute would all be
+system time: `utime` stayed zero, `ITIMER_VIRTUAL` never fired, and
+`getrusage` reported all work as system time. The kernel counts a tick that
+interrupts a progress charge directly, not a softirq or a nested interrupt, as
+user time. On ARM the mark covers the bulk charge, whose rendezvous takes the
+tick. On x86 it covers the progress call's yield, after which the VMM injects
+the timer interrupt. Only tick accounting reads the mark. RCU and the
+scheduler still see kernel mode, and the charges are unchanged. Syscall and
+translator charges remain system time.
+
+Precise (`VIRT_CPU_ACCOUNTING_GEN`) accounting would not help: it reads the
+clock at each kernel entry and exit, and the clock does not move in user mode.
+It also needs a `nohz_full` CPU, and the guest's one CPU is the boot CPU.
+
+Code: [ARM charge](../kernel-arm64/seedbox.c), [x86 hook](../kernel/seedbox.h),
+the `kernel/time/timer.c` edit in both patch scripts, and the
+[guest check](../guest/progress/fixtures/cputime.c).
 
 ## Progress inside kernel polling
 
@@ -133,10 +221,39 @@ arbitrary assembly `PAUSE`/`YIELD`, early decompression or the vDSO. ARM
 `cpu_relax()` uses the same bounded read. Its raw exclusive-store retry loops
 remain uncharged: host interruptions can cause those retries and must not
 advance guest time or the software reservation epoch. Application polling is
-handled by binary instrumentation.
+handled by binary instrumentation. Two kinds of application code run uncharged:
+the translator's own code, so a translator spin loop must sleep rather than
+yield (its thread-exit lock once froze guest time), and `rseq` critical
+sections, which run from an uninstrumented native copy. Preemption and signals
+arrive only at charges, so `rseq` aborts are rare in a simulation.
+
+Kernel code charges no guest time of its own, so a kernel loop that waits for
+another task to run would never see the tick that sets `need_resched` on the
+single guest CPU. Such loops yield through `cond_resched()`: on ARM, a call that
+does not reschedule makes the same bounded read as `cpu_relax()`. Without it a
+JVM exiting several threads hung in `shrink_dcache_parent`, retrying while the
+task killing a `/proc` dentry stayed preempted. The x86 kernel lacks this hook.
 
 Code: [x86 clock](../kernel/seedbox.c), [x86 patch sites](../kernel/apply.py),
 [ARM clock](../kernel-arm64/seedbox.c), [ARM patch sites](../kernel-arm64/apply.py).
+
+## Seeded scheduler perturbation
+
+One guest CPU with `PREEMPT_NONE` switches threads only when one blocks or a
+tick lands, so a race whose window is short and opens while other threads are
+runnable can be out of reach of every seed. A `preempt` fault sets two PV
+page words on its target, a rate in parts per million and a seed, and the ARM
+kernel draws once per syscall and progress call from a splitmix stream on
+that seed (separate from progress jitter) and calls `yield()` on a hit, at
+syscall entry in process context. Progress calls sit every 50,000
+application instructions, so yields land inside application code without
+charging any time. The coordinator derives the seed from
+`preempt/<machine>/<incarnation>/<id>`, reapplies the fault to a rebooted
+incarnation and clears the words on heal; the page and the stream state are
+guest memory, so checkpoints continue them. Zero words leave scheduling
+untouched. x86 does not support it yet.
+
+Code: [ARM kernel](../kernel-arm64/seedbox.c), [machine](../crates/seedbox-arm64/src/machine.rs).
 
 ## Observation without guest progress
 
@@ -147,11 +264,42 @@ transaction: it must not adopt guest time, publish a new plan, draw timer
 randomness, deliver a guest interrupt, or advance the ARM reservation epoch
 described below.
 
+On HVF a stall watch thread per machine worker forces an exit
+(`hv_vcpus_exit`) once one entry has run 10 s of host time without a guest
+exit, then waits twice as long before each further report of the same
+stall; any guest exit resets it. The forced exit is an ordinary host
+interruption (`RunStop::Interrupted`). The machine reads the stopped vCPU's
+PC, exception level, DAIF mask, LR, stack pointers and ELR_EL1, prints one
+`seedbox stall: machine NAME` line on the worker's stderr (retained as `vmm.stderr`), and
+re-enters. A guest spinning without exits, such as a raw loop outside progress
+instrumentation or one with interrupts masked, otherwise hangs a run with no
+evidence of where.
+
 The same distinction applies to backend maintenance exits, such as the ARM
 debug-register unlock bypass. An exit visible to the hypervisor is not
 automatically an event that belongs in the simulated world.
 
 Code: [x86 PV execution](../crates/seedbox-vmm/src/machine/pv.rs), [ARM machine](../crates/seedbox-arm64/src/machine.rs).
+
+## Out-of-memory kills
+
+A process the guest kernel kills for lack of memory exits with SIGKILL, which
+looks like any other `137`. The guest supervisor therefore reports each kill on
+its management transport as an `SBX_OOM1` frame, before it reports the exit.
+`/proc/vmstat` `oom_kill` counts kills. Linux reports a victim's PID, name and
+memory only in its log, so the supervisor polls `/dev/kmsg` from its start and
+parses the kernel's own `Killed process` record; it accepts only facility 0,
+which userspace cannot write. If the log ring overwrote a counted kill's
+record, that kill's frame carries no details. Both sources are guest state, so
+a replay reports the same kills at the same simulated times.
+
+The shared decoder turns each frame into an observation. The server publishes an
+`outOfMemoryKill` event, keeps the last 64 kills per machine in the world, and
+lists them in `diagnostics`. Like other events, they are not compared evidence.
+A kill that does not end the application, such as of a child process, is
+reported when it happens.
+
+Code: [guest parser](../guest/oom-report.h), [frame](../crates/seedbox-engine-protocol/src/out_of_memory.rs), [server world](../crates/seedbox-server/src/world.rs).
 
 ## Software exclusive reservations
 
@@ -173,7 +321,7 @@ Faults must reconstruct the original application registers and instruction
 pointer. Internal retries cannot count as application progress. Application wait
 hints are rewritten so host wakeups cannot change charged loop counts.
 
-Code: [translator patch](../guest/progress/dynamorio-exclusives.patch), [ARM kernel patches](../kernel-arm64/apply.py), [assembly fixtures](../guest/progress/fixtures/).
+Code: the exclusives commit in the ARM DynamoRIO fork, [ARM kernel patches](../kernel-arm64/apply.py), [assembly fixtures](../guest/progress/fixtures/).
 
 ## Interrupt delivery at an idle rendezvous
 
@@ -242,8 +390,39 @@ and machine-local sequence before routing them. A failure prevents the round
 from committing. Worker completion order must not change results. An idle
 machine must advance to its assigned wake time before delivering inputs.
 
+The server sizes the pool (`seedbox serve --machine-workers`). By default one
+worker runs every machine on the coordinating thread: concurrent seeds use host
+cores better. A larger pool helps a run whose machines could use spare cores, as
+when memory limits how many simulations run at once. An explicit count
+is recorded among a run's performance parameters, and the engine report's
+scheduler evidence states the count used. Neither is part of identity, witness or
+comparison, so a replay may use a different count and must still match.
+
 Code: [round contract](../crates/seedbox-engine-core/src/window/mod.rs),
 [world adapter](../crates/seedbox-engine-core/src/world_windowed.rs).
+
+## Chained ARM slices
+
+Each ARM machine runs in its own HVF worker process, driven by the coordinator
+over a pipe. A link delivers frames in order, at least 1 ns apart, so a burst
+from one send reaches the receiver as a run of delivery points: a slice to
+each frame's time, then its delivery. One host exchange per step limited bulk
+TCP to about 20 MiB of guest data per wall second.
+
+With each slice, the scheduler gives the ARM adapter the frames due at its
+limit and the slices it will request next if each one reaches its limit. The
+worker runs them in one exchange and stops after the first that falls short.
+Their answers wait in the worker handle and go only to the identical next
+requests, each validated as a separate exchange would be. Any other operation
+while chained slices are pending is a protocol error. Horizons, events,
+deliveries and interrupt state are therefore those of separate requests, and
+the chain is not in any witness. Planning stops before anything the loop
+handles itself: an event already due (with early-delivery slack), the slice
+end, a fork or a suspension. Payload bytes cross the pipe as one binary
+attachment after the JSON message.
+
+Code: [planner](../crates/seedbox-engine-core/src/world_windowed.rs),
+[worker protocol](../crates/seedbox-arm64/src/application/worker.rs).
 
 ## Fault ordering and replay
 
@@ -265,6 +444,341 @@ again.
 
 Code: [input program](../crates/seedbox-engine-core/src/input_program.rs),
 [coordinator](../crates/seedbox-engine-core/src/world.rs).
+
+A fault profile (`--fault-profile`) is a request option, never part of a
+definition. The server samples it once, after choosing the seed, into keyed
+`gen-<n>` and `gen-<n>-end` program inputs, so describe, rerun and replay carry
+the generated faults and never sample again. Each seed-range member samples
+the profile with its own seed. Sampling uses integer arithmetic only, keeps
+lifecycle and clock faults from overlapping on one machine, and never targets
+the oracle. Code: [sampler](../crates/seedbox-explore/src/faults.rs).
+
+The engine gates generated inputs by their reserved key namespace. A generated
+start due before every initial application is ready, or before the end of a
+quiet period, is skipped and recorded as a rejection whose reason begins with
+`skipped`; its `gen-<n>-end` teardown is skipped with it. Authored inputs and
+teardowns of admitted starts always run. The oracle's `quiet` control
+operation extends the quiet period from its admission time, so a workload can
+let its system recover before checking it; generated faults already active
+still end on schedule. Code: [gate](../crates/seedbox-engine-core/src/input_program.rs).
+
+## Anchors, reseeds and branch captures
+
+Program inputs may be branch inputs as well as faults. An `anchor` at T
+establishes the timed checkpoint phase: branch inputs due at T run before the
+controls, triggers and ordinary inputs due then, and allocate no fault IDs.
+A `reseed` after an anchor at the same time changes every future draw (guest
+entropy through the PV page, timer and progress jitter, network streams, and
+the seed later crashes, reboots and disk faults derive from); effects already
+sampled stay. The anchor's time is a scheduling boundary whether or not
+anything is captured there, so a parent and its children share it.
+
+A run can stop at listed anchors (`capture_anchors`) to capture
+`checkpoint-anchor-<key>.json`. The capture stops inside the boundary, after
+the anchor's receipt and before its remaining inputs, without counting the
+boundary or entering the host; the resumed segment finishes the boundary and
+counts it once, as a cold run does. Branching from the capture with a reseed
+added after the anchor is identical to running the child cold. Code:
+[coordinator](../crates/seedbox-engine-core/src/world_windowed.rs),
+[program](../crates/seedbox-engine-core/src/input_program.rs).
+
+## Typed triggers
+
+A `trigger` program input arms a typed trigger when due, in document order
+with the other inputs at its time; it allocates a trigger ID, not a fault ID.
+Its selector watches committed occurrences only: SDK events, assertions and
+setup markers at frame acceptance, readiness and exits as the coordinator
+absorbs them, lifecycle transitions where it commits them, and frames and TCP
+connection openings as it routes them. Each round's occurrences are offered in
+one order (time, machine, source, position), so worker count never changes
+which occurrence is the `nth`. The match schedules the effect one causal
+lookahead plus `delay_ns` later, which is never in any machine's committed
+past; at that boundary the effect meets the same state checks as a timed input
+and is admitted as an ordinary fault, or the trigger is rejected. Triggers
+still armed or matched when the run ends are cut off.
+
+Two selectors refer to other evidence. `state` matches an SDK state report
+(a name, optionally one value) at frame acceptance, like an event. `fired`
+matches another typed trigger, by input key, admitting its effect at a
+boundary; it is offered right after that boundary's effects, in arm order,
+so a teardown (reboot, heal, resume) placed one delay after a triggered
+crash or partition follows the effect it undoes rather than a fixed time.
+
+A `block_request` trigger works at the device instead. Arming installs a
+hold in its machine's block model, which counts matching requests from then
+on (a successor incarnation starts afresh, as `disk_error` does). On admission
+of the `nth` one, earlier requests in the notification complete normally; the
+selected request gets no disk effect, used-ring entry or IRQ, and nothing
+after it is processed. The MMIO write completes and the machine stops with a
+held suspension: it neither runs nor receives, and its queued inputs stay
+unconsumed. The coordinator records the hold time as the match and commits
+the crash one causal lookahead later through the ordinary lifecycle path, so
+the crash time never depends on where rounds end. An oracle exit first cuts
+the pending crash off with both times recorded. No checkpoint or anchor
+capture is taken while a request is held. x86 does not support holds yet.
+
+Records are checkpointed whole and their receipts (armed, matched, fired,
+expired, rejected, cut off) are published for the world view; a fired
+trigger's fault carries the trigger's input key, and its status says whether
+the effect applied. A run allocates at most `MAX_TRIGGERS` IDs, never reused,
+and keeps at most `MAX_ACTIVE_TRIGGERS` armed or matched at once; resolved
+marker triggers free their matcher tables. Code:
+[matchers](../crates/seedbox-engine-core/src/triggers.rs),
+[rules](../crates/seedbox-control/src/lib.rs).
+
+## Campaigns
+
+The planner (`seedbox-explore::campaign`) is passive: the server asks for a
+generation, submits its members, and reports each finished member's
+feedback. Ordinals are assigned when a generation is planned, and the planner
+folds a generation only when all its members have reported, in ordinal order,
+so neither capacity nor completion order reaches a plan. Its own choices draw
+from a stream seeded by the campaign seed. Generation 0 is a seed sweep of
+roots, each with the declared anchors and captures at all of them. A member's
+features (property outcomes, power-of-two event-count buckets, setup and
+exits, chosen alternatives) are novel when no earlier ordinal showed them; a
+member with novelty and captures joins the bounded corpus. Branches pick a
+corpus member weighted by novelty against picks and depth, prefer the last
+anchor before its earliest novel feature, and continue from that capture with
+a reseed, sometimes a choice input for a later occurrence, and a freshly
+sampled fault suffix. The branch keeps its parent's consumed prefix, the
+teardowns of generated faults already started, and the later anchors.
+Members that leave or never enter the corpus release their captures.
+
+States are features too. An SDK `state(name, value)` report keeps, per
+machine, the commit time of each value's and each transition's first
+occurrence (bounded counts and lengths, overflow counted), and event-count
+bucket 0 carries its first time, so the planner can pick an anchor before a
+state first appeared. Feedback also lists a member's moments: first event
+times, first state times, and crashes and reboots from its report. A branch
+sometimes adds one event-relative mutation after a parent moment later than
+its anchor: a `crash`, `isolate` or `pause` of a target, a slow disk (a
+latency drawn from a profile `disk_latency` entry's range, on its targets) or
+scheduler perturbation (a profile `preempt` entry's rate), from the kinds in
+the fault profile, as a typed trigger on the `nth` occurrence of that moment's
+event or state plus a delay; its teardown (`<key>-end`) is a `fired` trigger,
+so recovery timing stays causal. Mutation effects due during an oracle quiet
+period are skipped, as generated faults are; teardowns still run. Each branch draws a strategy: novelty
+weighting (half), uniform (a quarter) or rarity, which weights members by how
+few others share their features. A failure feature already seen in three or
+more members divides a source's weight by four, so budget is not spent
+re-finding one bug. The corpus admits on novelty or rarity and evicts the
+member with the least of both. Fresh roots after generation 0 may sample a
+subset of the profile's fault kinds (swarm testing); the subset is part of the
+member's plan, and the server filters the profile before generating faults.
+
+Aggregation counts each member's own evaluations: a branch's ledger less the
+ledger in the checkpoint it started from, so an encounter inherited from an
+ancestor's prefix counts once. Members violating a property over completed
+members is reported as the observed campaign rate. Findings group a member's
+own violations by property and selected detail fields; the earliest ordinal
+is the representative, exported without anchor captures, synced, linked
+without overwriting, then the directory synced, before it is reported as
+published. A branched representative is first rerun cold: its full program
+(every ancestor's prefix, anchors and reseeds included) from a fresh start,
+capturing nothing. When that run's record matches the representative's
+(outcome, result, fault history and witness), the cold run is exported, so
+the bundle carries no checkpoint; otherwise the representative is, marked
+`fromCheckpoint`. The campaign finishes only once no cold rerun is pending. `findings.json` in the directory is the baseline for later
+campaigns. Code: [planner](../crates/seedbox-explore/src/campaign.rs),
+[server](../crates/seedbox-server/src/execution/campaigns.rs).
+
+## Edge coverage (experimental)
+
+A machine whose process environment has `SEEDBOX_COVERAGE=1` runs the
+progress client with `--coverage-dir`. On AArch64 every block's entry adds one
+to a wrapping byte counter for the edge (previous block, block), AFL's
+scheme: the counter index is the previous block's ID shifted right by one,
+XORed with the block's ID, and the previous ID lives in a TLS slot beside the
+progress budget. A block's ID hashes its module's name and offset (or, for
+code in no module, its address) into 8192 slots. The instrumentation uses no
+flag-setting instructions and restores its two scratch registers before the
+application instruction, like the progress charge. At every progress call
+and at exit the process's counter file is overwritten. Elsewhere (x86) a
+block's first translation sets its own counter to one. The supervisor turns
+each count into one of four hit-count buckets (1, 2-3, 4-15, 16 or more), so
+every (edge, bucket) is a feature bit in a 4 KiB map; it keeps the union over
+the run and relays each changed 1 KiB slice with its offset about once a
+second of guest time and at the main process's exit. The ledger ORs slices
+into each machine's map, and the campaign planner treats each set bit as a
+feature. The instrumentation and file writes change timing, so runs replay
+only with the same setting, which is part of the resolved definition. Code:
+[client](../guest/progress/progress.c), [supervisor](../guest/compose-init.c).
+
+## Shrinking
+
+`seedbox shrink` runs ddmin (`seedbox-explore::shrink`) over a failed
+simulation's external inputs; oracle calls are never in the program. A source
+that started from a checkpoint shrinks its full program from a fresh start, so
+its prefix can shrink too; only if that does not reproduce the failure does it
+fall back to the checkpoint, whose consumed prefix is then fixed. A generated fault and its teardown are
+one atom, as is a mutation and its `-end` teardown; removing an anchor removes its reseeds, and removing a fault removes
+the heals of its handle. The unchanged program runs first to confirm the
+failure, then every probe reruns the whole simulation and its oracle and
+counts as reproducing only when it fails the same way: the target property is
+violated again or, for an oracle failure, the oracle exits with the same code
+and every property the source violated is violated again, so a probe cannot
+drift into an unrelated failure. A probe may run under several seeds at once
+(`--seeds`, three by default): the source's own, then derived ones that change
+timing (guest entropy, jitter) but no input. It reproduces at the lowest seed
+that fails the same way, decided only once every lower seed has completed, so
+completion order never matters, and the other runs are then stopped. A
+failure that hangs on exact timing can then lose inputs that only shaped that
+timing. `--from-checkpoint` shrinks a branched source from its start
+checkpoint directly, so only inputs after the branch point (often a single
+mutation and its teardown) are candidates; a checkpoint start keeps its state,
+so derived seeds instead change the seed of a reseed input the probe keeps and
+the checkpoint has not consumed, and without one only the source seed applies.
+The reproduction names the run, and so the seed, that reproduced. The result is "1-minimal under these transformations" only when
+ddmin finished at single-atom granularity; otherwise it is "reduced".
+With probes left, a greedy simplification pass then edits the kept inputs one
+at a time and keeps an edit only when the failure persists: a fault's teardown
+or heal moves halfway towards its start (never below 1 ms, nor before a fixed
+prefix), a trigger fires without its delay or after half of it, and a choice
+input selects its first alternative. Edits never change keys, so the kept set
+stands; the reproduction is the last probe that ran it.
+
+## Counterfactual analysis
+
+Some failures need a cluster of faults and timing, so no small input set
+reproduces them. `seedbox analyze` (`seedbox-explore::counterfactual`, the
+server's `campaigns/analysis.rs`) asks instead how often the failure recurs
+when one thing changes, rerunning the source's full program from a fresh start
+in arms of `--samples` runs. The baseline varies every draw (the run seed and
+every reseed's seed). A time arm keeps every draw before T and varies every
+later one: it adds an anchor and a reseed at T and derives the seeds of the
+reseeds after it, so a later branch point does not restore the source's draws.
+Its times are evenly spaced before the source ended, rounded to milliseconds,
+skipping any that already hold an anchor. With `--faults`, a fault arm removes
+one external fault due before the source ended (with its teardown and the
+heals of its handle; a fault due later never applied) and varies
+every draw; its extra exact run keeps the source's seeds, so it is exactly the
+source minus that fault. Variant `v` derives the same seeds in every arm, so
+arms differ only in what they change. A run counts when it fails the same way
+(the shrink rule); runs that fail otherwise and runs without a verdict are
+counted apart and excluded from the rate. Each rate carries a 95% Wilson
+interval. A time arm near the baseline rate says the outcome was still open at
+T; one near 100% says the run was already doomed by then. Rates describe
+these reruns, not a proven cause. Every run is submitted at once, variant by
+variant, so early results cover every arm.
+
+## Commands in a recorded run
+
+`seedbox exec ID MACHINE --at T -- ARGV` runs a command in a machine at a
+moment of a completed simulation. The server (`exec_submission`) builds an
+ordinary rerun of the source's full program from a fresh start, with one
+`exec` input at T after the inputs already due then; replay is exact, so the
+rerun is the source up to T. The engine sends the guest supervisor
+`exec ID HEX`, the argv joined by NUL in lowercase hex
+(`seedbox_control::exec_payload`), when the application is running (not
+stopped or paused), and the supervisor acknowledges it like a process fault.
+The supervisor forks the command in the application's environment (working
+directory, limits, credentials, variables, PATH lookup) under the same
+translator, reads its output through a pipe, and writes each line to the
+application's stderr as `seedbox exec ID| LINE`, between `seedbox exec ID:
+start PATH` and `exited N` or `killed by signal N` (or `NAME: not found`).
+One runs at a time. The CLI follows the machine's logs, prints the prefixed
+lines and exits 0, 1 or 2 by the command's outcome, then stops the rerun
+unless `--keep`. The command must exist in the image; the rerun is a new
+simulation, and its results after T reflect the command.
+Code: [supervisor](../guest/compose-init.c), [server](../crates/seedbox-server/src/execution/campaigns/analysis.rs).
+
+## Failure timeline
+
+`seedbox explain` projects a completed simulation's retained evidence into
+one simulated-time order (`seedbox-server/src/explain.rs`): non-fault program
+inputs with their trigger outcomes, trigger matches, faults at their applied
+(or scheduled) times, lifecycle, readiness and exits from the event history,
+oracle controls, every retained choice, and from the property ledger setup,
+main-process exits, each event name's first occurrence, first state values and
+transitions, and each property's first pass and first failure. Entries carry
+stable identities (`input:KEY`, `fault:ID`, `trigger:KEY`,
+`machine:NAME#INCARNATION`, `property:ID`, ...) and link what caused them: a
+fault to its input or trigger, a trigger match to its fault, a crash to the
+fault applied with it. The ledger keeps first occurrences and counts, so the
+explanation lists, rather than guesses, what it omits: repeated events,
+further property evaluations, dropped states, untracked choices, lost event
+history and evidence errors. It reads evidence only; nothing reruns.
+
+## Property records
+
+Guest properties travel the same committed path as application output. Every
+machine's supervisor serves `/run/seedbox/sdk.sock`; each `SOCK_SEQPACKET`
+connection is a session, and each message is relayed unparsed as
+`SBX_PROP1 <session> <seq> <hex>`. Session 0 is the supervisor's own: lost
+records and the main process's exit. The management decoder retains every
+property line, whether or not anything observes the console, and the
+coordinator reduces them in its fixed absorb order (time, machine, channel
+order). The engine attributes each record to its machine and incarnation and
+stamps it with the commit time; guest-supplied times are never used.
+
+The reducer is pure and shared with offline reporting. It never fails: a
+malformed record, a sequence gap, an exceeded bound, a reserved or conflicting
+declaration all become evidence errors, and an assessment with evidence
+errors is at best incomplete. A definite violation stays visible regardless.
+Checkpoints carry the ledger, so a continuation keeps earlier records and
+sequencing. Reports include the ledger, and the world witness hashes it, only
+when a run produced records.
+
+The supervisor also reports default-property evidence on session 0: its main
+process's exit status, and kernel log lines (read from `/dev/kmsg`, from the
+application's start) about OOM kills and crashes. It enables the kernel's
+`print-fatal-signals`, because the translator re-raises an application fault
+with `kill()`, which the kernel's fault messages never report; that sysctl logs
+every process a core-dumping signal kills and never SIGKILL or SIGTERM, so
+injected stops and machine crashes are not evidence. The reducer turns these
+into `seedbox.no_out_of_memory_kills` and `seedbox.no_crashing_processes`.
+
+A machine's `expectedCrashes` declare crashes it is designed to have, such as a
+watchdog that aborts a stalled server for its supervisor to restart. Each names
+a core-dumping signal and the crashing thread's command name, and optionally its
+executable's file name; under the translator that is `libdynamorio.so`. They
+match only the kernel's exact fatal-signal line, `[EXECUTABLE: ]COMMAND:
+potentially unexpected fatal signal N.`: segfault, trap and unhandled-exception
+lines, truncated lines and OOM kills never match, and another machine's
+declarations never apply. A matching line is a passing evaluation of
+`seedbox.no_crashing_processes` whose example details name the declaration, so
+the property reports `passed` with its expected crashes counted as passes and
+stays `violated` beside any unexpected crash. No new status is needed: the
+declaration is part of the definition, which the resolved definition inlines,
+the world document carries per machine (`expected_crashes`) and the world
+coordinator applies at commit. It is configuration, not checkpointed state, and
+reduction stays a pure function of recorded evidence, so replay compares the
+same ledger. Code: [matching](../crates/seedbox-engine-protocol/src/property.rs),
+[authoring](../crates/seedbox-spec/src/project.rs).
+
+`flush` and `summary` are records too, relayed in order. When the engine
+commits one it has committed and reduced every earlier record of that session,
+so it replies one lookahead later on the session's reply path, like a choice:
+`{"flush":{"seq":N}}`, or `{"summary":...}` with each property's passes and
+failures at that point (at most 32, by ID, with `truncated`). A workload can
+therefore finish once, say, a property has been violated, and a final flush
+means its verdict reached the ledger. Records sent before the main process
+exits are relayed before its exit record, but descendants still writing are
+not waited for, and a machine crash discards what has not crossed the port,
+including an unanswered request.
+
+Code: [reducer](../crates/seedbox-engine-protocol/src/property.rs),
+[commit](../crates/seedbox-engine-core/src/properties.rs),
+[supervisor](../guest/compose-init.c), [SDK](../crates/seedbox-sdk/src/lib.rs).
+
+## Structured choices
+
+`seedbox_sdk::choose(site, alternatives)` sends a choice record on its SDK
+session and waits. The engine accepts it with the session's other records, at
+complete-frame commit, and numbers its occurrence within its machine,
+incarnation, producer session and site. A due `choice` input matching that
+identity selects the alternative and is consumed; otherwise a draw from a
+domain naming the whole identity does, under the current seed and branch
+identity, so a reseed changes later choices and nothing else shifts them.
+The reply, `SBX_SDK1 <session> <json>`, is queued on the management channel
+one causal lookahead after the request; the supervisor hands it to that
+session's socket, and a crash before delivery discards it with the
+incarnation. Occurrence counts, armed inputs and answered choices are
+checkpointed; answered choices enter the world witness and the report. Code:
+[choices](../crates/seedbox-engine-core/src/choices.rs),
+[SDK](../crates/seedbox-sdk/src/lib.rs),
+[supervisor](../guest/compose-init.c).
 
 ## Fault discovery and previews
 
@@ -296,10 +810,44 @@ waits for a new readiness observation. Application exits retain their exit code.
 Persistent stop and pause effects remain active until reversed or ended by a
 lifecycle transition.
 
+Process faults signal the application's process group, as job control does.
+`stop` kills the group and reaps its descendants, including those adopted by
+PID 1, before it is confirmed; `pause_process` stops the group with SIGSTOP. A
+descendant that calls `setsid()` has left the group: it keeps running through
+both, keeps its listening ports across `restart` (the new incarnation cannot
+bind them until it exits), and ends only by exiting or with a machine crash.
+Daemonizing applications must close inherited listeners, or the survivor also
+holds the application's own port. When the application's main process exits,
+the supervisor relays the output already queued and reports the exit at once;
+it does not wait for descendants that inherited stdout or stderr, and nothing
+they write later is logged.
+
 A checkpoint captures the world and its input-program cursor together. Restoring
 it must neither repeat consumed overrides nor lose pending ones. Capture requires
 a committed boundary with no outstanding I/O cost. A requested checkpoint may
 therefore need another step before it becomes available.
+
+Machines in separate workers capture and restore at once: the coordinator
+first starts every machine's snapshot (or restore) request
+(`WorldMachine::begin_snapshot`, `begin_restore`), then collects the answers in
+machine order, so the checkpoint is the same as a serial one. On ARM a request
+is sent with `OwnedWorker::begin` and answered by `finish`; only snapshots and
+restores can be begun, one at a time per worker. A TigerBeetle machine's RAM
+checkpoint is about 2 GiB, so a four-machine capture or restore took the sum of
+four such copies before.
+
+An ARM checkpoint (`SBXARM02`) holds its metadata section, a zero padding
+section (a hole in the sparse file) and the RAM section, whose data starts at
+a host page boundary, then the disk section; each section ends with its
+SHA-256. With `seedbox serve --lazy-restore` the machine worker restores by
+unmapping guest RAM from the hypervisor, mapping the RAM section over it
+privately (`MAP_PRIVATE|MAP_FIXED`), and mapping it back: a page loads the
+first time the guest touches it and guest writes stay private. It does not
+hash the whole file first, nor the RAM section, which would read every page;
+the metadata and disk sections are still verified. The bytes the guest sees
+are the same, so results are too. On an 8-member TigerBeetle campaign a
+branch's four-machine restore took 14 s serially, 6.5 s in parallel and
+0.6 s lazily, with no measurable cost in the branch's execution.
 
 Machine lifecycle updates must occur at their defined commit points around
 fallible backend operations. A failed crash transaction poisons the world and
@@ -312,6 +860,7 @@ changes entropy must update the guest's generator as well as the host's streams.
 The x86 PV page carries an entropy generation consumed by kernel hooks.
 
 Code: [world](../crates/seedbox-engine-core/src/world.rs),
+[supervisor](../guest/compose-init.c),
 [ARM checkpoint adapter](../crates/seedbox-arm64/src/application/world/checkpoint.rs),
 [x86 entropy hooks](../kernel/apply.py).
 
@@ -329,6 +878,52 @@ chain rather than per notification. Network offloads that were not advertised
 are rejected, received frames are limited to 64 KiB, and an undersized receive
 chain retains the frame without writing a truncated payload.
 
+A `disk_error` fault fails matching read, write or flush requests with IOERR
+before any disk effect: a failed write changes nothing, a failed flush makes
+nothing durable, and a failed read writes no data. Each fault draws on its own
+`disk-error/<machine>/<incarnation>/<id>` stream, which checkpoints carry with
+the device; it survives a guest device reset and is reapplied to a rebooted
+incarnation. The heal row records how many requests it matched and failed. A
+supervisor that cannot read, format or mount a failing retained disk exits 125,
+like a container runtime, rather than reporting an infrastructure failure.
+
+With `effect: corrupt` the fault selects reads and writes the same way (never
+flushes, which draw nothing) but completes them successfully with one sector,
+chosen from the request on the same stream, replaced by seeded bytes: a read
+returns the garbage and leaves the disk intact, a write stores it. The heal
+row's failed count is then the corrupted requests. The fault acts on the whole
+retained disk, which holds the ext4 filesystem under every volume, so it
+corrupts filesystem metadata and the journal as readily as application data;
+ext4 checksums its metadata, and a corrupted mount after a reboot fails as
+above. With `scope: data` the fault selects only reads and writes that avoid
+the filesystem's metadata (`disk/ext4.rs`): the static layout, read from the
+disk once it is formatted (superblocks, descriptors and reserved GDT,
+bitmaps, inode tables, and the blocks of the reserved inodes and the orphan
+file), and any block whose content looks like metadata allocated later (an
+extent node, a directory block's checksum tail or `.` entry, an htree node,
+an xattr block): the data written, or the disk's content for a read. It
+selects nothing before the disk is formatted, and never flushes. Runs without
+these fields are unchanged.
+
+A `disk_latency` fault makes the block model complete requests later instead
+of at their notification. Each admitted request is consumed from the avail
+ring and queued with a due time: the guest time of the notification plus the
+fault's latency and a draw up to its jitter (on its own
+`disk-latency/<machine>/<incarnation>/<id>` stream) for matching requests,
+and never before the request ahead of it, so completion order is submission
+order. At its due time the request is decoded again from guest memory (the
+driver may not touch its buffers before completion), then has its disk
+effect, data, status, used entry and interrupt exactly as an immediate
+completion would; a FLUSH therefore completes after the writes before it.
+On ARM the PV clock carries the earliest due time as a device deadline
+beside the guest timer and the world horizon: the guest stops there, an idle
+guest wakes there, and stopped observations report it as the machine's next
+event. Checkpoints carry the queue and the clock's deadline. A crash or guest
+device reset drops pending requests, which were never acknowledged; healing
+leaves queued requests to complete at their times. Without the fault, and
+with nothing pending, requests complete at notification as before. x86 does
+not support disk latency yet.
+
 Each completed request publishes its interrupt state before the next request
 is validated. Earlier payload, status, used-ring writes and backlog removals
 survive a later failure; the failing request is not completed. MMIO rejects
@@ -344,7 +939,18 @@ change request validation or completed-prefix mutation rules.
 
 The disk model separates stable and volatile writes. Flush and FUA affect what
 is stable; a crash applies the configured survival policy to volatile state.
+The default policy drops every unflushed sector; `simulator.disk.torn_writes`
+in a resolved definition keeps each one with probability one half. Neither
+keeps the guest's unwritten page cache.
 Restarting an application process is different from crashing its machine and disk.
+
+A machine whose service mounts named volumes gets one disk. The supervisor
+formats it as ext4 on first boot and bind-mounts one directory per volume, so
+volumes share its space. Its size is the sum of the resolved volumes'
+`sizeBytes` (each 1 GiB unless authored), at most 64 GiB, and is part of the
+world document. The disk is sparse: it stores only written sectors, in the
+worker's memory. Host memory, crash transfers, checkpoints and disk digests
+scale with written sectors, not the declared size.
 
 Code: [block](../crates/seedbox-engine-core/src/virtio_block.rs),
 [console](../crates/seedbox-engine-core/src/virtio_console.rs),
@@ -387,6 +993,39 @@ Code: [definition types](../crates/seedbox-spec/src/definition.rs),
 [image preparation](../crates/seedbox-application/src/oci.rs),
 [server](../crates/seedbox-server/src/).
 
+## Owned cache objects
+
+Bundle import and edited launch records create *owned* cache objects; an object
+the cache already holds stays an ordinary input, and an ordinary put of an owned
+object's bytes makes it one. A checkpoint capture is owned too, but as the
+session's own file: it is hard-linked (copied only across filesystems) into the
+session store, keeping its holes, and never enters the cache, so it needs no
+marker and goes with the session at shutdown. The session's `owned/`
+ledger holds an empty marker per owned object, made durable before the object is
+named. One store lock orders naming, adoption and removal, so an object an
+ordinary put returned is never reclaimed.
+
+After `delete` and checkpoint deletion, the server removes every owned object
+that no remaining resource names: submitted and resolved specs, undeleted
+imported checkpoints, retained input files, and checkpoints exported from a
+source that still exists (a fetched branch definition stays submittable). Roots
+over-approximate: any digest-shaped string counts. Reclamation holds the evidence
+lock, which imports, exports and deletes share, and then the reference lock for
+writing. Checkpoint export and the resolved-input commit in execution hold it for
+reading from their owned puts until the export registry or the resource and
+retained inputs name the objects. A client that submits a definition after every
+resource naming its objects was deleted gets a missing-asset error.
+
+Graceful shutdown reclaims once more; cache objects still referenced then stay
+as ordinary cache content for saved definitions, while captures leave with the
+session (export a simulation to keep its checkpoints). Startup removes the objects listed
+in an abandoned session's ledger, because no resource survives a crash. Objects
+from earlier versions or lost markers are never pruned automatically.
+
+Code: [content store](../crates/seedbox-artifacts/src/store.rs),
+[reclamation](../crates/seedbox-server/src/execution/content.rs),
+[session ledger](../crates/seedbox/src/cli/daemon.rs).
+
 ## Development checks
 
 Run from the checkout root:
@@ -406,6 +1045,17 @@ The VMM and ARM backends have separate Cargo workspaces and lockfiles; use the
 root Cargo aliases when building them directly. ARM guest fixtures read
 `SEEDBOX_ARM64_KERNEL` and `SEEDBOX_ARM64_INITRD`; `harness/check.py` defines
 their checkout defaults and the other suite requirements.
+
+The application suites also run `crates/seedbox/tests/determinism.rs`: one
+definition built from `harness/fixtures/determinism` must keep its witness,
+full state and fault history under slowed, paused and observed playback, beside
+a concurrently controlled simulation, with checkpoints captured, and with fault
+previews issued while paused. Its branches must match each other, and edited
+inputs must reproduce output, events and faults before their first changed time.
+A keyed fault whose HTTP client disconnects must be admitted once. Runs exported
+from that server are imported into a second one with a fresh state directory,
+where fresh runs of the same projects (one image pinned by registry digest) must
+match them and an imported checkpoint of a deleted source must branch.
 
 Unit tests live beside their component under `src/`. Integration tests live in
 the owning crate's `tests/` and exercise public boundaries. Give each scenario
@@ -441,8 +1091,8 @@ end blocks. Manifest metadata is bounded (16 MiB); large assets and diagnostic
 payloads use bounded buffers and disk spools. Transfers are not resumable or
 idempotent. After a full upload, disconnect/cancellation cannot guarantee that
 import was not accepted; clients never automatically retry it. Failed validation
-publishes no resource, but verified cache objects may remain after publication
-failure. This is not cache pruning.
+publishes no resource; the binaries it owned are reclaimed with the next deletion
+or at shutdown.
 
 Logs and events preserve their independent aggregate/per-machine sequences,
 source unavailability and delivery gaps. Restoration uses the shared 64 MiB log

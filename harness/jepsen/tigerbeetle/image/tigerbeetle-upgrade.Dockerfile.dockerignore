@@ -1,0 +1,3 @@
+# Only the built guest binary enters the build context.
+*
+!build/jepsen/*/seedbox-jepsen

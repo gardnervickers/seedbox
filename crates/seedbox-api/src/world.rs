@@ -20,6 +20,72 @@ pub struct WorldState {
     pub machines: Vec<MachineState>,
     pub links: Vec<LinkState>,
     pub faults: Vec<FaultState>,
+    /// Typed trigger inputs by input key: what each has matched and done.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub triggers: std::collections::BTreeMap<String, TriggerState>,
+    /// Due choice inputs by input key, and the alternative each selected.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub choice_inputs: std::collections::BTreeMap<String, ChoiceInputState>,
+}
+
+/// A due choice input: active until it answers its request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChoiceInputState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_at_ns: Option<u64>,
+}
+
+/// A typed trigger input's receipt. A fired trigger's effect is the fault
+/// `fault_id`; that fault's status says whether it applied.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TriggerState {
+    pub status: TriggerStatus,
+    /// Matching occurrences so far.
+    pub seen: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_at_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_at_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TriggerStatus {
+    /// Watching for its occurrence.
+    Armed,
+    /// Matched; its effect waits for its time.
+    Matched,
+    /// Its effect was admitted as a fault.
+    Fired,
+    /// No match before its deadline.
+    Expired,
+    /// Its effect was refused at its time.
+    Rejected,
+    /// The run ended while it was armed or matched.
+    CutOff,
+    Cancelled,
+}
+impl From<seedbox_control::TriggerStatus> for TriggerStatus {
+    fn from(status: seedbox_control::TriggerStatus) -> Self {
+        use seedbox_control::TriggerStatus as Engine;
+        match status {
+            Engine::Armed => Self::Armed,
+            Engine::Matched => Self::Matched,
+            Engine::Fired => Self::Fired,
+            Engine::Expired => Self::Expired,
+            Engine::Rejected => Self::Rejected,
+            Engine::CutOff => Self::CutOff,
+            Engine::Cancelled => Self::Cancelled,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +144,38 @@ pub struct MachineState {
     pub condition_since_ns: Option<u64>,
     #[serde(default)]
     pub application: ApplicationState,
+    /// Guest kernel out-of-memory kills on this machine, oldest first, across
+    /// incarnations. Only the most recent [`MAX_OUT_OF_MEMORY_KILLS`] are kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub out_of_memory_kills: Vec<OutOfMemoryKill>,
+}
+
+/// Kills retained per machine; each needs the guest to exhaust its memory.
+pub const MAX_OUT_OF_MEMORY_KILLS: usize = 64;
+
+/// The process the guest kernel's out-of-memory killer chose, from its log.
+pub use seedbox_engine_protocol::out_of_memory::Process as OutOfMemoryProcess;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OutOfMemoryKill {
+    pub incarnation: u32,
+    pub simulated_time_ns: u64,
+    /// Absent when the kernel counted the kill but its log record was lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<OutOfMemoryProcess>,
+}
+
+impl MachineState {
+    /// The kill that ended the current incarnation's application, if it exited.
+    pub fn exited_out_of_memory(&self) -> Option<&OutOfMemoryKill> {
+        if self.condition != MachineCondition::Exited {
+            return None;
+        }
+        self.out_of_memory_kills
+            .last()
+            .filter(|kill| kill.incarnation == self.incarnation)
+    }
 }
 
 /// One direction of a machine pair.
@@ -139,6 +237,9 @@ pub struct FaultState {
     pub plan: Option<serde_json::Value>,
     /// An applied effect that persists until healed, reversed, or ended by lifecycle.
     pub active: bool,
+    /// What the fault matched and did, once known, by kind of count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counts: Option<serde_json::Value>,
 }
 
 /// One batch of routed frames on the live frame stream.

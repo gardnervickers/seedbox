@@ -21,6 +21,8 @@ pub struct RunOptions {
     /// An explicit override wins over the resolved seed.
     pub seed: Option<u64>,
     pub cancellation: CancellationToken,
+    /// Anchor inputs to capture checkpoints at; never changes results.
+    pub capture_anchors: Vec<String>,
 }
 
 pub enum RunProgress<'a> {
@@ -310,6 +312,7 @@ impl Orchestrator {
             }
             if cancellation.is_cancelled() {
                 return Ok(ExecutionReport {
+                    choices: None,
                     host_wait_ns: 0,
                     simulated_time_ns: None,
                     reason: StopReason::Cancelled,
@@ -318,6 +321,7 @@ impl Orchestrator {
                     full_state: None,
                     faults: vec![],
                     detail: Some("cancelled before execution".into()),
+                    properties: None,
                 });
             }
             let start = seedbox_engine_protocol::host_clock::Instant::now()?;
@@ -329,6 +333,7 @@ impl Orchestrator {
                 wall_time_ns: options.wall_time_ns.unwrap_or(u64::MAX),
             };
             let mut report = executor.execute(ExecutionRequest {
+                capture_anchors: &options.capture_anchors,
                 start_paused: self.start_paused,
                 resume_checkpoint: self.resume_checkpoint.as_deref(),
                 intervention_history: Some(&directory.join("interventions.json")),
@@ -344,6 +349,14 @@ impl Orchestrator {
                     .services
                     .iter()
                     .map(|(name, service)| (name.clone(), service.cpu.clone()))
+                    .collect(),
+                expected_crashes: &record
+                    .identity
+                    .configuration
+                    .services
+                    .iter()
+                    .filter(|(_, service)| !service.expected_crashes.is_empty())
+                    .map(|(name, service)| (name.clone(), service.expected_crashes.clone()))
                     .collect(),
                 schedule: &record.identity.configuration.schedule,
                 control: record.identity.configuration.control.as_ref(),

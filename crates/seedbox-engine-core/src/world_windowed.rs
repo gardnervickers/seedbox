@@ -14,10 +14,12 @@ use crate::links;
 use crate::network_counters::{
     self, DELIVERED, LOSS_DROPPED, PARTITION_DROPPED, QUEUE_DROPPED, RECEIVER_DROPPED,
 };
+use crate::triggers::Observed;
 use crate::window as sw;
 use crate::world::{self, Crash, Payload, SliceRequest, State, Stop, World, WorldMachine};
 use crate::world_events as events;
 use crate::{control, faults};
+use seedbox_control::Transition;
 pub use seedbox_engine_protocol::host_control::{Boundary, BoundaryPosition};
 use seedbox_engine_protocol::observation::{Frame, FrameFate, Kind as ObservationKind};
 use serde_json::{json, Value};
@@ -163,9 +165,19 @@ struct Guest<'a, M> {
     console: Vec<(u64, u8)>,
     /// Times a control reply reached the controller.
     replies: Vec<u64>,
+    /// Committed property frames: (time, incarnation, line).
+    properties: Vec<(u64, u32, Option<Vec<u8>>)>,
     observations: crate::observation::Buffer,
     /// Exited in the last round.
     exited_now: bool,
+    /// Held a block request in the last round: when, and for which trigger.
+    held_now: Option<(u64, u32)>,
+    /// Results of frames the last slice already delivered at its hard
+    /// limit: (index of the first, one per frame). The next delivery consumes it.
+    delivered: Option<(usize, Vec<bool>)>,
+    /// Slices the adapter already ran ahead in an earlier exchange; the next
+    /// that many advances replay them.
+    ahead: usize,
 }
 
 /// Machine capability and exited-target policy shared by all host-origin inputs.
@@ -181,6 +193,19 @@ fn validate_host_action<M: WorldMachine>(
             if let Some(message) = crate::control::exited_target_error(action) {
                 return Err(format!("{machine}: {message}"));
             }
+        }
+    }
+    if let seedbox_control::Action::DiskError { machine, .. }
+    | seedbox_control::Action::DiskLatency { machine, .. } = action
+    {
+        if guests
+            .iter()
+            .any(|guest| guest.m.name == *machine && !guest.m.has_disk())
+        {
+            return Err(format!(
+                "{machine}: {} needs a retained disk",
+                action.name()
+            ));
         }
     }
     if let seedbox_control::Action::Throttle { machine, .. } = action {
@@ -209,13 +234,17 @@ impl<'a, M: WorldMachine> Guest<'a, M> {
             requests: Vec::new(),
             console: Vec::new(),
             replies: Vec::new(),
+            properties: Vec::new(),
             observations: crate::observation::Buffer::default(),
             exited_now: false,
+            held_now: None,
+            delivered: None,
+            ahead: 0,
         }
     }
 
     fn suspended(&self) -> bool {
-        self.m.parked || self.m.paused || self.m.down
+        self.m.parked || self.m.paused || self.m.down || self.m.held.is_some()
     }
 
     fn exited_at(&self) -> Option<u64> {
@@ -256,6 +285,8 @@ impl<'a, M: WorldMachine> Guest<'a, M> {
         for (at, line) in std::mem::take(&mut self.m.control_requests) {
             self.requests.push((at, line));
         }
+        self.properties
+            .append(&mut std::mem::take(&mut self.m.committed_properties));
         if let Some((at, byte)) = self.m.committed_console.take() {
             self.console.push((at, byte));
         }
@@ -288,6 +319,34 @@ impl<'a, M: WorldMachine> Guest<'a, M> {
     /// Deliver the assigned events the machine's time has reached, in key
     /// order. With `slack`, a non-strict event may arrive `delivery_early`
     /// before its time; a strict one never does.
+    /// Record frames a slice delivered at its limit for the next delivery,
+    /// which must then find exactly them due.
+    fn check_delivered(
+        &mut self,
+        stop: Stop,
+        limit: u64,
+        i: usize,
+        then: &[(u64, usize, &[u8])],
+        delivered: Option<Vec<bool>>,
+    ) -> Result<(), String> {
+        let Some(accepted) = delivered else {
+            return Ok(());
+        };
+        if stop != Stop::Reached
+            || self.m.time != limit
+            || self.m.state != State::Running
+            || accepted.len() != then.len()
+            || then.is_empty()
+        {
+            return Err(format!(
+                "{}: frames delivered with a slice that did not reach them",
+                self.m.name
+            ));
+        }
+        self.delivered = Some((i, accepted));
+        Ok(())
+    }
+
     fn deliver(
         &mut self,
         a: &sw::Assignment<Msg>,
@@ -295,19 +354,45 @@ impl<'a, M: WorldMachine> Guest<'a, M> {
         outputs: &mut Vec<sw::Output<Msg>>,
         slack: bool,
     ) -> Result<(), String> {
-        while let Some(e) = a.incoming.get(*i).filter(|e| {
-            let early = if slack && !e.payload.strict() {
-                a.delivery_early
-            } else {
-                0
-            };
-            e.key.at <= self.m.time.saturating_add(early)
-        }) {
+        while let Some(e) = a.incoming.get(*i).filter(|e| due(a, e, self.m.time, slack)) {
             let now = self.m.time;
             match &e.payload {
-                Msg::Frame { from, bytes } => {
-                    let accepted = self.m.deliver_frame(bytes)?;
-                    self.received.push((e.key.at, *from, accepted));
+                Msg::Frame { .. } => {
+                    // Deliver the run of consecutive due frames together.
+                    // Delivery never moves the machine's time, so these are
+                    // exactly the frames, in the order, that one-by-one
+                    // delivery would take, and each keeps its own effects.
+                    let run = due_frames(a, *i, now, slack);
+                    let accepted = match self.delivered.take() {
+                        // The slice that reached this time delivered them.
+                        Some((start, accepted)) if start == *i && accepted.len() == run.len() => {
+                            accepted
+                        }
+                        Some(_) => {
+                            return Err(format!(
+                                "{}: frames delivered with the slice differ from those due",
+                                self.m.name
+                            ))
+                        }
+                        None => {
+                            let frames: Vec<&[u8]> =
+                                run.iter().map(|(_, _, bytes)| *bytes).collect();
+                            self.m.deliver_frames(&frames)?
+                        }
+                    };
+                    if accepted.len() != run.len() {
+                        return Err(format!(
+                            "{}: {} frame results for {} frames",
+                            self.m.name,
+                            accepted.len(),
+                            run.len()
+                        ));
+                    }
+                    for (&(at, from, _), accepted) in run.iter().zip(accepted) {
+                        self.received.push((at, from, accepted));
+                    }
+                    *i += run.len();
+                    continue;
                 }
                 Msg::Serial(bytes) => self.m.deliver_serial(bytes)?,
                 Msg::Control(bytes) => {
@@ -330,6 +415,92 @@ impl<'a, M: WorldMachine> Guest<'a, M> {
         }
         Ok(())
     }
+}
+
+/// Whether the machine may take this event at `time`. With `slack`, a
+/// non-strict event may arrive `delivery_early` before its time; a strict
+/// one never does.
+fn due(a: &sw::Assignment<Msg>, e: &sw::Event<Msg>, time: u64, slack: bool) -> bool {
+    let early = if slack && !e.payload.strict() {
+        a.delivery_early
+    } else {
+        0
+    };
+    e.key.at <= time.saturating_add(early)
+}
+
+/// The run of consecutive frames from `start` that are due at `time`:
+/// (nominal time, sender, bytes).
+fn due_frames(
+    a: &sw::Assignment<Msg>,
+    start: usize,
+    time: u64,
+    slack: bool,
+) -> Vec<(u64, usize, &[u8])> {
+    a.incoming[start..]
+        .iter()
+        .take_while(|e| due(a, e, time, slack))
+        .map_while(|e| match &e.payload {
+            Msg::Frame { from, bytes } => Some((e.key.at, *from, &bytes[..])),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The slices this round's loop requests after one that reaches `time`
+/// with the frames due there delivered, `next` being the first event left,
+/// for as long as each later slice also reaches its limit: the loop then
+/// delivers nothing else, stays running and does not reach the slice end.
+/// It stops before any slice the loop might not request that way.
+fn plan_ahead(
+    a: &sw::Assignment<Msg>,
+    slice_end: u64,
+    mut next: usize,
+    mut time: u64,
+    observe_console: bool,
+    capacity: usize,
+) -> Vec<world::ChainStep<'_>> {
+    let mut steps = Vec::new();
+    while steps.len() < capacity && time < slice_end {
+        // Anything due now, even early, is delivered by the loop itself.
+        if a.incoming.get(next).is_some_and(|e| due(a, e, time, true)) {
+            break;
+        }
+        let (event, strict) = a
+            .incoming
+            .get(next)
+            .map_or((sw::NEVER, false), |e| (e.key.at, e.payload.strict()));
+        let limit = a.stop.min(event);
+        if limit <= time {
+            break;
+        }
+        let early_slack = if limit == a.stop {
+            a.stop_early
+        } else if strict {
+            0
+        } else {
+            a.delivery_early
+        };
+        let then: Vec<&[u8]> = if limit == event {
+            due_frames(a, next, limit, false)
+                .into_iter()
+                .map(|(_, _, bytes)| bytes)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        next += then.len();
+        time = limit;
+        steps.push(world::ChainStep {
+            request: SliceRequest {
+                hard_limit: limit,
+                early_slack,
+                observe_console,
+            },
+            then,
+        });
+    }
+    steps
 }
 
 impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
@@ -370,6 +541,12 @@ impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
             // state and even when it stands at or past the slice end: a
             // skewed release or a resumed segment can leave it there.
             self.deliver(a, &mut i, &mut outputs, false)?;
+            if self.delivered.is_some() {
+                return Err(format!(
+                    "{}: frames delivered with the slice were not due",
+                    self.m.name
+                ));
+            }
             if self.m.state == State::Halted {
                 // Wake at the machine's own next action or the next event's
                 // nominal time, as the reference scheduler's key does. An
@@ -410,8 +587,57 @@ impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
                 early_slack: early,
                 observe_console: self.observe,
             };
+            // When the slice ends at a frame's time, the next iteration
+            // delivers the frames due there before anything else: the machine
+            // stays running, unsuspended and short of its fork time. An
+            // adapter may then deliver them in the same host exchange.
+            let then = if self.m.delivers_after_advance()
+                && limit == event
+                && self.fork_at.is_none_or(|t| limit < t)
+                && !self.suspended()
+            {
+                due_frames(a, i, limit, false)
+            } else {
+                Vec::new()
+            };
             let observation = world::SliceObservation::begin(self.m, request)?;
-            let stop = self.m.advance(clock, request, &mut frames)?;
+            let first = world::ChainStep {
+                request,
+                then: then.iter().map(|(_, _, bytes)| *bytes).collect(),
+            };
+            let chain = self.ahead == 0
+                && self.m.delivers_after_advance()
+                && self.m.chain_capacity() > 0
+                && self.fork_at.is_none()
+                && !self.suspended();
+            let stop = if chain {
+                let ahead = plan_ahead(
+                    a,
+                    slice_end,
+                    i + then.len(),
+                    limit,
+                    self.observe,
+                    self.m.chain_capacity(),
+                );
+                let (stop, delivered, ran) =
+                    self.m.advance_chain(clock, first, &ahead, &mut frames)?;
+                if ran > ahead.len() {
+                    return Err(format!("{}: adapter ran unplanned slices", self.m.name));
+                }
+                self.ahead = ran;
+                self.check_delivered(stop, limit, i, &then, delivered)?;
+                stop
+            } else if then.is_empty() {
+                self.ahead = self.ahead.saturating_sub(1);
+                self.m.advance(clock, request, &mut frames)?
+            } else {
+                self.ahead = self.ahead.saturating_sub(1);
+                let (stop, delivered) =
+                    self.m
+                        .advance_then_deliver(clock, request, &mut frames, &first.then)?;
+                self.check_delivered(stop, limit, i, &then, delivered)?;
+                stop
+            };
             observation.validate(self.m, request, stop)?;
             self.drain();
             let now = self.m.time;
@@ -427,6 +653,14 @@ impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
                 }
                 Stop::Barrier => {
                     // Parked at the guest's launch barrier.
+                    suspended = true;
+                    break;
+                }
+                Stop::Held(trigger) => {
+                    // Terminal suspension: it neither acts nor receives, and
+                    // its queued inputs stay unconsumed until the crash.
+                    self.m.held = Some(trigger);
+                    self.held_now = Some((self.m.time, trigger));
                     suspended = true;
                     break;
                 }
@@ -447,6 +681,12 @@ impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
             } else {
                 stalled = None;
             }
+        }
+        if self.ahead != 0 {
+            return Err(format!(
+                "{}: {} slices run ahead were not requested",
+                self.m.name, self.ahead
+            ));
         }
         Ok(sw::Report {
             time: self.m.time,
@@ -498,16 +738,115 @@ struct Coord<'a, M: WorldMachine> {
     prior_rounds: u64,
     boundaries: &'a mut u64,
     application_ready: bool,
-    fault_statuses: Vec<faults::RowStatus>,
+    /// Published status of each fault row, and whether its counts were.
+    fault_statuses: Vec<(faults::RowStatus, bool)>,
     published_rejections: usize,
     /// Routed frames not yet published; empty without an observation socket.
     frames: Vec<Frame>,
+    /// Published status of each trigger record; typed ones only.
+    trigger_statuses: Vec<Option<seedbox_control::TriggerStatus>>,
+    /// Frames routed this round while typed triggers watch: send time,
+    /// source, destination, and the port of a connection it opened.
+    trigger_frames: Vec<(u64, usize, usize, Option<u16>)>,
+    /// No frame arrives sooner than this after it is sent; typed trigger
+    /// effects follow their match by at least this much.
+    lookahead: u64,
+    /// The block request hold installed in each machine, by trigger ID.
+    holds: Vec<Option<u32>>,
+    properties: &'a mut seedbox_engine_protocol::property::Ledger,
+    /// Per machine, the crashes its definition expects.
+    expected_crashes: &'a [Vec<seedbox_engine_protocol::property::ExpectedCrash>],
+    choices: &'a mut crate::choices::Choices,
+    /// Choice replies committed this round: when, to which machine, what.
+    choice_replies: Vec<(u64, usize, Vec<u8>)>,
+    anchor_captures: &'a std::collections::BTreeSet<String>,
+    captured_anchor: Option<String>,
+    /// Resume the boundary an anchor capture stopped in.
+    resume_after_anchor: bool,
 }
 
 impl<M: WorldMachine> Coord<'_, M> {
+    /// Install each armed `block_request` trigger's hold in its machine, and
+    /// remove holds whose trigger no longer is armed. Runs at boundaries,
+    /// where no machine is past the boundary's time.
+    fn sync_holds(&mut self, guests: &mut [Guest<'_, M>]) -> Result<(), String> {
+        for (m, g) in guests.iter_mut().enumerate() {
+            let wanted = (self.control.triggers.armed_holds())
+                .find(|(machine, _)| *machine == self.names[m])
+                .map(|(_, hold)| hold);
+            // A held device has consumed its hold; the crash replaces it.
+            if g.m.held.is_some() {
+                self.holds[m] = None;
+                continue;
+            }
+            if wanted.map(|h| h.trigger_id) == self.holds[m] {
+                continue;
+            }
+            // A down or exited machine has no device to hold; its successor does.
+            if g.m.down || matches!(g.m.state, State::Exited(_)) {
+                if wanted.is_none() {
+                    self.holds[m] = None;
+                }
+                continue;
+            }
+            g.m.hold_block(wanted)?;
+            self.holds[m] = wanted.map(|h| h.trigger_id);
+        }
+        Ok(())
+    }
+
+    /// The input that admitted a fault: directly, or through a typed trigger.
+    fn input_key(&self, id: u32) -> Option<String> {
+        self.input_program
+            .key_for(id)
+            .or_else(|| {
+                let records = &self.control.triggers.records;
+                records
+                    .iter()
+                    .find(|r| r.fault_id == Some(id))?
+                    .key
+                    .as_deref()
+            })
+            .map(str::to_owned)
+    }
+
+    /// Publish each typed trigger whose receipt status changed.
+    fn publish_triggers(&mut self, at: u64) {
+        let Some(publisher) = self.observations else {
+            return;
+        };
+        for (index, r) in self.control.triggers.records.iter().enumerate() {
+            let Some(key) = r.key.as_ref() else {
+                continue;
+            };
+            if self.trigger_statuses.get(index) == Some(&Some(r.status)) {
+                continue;
+            }
+            publisher.publish(
+                "",
+                0,
+                at,
+                ObservationKind::TriggerChanged {
+                    input_key: key.clone(),
+                    status: r.status,
+                    seen: r.seen,
+                    matched_at_ns: r.matched_at_ns,
+                    effect_at_ns: r.effect_at_ns,
+                    fault_id: r.fault_id,
+                    reason: r.rejection_reason.clone(),
+                },
+            );
+            if self.trigger_statuses.len() <= index {
+                self.trigger_statuses.resize(index + 1, None);
+            }
+            self.trigger_statuses[index] = Some(r.status);
+        }
+    }
+
     /// Called only after policy mutations, never on idle execution rounds.
     /// This cache is runtime-only and starts at the segment's existing state.
     fn publish_faults(&mut self, at: u64) {
+        self.publish_triggers(at);
         let Some(publisher) = self.observations else {
             return;
         };
@@ -525,7 +864,9 @@ impl<M: WorldMachine> Coord<'_, M> {
         }
         self.published_rejections = self.input_program.rejections().len();
         for (index, row) in self.faults.log.iter().enumerate() {
-            if self.fault_statuses.get(index) == Some(&row.status) {
+            let counts = row.counts();
+            let published = (row.status, counts.is_some());
+            if self.fault_statuses.get(index) == Some(&published) {
                 continue;
             }
             publisher.publish(
@@ -533,8 +874,9 @@ impl<M: WorldMachine> Coord<'_, M> {
                 0,
                 at,
                 seedbox_engine_protocol::observation::Kind::FaultChanged {
+                    counts,
                     id: row.id,
-                    input_key: self.input_program.key_for(row.id).map(str::to_owned),
+                    input_key: self.input_key(row.id),
                     action: row.action.to_string(),
                     machine: row.machine.clone(),
                     status: row.status,
@@ -546,9 +888,9 @@ impl<M: WorldMachine> Coord<'_, M> {
                 },
             );
             if let Some(status) = self.fault_statuses.get_mut(index) {
-                *status = row.status;
+                *status = published;
             } else {
-                self.fault_statuses.push(row.status);
+                self.fault_statuses.push(published);
             }
         }
     }
@@ -585,8 +927,9 @@ impl<M: WorldMachine> Coord<'_, M> {
                 0,
                 at,
                 ObservationKind::FaultChanged {
+                    counts: row.counts(),
                     id: row.id,
-                    input_key: self.input_program.key_for(row.id).map(str::to_owned),
+                    input_key: self.input_key(row.id),
                     action: row.action.to_string(),
                     machine: row.machine.clone(),
                     status: row.status,
@@ -662,7 +1005,14 @@ impl<M: WorldMachine> Coord<'_, M> {
         let mut console = Vec::new();
         let mut replies = Vec::new();
         let mut requests = Vec::new();
+        let mut properties = Vec::new();
         for (m, g) in guests.iter_mut().enumerate() {
+            properties.extend(
+                g.properties
+                    .drain(..)
+                    .enumerate()
+                    .map(|(j, (at, incarnation, line))| (at, m, j, incarnation, line)),
+            );
             received.extend(g.received.drain(..).map(|(at, from, ok)| (at, from, m, ok)));
             effects.extend(
                 g.effects
@@ -686,6 +1036,10 @@ impl<M: WorldMachine> Coord<'_, M> {
         }
         let faults_changed = effects.iter().any(|(_, _, _, id, _)| *id != 0)
             || guests.iter().any(|guest| guest.exited_now);
+        // Typed triggers see this round's committed occurrences in one fixed
+        // order: time, machine, then source and position within it.
+        let typed = self.control.triggers.typed_armed();
+        let mut occurrences: Vec<(u64, usize, u8, usize, Observed)> = Vec::new();
         received.sort();
         for (at, from, to, accepted) in received {
             if accepted {
@@ -701,18 +1055,90 @@ impl<M: WorldMachine> Coord<'_, M> {
             if id == 0 && success {
                 match self.faults.management_ready(m, at, self.latency) {
                     Err(error) => self.faults.error = Some(error),
-                    Ok(()) => machine_events.push((
-                        at,
-                        m,
-                        0,
-                        seedbox_engine_protocol::observation::Kind::MachineReady,
-                    )),
+                    Ok(()) => {
+                        if typed {
+                            let event = Observed::Lifecycle {
+                                machine: self.names[m].clone(),
+                                transition: Transition::Ready,
+                            };
+                            occurrences.push((at, m, 0, 0, event));
+                        }
+                        machine_events.push((
+                            at,
+                            m,
+                            0,
+                            seedbox_engine_protocol::observation::Kind::MachineReady,
+                        ))
+                    }
                 }
                 if !self.application_ready {
                     self.application_ready = self.faults.initial_applications_ready();
                 }
             } else {
                 self.faults.effect(m, id, at, success);
+            }
+        }
+        properties.sort();
+        for (at, m, j, incarnation, line) in properties {
+            let request = line.as_deref().and_then(crate::properties::request);
+            if let Some((session, _, crate::properties::Request::Choice { site, alternatives })) =
+                &request
+            {
+                let (session, site, alternatives) = (*session, site.clone(), alternatives.clone());
+                let request = crate::choices::Request {
+                    machine: &self.names[m],
+                    incarnation,
+                    session,
+                    site: &site,
+                    alternatives: &alternatives,
+                    at,
+                };
+                let answer = self.choices.request(
+                    request,
+                    self.lookahead,
+                    self.run_seed,
+                    self.branch_identity.as_deref(),
+                )?;
+                self.choice_replies.push((answer.reply_at, m, answer.reply));
+                if let (Some(publisher), Some(input_key)) = (self.observations, answer.input_key) {
+                    let kind = ObservationKind::ChoiceChanged {
+                        input_key,
+                        chosen: Some(answer.chosen),
+                        selected_at_ns: Some(at),
+                    };
+                    publisher.publish("", 0, at, kind);
+                }
+            }
+            if typed {
+                if let Some(event) = line
+                    .as_deref()
+                    .and_then(|line| crate::properties::observed(&self.names[m], line))
+                {
+                    occurrences.push((at, m, 1, j, event));
+                }
+            }
+            crate::properties::commit(
+                self.properties,
+                &self.names[m],
+                &self.expected_crashes[m],
+                incarnation,
+                at,
+                line,
+            );
+            // Every earlier record of the session committed before this one,
+            // so the reply confirms them; it travels like a choice's.
+            let reply = match request {
+                Some((session, seq, crate::properties::Request::Flush)) => {
+                    Some(seedbox_engine_protocol::choice::flush_line(session, seq))
+                }
+                Some((session, seq, crate::properties::Request::Summary)) => Some(
+                    seedbox_engine_protocol::choice::summary_line(session, seq, self.properties),
+                ),
+                _ => None,
+            };
+            if let Some(reply) = reply {
+                let reply_at = at.checked_add(self.lookahead).ok_or("SDK reply overflow")?;
+                self.choice_replies.push((reply_at, m, reply));
             }
         }
         console.sort();
@@ -737,7 +1163,49 @@ impl<M: WorldMachine> Coord<'_, M> {
                     seedbox_engine_protocol::observation::Kind::MachineExited { code },
                 ));
             }
+            if typed {
+                let event = Observed::Lifecycle {
+                    machine: self.names[m].clone(),
+                    transition: Transition::Exited,
+                };
+                occurrences.push((g.m.time, m, 3, 0, event));
+            }
             self.faults.machine_exited(m, g.m.time);
+        }
+        for g in guests.iter_mut() {
+            if let Some((at, trigger)) = g.held_now.take() {
+                self.control
+                    .triggers
+                    .hold(trigger, at, self.lookahead, committed)?;
+            }
+        }
+        for (j, (at, from, to, opened)) in std::mem::take(&mut self.trigger_frames)
+            .into_iter()
+            .enumerate()
+        {
+            if !typed {
+                break;
+            }
+            let (from_name, to_name) = (self.names[from].clone(), self.names[to].clone());
+            if let Some(port) = opened {
+                let event = Observed::ConnectionOpen {
+                    from: from_name.clone(),
+                    to: to_name.clone(),
+                    port,
+                };
+                occurrences.push((at, from, 2, 2 * j, event));
+            }
+            let event = Observed::Frame {
+                from: from_name,
+                to: to_name,
+            };
+            occurrences.push((at, from, 2, 2 * j + 1, event));
+        }
+        occurrences.sort();
+        for (at, _, _, _, event) in occurrences {
+            self.control
+                .triggers
+                .observe(&event, at, self.lookahead, committed)?;
         }
         replies.sort();
         for (at, _) in replies {
@@ -786,6 +1254,8 @@ impl<M: WorldMachine> Coord<'_, M> {
         self.publish_frames(committed);
         if faults_changed {
             self.publish_faults(committed);
+        } else {
+            self.publish_triggers(committed);
         }
         Ok(())
     }
@@ -842,6 +1312,24 @@ impl<M: WorldMachine> Coord<'_, M> {
                     if let Some(speed_hz) = self.faults.throttle(m) {
                         guests[m].m.throttle(Some(speed_hz))?;
                     }
+                    for op in [
+                        self.faults.disk_errors(m),
+                        self.faults.disk_latency(m),
+                        self.faults
+                            .preempt(m)
+                            .map(|p| faults::Lifecycle::Preempt(Some(p))),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        world::apply_disk_fault(
+                            &mut *guests[m].m,
+                            self.faults,
+                            self.run_seed,
+                            self.branch_identity.as_deref(),
+                            op,
+                        )?;
+                    }
                     Ok(())
                 });
                 if let Err(mut error) = result {
@@ -849,9 +1337,26 @@ impl<M: WorldMachine> Coord<'_, M> {
                     self.failure = Some(error.clone());
                     return Err(error);
                 }
+                // The successor's device starts without a hold.
+                self.holds[m] = None;
             }
             faults::Lifecycle::Throttle(speed_hz) => {
                 applied_speed_hz = guests[m].m.throttle(speed_hz)?;
+            }
+            faults::Lifecycle::DiskErrors { .. }
+            | faults::Lifecycle::HealDiskErrors { .. }
+            | faults::Lifecycle::DiskLatency { .. }
+            | faults::Lifecycle::HealDiskLatency { .. }
+            | faults::Lifecycle::Preempt(_) => {
+                world::apply_disk_fault(
+                    &mut *guests[m].m,
+                    self.faults,
+                    self.run_seed,
+                    self.branch_identity.as_deref(),
+                    op,
+                )?;
+                // A device policy change is no machine lifecycle transition.
+                return Ok(());
             }
             faults::Lifecycle::Reboot => {
                 // Frames that reached it before `t` belonged to the dead
@@ -874,6 +1379,24 @@ impl<M: WorldMachine> Coord<'_, M> {
         let g = &guests[m];
         self.life[m] = (g.m.paused, g.m.down);
         sync(plan, m, g)?;
+        let current_incarnation = g.m.incarnation();
+        let transition = match op {
+            faults::Lifecycle::Pause => Some(Transition::Paused),
+            faults::Lifecycle::Resume => Some(Transition::Resumed),
+            faults::Lifecycle::Crash => Some(Transition::Crashed),
+            faults::Lifecycle::Reboot => Some(Transition::Rebooted),
+            _ => None,
+        };
+        if let Some(transition) = transition.filter(|_| self.control.triggers.typed_armed()) {
+            let event = Observed::Lifecycle {
+                machine: self.names[m].clone(),
+                transition,
+            };
+            self.control
+                .triggers
+                .observe(&event, t, self.lookahead, t)?;
+        }
+        self.sync_holds(guests)?;
         if let Some(publisher) = self.observations {
             use seedbox_engine_protocol::observation::{Kind, MachineTransition};
             let transition = match op {
@@ -884,11 +1407,18 @@ impl<M: WorldMachine> Coord<'_, M> {
                 faults::Lifecycle::Throttle(_) => MachineTransition::Throttled {
                     speed_hz: applied_speed_hz,
                 },
+                faults::Lifecycle::DiskErrors { .. }
+                | faults::Lifecycle::HealDiskErrors { .. }
+                | faults::Lifecycle::DiskLatency { .. }
+                | faults::Lifecycle::HealDiskLatency { .. }
+                | faults::Lifecycle::Preempt(_) => {
+                    return Ok(());
+                }
             };
             let incarnation = if op == faults::Lifecycle::Crash {
                 previous_incarnation
             } else {
-                g.m.incarnation()
+                current_incarnation
             };
             publisher.publish(
                 &self.names[m],
@@ -913,11 +1443,18 @@ impl<M: WorldMachine> Coord<'_, M> {
         // existing boundary instead of applying it twice or creating a phantom
         // replay position for later interactive faults.
         let resuming = std::mem::take(&mut self.resume_boundary);
+        // An anchor capture stops inside this boundary before counting it or
+        // entering the host; the resumed segment finishes the boundary's
+        // remaining inputs and then counts it once, as a cold run does.
+        self.resume_after_anchor = false;
         let mut flow = if resuming {
             sw::Flow::Continue
         } else {
             self.advance_boundaries(plan, guests)?
         };
+        if self.captured_anchor.is_some() {
+            return Ok(flow);
+        }
         if !resuming {
             *self.boundaries = self
                 .boundaries
@@ -945,7 +1482,11 @@ impl<M: WorldMachine> Coord<'_, M> {
         let mut admission =
             crate::intervention::Admission::new(self.faults, boundary, &validate_action)
                 .with_program(self.input_program)
-                .with_checkpoint_support(matches!(flow, sw::Flow::Continue) && !terminal);
+                .with_checkpoint_support(
+                    matches!(flow, sw::Flow::Continue)
+                        && !terminal
+                        && guests.iter().all(|g| g.m.held.is_none()),
+                );
         self.published_boundary = boundary;
         self.host.boundary(boundary, &mut admission)?;
         if admission.checkpoint_requested() {
@@ -972,6 +1513,12 @@ impl<M: WorldMachine> Coord<'_, M> {
         let duration = self.run.duration;
         let n = guests.len();
         self.absorb(guests, committed)?;
+        // Replies travel the management channel like a control reply; a
+        // crash before delivery discards them with the incarnation.
+        for (at, m, bytes) in std::mem::take(&mut self.choice_replies) {
+            plan.schedule(m, at, Msg::Control(bytes))?;
+            plan.add_boundary(at)?;
+        }
         if self.fault_failed() {
             self.stopped = Some(RunOutcome::FaultFailed);
             return Ok(sw::Flow::Stop);
@@ -990,13 +1537,19 @@ impl<M: WorldMachine> Coord<'_, M> {
             let fault_boundary = self.faults.next_boundary();
             let input_boundary = self.input_program.next_time();
             // A checkpoint precedes every action at T, including exact-time faults.
-            if self.run.checkpoint.is_some_and(|t| {
+            if let Some(t) = self.run.checkpoint.filter(|&t| {
                 start >= t
                     && control_boundary >= t
                     && fault_boundary >= t
                     && trigger_boundary >= t
                     && input_boundary >= t
             }) {
+                if let Some(g) = guests.iter().find(|g| g.m.held.is_some()) {
+                    return Err(format!(
+                        "checkpoint at {t} ns: {} holds an unresolved block request",
+                        g.m.name
+                    ));
+                }
                 self.stopped = Some(RunOutcome::Checkpoint);
                 return Ok(sw::Flow::Stop);
             }
@@ -1018,6 +1571,47 @@ impl<M: WorldMachine> Coord<'_, M> {
                     .min(input_boundary)
                     .min(duration),
             );
+            // Branch inputs establish the anchor phase at T: before the
+            // controls, triggers and ordinary inputs due then.
+            if input_boundary <= start
+                && input_boundary <= control_boundary
+                && input_boundary <= trigger_boundary
+                && input_boundary <= fault_boundary
+                && input_boundary < duration
+                && self.input_program.next_is_branch()
+            {
+                if guests.iter().any(|g| g.m.time > input_boundary) {
+                    return Err("branch input boundary is in committed machine past".into());
+                }
+                let gate = crate::input_program::Gate {
+                    ready: self.application_ready,
+                    quiet_until: self.control.quiet_until(),
+                };
+                match self.input_program.admit_due(
+                    self.faults,
+                    &mut self.control.triggers,
+                    input_boundary,
+                    gate,
+                    &|_| Ok(()),
+                )? {
+                    // A capture is only a cache: none is taken while a
+                    // machine holds an unresolved block request.
+                    crate::input_program::Admitted::Anchor { key }
+                        if self.anchor_captures.contains(&key)
+                            && guests.iter().all(|g| g.m.held.is_none()) =>
+                    {
+                        self.captured_anchor = Some(key);
+                        self.stopped = Some(RunOutcome::Checkpoint);
+                        self.interactive_checkpoint = true;
+                        return Ok(sw::Flow::Stop);
+                    }
+                    crate::input_program::Admitted::Reseed { seed, identity } => {
+                        self.reseed(guests, seed, &identity)?;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             if control_boundary <= start
                 && control_boundary <= trigger_boundary
                 && control_boundary <= input_boundary
@@ -1034,9 +1628,22 @@ impl<M: WorldMachine> Coord<'_, M> {
                 if guests.iter().any(|g| g.m.time > trigger_boundary) {
                     return Err("trigger boundary is in committed machine past".into());
                 }
-                self.control
-                    .triggers
-                    .apply_boundary(self.faults, trigger_boundary)?;
+                let fired = self.control.triggers.apply_boundary_gated(
+                    self.faults,
+                    trigger_boundary,
+                    self.control.quiet_until(),
+                )?;
+                // A teardown can follow the effect it undoes.
+                for key in fired {
+                    let event = Observed::Fired { key };
+                    self.control.triggers.observe(
+                        &event,
+                        trigger_boundary,
+                        self.lookahead,
+                        trigger_boundary,
+                    )?;
+                }
+                self.sync_holds(guests)?;
                 self.publish_faults(trigger_boundary);
                 continue;
             }
@@ -1050,10 +1657,29 @@ impl<M: WorldMachine> Coord<'_, M> {
                 if guests.iter().any(|g| g.m.time > input_boundary) {
                     return Err("input boundary is in committed machine past".into());
                 }
-                self.input_program
-                    .admit_due(self.faults, input_boundary, &|action| {
-                        validate_host_action(guests, action)
-                    })?;
+                let gate = crate::input_program::Gate {
+                    ready: self.application_ready,
+                    quiet_until: self.control.quiet_until(),
+                };
+                let admitted = self.input_program.admit_due(
+                    self.faults,
+                    &mut self.control.triggers,
+                    input_boundary,
+                    gate,
+                    &|action| validate_host_action(guests, action),
+                )?;
+                if let crate::input_program::Admitted::Choice { key, choice } = admitted {
+                    if let Some(publisher) = self.observations {
+                        let kind = ObservationKind::ChoiceChanged {
+                            input_key: key.clone(),
+                            chosen: None,
+                            selected_at_ns: None,
+                        };
+                        publisher.publish("", 0, input_boundary, kind);
+                    }
+                    self.choices.arm(key, choice);
+                }
+                self.sync_holds(guests)?;
                 self.publish_faults(input_boundary);
                 self.apply_faults(plan, guests, input_boundary)?;
                 if self.faults.error.is_some() && self.control.pending.is_none() {
@@ -1094,6 +1720,44 @@ impl<M: WorldMachine> Coord<'_, M> {
             g.fork_at = fork_at;
         }
         Ok(sw::Flow::Continue)
+    }
+
+    /// Reseed every future draw from a branch input: guest entropy, timer and
+    /// progress jitter, network policy streams, and the seed later crashes,
+    /// reboots and disk faults derive from. Effects already sampled stay.
+    fn reseed(
+        &mut self,
+        guests: &mut [Guest<'_, M>],
+        seed: u64,
+        identity: &str,
+    ) -> Result<(), String> {
+        self.run_seed = seed;
+        self.branch_identity = Some(identity.to_owned());
+        self.faults
+            .links
+            .reseed_branch(seed, Some(identity), &self.names);
+        for (g, name) in guests.iter_mut().zip(&self.names) {
+            let incarnation = g.m.incarnation();
+            g.m.seed_timer_branch(
+                seed,
+                Some(identity),
+                &format!("timer-jitter/{name}/{incarnation}"),
+            )?;
+            g.m.seed_progress_jitter_branch(
+                seed,
+                Some(identity),
+                &format!("progress-jitter/{name}/{incarnation}"),
+            )?;
+            if !(g.m.down || matches!(g.m.state, State::Exited(_))) {
+                let mut rng = crate::rng::Rng::branch(
+                    seed,
+                    Some(identity),
+                    &format!("guest-entropy/{name}/{incarnation}"),
+                );
+                g.m.reseed_guest(std::array::from_fn(|_| rng.next() as u32))?;
+            }
+        }
+        Ok(())
     }
 
     /// The control barrier at `at`: refuse what the machines can no longer
@@ -1206,10 +1870,19 @@ impl<M: WorldMachine> sw::Router<Msg> for Coord<'_, M> {
         }
         let mut dst_mac = [0; 6];
         dst_mac.copy_from_slice(&frame[0..6]);
+        let typed = self.control.triggers.typed_armed();
         for dst in links::candidates(src, dst_mac, self.macs) {
             let last = self.faults.links.last.get(&(src, dst)).copied();
             let cut = *self.partitioned.get(&(src, dst)).unwrap_or(&false);
-            let at = match self.faults.route(src, dst, sent_at, &frame, cut) {
+            let opened_before = self.faults.connections_opened();
+            let routed = self.faults.route(src, dst, sent_at, &frame, cut);
+            if typed {
+                let opened = (self.faults.connections_opened() != opened_before)
+                    .then(|| crate::connections::syn_port(&frame))
+                    .flatten();
+                self.trigger_frames.push((sent_at, src, dst, opened));
+            }
+            let at = match routed {
                 links::Outcome::Cut => {
                     *self.dropped += 1;
                     self.count(sent_at, src, dst, PARTITION_DROPPED);
@@ -1443,8 +2116,9 @@ where
         ),
         None => None,
     };
+    let lookahead = world.lookahead;
     let params = sw::Params {
-        latency: world.lookahead,
+        latency: lookahead,
         early: world.early,
         duration: run.duration,
         end_on,
@@ -1477,6 +2151,12 @@ where
         slices,
         boundaries,
         scheduler_continuation,
+        properties,
+        expected_crashes,
+        choices,
+        anchor_captures,
+        captured_anchor,
+        resume_after_anchor,
         ..
     } = world;
     if let Some(plan) = scheduler_continuation.as_ref() {
@@ -1497,7 +2177,8 @@ where
     for g in &mut guests {
         g.drain();
     }
-    let resume_boundary = scheduler_continuation.is_some();
+    let resume_anchor = std::mem::take(resume_after_anchor);
+    let resume_boundary = scheduler_continuation.is_some() && !resume_anchor;
     let mut plan = if let Some(mut plan) = scheduler_continuation.take() {
         for (index, guest) in guests.iter().enumerate() {
             sync(&mut plan, index, guest)?;
@@ -1528,7 +2209,11 @@ where
     let life = guests.iter().map(|g| (g.m.paused, g.m.down)).collect();
     let application_ready = faults.initial_applications_ready();
     let fault_statuses = if observations.is_some() {
-        faults.log.iter().map(|row| row.status).collect()
+        faults
+            .log
+            .iter()
+            .map(|row| (row.status, row.counts().is_some()))
+            .collect()
     } else {
         Vec::new()
     };
@@ -1548,6 +2233,25 @@ where
         application_ready,
         fault_statuses,
         frames: Vec::new(),
+        trigger_statuses: Vec::new(),
+        trigger_frames: Vec::new(),
+        lookahead,
+        choices,
+        choice_replies: Vec::new(),
+        // A restored machine's device already holds its armed rule.
+        holds: names
+            .iter()
+            .map(|name| {
+                (control.triggers.armed_holds())
+                    .find(|(machine, _)| machine == name)
+                    .map(|(_, hold)| hold.trigger_id)
+            })
+            .collect(),
+        properties,
+        expected_crashes,
+        anchor_captures,
+        captured_anchor: None,
+        resume_after_anchor: resume_anchor,
         observations: observations.as_deref(),
         run,
         names,
@@ -1579,6 +2283,7 @@ where
         boundaries,
     };
     coord.publish_initial_faults(plan.committed());
+    coord.publish_triggers(plan.committed());
     let started = Instant::now();
     let result = execute(&mut plan, &mut guests, clock, &mut coord);
     let host_seconds = started.elapsed().as_secs_f64();
@@ -1586,6 +2291,13 @@ where
     let interactive_checkpoint = coord.interactive_checkpoint;
     if let Some(reason) = coord.failure.take() {
         *failure = Some(reason);
+    }
+    // A reseed input changes the seed and identity later draws derive from.
+    *run_seed = coord.run_seed;
+    *branch_identity = coord.branch_identity.clone();
+    if let Some(key) = coord.captured_anchor.take() {
+        *captured_anchor = Some(key);
+        *resume_after_anchor = true;
     }
     drop(coord);
     drop(guests);

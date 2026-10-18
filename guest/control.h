@@ -55,4 +55,41 @@ static int control_parse(char *command, char **action, uint32_t *id, int64_t *st
         if (!strcmp(*action, actions[i])) return 0;
     return -1;
 }
+/* `exec ID HEX`: run the argv HEX encodes (its arguments joined by NUL, in
+ * lowercase hex) beside the application. Returns 1 for an exec command,
+ * decoding the argv in place into `*argv` (at most `max` pointers, NULL
+ * terminated); 0 for any other command; -1 for a malformed exec. */
+static int control_exec(char *command, uint32_t *id, char **argv, unsigned max) {
+    if (strncmp(command, "exec ", 5)) return 0;
+    char *hex = strchr(command + 5, ' ');
+    if (!hex) return -1;
+    *hex++ = 0;
+    uint64_t value;
+    if (control_decimal(command + 5, UINT32_MAX, &value) || !value) return -1;
+    *id = (uint32_t)value;
+    size_t length = strlen(hex);
+    if (!length || length % 2) return -1;
+    size_t bytes = length / 2;
+    for (size_t i = 0; i < bytes; i++) {
+        int byte = 0;
+        for (int half = 0; half < 2; half++) {
+            char c = hex[2 * i + half];
+            int nibble = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+            if (nibble < 0) return -1;
+            byte = byte * 16 + nibble;
+        }
+        hex[i] = (char)byte;
+    }
+    hex[bytes] = 0;
+    /* Arguments are separated by NUL, with none after the last. */
+    unsigned count = 0;
+    argv[count++] = hex;
+    for (size_t i = 0; i < bytes; i++) {
+        if (hex[i]) continue;
+        if (count + 1 >= max) return -1;
+        argv[count++] = hex + i + 1;
+    }
+    argv[count] = 0;
+    return argv[0][0] ? 1 : -1;
+}
 #endif

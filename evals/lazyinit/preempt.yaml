@@ -1,0 +1,11 @@
+# Perturb the app's thread scheduling for the whole run: its guest yields at
+# 10% of syscalls and progress calls, so threads switch inside the lazy
+# build often enough to race. Without it one guest CPU rarely switches there.
+start: 5ms
+end: 100ms
+interval: 10ms
+maxFaults: 1
+faults:
+  - kind: preempt
+    duration: {min: 60s, max: 60s}
+    ppm: 100000

@@ -14,12 +14,18 @@ pub struct Queue {
     pub used_idx: u16,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Segment {
     pub offset: usize,
     pub len: usize,
     pub writable: bool,
 }
 
+/// A validated chain; a device that completes it later keeps it, with the
+/// used ring's RAM offset it was validated against.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Chain {
     pub head: u16,
     pub segments: Vec<Segment>,
@@ -301,6 +307,25 @@ impl Queue {
         memory: &mut [u8],
         chain: &Chain,
         len: usize,
+        dirty: impl FnMut(usize, usize),
+    ) {
+        self.complete_used(memory, chain, len, dirty);
+        self.consume();
+    }
+
+    /// Take the next available chain without completing it: a device that
+    /// completes requests later consumes them as it admits them.
+    pub fn consume(&mut self) {
+        self.last_avail = self.last_avail.wrapping_add(1);
+    }
+
+    /// Publish a consumed chain's used entry, preserving the used-entry/index
+    /// journal order.
+    pub fn complete_used(
+        &mut self,
+        memory: &mut [u8],
+        chain: &Chain,
+        len: usize,
         mut dirty: impl FnMut(usize, usize),
     ) {
         let entry = chain.used + 4 + 8 * (self.used_idx % self.num) as usize;
@@ -311,7 +336,6 @@ impl Queue {
         memory[index..index + 2].copy_from_slice(&self.used_idx.to_le_bytes());
         dirty(entry, 8);
         dirty(index, 2);
-        self.last_avail = self.last_avail.wrapping_add(1);
     }
 }
 

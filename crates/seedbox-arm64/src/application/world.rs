@@ -37,6 +37,12 @@ pub struct Options {
     /// Machine threads under the windowed scheduler; a performance setting
     /// that never changes results. 1 runs every machine on this thread.
     pub machine_workers: usize,
+    /// Machine workers restore checkpoints lazily (`ServeOptions`); a
+    /// performance setting that never changes results.
+    pub lazy_restore: bool,
+    /// Anchor inputs to capture checkpoints at, published as
+    /// `checkpoint-anchor-<key>.json`. Captures never change results.
+    pub capture_anchors: Vec<String>,
 }
 
 mod checkpoint;
@@ -109,6 +115,11 @@ fn simulate_windowed(
             )
         }?;
         if outcome == world_windowed::RunOutcome::Checkpoint {
+            if let Some(key) = world.take_captured_anchor() {
+                capture_anchor(world, interactive, &key)?;
+                segments.push(scheduler);
+                continue;
+            }
             if let Some(host) = &mut interactive.host {
                 if interactive.checkpoints.capture_pending_with(
                     world,
@@ -139,6 +150,40 @@ fn simulate_windowed(
         return Ok((outcome.as_str(), scheduler));
     }
 }
+/// Publish the world stopped at an anchor, like an interactive capture but
+/// owned by the run: no host request, and the run continues at once.
+fn capture_anchor(
+    world: &mut world_core::World<ArmMachine>,
+    interactive: &Interactive,
+    key: &str,
+) -> Result<()> {
+    let at = world
+        .input_branches()
+        .last()
+        .filter(|receipt| receipt.key == key)
+        .ok_or("anchor capture without its receipt")?
+        .at_ns;
+    let position = seedbox_engine_core::host_control::BoundaryPosition {
+        boundary_index: world.boundaries(),
+        completed_rounds: world.slices(),
+        simulated_time_ns: at,
+    };
+    let replay = interactive.replay.checkpoint(position)?;
+    let snapshot = world_core::WorldSnapshot::take_checkpoint(world)?;
+    checkpoint::publish(
+        &interactive.output,
+        &format!("anchor-{key}"),
+        &checkpoint::Saved {
+            state: seedbox_engine_core::checkpoint::LiveCheckpoint {
+                world: snapshot,
+                replay,
+                position,
+            },
+            initial_launch: interactive.initial_launch.clone(),
+        },
+    )
+}
+
 /// Decode the ARM application dialect into the shared typed world document.
 /// Keep its existing required keys and rejection of x86-only inputs explicit.
 fn decode_config(bytes: &[u8]) -> Result<seedbox_engine_core::world_config::WorldConfig> {
@@ -291,7 +336,8 @@ pub fn run(options: &Options) -> Result<Value> {
             options.full_state,
         )?
     }
-    .with_observations(observations.clone());
+    .with_observations(observations.clone())
+    .with_lazy_restore(options.lazy_restore);
     let mut machines = Vec::new();
     let mut boots = Vec::new();
     let mut macs = Vec::new();
@@ -363,6 +409,7 @@ pub fn run(options: &Options) -> Result<Value> {
         faults,
         control,
         macs,
+        expected_crashes: cfg.expected_crashes(),
     })?
     .with_observations(observations);
     seedbox_engine_core::input_program::validate_program(&cfg.input_program, cfg.duration_ns)?;
@@ -396,6 +443,7 @@ pub fn run(options: &Options) -> Result<Value> {
         replay,
         checkpoints: Default::default(),
     };
+    world.set_anchor_captures(options.capture_anchors.iter().cloned());
     let resuming = options.resume_checkpoint.is_some();
     if let Some(path) = &options.resume_checkpoint {
         let saved = checkpoint::load(path)?;
@@ -568,9 +616,15 @@ pub fn run(options: &Options) -> Result<Value> {
             .map_err(|e| e.to_string())?,
     );
     world.control().triggers.hash_into(&mut hash)?;
+    world.choices().hash_into(&mut hash)?;
     let trigger_evidence = world.control().triggers.evidence()?;
     if !world.input_rejections().is_empty() {
         hash.update(serde_json::to_vec(world.input_rejections()).map_err(|e| e.to_string())?);
+    }
+    // Only a run with property records hashes them, keeping earlier witnesses.
+    let properties = (world.properties().records > 0).then(|| world.properties().clone());
+    if let Some(properties) = &properties {
+        hash.update(serde_json::to_vec(properties).map_err(|e| e.to_string())?);
     }
     let counters = arm_counters(&world);
     let mut report = json!({"report_version":2,"seed":options.seed,"timebase":"arm64-pv-world-v1",
@@ -579,6 +633,8 @@ pub fn run(options: &Options) -> Result<Value> {
         "frames_delivered":world.delivered(),"frames_dropped":world.dropped(),"network_counters":counters,
         "input_admissions":world.input_admissions(),
         "input_rejections":world.input_rejections(),
+        "input_branches":world.input_branches(),
+        "input_armed":world.input_armed(),
         "faults":world.faults().log,"fault_error":world.faults().error.clone().or(world.control().error.clone()),
         "control_history":world.control().log,"control_latency_ns":world.control().latency,
         "rejected_fault_effects":world.faults().rejected_effects,"management_readiness":world.faults().readiness,
@@ -591,6 +647,12 @@ pub fn run(options: &Options) -> Result<Value> {
     }
     if let Some(evidence) = trigger_evidence {
         report["triggers"] = evidence;
+    }
+    if let Some(properties) = properties {
+        report["properties"] = serde_json::to_value(properties).map_err(|e| e.to_string())?;
+    }
+    if let Some(choices) = world.choices().evidence() {
+        report["choices"] = serde_json::to_value(choices).map_err(|e| e.to_string())?;
     }
     Ok(report)
 }

@@ -2,6 +2,8 @@
 //! injected by the executable; clients never own worker lifetimes or leases.
 
 mod bundles;
+mod campaigns;
+pub(crate) mod content;
 mod diagnostics;
 
 use crate::{catalogue, manager::Manager};
@@ -23,7 +25,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
     },
     time::Duration,
 };
@@ -82,7 +84,14 @@ pub struct ExecutionService {
     backends: Arc<dyn BackendProvider>,
     preparation_limit: Duration,
     evidence: Mutex<()>,
+    /// Read while creating owned content a resource will reference; written by
+    /// reclamation (`content.rs`).
+    references: RwLock<()>,
+    /// Captured state of exported checkpoints, by source and checkpoint.
+    exports: Mutex<BTreeMap<SimulationId, BTreeMap<String, BTreeSet<ContentDigest>>>>,
     admission: Mutex<(usize, BTreeMap<tokio::task::Id, SimulationId>)>,
+    jobs: Mutex<campaigns::Jobs>,
+    findings_root: Option<PathBuf>,
 }
 
 impl ExecutionService {
@@ -101,6 +110,10 @@ impl ExecutionService {
             backends,
             preparation_limit: crate::preparation_budget::DEFAULT_LIMIT,
             evidence: Mutex::new(()),
+            jobs: Mutex::default(),
+            findings_root: None,
+            references: RwLock::new(()),
+            exports: Mutex::default(),
             admission: Mutex::new((0, BTreeMap::new())),
         })
     }
@@ -116,7 +129,8 @@ impl ExecutionService {
     }
 
     /// Foreground cascading deletion: stop the frozen ownership tree, wait for
-    /// execution cleanup, then remove dependents before their parents.
+    /// execution cleanup, then remove dependents before their parents, and
+    /// finally the owned content no remaining resource references.
     pub fn delete(&self, id: &SimulationId) -> Result<(), Error> {
         let _evidence = self
             .evidence
@@ -155,7 +169,9 @@ impl ExecutionService {
                 result => result?,
             }
             self.manager.delete(&id)?;
+            self.forget_exports(&id, None)?;
         }
+        self.reclaim_unreferenced()?;
         Ok(())
     }
 
@@ -167,7 +183,9 @@ impl ExecutionService {
             .lock()
             .map_err(|_| catalogue::Error::StorageFailed)?;
         self.manager.delete_checkpoint(id, name)?;
+        self.forget_exports(id, Some(name))?;
         if self.manager.read(|catalogue| catalogue.is_imported(id))? {
+            self.reclaim_unreferenced()?;
             return Ok(());
         }
         let inputs: RetainedInputs = serde_json::from_reader(fs::File::open(
@@ -182,7 +200,9 @@ impl ExecutionService {
                 e.kind(),
                 format!("checkpoint {name} cleanup: {e}"),
             ))
-        })
+        })?;
+        self.reclaim_unreferenced()?;
+        Ok(())
     }
 
     /// Snapshot the atomically published semantic journal using owned paths.
@@ -191,6 +211,32 @@ impl ExecutionService {
         let (resource, history) = self.recorded_snapshot(id)?;
         let world = self.manager.world(id)?;
         Ok(crate::timeline::project(&resource, &history, &world))
+    }
+
+    /// A completed simulation's failure timeline from its retained evidence.
+    /// `events` is its retained event history, less `gaps` lost records.
+    pub fn explanation(
+        &self,
+        id: &SimulationId,
+        events: &[seedbox_api::SimulationEvent],
+        gaps: u64,
+    ) -> Result<seedbox_api::Explanation, Error> {
+        let resource = self.describe(id)?;
+        if resource.status.phase != Phase::Completed {
+            return Err(Error::Catalogue(catalogue::Error::Invalid(format!(
+                "simulation {id} is not complete; explain a completed simulation"
+            ))));
+        }
+        let world = self.manager.world(id)?;
+        let record = self.run_record(id)?;
+        Ok(crate::explain::project(
+            id,
+            &resource.spec.program,
+            &world,
+            events,
+            gaps,
+            record.as_ref().and_then(|r| r.report.as_ref()),
+        ))
     }
 
     /// Return the immutable submitted inputs enriched with recorded external overrides.
@@ -293,8 +339,14 @@ impl ExecutionService {
                 timeout_ns: input.timeout_ns,
             })
             .collect();
+        let references = self
+            .references
+            .read()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
         definition.start =
             seedbox_application::definition::capture_start(&path, &attempt, &self.store)?;
+        self.record_export(id, name, &definition.start)?;
+        drop(references);
         let frozen = seedbox_artifacts::interventions::read(
             &attempt.join(format!("checkpoint-{name}-interventions.json")),
         )?;
@@ -313,6 +365,28 @@ impl ExecutionService {
 
     /// Read final evidence using server-owned attempt references. Clients never
     /// need host run paths, and comparison never changes a simulation's verdict.
+    /// A completed simulation's retained run record, if it has one.
+    fn run_record(
+        &self,
+        id: &SimulationId,
+    ) -> Result<Option<seedbox_artifacts::record::RunRecord>, Error> {
+        if self.manager.read(|catalogue| catalogue.is_imported(id))? {
+            return Ok(self.imported_snapshot(id)?.record);
+        }
+        let path = self.root.join("inputs").join(format!("{id}.json"));
+        let file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let inputs: RetainedInputs =
+            serde_json::from_reader(file).map_err(std::io::Error::other)?;
+        let Some(attempt) = inputs.attempt else {
+            return Ok(None);
+        };
+        Ok(Some(seedbox_application::orchestration::inspect(&attempt)?))
+    }
+
     pub fn compare(
         &self,
         baseline: &SimulationId,
@@ -332,31 +406,8 @@ impl ExecutionService {
                     "simulation {id} is not complete"
                 )));
             }
-            if self
-                .manager
-                .read(|catalogue| catalogue.is_imported(id))
-                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?
-            {
-                let snapshot = self
-                    .imported_snapshot(id)
-                    .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?;
-                return Ok(snapshot.record);
-            }
-            let path = self.root.join("inputs").join(format!("{id}.json"));
-            let file = match fs::File::open(&path) {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => {
-                    return Err(seedbox_application::Error::Setup(format!(
-                        "simulation {id} retained inputs: {error}"
-                    )))
-                }
-            };
-            let inputs: RetainedInputs = serde_json::from_reader(file)?;
-            let Some(attempt) = inputs.attempt else {
-                return Ok(None);
-            };
-            seedbox_application::orchestration::inspect(&attempt).map(Some)
+            self.run_record(id)
+                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))
         };
         let (Some(first), Some(second)) = (record(baseline)?, record(simulation)?) else {
             return Ok(seedbox_api::SimulationComparison {
@@ -535,12 +586,22 @@ impl ExecutionService {
                         },
                     }
                 };
+                if let Err(error) = self.register_anchor_captures(&id) {
+                    eprintln!("simulation {id}: anchor captures: {error}");
+                }
+                let lost = report.is_none() && run.record.error.is_some();
                 self.manager.update(&id, |s| {
                     merge_report_observation(
                         &mut s.status,
                         exit,
                         report.and_then(|r| r.simulated_time_ns),
+                        report.and_then(|r| r.properties.as_ref()),
                     );
+                    if lost {
+                        // The final report, and any property evidence in it,
+                        // never arrived: a passing oracle proves nothing alone.
+                        s.status.properties = Some(lost_evidence());
+                    }
                     s.status.termination = Some(termination);
                     s.status.phase = Phase::Completed;
                     s.status.stage = None;
@@ -548,6 +609,11 @@ impl ExecutionService {
             }
             Err(error) => {
                 self.manager.update(&id, |s| {
+                    // An oracle that exited before the error left no final
+                    // report: its property evidence is lost too.
+                    if s.status.oracle_exit_code.is_some() && s.status.properties.is_none() {
+                        s.status.properties = Some(lost_evidence());
+                    }
                     s.status.phase = Phase::Completed;
                     s.status.stage = None;
                     s.status.termination = Some(if cancellation.is_cancelled() {
@@ -721,6 +787,11 @@ impl ExecutionService {
         } else {
             seedbox_application::definition::resolve(&spec.configuration, &inputs, seed, overrides)?
         };
+        // Owned boot archives made here are unreferenced until the resolved
+        // definition and retained inputs below name them.
+        let references = self.references.read().map_err(|_| {
+            seedbox_application::Error::Execution("content reference lock failed".into())
+        })?;
         // The first run and every resubmission use the same resolved private representation.
         // Source paths, image transport manifests and human metadata never enter experiment identity.
         let inputs = seedbox_application::definition::prepared(&definition, &self.store)?;
@@ -765,6 +836,7 @@ impl ExecutionService {
                 s.status.engine = engine;
             })
             .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
+        drop(references);
         let observations = crate::observations::Receiver::start(self.manager.clone(), id.clone())?;
         let mut orchestrator = Orchestrator::new(self.store.clone(), directory.join("attempts"));
         if let Some(checkpoint) = checkpoint {
@@ -778,6 +850,7 @@ impl ExecutionService {
             .run_prepared_observed(
                 &configuration,
                 RunOptions {
+                    capture_anchors: options.capture_anchors.clone(),
                     seed: spec.seed,
                     wall_time_ns: options.wall_time_ns,
                     cancellation: cancellation.clone(),
@@ -808,6 +881,7 @@ impl ExecutionService {
                                 &mut s.status,
                                 exit,
                                 report.and_then(|r| r.simulated_time_ns),
+                                report.and_then(|r| r.properties.as_ref()),
                             );
                         })
                         .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
@@ -818,6 +892,60 @@ impl ExecutionService {
 }
 
 impl ExecutionService {
+    /// Register each `checkpoint-anchor-<key>.json` the engine published, with
+    /// the intervention history frozen at its position, so it can be branched
+    /// from like an interactive capture.
+    fn register_anchor_captures(&self, id: &SimulationId) -> seedbox_application::Result<()> {
+        let inputs: RetainedInputs = serde_json::from_reader(fs::File::open(
+            self.root.join("inputs").join(format!("{id}.json")),
+        )?)?;
+        let Some(attempt) = inputs.attempt else {
+            return Ok(());
+        };
+        let output = attempt
+            .join("output")
+            .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR);
+        let Ok(entries) = fs::read_dir(&output) else {
+            return Ok(());
+        };
+        let history = seedbox_artifacts::interventions::read(&attempt.join("interventions.json"))?;
+        for entry in entries {
+            let file_name = entry?.file_name();
+            let Some(name) = file_name
+                .to_str()
+                .and_then(|n| n.strip_prefix("checkpoint-"))
+                .and_then(|n| n.strip_suffix(".json"))
+                .filter(|n| n.starts_with("anchor-") && !n.ends_with("-interventions"))
+            else {
+                continue;
+            };
+            #[derive(serde::Deserialize)]
+            struct Saved {
+                state: State,
+            }
+            #[derive(serde::Deserialize)]
+            struct State {
+                position: seedbox_engine_protocol::host_control::BoundaryPosition,
+            }
+            let saved: Saved = serde_json::from_reader(fs::File::open(output.join(&file_name))?)?;
+            let position = saved.state.position;
+            let mut frozen = history.clone();
+            frozen
+                .entries
+                .retain(|entry| entry.position.boundary_index <= position.boundary_index);
+            fs::write(
+                attempt.join(format!("checkpoint-{name}-interventions.json")),
+                frozen
+                    .encode()
+                    .map_err(seedbox_application::Error::Integrity)?,
+            )?;
+            self.manager
+                .record_anchor_checkpoint(id, name, position)
+                .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     fn retained_history(
         &self,
         retained: &RetainedInputs,
@@ -865,12 +993,29 @@ fn save_inputs(
 
 // Committed observations may be ahead of a late final report. Neither the
 // oracle's first exit nor the public timeline may move backwards during cleanup.
+/// The assessment of a run whose final report was lost.
+fn lost_evidence() -> seedbox_engine_protocol::property::Assessment {
+    seedbox_engine_protocol::property::Assessment {
+        status: seedbox_engine_protocol::property::AssessmentStatus::Incomplete,
+        violated: 0,
+        unmet: 0,
+        evidence_complete: false,
+        error_count: 1,
+        errors: Vec::new(),
+        properties: Vec::new(),
+    }
+}
+
 fn merge_report_observation(
     status: &mut seedbox_api::SimulationStatus,
     exit: Option<u8>,
     time: Option<u64>,
+    properties: Option<&seedbox_engine_protocol::property::Ledger>,
 ) {
     status.oracle_exit_code = status.oracle_exit_code.or(exit);
+    if let Some(properties) = properties {
+        status.properties = Some(properties.assessment());
+    }
     if let Some(time) = time {
         status.simulated_time_ns = status.simulated_time_ns.max(time);
     }
@@ -880,6 +1025,17 @@ fn merge_report_observation(
 mod tests {
     use super::*;
     use seedbox_api::{SimulationSpec, SubmitRequest, TestVerdict};
+
+    #[test]
+    fn a_passing_oracle_whose_report_was_lost_is_incomplete() {
+        let status = seedbox_api::SimulationStatus {
+            phase: Phase::Completed,
+            oracle_exit_code: Some(0),
+            properties: Some(lost_evidence()),
+            ..Default::default()
+        };
+        assert_eq!(status.verdict(), TestVerdict::Incomplete);
+    }
 
     struct WaitingProvider(AtomicBool);
     impl BackendProvider for WaitingProvider {
@@ -945,6 +1101,7 @@ mod tests {
             metadata: Default::default(),
             options: Default::default(),
             request_id: name.into(),
+            fault_profile: None,
             spec: SimulationSpec {
                 program: Vec::new(),
                 start_paused: false,
@@ -1037,6 +1194,7 @@ mod tests {
                 assert_eq!(request.prepared.memory_mb("oracle"), 256);
                 assert_eq!(request.prepared.memory_mb("helper"), 1024);
                 Ok(ExecutionReport {
+                    choices: None,
                     simulated_time_ns: Some(1),
                     host_wait_ns: 0,
                     reason: StopReason::Completed,
@@ -1048,6 +1206,7 @@ mod tests {
                     full_state: None,
                     faults: vec![],
                     detail: None,
+                    properties: None,
                 })
             }
         }
@@ -1140,6 +1299,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "mixed-memory".into(),
+                fault_profile: None,
                 spec,
             })
             .unwrap()
@@ -1177,6 +1337,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "late-report".into(),
+                fault_profile: None,
                 spec: SimulationSpec {
                     program: Vec::new(),
                     start_paused: false,
@@ -1207,7 +1368,7 @@ mod tests {
         for phase in [Phase::Finalizing, Phase::Completed] {
             manager
                 .update(&id, |s| {
-                    merge_report_observation(&mut s.status, Some(7), Some(50));
+                    merge_report_observation(&mut s.status, Some(7), Some(50), None);
                     s.status.phase = phase;
                 })
                 .unwrap();
@@ -1244,6 +1405,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "delete-control-io".into(),
+                fault_profile: None,
                 spec: SimulationSpec {
                     program: Vec::new(),
                     start_paused: false,
@@ -1341,6 +1503,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "delete-control-io".into(),
+                fault_profile: None,
                 spec: SimulationSpec {
                     program: Vec::new(),
                     start_paused: false,
@@ -1438,6 +1601,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "timeout".into(),
+                fault_profile: None,
                 spec: SimulationSpec {
                     program: Vec::new(),
                     start_paused: false,

@@ -210,3 +210,259 @@ fn aliased_receive_dma_preserves_the_same_completed_prefix() {
         }
     }
 }
+
+/// NEXT-100 case 84: a driver reset after a partial receive. Two frames arrive,
+/// the first is DMAed and interrupts, the second waits in the backlog; the
+/// driver resets through Status with the interrupt still asserted and
+/// negotiates fresh rings elsewhere. Nothing from before the reset may reach
+/// the new rings or the interrupt line, and the device must be indistinguishable
+/// from one that only ever saw the fresh negotiation.
+mod reset_after_partial_rx {
+    use super::*;
+    use crate::virtio_mmio::Effect;
+
+    pub(super) struct Rings {
+        pub num: u16,
+        pub desc: usize,
+        pub avail: usize,
+        pub used: usize,
+        pub buffer: usize,
+    }
+    pub(super) const OLD: Rings = Rings {
+        num: 2,
+        desc: 0x100,
+        avail: 0x200,
+        used: 0x300,
+        buffer: 0x400,
+    };
+    pub(super) const NEW: Rings = Rings {
+        num: 4,
+        desc: 0x800,
+        avail: 0x900,
+        used: 0xa00,
+        buffer: 0xc00,
+    };
+    const TX: Rings = Rings {
+        num: 2,
+        desc: 0xe00,
+        avail: 0xe40,
+        used: 0xe80,
+        buffer: 0xf00,
+    };
+
+    pub(super) struct Device {
+        pub model: Network,
+        pub transport: Transport,
+        pub memory: Vec<u8>,
+        pub dirty: Vec<(usize, usize)>,
+    }
+
+    impl Device {
+        pub fn new(policy: Policy) -> Self {
+            let offered = if policy == Policy::Network {
+                (1 << 5) | EVENT_IDX
+            } else {
+                1 << 5
+            };
+            Self {
+                model: Network::new([2, 0, 0, 0, 0, 1], policy),
+                transport: Transport::new(
+                    Spec {
+                        device_id: 1,
+                        features: [offered, 1],
+                    },
+                    2,
+                    if policy == Policy::Application {
+                        MmioPolicy::Application
+                    } else {
+                        MmioPolicy::Network
+                    },
+                ),
+                memory: vec![0; 0x1000],
+                dirty: Vec::new(),
+            }
+        }
+        /// One register write with the adapters' effect handling.
+        pub fn mmio(&mut self, offset: u64, value: u32) -> Effect {
+            let dirty = &mut self.dirty;
+            let effect = self.transport.write(offset, value).unwrap();
+            match effect {
+                Effect::Reset => self.model.reset(),
+                Effect::Notify(index) => {
+                    self.model
+                        .notify(&mut self.transport, &mut self.memory, 0, index, |a, n| {
+                            dirty.push((a, n))
+                        })
+                        .unwrap();
+                }
+                Effect::None => {}
+            }
+            self.model
+                .after_write(&self.transport, &mut self.memory, 0, offset, |a, n| {
+                    dirty.push((a, n))
+                })
+                .unwrap();
+            effect
+        }
+        pub fn negotiate(&mut self, rx: &Rings, event_idx: bool) {
+            self.mmio(0x70, 1);
+            self.mmio(0x70, 3);
+            self.mmio(0x24, 0);
+            self.mmio(0x20, if event_idx { EVENT_IDX } else { 0 });
+            self.mmio(0x24, 1);
+            self.mmio(0x20, 1);
+            self.mmio(0x70, 0xb);
+            for (index, rings) in [(0, rx), (1, &TX)] {
+                self.mmio(0x30, index);
+                self.mmio(0x38, rings.num as u32);
+                self.mmio(0x80, rings.desc as u32);
+                self.mmio(0x90, rings.avail as u32);
+                self.mmio(0xa0, rings.used as u32);
+                self.mmio(0x44, 1);
+            }
+            self.mmio(0x70, 0xf);
+        }
+        /// Post one 128-byte receive buffer in descriptor `slot`.
+        pub fn post(&mut self, rx: &Rings, slot: u16) {
+            let m = &mut self.memory;
+            let d = rx.desc + 16 * slot as usize;
+            let at = (rx.buffer + 128 * slot as usize) as u64;
+            m[d..d + 8].copy_from_slice(&at.to_le_bytes());
+            m[d + 8..d + 12].copy_from_slice(&128u32.to_le_bytes());
+            m[d + 12..d + 14].copy_from_slice(&2u16.to_le_bytes());
+            let idx = u16::from_le_bytes(m[rx.avail + 2..rx.avail + 4].try_into().unwrap());
+            let entry = rx.avail + 4 + 2 * (idx % rx.num) as usize;
+            m[entry..entry + 2].copy_from_slice(&slot.to_le_bytes());
+            m[rx.avail + 2..rx.avail + 4].copy_from_slice(&idx.wrapping_add(1).to_le_bytes());
+        }
+        pub fn receive(&mut self, frame: &[u8]) -> Received {
+            let dirty = &mut self.dirty;
+            self.model
+                .receive(&mut self.transport, &mut self.memory, 0, frame, |a, n| {
+                    dirty.push((a, n))
+                })
+                .unwrap()
+        }
+        pub fn state(&self) -> String {
+            serde_json::to_string(&(self.transport.snapshot(), self.model.snapshot())).unwrap()
+        }
+    }
+
+    fn within(rings: &Rings, (at, len): (usize, usize)) -> bool {
+        let n = rings.num as usize;
+        [
+            (rings.desc, 16 * n),
+            (rings.avail, 6 + 2 * n),
+            (rings.used, 6 + 8 * n),
+            (rings.buffer, 128 * n),
+        ]
+        .iter()
+        .any(|&(start, size)| at >= start && at + len <= start + size)
+    }
+
+    #[test]
+    fn reset_discards_stale_frames_and_interrupts_before_fresh_rings() {
+        for policy in [Policy::Application, Policy::Network] {
+            for event_idx in [false, true] {
+                if event_idx && policy == Policy::Application {
+                    continue;
+                }
+                let mut device = Device::new(policy);
+                device.negotiate(&OLD, event_idx);
+                device.post(&OLD, 0);
+                let first = device.receive(b"first");
+                assert_eq!(
+                    first,
+                    Received {
+                        accepted: true,
+                        irq: true
+                    }
+                );
+                assert_eq!(&device.memory[OLD.buffer + 12..OLD.buffer + 17], b"first");
+                // No second buffer: the frame is accepted into the backlog.
+                assert_eq!(
+                    device.receive(b"second"),
+                    Received {
+                        accepted: true,
+                        irq: false
+                    }
+                );
+                assert_eq!(device.model.backlog.len(), 1);
+                assert_eq!(device.transport.read(0x60), 1, "interrupt left asserted");
+
+                assert_eq!(device.mmio(0x70, 0), Effect::Reset);
+                assert_eq!(device.transport.read(0x60), 0);
+                assert_eq!(device.transport.read(0x70), 0);
+                assert!(device.model.backlog.is_empty());
+                for queue in &device.transport.queues {
+                    assert!(!queue.ready);
+                    assert_eq!((queue.num, queue.last_avail, queue.used_idx), (0, 0, 0));
+                }
+                assert!(!device.model.event_idx(&device.transport));
+                let at_reset = device.memory.clone();
+                device.dirty.clear();
+
+                device.negotiate(&NEW, event_idx);
+                device.post(&NEW, 0);
+                device.post(&NEW, 1);
+                let posted = device.memory.clone();
+                // The driver kicks RX after refilling; the stale frame must not appear.
+                device.mmio(0x50, 0);
+                assert_eq!(device.transport.read(0x60), 0, "stale interrupt");
+                assert_eq!(device.transport.queues[0].used_idx, 0);
+                let changed: Vec<_> = (0..posted.len())
+                    .filter(|&i| posted[i] != device.memory[i])
+                    .collect();
+                assert!(
+                    changed.iter().all(|&i| within(&NEW, (i, 1))),
+                    "kick wrote outside the fresh rings: {changed:x?}"
+                );
+
+                let third = device.receive(b"third");
+                assert_eq!(
+                    third,
+                    Received {
+                        accepted: true,
+                        irq: true
+                    }
+                );
+                assert_eq!(&device.memory[NEW.buffer + 12..NEW.buffer + 17], b"third");
+                let used = NEW.used + 4;
+                assert_eq!(&device.memory[used..used + 8], &[0, 0, 0, 0, 17, 0, 0, 0]);
+                assert_eq!(
+                    &device.memory[NEW.used + 2..NEW.used + 4],
+                    &1u16.to_le_bytes()
+                );
+                assert_eq!(device.transport.queues[0].last_avail, 1);
+                assert_eq!(device.transport.read(0x60), 1);
+                // The old rings are guest memory now: untouched since the reset.
+                for (i, byte) in at_reset.iter().enumerate() {
+                    if within(&OLD, (i, 1)) {
+                        assert_eq!(device.memory[i], *byte, "old ring byte {i:#x}");
+                    }
+                }
+                assert!(!device.memory.windows(6).any(|w| w == b"second"));
+                let payload = [(NEW.buffer, 17), (used, 8), (NEW.used + 2, 2)];
+                let journal: Vec<_> = device
+                    .dirty
+                    .iter()
+                    .copied()
+                    .filter(|entry| payload.contains(entry))
+                    .collect();
+                assert_eq!(journal, payload);
+                assert!(device.dirty.iter().all(|&entry| within(&NEW, entry)));
+
+                // Indistinguishable from a device that only saw the fresh rings.
+                let mut fresh = Device::new(policy);
+                fresh.memory = at_reset.clone();
+                fresh.negotiate(&NEW, event_idx);
+                fresh.post(&NEW, 0);
+                fresh.post(&NEW, 1);
+                fresh.mmio(0x50, 0);
+                fresh.receive(b"third");
+                assert_eq!(fresh.memory, device.memory);
+                assert_eq!(fresh.state(), device.state(), "event_idx={event_idx}");
+            }
+        }
+    }
+}

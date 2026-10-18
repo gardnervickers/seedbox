@@ -15,6 +15,20 @@ pub struct DiagnosticFile {
 pub struct DiagnosticFiles {
     pub files: Vec<DiagnosticFile>,
     pub omissions: BTreeMap<String, String>,
+    /// Processes the guest kernel killed for lack of memory, by machine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub out_of_memory_kills: Vec<MachineOutOfMemoryKill>,
+}
+
+/// One guest kernel out-of-memory kill and the machine's configured memory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineOutOfMemoryKill {
+    pub machine: String,
+    /// The machine's guest RAM, when the definition names the machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mib: Option<u32>,
+    pub kill: crate::OutOfMemoryKill,
 }
 
 /// Single lossless JSON diagnostic document. Clients may encode payloadHex

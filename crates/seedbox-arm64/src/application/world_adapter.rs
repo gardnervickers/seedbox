@@ -10,6 +10,12 @@ use crate::{control::ManagementFramer, machine::MachineStop, Result};
 use seedbox_engine_core::world::{MachineState, Reseed, SliceRequest, State, Stop, WorldMachine};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+/// Slices one worker exchange may run beyond the requested one. A host
+/// performance bound: chained slices replay exactly as separate requests.
+const CHAIN_SLICES: usize = 1024;
+/// Frame bytes one exchange carries to the worker, well inside the protocol's
+/// message limit. Larger deliveries split; their effects are unchanged.
+const EXCHANGE_FRAME_BYTES: usize = 4 << 20;
 use std::{
     cell::Cell,
     collections::BTreeMap,
@@ -178,8 +184,14 @@ pub struct Factory {
     captures: Vec<Option<Arc<Mutex<Captures>>>>,
     generation: Cell<u64>,
     full_state: bool,
+    /// Machine workers restore checkpoints lazily; never changes results.
+    lazy_restore: bool,
 }
 impl Factory {
+    pub(crate) fn with_lazy_restore(mut self, lazy_restore: bool) -> Self {
+        self.lazy_restore = lazy_restore;
+        self
+    }
     pub(crate) fn with_observations(
         mut self,
         observations: Option<Arc<seedbox_engine_core::observation::Publisher>>,
@@ -262,6 +274,7 @@ impl Factory {
             captures,
             generation: Cell::new(0),
             full_state,
+            lazy_restore: false,
         })
     }
 }
@@ -291,6 +304,8 @@ pub struct ArmMachine {
     ram_pages: u64,
     /// The machine's configured CPU speed, which a throttle is a fraction of.
     cpu_speed_hz: u64,
+    /// Booted with a retained disk, which disk errors can target.
+    has_disk: bool,
 }
 impl Deref for ArmMachine {
     type Target = MachineState;
@@ -304,6 +319,20 @@ impl DerefMut for ArmMachine {
     }
 }
 impl ArmMachine {
+    /// The next checkpoint file for this machine's worker.
+    fn next_checkpoint_artifact(&mut self) -> Result<std::path::PathBuf> {
+        self.snapshot_sequence = self
+            .snapshot_sequence
+            .checked_add(1)
+            .ok_or("ARM checkpoint sequence overflow")?;
+        let artifact = self.output.join(format!(
+            ".arm-checkpoint-{}-{}-{}",
+            std::process::id(),
+            self.worker.identity().generation,
+            self.snapshot_sequence
+        ));
+        std::path::absolute(artifact).map_err(|e| format!("checkpoint path: {e}"))
+    }
     fn reject<T>(&mut self, error: String) -> Result<T> {
         self.worker.invalidate(&error);
         Err(error)
@@ -412,11 +441,18 @@ impl WorldMachine for ArmMachine {
             generation,
             incarnation: 0,
         };
-        let mut worker = OwnedWorker::spawn(&factory.executable, identity)?;
+        let mut worker = OwnedWorker::spawn_with(
+            &factory.executable,
+            identity,
+            super::worker::ServeOptions {
+                lazy_restore: factory.lazy_restore,
+            },
+        )?;
         let cpu_speed_hz = boot
             .progress
             .as_ref()
             .map_or(0, |progress| progress.speed_hz);
+        let has_disk = boot.disk_sectors.is_some() || boot.disk_image.is_some();
         let mut boot = boot.clone();
         boot.seed = u64::from_le_bytes(
             entropy[..8]
@@ -452,6 +488,7 @@ impl WorldMachine for ArmMachine {
             snapshot_sequence: 0,
             ram_pages,
             cpu_speed_hz,
+            has_disk,
         })
     }
     fn has_pending_irq(&self) -> bool {
@@ -473,17 +510,42 @@ impl WorldMachine for ArmMachine {
         Err("ARM application serial delivery is unsupported; use virtio console".into())
     }
     fn deliver_frame(&mut self, bytes: &[u8]) -> Result<bool> {
-        match self.worker.call(Operation::Frame(bytes.to_vec()))? {
-            Answer::Accepted(accepted) => {
-                self.physical = self
-                    .worker
-                    .observation()
-                    .cloned()
-                    .ok_or("missing stopped ARM observation")?;
-                Ok(accepted)
-            }
+        match self.deliver_frames(&[bytes])?.as_slice() {
+            [accepted] => Ok(*accepted),
             _ => self.reject("invalid frame response".into()),
         }
+    }
+    /// One worker exchange for the whole run; the worker applies each frame
+    /// as its own delivery, in order.
+    fn deliver_frames(&mut self, frames: &[&[u8]]) -> Result<Vec<bool>> {
+        let mut accepted = Vec::with_capacity(frames.len());
+        let mut rest = frames;
+        while !rest.is_empty() {
+            let mut bytes = 0;
+            let count = rest
+                .iter()
+                .take_while(|frame| {
+                    bytes += frame.len();
+                    bytes <= EXCHANGE_FRAME_BYTES
+                })
+                .count()
+                .max(1);
+            let (batch, later) = rest.split_at(count);
+            rest = later;
+            let batch = batch.iter().map(|bytes| bytes.to_vec()).collect();
+            match self.worker.call(Operation::Frames(batch))? {
+                Answer::Accepted(results) => {
+                    self.physical = self
+                        .worker
+                        .observation()
+                        .cloned()
+                        .ok_or("missing stopped ARM observation")?;
+                    accepted.extend(results);
+                }
+                _ => return self.reject("invalid frame response".into()),
+            }
+        }
+        Ok(accepted)
     }
     fn pause(&mut self) -> Result<()> {
         // ACKs prove a stopped vCPU. Pausing preserves its allowed completion.
@@ -504,6 +566,15 @@ impl WorldMachine for ArmMachine {
         Ok(())
     }
     fn succeed(&mut self, old: &mut Self, at: u64, seed: u64) -> Result<Option<u64>> {
+        self.succeed_branch(old, at, seed, None)
+    }
+    fn succeed_branch(
+        &mut self,
+        old: &mut Self,
+        at: u64,
+        seed: u64,
+        identity: Option<&str>,
+    ) -> Result<Option<u64>> {
         let mut guard = None;
         let mut result: Result<Option<u64>> = (|| {
             self.worker.ensure_active()?;
@@ -540,6 +611,7 @@ impl WorldMachine for ArmMachine {
                 transfer,
             } = old.worker.call(Operation::CrashExport {
                 run_seed: seed,
+                branch_identity: identity.map(str::to_owned),
                 full_state: self.full_state,
                 transfer: descriptor.clone(),
             })?
@@ -616,6 +688,17 @@ impl WorldMachine for ArmMachine {
             domain: domain.into(),
         })
     }
+    /// A branch's timer stream, as `Rng::branch` keys it on x86.
+    fn seed_timer_branch(&mut self, seed: u64, identity: Option<&str>, domain: &str) -> Result<()> {
+        match identity {
+            Some(identity) => self.seed_timer(seed, &format!("checkpoint/{identity}/{domain}")),
+            None => self.seed_timer(seed, domain),
+        }
+    }
+    fn reseed_guest(&mut self, entropy: [u32; 8]) -> Result<()> {
+        self.worker.ensure_active()?;
+        self.ready(Operation::ReseedGuest { entropy })
+    }
     fn seed_progress_jitter(&mut self, seed: u64, domain: &str) -> Result<()> {
         self.ready(Operation::SeedProgressJitter {
             seed: crate::rng::Rng::new(seed, domain).next(),
@@ -645,6 +728,57 @@ impl WorldMachine for ArmMachine {
         Ok(speed_hz
             .map(|_| seedbox_control::effective_throttle_speed(self.cpu_speed_hz, factor_permille)))
     }
+    fn has_disk(&self) -> bool {
+        self.has_disk
+    }
+    fn snapshot_bytes(snapshot: &Self::Snapshot) -> u64 {
+        std::fs::metadata(&snapshot.checkpoint.artifact).map_or(0, |m| m.len())
+    }
+    fn hold_block(&mut self, hold: Option<seedbox_engine_core::virtio_block::Hold>) -> Result<()> {
+        let Answer::Ready = self.worker.call(Operation::HoldBlock(hold))? else {
+            return self.reject("invalid block request hold response".into());
+        };
+        Ok(())
+    }
+    fn disk_errors(
+        &mut self,
+        errors: Option<seedbox_engine_core::virtio_block::InjectedErrors>,
+    ) -> Result<Option<seedbox_engine_core::virtio_block::ErrorCounts>> {
+        let Answer::DiskErrors(counts) = self.worker.call(Operation::DiskErrors(errors))? else {
+            return self.reject("invalid ARM disk error response".into());
+        };
+        self.physical = self
+            .worker
+            .observation()
+            .cloned()
+            .ok_or("missing stopped ARM observation")?;
+        Ok(counts)
+    }
+    fn disk_latency(
+        &mut self,
+        latency: Option<seedbox_engine_core::virtio_block::InjectedLatency>,
+    ) -> Result<Option<seedbox_engine_core::virtio_block::LatencyCounts>> {
+        let Answer::DiskLatency(counts) = self.worker.call(Operation::DiskLatency(latency))? else {
+            return self.reject("invalid ARM disk latency response".into());
+        };
+        self.physical = self
+            .worker
+            .observation()
+            .cloned()
+            .ok_or("missing stopped ARM observation")?;
+        Ok(counts)
+    }
+    fn preempt(&mut self, setting: Option<(u32, u64)>) -> Result<()> {
+        let Answer::Ready = self.worker.call(Operation::Preempt(setting))? else {
+            return self.reject("invalid ARM preempt response".into());
+        };
+        self.physical = self
+            .worker
+            .observation()
+            .cloned()
+            .ok_or("missing stopped ARM observation")?;
+        Ok(())
+    }
     fn seed_speed(&mut self, _: u64, _: &str) -> Result<()> {
         Err("ARM machine speed reseeding is unsupported".into())
     }
@@ -662,21 +796,18 @@ impl WorldMachine for ArmMachine {
         // validate each stopped worker before reading its native state.
         Ok(())
     }
+    fn begin_snapshot(&mut self) -> Result<()> {
+        let artifact = self.next_checkpoint_artifact()?;
+        self.worker.begin(Operation::Snapshot { artifact })
+    }
     fn snapshot(&mut self) -> Result<Self::Snapshot> {
-        self.snapshot_sequence = self
-            .snapshot_sequence
-            .checked_add(1)
-            .ok_or("ARM checkpoint sequence overflow")?;
-        let artifact = self.output.join(format!(
-            ".arm-checkpoint-{}-{}-{}",
-            std::process::id(),
-            self.worker.identity().generation,
-            self.snapshot_sequence
-        ));
-        let artifact =
-            std::path::absolute(artifact).map_err(|e| format!("checkpoint path: {e}"))?;
-        let Answer::Snapshot(checkpoint) = self.worker.call(Operation::Snapshot { artifact })?
-        else {
+        let answer = if self.worker.begun() {
+            self.worker.finish()?
+        } else {
+            let artifact = self.next_checkpoint_artifact()?;
+            self.worker.call(Operation::Snapshot { artifact })?
+        };
+        let Answer::Snapshot(checkpoint) = answer else {
             return self.reject("invalid ARM checkpoint response".into());
         };
         Ok(Snapshot {
@@ -689,15 +820,24 @@ impl WorldMachine for ArmMachine {
             retired: self.retired.clone(),
         })
     }
+    fn begin_restore(&mut self, snapshot: &Self::Snapshot) -> Result<()> {
+        if self.name != snapshot.world.name {
+            return Err("ARM checkpoint machine name mismatch".into());
+        }
+        self.worker
+            .begin(Operation::Restore(snapshot.checkpoint.clone()))
+    }
     fn restore(&mut self, snapshot: &Self::Snapshot) -> Result<u64> {
         if self.name != snapshot.world.name {
             return Err("ARM checkpoint machine name mismatch".into());
         }
-        if !matches!(
+        let answer = if self.worker.begun() {
+            self.worker.finish()?
+        } else {
             self.worker
-                .call(Operation::Restore(snapshot.checkpoint.clone()))?,
-            Answer::Restored(_)
-        ) {
+                .call(Operation::Restore(snapshot.checkpoint.clone()))?
+        };
+        if !matches!(answer, Answer::Restored(_)) {
             return self.reject("invalid ARM checkpoint restore response".into());
         }
         self.physical = self
@@ -718,20 +858,102 @@ impl WorldMachine for ArmMachine {
 
     fn advance(
         &mut self,
-        _: &mut (),
+        clock: &mut (),
         request: SliceRequest,
         frames: &mut Vec<Vec<u8>>,
     ) -> Result<Stop> {
+        let (stop, delivered) = self.advance_then_deliver(clock, request, frames, &[])?;
+        if delivered.is_some() {
+            return self.reject("frames delivered without a request".into());
+        }
+        Ok(stop)
+    }
+
+    fn delivers_after_advance(&self) -> bool {
+        true
+    }
+
+    fn chain_capacity(&self) -> usize {
+        CHAIN_SLICES
+    }
+
+    /// One worker exchange runs the first slice and, while each reaches its
+    /// limit, the planned slices after it; their answers wait in the worker
+    /// handle for the scheduler's matching requests.
+    fn advance_chain(
+        &mut self,
+        clock: &mut (),
+        first: seedbox_engine_core::world::ChainStep<'_>,
+        ahead: &[seedbox_engine_core::world::ChainStep<'_>],
+        frames: &mut Vec<Vec<u8>>,
+    ) -> Result<(Stop, Option<Vec<bool>>, usize)> {
+        // Run ahead only while the exchange's frames stay within bounds.
+        let mut bytes = frame_bytes(&first.then);
+        let ahead = ahead
+            .iter()
+            .take_while(|step| {
+                bytes += frame_bytes(&step.then);
+                bytes <= EXCHANGE_FRAME_BYTES
+            })
+            .map(|step| super::worker::Slice {
+                hard_limit: step.request.hard_limit,
+                early_slack: step.request.early_slack,
+                observe_console: step.request.observe_console,
+                then: step.then.iter().map(|bytes| bytes.to_vec()).collect(),
+            })
+            .collect();
+        let (stop, delivered) =
+            self.advance_slice(clock, first.request, frames, &first.then, ahead)?;
+        Ok((stop, delivered, self.worker.chained()))
+    }
+
+    /// One worker exchange runs the slice and, when it reaches its limit,
+    /// makes the deliveries the scheduler would make there next.
+    fn advance_then_deliver(
+        &mut self,
+        clock: &mut (),
+        request: SliceRequest,
+        frames: &mut Vec<Vec<u8>>,
+        then: &[&[u8]],
+    ) -> Result<(Stop, Option<Vec<bool>>)> {
+        self.advance_slice(clock, request, frames, then, Vec::new())
+    }
+}
+
+fn frame_bytes(frames: &[&[u8]]) -> usize {
+    frames.iter().map(|frame| frame.len()).sum()
+}
+
+impl ArmMachine {
+    fn advance_slice(
+        &mut self,
+        _: &mut (),
+        request: SliceRequest,
+        frames: &mut Vec<Vec<u8>>,
+        then: &[&[u8]],
+        ahead: Vec<super::worker::Slice>,
+    ) -> Result<(Stop, Option<Vec<bool>>)> {
+        // A new exchange too large to carry the frames leaves them to the
+        // scheduler's own delivery; a chained slice must match as planned.
+        let then = if self.worker.chained() == 0 && frame_bytes(then) > EXCHANGE_FRAME_BYTES {
+            &[]
+        } else {
+            then
+        };
         let Answer::Advanced {
             stop,
             time_ns,
             events,
             console,
             log_chunks,
+            accepted,
+            ..
         } = self.worker.call(Operation::Advance {
             hard_limit: request.hard_limit,
             early_slack: request.early_slack,
             observe_console: request.observe_console,
+            then: then.iter().map(|bytes| bytes.to_vec()).collect(),
+            ahead,
         })?
         else {
             return self.reject("invalid machine advancement response".into());
@@ -758,6 +980,7 @@ impl WorldMachine for ArmMachine {
                 || (!matches!(
                     stop,
                     MachineStop::Device { .. }
+                        | MachineStop::Held { .. }
                         | MachineStop::ApplicationExit { .. }
                         | MachineStop::Barrier
                 ) && !events.is_empty())
@@ -771,7 +994,7 @@ impl WorldMachine for ArmMachine {
             let mut management = Vec::new();
             let mut event_hash = self.transcript.events.clone();
             for event in &events {
-                let bytes = serde_json::to_vec(event).map_err(|e| e.to_string())?;
+                let bytes = super::event_json(event)?;
                 event_hash.update((self.index as u64).to_le_bytes());
                 event_hash.update(time_ns.to_le_bytes());
                 event_hash.update((bytes.len() as u64).to_le_bytes());
@@ -799,6 +1022,11 @@ impl WorldMachine for ArmMachine {
                             return Err("ARM barrier effect without physical barrier".into());
                         }
                     }
+                    Event::Held { trigger } => {
+                        if !matches!(stop, MachineStop::Held { trigger: t, .. } if t == *trigger) {
+                            return Err("ARM held request without its stop".into());
+                        }
+                    }
                 }
             }
             let observed = if request.observe_console {
@@ -816,6 +1044,10 @@ impl WorldMachine for ArmMachine {
                 MachineStop::PoweredOff => (Stop::Exited, State::Exited(255)),
                 MachineStop::ApplicationExit { code, .. } => (Stop::Exited, State::Exited(code)),
                 MachineStop::Barrier => (Stop::Barrier, State::Running),
+                MachineStop::Held {
+                    time_ns: stopped,
+                    trigger,
+                } if stopped == time_ns => (Stop::Held(trigger), State::Running),
                 MachineStop::Device { time_ns: stopped } if stopped == time_ns => (
                     if sent.is_empty() {
                         Stop::Control
@@ -885,7 +1117,7 @@ impl WorldMachine for ArmMachine {
             &management,
         );
         frames.extend(sent);
-        Ok(semantic)
+        Ok((semantic, accepted))
     }
 }
 

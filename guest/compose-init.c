@@ -17,6 +17,7 @@
 #include <pwd.h>
 #include <signal.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +26,8 @@
 #endif
 #include "control.h"
 #include "application-output.h"
+#include "property-relay.h"
+#include "oom-report.h"
 #include "barrier.h"
 #include "progress-launch.h"
 #include "world-clock.h"
@@ -344,6 +347,10 @@ static void write_sysctl(const char *path, unsigned long value) {
 }
 static void application_sysctls(uint32_t max_map_count) {
     write_sysctl("/proc/sys/vm/max_map_count", max_map_count);
+    /* Log every process a core-dumping signal kills, however it was raised:
+     * the translator re-raises an application fault with kill(), which the
+     * kernel's fault messages never see. SIGKILL and SIGTERM are not logged. */
+    write_sysctl("/proc/sys/kernel/print-fatal-signals", 1);
     write_sysctl("/proc/sys/fs/nr_open", APPLICATION_NOFILE + INSTRUMENTATION_FDS);
 }
 static void application_limits(void) {
@@ -392,6 +399,15 @@ static void configure_network(const char *cidr) {
     interface_up(fd, "eth0");
     if (close(fd)) die("close guest network control");
 }
+/* A retained disk that returns I/O errors (an injected disk fault, say) keeps
+ * the container from starting, as a failing disk would. Report that as the
+ * application's exit status 125, like a container runtime, rather than a
+ * supervisor or VMM failure. Other errors remain setup failures. */
+static void disk_failure(const char *what) {
+    if (errno != EIO && errno != EUCLEAN && errno != EROFS) die(what);
+    dprintf(diagnostic_fd, "SEEDBOX_DISK_ERROR %s: %s\n", what, strerror(errno));
+    finish(125, 0);
+}
 /* ext4 on the retained disk, formatted on the machine's first boot. Fixed
  * UUID and hash seed; the disk starts zeroed, so inode tables and the journal
  * need no initialization. */
@@ -399,7 +415,7 @@ static void format_disk(const char *device) {
     int fd = open(device, O_RDONLY|O_CLOEXEC);
     if (fd < 0) die("open retained disk");
     unsigned char magic[2];
-    if (pread(fd, magic, 2, 1024 + 56) != 2) die("read retained disk superblock");
+    if (pread(fd, magic, 2, 1024 + 56) != 2) disk_failure("read retained disk superblock");
     close(fd);
     if (magic[0] == 0x53 && magic[1] == 0xef) return;
     pid_t pid = fork();
@@ -413,7 +429,7 @@ static void format_disk(const char *device) {
     }
     int status;
     while (waitpid(pid, &status, 0) < 0) { if (errno != EINTR) die("wait mke2fs"); }
-    if (!WIFEXITED(status) || WEXITSTATUS(status)) { errno = EIO; die("format retained disk"); }
+    if (!WIFEXITED(status) || WEXITSTATUS(status)) { errno = EIO; disk_failure("format retained disk"); }
 }
 /* Refuse a target reached through a symlink in the image: resolved here,
  * before the chroot, it could point outside the image root. */
@@ -440,7 +456,7 @@ static void mount_volumes(char **volumes) {
     if (mount("proc", "/proc", "proc", 0, NULL)) die("mount bootstrap proc");
     format_disk("/dev/vda");
     directories("/seedbox/disk", 0700);
-    if (mount("/dev/vda", "/seedbox/disk", "ext4", 0, "noinit_itable")) die("mount retained disk");
+    if (mount("/dev/vda", "/seedbox/disk", "ext4", 0, "noinit_itable")) disk_failure("mount retained disk");
     int created = 0;
     for (char **volume = volumes; volume[0] && volume[1]; volume += 2) {
         char source[PATH_MAX], target[PATH_MAX];
@@ -450,15 +466,15 @@ static void mount_volumes(char **volumes) {
         struct stat image = {.st_mode = S_IFDIR|0755};
         if (stat(target, &image) == 0 && !S_ISDIR(image.st_mode)) { errno = ENOTDIR; die(target); }
         if (mkdir(source, image.st_mode & 07777) == 0) {
-            if (chown(source, image.st_uid, image.st_gid) || chmod(source, image.st_mode & 07777)) die(source);
+            if (chown(source, image.st_uid, image.st_gid) || chmod(source, image.st_mode & 07777)) disk_failure(source);
             created = 1;
-        } else if (errno != EEXIST) die(source);
+        } else if (errno != EEXIST) disk_failure(source);
         directories(target, 0755);
         if (mount(source, target, NULL, MS_BIND, NULL)) die("bind volume");
     }
     if (created) {
         int root = open("/seedbox/disk", O_RDONLY|O_DIRECTORY|O_CLOEXEC);
-        if (root < 0 || fsync(root)) die("sync volume directories");
+        if (root < 0 || fsync(root)) disk_failure("sync volume directories");
         close(root);
     }
 }
@@ -485,6 +501,192 @@ static void credentials(void) {
     if (setgid(gid) || setuid(uid)) die("set image user");
     free(copy);
 }
+/* SDK connections on every machine. Each accepted connection is a session;
+ * its records keep their order, and a flush reply follows every earlier one. */
+static int property_listener = -1;
+static struct property_client { int fd; uint32_t session; uint64_t seq; } property_clients[PROPERTY_SESSIONS];
+static uint32_t property_session_id;
+static uint64_t supervisor_seq;
+static void property_relay(uint32_t session, uint64_t seq, const void *record, size_t size) {
+    char frame[PROPERTY_FRAME_BYTES];
+    size_t length = property_frame(frame, session, seq, record, size);
+    if (!length) { errno = E2BIG; die("property frame"); }
+    send_all(management, frame, length);
+}
+static void supervisor_record(const char *record) {
+    property_relay(0, ++supervisor_seq, record, strlen(record));
+}
+static void property_lost(const char *reason) {
+    char record[128];
+    int length = snprintf(record, sizeof(record), "{\"lost\":{\"reason\":\"%s\",\"count\":1}}", reason);
+    if (length < 0 || (size_t)length >= sizeof(record)) { errno = E2BIG; die("lost property record"); }
+    supervisor_record(record);
+}
+static void property_socket(const char *socket_path) {
+    for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) property_clients[i].fd = -1;
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    if (strlen(socket_path) >= sizeof(address.sun_path)) { errno = ENAMETOOLONG; die("SDK socket path"); }
+    char *parent = strdup(socket_path), *slash;
+    if (!parent) die("SDK socket parent");
+    slash = strrchr(parent, '/');
+    if (slash && slash != parent) { *slash = 0; directories(parent, 0755); }
+    free(parent);
+    property_listener = socket(AF_UNIX, SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC, 0);
+    if (property_listener < 0) die("SDK socket");
+    strcpy(address.sun_path, socket_path);
+    if (bind(property_listener, (struct sockaddr *)&address, sizeof(address)) || chmod(socket_path, 0666)
+        || listen(property_listener, PROPERTY_SESSIONS)) die("SDK socket bind");
+}
+static void property_accept(void) {
+    for (;;) {
+        int client = accept4(property_listener, NULL, NULL, SOCK_NONBLOCK|SOCK_CLOEXEC);
+        if (client < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ECONNABORTED) return;
+            die("accept SDK socket");
+        }
+        struct property_client *slot = NULL;
+        for (unsigned i = 0; i < PROPERTY_SESSIONS && !slot; ++i) {
+            if (property_clients[i].fd < 0) slot = &property_clients[i];
+        }
+        /* Refused connections are evidence loss, never silently ignored. */
+        if (!slot) { close(client); property_lost("too many SDK connections"); continue; }
+        if (property_session_id == UINT32_MAX) { close(client); errno = EOVERFLOW; die("SDK session IDs exhausted"); }
+        *slot = (struct property_client){.fd = client, .session = ++property_session_id};
+    }
+}
+static void property_read(struct property_client *client) {
+    unsigned char record[PROPERTY_RECORD_BYTES + 1];
+    while (client->fd >= 0) {
+        ssize_t received = recv(client->fd, record, sizeof(record), MSG_TRUNC);
+        if (received < 0 && errno == EINTR) continue;
+        if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        if (received <= 0 && (received == 0 || errno == ECONNRESET)) {
+            close(client->fd); client->fd = -1;
+            return;
+        }
+        if (received < 0) die("read SDK socket");
+        if ((size_t)received > PROPERTY_RECORD_BYTES) { property_lost("SDK record too large"); continue; }
+        /* Flush and summary requests are records too: the engine answers
+         * them on the session's reply path once it has committed them. */
+        property_relay(client->session, ++client->seq, record, (size_t)received);
+    }
+}
+/* The engine's answer to an SDK request (a choice) for one session. A session
+ * that has gone, or cannot take it now, loses it; the engine has its record. */
+static void property_reply(uint32_t session, const char *payload) {
+    for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) {
+        if (property_clients[i].fd < 0 || property_clients[i].session != session) continue;
+        ssize_t sent;
+        do { sent = send(property_clients[i].fd, payload, strlen(payload), MSG_DONTWAIT|MSG_NOSIGNAL); } while (sent < 0 && errno == EINTR);
+        return;
+    }
+}
+/* Relay every record already sent, without waiting for further writers. */
+static void kernel_log_read(void);
+static void property_drain(void) {
+    kernel_log_read();
+    property_accept();
+    for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) property_read(&property_clients[i]);
+}
+/* The kernel log, opened before the application starts and read from its
+ * end, so only messages from the run itself are evidence. */
+static int kernel_log = -1;
+/* Open while the bootstrap devtmpfs is mounted; the image's /dev has no kmsg. */
+static void kernel_log_open(void) {
+    kernel_log = open("/dev/kmsg", O_RDONLY|O_NONBLOCK|O_CLOEXEC);
+}
+/* Skip everything logged before the application starts. */
+static void kernel_log_skip(void) {
+    if (kernel_log >= 0 && lseek(kernel_log, 0, SEEK_END) < 0) die("seek kernel log");
+}
+static void oom_kills_reconcile(int64_t reported);
+/* One reader for both uses of the kernel log: default-property evidence for
+ * the SDK relay, and out-of-memory kill frames for the host. */
+static void kernel_log_read(void) {
+    char kmsg[OOM_REPORT_RECORD_BYTES], record[PROPERTY_RECORD_BYTES];
+    int64_t oom_reported = 0;
+    while (kernel_log >= 0) {
+        ssize_t n = read(kernel_log, kmsg, sizeof(kmsg));
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && errno == EPIPE) continue; /* Overwritten records; read on. */
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+        if (n <= 0) die("read kernel log");
+        if (property_listener >= 0) {
+            size_t size = kernel_record(record, kmsg, (size_t)n);
+            if (size) property_relay(0, ++supervisor_seq, record, size);
+        }
+        if (management >= 0) {
+            char frame[OOM_REPORT_FRAME_BYTES];
+            size_t size = oom_report_frame(kmsg, (size_t)n, frame);
+            if (size) { send_all(management, frame, size); oom_reported++; }
+        }
+    }
+    oom_kills_reconcile(oom_reported);
+}
+static void property_exit(int status) {
+    char record[64];
+    if (WIFEXITED(status)) snprintf(record, sizeof(record), "{\"exit\":{\"code\":%d}}", WEXITSTATUS(status));
+    else snprintf(record, sizeof(record), "{\"exit\":{\"signal\":%d}}", WTERMSIG(status));
+    supervisor_record(record);
+}
+/* Edge coverage, when the application's environment asks for it: the
+ * translator writes one counter file per process (progress/budget.h). Each
+ * edge's count falls in a bucket (1, 2-3, 4-15, 16 or more), and each
+ * (edge, bucket) is one feature bit; the supervisor keeps the union of every
+ * feature seen and relays each changed 1 KiB slice of it with its offset,
+ * checked about once a second of guest time. */
+enum { COVERAGE_EDGES = 8192, COVERAGE_BUCKETS = 4,
+       COVERAGE_FEATURE_BYTES = COVERAGE_EDGES * COVERAGE_BUCKETS / 8, COVERAGE_SLICE = 1024 };
+#define COVERAGE_DIR "/run/seedbox/coverage"
+static int coverage_enabled;
+static unsigned char coverage_features[COVERAGE_FEATURE_BYTES];
+static unsigned char coverage_sent[COVERAGE_FEATURE_BYTES];
+static struct timespec coverage_checked;
+static int coverage_bucket(unsigned char count) {
+    return !count ? -1 : count == 1 ? 0 : count < 4 ? 1 : count < 16 ? 2 : 3;
+}
+static void coverage_relay(void) {
+    if (!coverage_enabled) return;
+    DIR *dir = opendir(COVERAGE_DIR);
+    if (!dir) return;
+    struct dirent *entry;
+    while ((entry = readdir(dir))) {
+        if (entry->d_name[0] == '.') continue;
+        int fd = openat(dirfd(dir), entry->d_name, O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+        if (fd < 0) continue;
+        unsigned char counts[COVERAGE_EDGES];
+        ssize_t n = read(fd, counts, sizeof(counts));
+        close(fd);
+        for (ssize_t edge = 0; edge < n; ++edge) {
+            int bucket = coverage_bucket(counts[edge]);
+            if (bucket < 0) continue;
+            unsigned bit = (unsigned)edge * COVERAGE_BUCKETS + (unsigned)bucket;
+            coverage_features[bit / 8] |= (unsigned char)(1u << (bit % 8));
+        }
+    }
+    closedir(dir);
+    for (unsigned offset = 0; offset < COVERAGE_FEATURE_BYTES; offset += COVERAGE_SLICE) {
+        if (!memcmp(coverage_features + offset, coverage_sent + offset, COVERAGE_SLICE)) continue;
+        memcpy(coverage_sent + offset, coverage_features + offset, COVERAGE_SLICE);
+        char record[96 + 2 * COVERAGE_SLICE];
+        int used = snprintf(record, sizeof(record), "{\"coverage\":{\"offset\":%u,\"map\":\"", offset);
+        for (unsigned i = 0; i < COVERAGE_SLICE; ++i)
+            used += snprintf(record + used, sizeof(record) - used, "%02x", coverage_features[offset + i]);
+        used += snprintf(record + used, sizeof(record) - used, "\"}}");
+        if (used <= 0 || (size_t)used >= sizeof(record)) { errno = E2BIG; die("coverage record"); }
+        supervisor_record(record);
+    }
+}
+/* Relay at most about once a second of guest time while the application runs. */
+static void coverage_tick(void) {
+    if (!coverage_enabled) return;
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now)) die("coverage clock");
+    if (now.tv_sec - coverage_checked.tv_sec >= 1) {
+        coverage_checked = now;
+        coverage_relay();
+    }
+}
 static struct application_output application_outputs[2] = {{-1, -1}, {-1, -1}};
 static void relay_output(unsigned stream, size_t limit) {
     char frame[2 * APPLICATION_OUTPUT_BYTES + 16];
@@ -505,7 +707,184 @@ static void drain_output(void) {
         }
     }
 }
+#ifndef SEEDBOX_VMSTAT
+#define SEEDBOX_VMSTAT "/proc/vmstat"
+#endif
+static int64_t oom_kills_counted = -1;
+static int64_t oom_kill_count(void) {
+    static char text[32768];
+    int fd = open(SEEDBOX_VMSTAT, O_RDONLY|O_CLOEXEC);
+    if (fd < 0) return -1;
+    size_t used = 0;
+    for (;;) {
+        ssize_t n = read(fd, text + used, sizeof(text) - used);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { if (n < 0) used = 0; break; }
+        used += (size_t)n;
+        if (used == sizeof(text)) break;
+    }
+    close(fd);
+    return oom_report_count(text, used);
+}
+/* Report kills /proc/vmstat counted beyond the `reported` kernel kill records
+ * just framed: a detail-free frame for each one whose record the log ring
+ * overwrote. */
+static void oom_kills_reconcile(int64_t reported) {
+    if (management < 0) return;
+    int64_t counted = oom_kill_count();
+    if (counted >= 0 && oom_kills_counted >= 0) {
+        for (int64_t missing = counted - oom_kills_counted - reported; missing > 0; missing--) send_all(management, "SBX_OOM1 -\n", 11);
+    }
+    if (counted >= 0) oom_kills_counted = counted;
+}
+/* The application's argv under the progress translator: drrun, its
+ * options and client, `--`, then the arguments. */
+static char **instrumented_arguments(char **arguments) {
+    size_t count = 0;
+    while (arguments[count]) ++count;
+    /* Translator arguments, the application's own, and execv's NULL. */
+    enum { PREFIX_MAX = 15 };
+    char **instrumented = calloc(PREFIX_MAX + count + 1, sizeof(*instrumented));
+    if (!instrumented) die("instrumentation arguments");
+    size_t prefix = 0;
+    instrumented[prefix++] = "/seedbox/progress/bin64/drrun";
+    instrumented[prefix++] = "-opt_speed";
+    instrumented[prefix++] = "-disable_traces";
+#if defined(__aarch64__)
+    /* The patched ARM translator implements guest-epoch reservations and
+     * hides host-only exclusive-store retries from application execution. */
+    instrumented[prefix++] = "-ldstex2cas";
+    /* Detect rewritten code through the application's IC IVAU, rather
+     * than write protection and sandboxing; the latter exhausted memory
+     * in the observed Kafka startup. Clear CTR_EL0.DIC so applications
+     * cannot legally omit the IC IVAU that invalidates cached code. */
+    instrumented[prefix++] = "-no_hw_cache_consistency";
+    instrumented[prefix++] = "-fake_ctr_dic";
+#endif
+    instrumented[prefix++] = "-c";
+    instrumented[prefix++] = "/seedbox/progress/libseedbox_progress.so";
+    /* Static: the vector outlives this call. */
+    static char progress_budget[11], progress_points[11];
+    snprintf(progress_budget, sizeof(progress_budget), "%u", instructions_per_progress_call);
+    snprintf(progress_points, sizeof(progress_points), "%u", progress_points_per_block);
+    instrumented[prefix++] = "--instructions-per-progress-call";
+    instrumented[prefix++] = progress_budget;
+    instrumented[prefix++] = "--progress-points-per-block";
+    instrumented[prefix++] = progress_points;
+    if (coverage_enabled) {
+        instrumented[prefix++] = "--coverage-dir";
+        instrumented[prefix++] = COVERAGE_DIR;
+    }
+    instrumented[prefix++] = "--";
+    if (prefix > PREFIX_MAX) die("instrumentation prefix");
+    for (size_t i = 0; i < count; ++i) instrumented[i + prefix] = arguments[i];
+    instrumented[prefix + count] = NULL;
+    return instrumented;
+}
+/* `exec` children run beside the application, one at a time. Their output
+ * comes back through `exec_read`, and each line joins the application's
+ * stderr prefixed `seedbox exec ID| `, so it stays apart from the
+ * application's own output. */
+static int exec_output[2] = {-1, -1};
+static int exec_read = -1;
+static char exec_line[1024];
+static size_t exec_used;
+static pid_t exec_child = -1;
+static uint32_t exec_id;
+static void exec_note(const char *format, ...) __attribute__((format(printf, 1, 2)));
+static void exec_note(const char *format, ...) {
+    if (exec_output[1] < 0) return;
+    char line[512];
+    va_list args;
+    va_start(args, format);
+    int length = vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    /* Best effort: a diagnostic line never stops the supervisor. */
+    if (length > 0 && write(exec_output[1], line, (size_t)length < sizeof(line) ? (size_t)length : sizeof(line) - 1) < 0) {}
+}
+/* Relay what the exec child wrote, line by line; at end of file, the rest. */
+static void exec_relay(void) {
+    char bytes[4096];
+    for (;;) {
+        ssize_t n = read(exec_read, bytes, sizeof(bytes));
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) return; /* EAGAIN: more later. */
+        for (ssize_t i = 0; i < n; i++) {
+            if (bytes[i] != '\n') exec_line[exec_used++] = bytes[i];
+            if (bytes[i] == '\n' || exec_used == sizeof(exec_line)) {
+                exec_note("seedbox exec %u| %.*s\n", exec_id, (int)exec_used, exec_line);
+                exec_used = 0;
+            }
+        }
+        if (!n) {
+            if (exec_used) exec_note("seedbox exec %u| %.*s\n", exec_id, (int)exec_used, exec_line);
+            exec_used = 0;
+            close(exec_read);
+            exec_read = -1;
+            return;
+        }
+    }
+}
+/* Run `argv` in the application's environment, under the translator,
+ * bracketed by `seedbox exec ID: start` and `exited` lines. */
+static int run_exec(char **argv, uint32_t id) {
+    if (exec_child > 0 || exec_read >= 0 || exec_output[0] < 0) { errno = EBUSY; return -1; }
+    char *path = argv[0];
+    static char resolved[PATH_MAX];
+    if (!strchr(path, '/')) {
+        const char *search = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+        for (char **entry = environment; entry && *entry; ++entry)
+            if (!strncmp(*entry, "PATH=", 5)) search = *entry + 5;
+        path = NULL;
+        while (*search && !path) {
+            size_t length = strcspn(search, ":");
+            if (snprintf(resolved, sizeof(resolved), "%.*s/%s", (int)length, search, argv[0]) < (int)sizeof(resolved)
+                && !access(resolved, X_OK)) path = resolved;
+            search += length + (search[length] == ':');
+        }
+        if (!path) { exec_note("seedbox exec %u: %s: not found\n", id, argv[0]); errno = ENOENT; return -1; }
+    }
+    int relay[2];
+    if (pipe2(relay, O_CLOEXEC)) return -1;
+    exec_id = id;
+    exec_note("seedbox exec %u: start %s\n", id, path);
+    pid_t pid = fork();
+    if (pid < 0) { close(relay[0]); close(relay[1]); return -1; }
+    if (!pid) {
+        diagnostic_fd = fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 3);
+        if (diagnostic_fd < 0) diagnostic_fd = STDERR_FILENO;
+        if (setpgid(0, 0)) die("exec process group");
+        if (watching && sigprocmask(SIG_SETMASK, &wait_mask, NULL)) die("exec signal mask");
+        if (management >= 0) close(management);
+        for (int stream = 1; stream <= 2; ++stream)
+            if (dup2(relay[1], stream) < 0) die("exec output");
+        int input = open("/dev/null", O_RDONLY);
+        if (input < 0 || dup2(input, STDIN_FILENO) < 0) die("exec stdin");
+        if (input > 2) close(input);
+        if (chdir(working_dir)) die("exec working directory");
+        application_limits();
+        credentials();
+        environ = environment;
+        argv[0] = path;
+        char **instrumented = instrumented_arguments(argv);
+        execv(instrumented[0], instrumented);
+        die("exec");
+    }
+    close(relay[1]);
+    if (fcntl(relay[0], F_SETFL, O_NONBLOCK)) die("exec relay");
+    exec_read = relay[0];
+    exec_child = pid;
+    return 0;
+}
 static pid_t start(void) {
+    for (char **entry = environment; entry && *entry; ++entry) {
+        if (!strcmp(*entry, "SEEDBOX_COVERAGE=1")) coverage_enabled = 1;
+    }
+    if (coverage_enabled) {
+        directories(COVERAGE_DIR, 0755);
+        if (chmod(COVERAGE_DIR, 01777)) die("coverage directory");
+        if (clock_gettime(CLOCK_MONOTONIC, &coverage_checked)) die("coverage clock");
+    }
     for (unsigned stream = 0; stream < 2; ++stream) {
         application_output_close(&application_outputs[stream]);
         if (application_output_open(&application_outputs[stream])) die("application output pipe");
@@ -534,46 +913,16 @@ static pid_t start(void) {
         environ = environment;
         arguments = seedbox_script_arguments(arguments);
         if (!arguments) die("resolve application interpreter");
-        size_t count = 0;
-        while (arguments[count]) ++count;
-        /* Translator arguments, the application's own, and execv's NULL. */
-        enum { PREFIX_MAX = 13 };
-        char **instrumented = calloc(PREFIX_MAX + count + 1, sizeof(*instrumented));
-        if (!instrumented) die("instrumentation arguments");
-        size_t prefix = 0;
-        instrumented[prefix++] = "/seedbox/progress/bin64/drrun";
-        instrumented[prefix++] = "-opt_speed";
-        instrumented[prefix++] = "-disable_traces";
-#if defined(__aarch64__)
-        /* The patched ARM translator implements guest-epoch reservations and
-         * hides host-only exclusive-store retries from application execution. */
-        instrumented[prefix++] = "-ldstex2cas";
-        /* Detect rewritten code through the application's IC IVAU, rather
-         * than write protection and sandboxing; the latter exhausted memory
-         * in the observed Kafka startup. Clear CTR_EL0.DIC so applications
-         * cannot legally omit the IC IVAU that invalidates cached code. */
-        instrumented[prefix++] = "-no_hw_cache_consistency";
-        instrumented[prefix++] = "-fake_ctr_dic";
-#endif
-        instrumented[prefix++] = "-c";
-        instrumented[prefix++] = "/seedbox/progress/libseedbox_progress.so";
-        char progress_budget[11], progress_points[11];
-        snprintf(progress_budget, sizeof(progress_budget), "%u", instructions_per_progress_call);
-        snprintf(progress_points, sizeof(progress_points), "%u", progress_points_per_block);
-        instrumented[prefix++] = "--instructions-per-progress-call";
-        instrumented[prefix++] = progress_budget;
-        instrumented[prefix++] = "--progress-points-per-block";
-        instrumented[prefix++] = progress_points;
-        instrumented[prefix++] = "--";
-        if (prefix > PREFIX_MAX) die("instrumentation prefix");
-        for (size_t i = 0; i < count; ++i) instrumented[i + prefix] = arguments[i];
-        instrumented[prefix + count] = NULL;
+        char **instrumented = instrumented_arguments(arguments);
         execv(instrumented[0], instrumented);
         die("exec application");
     }
     close(launch_error[1]);
+    /* Keep the write ends (close-on-exec) for `exec` children, so their
+     * output joins the application's streams. */
     for (unsigned stream = 0; stream < 2; ++stream) {
-        close(application_outputs[stream].write_fd);
+        if (exec_output[stream] >= 0) close(exec_output[stream]);
+        exec_output[stream] = application_outputs[stream].write_fd;
         application_outputs[stream].write_fd = -1;
     }
     char error; ssize_t received;
@@ -641,7 +990,12 @@ static int stop(pid_t *child) {
     while (waitpid(-group, &status, 0) >= 0 || errno == EINTR) {}
     if (errno != ECHILD) return -1;
     drain_output();
-    for (unsigned stream = 0; stream < 2; ++stream) application_output_close(&application_outputs[stream]);
+    if (property_listener >= 0) property_drain();
+    for (unsigned stream = 0; stream < 2; ++stream) {
+        application_output_close(&application_outputs[stream]);
+        if (exec_output[stream] >= 0) close(exec_output[stream]);
+        exec_output[stream] = -1;
+    }
     return 0;
 }
 /* Test builds replace the privileged clock adjustment. */
@@ -695,6 +1049,13 @@ static int thaw(pid_t *child) {
     return kill(-*child, SIGCONT);
 }
 static void control(char *command, pid_t *child) {
+    if (!strncmp(command, "SBX_SDK1 ", 9)) {
+        char *end; errno = 0;
+        unsigned long session = strtoul(command + 9, &end, 10);
+        if (errno || !session || session > UINT32_MAX || *end != ' ' || !end[1]) { errno = EINVAL; die("malformed SDK reply"); }
+        property_reply((uint32_t)session, end + 1);
+        return;
+    }
     if (!strncmp(command, "SBX_REPLY1 ", 11)) {
         char *payload = command + 11, *end; errno = 0;
         unsigned long id = strtoul(payload, &end, 10);
@@ -706,6 +1067,11 @@ static void control(char *command, pid_t *child) {
         return;
     }
     char *action; uint32_t id; int64_t step;
+    char *exec_argv[65];
+    switch (control_exec(command, &id, exec_argv, 65)) {
+    case 1: acknowledge("exec", id, run_exec(exec_argv, id) == 0); return;
+    case -1: errno = EINVAL; die("invalid exec command");
+    }
     if (control_parse(command, &action, &id, &step)) { errno = EINVAL; die("invalid management command"); }
     int success = 0;
     if (!strcmp(action, "clock_step")) success = step_wall_clock(step) == 0;
@@ -743,15 +1109,21 @@ static void relay_management(pid_t *child) {
  * idle disconnect releases the current session; a partial or outstanding RPC
  * still fails closed. The listener stays open for a later connection. */
 static void service_channels(pid_t *child, int timeout) {
-    struct pollfd pfds[5] = {
+    struct pollfd pfds[8 + PROPERTY_SESSIONS] = {
         {.fd = management, .events = POLLIN},
         {.fd = control_client < 0 ? control_listener : -1, .events = POLLIN},
         {.fd = control_client, .events = POLLIN},
         {.fd = application_outputs[0].read_fd, .events = POLLIN},
-        {.fd = application_outputs[1].read_fd, .events = POLLIN}
+        {.fd = application_outputs[1].read_fd, .events = POLLIN},
+        {.fd = property_listener, .events = POLLIN},
+        {.fd = property_listener >= 0 || management >= 0 ? kernel_log : -1, .events = POLLIN}
     };
+    for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) {
+        pfds[7 + i] = (struct pollfd){.fd = property_listener >= 0 ? property_clients[i].fd : -1, .events = POLLIN};
+    }
+    pfds[7 + PROPERTY_SESSIONS] = (struct pollfd){.fd = exec_read, .events = POLLIN};
     struct timespec limit = {.tv_sec = timeout / 1000, .tv_nsec = timeout % 1000 * 1000000L};
-    int ready = ppoll(pfds, 5, timeout < 0 ? NULL : &limit, watching ? &wait_mask : NULL);
+    int ready = ppoll(pfds, 8 + PROPERTY_SESSIONS, timeout < 0 ? NULL : &limit, watching ? &wait_mask : NULL);
     if (ready < 0) { if (errno != EINTR) die("poll management"); return; }
     if (!ready) return;
     if (pfds[1].revents & (POLLERR|POLLHUP|POLLNVAL)) { errno = EIO; die("control listener poll"); }
@@ -762,6 +1134,16 @@ static void service_channels(pid_t *child, int timeout) {
         if (pfds[3 + stream].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("application output poll"); }
         if (pfds[3 + stream].revents & (POLLIN|POLLHUP)) relay_output(stream, APPLICATION_OUTPUT_BYTES);
     }
+    if (pfds[5].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("SDK listener poll"); }
+    if (pfds[5].revents & POLLIN) property_accept();
+    /* /dev/kmsg reports overwritten records as POLLERR; the next read skips them. */
+    if (pfds[6].revents & POLLNVAL) { errno = EIO; die("kernel log poll"); }
+    if (pfds[6].revents & (POLLIN|POLLERR)) kernel_log_read();
+    for (unsigned i = 0; i < PROPERTY_SESSIONS; ++i) {
+        if (pfds[7 + i].revents & POLLNVAL) { errno = EIO; die("SDK client poll"); }
+        if (pfds[7 + i].revents & (POLLIN|POLLHUP|POLLERR)) property_read(&property_clients[i]);
+    }
+    if (pfds[7 + PROPERTY_SESSIONS].revents & (POLLIN|POLLHUP|POLLERR)) exec_relay();
     if (pfds[0].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("management port poll"); }
     if (pfds[0].revents & (POLLIN|POLLHUP)) relay_management(child);
 }
@@ -770,12 +1152,21 @@ static void supervise(pid_t *child) {
         int status;
         pid_t done;
         while ((done = waitpid(-1, &status, WNOHANG)) > 0) {
+            if (done == exec_child) {
+                exec_child = -1;
+                if (exec_read >= 0) exec_relay();
+                if (WIFEXITED(status)) exec_note("seedbox exec %u: exited %d\n", exec_id, WEXITSTATUS(status));
+                else exec_note("seedbox exec %u: killed by signal %d\n", exec_id, WTERMSIG(status));
+            }
             if (done == *child) {
                 drain_output();
+                kernel_log_read();
+                if (property_listener >= 0) { property_drain(); coverage_relay(); property_exit(status); }
                 finish(WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status), 0);
             }
         }
-        service_channels(child, -1);
+        service_channels(child, coverage_enabled ? 1000 : -1);
+        coverage_tick();
     }
 }
 #ifndef SEEDBOX_SUPERVISOR_TEST
@@ -783,6 +1174,7 @@ int main(void) {
     if (signal(SIGPIPE,SIG_IGN)==SIG_ERR) die("ignore relay SIGPIPE");
     directories("/dev", 0755);
     if (mount("devtmpfs", "/dev", "devtmpfs", 0, NULL)) die("mount bootstrap dev");
+    kernel_log_open();
     int console = open("/dev/console", O_RDWR);
     if (console >= 0) {
         /* /proc/self/fd/1 rechecks this inode's permissions on reopen, even
@@ -840,12 +1232,15 @@ int main(void) {
     }
     close(recipe_fd);
     relay_socket("/proc/cmdline", "/run/seedbox/control.sock");
+    property_socket("/run/seedbox/sdk.sock");
+    kernel_log_skip();
     /* Everything before this point is fixed by the boot seed; the application
      * starts after the world is released under the run seed. */
     struct timespec wall_clock = seedbox_wall_clock_at(wall_clock_epoch, seedbox_world_time_ns());
     if (clock_settime(CLOCK_REALTIME, &wall_clock)) die("set recorded wall clock");
     if (seedbox_launch_barrier("/proc/cmdline", "/dev/urandom")) die("launch barrier");
     watch_children();
+    oom_kills_counted = oom_kill_count();
     pid_t child = start();
     if (child < 0) die("initial application launch failed");
     management_ready();

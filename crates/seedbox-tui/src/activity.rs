@@ -256,6 +256,8 @@ pub fn derive(
 ) -> Activity {
     let mut activity = Activity::default();
     let empty = WorldState {
+        choice_inputs: Default::default(),
+        triggers: Default::default(),
         override_rejections: Default::default(),
         simulation: "aaaaaaaa".parse().expect("valid placeholder id"),
         revision: 0,
@@ -444,6 +446,8 @@ mod tests {
 
     fn world(faults: Vec<FaultState>) -> WorldState {
         WorldState {
+            choice_inputs: Default::default(),
+            triggers: Default::default(),
             override_rejections: Default::default(),
             simulation: "k7m2p9qx".parse().unwrap(),
             revision: 1,
@@ -456,6 +460,7 @@ mod tests {
 
     fn fault(id: u32, action: &str, plan: serde_json::Value, at: u64, active: bool) -> FaultState {
         FaultState {
+            counts: None,
             id,
             input_key: None,
             action: action.into(),
@@ -607,6 +612,7 @@ mod tests {
             last_transition_at_ns: None,
             condition_since_ns: None,
             application: Default::default(),
+            out_of_memory_kills: Vec::new(),
         });
         let activity = derive(Some(&w), &[], &[], 5);
         assert_eq!(

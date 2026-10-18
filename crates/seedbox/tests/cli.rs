@@ -82,6 +82,59 @@ fn long_server_state_path_fails_before_creating_state() {
 }
 
 #[test]
+fn server_performance_settings_are_bounded_usage_errors_before_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let help = seedbox(&["help", "serve"], directory.path());
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    let performance = help
+        .split_once("Performance (never changes results):")
+        .map(|(_, section)| section)
+        .unwrap_or_else(|| panic!("{help}"));
+    assert!(
+        performance.contains("--machine-workers <N>") && performance.contains("[default: 1]"),
+        "{help}"
+    );
+    let state = directory.path().join("state");
+    let mut bounded = vec![("--machine-workers", ["0", "65", "all"])];
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        // The ARM engine has no PV watchdog to tune.
+        assert!(!help.contains("--watchdog-ms"), "{help}");
+        let output = seedbox(
+            &[
+                "serve",
+                "--state",
+                state.to_str().unwrap(),
+                "--watchdog-ms",
+                "20",
+            ],
+            directory.path(),
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("unexpected argument '--watchdog-ms'"));
+    } else {
+        assert!(performance.contains("--watchdog-ms <MS>"), "{help}");
+        assert!(performance.contains("[default: 20]"), "{help}");
+        bounded.push(("--watchdog-ms", ["0", "60001", "fast"]));
+    }
+    for (flag, values) in bounded {
+        for value in values {
+            let output = seedbox(
+                &["serve", "--state", state.to_str().unwrap(), flag, value],
+                directory.path(),
+            );
+            assert_eq!(output.status.code(), Some(2), "{flag} {value}");
+            assert!(
+                stderr(&output).contains(&format!("invalid value '{value}' for '{flag}")),
+                "{}",
+                stderr(&output)
+            );
+        }
+    }
+    assert!(!state.exists());
+}
+
+#[test]
 fn explicit_asset_directory_overrides_bundled_kernel_without_build_tools() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
@@ -335,6 +388,7 @@ fn execution_commands_keep_performance_settings_on_the_server() {
         for flag in [
             "--watchdog-ms",
             "--pv-watchdog-ms",
+            "--machine-workers",
             "--margin",
             "--undo",
             "--timebase",
@@ -966,6 +1020,10 @@ fn observation_flags_are_validated_before_connecting() {
             "simulation ID must contain",
         ),
         (
+            vec!["get", "properties", "invalid"],
+            "simulation ID must contain",
+        ),
+        (
             vec!["events", "invalid", "--follow"],
             "simulation ID must contain",
         ),
@@ -1098,6 +1156,76 @@ fn native_project_discovery_prefers_seedbox_yaml_and_validates_oracle() {
 }
 
 #[test]
+fn volume_sizes_validate_with_errors_that_name_the_field() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = |volumes: &str| {
+        fs::write(
+            directory.path().join("seedbox.yaml"),
+            format!("name: sized\nmachines:\n  db:\n    image: app\n    volumes:\n{volumes}oracle: {{image: checker}}\n"),
+        )
+        .unwrap();
+        seedbox(&["validate"], directory.path())
+    };
+    let output = project("      data: {target: /data, size: 4GiB}\n      wal: {target: /wal}\n");
+    assert!(output.status.success(), "{}", stderr(&output));
+    for (size, column) in [("4GB", 35), ("4096", 35), ("1.5GiB", 35), ("128GiB", 35)] {
+        let output = project(&format!("      data: {{target: /data, size: {size}}}\n"));
+        assert_eq!(output.status.code(), Some(2), "{size}");
+        assert_eq!(
+            stderr(&output),
+            format!("error: machines.db.volumes.data.size: size \"{size}\": expected a whole number of MiB or GiB such as 4GiB or 512MiB, from 16MiB to 64GiB at line 6 column {column}\n"),
+        );
+    }
+    let output = project(
+        "      data: {target: /data, size: 40GiB}\n      wal: {target: /wal, size: 30GiB}\n",
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        "error: $.machines.db.volumes: volume sizes total 70GiB, above the 64GiB limit for one machine\n"
+    );
+}
+
+#[test]
+fn progress_client_is_optional_and_validated() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = |engine: &str| {
+        fs::write(
+            directory.path().join("seedbox.yaml"),
+            format!(
+                "name: engine
+oracle: {{image: checker}}
+{engine}"
+            ),
+        )
+        .unwrap();
+        seedbox(&["validate"], directory.path())
+    };
+    for engine in [
+        "",
+        "engine: {}\n",
+        "engine: {progressClient: standard}\n",
+        "engine: {progressClient: lean}\n",
+    ] {
+        let output = project(engine);
+        assert!(output.status.success(), "{engine}: {}", stderr(&output));
+    }
+    let output = project("engine: {progressClient: fast}\n");
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        "error: engine.progressClient: unknown variant `fast`, expected `standard` or `lean` at line 3 column 26\n"
+    );
+    let output = project("engine: {progress: lean}\n");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("unknown field `progress`, expected `progressClient`"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn capacity_help_explains_resident_slots_and_accepts_json() {
     let directory = tempfile::tempdir().unwrap();
     let output = seedbox(&["get", "capacity", "--help"], directory.path());
@@ -1184,20 +1312,62 @@ fn transfer_symlinks_are_rejected_and_compare_documents_exit_codes() {
     assert!(String::from_utf8_lossy(&help.stdout).contains("NOT_COMPARABLE"));
 }
 
+/// Answer one GET whose request line starts with `path` on the default server
+/// socket, as a stand-in for the server.
+fn stand_in_server(state: &Path, path: &'static str, body: String) {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(state)
+        .unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(state.join("server.sock")).unwrap();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&buffer[..n]),
+                }
+            }
+            if !request.starts_with(format!("GET {path} ").as_bytes()) {
+                continue;
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            return;
+        }
+    });
+}
+
+fn out_of_memory_kill(incarnation: u32) -> seedbox_api::OutOfMemoryKill {
+    seedbox_api::OutOfMemoryKill {
+        incarnation,
+        simulated_time_ns: 122_954_950_231,
+        process: Some(seedbox_api::OutOfMemoryProcess {
+            pid: 412,
+            command: "nats-server".into(),
+            total_vm_kib: 1_203_328,
+            anon_rss_kib: 446_228,
+            file_rss_kib: 1024,
+            shmem_rss_kib: 0,
+        }),
+    }
+}
+
 #[test]
 fn get_world_prints_machine_and_link_tables() {
     use seedbox_api::{
         LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState, WorldState,
     };
-    use std::io::{Read, Write};
-    use std::os::unix::fs::DirBuilderExt;
     let directory = tempfile::tempdir().unwrap();
     let state = directory.path().join(".local/state/seedbox");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&state)
-        .unwrap();
     let machine = |name: &str, oracle| MachineState {
         name: name.into(),
         incarnation: 0,
@@ -1210,6 +1380,16 @@ fn get_world_prints_machine_and_link_tables() {
         last_transition_at_ns: None,
         condition_since_ns: None,
         application: Default::default(),
+        out_of_memory_kills: Vec::new(),
+    };
+    // n2 exited after the guest kernel killed its application for memory;
+    // n3's kill was in an earlier incarnation, so its exit is unexplained.
+    let exited = |name: &str, incarnation, killed| MachineState {
+        incarnation,
+        condition: MachineCondition::Exited,
+        exit_code: Some(137),
+        out_of_memory_kills: vec![out_of_memory_kill(killed)],
+        ..machine(name, false)
     };
     let link = |from: &str, to: &str, cut: Option<&str>| LinkState {
         from: from.into(),
@@ -1231,46 +1411,36 @@ fn get_world_prints_machine_and_link_tables() {
         },
     };
     let world = WorldState {
+        choice_inputs: Default::default(),
+        triggers: Default::default(),
         override_rejections: Default::default(),
         simulation: "k7m2p9qx".parse().unwrap(),
         revision: 3,
         simulated_time_ns: 1_000_000_000,
-        machines: vec![machine("n1", false), machine("oracle", true)],
+        machines: vec![
+            machine("n1", false),
+            exited("n2", 0, 0),
+            exited("n3", 1, 0),
+            machine("oracle", true),
+        ],
         links: vec![link("n1", "oracle", None), link("oracle", "n1", Some("p1"))],
         faults: Vec::new(),
     };
-    let body = serde_json::to_string(&world).unwrap();
-    // A stand-in server answering the one world request on the default socket.
-    let listener = std::os::unix::net::UnixListener::bind(state.join("server.sock")).unwrap();
-    std::thread::spawn(move || {
-        for mut stream in listener.incoming().flatten() {
-            let mut request = Vec::new();
-            let mut buffer = [0; 1024];
-            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                match stream.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => request.extend_from_slice(&buffer[..n]),
-                }
-            }
-            if !request.starts_with(b"GET /v1/simulations/k7m2p9qx/world ") {
-                continue;
-            }
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            return;
-        }
-    });
+    stand_in_server(
+        &state,
+        "/v1/simulations/k7m2p9qx/world",
+        serde_json::to_string(&world).unwrap(),
+    );
     let output = seedbox(&["get", "world", "k7m2p9qx"], directory.path());
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         "\
-MACHINE  CONDITION  INCARNATION  EXIT  ORACLE
-n1       ready      0            -     -
-oracle   ready      0            -     yes
+MACHINE  CONDITION  INCARNATION  EXIT                 ORACLE
+n1       ready      0            -                    -
+n2       exited     0            137 (out of memory)  -
+n3       exited     1            137                  -
+oracle   ready      0            -                    yes
 
 FROM    TO      LATENCY  JITTER  LOSS    FRAMES  BYTES  DROPPED  FAULT
 n1      oracle  2.5ms    500µs   100ppm  12      960    4        -
@@ -1278,5 +1448,150 @@ oracle  n1      2.5ms    500µs   100ppm  12      960    4        cut p1
 
 simulated time: 1s
 "
+    );
+}
+
+#[test]
+fn fault_profiles_are_checked_before_connecting() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing.yaml");
+    let output = seedbox(
+        &["run", "--fault-profile", missing.to_str().unwrap()],
+        directory.path(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        format!("error: --fault-profile {}: not found\n", missing.display())
+    );
+    let invalid = directory.path().join("profile.yaml");
+    std::fs::write(&invalid, "end: 1s\ninterval: 1s\nfaults: []\n").unwrap();
+    for command in ["run", "explore"] {
+        let output = seedbox(
+            &[command, "--fault-profile", invalid.to_str().unwrap()],
+            directory.path(),
+        );
+        assert_eq!(output.status.code(), Some(2), "{command}");
+        assert_eq!(
+            stderr(&output),
+            format!(
+                "error: --fault-profile {}: fault profile needs at least one fault kind with positive weight\n",
+                invalid.display()
+            ),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn campaign_shrink_and_findings_bounds_are_usage_errors_before_any_server() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path();
+    for (args, phrase) in [
+        (vec!["campaign", "--budget", "0"], "--budget"),
+        (vec!["campaign", "--batch", "65"], "--batch"),
+        (vec!["campaign", "--fresh-share", "1001"], "--fresh-share"),
+        (vec!["campaign", "--corpus", "0"], "--corpus"),
+        (vec!["campaign", "--anchor", "soon"], "--anchor"),
+        (
+            vec!["shrink", "k7m2p9qx", "--max-probes", "0"],
+            "--max-probes",
+        ),
+        (vec!["shrink", "not-an-id"], "ID"),
+        (vec!["shrink", "k7m2p9qx", "--seeds", "0"], "--seeds"),
+        (vec!["shrink", "k7m2p9qx", "--seeds", "9"], "--seeds"),
+        (vec!["analyze", "not-an-id"], "ID"),
+        (vec!["exec", "k7m2p9qx", "n1", "--", "ls"], "--at"),
+        (vec!["serve", "--lazy-restore=yes"], "--lazy-restore"),
+        (
+            vec!["exec", "k7m2p9qx", "n1", "--at", "soon", "--", "ls"],
+            "--at",
+        ),
+        (vec!["exec", "k7m2p9qx", "n1", "--at", "1s"], "ARGV"),
+        (vec!["analyze", "k7m2p9qx", "--samples", "0"], "--samples"),
+        (vec!["analyze", "k7m2p9qx", "--samples", "65"], "--samples"),
+        (vec!["analyze", "k7m2p9qx", "--times", "33"], "--times"),
+        (vec!["analyze", "k7m2p9qx", "--faults=yes"], "--faults"),
+        (
+            vec!["shrink", "k7m2p9qx", "--from-checkpoint=yes"],
+            "--from-checkpoint",
+        ),
+        (
+            vec!["get", "findings", "campaign-1", "--limit", "101"],
+            "--limit",
+        ),
+        (
+            vec!["get", "findings", "campaign-1", "--within", "x"],
+            "--within",
+        ),
+        (vec!["stop", "nonsense!"], "ID"),
+        (vec!["explain", "k7m2p9qx", "--kind", "gossip"], "--kind"),
+        (vec!["explain", "not-an-id"], "ID"),
+    ] {
+        let output = seedbox(&args, project);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(
+            stderr(&output).contains(phrase),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
+    let help = seedbox(&["help", "campaign"], project);
+    let help = String::from_utf8_lossy(&help.stdout).into_owned();
+    assert!(
+        help.contains("--budget") && help.contains("Exit status"),
+        "{help}"
+    );
+    let help = seedbox(&["help", "serve"], project);
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Performance (never changes results)"));
+}
+
+#[test]
+fn diagnostics_lists_out_of_memory_kills_after_retained_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join(".local/state/seedbox");
+    let lost = seedbox_api::OutOfMemoryKill {
+        simulated_time_ns: 130_000_000_000,
+        process: None,
+        ..out_of_memory_kill(1)
+    };
+    let report = seedbox_api::DiagnosticFiles {
+        files: vec![seedbox_api::DiagnosticFile {
+            name: "vmm.json".into(),
+            sha256: "ab".repeat(32),
+            size_bytes: 29414,
+        }],
+        omissions: Default::default(),
+        out_of_memory_kills: vec![
+            seedbox_api::MachineOutOfMemoryKill {
+                machine: "n3".into(),
+                memory_mib: Some(512),
+                kill: out_of_memory_kill(0),
+            },
+            seedbox_api::MachineOutOfMemoryKill {
+                machine: "n3".into(),
+                memory_mib: Some(512),
+                kill: lost,
+            },
+        ],
+    };
+    stand_in_server(
+        &state,
+        "/v1/simulations/k7m2p9qx/diagnostics",
+        serde_json::to_string(&report).unwrap(),
+    );
+    let output = seedbox(&["diagnostics", "k7m2p9qx"], directory.path());
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "\
+NAME      BYTES  SHA256
+vmm.json  29414  {}
+out-of-memory: machine n3 incarnation 0 at 122.955s: the guest kernel's out-of-memory killer killed nats-server (pid 412, anon-rss 446228 kB); raise memoryMiB (now 512)
+out-of-memory: machine n3 incarnation 1 at 130s: the guest kernel's out-of-memory killer killed a process whose kernel log record was lost; raise memoryMiB (now 512)
+",
+            "ab".repeat(32)
+        )
     );
 }

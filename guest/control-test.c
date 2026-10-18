@@ -28,4 +28,17 @@ int main(void) {
                       "clock_rate","clock_rate 1","clock_rate 1 -0","clock_rate 1 +5","clock_rate 0 5","clock_rate 1 5 6",
                       "freez 1","thaw 0","freeze 1 5"};
     for (unsigned i=0;i<sizeof(bad)/sizeof(*bad);i++) assert(control_parse(bad[i],&action,&id,&step));
+    /* exec ID HEX: "cat\0/data/a b" and a lone "ls". */
+    char *argv[8];
+    char exec1[] = "exec 3 636174002f646174612f612062";
+    assert(control_exec(exec1, &id, argv, 8) == 1 && id == 3);
+    assert(!strcmp(argv[0], "cat") && !strcmp(argv[1], "/data/a b") && !argv[2]);
+    char exec2[] = "exec 9 6c73";
+    assert(control_exec(exec2, &id, argv, 8) == 1 && id == 9 && !strcmp(argv[0], "ls") && !argv[1]);
+    char other[] = "stop 1";
+    assert(control_exec(other, &id, argv, 8) == 0);
+    char bad_exec[][32] = {"exec 1", "exec 0 6c73", "exec 1 6c7", "exec 1 6C73", "exec 1 zz", "exec 1 006c", "exec 1 "};
+    for (unsigned i=0;i<sizeof(bad_exec)/sizeof(*bad_exec);i++) assert(control_exec(bad_exec[i],&id,argv,8) == -1);
+    char many[] = "exec 1 610061006100610061006100610061";
+    assert(control_exec(many, &id, argv, 8) == -1);
 }

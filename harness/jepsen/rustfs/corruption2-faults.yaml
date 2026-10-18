@@ -1,0 +1,22 @@
+# Silent corruption of object data on n1 and n2, with windows that can
+# overlap, plus pauses and partitions. Four drives erasure-coded two data and
+# two parity can rebuild an object from any two intact shards, so even two
+# corrupt drives at once must not lose or alter an acknowledged object.
+start: 20s
+end: 80s
+interval: 3s
+faults:
+  - kind: pause_process
+    weight: 1
+    duration: {min: 500ms, max: 4s}
+  - kind: partition
+    weight: 1
+    duration: {min: 1s, max: 4s}
+  - kind: disk_error
+    weight: 4
+    op: any
+    ppm: 20000
+    effect: corrupt
+    scope: data
+    duration: {min: 3s, max: 10s}
+    targets: [n1, n2]

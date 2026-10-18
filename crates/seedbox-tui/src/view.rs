@@ -332,6 +332,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 );
             }
         }
+        (Screen::Campaigns, _) => campaigns(frame, app, body),
         _ => catalogue(frame, app, body),
     }
     footer(frame, app, keys, now);
@@ -367,6 +368,7 @@ fn header(frame: &mut Frame, app: &App, area: Rect) {
         tabs.push((Screen::Simulation, "2 simulation"));
     }
     tabs.push((Screen::Timeline, "3 timeline"));
+    tabs.push((Screen::Campaigns, "4 campaigns"));
     let mut x = area.x + width_of(&spans) as u16;
     for (screen, label) in tabs {
         let span = tab(label, app.screen == screen);
@@ -547,6 +549,17 @@ fn footer(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
     let mut keys: Vec<(String, String)> = Vec::new();
     let mut push = |key: &str, label: String| keys.push((key.to_owned(), label));
     match app.screen {
+        Screen::Campaigns => {
+            for (k, l) in [
+                ("↑↓", "select"),
+                ("tab", "campaigns/members"),
+                ("⏎", "open member"),
+                ("esc", "back"),
+                ("q", "quit"),
+            ] {
+                push(k, l.into());
+            }
+        }
         Screen::Timeline => {
             for (k, l) in [
                 ("↑↓", "select"),
@@ -648,6 +661,14 @@ fn footer(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
 
 fn help(frame: &mut Frame, app: &App, area: Rect) {
     let lines: &[(&str, &str)] = match app.screen {
+        Screen::Campaigns => &[
+            ("↑ ↓  j k", "select a campaign, or a member after tab"),
+            ("tab", "move between the campaigns and the members"),
+            ("⏎", "open the selected member's simulation"),
+            ("esc", "back"),
+            ("1 2 3 4", "catalogue · simulation · timeline · campaigns"),
+            ("q", "quit"),
+        ],
         Screen::Catalogue => &[
             ("↑ ↓  j k", "select a simulation"),
             ("⏎", "open it"),
@@ -2477,6 +2498,20 @@ fn oracle_logs(frame: &mut Frame, app: &App, focus: &Focus, name: &str, area: Re
             format!("verdict {text} "),
             Style::new().fg(color),
         ));
+        // Say why a passing oracle's verdict changed.
+        if let Some(properties) = &resource.status.properties {
+            let reason = if properties.violated > 0 {
+                Some(format!("{} violated properties ", properties.violated))
+            } else if !properties.evidence_complete {
+                Some("property evidence lost ".into())
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                right.push(Span::styled("· ", Style::new().fg(DIM)));
+                right.push(Span::styled(reason, Style::new().fg(color)));
+            }
+        }
     }
     let b = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -2928,6 +2963,176 @@ fn summary_phase(s: &SimulationSummary) -> (&'static str, Color) {
     }
 }
 
+/// Campaigns on the left; the selected one's findings and members, with each
+/// branch's parent and planned fault, on the right.
+fn campaigns(frame: &mut Frame, app: &App, area: Rect) {
+    let list_width = (area.width * 34 / 100).clamp(28, 56);
+    let [list_area, detail_area] =
+        Layout::horizontal([Constraint::Length(list_width), Constraint::Min(30)]).areas(area);
+    let rows: Vec<Line> = if app.campaigns.is_empty() {
+        vec![Line::styled(
+            " no campaigns yet: run `seedbox campaign`",
+            Style::new().fg(DIM),
+        )]
+    } else {
+        app.campaigns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let phase = match (&c.phase, &c.completion) {
+                    (seedbox_api::CampaignPhase::Running, _) => ("running", ICE),
+                    (_, Some(seedbox_api::CampaignCompletion::Failed { .. })) => ("failed", RED),
+                    _ => ("done", GREEN),
+                };
+                let findings = if c.findings > 0 {
+                    let noun = if c.findings == 1 {
+                        "finding"
+                    } else {
+                        "findings"
+                    };
+                    Span::styled(
+                        format!(" {} {noun}", c.findings),
+                        Style::new().fg(RED).bold(),
+                    )
+                } else {
+                    Span::styled(" no findings", Style::new().fg(DIM))
+                };
+                let line = Line::from(vec![
+                    Span::styled(format!(" {} ", c.name), Style::new().fg(TEXT)),
+                    Span::styled(format!("{} ", phase.0), Style::new().fg(phase.1)),
+                    Span::styled(
+                        format!("{}/{}", c.completed, c.budget),
+                        Style::new().fg(DIM),
+                    ),
+                    findings,
+                ]);
+                if i == app.campaign_row {
+                    line.style(Style::new().bg(SELECTED))
+                } else {
+                    line
+                }
+            })
+            .collect()
+    };
+    frame.render_widget(
+        Paragraph::new(rows).block(block("campaigns", !app.members_focus)),
+        list_area,
+    );
+    let Some(campaign) = &app.campaign else {
+        frame.render_widget(
+            Paragraph::new(" select a campaign")
+                .fg(DIM)
+                .block(block("members", false)),
+            detail_area,
+        );
+        return;
+    };
+    let findings_height = (campaign.findings.len() as u16).clamp(1, 6) + 2;
+    let [findings_area, members_area] =
+        Layout::vertical([Constraint::Length(findings_height), Constraint::Min(4)])
+            .areas(detail_area);
+    let findings: Vec<Line> = if campaign.findings.is_empty() {
+        vec![Line::styled(" none", Style::new().fg(DIM))]
+    } else {
+        campaign
+            .findings
+            .iter()
+            .map(|f| {
+                let ancestry = f
+                    .ancestry
+                    .iter()
+                    .map(u32::to_string)
+                    .chain(std::iter::once(f.ordinal.to_string()))
+                    .collect::<Vec<_>>()
+                    .join("→");
+                Line::from(vec![
+                    Span::styled(format!(" {} ", f.group), Style::new().fg(RED).bold()),
+                    Span::styled(
+                        format!(
+                            "member {ancestry} · {} · seen in {}",
+                            f.representative,
+                            f.members.len()
+                        ),
+                        Style::new().fg(DIM),
+                    ),
+                ])
+            })
+            .collect()
+    };
+    frame.render_widget(
+        Paragraph::new(findings).block(block(
+            &format!(
+                "{} · {} generations · {} features",
+                campaign.id, campaign.generations, campaign.features
+            ),
+            false,
+        )),
+        findings_area,
+    );
+    let visible = members_area.height.saturating_sub(2) as usize;
+    let first = app.member_row.saturating_sub(visible.saturating_sub(1));
+    let members: Vec<Line> = campaign
+        .members
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(visible)
+        .map(|(i, m)| {
+            let (verdict, color) = match m.verdict {
+                Some(seedbox_api::TestVerdict::Failed) => ("failed", RED),
+                Some(seedbox_api::TestVerdict::Passed) => ("passed", GREEN),
+                Some(seedbox_api::TestVerdict::Incomplete) => ("incomplete", AMBER),
+                _ => ("…", DIM),
+            };
+            let plan = match &m.plan {
+                seedbox_api::MemberPlan::Root { seed, .. } => format!("root seed {seed}"),
+                seedbox_api::MemberPlan::Branch {
+                    parent,
+                    anchor,
+                    mutation,
+                    ..
+                } => match mutation {
+                    Some(mutation) => format!("branch of {parent} at {anchor}: {mutation}"),
+                    None => format!("branch of {parent} at {anchor}"),
+                },
+            };
+            let line = Line::from(vec![
+                Span::styled(format!(" {:>3} ", m.ordinal), Style::new().fg(DIM)),
+                Span::styled(
+                    format!("{:<9}", m.simulation.as_ref().map_or("-", |s| s.as_str())),
+                    Style::new().fg(ICE),
+                ),
+                Span::styled(format!("{verdict:<11}"), Style::new().fg(color)),
+                Span::styled(
+                    if m.novelty > 0 {
+                        format!("+{:<4}", m.novelty)
+                    } else {
+                        "     ".into()
+                    },
+                    Style::new().fg(TEAL),
+                ),
+                Span::styled(plan, Style::new().fg(TEXT)),
+            ]);
+            if app.members_focus && i == app.member_row {
+                line.style(Style::new().bg(SELECTED))
+            } else {
+                line
+            }
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(members).block(block(
+            &format!(
+                "members {}/{}",
+                campaign.members.len(),
+                campaign.plan.budget
+            ),
+            app.members_focus,
+        )),
+        members_area,
+    );
+}
+
 fn catalogue(frame: &mut Frame, app: &App, area: Rect) {
     let comparison_height = if app.comparison.is_some() || app.baseline.is_some() {
         7
@@ -3353,6 +3558,19 @@ fn event_text(kind: &EventKind) -> (String, String, Color) {
             format!("{machine} exited {code}"),
             if *code == 0 { DIM } else { RED },
         ),
+        EventKind::OutOfMemoryKill {
+            machine, process, ..
+        } => (
+            "machine".into(),
+            match process {
+                Some(process) => format!(
+                    "{machine} out of memory: killed {} (anon-rss {} kB)",
+                    process.command, process.anon_rss_kib
+                ),
+                None => format!("{machine} out of memory: killed a process"),
+            },
+            RED,
+        ),
         EventKind::ControlChanged { control } => {
             let (text, color) = control_summary(control);
             ("control".into(), text, color)
@@ -3539,6 +3757,35 @@ mod tests {
         SimulationEvent,
     };
 
+    #[test]
+    fn out_of_memory_kills_name_the_victim() {
+        let mut kind = EventKind::OutOfMemoryKill {
+            machine: "n3".into(),
+            incarnation: 0,
+            process: Some(seedbox_api::OutOfMemoryProcess {
+                pid: 412,
+                command: "nats-server".into(),
+                total_vm_kib: 1_203_328,
+                anon_rss_kib: 446_228,
+                file_rss_kib: 1024,
+                shmem_rss_kib: 0,
+            }),
+        };
+        let (category, text, color) = event_text(&kind);
+        assert_eq!(
+            (category.as_str(), text.as_str(), color),
+            (
+                "machine",
+                "n3 out of memory: killed nats-server (anon-rss 446228 kB)",
+                RED
+            )
+        );
+        if let EventKind::OutOfMemoryKill { process, .. } = &mut kind {
+            *process = None;
+        }
+        assert_eq!(event_text(&kind).1, "n3 out of memory: killed a process");
+    }
+
     fn render(app: &App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();
         terminal.draw(|frame| draw(frame, app)).unwrap();
@@ -3711,6 +3958,7 @@ mod tests {
             event,
         };
         let applied = |id| EventKind::FaultChanged {
+            counts: None,
             id,
             input_key: None,
             action: "heal".into(),
@@ -3997,6 +4245,7 @@ mod tests {
         let mut w = world(&["api", "db", "oracle"]);
         w.simulated_time_ns = 2_000_000;
         w.faults.push(FaultState {
+            counts: None,
             input_key: None,
             id: 3,
             action: "partition".into(),
@@ -4146,6 +4395,7 @@ mod tests {
         w.revision = 2;
         w.simulated_time_ns = 2_000_000_000;
         w.faults.push(FaultState {
+            counts: None,
             input_key: None,
             id: 1,
             action: "partition".into(),
@@ -4390,6 +4640,7 @@ mod tests {
         w.simulated_time_ns = 3_000_000_000;
         for (id, action, handle) in [(1, "throttle", "t1"), (2, "clock_skew", "c1")] {
             w.faults.push(FaultState {
+                counts: None,
                 input_key: None,
                 id,
                 action: action.into(),

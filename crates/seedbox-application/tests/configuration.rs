@@ -664,3 +664,39 @@ fn native_projects_resolve_memory_per_machine_and_validate_the_architecture_rang
         .values()
         .all(|service| service.memory_mb.is_none()));
 }
+
+#[test]
+fn native_projects_carry_expected_crashes_per_machine_and_compose_has_none() {
+    let document = "name: keel\nmachines:\n  s3:\n    image: example/keel\n    expectedCrashes:\n    - {signal: SIGABRT, command: keel-watchdog}\noracle: {image: example/oracle}\n";
+    let parse = |document: &str| {
+        config::parse_for_architecture(
+            document,
+            Path::new("/project/seedbox.yaml"),
+            &Default::default(),
+            seedbox_application::guest::Architecture::Arm64,
+        )
+    };
+    let configuration = parse(document).unwrap();
+    let expected = &configuration.services["s3"].expected_crashes;
+    assert_eq!(expected.len(), 1);
+    assert_eq!(expected[0].signal.number(), 6);
+    assert_eq!(expected[0].command, "keel-watchdog");
+    assert!(configuration.services["oracle"].expected_crashes.is_empty());
+    // An invalid declaration is a validation error naming the machine.
+    let error = parse(&document.replace("SIGABRT", "SIGKILL"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("machines.s3"), "{error}");
+    assert!(error.contains("unknown variant `SIGKILL`"), "{error}");
+    // The legacy Compose reader has no such key.
+    let compose = BASE.replace(
+        "    image: example/workload:v1\n",
+        "    image: example/workload:v1\n    expected_crashes: [{signal: SIGABRT, command: x}]\n",
+    );
+    assert!(config::parse(
+        &compose,
+        Path::new("/fixture/compose.yaml"),
+        &BTreeMap::new()
+    )
+    .is_err());
+}

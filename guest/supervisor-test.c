@@ -14,6 +14,8 @@ static int test_adjtimex(struct timex *adjustment);
 #define SEEDBOX_READY_IOPERM readiness_ioperm
 #define SEEDBOX_READY_OUTL readiness_outl
 #define SEEDBOX_TEST_READY_DELAY_NS 10000000ULL
+static char test_vmstat[] = "/tmp/seedbox-vmstat-XXXXXX";
+#define SEEDBOX_VMSTAT test_vmstat
 #define SEEDBOX_SUPERVISOR_TEST
 #include "compose-init.c"
 #undef setrlimit
@@ -122,6 +124,19 @@ int main(int argc, char **argv) {
         if (sigismember(&mask, SIGCHLD)) _exit(3);
         struct timespec delay = {.tv_nsec = 100000000}; nanosleep(&delay, NULL);
         _exit(7);
+    }
+    if (argc > 2 && (!strcmp(argv[1], "property-exit") || !strcmp(argv[1], "property-signal"))) {
+        /* Records sent before the exit reach the transport, flushed or not. */
+        int sdk = socket(AF_UNIX, SOCK_SEQPACKET, 0); assert(sdk >= 0);
+        struct sockaddr_un sdk_address = {.sun_family = AF_UNIX};
+        strcpy(sdk_address.sun_path, argv[2]);
+        assert(!connect(sdk, (struct sockaddr *)&sdk_address, sizeof(sdk_address)));
+        assert(send(sdk, "{\"a\":1}", 7, 0) == 7);
+        /* A flush is a record too; without an engine nobody answers it. */
+        assert(send(sdk, "{\"flush\":{}}", 12, 0) == 12);
+        assert(send(sdk, "{\"b\":2}", 7, 0) == 7);
+        if (!strcmp(argv[1], "property-signal")) raise(SIGTERM);
+        _exit(5);
     }
     if (argc > 1) { for (;;) pause(); }
     int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,sockets));
@@ -306,6 +321,107 @@ int main(int argc, char **argv) {
     }
     close(control_listener); control_listener = -1;
     assert(!unlink(address.sun_path) && !unlink(cmdline_path) && !rmdir(directory));
+    /* Property records: framing is hex of the exact datagram, sessions are
+     * per connection, and loss is reported by the supervisor's own session. */
+    char frame[PROPERTY_FRAME_BYTES];
+    size_t framed = property_frame(frame, 7, 42, (const unsigned char *)"{}", 2);
+    assert(framed == strlen("SBX_PROP1 7 42 7b7d\n") && !memcmp(frame, "SBX_PROP1 7 42 7b7d\n", framed));
+    unsigned char large[PROPERTY_RECORD_BYTES + 1]; memset(large, 'x', sizeof(large));
+    assert(property_frame(frame, 1, 1, large, PROPERTY_RECORD_BYTES) == strlen("SBX_PROP1 1 1 \n") + 2 * PROPERTY_RECORD_BYTES);
+    assert(!property_frame(frame, 1, 1, large, sizeof(large)) && !property_frame(frame, 1, 1, large, 0));
+    /* Kernel log records: only OOM kills and crashes are evidence, and the
+     * message is escaped into one JSON string. */
+    char kernel[PROPERTY_RECORD_BYTES];
+    const char oom[] = "3,812,4096,-;Out of memory: Killed process 412 (ja\"va) total-vm:1kB\n SUBSYSTEM=x\n";
+    size_t kernel_size = kernel_record(kernel, oom, sizeof(oom) - 1);
+    kernel[kernel_size] = 0;
+    assert(!strcmp(kernel, "{\"kernel\":{\"message\":\"Out of memory: Killed process 412 (ja\\\"va) total-vm:1kB\"}}"));
+    const char segv[] = "6,9,1,-;worker[77]: segfault at 0 ip 1 sp 2 error 4\tx\n";
+    kernel_size = kernel_record(kernel, segv, sizeof(segv) - 1);
+    kernel[kernel_size] = 0;
+    assert(strstr(kernel, "segfault at 0") && strstr(kernel, "\\u0009x"));
+    const char fatal[] = "6,11,3,-;potentially unexpected fatal signal 6.\n";
+    assert(kernel_record(kernel, fatal, sizeof(fatal) - 1));
+    const char noise[] = "6,10,2,-;virtio_net virtio1 eth0: link up\n";
+    assert(!kernel_record(kernel, noise, sizeof(noise) - 1));
+    assert(!kernel_record(kernel, "no separator", 12));
+    char sdk_directory[] = "/tmp/seedbox-sdk-XXXXXX"; assert(mkdtemp(sdk_directory));
+    struct sockaddr_un sdk_address = {.sun_family = AF_UNIX};
+    assert(snprintf(sdk_address.sun_path, sizeof(sdk_address.sun_path), "%s/run/sdk.sock", sdk_directory) > 0);
+    property_socket(sdk_address.sun_path); assert(property_listener >= 0);
+    assert(!stat(sdk_address.sun_path, &permissions)); assert((permissions.st_mode & 0777) == 0666);
+    int sdk = socket(AF_UNIX, SOCK_SEQPACKET, 0); assert(sdk >= 0);
+    assert(!connect(sdk, (struct sockaddr *)&sdk_address, sizeof(sdk_address)));
+    assert(send(sdk, "{}", 2, 0) == 2);
+    assert(send(sdk, "{\"flush\":{}}", 12, 0) == 12);
+    assert(send(sdk, large, sizeof(large), 0) == sizeof(large));
+    service_channels(&child, 0);
+    service_channels(&child, 0);
+    n = read(sockets[1], buffer, sizeof(buffer)-1); assert(n > 0); buffer[n] = 0;
+    char lost[256];
+    /* The flush is relayed in order (7b22666c757368223a7b7d7d = {"flush":{}}). */
+    snprintf(lost, sizeof(lost), "SBX_PROP1 1 1 7b7d\nSBX_PROP1 1 2 7b22666c757368223a7b7d7d\nSBX_PROP1 0 1 ");
+    assert(!strncmp(buffer, lost, strlen(lost)));
+    /* 7b226c6f7374223a = {"lost": */
+    assert(strstr(buffer, "SBX_PROP1 0 1 7b226c6f7374223a") && buffer[n - 1] == '\n');
+    /* Only the engine answers a flush, over management. */
+    char none[8]; assert(recv(sdk, none, sizeof(none), MSG_DONTWAIT) < 0 && errno == EAGAIN);
+    char flush_reply[] = "SBX_SDK1 1 {\"flush\":{\"seq\":2}}";
+    control(flush_reply, &child);
+    char flushed[64]; n = recv(sdk, flushed, sizeof(flushed), MSG_DONTWAIT);
+    assert(n == 19 && !memcmp(flushed, "{\"flush\":{\"seq\":2}}", 19));
+    /* The engine answers a session over management; other sessions get nothing. */
+    char choice_reply[] = "SBX_SDK1 1 {\"choice\":{\"index\":1}}";
+    control(choice_reply, &child);
+    char other_session[] = "SBX_SDK1 9 {}";
+    control(other_session, &child);
+    char answer[64]; n = recv(sdk, answer, sizeof(answer), MSG_DONTWAIT);
+    assert(n == 22 && !memcmp(answer, "{\"choice\":{\"index\":1}}", 22));
+    assert(recv(sdk, answer, sizeof(answer), MSG_DONTWAIT) < 0 && errno == EAGAIN);
+    /* Connections beyond the session limit are refused and reported. */
+    int extra[PROPERTY_SESSIONS];
+    for (unsigned i = 0; i < PROPERTY_SESSIONS; i++) {
+        extra[i] = socket(AF_UNIX, SOCK_SEQPACKET, 0); assert(extra[i] >= 0);
+        assert(!connect(extra[i], (struct sockaddr *)&sdk_address, sizeof(sdk_address)));
+    }
+    service_channels(&child, 0);
+    n = read(sockets[1], buffer, sizeof(buffer)-1); assert(n > 0); buffer[n] = 0;
+    assert(!strncmp(buffer, "SBX_PROP1 0 2 7b226c6f7374223a", 30) && !strchr(buffer, '\n')[1]);
+    assert(property_session_id == PROPERTY_SESSIONS);
+    /* A closed session frees its slot; the next connection gets a new ID. */
+    close(sdk); for (unsigned i = 0; i < PROPERTY_SESSIONS; i++) close(extra[i]);
+    service_channels(&child, 0);
+    for (unsigned i = 0; i < PROPERTY_SESSIONS; i++) assert(property_clients[i].fd == -1);
+    /* At the application's exit, already-sent records precede its exit record. */
+    for (int signalled = 0; signalled < 2; signalled++) {
+        int records[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, records));
+        check = fork(); assert(check >= 0);
+        if (!check) {
+            alarm(10); close(records[1]); management = records[0];
+            watch_children();
+            arguments = (char *[]){argv[0], signalled ? "property-signal" : "property-exit", sdk_address.sun_path, NULL};
+            child = start(); assert(child > 0);
+            supervise(&child);
+        }
+        close(records[0]);
+        assert(waitpid(check, &status, 0) == check);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == (signalled ? 128 + SIGTERM : 5));
+        size_t got = 0;
+        while ((n = read(records[1], buffer + got, sizeof(buffer) - got - 1)) > 0) got += (size_t)n;
+        assert(n == 0); buffer[got] = 0; close(records[1]);
+        /* {"a":1}, {"flush":{}}, {"b":2}, then {"exit":{"code":5}} or {"exit":{"signal":15}}. */
+        unsigned session = PROPERTY_SESSIONS + 1 + signalled;
+        char expected[512];
+        snprintf(expected, sizeof(expected), "SBX_PROP1 %u 1 7b2261223a317d\nSBX_PROP1 %u 2 7b22666c757368223a7b7d7d\nSBX_PROP1 %u 3 7b2262223a327d\nSBX_PROP1 0 3 %s\n",
+                 session, session, session, signalled ? "7b2265786974223a7b227369676e616c223a31357d7d" : "7b2265786974223a7b22636f6465223a357d7d");
+        assert(!strcmp(buffer, expected));
+        /* The forked supervisor's session counter is its own. */
+        property_session_id++;
+    }
+    close(property_listener); property_listener = -1;
+    assert(!unlink(sdk_address.sun_path));
+    char sdk_parent[PATH_MAX]; snprintf(sdk_parent, sizeof(sdk_parent), "%s/run", sdk_directory);
+    assert(!rmdir(sdk_parent) && !rmdir(sdk_directory));
     /* Final output must reach the transport before the oracle exit, even when
      * SIGCHLD wins the poll race. Binary bytes and stream identity survive. */
     int logs[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, logs));
@@ -340,4 +456,78 @@ int main(int argc, char **argv) {
         assert(waitpid(check, &status, 0) == check);
         assert(WIFEXITED(status) && WEXITSTATUS(status) == (later ? 7 : 1));
     }
+    /* Each kernel kill record becomes one frame and other records none; each
+     * kill /proc/vmstat counted beyond them is reported without details. A
+     * datagram socket stands in for /dev/kmsg's one record per read. */
+    int records[2]; assert(!socketpair(AF_UNIX, SOCK_SEQPACKET, 0, records));
+    assert(!fcntl(records[0], F_SETFL, O_NONBLOCK));
+    int reports[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, reports));
+    assert(!fcntl(reports[1], F_SETFL, O_NONBLOCK));
+    management = reports[0]; kernel_log = records[0];
+    const char *other = "6,8,2,-;random: crng init done\n";
+    const char *killed = "3,9,3,-;Out of memory: Killed process 42 (memhog) total-vm:9kB, anon-rss:8kB, "
+                         "file-rss:2kB, shmem-rss:1kB, UID:0 pgtables:1kB oom_score_adj:0\n";
+    assert(send(records[1], other, strlen(other), 0) == (ssize_t)strlen(other));
+    assert(send(records[1], killed, strlen(killed), 0) == (ssize_t)strlen(killed));
+    int vmstat = mkstemp(test_vmstat); assert(vmstat >= 0);
+    const char *counter = "nr_free_pages 9\noom_kill 5\n";
+    assert(write(vmstat, counter, strlen(counter)) == (ssize_t)strlen(counter)); close(vmstat);
+    oom_kills_counted = 3;
+    service_channels(&child, 0);
+    size_t reported = 0;
+    while ((n = read(reports[1], buffer + reported, sizeof(buffer) - reported - 1)) > 0) reported += (size_t)n;
+    assert(n == -1 && errno == EAGAIN); buffer[reported] = 0;
+    assert(!strcmp(buffer, "SBX_OOM1 42 9 8 2 1 6d656d686f67\nSBX_OOM1 -\n"));
+    assert(oom_kills_counted == 5);
+    kernel_log_read();
+    assert(read(reports[1], buffer, sizeof(buffer)) == -1 && errno == EAGAIN);
+    /* Without a counter, each record is still reported. */
+    assert(!unlink(test_vmstat)); oom_kills_counted = oom_kill_count(); assert(oom_kills_counted == -1);
+    assert(send(records[1], killed, strlen(killed), 0) == (ssize_t)strlen(killed));
+    kernel_log_read();
+    n = read(reports[1], buffer, sizeof(buffer) - 1); assert(n > 0); buffer[n] = 0;
+    assert(!strcmp(buffer, "SBX_OOM1 42 9 8 2 1 6d656d686f67\n"));
+    close(records[0]); close(records[1]); close(reports[0]); close(reports[1]);
+    kernel_log = -1;
+    /* Coverage counts become (edge, bucket) features; only changed 1 KiB
+     * slices are relayed, each with its offset. */
+    int frames[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, frames));
+    assert(!fcntl(frames[1], F_SETFL, O_NONBLOCK));
+    management = frames[0];
+    directories(COVERAGE_DIR, 0755);
+    unsigned char counts[COVERAGE_EDGES] = {0};
+    counts[0] = 1; counts[5] = 3; counts[COVERAGE_EDGES - 1] = 200;
+    int file = open(COVERAGE_DIR "/1", O_WRONLY|O_CREAT|O_TRUNC, 0644); assert(file >= 0);
+    assert(write(file, counts, sizeof(counts)) == (ssize_t)sizeof(counts)); close(file);
+    coverage_enabled = 1;
+    coverage_relay();
+    static char relayed[4 * (128 + 4 * COVERAGE_SLICE)];
+    size_t got = 0;
+    while ((n = read(frames[1], relayed + got, sizeof(relayed) - got - 1)) > 0) got += (size_t)n;
+    relayed[got] = 0;
+    /* Two slices: offset 0 (edges 0 and 5) and the last (edge 8191). */
+    unsigned lines = 0;
+    for (char *p = relayed; *p; ++p) lines += *p == '\n';
+    assert(lines == 2);
+    /* "offset":0, and "offset":3072, as hex in the frames. */
+    assert(strstr(relayed, "226f6666736574223a302c"));
+    assert(strstr(relayed, "226f6666736574223a333037322c"));
+    /* Edge 0 at bucket 0 and edge 5 at bucket 1 (2-3): bits 0 and 21. */
+    assert(coverage_features[0] == 0x01 && coverage_features[2] == 0x20);
+    /* Edge 8191 at bucket 3 (16 or more): the map's last bit. */
+    assert(coverage_features[COVERAGE_FEATURE_BYTES - 1] == 0x80);
+    coverage_relay();
+    assert(read(frames[1], relayed, sizeof(relayed)) == -1 && errno == EAGAIN);
+    counts[0] = 2;
+    file = open(COVERAGE_DIR "/1", O_WRONLY|O_TRUNC); assert(file >= 0);
+    assert(write(file, counts, sizeof(counts)) == (ssize_t)sizeof(counts)); close(file);
+    coverage_relay();
+    got = 0;
+    while ((n = read(frames[1], relayed + got, sizeof(relayed) - got - 1)) > 0) got += (size_t)n;
+    relayed[got] = 0;
+    lines = 0;
+    for (char *p = relayed; *p; ++p) lines += *p == '\n';
+    assert(lines == 1 && strstr(relayed, "226f6666736574223a302c"));
+    assert(coverage_features[0] == 0x03);
+    close(frames[0]); close(frames[1]);
 }

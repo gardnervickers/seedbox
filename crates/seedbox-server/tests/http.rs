@@ -59,7 +59,7 @@ async fn unix_client_submits_describes_and_retries_without_duplicate_work() {
     assert!(world.links.is_empty() && world.faults.is_empty());
     let catalogue = client.fault_types(&simulation.metadata.id).await.unwrap();
     assert_eq!(catalogue.simulation, simulation.metadata.id);
-    assert_eq!(catalogue.faults.len(), 15);
+    assert_eq!(catalogue.faults.len(), 18);
     let stop = catalogue.faults.iter().find(|f| f.name == "stop").unwrap();
     assert_eq!(
         stop.schema["properties"]["machine"]["enum"],
@@ -478,6 +478,7 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
             metadata: Default::default(),
             options: Default::default(),
             request_id: "recorded-definition".into(),
+            fault_profile: None,
             spec: exported.spec,
         })
         .await

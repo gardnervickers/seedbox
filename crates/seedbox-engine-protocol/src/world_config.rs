@@ -155,6 +155,10 @@ pub struct MachineConfig {
     /// Appended to the generated kernel command line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cmdline: Option<String>,
+    /// Crashes the simulation definition declares as designed behavior here;
+    /// they pass `seedbox.no_crashing_processes` instead of violating it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_crashes: Vec<crate::property::ExpectedCrash>,
 }
 
 impl MachineConfig {
@@ -261,6 +265,15 @@ pub struct SeedPlan<'a> {
 }
 
 impl WorldConfig {
+    /// Each machine's expected crashes, in machine order. The world
+    /// coordinator validates them.
+    pub fn expected_crashes(&self) -> Vec<Vec<crate::property::ExpectedCrash>> {
+        self.machines
+            .iter()
+            .map(|m| m.expected_crashes.clone())
+            .collect()
+    }
+
     pub fn seed_plan(&self) -> SeedPlan<'_> {
         SeedPlan {
             faults: &self.faults,
@@ -400,6 +413,26 @@ mod tests {
         let raw = serde_json::to_value(&world).unwrap();
         assert_eq!(raw["machines"][0]["mem_mb"], 2048);
         assert!(raw["machines"][1].get("mem_mb").is_none());
+        assert_eq!(serde_json::from_value::<WorldConfig>(raw).unwrap(), world);
+    }
+
+    #[test]
+    fn expected_crashes_are_per_machine_and_omitted_when_empty() {
+        let world: WorldConfig = serde_json::from_value(serde_json::json!({
+            "kernel":"kernel",
+            "machines":[
+                {"name":"s3","initrd":"s3","expected_crashes":[{"signal":6,"command":"keel-watchdog"}]},
+                {"name":"oracle","initrd":"oracle"}
+            ]
+        }))
+        .unwrap();
+        let expected = world.expected_crashes();
+        assert_eq!(expected.len(), 2);
+        assert_eq!(expected[0][0].command, "keel-watchdog");
+        assert!(expected[1].is_empty());
+        let raw = serde_json::to_value(&world).unwrap();
+        assert_eq!(raw["machines"][0]["expected_crashes"][0]["signal"], 6);
+        assert!(raw["machines"][1].get("expected_crashes").is_none());
         assert_eq!(serde_json::from_value::<WorldConfig>(raw).unwrap(), world);
     }
 

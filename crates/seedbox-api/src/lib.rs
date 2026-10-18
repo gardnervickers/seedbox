@@ -34,8 +34,9 @@ pub use events::{
 pub use http::{ApiError, ErrorCode, ServerInfo, SimulationList, SimulationSummary};
 pub use id::{InvalidSimulationId, SimulationId};
 pub use resource::{
-    ApiVersion, EngineBuild, ExecutionOptions, InputSource, Metadata, ProgramInput, ResourceKind,
-    Simulation, SimulationDocument, SimulationSpec, SimulationStatus, SubmitRequest,
+    ApiVersion, EngineBuild, ExecutionOptions, InputSource, Metadata, ProgramInput,
+    PropertyAssessment, ResourceKind, Simulation, SimulationDocument, SimulationSpec,
+    SimulationStatus, SubmitRequest,
 };
 pub use status::{ExecutionTermination, Phase, Stage, StageTiming, TestVerdict};
 
@@ -45,15 +46,33 @@ pub const API_VERSION: &str = "seedbox/v1";
 mod seeds;
 pub use seeds::{SeedRangeRequest, SeedRangeStatus};
 
+mod campaign;
+pub use campaign::{
+    AppliedFault, Campaign, CampaignAssessment, CampaignCompletion, CampaignMember, CampaignPhase,
+    CampaignPlan, CampaignProperty, CampaignRequest, CampaignSummary, Encounter, EncounterPage,
+    ExportState, Finding, FindingLabel, FindingQuery, MemberPlan, Moment, Shrink, ShrinkOutcome,
+    ShrinkProbe, ShrinkRequest, MAX_PAGE, MAX_SHRINK_SEEDS,
+};
+
+mod analysis;
+pub use analysis::{
+    Analysis, AnalysisArm, AnalysisArmKind, AnalysisRequest, ExecRequest, MAX_ANALYSIS_RUNS,
+    MAX_ANALYSIS_SAMPLES, MAX_ANALYSIS_TIMES,
+};
+
 mod world;
 pub use world::{
-    ApplicationCondition, ApplicationState, FaultState, Frame, FrameDelivery, FrameFate,
-    LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState, WorldState,
+    ApplicationCondition, ApplicationState, ChoiceInputState, FaultState, Frame, FrameDelivery,
+    FrameFate, LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState,
+    OutOfMemoryKill, OutOfMemoryProcess, TriggerState, TriggerStatus, WorldState,
+    MAX_OUT_OF_MEMORY_KILLS,
 };
 
 mod timeline;
 pub use timeline::{DeriveRequest, FaultTimeline, TimelineEntry, TimelineOrigin};
 
+mod explanation;
+pub use explanation::{Explanation, ExplanationEntry, ExplanationKind};
 mod comparison;
 pub use comparison::{ComparisonStatus, SimulationComparison};
 
@@ -63,4 +82,7 @@ pub use capacity::{ExecutionCapacity, ExecutionOccupant, QueueReason, QueuedSimu
 mod bundles;
 mod diagnostics;
 pub use bundles::*;
-pub use diagnostics::{DiagnosticDocument, DiagnosticFile, DiagnosticFileQuery, DiagnosticFiles};
+pub use diagnostics::{
+    DiagnosticDocument, DiagnosticFile, DiagnosticFileQuery, DiagnosticFiles,
+    MachineOutOfMemoryKill,
+};

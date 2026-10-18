@@ -2,6 +2,7 @@
 
 use super::*;
 use seedbox_engine_protocol::disk::DiskFaultModel;
+use seedbox_engine_protocol::property::ExpectedCrash;
 use seedbox_engine_protocol::world_config::{
     CheckpointConfig, ControlChannel, ControlConfig, DiskConfig, LinkConfig, MachineConfig,
     NetworkConfig, WorldConfig,
@@ -16,10 +17,6 @@ pub(super) fn control_latency(request: &ExecutionRequest<'_>) -> Result<u64> {
         .and_then(|n| n.checked_add(1_000_000))
         .ok_or_else(|| Error::Execution("control latency overflow".into()))
 }
-
-/// Size of the retained disk of a machine whose service mounts named volumes.
-/// Part of the execution semantics: changing it changes runs.
-pub const VOLUME_DISK_MIB: u64 = 1024;
 
 /// Translate an execution request without consulting registry tags or source
 /// paths. Exposed for preparation tools and report inspection without KVM.
@@ -135,20 +132,31 @@ fn artifact(request: &ExecutionRequest<'_>, digest: &ContentDigest) -> Result<st
 }
 
 /// A machine booting `digest`; it gets a disk when a service placed on it
-/// mounts a volume.
+/// mounts a volume. The disk holds all of the machine's volumes, so its size
+/// is the sum of theirs. Part of the execution semantics: it changes runs.
 fn machine(
     request: &ExecutionRequest<'_>,
     name: &String,
     digest: &ContentDigest,
 ) -> Result<MachineConfig> {
-    let volumes = request.prepared.placement.iter().any(|(service, machine)| {
-        machine == name
-            && request
-                .prepared
-                .images
-                .get(service)
-                .is_some_and(|image| !image.launch.disk_volumes.is_empty())
-    });
+    let volumes: Vec<_> = request
+        .prepared
+        .placement
+        .iter()
+        .filter(|(_, machine)| *machine == name)
+        .filter_map(|(service, _)| request.prepared.images.get(service))
+        .flat_map(|image| image.launch.disk_volumes.iter().map(|v| v.size_bytes))
+        .collect();
+    let disk = if volumes.is_empty() {
+        None
+    } else {
+        let bytes = seedbox_spec::project::machine_disk_bytes(volumes)
+            .map_err(|error| Error::Setup(format!("machine {name}: {error}")))?;
+        Some(DiskConfig {
+            size_mib: Some(bytes / (1024 * 1024)),
+            image: None,
+        })
+    };
     let cpu = request
         .prepared
         .placement
@@ -159,6 +167,19 @@ fn machine(
                 .flatten()
         })
         .ok_or_else(|| Error::Integrity(format!("missing CPU configuration for machine {name}")))?;
+    let expected_crashes = request
+        .prepared
+        .placement
+        .iter()
+        .filter(|(_, machine)| *machine == name)
+        .filter_map(|(service, _)| request.expected_crashes.get(service))
+        .flatten()
+        .map(|crash| ExpectedCrash {
+            signal: crash.signal.number(),
+            command: crash.command.clone(),
+            executable: crash.executable.clone(),
+        })
+        .collect();
     Ok(MachineConfig {
         cpu_speed_hz: cpu.speed_hz,
         progress_ns: cpu.progress_ns(),
@@ -171,11 +192,9 @@ fn machine(
             .copied()
             .map(u64::from),
         initrd: artifact(request, digest)?,
-        disk: volumes.then_some(DiskConfig {
-            size_mib: Some(VOLUME_DISK_MIB),
-            image: None,
-        }),
+        disk,
         cmdline: None,
+        expected_crashes,
     })
 }
 
@@ -271,9 +290,11 @@ pub fn validate_input_program(
     }
     let faults = configured_faults(configuration)?;
     for input in program {
-        faults
-            .validate_action_shape(&input.action)
-            .map_err(|error| Error::Setup(format!("program {}: {error}", input.key)))?;
+        if let Some(action) = input.action.fault() {
+            faults
+                .validate_action_shape(action)
+                .map_err(|error| Error::Setup(format!("program {}: {error}", input.key)))?;
+        }
     }
     Ok(())
 }
@@ -341,7 +362,8 @@ mod program_tests {
                 handle: "slow".into(),
                 machine: "db".into(),
                 speed_hz: 1_000_000_000,
-            },
+            }
+            .into(),
         };
         let heal = TimedInput {
             timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
@@ -349,7 +371,8 @@ mod program_tests {
             at_ns: 10,
             action: Action::Heal {
                 handle: "slow".into(),
-            },
+            }
+            .into(),
         };
         let entries = [slow("first", 10), heal.clone(), slow("again", 20)];
         validate_input_program(&config, &entries).unwrap();
@@ -368,7 +391,8 @@ mod program_tests {
         let mut unknown = slow("unknown", 1);
         unknown.action = Action::Stop {
             machine: "missing".into(),
-        };
+        }
+        .into();
         assert!(validate_input_program(&config, &[unknown]).is_err());
         config.control = Some(crate::config::Control {
             service: "db".into(),

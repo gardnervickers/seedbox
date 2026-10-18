@@ -1,0 +1,20 @@
+name: bitrot-eval-fixed
+machines:
+  kv:
+    build:
+      context: ../..
+      dockerfile: evals/bitrot/Dockerfile
+    entrypoint: [/bitrot-server]
+    environment:
+      BITROT_BUG: "0"
+    # The log must outlive a crash: keep it on a disk.
+    volumes:
+      data:
+        target: /data
+oracle:
+  build:
+    context: ../..
+    dockerfile: evals/bitrot/Dockerfile
+  entrypoint: [/bitrot-oracle]
+network:
+  latency: 1ms

@@ -1,0 +1,16 @@
+[package]
+name = "seedbox-eval-casreg"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Built in its own image, outside the Seedbox workspace.
+[workspace]
+
+[dependencies]
+seedbox-check = { path = "../../crates/seedbox-check" }
+seedbox-sdk = { path = "../../crates/seedbox-sdk" }
+serde_json = "1"
+
+[profile.release]
+debug = 1

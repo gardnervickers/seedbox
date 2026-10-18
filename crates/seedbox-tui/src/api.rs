@@ -66,6 +66,13 @@ impl Api {
                     }
                 });
             }
+            Request::Campaign(id) => {
+                tokio::spawn(async move {
+                    if let Ok(campaign) = client.campaign(&id).await {
+                        let _ = tx.send(Update::Campaign(Box::new(campaign))).await;
+                    }
+                });
+            }
             Request::Preview(id) => {
                 tokio::spawn(async move {
                     let world = client.world(&id).await.ok().map(Box::new);
@@ -339,6 +346,10 @@ async fn poll_list(client: Client, tx: Sender<Update>) {
                 let _ = tx.send(Update::Connection(true)).await;
                 if tx.send(Update::List(list)).await.is_err() {
                     return;
+                }
+                if let Ok(mut campaigns) = client.campaigns().await {
+                    campaigns.sort_by(|a, b| b.id.cmp(&a.id));
+                    let _ = tx.send(Update::Campaigns(campaigns)).await;
                 }
             }
             Err(_) => {

@@ -1,13 +1,16 @@
-//! Nonblocking worker-side observation delivery. No delivery outcome can change
-//! guest state, a witness, or an execution result.
+//! Worker-side observation delivery. No delivery outcome can change guest
+//! state, a witness, or an execution result: the coordinator publishes between
+//! rounds, so waiting for the observer only delays the next round.
 use seedbox_engine_protocol::{
     application_log,
-    observation::{Kind, Observation, MAX_DATAGRAM_BYTES},
+    observation::{receiver_full, Kind, Observation, MAX_DATAGRAM_BYTES},
+    out_of_memory, property,
 };
 use std::{
     os::unix::net::UnixDatagram,
     path::Path,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 /// Runtime-only observations waiting for coordinator commit.
@@ -18,10 +21,12 @@ pub(crate) struct Entry {
     pub kind: Kind,
 }
 
-/// Bound both slice and round buffering independently of reader speed.
+/// Bound both slice and round buffering independently of reader speed. What a
+/// buffer keeps depends only on the machine's committed output.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Buffer {
     entries: Vec<Entry>,
+    bytes: usize,
     lost: Option<Entry>,
 }
 
@@ -45,14 +50,26 @@ pub(crate) mod empty_checkpoint {
 }
 
 impl Buffer {
-    const CAPACITY: usize = 64;
+    /// Records one machine may publish per round.
+    const CAPACITY: usize = 8192;
+    /// Application-log bytes one machine may publish per round: 2048 full
+    /// chunks, bounding round memory independently of chunk sizes.
+    const BYTES: usize = 2048 * application_log::MAX_BYTES;
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty() && self.lost.is_none()
     }
 
     pub fn push(&mut self, entry: Entry) {
-        if self.entries.len() < Self::CAPACITY && self.lost.is_none() {
+        let bytes = match &entry.kind {
+            Kind::Log(chunk) => chunk.bytes.len(),
+            _ => 0,
+        };
+        if self.entries.len() < Self::CAPACITY
+            && self.bytes + bytes <= Self::BYTES
+            && self.lost.is_none()
+        {
+            self.bytes += bytes;
             self.entries.push(entry);
             return;
         }
@@ -73,18 +90,56 @@ impl Buffer {
     }
 
     pub fn drain(&mut self) -> impl Iterator<Item = Entry> + '_ {
+        self.bytes = 0;
         self.entries.drain(..).chain(self.lost.take())
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.bytes = 0;
         self.lost = None;
     }
 }
 
+/// How long one mandatory observation waits for a live observer to drain
+/// earlier datagrams before it is dropped as a source gap.
+const STALL: Duration = Duration::from_secs(2);
+
 struct Sender {
     socket: UnixDatagram,
     sequence: u64,
+    stall: Duration,
+    /// The observer let a datagram time out. Later sends try once until one is
+    /// accepted, so a stopped observer delays a worker at most once.
+    stalled: bool,
+}
+
+impl Sender {
+    /// Wait for a full receiver only when asked and not already stalled.
+    fn send(&mut self, bytes: &[u8], wait: bool) -> bool {
+        let mut deadline = None;
+        let mut pause = Duration::from_micros(20);
+        loop {
+            match self.socket.send(bytes) {
+                Ok(_) => {
+                    self.stalled = false;
+                    return true;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if wait && !self.stalled && receiver_full(&error) => {
+                    let now = Instant::now();
+                    let deadline = *deadline.get_or_insert(now + self.stall);
+                    if now >= deadline {
+                        self.stalled = true;
+                        return false;
+                    }
+                    std::thread::sleep(pause.min(deadline - now));
+                    pause = (pause * 2).min(Duration::from_millis(1));
+                }
+                Err(_) => return false,
+            }
+        }
+    }
 }
 
 pub struct Publisher(Mutex<Sender>);
@@ -99,6 +154,10 @@ impl Drop for Publisher {
 
 impl Publisher {
     pub fn connect(path: &Path) -> std::io::Result<Arc<Self>> {
+        Self::connect_with_stall(path, STALL)
+    }
+
+    fn connect_with_stall(path: &Path, stall: Duration) -> std::io::Result<Arc<Self>> {
         let socket = UnixDatagram::unbound()?;
         seedbox_engine_protocol::observation::configure_socket(&socket)?;
         socket.connect(path)?;
@@ -106,6 +165,8 @@ impl Publisher {
         Ok(Arc::new(Self(Mutex::new(Sender {
             socket,
             sequence: 0,
+            stall,
+            stalled: false,
         }))))
     }
 
@@ -133,9 +194,11 @@ impl Publisher {
             simulated_time_ns,
             kind,
         };
+        // Mandatory observations wait for a live observer; optional frame
+        // batches never delay a round.
         if let Ok(bytes) = serde_json::to_vec(&observation) {
             if bytes.len() <= MAX_DATAGRAM_BYTES
-                && sender.socket.send(&bytes).is_ok()
+                && sender.send(&bytes, !optional_frames)
                 && optional_frames
             {
                 sender.sequence = sequence;
@@ -154,6 +217,12 @@ pub struct Decoder {
 }
 
 const MAX_LINE: usize = 16_384 + 64;
+
+enum Line {
+    Log(Kind),
+    /// A complete `SBX_PROP1` line, or `None` when it exceeded [`MAX_LINE`].
+    Property(Option<Vec<u8>>),
+}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -195,34 +264,63 @@ impl Decoder {
         time_ns: u64,
         bytes: &[u8],
     ) {
-        self.receive(bytes, |kind| {
-            if state.observe_console {
-                if let Kind::Log(chunk) = &kind {
-                    state.committed_output.push((time_ns, chunk.bytes.clone()));
+        self.receive_lines(bytes, |line| match line {
+            Line::Log(kind) => {
+                if state.observe_console {
+                    if let Kind::Log(chunk) = &kind {
+                        state.committed_output.push((time_ns, chunk.bytes.clone()));
+                    }
+                }
+                if publisher.is_some() {
+                    state.observations.push(Entry {
+                        time_ns,
+                        incarnation: state.incarnation(),
+                        kind,
+                    });
                 }
             }
-            if publisher.is_some() {
-                state.observations.push(Entry {
-                    time_ns,
-                    incarnation: state.incarnation(),
-                    kind,
-                });
+            // Property evidence is always retained, independent of observers.
+            Line::Property(frame) => {
+                let incarnation = state.incarnation();
+                state
+                    .committed_properties
+                    .push((time_ns, incarnation, frame));
             }
         });
     }
 
     pub fn receive(&mut self, bytes: &[u8], mut emit: impl FnMut(Kind)) {
+        self.receive_lines(bytes, |line| {
+            if let Line::Log(kind) = line {
+                emit(kind);
+            }
+        });
+    }
+
+    fn receive_lines(&mut self, bytes: &[u8], mut emit: impl FnMut(Line)) {
         for &byte in bytes {
             if byte == b'\n' {
-                if self.oversized {
+                if self.line.starts_with(property::PREFIX) {
+                    // An oversized property line is reported, never truncated
+                    // into something that might decode.
+                    emit(Line::Property((!self.oversized).then(|| self.line.clone())));
+                } else if self.oversized {
                     if self.line.starts_with(application_log::PREFIX) {
-                        emit(Kind::MalformedLog);
+                        emit(Line::Log(Kind::MalformedLog));
                     }
+                } else if self.line.starts_with(out_of_memory::PREFIX) {
+                    // A kill is reported even if its details are unreadable.
+                    emit(Line::Log(Kind::OutOfMemoryKill(
+                        out_of_memory::decode(&self.line)
+                            .ok()
+                            .flatten()
+                            .unwrap_or(out_of_memory::Kill { process: None }),
+                    )));
                 } else {
                     match application_log::decode(&self.line) {
-                        Ok(Some(chunk)) => emit(Kind::Log(chunk)),
+                        Ok(Some(chunk)) => emit(Line::Log(Kind::Log(chunk))),
                         Ok(None) => {}
-                        Err(_) => emit(Kind::MalformedLog),
+                        Err(_) => emit(Line::Log(Kind::MalformedLog)),
                     }
                 }
                 self.line.clear();
@@ -240,15 +338,17 @@ impl Decoder {
 mod tests {
     use super::*;
     use seedbox_engine_protocol::application_log::{Chunk, Stream};
+    use seedbox_engine_protocol::observation::configure_socket;
 
     #[test]
     fn slice_and_round_overflow_preserve_exact_omission_count() {
+        let per_slice = Buffer::CAPACITY as u64 + 36;
         let mut round = Buffer::default();
         for slice in 0..3 {
             let mut pending = Buffer::default();
-            for offset in 0..100 {
+            for offset in 0..per_slice {
                 pending.push(Entry {
-                    time_ns: slice * 100 + offset,
+                    time_ns: slice * per_slice + offset,
                     incarnation: 2,
                     kind: Kind::MalformedLog,
                 });
@@ -261,14 +361,54 @@ mod tests {
         let entries: Vec<_> = round.drain().collect();
         assert_eq!(entries.len(), Buffer::CAPACITY + 1);
         let gap = entries.last().unwrap();
-        assert_eq!(gap.kind, Kind::LogGap { records: 236 });
-        assert_eq!((gap.time_ns, gap.incarnation), (299, 2));
+        assert_eq!(
+            gap.kind,
+            Kind::LogGap {
+                records: 3 * per_slice - Buffer::CAPACITY as u64
+            }
+        );
+        assert_eq!((gap.time_ns, gap.incarnation), (3 * per_slice - 1, 2));
         assert!(round.is_empty());
     }
 
     #[test]
+    fn round_output_bytes_are_bounded_and_later_records_stay_behind_the_gap() {
+        let chunk = |bytes| Entry {
+            time_ns: 7,
+            incarnation: 1,
+            kind: Kind::Log(Chunk {
+                stream: Stream::Stdout,
+                bytes: vec![b'x'; bytes],
+            }),
+        };
+        let mut round = Buffer::default();
+        // Small chunks are bounded by record count, not bytes.
+        for _ in 0..Buffer::CAPACITY / 2 {
+            round.push(chunk(1));
+        }
+        assert_eq!(round.drain().count(), Buffer::CAPACITY / 2);
+        let full = Buffer::BYTES / application_log::MAX_BYTES;
+        for _ in 0..full {
+            round.push(chunk(application_log::MAX_BYTES));
+        }
+        round.push(chunk(1));
+        round.push(Entry {
+            time_ns: 8,
+            incarnation: 1,
+            kind: Kind::MalformedLog,
+        });
+        let entries: Vec<_> = round.drain().collect();
+        assert_eq!(entries.len(), full + 1);
+        let gap = entries.last().unwrap();
+        assert_eq!((gap.time_ns, &gap.kind), (8, &Kind::LogGap { records: 2 }));
+        // Draining restores the whole byte budget for the next round.
+        round.push(chunk(application_log::MAX_BYTES));
+        assert_eq!(round.drain().count(), 1);
+    }
+
+    #[test]
     fn large_frame_batches_cross_darwin_default_limit_and_omissions_do_not_gap_logs() {
-        use seedbox_engine_protocol::observation::{configure_socket, Frame, FrameFate};
+        use seedbox_engine_protocol::observation::{Frame, FrameFate};
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("observer");
         let receiver = UnixDatagram::bind(&path).unwrap();
@@ -362,6 +502,36 @@ mod tests {
     }
 
     #[test]
+    fn property_lines_are_always_retained_and_never_published_as_logs() {
+        let mut decoder = Decoder::default();
+        let mut state = crate::world::MachineState::new("n1".into());
+        decoder.commit(
+            &mut state,
+            None,
+            3,
+            b"SBX_PROP1 1 1 7b7d\nSBX_LOG1 1 61\nSBX_PROP1 1 2 7b",
+        );
+        assert_eq!(
+            state.committed_properties,
+            vec![(3, 0, Some(b"SBX_PROP1 1 1 7b7d".to_vec()))]
+        );
+        assert!(state.committed_output.is_empty() && state.observations.is_empty());
+        decoder.commit(&mut state, None, 4, b"7d\n");
+        assert_eq!(
+            state.committed_properties[1],
+            (4, 0, Some(b"SBX_PROP1 1 2 7b7d".to_vec()))
+        );
+        let mut oversized = b"SBX_PROP1 1 3 ".to_vec();
+        oversized.resize(MAX_LINE + 10, b'a');
+        oversized.push(b'\n');
+        decoder.commit(&mut state, None, 5, &oversized);
+        assert_eq!(state.committed_properties[2], (5, 0, None));
+        let mut logs = Vec::new();
+        decoder.receive(b"SBX_PROP1 1 4 7b7d\n", |kind| logs.push(kind));
+        assert!(logs.is_empty());
+    }
+
+    #[test]
     fn partial_frames_survive_snapshot_without_mixing_management_or_restarts() {
         let mut decoder = Decoder::default();
         let mut output = Vec::new();
@@ -417,16 +587,96 @@ mod tests {
     }
 
     #[test]
-    fn datagram_delivery_is_bounded_nonblocking_and_reports_sequence_gaps() {
+    fn out_of_memory_kills_are_observed_even_without_details() {
+        use seedbox_engine_protocol::out_of_memory::{Kill, Process};
+        let mut decoder = Decoder::default();
+        let mut output = Vec::new();
+        decoder.receive(
+            b"SBX_OOM1 7 9 8 2 1 6d656d686f67\nSBX_OOM1 -\nSBX_OOM1 x\nSBX_LOG1 1 61\n",
+            |kind| output.push(kind),
+        );
+        assert_eq!(
+            output,
+            vec![
+                Kind::OutOfMemoryKill(Kill {
+                    process: Some(Process {
+                        pid: 7,
+                        command: "memhog".into(),
+                        total_vm_kib: 9,
+                        anon_rss_kib: 8,
+                        file_rss_kib: 2,
+                        shmem_rss_kib: 1,
+                    })
+                }),
+                Kind::OutOfMemoryKill(Kill { process: None }),
+                Kind::OutOfMemoryKill(Kill { process: None }),
+                Kind::Log(Chunk {
+                    stream: Stream::Stdout,
+                    bytes: b"a".to_vec()
+                })
+            ]
+        );
+        // A kill is not application output, so output triggers never see it.
+        let mut state = crate::world::MachineState::new("app".into());
+        state.observe_console = true;
+        decoder.commit(&mut state, None, 3, b"SBX_OOM1 -\n");
+        assert!(state.committed_output.is_empty());
+    }
+
+    #[test]
+    fn mandatory_observations_wait_for_a_slow_live_observer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observations.sock");
+        let receiver = UnixDatagram::bind(&path).unwrap();
+        configure_socket(&receiver).unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let publisher = Publisher::connect(&path).unwrap();
+        // Far more than the receive buffer holds: the observer falls behind.
+        const COUNT: u64 = 1024;
+        let reader = std::thread::spawn(move || {
+            let mut buffer = [0; MAX_DATAGRAM_BYTES];
+            let mut sequences = Vec::new();
+            while sequences.len() < COUNT as usize {
+                let count = receiver.recv(&mut buffer).unwrap();
+                let observation: Observation = serde_json::from_slice(&buffer[..count]).unwrap();
+                sequences.push(observation.sequence);
+                if sequences.len() % 64 == 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+            sequences
+        });
+        for _ in 0..COUNT {
+            publisher.publish(
+                "app",
+                1,
+                9,
+                Kind::Log(Chunk {
+                    stream: Stream::Stdout,
+                    bytes: vec![0xff; application_log::MAX_BYTES],
+                }),
+            );
+        }
+        assert_eq!(reader.join().unwrap(), (1..=COUNT).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_stopped_observer_delays_once_and_reports_sequence_gaps() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("observations.sock");
         let receiver = UnixDatagram::bind(&path).unwrap();
         receiver.set_nonblocking(true).unwrap();
-        let publisher = Publisher::connect(&path).unwrap();
+        let stall = std::time::Duration::from_millis(50);
+        let publisher = Publisher::connect_with_stall(&path, stall).unwrap();
         let emit = || publisher.publish("oracle", 3, 42, Kind::MalformedLog);
+        let started = Instant::now();
         for _ in 0..4096 {
             emit();
         }
+        // One timed-out wait, not one per lost observation.
+        assert!(started.elapsed() >= stall && started.elapsed() < stall * 20);
         let mut buffer = [0; MAX_DATAGRAM_BYTES];
         let mut last = 0;
         while let Ok(count) = receiver.recv(&mut buffer) {

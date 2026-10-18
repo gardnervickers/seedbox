@@ -30,6 +30,16 @@
 #include "budget.h"
 
 static ptr_int_t instruction_budget;
+/* Coverage, when enabled: a wrapping byte counter per hashed edge. On AArch64
+ * each block's entry adds one to the counter of (previous block, block), the
+ * previous block's ID kept in a TLS slot beside the budget (AFL's scheme);
+ * elsewhere a block's first translation sets its own counter to one. At
+ * every progress call (every 32 new blocks elsewhere) and at exit the
+ * process's file is overwritten with the counters. */
+static const char *coverage_dir;
+static byte coverage_counts[SEEDBOX_COVERAGE_EDGES];
+static uint coverage_new;
+static void *coverage_lock;
 static uint points_per_block;
 static reg_id_t budget_segment;
 static uint budget_offset;
@@ -58,6 +68,8 @@ static void progress_call(void)
     DR_ASSERT(result > 0);
 }
 
+static void coverage_flush(void);
+
 /* One progress call per budget the charges have used, so a charge larger than
  * the budget still advances virtual time in proportion to its instructions. */
 static void checkpoint(void)
@@ -67,6 +79,14 @@ static void checkpoint(void)
         *left += instruction_budget;
         progress_call();
     } while (*left < 0);
+#ifdef AARCH64
+    /* Mostly idle servers make few progress calls, so write at every one. */
+    if (coverage_dir != NULL) {
+        dr_mutex_lock(coverage_lock);
+        coverage_flush();
+        dr_mutex_unlock(coverage_lock);
+    }
+#endif
 }
 
 #ifdef AARCH64
@@ -93,6 +113,8 @@ static void thread_init(void *context)
 {
     (void)context;
     *budget() = instruction_budget;
+    /* Coverage's previous block ID starts at zero in every thread. */
+    budget()[1] = 0;
 }
 
 /* Charge `instructions` before `where` and call the checkpoint when the charge
@@ -139,6 +161,12 @@ static void charge_before(void *context, instrlist_t *block, instr_t *where,
 #ifdef X86_64
     DR_ASSERT(drreg_unreserve_aflags(context, block, where) == DRREG_SUCCESS);
 #else
+    /* Give the scratch register its application value back before `where`.
+     * drreg would restore it lazily, at the next application read, and an
+     * application instruction that faults before then would expose the budget:
+     * HotSpot's implicit null checks deoptimize through handlers that read
+     * registers the straight-line code has not read yet. */
+    DR_ASSERT(drreg_get_app_value(context, block, where, scratch, scratch) == DRREG_SUCCESS);
     DR_ASSERT(drreg_unreserve_register(context, block, where, scratch) == DRREG_SUCCESS);
 #endif
 }
@@ -173,6 +201,8 @@ typedef struct {
     uint points;
     uint index;
     uint next;
+    /* The block's coverage ID, below SEEDBOX_COVERAGE_EDGES. */
+    uint edge;
 } charge_plan_t;
 
 static uint point_start(const charge_plan_t *plan, uint point)
@@ -180,10 +210,96 @@ static uint point_start(const charge_plan_t *plan, uint point)
     return (uint)((uint64)point * plan->length / plan->points);
 }
 
+/* Overwrite this process's counter file; the supervisor reads every file. */
+static void coverage_flush(void)
+{
+    char path[512];
+    dr_snprintf(path, sizeof(path), "%s/%d", coverage_dir, (int)dr_get_process_id());
+    path[sizeof(path) - 1] = 0;
+    file_t file = dr_open_file(path, DR_FILE_WRITE_OVERWRITE);
+    if (file == INVALID_FILE)
+        return;
+    dr_write_file(file, coverage_counts, sizeof(coverage_counts));
+    dr_close_file(file);
+}
+
+/* A block's coverage ID: its module's name and offset hashed, or for code in
+ * no module (JIT code) its address, below SEEDBOX_COVERAGE_EDGES. */
+static uint coverage_id(void *tag)
+{
+    module_data_t *module = dr_lookup_module((app_pc)tag);
+    uint hash = 2166136261u;
+    if (module == NULL)
+        return (uint)((ptr_uint_t)tag * 2654435761u) % SEEDBOX_COVERAGE_EDGES;
+    const char *name = dr_module_preferred_name(module);
+    for (; name != NULL && *name; ++name)
+        hash = (hash ^ (byte)*name) * 16777619u;
+    hash ^= (uint)((ptr_uint_t)((app_pc)tag - module->start) * 2654435761u);
+    dr_free_module_data(module);
+    return hash % SEEDBOX_COVERAGE_EDGES;
+}
+
+#ifndef AARCH64
+/* Without inline edge counting, a block's first translation sets its own
+ * counter, which never changes the code that runs. */
+static void coverage_record(uint id)
+{
+    dr_mutex_lock(coverage_lock);
+    if (!coverage_counts[id]) {
+        coverage_counts[id] = 1;
+        if (++coverage_new % 32 == 0)
+            coverage_flush();
+    }
+    dr_mutex_unlock(coverage_lock);
+}
+#endif
+
+#ifdef AARCH64
+/* counts[previous ^ edge] += 1 and previous = edge >> 1, before `where`.
+ * Only non-flag-setting instructions, and both scratch registers get their
+ * application values back before `where`, as in charge_before. */
+static void count_edge_before(void *context, instrlist_t *block, instr_t *where, uint edge)
+{
+    reg_id_t index, address;
+    DR_ASSERT(drreg_reserve_register(context, block, where, NULL, &index) == DRREG_SUCCESS);
+    DR_ASSERT(drreg_reserve_register(context, block, where, NULL, &address) == DRREG_SUCCESS);
+    uint previous = budget_offset + sizeof(ptr_int_t);
+    dr_insert_read_raw_tls(context, block, where, budget_segment, previous, index);
+    instrlist_insert_mov_immed_ptrsz(context, (ptr_int_t)edge, opnd_create_reg(address),
+                                     block, where, NULL, NULL);
+    instrlist_meta_preinsert(block, where,
+        INSTR_CREATE_eor(context, opnd_create_reg(index), opnd_create_reg(address)));
+    instrlist_insert_mov_immed_ptrsz(context, (ptr_int_t)coverage_counts,
+                                     opnd_create_reg(address), block, where, NULL, NULL);
+    instrlist_meta_preinsert(block, where, INSTR_CREATE_add(context,
+        opnd_create_reg(address), opnd_create_reg(address), opnd_create_reg(index)));
+    reg_id_t count = reg_resize_to_opsz(index, OPSZ_4);
+    opnd_t counter = opnd_create_base_disp(address, DR_REG_NULL, 0, 0, OPSZ_1);
+    instrlist_meta_preinsert(block, where,
+        INSTR_CREATE_ldrb(context, opnd_create_reg(count), counter));
+    instrlist_meta_preinsert(block, where, INSTR_CREATE_add(context,
+        opnd_create_reg(count), opnd_create_reg(count), OPND_CREATE_INT(1)));
+    instrlist_meta_preinsert(block, where,
+        INSTR_CREATE_strb(context, counter, opnd_create_reg(count)));
+    instrlist_insert_mov_immed_ptrsz(context, (ptr_int_t)(edge >> 1), opnd_create_reg(index),
+                                     block, where, NULL, NULL);
+    dr_insert_write_raw_tls(context, block, where, budget_segment, previous, index);
+    DR_ASSERT(drreg_get_app_value(context, block, where, index, index) == DRREG_SUCCESS);
+    DR_ASSERT(drreg_get_app_value(context, block, where, address, address) == DRREG_SUCCESS);
+    DR_ASSERT(drreg_unreserve_register(context, block, where, address) == DRREG_SUCCESS);
+    DR_ASSERT(drreg_unreserve_register(context, block, where, index) == DRREG_SUCCESS);
+}
+#endif
+
 static dr_emit_flags_t analyze(void *context, void *tag, instrlist_t *block, bool trace,
                                bool translating, void **user)
 {
     charge_plan_t *plan = dr_thread_alloc(context, sizeof(*plan));
+    plan->edge = coverage_dir != NULL ? coverage_id(tag) : 0;
+#ifndef AARCH64
+    if (coverage_dir != NULL && !translating && !trace)
+        coverage_record(plan->edge);
+#endif
     plan->length = 0;
     for (instr_t *instruction = instrlist_first_app(block); instruction != NULL;
          instruction = instr_get_next_app(instruction))
@@ -200,6 +316,10 @@ static dr_emit_flags_t instrument(void *context, void *tag, instrlist_t *block,
                                  bool translating, void *user)
 {
     charge_plan_t *plan = user;
+#ifdef AARCH64
+    if (coverage_dir != NULL && instr_is_app(instruction) && plan->index == 0)
+        count_edge_before(context, block, instruction, plan->edge);
+#endif
     if (instr_is_app(instruction)) {
         if (plan->next < plan->points && plan->index == point_start(plan, plan->next)) {
             plan->next++;
@@ -217,7 +337,11 @@ static dr_emit_flags_t instrument(void *context, void *tag, instrlist_t *block,
 
 static void finished(void)
 {
-    DR_ASSERT(dr_raw_tls_cfree(budget_offset, 1));
+    if (coverage_dir != NULL) {
+        coverage_flush();
+        dr_mutex_destroy(coverage_lock);
+    }
+    DR_ASSERT(dr_raw_tls_cfree(budget_offset, 2));
     drreg_exit();
     drmgr_exit();
 }
@@ -225,20 +349,27 @@ static void finished(void)
 DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
 {
     uint32_t parsed_budget, parsed_points;
-    if (!seedbox_progress_arguments(argc, argv, &parsed_budget, &parsed_points)) {
+    if (!seedbox_progress_arguments(argc, argv, &parsed_budget, &parsed_points,
+                                    &coverage_dir)) {
         dr_fprintf(STDERR, "seedbox progress: expected " SEEDBOX_PROGRESS_INSTRUCTIONS
-                   " and " SEEDBOX_PROGRESS_POINTS ", each with a positive u32\n");
+                   " and " SEEDBOX_PROGRESS_POINTS ", each with a positive u32, then"
+                   " optionally " SEEDBOX_PROGRESS_COVERAGE " DIR\n");
         dr_abort();
         return;
     }
     /* Both supported ISAs use a 64-bit raw TLS word. Never encode the budget
      * as an instruction immediate: the entire u32 range fits in ptr_int_t. */
     instruction_budget = (ptr_int_t)parsed_budget;
+    if (coverage_dir != NULL)
+        coverage_lock = dr_mutex_create();
     points_per_block = parsed_points;
-    drreg_options_t options = {sizeof(options), 3, false};
+    /* Conservative: a register dead on the straight-line path can still be read
+     * on a fault path (see charge_before), so always save the application value. */
+    drreg_options_t options = {sizeof(options), 3, true};
     DR_ASSERT(drmgr_init());
     DR_ASSERT(drreg_init(&options) == DRREG_SUCCESS);
-    DR_ASSERT(dr_raw_tls_calloc(&budget_segment, &budget_offset, 1, 0));
+    /* The budget, then coverage's previous block ID. */
+    DR_ASSERT(dr_raw_tls_calloc(&budget_segment, &budget_offset, 2, 0));
     drmgr_register_thread_init_event(thread_init);
     drmgr_register_bb_app2app_event(neutralize_waits, NULL);
     drmgr_register_bb_instrumentation_event(analyze, instrument, NULL);

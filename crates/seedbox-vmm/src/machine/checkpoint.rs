@@ -50,6 +50,13 @@ struct Metadata<T> {
 }
 
 impl MachineSnapshot {
+    /// Bytes this snapshot retains: its RAM copy, or its persisted file.
+    pub fn ram_bytes(&self) -> u64 {
+        match self {
+            Self::Memory(saved) => saved.ram.size as u64,
+            Self::File(artifact) => std::fs::metadata(&artifact.path).map_or(0, |m| m.len()),
+        }
+    }
     /// Publish only a complete file. Coordinator metadata is written afterward.
     pub fn persist(&self, path: &Path) -> Result<(), String> {
         let Self::Memory(saved) = self else {
@@ -115,7 +122,7 @@ impl<T: Read> Read for Hashing<T> {
 fn write(saved: &MemorySnapshot, output: impl Write) -> Result<String, String> {
     let metadata = serde_json::to_vec(&Metadata {
         state: &saved.state,
-        block: saved.blk.as_ref().map(VirtioBlk::snapshot),
+        block: saved.blk.as_ref().map(VirtioBlk::snapshot).transpose()?,
     })
     .map_err(|e| format!("machine checkpoint metadata: {e}"))?;
     if metadata.len() as u64 > MAX_METADATA {

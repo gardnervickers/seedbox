@@ -1,5 +1,6 @@
 //! Engine requests and retained evidence formats, independent of execution.
 pub mod application_log;
+pub mod choice;
 pub mod disk;
 #[cfg(unix)]
 pub mod host_clock;
@@ -10,7 +11,9 @@ pub mod launch;
 pub mod log_index;
 pub mod network_counters;
 pub mod observation;
+pub mod out_of_memory;
 pub mod output_layout;
+pub mod property;
 pub mod report;
 pub mod trace;
 pub mod world_config;

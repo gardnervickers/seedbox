@@ -30,6 +30,7 @@ timed shell-syntax check_shells
 # Discover new Python tests without maintaining per-module lists.
 timed harness-python bash -c 'cd harness/tests && python3 -m unittest discover -s . -q'
 timed client-python bash -c 'cd python && python3 -m unittest discover -s tests -q'
+timed jvm-fuzz-python bash -c 'cd tools/jvm-fuzz && python3 -m unittest discover -s . -q'
 # Compile hardware-feature tests without opening KVM or HVF. Default execution
 # keeps hardware tests ignored, while their bodies remain type-checked.
 if [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]]; then
@@ -43,7 +44,7 @@ timed arm64-compare python3 crates/seedbox-arm64/test_compare.py -q
 timed workspace-feature-build cargo test --workspace --locked --all-features --no-run
 timed workspace-tests cargo test --workspace --locked
 validate_workloads() {
-  for scenario in harness/acceptance/workloads/*.yaml; do
+  for scenario in harness/acceptance/workloads/*.yaml harness/acceptance/long/*.yaml; do
     cargo run --quiet --locked -p seedbox -- validate "$scenario"
   done
 }

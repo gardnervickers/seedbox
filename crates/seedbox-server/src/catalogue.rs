@@ -313,6 +313,32 @@ impl Catalogue {
         Ok(())
     }
 
+    /// Every content digest the remaining resources name: their submitted and
+    /// resolved inputs, and imported checkpoints that have not been deleted.
+    pub(crate) fn referenced_content(
+        &self,
+    ) -> Result<BTreeSet<seedbox_artifacts::store::ContentDigest>> {
+        let mut digests = BTreeSet::new();
+        let json = |value: std::result::Result<serde_json::Value, serde_json::Error>| {
+            value.map_err(|e| Error::Invalid(e.to_string()))
+        };
+        for entry in self.entries.values() {
+            let mut values = vec![
+                json(serde_json::to_value(&entry.request.spec))?,
+                json(serde_json::to_value(&entry.resource.spec))?,
+            ];
+            for (name, definition) in entry.imported_checkpoints.iter().flatten() {
+                if !entry.deleted_checkpoints.contains(name) {
+                    values.push(json(serde_json::to_value(definition))?);
+                }
+            }
+            for value in &values {
+                crate::execution::content::digests_in(value, &mut digests);
+            }
+        }
+        Ok(digests)
+    }
+
     pub(crate) fn imported_checkpoint(
         &self,
         id: &SimulationId,
@@ -370,6 +396,7 @@ impl Catalogue {
         resource.status.playback = None;
         let request = SubmitRequest {
             request_id: format!("import-{id}"),
+            fault_profile: None,
             options: resource.options.clone(),
             metadata: seedbox_spec::definition::Metadata {
                 name: resource.metadata.name.clone(),
@@ -450,6 +477,9 @@ impl Catalogue {
                 u64::from_le_bytes(bytes)
             }
         });
+        if let Some(profile) = &request.fault_profile {
+            generate_faults(&mut spec, profile)?;
+        }
         spec = serde_json::from_value(
             serde_json::to_value(&spec).map_err(|e| Error::Invalid(e.to_string()))?,
         )
@@ -458,6 +488,16 @@ impl Catalogue {
             spec.seed
                 .and_then(|seed| seed.checked_add(u64::from(range.count - 1)))
                 .ok_or_else(|| Error::Invalid("seed range overflows u64".into()))?;
+        }
+        // Store actions as the engine reads and writes them, so a consumed
+        // input compares equal to its override whatever defaults it omitted.
+        for input in &mut spec.program {
+            input.action = canonical_action(&input.action)?;
+        }
+        if let InputSource::Resolved { definition } = &mut spec.inputs {
+            for input in &mut definition.overrides {
+                input.action = canonical_action(&input.action)?;
+            }
         }
         let reference = match &spec.inputs {
             InputSource::Project | InputSource::Resolved { .. } => None,
@@ -882,6 +922,57 @@ impl Catalogue {
         Ok((control, true))
     }
 
+    /// Register a checkpoint the engine captured at a requested anchor, as
+    /// the captured checkpoint receipt an interactive capture leaves.
+    pub fn record_anchor_checkpoint(
+        &mut self,
+        id: &SimulationId,
+        name: &str,
+        position: seedbox_engine_protocol::host_control::BoundaryPosition,
+    ) -> Result<()> {
+        if self.storage_failed {
+            return Err(Error::StorageFailed);
+        }
+        let mut entry = self
+            .entries
+            .get(id)
+            .ok_or_else(|| Error::NotFound(id.clone()))?
+            .clone();
+        if entry.controls.contains_key(name) {
+            return Ok(());
+        }
+        let checkpoint = seedbox_engine_protocol::host_control::CheckpointStatus {
+            request_id: name.to_owned(),
+            position,
+            state: seedbox_engine_protocol::host_control::CheckpointState::Captured,
+        };
+        let receipt = ControlReceipt {
+            request: seedbox_api::ControlRequest {
+                request_id: name.to_owned(),
+                command: seedbox_api::ControlCommand::Checkpoint,
+            },
+            revision: 1,
+            state: ControlState::Acknowledged {
+                status: seedbox_api::PlaybackStatus {
+                    position,
+                    rate: Default::default(),
+                    achieved_rate: None,
+                    stepping: false,
+                    terminal: false,
+                    application_ready: true,
+                },
+                error: None,
+                intervention: None,
+                detail: Some("captured at an anchor input".into()),
+                checkpoint: Some(checkpoint),
+            },
+        };
+        entry.controls.insert(name.to_owned(), receipt);
+        self.persist(&entry)?;
+        self.entries.insert(id.clone(), entry);
+        Ok(())
+    }
+
     pub fn acknowledge_control(
         &mut self,
         id: &SimulationId,
@@ -959,7 +1050,7 @@ fn random(bytes: &mut [u8]) -> Result<()> {
     getrandom::fill(bytes).map_err(|e| Error::Random(e.to_string()))
 }
 
-fn random_id() -> Result<SimulationId> {
+pub(crate) fn random_id() -> Result<SimulationId> {
     let alphabet = SimulationId::ALPHABET.as_bytes();
     let limit = 256 - 256 % alphabet.len();
     let mut id = String::with_capacity(SimulationId::LENGTH);
@@ -1004,6 +1095,52 @@ fn validate_submission_request_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Sample a fault profile with the submission's seed into its program. The
+/// generated inputs then belong to the simulation like any authored ones.
+fn generate_faults(
+    spec: &mut seedbox_api::SimulationSpec,
+    profile: &seedbox_spec::fault_profile::FaultProfile,
+) -> Result<()> {
+    use seedbox_explore::faults::{generate, KEY_PREFIX};
+    if matches!(spec.inputs, InputSource::Checkpoint { .. }) {
+        return Err(Error::Invalid(
+            "fault profiles need a fresh start, not a checkpoint".into(),
+        ));
+    }
+    if let Some(input) = spec.program.iter().find(|i| i.key.starts_with(KEY_PREFIX)) {
+        return Err(Error::Invalid(format!(
+            "program {}: keys starting with {KEY_PREFIX} are reserved for generated faults",
+            input.key
+        )));
+    }
+    let config = &spec.configuration;
+    let machines: Vec<String> = config.services.keys().cloned().collect();
+    let seed = spec.seed.ok_or(Error::StorageFailed)?;
+    let generated = generate(
+        profile,
+        seed,
+        &machines,
+        &config.check.service,
+        config.limits.simulated_time_ns,
+    )
+    .map_err(Error::Invalid)?;
+    let mut program = std::mem::take(&mut spec.program);
+    for input in generated {
+        program.push(seedbox_api::ProgramInput {
+            key: input.key,
+            at_ns: input.at_ns,
+            action: serde_json::to_value(&input.action)
+                .map_err(|e| Error::Invalid(e.to_string()))?,
+            timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+        });
+    }
+    // Stable: authored inputs keep their order and precede generated ones at
+    // equal times.
+    program.sort_by_key(|input| input.at_ns);
+    spec.program = program;
+    resolve_program(spec).map(drop)
+}
+
 pub(crate) fn resolve_program(
     spec: &seedbox_api::SimulationSpec,
 ) -> Result<Vec<seedbox_engine_protocol::input_program::TimedInput>> {
@@ -1023,4 +1160,12 @@ pub(crate) fn resolve_program(
     seedbox_application::engine_adapter::validate_input_program(&spec.configuration, &program)
         .map_err(|error| Error::Invalid(error.to_string()))?;
     Ok(program)
+}
+
+/// An input action in its typed form's serialization.
+fn canonical_action(action: &serde_json::Value) -> Result<serde_json::Value> {
+    let typed: seedbox_engine_protocol::input_program::InputAction =
+        serde_json::from_value(action.clone())
+            .map_err(|e| Error::Invalid(format!("invalid input action: {e}")))?;
+    serde_json::to_value(typed).map_err(|e| Error::Invalid(e.to_string()))
 }

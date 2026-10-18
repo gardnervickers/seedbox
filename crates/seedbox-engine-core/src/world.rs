@@ -37,6 +37,9 @@ pub enum Stop {
     Sent,
     Barrier,
     Control,
+    /// The block device held a request for this trigger: the machine is
+    /// suspended until the coordinator crashes it.
+    Held(u32),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reseed {
@@ -77,10 +80,20 @@ pub struct MachineState {
     pub committed_console: Option<(u64, u8)>,
     /// Complete application frames, committed at their terminating transport byte.
     pub committed_output: Vec<(u64, Vec<u8>)>,
+    /// Complete property frames: (time, incarnation, line). `None` marks an
+    /// oversized line. Unlike application output, these are always retained.
+    #[serde(default)]
+    pub committed_properties: Vec<(u64, u32, Option<Vec<u8>>)>,
     #[serde(with = "crate::observation::empty_checkpoint")]
     pub(crate) observations: crate::observation::Buffer,
+    /// The trigger whose block request hold suspended this incarnation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) held: Option<u32>,
 }
 impl MachineState {
+    pub fn held(&self) -> Option<u32> {
+        self.held
+    }
     pub fn is_parked(&self) -> bool {
         self.parked
     }
@@ -111,7 +124,9 @@ impl MachineState {
             observe_console: false,
             committed_console: None,
             committed_output: Vec::new(),
+            committed_properties: Vec::new(),
             observations: crate::observation::Buffer::default(),
+            held: None,
         }
     }
 }
@@ -178,6 +193,7 @@ impl MachineState {
         self.control_requests.clear();
         self.committed_console = None;
         self.committed_output.clear();
+        self.committed_properties.clear();
         self.observations.clear();
     }
     pub fn restore_lifecycle(&mut self) {
@@ -193,7 +209,7 @@ impl MachineState {
         }
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SliceRequest {
     pub hard_limit: u64,
     pub early_slack: u64,
@@ -222,6 +238,15 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
     fn deliver_control(&mut self, bytes: &[u8]) -> Result<(), String>;
     fn deliver_serial(&mut self, bytes: &[u8]) -> Result<(), String>;
     fn deliver_frame(&mut self, bytes: &[u8]) -> Result<bool, String>;
+    /// Deliver consecutive frames due at one stopped point, in order, with
+    /// exactly the effects of one `deliver_frame` call each. An adapter may
+    /// override it to cross its host boundary once for the whole run.
+    fn deliver_frames(&mut self, frames: &[&[u8]]) -> Result<Vec<bool>, String> {
+        frames
+            .iter()
+            .map(|bytes| self.deliver_frame(bytes))
+            .collect()
+    }
     fn pause(&mut self) -> Result<(), String>;
     fn resume(&mut self, at: u64) -> Result<(), String>;
     fn boot_at(&mut self, at: u64) -> Result<(), String>;
@@ -290,12 +315,69 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
     /// next slice. Returns the effective nominal speed after backend rounding
     /// and clamping, or `None` when healed.
     fn throttle(&mut self, speed_hz: Option<u64>) -> Result<Option<u64>, String>;
+    /// Bytes a retained snapshot of this machine holds (RAM image or its
+    /// on-disk artifact), for live checkpoint retention budgets.
+    fn snapshot_bytes(_: &Self::Snapshot) -> u64 {
+        0
+    }
+    /// Whether the machine has a retained disk that disk errors can target.
+    fn has_disk(&self) -> bool {
+        false
+    }
+    /// Install (`Some`) or remove (`None`) a block request hold on the
+    /// machine's retained disk; it counts from the next request.
+    fn hold_block(&mut self, _hold: Option<crate::virtio_block::Hold>) -> Result<(), String> {
+        Err(format!(
+            "{}: block request triggers are unsupported by this backend",
+            self.name
+        ))
+    }
+    /// Start (`Some`) or end (`None`) injected disk errors on the machine's
+    /// retained disk, from its next request. Ending returns their counts.
+    fn disk_errors(
+        &mut self,
+        _errors: Option<crate::virtio_block::InjectedErrors>,
+    ) -> Result<Option<crate::virtio_block::ErrorCounts>, String> {
+        Err(format!(
+            "{}: disk errors are unsupported by this backend",
+            self.name
+        ))
+    }
+    /// Start (`Some`) or end (`None`) injected disk latency on the machine's
+    /// retained disk, from its next request. Ending returns its counts.
+    fn disk_latency(
+        &mut self,
+        _latency: Option<crate::virtio_block::InjectedLatency>,
+    ) -> Result<Option<crate::virtio_block::LatencyCounts>, String> {
+        Err(format!(
+            "{}: disk latency is unsupported by this backend",
+            self.name
+        ))
+    }
+    /// Start (`Some((ppm, seed))`) or stop (`None`) seeded scheduler
+    /// perturbation in the guest, from its next syscall.
+    fn preempt(&mut self, _setting: Option<(u32, u64)>) -> Result<(), String> {
+        Err(format!(
+            "{}: scheduler perturbation is unsupported by this backend",
+            self.name
+        ))
+    }
     fn exits(&self) -> u64;
     fn exit_witness(&mut self) -> Result<String, String>;
     /// Idempotently poison, close and reap owned worker transport without another
     /// guest request. In-process adapters explicitly succeed without a child.
     fn terminate_worker(&mut self) -> Result<(), String>;
+    /// Start `snapshot` without waiting for it, so a world's machines in
+    /// separate workers capture at once; `snapshot` then completes it. In-process
+    /// adapters do nothing here.
+    fn begin_snapshot(&mut self) -> Result<(), String> {
+        Ok(())
+    }
     fn snapshot(&mut self) -> Result<Self::Snapshot, String>;
+    /// Start `restore` without waiting, as `begin_snapshot` does.
+    fn begin_restore(&mut self, _snapshot: &Self::Snapshot) -> Result<(), String> {
+        Ok(())
+    }
     fn restore(&mut self, snapshot: &Self::Snapshot) -> Result<u64, String>;
     /// Return at the first causal effect. Frames share this stop's committed
     /// timestamp; never batch frames past that stop or advance past hard_limit
@@ -307,6 +389,57 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
         request: SliceRequest,
         frames: &mut Vec<Vec<u8>>,
     ) -> Result<Stop, String>;
+    /// Whether `advance_then_deliver` saves host work over `advance` followed
+    /// by `deliver_frames`. The scheduler only asks for it when it is true.
+    fn delivers_after_advance(&self) -> bool {
+        false
+    }
+    /// `advance`, then, only when it stops `Reached` exactly at the hard
+    /// limit, `deliver_frames(then)` there: the delivery the scheduler makes
+    /// next in that case. Returns the frame results only when it delivered.
+    fn advance_then_deliver(
+        &mut self,
+        clock: &mut Self::Clock,
+        request: SliceRequest,
+        frames: &mut Vec<Vec<u8>>,
+        then: &[&[u8]],
+    ) -> Result<(Stop, Option<Vec<bool>>), String> {
+        let stop = self.advance(clock, request, frames)?;
+        if stop == Stop::Reached && self.time == request.hard_limit && !then.is_empty() {
+            return Ok((stop, Some(self.deliver_frames(then)?)));
+        }
+        Ok((stop, None))
+    }
+    /// Further slices, beyond the next one, that this adapter can run in the
+    /// same host exchange. Zero asks the scheduler for no lookahead.
+    fn chain_capacity(&self) -> usize {
+        0
+    }
+    /// `advance_then_deliver(first)`. The adapter may also run `ahead`, the
+    /// slices the scheduler will request next if each one reaches its limit,
+    /// in the same host exchange, stopping after the first that does not.
+    /// Returns how many of them it ran; the scheduler's next that many
+    /// advances must request exactly those slices, which the adapter checks.
+    fn advance_chain(
+        &mut self,
+        clock: &mut Self::Clock,
+        first: ChainStep<'_>,
+        ahead: &[ChainStep<'_>],
+        frames: &mut Vec<Vec<u8>>,
+    ) -> Result<(Stop, Option<Vec<bool>>, usize), String> {
+        let _ = ahead;
+        let (stop, delivered) =
+            self.advance_then_deliver(clock, first.request, frames, &first.then)?;
+        Ok((stop, delivered, 0))
+    }
+}
+
+/// One slice a chain plans: its request and the frames due at its limit,
+/// which are delivered there only if the slice reaches it.
+#[derive(Clone, Debug)]
+pub struct ChainStep<'a> {
+    pub request: SliceRequest,
+    pub then: Vec<&'a [u8]>,
 }
 /// Immutable slice preconditions, checked before any returned effects enter the
 /// world. Channel order remains the reference KVM order, not a merged batch.
@@ -328,6 +461,7 @@ impl SliceObservation {
             || !m.control_requests.is_empty()
             || m.committed_console.is_some()
             || !m.committed_output.is_empty()
+            || !m.committed_properties.is_empty()
             || !m.observations.is_empty()
         {
             return Err(format!("{}: undrained effects before slice", m.name));
@@ -401,7 +535,15 @@ impl SliceObservation {
             m.control_requests.iter().map(|(at, _)| *at),
             self.time,
             m.time,
-        ) {
+        ) || !ordered(
+            m.committed_properties.iter().map(|(at, _, _)| *at),
+            self.time,
+            m.time,
+        ) || m
+            .committed_properties
+            .iter()
+            .any(|(_, incarnation, _)| *incarnation != m.incarnation)
+        {
             return Err(error("effect timestamps outside committed channel order"));
         }
         Ok(())
@@ -443,6 +585,9 @@ pub struct WorldInputs<M: WorldMachine> {
     pub faults: faults::Faults,
     pub control: control::Control,
     pub macs: Vec<[u8; 6]>,
+    /// Each machine's expected crashes, from its definition; they change how
+    /// its kernel crash evidence reduces.
+    pub expected_crashes: Vec<Vec<seedbox_engine_protocol::property::ExpectedCrash>>,
 }
 
 pub struct World<M: WorldMachine> {
@@ -486,6 +631,19 @@ pub struct World<M: WorldMachine> {
     pub(crate) semantic_counts: network_counters::NetworkCounters,
     pub(crate) slices: u64,
     pub(crate) boundaries: u64,
+    /// Reduced property evidence, in commit order.
+    pub(crate) properties: seedbox_engine_protocol::property::Ledger,
+    /// Per machine, the crashes its definition expects. Configuration, not
+    /// state: a restored checkpoint keeps the world's own.
+    pub(crate) expected_crashes: Vec<Vec<seedbox_engine_protocol::property::ExpectedCrash>>,
+    pub(crate) choices: crate::choices::Choices,
+    /// Anchors to stop at for a capture. A runtime option, never semantic.
+    pub(crate) anchor_captures: std::collections::BTreeSet<String>,
+    /// The anchor the last segment stopped at, for its owner to capture.
+    pub(crate) captured_anchor: Option<String>,
+    /// The last segment stopped at an anchor: the next resumes that
+    /// boundary's remaining inputs instead of reentering a host boundary.
+    pub(crate) resume_after_anchor: bool,
 }
 
 impl<M: WorldMachine> World<M> {
@@ -506,6 +664,7 @@ impl<M: WorldMachine> World<M> {
             faults,
             control,
             macs,
+            expected_crashes,
         } = inputs;
         let n = machines.len();
         let world = Self {
@@ -539,6 +698,12 @@ impl<M: WorldMachine> World<M> {
             semantic_counts: network_counters::NetworkCounters::default(),
             slices: 0,
             boundaries: 0,
+            properties: Default::default(),
+            expected_crashes,
+            choices: Default::default(),
+            anchor_captures: Default::default(),
+            captured_anchor: None,
+            resume_after_anchor: false,
         };
         world.validate()?;
         Ok(world)
@@ -568,6 +733,12 @@ impl<M: WorldMachine> World<M> {
     pub fn input_admissions(&self) -> &[crate::input_program::InputAdmission] {
         self.input_program.admissions()
     }
+    pub fn input_branches(&self) -> &[crate::input_program::BranchReceipt] {
+        self.input_program.branches()
+    }
+    pub fn input_armed(&self) -> &[crate::input_program::ArmReceipt] {
+        self.input_program.armed()
+    }
 
     /// Attach a runtime-only sink; observations publish after a round commits.
     pub fn with_observations(
@@ -593,6 +764,27 @@ impl<M: WorldMachine> World<M> {
     pub fn control(&self) -> &control::Control {
         &self.control
     }
+    pub fn properties(&self) -> &seedbox_engine_protocol::property::Ledger {
+        &self.properties
+    }
+    pub fn choices(&self) -> &crate::choices::Choices {
+        &self.choices
+    }
+    /// Stop at these anchors so the owner can capture checkpoints there.
+    /// Captures never change results; a cold run takes the same path.
+    pub fn set_anchor_captures(&mut self, keys: impl IntoIterator<Item = String>) {
+        self.anchor_captures = keys.into_iter().collect();
+    }
+    /// The anchor a `Checkpoint` outcome stopped at, if it was an anchor.
+    pub fn take_captured_anchor(&mut self) -> Option<String> {
+        self.captured_anchor.take()
+    }
+    pub fn run_seed(&self) -> u64 {
+        self.run_seed
+    }
+    pub fn branch_identity(&self) -> Option<&str> {
+        self.branch_identity.as_deref()
+    }
     pub fn boot_inputs(&self) -> &[M::Boot] {
         &self.boot
     }
@@ -613,6 +805,10 @@ impl<M: WorldMachine> World<M> {
     }
     pub fn dropped(&self) -> u64 {
         self.dropped
+    }
+    /// Completed host boundaries, the index a checkpoint position records.
+    pub fn boundaries(&self) -> u64 {
+        self.boundaries
     }
     pub fn slices(&self) -> u64 {
         self.slices
@@ -643,11 +839,16 @@ impl<M: WorldMachine> World<M> {
             self.events.len(),
             self.strict_events.len(),
             self.macs.len(),
+            self.expected_crashes.len(),
         ]
         .iter()
         .any(|&len| len != n)
         {
             return Err("world per-machine input lengths differ".into());
+        }
+        for (machine, expected) in self.machines.iter().zip(&self.expected_crashes) {
+            seedbox_engine_protocol::property::ExpectedCrash::validate_all(expected)
+                .map_err(|e| format!("machine {}: {e}", machine.name))?;
         }
         if self.early >= self.lookahead {
             return Err("world early slack must be below lookahead".into());
@@ -676,7 +877,36 @@ impl<M: WorldMachine> World<M> {
             self.machines.iter().map(|m| m.time).max().unwrap_or(0)
         };
         self.control.cut_off(&self.faults, cutoff);
+        let before: Vec<_> = self
+            .control
+            .triggers
+            .records
+            .iter()
+            .map(|r| r.status)
+            .collect();
         self.control.triggers.cut_off(cutoff);
+        if let Some(publisher) = &self.observations {
+            let records = &self.control.triggers.records;
+            for (r, before) in records.iter().zip(before) {
+                let Some(key) = r.key.as_ref().filter(|_| r.status != before) else {
+                    continue;
+                };
+                publisher.publish(
+                    "",
+                    0,
+                    cutoff,
+                    seedbox_engine_protocol::observation::Kind::TriggerChanged {
+                        input_key: key.clone(),
+                        status: r.status,
+                        seen: r.seen,
+                        matched_at_ns: r.matched_at_ns,
+                        effect_at_ns: r.effect_at_ns,
+                        fault_id: r.fault_id,
+                        reason: None,
+                    },
+                );
+            }
+        }
         Ok(cutoff)
     }
 
@@ -855,6 +1085,17 @@ impl<M: WorldMachine> World<M> {
             faults::Lifecycle::Throttle(speed_hz) => {
                 self.machines[m].throttle(speed_hz).map(|_| ())
             }
+            faults::Lifecycle::DiskErrors { .. }
+            | faults::Lifecycle::HealDiskErrors { .. }
+            | faults::Lifecycle::DiskLatency { .. }
+            | faults::Lifecycle::HealDiskLatency { .. }
+            | faults::Lifecycle::Preempt(_) => apply_disk_fault(
+                &mut self.machines[m],
+                &mut self.faults,
+                self.run_seed,
+                self.branch_identity.as_deref(),
+                op,
+            ),
         }
     }
 
@@ -886,6 +1127,24 @@ impl<M: WorldMachine> World<M> {
         }
         if let Some(speed_hz) = self.faults.throttle(m) {
             self.machines[m].throttle(Some(speed_hz))?;
+        }
+        for op in [
+            self.faults.disk_errors(m),
+            self.faults.disk_latency(m),
+            self.faults
+                .preempt(m)
+                .map(|p| faults::Lifecycle::Preempt(Some(p))),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            apply_disk_fault(
+                &mut self.machines[m],
+                &mut self.faults,
+                self.run_seed,
+                self.branch_identity.as_deref(),
+                op,
+            )?;
         }
         Ok(())
     }
@@ -1029,6 +1288,9 @@ pub(crate) fn crash_machine<M: WorldMachine>(
             "discarded_management_bytes": discarded,
             "witness": witness,
         });
+        if let Some(trigger) = old.held {
+            summary["held_request_trigger"] = trigger.into();
+        }
         if let Some(observations) = old.crash_observations().as_object() {
             for (key, value) in observations {
                 summary[key] = value.clone();
@@ -1366,6 +1628,12 @@ pub struct WorldSnapshot<M: WorldMachine> {
     branch_identity: Option<String>,
     incarnations: Vec<Vec<Value>>,
     paused_ingress: Vec<u64>,
+    #[serde(default)]
+    properties: seedbox_engine_protocol::property::Ledger,
+    #[serde(default)]
+    choices: crate::choices::Choices,
+    #[serde(default)]
+    resume_after_anchor: bool,
 }
 
 impl<M: WorldMachine> WorldSnapshot<M> {
@@ -1386,6 +1654,12 @@ impl<M: WorldMachine> WorldSnapshot<M> {
     fn capture(world: &mut World<M>, boot_snapshot: bool) -> Result<Self, String> {
         world.check_active()?;
         world.validate()?;
+        if let Some(m) = world.machines.iter().find(|m| m.held.is_some()) {
+            return Err(format!(
+                "{}: a checkpoint cannot contain an unresolved held block request",
+                m.name
+            ));
+        }
         if world.machines.iter().any(|m| {
             !m.fault_effects.is_empty()
                 || !m.control_requests.is_empty()
@@ -1394,6 +1668,11 @@ impl<M: WorldMachine> WorldSnapshot<M> {
                 || !m.observations.is_empty()
         }) {
             return Err("checkpoint requires drained machine messages".into());
+        }
+        // Workers capture their machines at once; collecting the results in
+        // machine order keeps the snapshot identical.
+        for machine in world.machines.iter_mut() {
+            machine.begin_snapshot()?;
         }
         Ok(Self {
             boot_snapshot,
@@ -1424,6 +1703,9 @@ impl<M: WorldMachine> WorldSnapshot<M> {
             branch_identity: world.branch_identity.clone(),
             incarnations: world.incarnations.clone(),
             paused_ingress: world.paused_ingress.clone(),
+            properties: world.properties.clone(),
+            choices: world.choices.clone(),
+            resume_after_anchor: world.resume_after_anchor,
         })
     }
 
@@ -1527,6 +1809,10 @@ impl<M: WorldMachine> WorldSnapshot<M> {
                 world.machines[i] =
                     M::boot(&world.factory, &name, &world.boot[i], world.barrier, seed)?;
             }
+            // Workers restore their machines at once.
+            world.machines[i].begin_restore(snapshot)?;
+        }
+        for (i, snapshot) in self.machines.iter().enumerate() {
             pages += world.machines[i].restore(snapshot)?;
         }
         if self.boot_snapshot {
@@ -1546,6 +1832,9 @@ impl<M: WorldMachine> WorldSnapshot<M> {
         world.semantic_counts = self.semantic_counts.clone();
         world.slices = self.slices;
         world.boundaries = self.boundaries;
+        world.properties = self.properties.clone();
+        world.choices = self.choices.clone();
+        world.resume_after_anchor = self.resume_after_anchor;
         if self.boot_snapshot && self.control.triggers.records.is_empty() {
             let names: Vec<_> = world.machines.iter().map(|m| m.name.clone()).collect();
             world.input_program = Default::default();
@@ -1565,6 +1854,69 @@ impl<M: WorldMachine> WorldSnapshot<M> {
         world.run_seed = self.run_seed;
         world.branch_identity = self.branch_identity.clone();
         Ok(pages)
+    }
+}
+
+/// Start or end a machine's injected disk errors or latency. Each
+/// incarnation draws on its own stream, so a rebooted machine's draws do not
+/// repeat the last incarnation's choices.
+pub(crate) fn apply_disk_fault<M: WorldMachine>(
+    machine: &mut M,
+    faults: &mut faults::Faults,
+    run_seed: u64,
+    branch_identity: Option<&str>,
+    op: faults::Lifecycle,
+) -> Result<(), String> {
+    match op {
+        faults::Lifecycle::DiskErrors {
+            id,
+            op,
+            ppm,
+            effect,
+            scope,
+        } => {
+            let domain = format!("disk-error/{}/{}/{id}", machine.name, machine.incarnation());
+            let rng = crate::rng::Rng::branch(run_seed, branch_identity, &domain);
+            let errors = crate::virtio_block::InjectedErrors::new(op, ppm, rng)?
+                .with_effect(effect)
+                .with_scope(scope);
+            machine.disk_errors(Some(errors)).map(drop)
+        }
+        faults::Lifecycle::HealDiskErrors { row } => {
+            if let Some(counts) = machine.disk_errors(None)? {
+                faults.record_disk_error_counts(row, counts);
+            }
+            Ok(())
+        }
+        faults::Lifecycle::DiskLatency {
+            id,
+            op,
+            latency_ns,
+            jitter_ns,
+        } => {
+            let domain = format!(
+                "disk-latency/{}/{}/{id}",
+                machine.name,
+                machine.incarnation()
+            );
+            let rng = crate::rng::Rng::branch(run_seed, branch_identity, &domain);
+            let latency =
+                crate::virtio_block::InjectedLatency::new(op, latency_ns, jitter_ns, rng)?;
+            machine.disk_latency(Some(latency)).map(drop)
+        }
+        faults::Lifecycle::HealDiskLatency { row } => {
+            if let Some(counts) = machine.disk_latency(None)? {
+                faults.record_disk_latency_counts(row, counts);
+            }
+            Ok(())
+        }
+        faults::Lifecycle::Preempt(Some((id, ppm))) => {
+            let domain = format!("preempt/{}/{}/{id}", machine.name, machine.incarnation());
+            let seed = crate::rng::Rng::branch(run_seed, branch_identity, &domain).next() | 1;
+            machine.preempt(Some((ppm, seed)))
+        }
+        faults::Lifecycle::Preempt(None) => machine.preempt(None),
+        _ => Err("not a disk fault transition".into()),
     }
 }
 
@@ -1601,6 +1953,18 @@ pub fn drain_machine_messages<M: WorldMachine>(
                 max_time,
             )?;
         }
+    }
+    for (at, incarnation, line) in std::mem::take(&mut world.machines[m].committed_properties) {
+        let name = world.machines[m].name.clone();
+        let expected = &world.expected_crashes[m];
+        crate::properties::commit(
+            &mut world.properties,
+            &name,
+            expected,
+            incarnation,
+            at,
+            line,
+        );
     }
     for (id, at, success) in world.machines[m].fault_effects.drain(..) {
         if id == 0 && success {
@@ -1804,10 +2168,12 @@ fn simulate_stopped<M: WorldMachine>(
             if world.machines.iter().any(|m| m.time > trigger_boundary) {
                 return Err("trigger boundary is in committed machine past".into());
             }
-            world
-                .control
-                .triggers
-                .apply_boundary(&mut world.faults, trigger_boundary)?;
+            let quiet_until = world.control.quiet_until();
+            world.control.triggers.apply_boundary_gated(
+                &mut world.faults,
+                trigger_boundary,
+                quiet_until,
+            )?;
             continue;
         }
         let fault_boundary = world.faults.next_boundary();

@@ -1,0 +1,13 @@
+[package]
+name = "seedbox-bench"
+description = "Compare search strategies on evaluation workloads through the CLI"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap.workspace = true
+seedbox-api.workspace = true
+seedbox-engine-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true

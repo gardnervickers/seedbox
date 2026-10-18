@@ -1,0 +1,22 @@
+# Faults aimed at the separate KRaft quorum of kafka4-split-queue (k1..k3):
+# power loss, kills, process pauses and partitions of one controller at a time,
+# now and then of two in a row. The brokers keep their data; the quorum must
+# keep electing a leader, and the brokers must keep their registrations and
+# leadership metadata, with no acknowledged record lost.
+start: 20s
+end: 55s
+interval: 4s
+targets: [k1, k2, k3]
+faults:
+  - kind: crash
+    weight: 2
+    downtime: {min: 1s, max: 8s}
+  - kind: stop
+    weight: 1
+    downtime: {min: 1s, max: 8s}
+  - kind: pause_process
+    weight: 2
+    duration: {min: 500ms, max: 10s}
+  - kind: partition
+    weight: 2
+    duration: {min: 1s, max: 10s}

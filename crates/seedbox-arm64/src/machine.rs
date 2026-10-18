@@ -1,3 +1,10 @@
+#[cfg(all(
+    test,
+    target_os = "macos",
+    target_arch = "aarch64",
+    feature = "hvf-tests"
+))]
+mod hvf_tests;
 mod snapshot;
 pub use snapshot::Snapshot;
 
@@ -21,20 +28,45 @@ use seedbox_engine_core::cpu_charge::{throttled_ns, SYSCALL_NS};
 const PROGRESS_NS_OFFSET: usize = 56;
 const PROGRESS_JITTER_NS_OFFSET: usize = 64;
 const PROGRESS_JITTER_SEED_OFFSET: usize = 72;
+/// Branch entropy: a generation, then 32 bytes (kernel-arm64/seedbox.c).
+const ENTROPY_GEN_OFFSET: usize = 80;
+const ENTROPY_OFFSET: usize = 88;
+/// Seeded scheduler perturbation: yields per million syscalls and progress
+/// calls, and the stream they are drawn from (kernel-arm64/seedbox.c).
+const PREEMPT_PPM_OFFSET: usize = 120;
+const PREEMPT_SEED_OFFSET: usize = 128;
+/// Raw exits a fixture may take before it must have powered off.
+const FIXTURE_EXIT_BUDGET: u64 = 5_000_000;
 
 /// A completed semantic stop, with the vCPU left stopped for the world owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MachineStop {
-    Horizon { time_ns: u64 },
+    Horizon {
+        time_ns: u64,
+    },
     PoweredOff,
-    Device { time_ns: u64 },
-    Console { time_ns: u64 },
-    ApplicationExit { code: u8, setup_error: bool },
+    Device {
+        time_ns: u64,
+    },
+    /// The block device held a selected request: terminal until a crash.
+    Held {
+        time_ns: u64,
+        trigger: u32,
+    },
+    Console {
+        time_ns: u64,
+    },
+    ApplicationExit {
+        code: u8,
+        setup_error: bool,
+    },
     Barrier,
 }
 
 /// Memory/device ownership and semantic decisions live here, never in a backend.
 /// Backend drops first and also retains its own references to every mapping.
+static STALL_LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 pub struct Machine<B: Backend> {
     backend: B,
     ram: Rc<Memory>,
@@ -195,13 +227,14 @@ impl<B: Backend> Machine<B> {
     }
     /// Advance a stopped machine to a finite world boundary. The horizon is
     /// published before entry, including boot/handshake reconciliation. A timer
-    /// beyond the boundary remains armed. The raw-exit budget spans all slices.
+    /// beyond the boundary remains armed. World runs have no exit budget: the
+    /// boundary ends each slice and a request's wall-time limit ends the run.
     pub fn run_until(&mut self, horizon: u64, before_run: impl FnMut()) -> Result<MachineStop> {
         if self.powered_off {
             return Ok(MachineStop::PoweredOff);
         }
         self.clock.set_horizon(Some(horizon))?;
-        self.advance(before_run, false)
+        self.advance(before_run, false, u64::MAX)
     }
 
     /// Slack permits an earlier stop; this cooperative backend uses the exact limit.
@@ -211,8 +244,18 @@ impl<B: Backend> Machine<B> {
         _early_slack: u64,
         observe_console: bool,
     ) -> Result<MachineStop> {
+        if self.held().is_some() {
+            return Err("machine holds a block request until its crash".into());
+        }
         self.clock.set_horizon(Some(hard_limit))?;
-        self.advance(|| {}, observe_console)
+        self.advance(|| {}, observe_console, u64::MAX)
+    }
+    /// The trigger whose block request hold suspended this machine.
+    pub fn held(&self) -> Option<u32> {
+        self.application
+            .as_ref()
+            .and_then(|d| d.block.as_ref())
+            .and_then(|b| b.held())
     }
     pub fn stopped_observation(&self) -> application::worker::StoppedObservation {
         application::worker::StoppedObservation {
@@ -220,7 +263,7 @@ impl<B: Backend> Machine<B> {
             pending_irq: self.clock.is_pending()
                 || !self.deferred_spis.is_empty()
                 || !self.asserted_spis.is_empty(),
-            next_deadline: self.clock.deadline().unwrap_or(u64::MAX),
+            next_deadline: self.clock.next_event().unwrap_or(u64::MAX),
             owed_io: None,
             abi: if self.ready { ABI } else { 0 },
             exits: self.trace.len() as u64,
@@ -256,10 +299,38 @@ impl<B: Backend> Machine<B> {
         }
     }
 
+    /// Start (`Some((ppm, seed))`) or stop seeded scheduler perturbation while
+    /// the vCPU is stopped; the guest kernel draws at its next syscall. The
+    /// page is part of snapshots, so a restored capture keeps it.
+    pub fn preempt(&mut self, setting: Option<(u32, u64)>) -> Result<()> {
+        let (ppm, seed) = setting.unwrap_or((0, 0));
+        if setting.is_some() && !seedbox_control::PREEMPT_PPM.contains(&ppm) {
+            return Err("invalid ARM preempt rate".into());
+        }
+        unsafe {
+            self.page.set_word(PREEMPT_SEED_OFFSET, seed)?;
+            self.page.set_word(PREEMPT_PPM_OFFSET, u64::from(ppm))
+        }
+    }
+
     /// Restart the progress jitter stream from `seed` while the vCPU is
     /// stopped; the guest kernel picks it up at its next progress call.
     pub fn seed_progress_jitter(&mut self, seed: u64) -> Result<()> {
         unsafe { self.page.set_word(PROGRESS_JITTER_SEED_OFFSET, seed) }
+    }
+
+    /// Give a stopped guest new entropy for a branch. The kernel mixes it
+    /// into its pool and reseeds at its next random draw or tick; the page is
+    /// part of snapshots, so a restored capture keeps the pending entropy.
+    pub fn reseed_guest(&mut self, entropy: [u32; 8]) -> Result<()> {
+        for (i, pair) in entropy.as_chunks::<2>().0.iter().enumerate() {
+            let word = u64::from(pair[0]) | (u64::from(pair[1]) << 32);
+            unsafe { self.page.set_word(ENTROPY_OFFSET + 8 * i, word)? };
+        }
+        let generation = unsafe { self.page.word(ENTROPY_GEN_OFFSET)? }
+            .checked_add(1)
+            .ok_or("entropy generation overflow")?;
+        unsafe { self.page.set_word(ENTROPY_GEN_OFFSET, generation) }
     }
 
     pub fn seed_timer(&mut self, seed: u64, domain: &str) -> Result<()> {
@@ -314,6 +385,61 @@ impl<B: Backend> Machine<B> {
     pub fn time_ns(&self) -> u64 {
         self.clock.now()
     }
+    /// Install or remove a block request hold on the retained disk.
+    pub fn hold_block(
+        &mut self,
+        hold: Option<seedbox_engine_core::virtio_block::Hold>,
+    ) -> Result<()> {
+        self.application
+            .as_mut()
+            .and_then(|devices| devices.block.as_mut())
+            .ok_or("no retained disk for a block request hold")?
+            .set_hold(hold)
+    }
+    /// Start or end injected errors on the retained disk, from its next request.
+    pub fn disk_errors(
+        &mut self,
+        errors: Option<seedbox_engine_core::virtio_block::InjectedErrors>,
+    ) -> Result<Option<seedbox_engine_core::virtio_block::ErrorCounts>> {
+        self.application
+            .as_mut()
+            .and_then(|devices| devices.block.as_mut())
+            .ok_or("no retained disk for disk errors")?
+            .set_disk_errors(errors)
+    }
+    /// Start or end injected latency on the retained disk, from its next
+    /// request. Requests already pending keep their due times.
+    pub fn disk_latency(
+        &mut self,
+        latency: Option<seedbox_engine_core::virtio_block::InjectedLatency>,
+    ) -> Result<Option<seedbox_engine_core::virtio_block::LatencyCounts>> {
+        self.application
+            .as_mut()
+            .and_then(|devices| devices.block.as_mut())
+            .ok_or("no retained disk for disk latency")?
+            .set_disk_latency(latency)
+    }
+    /// Complete delayed disk requests due by now, then publish the next one
+    /// as the clock's device deadline.
+    fn complete_device_work(&mut self) -> Result<()> {
+        let now = self.clock.now();
+        let Some(block) = self
+            .application
+            .as_mut()
+            .and_then(|devices| devices.block.as_mut())
+        else {
+            return Ok(());
+        };
+        if block.next_due().is_some_and(|due| due <= now) {
+            unsafe { self.ram.with_bytes_mut(|ram| block.complete_due(ram, now)) }?;
+            let next = block.next_due();
+            self.clock.set_device(next);
+            return self.sync_application_irqs();
+        }
+        let next = block.next_due();
+        self.clock.set_device(next);
+        Ok(())
+    }
 
     /// Resume after a world pause, or boot a new incarnation at a lifecycle
     /// boundary. Expired timers coalesce at this deterministic time.
@@ -326,6 +452,8 @@ impl<B: Backend> Machine<B> {
         if self.clock.judge(false)? {
             self.inject_spi(TIMER_SPI, true)?;
         }
+        // Device work that fell due while paused completes at the resume.
+        self.complete_device_work()?;
         self.publish()
     }
 
@@ -485,9 +613,12 @@ impl<B: Backend> Machine<B> {
         })
     }
 
+    /// The next incarnation's disk. A branch keys unflushed-sector loss on
+    /// its identity, as x86 does; a continuation keeps the ordinary stream.
     pub fn crashed_disk(
         &self,
         seed: u64,
+        identity: Option<&str>,
         name: &str,
         incarnation: u32,
     ) -> Option<(crate::disk::Disk, u64)> {
@@ -496,7 +627,7 @@ impl<B: Backend> Machine<B> {
             .block
             .as_ref()?
             .disk()
-            .map(|disk| disk.crashed_seeded(seed, name, incarnation))
+            .map(|disk| disk.crashed_branch(seed, identity, name, incarnation))
     }
 
     pub fn take_log_chunks(&mut self) -> Vec<application::log_capture::Chunk> {
@@ -566,7 +697,7 @@ impl<B: Backend> Machine<B> {
         }
         let start = Instant::now();
         self.clock.set_horizon(None)?;
-        if self.advance(before_run, false)? != MachineStop::PoweredOff {
+        if self.advance(before_run, false, FIXTURE_EXIT_BUDGET)? != MachineStop::PoweredOff {
             return Err("fixture stopped before power-off".into());
         }
         let console = String::from_utf8_lossy(&self.uart.console).into_owned();
@@ -610,6 +741,7 @@ impl<B: Backend> Machine<B> {
         &mut self,
         mut before_run: impl FnMut(),
         observe_console: bool,
+        exit_budget: u64,
     ) -> Result<MachineStop> {
         let console_start = self.uart.console.len();
         if self.powered_off {
@@ -629,15 +761,21 @@ impl<B: Backend> Machine<B> {
                 time_ns: self.clock.now(),
             });
         }
-        while self.raw_exits < 5_000_000 {
+        while self.raw_exits < exit_budget {
             before_run();
             let stop = match self.backend.run()? {
                 backend::RunStop::Guest(stop) => stop,
                 // Host stops create no Pending operation. Re-enter through
                 // before_run so cancellation/liveness remains observable, but
                 // do not read/publish PV time, deliver IRQs, complete an exit,
-                // spend a semantic budget or append a witness record.
-                backend::RunStop::Interrupted => continue,
+                // spend a semantic budget or append a witness record. A
+                // stall watch interruption only reports where the guest is.
+                backend::RunStop::Interrupted => {
+                    if let Some(ran) = self.backend.take_stall() {
+                        self.report_stall(ran);
+                    }
+                    continue;
+                }
             };
             self.raw_exits += 1;
             if self.backend.get_sys_reg(SysReg::CNTV_CTL)? & 1 != 0 {
@@ -790,6 +928,7 @@ impl<B: Backend> Machine<B> {
                     self.deferred_clock_read_spis += 1;
                 }
             }
+            self.complete_device_work()?;
             self.flush_spis()?;
             self.trace
                 .push(Record::new(&stop.exit, self.clock.now(), stop.pc, response));
@@ -826,6 +965,13 @@ impl<B: Backend> Machine<B> {
                 if devices.barrier {
                     return Ok(MachineStop::Barrier);
                 }
+                // The MMIO write completed, but the held request did not.
+                if let Some(trigger) = devices.block.as_ref().and_then(|b| b.held()) {
+                    return Ok(MachineStop::Held {
+                        time_ns: self.clock.now(),
+                        trigger,
+                    });
+                }
                 if !devices.events.is_empty() {
                     return Ok(MachineStop::Device {
                         time_ns: self.clock.now(),
@@ -843,7 +989,9 @@ impl<B: Backend> Machine<B> {
                 });
             }
         }
-        Err("exit budget exhausted (5,000,000); no successful power-off".into())
+        Err(format!(
+            "exit budget exhausted ({exit_budget}); no successful power-off"
+        ))
     }
 
     fn application_mmio(
@@ -854,6 +1002,7 @@ impl<B: Backend> Machine<B> {
         value: u64,
     ) -> Result<Option<u64>> {
         use application::*;
+        let now = self.clock.now();
         let devices = self
             .application
             .as_mut()
@@ -899,7 +1048,7 @@ impl<B: Backend> Machine<B> {
         let response = if write {
             let events = unsafe {
                 self.ram
-                    .with_bytes_mut(|ram| device.write(ram, addr - base, width, value))
+                    .with_bytes_mut(|ram| device.write(ram, addr - base, width, value, now))
             }?;
             devices.events.extend(events);
             None
@@ -979,6 +1128,37 @@ impl<B: Backend> Machine<B> {
             self.backend.set_sys_reg(SysReg::TPIDRRO_EL0, epoch)?;
         }
         Ok(())
+    }
+    /// Name this worker process's machine in stall reports; a worker serves
+    /// one machine, so the first name stands.
+    pub fn label_stall_reports(name: &str) {
+        let _ = STALL_LABEL.set(name.to_owned());
+    }
+    /// Report, on stderr, where a guest is after it ran an entry for `ran`
+    /// of host time without an exit. Diagnostic only: reads registers of
+    /// the stopped vCPU and changes nothing.
+    fn report_stall(&self, ran: std::time::Duration) {
+        let b = &self.backend;
+        let core = |reg| b.get_reg(reg).map_or("?".into(), |v| format!("{v:#x}"));
+        let sys = |reg| b.get_sys_reg(reg).map_or("?".into(), |v| format!("{v:#x}"));
+        let (el, daif) = match b.get_reg(CoreReg::Pstate) {
+            Ok(pstate) => (
+                ((pstate >> 2) & 3).to_string(),
+                format!("{:#x}", (pstate >> 6) & 0xf),
+            ),
+            Err(_) => ("?".into(), "?".into()),
+        };
+        eprintln!(
+            "seedbox stall: machine {} ran {:.1}s of host time without an exit at simulated {}ns: pc={} el={el} daif={daif} lr={} sp_el1={} sp_el0={} elr_el1={}",
+            STALL_LABEL.get().map_or("?", String::as_str),
+            ran.as_secs_f64(),
+            self.clock.now(),
+            core(CoreReg::Pc),
+            core(CoreReg::X(30)),
+            core(CoreReg::Sp),
+            sys(SysReg::SP_EL0),
+            sys(SysReg::ELR_EL1),
+        );
     }
     fn publish(&mut self) -> Result<()> {
         let last = unsafe { self.page.word(8)? };
@@ -1226,7 +1406,7 @@ mod spi_regression {
         );
         // A second branch receives the unchanged snapshot, not the first branch's RNG.
         let mut checkpoint = Vec::new();
-        snapshot.write_checkpoint(&mut checkpoint).unwrap();
+        snapshot.write_checkpoint(&mut checkpoint, 0).unwrap();
         let mut branch = fresh().restore_checkpoint(checkpoint.as_slice()).unwrap();
         assert_eq!(branch.application_evidence(true).unwrap(), expected);
         assert_eq!(branch.timer_policy.as_mut().unwrap().1.next(), next_random);
@@ -1235,6 +1415,132 @@ mod spi_regression {
         let last_ram_byte = 16 + metadata_len + 32 + 8 + branch.ram.len() - 1;
         checkpoint[last_ram_byte] ^= 1;
         assert!(fresh().restore_checkpoint(checkpoint.as_slice()).is_err());
+    }
+
+    /// NEXT-100 case 9: one-component mutations of a stopped application
+    /// machine against each retained comparison field. The application witness
+    /// and the full-state digest are different projections: the witness covers
+    /// the exit trace, the console stream, the clock and the disk; the full
+    /// state covers RAM, CPU, devices (with the disk), UART registers and the
+    /// interrupt and clock state. The matrix states what each mutation must
+    /// change and what it must leave alone.
+    #[test]
+    fn each_component_mutation_changes_exactly_its_comparison_fields() {
+        use std::collections::BTreeMap;
+        let fresh = || {
+            let mut m = machine();
+            let mut disk = crate::disk::Disk::new(None, Some(16)).unwrap();
+            disk.write(1, &[3; 512]).unwrap();
+            disk.flush();
+            disk.write(2, &[5; 512]).unwrap();
+            m.application.as_mut().unwrap().block = Some(application::virtio::Virtio::block(disk));
+            m.uart.console.extend_from_slice(b"ready\n");
+            m.trace.push(crate::witness::Record {
+                kind: 1,
+                time: 10,
+                pc: 0x1000,
+                addr: 0x900_0000,
+                data: 1,
+                len: 4,
+                write: true,
+            });
+            unsafe {
+                m.ram.write(0x2000, b"guest data").unwrap();
+            }
+            m
+        };
+        /// Change only the disk: a fresh block device over the edited disk has
+        /// the same transport state as the fixture's.
+        fn edit_disk(m: &mut Machine<Fake>, edit: impl FnOnce(&mut crate::disk::Disk)) {
+            let devices = m.application.as_mut().unwrap();
+            let mut disk = devices.block.as_ref().unwrap().disk().unwrap().clone();
+            edit(&mut disk);
+            devices.block = Some(application::virtio::Virtio::block(disk));
+        }
+        let fields = |m: &Machine<Fake>| -> BTreeMap<&'static str, String> {
+            let evidence = m.application_evidence(true).unwrap();
+            let parts = evidence.state_digest_parts.unwrap();
+            let disk = m
+                .application
+                .as_ref()
+                .unwrap()
+                .block
+                .as_ref()
+                .unwrap()
+                .disk()
+                .unwrap();
+            BTreeMap::from([
+                ("witness", evidence.witness),
+                ("full_state", evidence.state_digest.unwrap()),
+                ("trace", evidence.trace_hash),
+                ("console", evidence.console_hash),
+                ("disk", evidence.disk_digest.unwrap()),
+                // What survives a crash under the default drop-volatile policy.
+                ("disk_stable", disk.crashed().0.digest()),
+                ("ram", parts["ram"].clone()),
+                ("cpu", parts["cpu"].clone()),
+                ("devices", parts["devices"].clone()),
+                ("uart", parts["uart"].clone()),
+                ("clock", parts["clock"].clone()),
+            ])
+        };
+        let original = fields(&fresh());
+        assert_eq!(fields(&fresh()), original, "evidence is not reproducible");
+        type Mutation = fn(&mut Machine<Fake>);
+        let matrix: [(&str, Mutation, &[&str]); 7] = [
+            (
+                "console byte",
+                |m| m.uart.console[0] ^= 1,
+                &["witness", "console"],
+            ),
+            (
+                "exit record",
+                |m| m.trace.last_mut().unwrap().data ^= 1,
+                &["witness", "trace"],
+            ),
+            (
+                "timer delivery",
+                |m| m.inject_spi(TIMER_SPI, true).unwrap(),
+                &["full_state", "clock"],
+            ),
+            (
+                "volatile sector",
+                |m| edit_disk(m, |d| d.write(2, &[6; 512]).unwrap()),
+                &["witness", "full_state", "disk", "devices"],
+            ),
+            (
+                "stable sector",
+                |m| {
+                    edit_disk(m, |d| {
+                        d.write(1, &[4; 512]).unwrap();
+                        d.flush();
+                    })
+                },
+                &["witness", "full_state", "disk", "disk_stable", "devices"],
+            ),
+            (
+                "guest RAM byte",
+                |m| unsafe { m.ram.write(0x2000, b"G").unwrap() },
+                &["full_state", "ram"],
+            ),
+            (
+                "CPU register",
+                |m| m.backend.set_reg(CoreReg::X(3), 7).unwrap(),
+                &["full_state", "cpu"],
+            ),
+        ];
+        for (name, mutate, expected) in matrix {
+            let mut m = fresh();
+            mutate(&mut m);
+            let changed: Vec<&str> = fields(&m)
+                .into_iter()
+                .filter(|(field, value)| original[field] != *value)
+                .map(|(field, _)| field)
+                .collect();
+            let mut expected = expected.to_vec();
+            expected.sort_unstable();
+            assert_eq!(changed, expected, "{name}");
+        }
     }
 
     #[test]
@@ -1262,13 +1568,13 @@ mod spi_regression {
             .unwrap()
     }
     #[test]
-    fn host_interruptions_do_not_exhaust_last_semantic_exit() {
+    fn world_runs_continue_past_fixture_exit_budget() {
         let mut m = machine();
         m.ready = true;
         m.backend.set_reg(CoreReg::Pstate, 0).unwrap();
         // Simulate an epoch already advanced by the guest kernel.
         unsafe { m.page.set_word(EXCLUSIVE_EPOCH_OFFSET, 41).unwrap() };
-        m.raw_exits = 4_999_999;
+        m.raw_exits = FIXTURE_EXIT_BUDGET;
         m.backend.stops.extend([
             RunStop::Interrupted,
             RunStop::Interrupted,
@@ -1284,7 +1590,8 @@ mod spi_regression {
             MachineStop::Horizon { time_ns: 10 }
         );
         assert_eq!(entries, 3);
-        assert_eq!(m.raw_exits, 5_000_000);
+        // Host interruptions are not raw exits.
+        assert_eq!(m.raw_exits, FIXTURE_EXIT_BUDGET + 1);
         assert_eq!(m.trace.len(), 1);
         assert!(m.backend.injected.is_empty());
         assert_eq!(unsafe { m.page.word(EXCLUSIVE_EPOCH_OFFSET).unwrap() }, 42);
@@ -1324,7 +1631,7 @@ mod spi_regression {
                     (0xa0, RAM_BASE + 0x1100),
                     (0x44, 1),
                 ] {
-                    net.write(ram, offset, 4, value).unwrap();
+                    net.write(ram, offset, 4, value, 0).unwrap();
                 }
             });
         }

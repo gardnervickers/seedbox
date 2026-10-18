@@ -1,5 +1,6 @@
 //! Resolved configuration retained in run identities.
 pub mod definition;
+pub mod fault_profile;
 pub mod project;
 
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,8 @@ pub struct Simulation {
     pub machine: MachineOptions,
     #[serde(default, skip_serializing_if = "DiskOptions::is_default")]
     pub disk: DiskOptions,
+    #[serde(default, skip_serializing_if = "project::ProgressClient::is_standard")]
+    pub progress_client: project::ProgressClient,
 }
 
 /// Default guest machine settings; per-service RAM may override memory_mb.
@@ -98,6 +101,9 @@ pub struct Service {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<VolumeMount>,
     pub network: String,
+    /// Crashes the service's machine is designed to have.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_crashes: Vec<project::ExpectedCrash>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +132,10 @@ pub struct VolumeMount {
     pub source: String,
     /// Absolute directory in the service's filesystem.
     pub target: String,
+    /// Space the volume adds to the machine's retained disk; None is
+    /// `project::DEFAULT_VOLUME_BYTES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

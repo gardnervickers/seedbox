@@ -27,6 +27,12 @@ pub(crate) struct Step {
     pub(crate) requests: Vec<Vec<u8>>,
     pub(crate) effects: Vec<(u32, bool)>,
     pub(crate) frames: Vec<Vec<u8>>,
+    /// Committed property lines, as the shared decoder produces them.
+    #[serde(default)]
+    pub(crate) properties: Vec<Vec<u8>>,
+    /// A disk request admitted at the step, by VIRTIO_BLK_T_* kind.
+    #[serde(default)]
+    pub(crate) block: Option<u32>,
 }
 impl Step {
     pub(crate) fn new(at: u64, stop: Stop) -> Self {
@@ -39,6 +45,8 @@ impl Step {
             requests: vec![],
             effects: vec![],
             frames: vec![],
+            properties: vec![],
+            block: None,
         }
     }
 }
@@ -51,6 +59,13 @@ pub(crate) struct Mock {
     pub(crate) timer: u64,
     pub(crate) bad: Option<&'static str>,
     pub(crate) throttleable: bool,
+    pub(crate) hold: Option<crate::virtio_block::Hold>,
+    /// Chained slices this mock offers to run ahead; zero offers none.
+    pub(crate) chain: usize,
+    /// Slices run ahead, which the scheduler must request next, in order.
+    pub(crate) planned: VecDeque<(SliceRequest, Vec<Vec<u8>>)>,
+    /// Advances served as slices run ahead.
+    pub(crate) replayed: usize,
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Saved {
@@ -58,6 +73,8 @@ pub(crate) struct Saved {
     steps: VecDeque<Step>,
     irq: bool,
     timer: u64,
+    #[serde(default)]
+    hold: Option<crate::virtio_block::Hold>,
 }
 impl Deref for Mock {
     type Target = MachineState;
@@ -81,7 +98,27 @@ impl Mock {
             timer: u64::MAX,
             bad: None,
             throttleable: true,
+            hold: None,
+            chain: 0,
+            planned: VecDeque::new(),
+            replayed: 0,
         }
+    }
+    /// A request the scheduler makes must be the next slice run ahead, if any.
+    fn replay(&mut self, request: SliceRequest, then: &[&[u8]]) -> Result<(), String> {
+        let Some((planned, frames)) = self.planned.pop_front() else {
+            return Ok(());
+        };
+        if planned != request || frames.iter().map(Vec::as_slice).ne(then.iter().copied()) {
+            return Err(format!(
+                "{}: requested {request:?} with {} frames, ran ahead {planned:?} with {}",
+                self.name,
+                then.len(),
+                frames.len()
+            ));
+        }
+        self.replayed += 1;
+        Ok(())
     }
     fn record(&self, kind: &str) {
         self.trace
@@ -156,6 +193,18 @@ impl WorldMachine for Mock {
         }
         self.common.succeed(&old.common, at)?;
         Ok(Some(0))
+    }
+    fn succeed_branch(
+        &mut self,
+        old: &mut Self,
+        at: u64,
+        seed: u64,
+        identity: Option<&str>,
+    ) -> Result<Option<u64>, String> {
+        if let Some(identity) = identity {
+            self.record(&format!("succeed-branch/{identity}"));
+        }
+        self.succeed(old, at, seed)
     }
     fn park(&mut self) -> Result<(), String> {
         self.common.check_park(self.owed.is_some())?;
@@ -244,6 +293,68 @@ impl WorldMachine for Mock {
             )
         }))
     }
+    fn has_disk(&self) -> bool {
+        true
+    }
+    fn snapshot_bytes(_: &Self::Snapshot) -> u64 {
+        100
+    }
+    fn hold_block(&mut self, hold: Option<crate::virtio_block::Hold>) -> Result<(), String> {
+        if self.common.held.is_some() {
+            return Err("block device already holds a request".into());
+        }
+        self.record(if hold.is_some() {
+            "hold/on"
+        } else {
+            "hold/off"
+        });
+        self.hold = hold;
+        Ok(())
+    }
+    fn disk_latency(
+        &mut self,
+        latency: Option<crate::virtio_block::InjectedLatency>,
+    ) -> Result<Option<crate::virtio_block::LatencyCounts>, String> {
+        self.record(if latency.is_some() {
+            "disk_latency/on"
+        } else {
+            "disk_latency/off"
+        });
+        Ok(latency
+            .is_none()
+            .then_some(crate::virtio_block::LatencyCounts {
+                delayed: 4,
+                deepest: 2,
+            }))
+    }
+    fn preempt(&mut self, setting: Option<(u32, u64)>) -> Result<(), String> {
+        self.record(match setting {
+            Some((ppm, _)) => {
+                if ppm == 0 {
+                    return Err("zero preempt rate".into());
+                }
+                "preempt/on"
+            }
+            None => "preempt/off",
+        });
+        Ok(())
+    }
+    fn disk_errors(
+        &mut self,
+        errors: Option<crate::virtio_block::InjectedErrors>,
+    ) -> Result<Option<crate::virtio_block::ErrorCounts>, String> {
+        self.record(if errors.is_some() {
+            "disk_errors/on"
+        } else {
+            "disk_errors/off"
+        });
+        Ok(errors
+            .is_none()
+            .then_some(crate::virtio_block::ErrorCounts {
+                matched: 3,
+                failed: 2,
+            }))
+    }
     fn exits(&self) -> u64 {
         0
     }
@@ -261,11 +372,16 @@ impl WorldMachine for Mock {
         if self.owed.is_some() {
             return Err("owed I/O".into());
         }
+        let failpoint = format!("fail/snapshot/{}", self.name);
+        if self.trace.lock().unwrap().contains(&failpoint) {
+            return Err(format!("{} snapshot failed", self.name));
+        }
         Ok(Saved {
             common: self.common.clone(),
             steps: self.steps.clone(),
             irq: self.irq,
             timer: self.timer,
+            hold: self.hold,
         })
     }
     fn restore(&mut self, s: &Saved) -> Result<u64, String> {
@@ -278,10 +394,77 @@ impl WorldMachine for Mock {
         self.owed = None;
         self.irq = s.irq;
         self.timer = s.timer;
+        self.hold = s.hold;
         self.common.clear_effects();
         Ok(1)
     }
     fn advance(
+        &mut self,
+        clock: &mut MockClock,
+        request: SliceRequest,
+        frames: &mut Vec<Vec<u8>>,
+    ) -> Result<Stop, String> {
+        self.replay(request, &[])?;
+        self.slice(clock, request, frames)
+    }
+    fn delivers_after_advance(&self) -> bool {
+        self.chain > 0
+    }
+    fn advance_then_deliver(
+        &mut self,
+        clock: &mut MockClock,
+        request: SliceRequest,
+        frames: &mut Vec<Vec<u8>>,
+        then: &[&[u8]],
+    ) -> Result<(Stop, Option<Vec<bool>>), String> {
+        self.replay(request, then)?;
+        let stop = self.slice(clock, request, frames)?;
+        if stop == Stop::Reached && self.time == request.hard_limit && !then.is_empty() {
+            return Ok((stop, Some(self.deliver_frames(then)?)));
+        }
+        Ok((stop, None))
+    }
+    fn chain_capacity(&self) -> usize {
+        self.chain
+    }
+    /// Runs the first slice, then claims the planned slices its script would
+    /// reach in turn, through the first that stops short of its limit.
+    fn advance_chain(
+        &mut self,
+        clock: &mut MockClock,
+        first: ChainStep<'_>,
+        ahead: &[ChainStep<'_>],
+        frames: &mut Vec<Vec<u8>>,
+    ) -> Result<(Stop, Option<Vec<bool>>, usize), String> {
+        if !self.planned.is_empty() || ahead.len() > self.chain {
+            return Err(format!(
+                "{}: chain requested while one is pending",
+                self.name
+            ));
+        }
+        let (stop, delivered) =
+            self.advance_then_deliver(clock, first.request, frames, &first.then)?;
+        let mut reached = stop == Stop::Reached && self.time == first.request.hard_limit;
+        let mut script = self.steps.iter().peekable();
+        for step in ahead {
+            if !reached {
+                break;
+            }
+            let limit = step.request.hard_limit;
+            reached = match script.next_if(|s| s.at <= limit) {
+                Some(s) => s.stop == Stop::Reached && s.at == limit,
+                None => true,
+            };
+            self.planned.push_back((
+                step.request,
+                step.then.iter().map(|bytes| bytes.to_vec()).collect(),
+            ));
+        }
+        Ok((stop, delivered, self.planned.len()))
+    }
+}
+impl Mock {
+    fn slice(
         &mut self,
         _: &mut MockClock,
         request: SliceRequest,
@@ -321,6 +504,12 @@ impl WorldMachine for Mock {
         self.common
             .control_requests
             .extend(step.requests.into_iter().map(|bytes| (step.at, bytes)));
+        let incarnation = self.common.incarnation();
+        self.common.committed_properties.extend(
+            step.properties
+                .into_iter()
+                .map(|line| (step.at, incarnation, Some(line))),
+        );
         self.common
             .fault_effects
             .extend(step.effects.into_iter().map(|(id, ok)| (id, step.at, ok)));
@@ -347,6 +536,25 @@ impl WorldMachine for Mock {
                 .extend([(0, step.at, true), (0, 0, true)]),
             None => (),
             Some(other) => panic!("unknown test mutation {other}"),
+        }
+        // A held request stops the machine at the step, before its effect.
+        let matched = step
+            .block
+            .zip(self.hold.as_mut())
+            .is_some_and(|(kind, hold)| {
+                let matches = match hold.op {
+                    seedbox_control::DiskOp::Any => true,
+                    seedbox_control::DiskOp::Read => kind == 0,
+                    seedbox_control::DiskOp::Write => kind == 1,
+                    seedbox_control::DiskOp::Flush => kind == 4,
+                };
+                hold.seen += u64::from(matches);
+                matches && hold.seen == hold.nth
+            });
+        if matched {
+            let trigger = self.hold.take().map(|h| h.trigger_id).unwrap_or(0);
+            self.record("held");
+            return Ok(Stop::Held(trigger));
         }
         match step.stop {
             Stop::Exited => self.common.state = State::Exited(0),
@@ -402,5 +610,11 @@ pub(crate) fn world(names: &[&str]) -> World<Mock> {
         semantic_counts: network_counters::NetworkCounters::default(),
         slices: 0,
         boundaries: 0,
+        properties: Default::default(),
+        expected_crashes: vec![Vec::new(); n],
+        choices: Default::default(),
+        anchor_captures: Default::default(),
+        captured_anchor: None,
+        resume_after_anchor: false,
     }
 }

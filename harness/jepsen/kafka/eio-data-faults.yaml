@@ -1,0 +1,26 @@
+# Failed disk reads and writes (EIO) on any one Kafka node at a time, restricted
+# to requests clear of ext4's metadata (an unscoped error also fails the journal
+# and leaves the filesystem unusable), with crashes, pauses and partitions. A
+# broker whose only log directory fails halts by design; the node's supervisor
+# restarts it 2 s later, so it must recover its log and serve again without
+# losing an acknowledged record.
+start: 20s
+end: 55s
+interval: 4s
+targets: [n1, n2, n3]
+faults:
+  - kind: disk_error
+    weight: 3
+    op: any
+    ppm: 50000
+    scope: data
+    duration: {min: 2s, max: 8s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 5s}
+  - kind: pause_process
+    weight: 1
+    duration: {min: 500ms, max: 4s}
+  - kind: partition
+    weight: 1
+    duration: {min: 1s, max: 6s}

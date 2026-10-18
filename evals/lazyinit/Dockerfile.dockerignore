@@ -1,0 +1,5 @@
+*
+!Cargo.toml
+!crates/seedbox-sdk
+!evals/lazyinit
+evals/lazyinit/target

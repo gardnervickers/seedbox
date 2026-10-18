@@ -2003,6 +2003,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-bench"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "seedbox-api",
+ "seedbox-engine-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "seedbox-check"
+version = "0.1.0"
+
+[[package]]
 name = "seedbox-client"
 version = "0.1.0"
 dependencies = [
@@ -2024,6 +2039,14 @@ name = "seedbox-control"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "seedbox-control-client"
+version = "0.1.0"
+dependencies = [
+ "seedbox-control",
  "serde_json",
 ]
 
@@ -2052,6 +2075,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-explore"
+version = "0.1.0"
+dependencies = [
+ "seedbox-control",
+ "seedbox-engine-protocol",
+ "seedbox-spec",
+ "serde_json",
+]
+
+[[package]]
+name = "seedbox-sdk"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "seedbox-engine-protocol",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "seedbox-server"
 version = "0.1.0"
 dependencies = [
@@ -2065,6 +2108,7 @@ dependencies = [
  "seedbox-client",
  "seedbox-control",
  "seedbox-engine-protocol",
+ "seedbox-explore",
  "seedbox-spec",
  "serde",
  "serde_json",
@@ -3032,6 +3076,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "serde_json",
  "tempfile",
 ]
 

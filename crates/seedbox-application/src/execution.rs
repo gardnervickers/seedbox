@@ -55,6 +55,8 @@ pub struct ExecutionRequest<'a> {
     pub start_paused: bool,
     /// Saved engine position to restore before continuing this simulation.
     pub resume_checkpoint: Option<&'a Path>,
+    /// Anchor inputs to capture checkpoints at; never changes results.
+    pub capture_anchors: &'a [String],
     /// Optional durable semantic-input journal, read after the worker stops.
     pub intervention_history: Option<&'a Path>,
     /// Verified retained inputs to reapply, distinct from the live output journal.
@@ -67,6 +69,9 @@ pub struct ExecutionRequest<'a> {
     pub network: &'a Network,
     /// Resolved virtual CPUs by service, mapped through prepared placement.
     pub cpus: &'a BTreeMap<String, seedbox_spec::project::Cpu>,
+    /// Expected crashes by service, mapped through prepared placement; a
+    /// service that expects none may be absent.
+    pub expected_crashes: &'a BTreeMap<String, Vec<seedbox_spec::project::ExpectedCrash>>,
     pub schedule: &'a Schedule,
     pub control: Option<&'a crate::config::Control>,
     pub check: &'a Check,

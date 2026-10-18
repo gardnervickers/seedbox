@@ -83,6 +83,9 @@ impl Payload for SimulationEvent {
             | EventKind::MachineReady { machine, .. }
             | EventKind::MachineLifecycle { machine, .. }
             | EventKind::MachineExited { machine, .. } => machine.len(),
+            EventKind::OutOfMemoryKill {
+                machine, process, ..
+            } => machine.len() + process.as_ref().map_or(0, |p| p.command.len()),
             _ => 0,
         })
     }
@@ -405,6 +408,19 @@ impl Manager {
             .map_err(|_| Error::StorageFailed)?
             .catalogue
             .delete_checkpoint(id, name)
+    }
+
+    pub(crate) fn record_anchor_checkpoint(
+        &self,
+        id: &SimulationId,
+        name: &str,
+        position: seedbox_engine_protocol::host_control::BoundaryPosition,
+    ) -> Result<(), Error> {
+        self.0
+            .lock()
+            .map_err(|_| Error::StorageFailed)?
+            .catalogue
+            .record_anchor_checkpoint(id, name, position)
     }
 
     pub(crate) fn captured_checkpoint(
@@ -989,6 +1005,7 @@ impl Manager {
             | EventKind::MachineReady { machine, .. }
             | EventKind::MachineLifecycle { machine, .. }
             | EventKind::MachineExited { machine, .. }
+            | EventKind::OutOfMemoryKill { machine, .. }
                 if !live.logs.contains_key(machine) =>
             {
                 EventKind::SourceUnavailable
@@ -1233,6 +1250,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "world-logs".into(),
+                fault_profile: None,
                 spec: SimulationSpec {
                     program: Vec::new(),
                     start_paused: false,
@@ -1293,6 +1311,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "oversized-events".into(),
+                fault_profile: None,
                 spec: SimulationSpec {
                     program: Vec::new(),
                     start_paused: false,
@@ -1439,6 +1458,7 @@ mod tests {
                     metadata: Default::default(),
                     options: Default::default(),
                     request_id: "oracle-observation".into(),
+                    fault_profile: None,
                     spec: SimulationSpec {
                         program: Vec::new(),
                         start_paused: false,
@@ -1524,6 +1544,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "readiness".into(),
+                fault_profile: None,
                 spec: SimulationSpec {
                     program: Vec::new(),
                     start_paused: false,

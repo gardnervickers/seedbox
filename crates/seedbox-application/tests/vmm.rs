@@ -48,6 +48,7 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
     };
     let artifacts = BTreeMap::from([(hash, "/verified/retained-input".into())]);
     let request = ExecutionRequest {
+        capture_anchors: Default::default(),
         program: &[],
         intervention_history: None,
         start_paused: false,
@@ -83,6 +84,7 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
                 },
             ),
         ]),
+        expected_crashes: &BTreeMap::new(),
         schedule: &Schedule {
             timer_jitter_ns: 50_000,
             stop_tolerance_ns: 40_000,
@@ -225,6 +227,38 @@ fn open_ended_world_uses_a_real_scheduler_horizon_on_both_backends() {
 }
 
 #[test]
+fn expected_crashes_reach_the_world_through_placement() {
+    fixture(|base| {
+        // Without declarations the world document has no key at all.
+        let world = world_json(base).unwrap();
+        assert!(world["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m.get("expected_crashes").is_none()));
+        let crash: seedbox_spec::project::ExpectedCrash = serde_json::from_value(
+            json!({"signal": "SIGABRT", "command": "keel-watchdog", "executable": "libdynamorio.so"}),
+        )
+        .unwrap();
+        let expected = BTreeMap::from([("server".to_owned(), vec![crash])]);
+        let request = ExecutionRequest {
+            expected_crashes: &expected,
+            ..*base
+        };
+        let world = world_json(&request).unwrap();
+        let machines = world["machines"].as_array().unwrap();
+        let machine = |name: &str| machines.iter().find(|m| m["name"] == name).unwrap();
+        assert_eq!(
+            machine("server-machine")["expected_crashes"],
+            json!([{"signal": 6, "command": "keel-watchdog", "executable": "libdynamorio.so"}])
+        );
+        assert!(machine("client-machine").get("expected_crashes").is_none());
+        // The engine reads the same document back.
+        assert_eq!(typed(&world).expected_crashes()[1].len(), 1);
+    });
+}
+
+#[test]
 fn world_uses_verified_artifacts_and_explicit_placement() {
     fixture(|request| {
         let world = world_json(request).unwrap();
@@ -264,6 +298,7 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
                     disk_volumes: vec![seedbox_application::config::VolumeMount {
                         source: "state".into(),
                         target: "/state".into(),
+                        size_bytes: None,
                     }],
                 },
             },
@@ -304,6 +339,49 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
         .unwrap();
         assert_eq!(checkpoint_world["checkpoint"]["parent_identity"], parent);
         assert_eq!(checkpoint_world["machines"], world["machines"]);
+        // The disk holds every volume of the machine: their sizes add up.
+        let mut sized = prepared.clone();
+        let volumes = &mut sized.images.get_mut("server").unwrap().launch.disk_volumes;
+        volumes[0].size_bytes = Some(3 << 30);
+        volumes.push(seedbox_application::config::VolumeMount {
+            source: "wal".into(),
+            target: "/wal".into(),
+            size_bytes: None,
+        });
+        let sized_world = world_json(&ExecutionRequest {
+            program: &[],
+            intervention_history: None,
+            start_paused: false,
+            resume_checkpoint: None,
+            replay_interventions: None,
+            observations: None,
+            prepared: &sized,
+            ..*request
+        })
+        .unwrap();
+        assert_eq!(
+            sized_world["machines"][1]["disk"],
+            json!({"size_mib": 4096})
+        );
+        assert_ne!(
+            sized_world["checkpoint"]["parent_identity"],
+            checkpoint_world["checkpoint"]["parent_identity"]
+        );
+        let volumes = &mut sized.images.get_mut("server").unwrap().launch.disk_volumes;
+        volumes[0].size_bytes = Some(64 << 30);
+        assert!(world_json(&ExecutionRequest {
+            program: &[],
+            intervention_history: None,
+            start_paused: false,
+            resume_checkpoint: None,
+            replay_interventions: None,
+            observations: None,
+            prepared: &sized,
+            ..*request
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("machine server-machine: volume sizes total 65GiB, above the 64GiB limit"));
         prepared.images.clear();
         let without_volume = world_json(&ExecutionRequest {
             program: &[],
@@ -327,10 +405,7 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
             disks,
             [
                 ("client-machine", None),
-                (
-                    "server-machine",
-                    Some(json!({"size_mib": engine_adapter::VOLUME_DISK_MIB}))
-                )
+                ("server-machine", Some(json!({"size_mib": 1024})))
             ]
         );
     });
@@ -1510,7 +1585,8 @@ fn unavailable_at_admission_requires_prior_crash_without_intervening_reboot() {
                 at_ns: crash_at.as_u64().unwrap(),
                 action: seedbox_control::Action::Crash {
                     machine: "server-machine".into(),
-                },
+                }
+                .into(),
             }];
             let mut scheduled_raw = raw.clone();
             scheduled_raw["control_history"] = json!([scheduled_raw["control_history"][1].clone()]);
@@ -2206,7 +2282,8 @@ fn reports_correlate_retained_interventions_with_guest_faults_and_oracle_exit() 
             at_ns: 60_000_000,
             action: seedbox_control::Action::Stop {
                 machine: "server-machine".into(),
-            },
+            }
+            .into(),
         });
         let remaining_request = ExecutionRequest {
             program: &remaining,

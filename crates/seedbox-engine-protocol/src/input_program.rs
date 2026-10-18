@@ -1,5 +1,5 @@
 //! Authored external inputs and their runtime-assigned admission identities.
-use seedbox_control::{Action, Plan, PROCESS_EFFECT_TIMEOUT_NS};
+use seedbox_control::{Action, Plan, TriggerSpec, PROCESS_EFFECT_TIMEOUT_NS};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 pub const MAX_INPUTS: usize = 4096;
@@ -8,13 +8,145 @@ pub const MAX_INPUTS: usize = 4096;
 pub struct TimedInput {
     pub key: String,
     pub at_ns: u64,
-    pub action: Action,
+    pub action: InputAction,
     #[serde(
         default = "default_timeout_ns",
         skip_serializing_if = "is_default_timeout"
     )]
     pub timeout_ns: u64,
 }
+/// What an input does: an ordinary fault action, or a branch input that
+/// consumes no fault ID. Both share the `action`-tagged JSON form.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum InputAction {
+    Fault(Action),
+    Branch(BranchAction),
+    Rule(RuleAction),
+}
+impl From<Action> for InputAction {
+    fn from(action: Action) -> Self {
+        Self::Fault(action)
+    }
+}
+impl InputAction {
+    pub fn fault(&self) -> Option<&Action> {
+        match self {
+            Self::Fault(action) => Some(action),
+            Self::Branch(_) | Self::Rule(_) => None,
+        }
+    }
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Fault(action) => action.name(),
+            Self::Branch(BranchAction::Anchor {}) => "anchor",
+            Self::Branch(BranchAction::Reseed { .. }) => "reseed",
+            Self::Rule(RuleAction::Trigger(_)) => "trigger",
+            Self::Rule(RuleAction::Choice(_)) => "choice",
+        }
+    }
+}
+/// Rule inputs. A trigger input arms a typed trigger when due; the trigger,
+/// not the input, later admits its effect as a fault with its own ID.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum RuleAction {
+    Trigger(Box<TriggerSpec>),
+    Choice(ChoiceOverride),
+}
+/// Select one choice occurrence's alternative instead of drawing it. Once
+/// due, it answers the first matching request; omitted fields match any.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChoiceOverride {
+    pub machine: String,
+    pub site: String,
+    #[serde(
+        default = "first_occurrence",
+        skip_serializing_if = "is_first_occurrence"
+    )]
+    pub occurrence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<u32>,
+    pub select: usize,
+}
+fn first_occurrence() -> u64 {
+    1
+}
+fn is_first_occurrence(value: &u64) -> bool {
+    *value == 1
+}
+impl ChoiceOverride {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.machine.is_empty() || self.site.is_empty() || self.occurrence == 0 {
+            return Err("a choice input names a machine, a site and an occurrence from 1".into());
+        }
+        if self.select >= crate::property::MAX_CHOICE_ALTERNATIVES {
+            return Err("a choice input selects an alternative index below 256".into());
+        }
+        Ok(())
+    }
+}
+/// A consumed rule input: the trigger ID a trigger input armed. A choice
+/// input arms no trigger.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArmReceipt {
+    pub key: String,
+    pub at_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_id: Option<u32>,
+}
+impl ArmReceipt {
+    /// The receipt matches its input's kind; trigger IDs increase.
+    pub fn validate(&self, input: &TimedInput, previous_trigger: &mut u32) -> Result<(), String> {
+        let InputAction::Rule(rule) = &input.action else {
+            return Err("rule receipt for another input".into());
+        };
+        if self.key != input.key || self.at_ns != input.at_ns {
+            return Err("rule receipt differs from its source".into());
+        }
+        match (rule, self.trigger_id) {
+            (RuleAction::Trigger(_), Some(id)) if id > *previous_trigger => {
+                *previous_trigger = id;
+                Ok(())
+            }
+            (RuleAction::Choice(_), None) => Ok(()),
+            _ => Err("rule receipt differs from its source".into()),
+        }
+    }
+}
+/// Branch inputs. An anchor establishes the timed checkpoint phase at its
+/// time, before ordinary actions due then; a capture there is an optional
+/// cache of the execution. A reseed at the same time, after its anchor,
+/// changes every future draw from then on, identically in a cold run and in a
+/// continuation of that capture.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BranchAction {
+    Anchor {},
+    Reseed { seed: u64, identity: String },
+}
+/// A consumed branch input: where the program cursor passed it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BranchReceipt {
+    pub key: String,
+    pub at_ns: u64,
+    pub action: BranchAction,
+}
+/// Keys of inputs sampled from a fault profile. The server reserves this
+/// namespace: `gen-<n>` starts a generated fault and `gen-<n>-end` tears it
+/// down. Generated starts are skipped before the applications are ready and
+/// during quiet periods, and a skipped start's teardown is skipped with it.
+pub const GENERATED_PREFIX: &str = "gen-";
+/// Campaign mutations: generated trigger inputs. Their effects, though not
+/// their `-end` teardowns, are skipped during a quiet period, like other
+/// generated faults.
+pub const MUTATION_PREFIX: &str = "mutate-";
+pub const GENERATED_END_SUFFIX: &str = "-end";
 pub const fn default_timeout_ns() -> u64 {
     PROCESS_EFFECT_TIMEOUT_NS
 }
@@ -65,6 +197,52 @@ pub fn validate_program(inputs: &[TimedInput], duration_ns: u64) -> Result<(), S
             .ok_or_else(|| format!("input {} deadline overflows", input.key))?;
         previous = input.at_ns;
     }
+    validate_branches(inputs)
+}
+/// Branch inputs come first among the inputs due at their time; a reseed
+/// follows an anchor at the same time and names a nonempty identity. Trigger
+/// inputs are ordinary inputs with a well-formed rule.
+fn validate_branches(inputs: &[TimedInput]) -> Result<(), String> {
+    let mut ordinary_at = None;
+    let mut anchor_at = None;
+    for input in inputs {
+        match &input.action {
+            InputAction::Fault(_) => ordinary_at = Some(input.at_ns),
+            InputAction::Rule(rule) => {
+                ordinary_at = Some(input.at_ns);
+                match rule {
+                    RuleAction::Trigger(spec) => spec.validate(),
+                    RuleAction::Choice(choice) => choice.validate(),
+                }
+                .map_err(|e| format!("input {}: {e}", input.key))?;
+            }
+            InputAction::Branch(branch) => {
+                if ordinary_at == Some(input.at_ns) {
+                    return Err(format!(
+                        "input {}: branch inputs precede the ordinary inputs due at their time",
+                        input.key
+                    ));
+                }
+                match branch {
+                    BranchAction::Anchor {} => anchor_at = Some(input.at_ns),
+                    BranchAction::Reseed { identity, .. } => {
+                        if anchor_at != Some(input.at_ns) {
+                            return Err(format!(
+                                "input {}: a reseed follows an anchor at the same time",
+                                input.key
+                            ));
+                        }
+                        if identity.is_empty() || identity.len() > 256 {
+                            return Err(format!(
+                                "input {}: reseed identity must be 1 to 256 bytes",
+                                input.key
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -79,7 +257,7 @@ pub fn merge_interventions(
         let input = TimedInput {
             key: entry.request_id.clone(),
             at_ns: entry.plan.at_ns,
-            action: entry.plan.action.clone(),
+            action: entry.plan.action.clone().into(),
             timeout_ns: entry
                 .plan
                 .deadline_ns
@@ -104,6 +282,37 @@ pub fn merge_interventions(
 mod tests {
     use super::*;
     #[test]
+    fn trigger_inputs_parse_with_defaults_and_refuse_unknown_fields() {
+        let json = serde_json::json!({
+            "key": "kill-on-commit",
+            "at_ns": 5,
+            "action": {
+                "action": "trigger",
+                "when": {"on": "event", "name": "committed", "machine": "db"},
+                "nth": 3,
+                "then": {"action": "crash", "machine": "db"},
+            },
+        });
+        let input: TimedInput = serde_json::from_value(json.clone()).unwrap();
+        let InputAction::Rule(RuleAction::Trigger(spec)) = &input.action else {
+            panic!("not a trigger: {input:?}");
+        };
+        assert_eq!(spec.nth, 3);
+        assert_eq!(spec.delay_ns, 0);
+        assert_eq!(input.action.name(), "trigger");
+        assert_eq!(serde_json::to_value(&input).unwrap(), json);
+        validate_program(&[input], 10).unwrap();
+        let mut unknown = json.clone();
+        unknown["action"]["surprise"] = true.into();
+        assert!(serde_json::from_value::<TimedInput>(unknown).is_err());
+        let mut zero = json;
+        zero["action"]["nth"] = 0.into();
+        let zero: TimedInput = serde_json::from_value(zero).unwrap();
+        assert!(validate_program(&[zero], 10)
+            .unwrap_err()
+            .contains("nth counts from 1"));
+    }
+    #[test]
     fn retained_host_inputs_merge_by_explicit_identity_ignoring_scheduler_observations() {
         let input = TimedInput {
             key: "host-cut".into(),
@@ -113,7 +322,8 @@ mod tests {
                 handle: "cut".into(),
                 left: vec!["a".into()],
                 right: vec!["b".into()],
-            },
+            }
+            .into(),
         };
         let history = crate::intervention::History {
             entries: vec![crate::intervention::Intervention {
@@ -123,7 +333,7 @@ mod tests {
                     id: 99,
                     at_ns: input.at_ns,
                     deadline_ns: 110,
-                    action: input.action.clone(),
+                    action: input.action.fault().expect("a fault input").clone(),
                 },
             }],
             ..Default::default()

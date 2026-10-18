@@ -155,7 +155,17 @@ fn connection(tuple: Tuple, dir: usize, id: u64, names: &[String]) -> Connection
         incarnation: id,
     }
 }
+/// The destination port of a connection-opening SYN.
+pub fn syn_port(frame: &[u8]) -> Option<u16> {
+    packet(frame)
+        .filter(|p| p.flags & (SYN | ACK) == SYN)
+        .map(|p| p.dport)
+}
 impl Connections {
+    /// Connection incarnations opened so far.
+    pub fn opened(&self) -> u64 {
+        self.next
+    }
     pub fn observe(&mut self, from: usize, to: usize, frame: &[u8]) -> Option<Identity> {
         let p = packet(frame)?;
         let (tuple, dir) = key((from, p.src, p.sport), (to, p.dst, p.dport));

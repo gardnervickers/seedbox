@@ -1,0 +1,15 @@
+# Mostly crashes, with only occasional short disk-latency windows: a crash
+# rarely lands while an acknowledged write's fsync is still pending, so a
+# sweep seldom loses data. A campaign can place a slow disk after a moment
+# it saw, such as a reboot.
+start: 1s
+end: 18s
+interval: 1s
+faults:
+  - kind: crash
+    weight: 4
+    downtime: {min: 900ms, max: 1100ms}
+  - kind: disk_latency
+    weight: 1
+    duration: {min: 300ms, max: 600ms}
+    latency: {min: 25ms, max: 40ms}

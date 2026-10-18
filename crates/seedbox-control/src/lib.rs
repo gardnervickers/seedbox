@@ -118,6 +118,11 @@ pub enum Operation {
     Sleep {
         duration_ns: u64,
     },
+    /// Start no generated fault for this long. Teardowns of generated faults
+    /// already active still run, so the system can recover.
+    Quiet {
+        duration_ns: u64,
+    },
     Stop {
         target: Target,
     },
@@ -194,19 +199,212 @@ pub enum Operation {
         trigger_id: u32,
     },
 }
-pub const MAX_TRIGGERS: usize = 64;
+/// Trigger IDs a run may allocate. IDs are never recycled.
+pub const MAX_TRIGGERS: usize = 1024;
+/// Triggers armed or matched at once; resolved ones free their matcher.
+pub const MAX_ACTIVE_TRIGGERS: usize = 64;
 pub const MAX_TRIGGER_MARKER: usize = 256;
 
 /// A trigger marker holds 1..=[`MAX_TRIGGER_MARKER`] bytes.
 pub fn valid_trigger_marker(marker: &[u8]) -> bool {
     !marker.is_empty() && marker.len() <= MAX_TRIGGER_MARKER
 }
-/// Refuse another trigger once [`MAX_TRIGGERS`] have been armed in a run.
-pub fn check_trigger_budget(armed: usize) -> Result<(), String> {
-    if armed >= MAX_TRIGGERS {
+/// Refuse another trigger once [`MAX_TRIGGERS`] have been armed in a run, or
+/// while [`MAX_ACTIVE_TRIGGERS`] are still armed or matched.
+pub fn check_trigger_budget(records: &[TriggerRecord]) -> Result<(), String> {
+    if records.len() >= MAX_TRIGGERS {
         return Err(format!("trigger budget exhausted ({MAX_TRIGGERS} per run)"));
     }
+    let active = records
+        .iter()
+        .filter(|r| matches!(r.status, TriggerStatus::Armed | TriggerStatus::Matched))
+        .count();
+    if active >= MAX_ACTIVE_TRIGGERS {
+        return Err(format!(
+            "too many active triggers ({MAX_ACTIVE_TRIGGERS} armed or matched at once)"
+        ));
+    }
     Ok(())
+}
+
+/// A typed trigger: once `when` has matched `nth` times, `then` is admitted
+/// as a fault after the world's causal lookahead plus `delay_ns`. It never
+/// matches after `within_ns` from arming; without it, the run's end cuts it off.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerSpec {
+    pub when: EventSelector,
+    #[serde(
+        default = "first_occurrence",
+        skip_serializing_if = "is_first_occurrence"
+    )]
+    pub nth: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub delay_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub within_ns: Option<u64>,
+    pub then: Action,
+}
+fn first_occurrence() -> u64 {
+    1
+}
+fn is_first_occurrence(value: &u64) -> bool {
+    *value == 1
+}
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+impl TriggerSpec {
+    /// Shape checks that need no world: names, counts and effect pairing.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.nth == 0 {
+            return Err("trigger nth counts from 1".into());
+        }
+        if self.within_ns == Some(0) {
+            return Err("trigger within_ns must be positive".into());
+        }
+        self.when.validate()?;
+        if let EventSelector::BlockRequest { machine, .. } = &self.when {
+            // A request-phase rule acts locally before the request's effect.
+            if self.then
+                != (Action::Crash {
+                    machine: machine.clone(),
+                })
+                || self.delay_ns != 0
+            {
+                return Err(
+                    "a block_request trigger's only effect is an undelayed crash of its machine"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Committed evidence a typed trigger matches. Each selector names what it
+/// watches; omitted machines match any machine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "on", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EventSelector {
+    /// An SDK workload event with this name.
+    Event {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// An SDK evaluation of this property; `holds` keeps only passing or
+    /// only failing evaluations.
+    Assertion {
+        property: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holds: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// An SDK state report: `name` taking `value` (any value when absent).
+    State {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// Another typed trigger's effect, by its input key, being admitted: a
+    /// teardown that follows the effect it undoes.
+    Fired { trigger: String },
+    /// The SDK marker that a machine's workload finished setting up.
+    SetupComplete {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// A machine lifecycle transition.
+    Lifecycle {
+        machine: String,
+        transition: Transition,
+    },
+    /// A TCP connection opening: its first SYN sent between the machines.
+    ConnectionOpen {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        port: Option<u16>,
+    },
+    /// A frame sent from one machine towards another, whatever its fate.
+    Frame {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+    },
+    /// A guest disk request at admission, before it has any effect.
+    BlockRequest { machine: String, op: DiskOp },
+}
+impl EventSelector {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Event { .. } => "event",
+            Self::Assertion { .. } => "assertion",
+            Self::State { .. } => "state",
+            Self::Fired { .. } => "fired",
+            Self::SetupComplete { .. } => "setup_complete",
+            Self::Lifecycle { .. } => "lifecycle",
+            Self::ConnectionOpen { .. } => "connection_open",
+            Self::Frame { .. } => "frame",
+            Self::BlockRequest { .. } => "block_request",
+        }
+    }
+    /// Every machine the selector names.
+    pub fn machines(&self) -> Vec<&str> {
+        match self {
+            Self::Event { machine, .. }
+            | Self::Assertion { machine, .. }
+            | Self::State { machine, .. }
+            | Self::SetupComplete { machine } => machine.iter().map(String::as_str).collect(),
+            Self::Fired { .. } => Vec::new(),
+            Self::Lifecycle { machine, .. } | Self::BlockRequest { machine, .. } => {
+                vec![machine]
+            }
+            Self::ConnectionOpen { from, to, .. } | Self::Frame { from, to } => {
+                from.iter().chain(to).map(String::as_str).collect()
+            }
+        }
+    }
+    fn validate(&self) -> Result<(), String> {
+        let name = match self {
+            Self::Event { name, .. } => Some(name),
+            Self::Assertion { property, .. } => Some(property),
+            Self::State { name, .. } => Some(name),
+            Self::Fired { trigger } => Some(trigger),
+            _ => None,
+        };
+        if name.is_some_and(|n| n.is_empty() || n.len() > MAX_TRIGGER_MARKER) {
+            return Err(format!(
+                "{} selector names need 1..={MAX_TRIGGER_MARKER} bytes",
+                self.name()
+            ));
+        }
+        if self.machines().iter().any(|m| m.is_empty()) {
+            return Err(format!("{} selector machine is empty", self.name()));
+        }
+        Ok(())
+    }
+}
+
+/// Machine lifecycle transitions a trigger can watch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Transition {
+    /// The supervisor reported the machine ready.
+    Ready,
+    /// The machine's application exited.
+    Exited,
+    Crashed,
+    Rebooted,
+    Paused,
+    Resumed,
 }
 
 /// The initial trigger surface intentionally has only process stop and partition.
@@ -241,6 +439,7 @@ impl TriggerFault {
 pub struct TriggerRecord {
     pub id: u32,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub marker: Vec<u8>,
     pub armed_at_ns: u64,
     pub match_deadline_ns: u64,
@@ -256,19 +455,33 @@ pub struct TriggerRecord {
     pub status: TriggerStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejection_reason: Option<String>,
+    /// A typed trigger's authored input key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// A typed trigger's predicate; marker triggers have none. Its `seen`
+    /// counts matching occurrences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<EventSelector>,
+    #[serde(
+        default = "first_occurrence",
+        skip_serializing_if = "is_first_occurrence"
+    )]
+    pub nth: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub delay_ns: u64,
 }
 
 /// Where a trigger is in its life, serialized as its snake_case name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerStatus {
-    /// Watching its source's console for the marker.
+    /// Watching its source's console for the marker, or for its selector.
     Armed,
     /// Cancelled before it matched.
     Cancelled,
-    /// The marker was seen; the effect waits for its time.
+    /// The marker or nth occurrence was seen; the effect waits for its time.
     Matched,
-    /// The match deadline passed without the marker.
+    /// The match deadline passed without a match.
     Expired,
     /// The effect was refused at its time.
     Rejected,
@@ -334,6 +547,13 @@ pub enum Action {
     ResumeProcess {
         machine: String,
     },
+    /// Run `argv` in the machine's application environment, beside the
+    /// application, with its output in the machine's logs: a debugging probe
+    /// added to a rerun, never part of a fault profile.
+    Exec {
+        machine: String,
+        argv: Vec<String>,
+    },
     Partition {
         handle: String,
         left: Vec<String>,
@@ -388,6 +608,49 @@ pub enum Action {
         machine: String,
         speed_hz: u64,
     },
+    /// Fail the machine's disk requests of kind `op`, each with probability
+    /// `ppm` per million drawn on a seeded stream, until the handle is
+    /// healed. With the `error` effect a failed request returns an I/O
+    /// error: a failed write changes nothing on disk and a failed flush makes
+    /// nothing durable. With `corrupt` it succeeds with one sector's bytes
+    /// replaced by seeded garbage: a read returns them (the disk keeps the
+    /// right data) and a write stores them. Flushes are never corrupted.
+    /// With `scope: data` it selects only reads and writes clear of the
+    /// formatted filesystem's static metadata.
+    DiskError {
+        handle: String,
+        machine: String,
+        op: DiskOp,
+        #[serde(default = "every_request")]
+        ppm: u32,
+        #[serde(default, skip_serializing_if = "DiskEffect::is_error")]
+        effect: DiskEffect,
+        #[serde(default, skip_serializing_if = "DiskScope::is_disk")]
+        scope: DiskScope,
+    },
+    /// Complete the machine's disk requests late, until the handle is
+    /// healed: each request of kind `op` takes `latency_ns` plus a seeded
+    /// draw up to `jitter_ns`, and requests complete in submission order, so
+    /// none overtakes an earlier one. A request's disk effect happens when it
+    /// completes; a crash first loses what is still pending.
+    DiskLatency {
+        handle: String,
+        machine: String,
+        #[serde(default = "any_request")]
+        op: DiskOp,
+        latency_ns: u64,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        jitter_ns: u64,
+    },
+    /// Perturb the machine's thread scheduling until the handle is healed:
+    /// the guest yields its CPU at `ppm` per million syscalls and progress
+    /// calls, drawn on a seeded stream, so other runnable threads run at
+    /// points a seed alone rarely reaches.
+    Preempt {
+        handle: String,
+        machine: String,
+        ppm: u32,
+    },
     /// Freeze the machine's CPU and devices; the world goes on.
     Pause {
         machine: String,
@@ -413,12 +676,16 @@ impl Action {
             Self::Restart { .. } => "restart",
             Self::PauseProcess { .. } => "pause_process",
             Self::ResumeProcess { .. } => "resume_process",
+            Self::Exec { .. } => "exec",
             Self::Partition { .. } => "partition",
             Self::Shape { .. } => "shape",
             Self::Heal { .. } => "heal",
             Self::ClockSkew { .. } => "clock_skew",
             Self::ClockDrift { .. } => "clock_drift",
             Self::Throttle { .. } => "throttle",
+            Self::DiskError { .. } => "disk_error",
+            Self::DiskLatency { .. } => "disk_latency",
+            Self::Preempt { .. } => "preempt",
             Self::Pause { .. } => "pause",
             Self::Resume { .. } => "resume",
             Self::Crash { .. } => "crash",
@@ -431,13 +698,17 @@ impl Action {
             | Self::Restart { machine }
             | Self::PauseProcess { machine }
             | Self::ResumeProcess { machine }
+            | Self::Exec { machine, .. }
             | Self::Pause { machine }
             | Self::Resume { machine }
             | Self::Crash { machine }
             | Self::Reboot { machine }
             | Self::ClockSkew { machine, .. }
             | Self::ClockDrift { machine, .. }
-            | Self::Throttle { machine, .. } => Some(machine),
+            | Self::Throttle { machine, .. }
+            | Self::DiskError { machine, .. }
+            | Self::DiskLatency { machine, .. }
+            | Self::Preempt { machine, .. } => Some(machine),
             _ => None,
         }
     }
@@ -449,6 +720,7 @@ impl Action {
                 | Self::Restart { .. }
                 | Self::PauseProcess { .. }
                 | Self::ResumeProcess { .. }
+                | Self::Exec { .. }
         )
     }
     /// Whole-machine lifecycle effects, which the world applies at admission.
@@ -486,6 +758,101 @@ pub fn validate_clock_drift(
             "clock_drift needs exactly one of a nonzero rate_ppb or a positive max_rate_ppb, each at most {MAX_CLOCK_RATE_PPB}"
         )),
     }
+}
+
+/// Which disk requests a `disk_error` fault fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskOp {
+    Read,
+    Write,
+    Flush,
+    /// Reads, writes and flushes.
+    Any,
+}
+/// What a `disk_error` fault does to a request it selects.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskEffect {
+    /// Fail it with an I/O error.
+    #[default]
+    Error,
+    /// Complete it with one sector of seeded garbage: silent corruption.
+    Corrupt,
+}
+impl DiskEffect {
+    pub fn is_error(&self) -> bool {
+        *self == Self::Error
+    }
+}
+/// Which sectors a `disk_error` fault may select.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskScope {
+    /// Any request of the selected kind.
+    #[default]
+    Disk,
+    /// Only reads and writes that touch none of the formatted ext4
+    /// filesystem's static metadata (superblocks, descriptors, bitmaps,
+    /// inode tables and the journal); nothing before it is formatted.
+    Data,
+}
+impl DiskScope {
+    pub fn is_disk(&self) -> bool {
+        *self == Self::Disk
+    }
+}
+/// Disk error probabilities, in parts per million: from rare to every request.
+pub const DISK_ERROR_PPM: std::ops::RangeInclusive<u32> = 1..=1_000_000;
+fn every_request() -> u32 {
+    *DISK_ERROR_PPM.end()
+}
+fn any_request() -> DiskOp {
+    DiskOp::Any
+}
+/// Scheduler perturbation rates, in parts per million of syscalls and
+/// progress calls: from rare to every one.
+pub const PREEMPT_PPM: std::ops::RangeInclusive<u32> = 1..=1_000_000;
+/// Disk request latencies, in nanoseconds: from a fast SSD (1 µs) to a
+/// stalled device (1 s). Jitter is bounded the same way.
+pub const DISK_LATENCY_NS: std::ops::RangeInclusive<u64> = 1_000..=1_000_000_000;
+/// Latency and jitter within [`DISK_LATENCY_NS`] (jitter may be zero).
+/// The most bytes an `exec` argv may hold, NULs between arguments included.
+pub const EXEC_ARGV_BYTES: usize = 4096;
+
+/// An `exec` argv: one to 64 arguments, none with a NUL, the first nonempty.
+pub fn validate_exec(argv: &[String]) -> Result<(), String> {
+    if argv.is_empty() || argv.len() > 64 || argv[0].is_empty() {
+        return Err("exec argv must hold 1 to 64 arguments, the first nonempty".into());
+    }
+    if argv.iter().any(|a| a.contains('\0')) {
+        return Err("exec arguments may not contain NUL".into());
+    }
+    if argv.iter().map(|a| a.len() + 1).sum::<usize>() > EXEC_ARGV_BYTES {
+        return Err(format!("exec argv is over {EXEC_ARGV_BYTES} bytes"));
+    }
+    Ok(())
+}
+
+/// The supervisor's form of an `exec` argv: the arguments joined by NUL,
+/// in lowercase hex, so no byte can break the management frame.
+pub fn exec_payload(argv: &[String]) -> String {
+    argv.join("\0")
+        .bytes()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+pub fn validate_disk_latency(latency_ns: u64, jitter_ns: u64) -> Result<(), String> {
+    if !DISK_LATENCY_NS.contains(&latency_ns) || jitter_ns > *DISK_LATENCY_NS.end() {
+        return Err(format!(
+            "disk_latency latency_ns must be {} to {} and jitter_ns at most {}",
+            DISK_LATENCY_NS.start(),
+            DISK_LATENCY_NS.end(),
+            DISK_LATENCY_NS.end()
+        ));
+    }
+    Ok(())
 }
 
 /// Throttled CPU speeds, in Hz: from a thousandth of the slowest configured CPU

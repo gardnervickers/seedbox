@@ -44,6 +44,9 @@ class SelectionTests(unittest.TestCase):
                          ["portable", "linux-kvm", "linux-guests"])
         self.assertEqual(check.expand(["linux-guests"], "aarch64"), ["portable", "linux-kvm", "linux-guests"])
         self.assertEqual(check.expand(["mac-apps"], "arm64"), ["portable", "mac-hvf", "mac-apps"])
+        # The long-running tier is never part of a group.
+        self.assertEqual(check.expand(["mac-apps-long"], "arm64"), ["portable", "mac-hvf", "mac-apps-long"])
+        self.assertEqual(check.expand(["linux-apps-long"], "x86_64"), ["portable", "linux-apps-long"])
 
     def test_features_follow_suites_not_host_probes(self):
         self.assertEqual(check.features_for("seedbox-vmm", "x86_64", ["portable", "linux-kvm"]), ["kvm-tests"])
@@ -51,6 +54,10 @@ class SelectionTests(unittest.TestCase):
                          ["kvm-tests", "guest-tests"])
         self.assertEqual(check.features_for("seedbox", "x86_64", ["portable", "linux-oci", "linux-pause"]),
                          ["retained-run-tests"])
+        self.assertEqual(check.features_for("seedbox", "arm64", check.expand(["mac-apps-long"], "arm64")),
+                         ["long-application-tests"])
+        self.assertEqual(check.features_for("seedbox", "arm64", check.expand(["mac"], "arm64")),
+                         ["application-tests"])
         self.assertEqual(check.features_for("seedbox-application", "x86_64", ["portable", "linux-oci"]),
                          ["oci-tests"])
         self.assertEqual(check.features_for("seedbox-arm64", "x86_64", check.expand(["linux"], "x86_64")), [])

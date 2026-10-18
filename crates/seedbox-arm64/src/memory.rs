@@ -65,6 +65,35 @@ impl Memory {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.as_ptr().add(offset), bytes.len());
         Ok(())
     }
+    /// Replace these pages with a private (copy-on-write) mapping of `file`
+    /// from `offset`, which must be page aligned.
+    ///
+    /// # Safety
+    /// No backend maps these pages and no host reference to them is live.
+    pub unsafe fn map_file(&self, file: &std::fs::File, offset: u64) -> Result<()> {
+        use std::os::fd::AsRawFd;
+        if offset % crate::PAGE_SIZE as u64 != 0 {
+            return Err("file mapping offset is not page aligned".into());
+        }
+        let ptr = libc::mmap(
+            self.as_ptr().cast(),
+            self.len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_FIXED,
+            file.as_raw_fd(),
+            offset as libc::off_t,
+        );
+        if ptr == libc::MAP_FAILED {
+            return Err(format!(
+                "map checkpoint RAM: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if ptr.cast::<u8>() != self.as_ptr() {
+            return Err("checkpoint RAM mapped at another address".into());
+        }
+        Ok(())
+    }
     /// # Safety
     /// Guest stopped, with no outstanding reference to the page.
     pub unsafe fn word(&self, offset: usize) -> Result<u64> {

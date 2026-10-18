@@ -1,0 +1,21 @@
+# Failed data reads and writes (EIO) on the server's disk, restricted to
+# requests clear of ext4's metadata (an unscoped error also fails the journal
+# and leaves the filesystem unusable), with power loss and process pauses. A
+# failed write surfaces at fsync, where PostgreSQL PANICs and recovers from its
+# WAL; no acknowledged commit may be lost, and the server must serve again.
+start: 15s
+end: 78s
+interval: 4s
+faults:
+  - kind: disk_error
+    weight: 3
+    op: any
+    ppm: 50000
+    scope: data
+    duration: {min: 2s, max: 8s}
+  - kind: crash
+    weight: 2
+    downtime: {min: 1s, max: 4s}
+  - kind: pause_process
+    weight: 1
+    duration: {min: 500ms, max: 4s}

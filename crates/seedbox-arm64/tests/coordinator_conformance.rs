@@ -31,7 +31,7 @@ impl Fixture {
     fn worker(&self, replies: &[Value], keep_open: bool) -> PathBuf {
         let mut wire = Vec::new();
         for reply in replies {
-            worker::write_message(&mut wire, reply).unwrap();
+            worker::send(&mut wire, reply).unwrap();
         }
         self.raw_worker(&wire, keep_open)
     }
@@ -45,11 +45,11 @@ if sys.argv[1:] == ['--probe']:
 with open({:?}, 'w') as pid:
     pid.write(str(os.getpid()))
 with open({:?}, 'wb', buffering=0) as requests:
-    header = sys.stdin.buffer.read(4)
-    if len(header) == 4:
-        size = struct.unpack('<I', header)[0]
-        body = sys.stdin.buffer.read(size)
-        requests.write(header + body)
+    header = sys.stdin.buffer.read(8)
+    if len(header) == 8:
+        body, attachment = struct.unpack('<II', header)
+        message = sys.stdin.buffer.read(body + attachment)
+        requests.write(header + message)
     with open({:?}, 'rb') as replies:
         sys.stdout.buffer.write(replies.read())
         sys.stdout.buffer.flush()
@@ -118,7 +118,7 @@ with open({:?}, 'wb', buffering=0) as requests:
             let bytes = fs::read(self.path("requests")).unwrap();
             let mut wire = bytes.as_slice();
             let mut count = 0;
-            while let Ok(Some(_)) = worker::read_message::<worker::Request>(&mut wire) {
+            while let Ok(Some(_)) = worker::receive::<worker::Request>(&mut wire) {
                 count += 1;
             }
             if count == expected {
@@ -386,6 +386,8 @@ fn worker_logs_keep_first_commit_time_without_console_observation_stops() {
                 hard_limit: 10,
                 early_slack: 3,
                 observe_console: false,
+                then: Vec::new(),
+                ahead: Vec::new(),
             },
         ),
         request(
@@ -395,6 +397,8 @@ fn worker_logs_keep_first_commit_time_without_console_observation_stops() {
                 hard_limit: 20,
                 early_slack: 0,
                 observe_console: false,
+                then: Vec::new(),
+                ahead: Vec::new(),
             },
         ),
     ]);
@@ -866,13 +870,13 @@ fn external_worker_cancellation_becomes_terminal_and_is_reaped() {
 fn serve_requests(requests: Vec<worker::Request>) -> (ArmResult<()>, Vec<worker::Response>) {
     let mut input = Vec::new();
     for request in requests {
-        worker::write_message(&mut input, &request).unwrap();
+        worker::send(&mut input, &request).unwrap();
     }
     let mut output = Vec::new();
     let result = worker::serve::<ScriptBackend>(&mut input.as_slice(), &mut output);
     let mut output = output.as_slice();
     let mut replies = Vec::new();
-    while let Some(reply) = worker::read_message(&mut output).unwrap() {
+    while let Some(reply) = worker::receive(&mut output).unwrap() {
         replies.push(reply);
     }
     (result, replies)
@@ -907,6 +911,7 @@ fn export_transfer(fixture: &Fixture) -> worker::ExportedTransfer {
             1,
             predecessor,
             worker::Operation::CrashExport {
+                branch_identity: None,
                 run_seed: 1009,
                 full_state: false,
                 transfer: descriptor.clone(),
@@ -1061,6 +1066,8 @@ fn worker_rejects_stale_request_stamp_before_physical_entry() {
                     hard_limit: 10,
                     early_slack: 0,
                     observe_console: false,
+                    then: Vec::new(),
+                    ahead: Vec::new(),
                 },
             ),
         ]);
@@ -1176,6 +1183,7 @@ fn actual_arm_proxy_obeys_core_strict_reply_boundary_despite_fatal_control() {
         faults,
         control,
         macs: vec![[2, 0, 0, 0, 0, 1]],
+        expected_crashes: vec![Vec::new()],
     })
     .unwrap();
     assert_eq!(
@@ -1194,7 +1202,7 @@ fn actual_arm_proxy_obeys_core_strict_reply_boundary_despite_fatal_control() {
     let wire = fs::read(fixture.path("requests")).unwrap();
     let mut wire = wire.as_slice();
     let mut operations = Vec::new();
-    while let Some(request) = worker::read_message::<worker::Request>(&mut wire).unwrap() {
+    while let Some(request) = worker::receive::<worker::Request>(&mut wire).unwrap() {
         operations.push(request.operation);
     }
     assert_eq!(operations.len(), 5);
@@ -1260,7 +1268,7 @@ fn ordinary_ack_cannot_invent_scheduler_irq_or_deadline_hints() {
             reply["sequence"] = json!(1);
             reply["before"] = json!(identity("a", 1, 0));
             if operation == "frame_deadline" {
-                reply["answer"] = json!({"Accepted":false});
+                reply["answer"] = json!({"Accepted":[false]});
             }
             reply
         };
@@ -1305,6 +1313,105 @@ fn ordinary_ack_cannot_invent_scheduler_irq_or_deadline_hints() {
             requests,
             "{operation}: postpoison write"
         );
+        assert_reaped(fixture.pid());
+    }
+}
+
+fn chained_answer(time: u64) -> Value {
+    json!({"stop":{"Horizon":{"time_ns":time}},"time_ns":time,"events":[],"console":[],
+        "log_chunks":[],"accepted":null,"observation":observation(time)})
+}
+fn chain_reply(ahead: &[u64], first: Option<u64>, last: u64) -> Value {
+    let mut reply = advance_reply(10, json!({"Horizon":{"time_ns":10}}), b"", json!([]));
+    let answer = &mut reply["answer"]["Advanced"];
+    answer["ahead"] = ahead.iter().map(|&t| chained_answer(t)).collect();
+    answer["first"] = first.map_or(Value::Null, observation);
+    reply["observation"] = observation(last);
+    reply
+}
+fn slice(hard_limit: u64) -> worker::Slice {
+    worker::Slice {
+        hard_limit,
+        early_slack: 0,
+        observe_console: false,
+        then: Vec::new(),
+    }
+}
+fn advance(hard_limit: u64, ahead: Vec<worker::Slice>) -> worker::Operation {
+    worker::Operation::Advance {
+        hard_limit,
+        early_slack: 0,
+        observe_console: false,
+        then: Vec::new(),
+        ahead,
+    }
+}
+
+#[test]
+fn chained_slices_are_served_in_order_only_to_the_exact_next_requests() {
+    let fixture = Fixture::new();
+    let executable = fixture.worker(&[boot_reply(), chain_reply(&[20, 30], Some(10), 30)], true);
+    let mut worker = worker::OwnedWorker::spawn(&executable, identity("a", 1, 0)).unwrap();
+    worker
+        .call(worker::Operation::Boot(boot_inputs(&fixture)))
+        .unwrap();
+    let first = worker
+        .call(advance(10, vec![slice(20), slice(30)]))
+        .unwrap();
+    assert!(matches!(
+        first,
+        worker::Answer::Advanced { time_ns: 10, .. }
+    ));
+    assert_eq!(worker.observation().unwrap().time_ns, 10);
+    assert_eq!(worker.chained(), 2);
+    // The next request is served from the chain without another exchange.
+    let second = worker.call(advance(20, Vec::new())).unwrap();
+    assert!(matches!(
+        second,
+        worker::Answer::Advanced { time_ns: 20, .. }
+    ));
+    assert_eq!(worker.observation().unwrap().time_ns, 20);
+    assert_eq!(worker.chained(), 1);
+    fixture.wait_for_operations(2);
+    // Anything but the exact next slice is terminal.
+    let error = worker.call(advance(31, Vec::new())).unwrap_err();
+    assert!(error.contains("differs from the chained slice"), "{error}");
+    assert!(worker
+        .call(worker::Operation::Park)
+        .unwrap_err()
+        .contains("terminal"));
+    assert_reaped(fixture.pid());
+}
+
+#[test]
+fn chained_answers_must_match_the_requested_slices_and_final_observation() {
+    for (reply, expected) in [
+        // Chained answers without the first slice's own stopped facts.
+        (chain_reply(&[20], None, 20), "chained slices do not match"),
+        // More answers than slices requested.
+        (
+            chain_reply(&[20, 30, 40], Some(10), 40),
+            "chained slices do not match",
+        ),
+        // The response's observation must follow the last slice.
+        (
+            chain_reply(&[20, 30], Some(10), 20),
+            "disagrees with its last slice",
+        ),
+        // Time cannot move backwards from one slice to the next.
+        (chain_reply(&[20, 15], Some(10), 15), "moved backwards"),
+    ] {
+        let fixture = Fixture::new();
+        let executable = fixture.worker(&[boot_reply(), reply], false);
+        let mut worker = worker::OwnedWorker::spawn(&executable, identity("a", 1, 0)).unwrap();
+        worker
+            .call(worker::Operation::Boot(boot_inputs(&fixture)))
+            .unwrap();
+        let error = worker
+            .call(advance(10, vec![slice(20), slice(30)]))
+            .unwrap_err();
+        assert!(error.contains(expected), "{error}");
+        assert_eq!(worker.chained(), 0);
         assert_reaped(fixture.pid());
     }
 }

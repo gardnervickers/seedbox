@@ -131,6 +131,18 @@ impl WorldMachine for Machine {
         self.throttle_permille = Some(factor);
         Ok(speed_hz.map(|_| seedbox_control::effective_throttle_speed(self.cpu_speed_hz, factor)))
     }
+    fn has_disk(&self) -> bool {
+        Machine::has_disk(self)
+    }
+    fn snapshot_bytes(snapshot: &Self::Snapshot) -> u64 {
+        snapshot.ram_bytes()
+    }
+    fn disk_errors(
+        &mut self,
+        errors: Option<seedbox_engine_core::virtio_block::InjectedErrors>,
+    ) -> Result<Option<seedbox_engine_core::virtio_block::ErrorCounts>, String> {
+        Machine::disk_errors(self, errors)
+    }
     fn exits(&self) -> u64 {
         self.stats.exits
     }

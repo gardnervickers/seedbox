@@ -1,0 +1,19 @@
+name: retry-eval-fixed
+machines:
+  log:
+    build:
+      context: ../..
+      dockerfile: evals/retry/Dockerfile
+    entrypoint: [/retry-server]
+    environment:
+      RETRY_BUG: "0"
+    volumes:
+      data:
+        target: /data
+oracle:
+  build:
+    context: ../..
+    dockerfile: evals/retry/Dockerfile
+  entrypoint: [/retry-oracle]
+network:
+  latency: 1ms

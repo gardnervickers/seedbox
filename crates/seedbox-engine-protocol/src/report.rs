@@ -109,11 +109,23 @@ pub struct WorldEvidence {
     pub input_admissions: Vec<crate::input_program::InputAdmission>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_rejections: Vec<crate::input_program::InputRejection>,
+    /// Consumed anchors and reseeds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_branches: Vec<crate::input_program::BranchReceipt>,
+    /// Consumed trigger inputs and the triggers they armed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_armed: Vec<crate::input_program::ArmReceipt>,
     pub fault_error: Option<String>,
     pub control_history: Vec<ControlRecord>,
     pub control_latency_ns: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triggers: Option<Vec<TriggerRecord>>,
+    /// Reduced property evidence; absent when the run produced no records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<crate::property::Ledger>,
+    /// Answered structured choices; absent when the run made none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choices: Option<crate::choice::ChoiceEvidence>,
 }
 
 /// The x86 engine's report of one run segment.
@@ -406,6 +418,10 @@ pub struct FaultRecord {
     pub requested_at_ns: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection_counts: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_error_counts: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_latency_counts: Option<Value>,
     pub status: RowStatus,
 }
 

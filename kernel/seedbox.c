@@ -23,6 +23,8 @@
 #include <linux/io.h>
 #include <linux/i8253.h>
 #include <linux/kernel.h>
+#include <linux/preempt.h>
+#include <linux/sched.h>
 #include <linux/printk.h>
 #include <asm/cpufeature.h>
 #include <asm/fixmap.h>
@@ -33,6 +35,17 @@
 
 struct seedbox_time_page *seedbox_page;
 static unsigned long long seedbox_early_last;
+struct task_struct *seedbox_user_charge;
+
+/*
+ * Account the current tick as user time (kernel/time/timer.c): it arrived
+ * directly at a progress call's yield, not in a softirq or a nested interrupt.
+ * One guest CPU, and no preemption between the mark and the yield.
+ */
+bool seedbox_user_tick(void)
+{
+	return READ_ONCE(seedbox_user_charge) == current && irq_count() == HARDIRQ_OFFSET;
+}
 
 noinstr unsigned long long seedbox_rdtsc(void)
 {
@@ -201,6 +214,23 @@ u64 seedbox_progress_syscalls(struct seedbox_time_page *p)
 	}
 	carry = charge % SEEDBOX_SYSCALL_NS;
 	return charge / SEEDBOX_SYSCALL_NS;
+}
+
+/*
+ * A translator syscall costs a fraction of a syscall, as on ARM. The charge
+ * is counted in whole syscall costs, so every SEEDBOX_TRANSLATOR_DIVISOR-th
+ * one counts as a syscall; the count between them lives in guest RAM, like
+ * the progress carry, so a restored snapshot continues it. Called only from
+ * the syscall hook on the one guest CPU.
+ */
+u64 seedbox_translator_syscalls(void)
+{
+	static u64 pending;
+
+	if (++pending < SEEDBOX_TRANSLATOR_DIVISOR)
+		return 0;
+	pending = 0;
+	return 1;
 }
 
 bool seedbox_set_next_event(unsigned long ticks)

@@ -72,6 +72,19 @@ pub enum EventKind {
         /// The admitted action, so clients can tell what it affects.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan: Option<Box<serde_json::Value>>,
+        /// What the fault matched and did, once known, by kind of count.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counts: Option<Box<serde_json::Value>>,
+    },
+    /// A choice input became active, or answered its request.
+    ChoiceChanged {
+        input_key: String,
+        choice: crate::ChoiceInputState,
+    },
+    /// A typed trigger input's receipt changed.
+    TriggerChanged {
+        input_key: String,
+        trigger: crate::TriggerState,
     },
     MachineLifecycle {
         machine: String,
@@ -86,6 +99,15 @@ pub enum EventKind {
         machine: String,
         incarnation: u32,
         code: u8,
+    },
+    /// The guest kernel's out-of-memory killer killed a process on this
+    /// machine. It precedes the machine's exit when the victim was the
+    /// application. `process` is absent when the kernel's record was lost.
+    OutOfMemoryKill {
+        machine: String,
+        incarnation: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        process: Option<crate::OutOfMemoryProcess>,
     },
     /// Worker sequence range lost before the server received it. The range
     /// may contain application logs, engine events, or both.

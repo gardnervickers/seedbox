@@ -1,0 +1,18 @@
+# Wall-clock steps of up to ten seconds on one server at a time, with a few
+# partitions and process pauses. RustFS orders an object's versions by
+# modification time, so for the register workload a skewed server could let
+# an older overwrite win; S3 signatures tolerate skews of minutes.
+start: 20s
+end: 80s
+interval: 3s
+faults:
+  - kind: clock_skew
+    weight: 4
+    duration: {min: 3s, max: 15s}
+    maxOffset: 10s
+  - kind: partition
+    weight: 1
+    duration: {min: 1s, max: 6s}
+  - kind: pause_process
+    weight: 1
+    duration: {min: 500ms, max: 4s}

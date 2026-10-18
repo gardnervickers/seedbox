@@ -74,9 +74,30 @@ pub struct FaultRow {
     pub requested_at_ns: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_counts: Option<SelectionCounts>,
+    /// What a healed `disk_error` fault matched and failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_error_counts: Option<crate::virtio_block::ErrorCounts>,
+    /// What a healed `disk_latency` fault delayed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_latency_counts: Option<crate::virtio_block::LatencyCounts>,
     pub status: RowStatus,
 }
 impl FaultRow {
+    /// Every count the row carries, keyed by kind, or `None` before any.
+    pub fn counts(&self) -> Option<Value> {
+        let row = self.json();
+        let counts: serde_json::Map<String, Value> = [
+            "disk_error_counts",
+            "disk_latency_counts",
+            "network_fault_counts",
+            "queue_counts",
+            "selection_counts",
+        ]
+        .into_iter()
+        .filter_map(|key| row.get(key).map(|value| (key.to_owned(), value.clone())))
+        .collect();
+        (!counts.is_empty()).then_some(Value::Object(counts))
+    }
     /// The row as a JSON value.
     pub fn json(&self) -> Value {
         serde_json::to_value(self).expect("a fault row is plain JSON")
@@ -166,6 +187,34 @@ pub enum Lifecycle {
     Reboot,
     /// Run the CPU at this speed in Hz, or at the machine's configured speed again.
     Throttle(Option<u64>),
+    /// Start failing disk requests for the `disk_error` fault with this ID.
+    DiskErrors {
+        id: u32,
+        op: seedbox_control::DiskOp,
+        ppm: u32,
+        #[serde(default, skip_serializing_if = "seedbox_control::DiskEffect::is_error")]
+        effect: seedbox_control::DiskEffect,
+        #[serde(default, skip_serializing_if = "seedbox_control::DiskScope::is_disk")]
+        scope: seedbox_control::DiskScope,
+    },
+    /// End disk errors; their counts belong to the healing row.
+    HealDiskErrors {
+        row: u32,
+    },
+    /// Start delaying disk requests for the `disk_latency` fault with this ID.
+    DiskLatency {
+        id: u32,
+        op: seedbox_control::DiskOp,
+        latency_ns: u64,
+        jitter_ns: u64,
+    },
+    /// End disk latency; its counts belong to the healing row.
+    HealDiskLatency {
+        row: u32,
+    },
+    /// Perturb thread scheduling for the `preempt` fault with this ID, or
+    /// (`None`) stop.
+    Preempt(Option<(u32, u32)>),
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 enum Event {
@@ -198,6 +247,18 @@ pub struct Faults {
     clocks: BTreeMap<String, Clock>,
     /// Active throttle handles: machine and requested CPU speed in Hz.
     throttles: BTreeMap<String, (usize, u64)>,
+    /// Active disk error handles: machine, fault ID, operation and ppm.
+    #[serde(default)]
+    disk_errors: BTreeMap<String, (usize, u32, seedbox_control::DiskOp, u32)>,
+    /// Effects of active disk error handles other than `error`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    disk_effects: BTreeMap<String, (seedbox_control::DiskEffect, seedbox_control::DiskScope)>,
+    /// Active disk latency handles: machine, fault ID, operation, latency and jitter.
+    #[serde(default)]
+    disk_latencies: BTreeMap<String, (usize, u32, seedbox_control::DiskOp, u64, u64)>,
+    /// Active scheduler perturbation handles: machine, fault ID and ppm.
+    #[serde(default)]
+    preempts: BTreeMap<String, (usize, u32, u32)>,
     #[serde(with = "crate::checkpoint::ordered_map")]
     cuts: BTreeMap<(usize, usize), usize>,
     names: Vec<String>,
@@ -249,6 +310,10 @@ impl Faults {
             handles: BTreeMap::new(),
             clocks: BTreeMap::new(),
             throttles: BTreeMap::new(),
+            disk_errors: BTreeMap::new(),
+            disk_effects: BTreeMap::new(),
+            disk_latencies: BTreeMap::new(),
+            preempts: BTreeMap::new(),
             cuts: BTreeMap::new(),
             names,
             changed_network: vec![],
@@ -273,6 +338,9 @@ impl Faults {
             .ok_or_else(|| unknown.to_owned())
     }
     /// Validate shape and target names without assigning or reserving an ID.
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
     pub fn validate_action_shape(&self, action: &Action) -> Result<(), String> {
         self.compile(Plan {
             id: 0,
@@ -325,17 +393,62 @@ impl Faults {
             | Action::Restart { machine }
             | Action::PauseProcess { machine }
             | Action::ResumeProcess { machine }
+            | Action::Exec { machine, .. }
             | Action::Pause { machine }
             | Action::Resume { machine }
             | Action::Crash { machine }
             | Action::Reboot { machine }
-            | Action::Throttle { machine, .. } => {
+            | Action::Throttle { machine, .. }
+            | Action::DiskError { machine, .. }
+            | Action::DiskLatency { machine, .. }
+            | Action::Preempt { machine, .. } => {
+                if let Action::Preempt { handle, ppm, .. } = &plan.action {
+                    if handle.is_empty() || !seedbox_control::PREEMPT_PPM.contains(ppm) {
+                        return Err("invalid preempt handle/ppm".into());
+                    }
+                }
+                if let Action::DiskLatency {
+                    handle,
+                    latency_ns,
+                    jitter_ns,
+                    ..
+                } = &plan.action
+                {
+                    if handle.is_empty() {
+                        return Err("invalid disk_latency handle".into());
+                    }
+                    seedbox_control::validate_disk_latency(*latency_ns, *jitter_ns)?;
+                }
+                if let Action::Exec { argv, .. } = &plan.action {
+                    seedbox_control::validate_exec(argv)?;
+                }
                 if let Action::Throttle {
                     handle, speed_hz, ..
                 } = &plan.action
                 {
                     if handle.is_empty() || !seedbox_control::THROTTLE_SPEED_HZ.contains(speed_hz) {
                         return Err("invalid throttle handle/speed".into());
+                    }
+                }
+                if let Action::DiskError {
+                    handle,
+                    ppm,
+                    op,
+                    effect,
+                    scope,
+                    ..
+                } = &plan.action
+                {
+                    if handle.is_empty() || !seedbox_control::DISK_ERROR_PPM.contains(ppm) {
+                        return Err("invalid disk_error handle/ppm".into());
+                    }
+                    if *op == seedbox_control::DiskOp::Flush
+                        && (*effect == seedbox_control::DiskEffect::Corrupt
+                            || *scope == seedbox_control::DiskScope::Data)
+                    {
+                        return Err(
+                            "a corrupt or data-scoped disk_error cannot select only flushes".into(),
+                        );
                     }
                 }
                 target = Some(self.machine_index(machine, "unknown fault machine")?);
@@ -495,6 +608,8 @@ impl Faults {
             request: json!(entry.plan),
             requested_at_ns: entry.plan.at_ns,
             selection_counts: None,
+            disk_error_counts: None,
+            disk_latency_counts: None,
             status: RowStatus::Unrequested,
         });
         self.boundaries.insert((entry.plan.at_ns, id, Event::Apply));
@@ -562,8 +677,64 @@ impl Faults {
         handles.extend(self.connections.selections.keys().cloned());
         handles.extend(self.clocks.keys().cloned());
         handles.extend(self.throttles.keys().cloned());
+        handles.extend(self.disk_errors.keys().cloned());
+        handles.extend(self.disk_latencies.keys().cloned());
+        handles.extend(self.preempts.keys().cloned());
         handles.sort();
         handles
+    }
+    /// Machine `m`'s active disk errors, if any, as the lifecycle that starts
+    /// them. A rebooted incarnation takes them on again.
+    pub fn disk_errors(&self, m: usize) -> Option<Lifecycle> {
+        self.disk_errors
+            .iter()
+            .find(|(_, (machine, ..))| *machine == m)
+            .map(|(handle, &(_, id, op, ppm))| Lifecycle::DiskErrors {
+                id,
+                op,
+                ppm,
+                effect: self.disk_effects.get(handle).copied().unwrap_or_default().0,
+                scope: self.disk_effects.get(handle).copied().unwrap_or_default().1,
+            })
+    }
+    /// Machine `m`'s active disk latency, if any, as the lifecycle that
+    /// starts it. A rebooted incarnation takes it on again.
+    pub fn disk_latency(&self, m: usize) -> Option<Lifecycle> {
+        self.disk_latencies
+            .values()
+            .find(|(machine, ..)| *machine == m)
+            .map(
+                |&(_, id, op, latency_ns, jitter_ns)| Lifecycle::DiskLatency {
+                    id,
+                    op,
+                    latency_ns,
+                    jitter_ns,
+                },
+            )
+    }
+    /// Machine `m`'s active scheduler perturbation, if any: its fault ID and
+    /// ppm. A rebooted incarnation takes it on again.
+    pub fn preempt(&self, m: usize) -> Option<(u32, u32)> {
+        self.preempts
+            .values()
+            .find(|(machine, ..)| *machine == m)
+            .map(|&(_, id, ppm)| (id, ppm))
+    }
+    /// Record what healed disk latency did on the row that healed it.
+    pub fn record_disk_latency_counts(
+        &mut self,
+        row: u32,
+        counts: crate::virtio_block::LatencyCounts,
+    ) {
+        if let Some(row) = self.log.get_mut(row as usize) {
+            row.disk_latency_counts = Some(counts);
+        }
+    }
+    /// Record what healed disk errors did on the row that healed them.
+    pub fn record_disk_error_counts(&mut self, row: u32, counts: crate::virtio_block::ErrorCounts) {
+        if let Some(row) = self.log.get_mut(row as usize) {
+            row.disk_error_counts = Some(counts);
+        }
     }
     /// The speed of machine `m`'s active throttle, if any. A rebooted
     /// incarnation takes it on again.
@@ -626,6 +797,8 @@ impl Faults {
                 Some("restart requires a stopped target process")
             }
             Action::PauseProcess { .. } if self.stopped[index] => Some("target process is stopped"),
+            Action::Exec { .. } if self.stopped[index] => Some("target process is stopped"),
+            Action::Exec { .. } if self.frozen[index] => Some("target process is paused"),
             Action::PauseProcess { .. } if self.frozen[index] => {
                 Some("target process is already paused")
             }
@@ -660,6 +833,24 @@ impl Faults {
             Action::Throttle { .. } if self.throttle(index).is_some() => {
                 Some("target machine is already throttled")
             }
+            Action::DiskError { .. } if self.life[index] == Life::Down => {
+                Some("target machine is down")
+            }
+            Action::DiskError { .. } if self.disk_errors(index).is_some() => {
+                Some("target machine already has disk errors")
+            }
+            Action::DiskLatency { .. } if self.life[index] == Life::Down => {
+                Some("target machine is down")
+            }
+            Action::DiskLatency { .. } if self.disk_latency(index).is_some() => {
+                Some("target machine already has disk latency")
+            }
+            Action::Preempt { .. } if self.life[index] == Life::Down => {
+                Some("target machine is down")
+            }
+            Action::Preempt { .. } if self.preempt(index).is_some() => {
+                Some("target machine scheduling is already perturbed")
+            }
             _ => None,
         }
     }
@@ -682,6 +873,10 @@ impl Faults {
         after: u64,
     ) -> Vec<seedbox_control::Connection> {
         self.connections.list(from, to, after, &self.names)
+    }
+    /// Connection incarnations opened so far.
+    pub fn connections_opened(&self) -> u64 {
+        self.connections.opened()
     }
     pub fn route(
         &mut self,
@@ -853,7 +1048,12 @@ impl Faults {
         match e.clock {
             Some(ClockChange::Step(step)) => format!("clock_step {id} {step}\n"),
             Some(ClockChange::Rate(rate)) => format!("clock_rate {id} {rate}\n"),
-            None => format!("{} {id}\n", command(&e.plan.action)),
+            None => match &e.plan.action {
+                Action::Exec { argv, .. } => {
+                    format!("exec {id} {}\n", seedbox_control::exec_payload(argv))
+                }
+                action => format!("{} {id}\n", command(action)),
+            },
         }
         .into_bytes()
     }
@@ -946,7 +1146,8 @@ impl Faults {
             Action::Stop { .. }
             | Action::Restart { .. }
             | Action::PauseProcess { .. }
-            | Action::ResumeProcess { .. } => {
+            | Action::ResumeProcess { .. }
+            | Action::Exec { .. } => {
                 self.request_effect(i, commands);
             }
             Action::ClockSkew {
@@ -972,6 +1173,22 @@ impl Faults {
             Action::Throttle {
                 handle, speed_hz, ..
             } => self.apply_throttle(i, now, handle, speed_hz),
+            Action::DiskError {
+                handle,
+                op,
+                ppm,
+                effect,
+                scope,
+                ..
+            } => self.apply_disk_error(i, now, handle, op, ppm, (effect, scope)),
+            Action::DiskLatency {
+                handle,
+                op,
+                latency_ns,
+                jitter_ns,
+                ..
+            } => self.apply_disk_latency(i, now, handle, op, latency_ns, jitter_ns),
+            Action::Preempt { handle, ppm, .. } => self.apply_preempt(i, now, handle, ppm),
             Action::Heal { handle } => self.heal(i, now, handle),
             action @ (Action::Pause { .. }
             | Action::Resume { .. }
@@ -1173,11 +1390,131 @@ impl Faults {
         self.lifecycle
             .push((m, Lifecycle::Throttle(Some(speed_hz))));
     }
-    /// Heal a throttle, connection selector, shape layer or partition.
+    fn apply_disk_error(
+        &mut self,
+        i: usize,
+        now: u64,
+        handle: String,
+        op: seedbox_control::DiskOp,
+        ppm: u32,
+        (effect, scope): (seedbox_control::DiskEffect, seedbox_control::DiskScope),
+    ) {
+        let m = self.entries[i].target.expect("a disk error has a target");
+        if self.active_handles().contains(&handle) {
+            return self.fail(i, "duplicate active handle".into());
+        }
+        if self.disk_errors(m).is_some() {
+            return self.fail(i, "target machine already has disk errors".into());
+        }
+        let id = self.entries[i].plan.id;
+        self.disk_errors.insert(handle.clone(), (m, id, op, ppm));
+        if !effect.is_error() || !scope.is_disk() {
+            self.disk_effects.insert(handle.clone(), (effect, scope));
+        }
+        let op_name = serde_json::to_value(op).expect("a disk op is a JSON string");
+        let mut effect_note = String::new();
+        if !effect.is_error() {
+            effect_note.push_str("; effect=corrupt");
+        }
+        if !scope.is_disk() {
+            effect_note.push_str("; scope=data");
+        }
+        self.applied(
+            i,
+            now,
+            format!(
+                "handle={handle}; op={}; ppm={ppm}{effect_note}",
+                op_name.as_str().unwrap_or("?")
+            ),
+        );
+        self.lifecycle.push((
+            m,
+            Lifecycle::DiskErrors {
+                id,
+                op,
+                ppm,
+                effect,
+                scope,
+            },
+        ));
+    }
+    fn apply_disk_latency(
+        &mut self,
+        i: usize,
+        now: u64,
+        handle: String,
+        op: seedbox_control::DiskOp,
+        latency_ns: u64,
+        jitter_ns: u64,
+    ) {
+        let m = self.entries[i].target.expect("a disk latency has a target");
+        if self.active_handles().contains(&handle) {
+            return self.fail(i, "duplicate active handle".into());
+        }
+        if self.disk_latency(m).is_some() {
+            return self.fail(i, "target machine already has disk latency".into());
+        }
+        let id = self.entries[i].plan.id;
+        self.disk_latencies
+            .insert(handle.clone(), (m, id, op, latency_ns, jitter_ns));
+        let op_name = serde_json::to_value(op).expect("a disk op is a JSON string");
+        self.applied(
+            i,
+            now,
+            format!(
+                "handle={handle}; op={}; latency_ns={latency_ns}; jitter_ns={jitter_ns}",
+                op_name.as_str().unwrap_or("?")
+            ),
+        );
+        self.lifecycle.push((
+            m,
+            Lifecycle::DiskLatency {
+                id,
+                op,
+                latency_ns,
+                jitter_ns,
+            },
+        ));
+    }
+    fn apply_preempt(&mut self, i: usize, now: u64, handle: String, ppm: u32) {
+        let m = self.entries[i]
+            .target
+            .expect("a preempt fault has a target");
+        if self.active_handles().contains(&handle) {
+            return self.fail(i, "duplicate active handle".into());
+        }
+        if self.preempt(m).is_some() {
+            return self.fail(i, "target machine scheduling is already perturbed".into());
+        }
+        let id = self.entries[i].plan.id;
+        self.preempts.insert(handle.clone(), (m, id, ppm));
+        self.applied(i, now, format!("handle={handle}; ppm={ppm}"));
+        self.lifecycle
+            .push((m, Lifecycle::Preempt(Some((id, ppm)))));
+    }
+    /// Heal a throttle, disk errors, connection selector, shape layer or partition.
     fn heal(&mut self, i: usize, now: u64, handle: String) {
         if let Some((m, _)) = self.throttles.remove(&handle) {
             self.applied(i, now, format!("handle={handle}; project speed restored"));
             self.lifecycle.push((m, Lifecycle::Throttle(None)));
+            return;
+        }
+        if let Some((m, ..)) = self.disk_errors.remove(&handle) {
+            self.disk_effects.remove(&handle);
+            self.applied(i, now, format!("handle={handle}; disk errors ended"));
+            self.lifecycle
+                .push((m, Lifecycle::HealDiskErrors { row: i as u32 }));
+            return;
+        }
+        if let Some((m, ..)) = self.preempts.remove(&handle) {
+            self.applied(i, now, format!("handle={handle}; scheduling restored"));
+            self.lifecycle.push((m, Lifecycle::Preempt(None)));
+            return;
+        }
+        if let Some((m, ..)) = self.disk_latencies.remove(&handle) {
+            self.applied(i, now, format!("handle={handle}; disk latency ended"));
+            self.lifecycle
+                .push((m, Lifecycle::HealDiskLatency { row: i as u32 }));
             return;
         }
         if let Some(selection) = self.connections.selections.remove(&handle) {
@@ -1325,6 +1662,7 @@ impl Faults {
                 }
                 Action::PauseProcess { .. } => self.frozen[machine] = true,
                 Action::ResumeProcess { .. } => self.frozen[machine] = false,
+                Action::Exec { .. } => {}
                 _ => self.stopped[machine] = false,
             }
             self.applied(
@@ -1459,6 +1797,55 @@ mod link_tests {
                 .contains("handle=old"));
         }
     }
+    /// NEXT-100 case 9, engine arm: the network witness and the fault history
+    /// each change for their own component and only for it, so neither
+    /// comparison field can silently ignore a queued frame or a fault row.
+    #[test]
+    fn network_witness_and_fault_history_change_only_for_their_own_component() {
+        fn fields(f: &Faults) -> (Vec<u8>, Vec<u8>) {
+            let mut h = Sha256::new();
+            f.network_witness(&mut h);
+            (h.finalize().to_vec(), serde_json::to_vec(&f.log).unwrap())
+        }
+        let mut base = fixture(vec![shape(1, "s", 30)]);
+        base.apply_due(10);
+        assert_eq!(base.log.len(), 1);
+        let original = fields(&base);
+        assert_eq!(fields(&base.clone()), original);
+        // One link-queue entry: a frame scheduled on the shaped direction.
+        let mut queued = base.clone();
+        assert!(matches!(
+            queued.links.decide(0, 1, 15, 1500, false),
+            crate::links::Outcome::Deliver(_)
+        ));
+        let (network, history) = fields(&queued);
+        assert_ne!(
+            network, original.0,
+            "network witness ignored a queued frame"
+        );
+        assert_eq!(history, original.1, "a queued frame changed fault history");
+        // One fault-history entry, with the links untouched.
+        let mut recorded = base.clone();
+        let mut row = recorded.log[0].clone();
+        row.applied_at_ns = row.applied_at_ns.map(|at| at + 1);
+        recorded.log[0] = row;
+        let (network, history) = fields(&recorded);
+        assert_eq!(
+            network, original.0,
+            "a history row changed the network witness"
+        );
+        assert_ne!(history, original.1, "fault history ignored an edited row");
+        // An active handle is network state: healing it changes the witness and adds a row.
+        let mut healed = fixture(vec![shape(1, "s", 30), heal(2, "s")]);
+        healed.apply_due(10);
+        let scheduled = fields(&healed);
+        // The scheduled heal is already a history row, but not network state.
+        assert_eq!(scheduled.0, original.0);
+        healed.apply_due(20);
+        let (network, history) = fields(&healed);
+        assert_ne!(network, scheduled.0);
+        assert_ne!(history, scheduled.1);
+    }
     #[test]
     fn cut_dominates_live_shape_then_heal_resumes_identical_stream_position() {
         let mut f = fixture(vec![
@@ -1526,6 +1913,8 @@ mod link_tests {
             rate_ppb: None,
             request: json!({"id": 2, "action": "shape"}),
             requested_at_ns: 7,
+            disk_error_counts: None,
+            disk_latency_counts: None,
             selection_counts: Some(SelectionCounts {
                 dropped: 1,
                 matched: 4,

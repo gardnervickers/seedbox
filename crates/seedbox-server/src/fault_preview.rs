@@ -137,6 +137,19 @@ pub(crate) fn preview(
             "Send SIGSTOP to the application process group; the guest kernel continues running."
                 .into()
         }
+        Action::Exec { argv, .. } => {
+            result.preconditions.push(
+                "The application must be running, not stopped or paused; its machine must be up."
+                    .into(),
+            );
+            result.limitations.push(
+                "The command must exist in the machine's image; it runs beside the application, under the same translator, and its output joins the machine's logs.".into(),
+            );
+            format!(
+                "Run `{}` in the machine's application environment.",
+                argv.join(" ")
+            )
+        }
         Action::ResumeProcess { .. } => {
             result
                 .preconditions
@@ -190,6 +203,72 @@ pub(crate) fn preview(
                 Some(rate) => format!("Change realtime and monotonic clock rate by {rate} ppb; heal restores the nominal rate."),
                 None => format!("Change clock rate by a seeded amount within ±{} ppb. The draw occurs only during execution; heal restores the nominal rate.", max_rate_ppb.unwrap_or(0)),
             }
+        }
+        Action::DiskError {
+            op,
+            ppm,
+            effect,
+            scope,
+            ..
+        } => {
+            if *scope == seedbox_control::DiskScope::Data {
+                result.limitations.push(
+                    "Only reads and writes clear of the filesystem's superblocks, descriptors, bitmaps, inode tables and journal are selected, and none before the disk is formatted; directory and extent-index blocks can still be.".into(),
+                );
+            }
+            result.preconditions.push(
+                "The machine must be up, have a retained disk and no active disk errors.".into(),
+            );
+            result.limitations.push(
+                "Only requests the guest issues while active can fail; cached reads and unflushed writes may never reach the disk.".into(),
+            );
+            let op = match op {
+                seedbox_control::DiskOp::Read => "reads",
+                seedbox_control::DiskOp::Write => "writes",
+                seedbox_control::DiskOp::Flush => "flushes",
+                seedbox_control::DiskOp::Any => "reads, writes and flushes",
+            };
+            match effect {
+                seedbox_control::DiskEffect::Error => format!(
+                    "Fail the machine's disk {op} with an I/O error, {ppm} per million, until healed."
+                ),
+                seedbox_control::DiskEffect::Corrupt => format!(
+                    "Silently corrupt one sector of the machine's disk {op}, {ppm} per million, until healed: a read returns seeded garbage, a write stores it, and flushes are untouched."
+                ),
+            }
+        }
+        Action::DiskLatency {
+            op,
+            latency_ns,
+            jitter_ns,
+            ..
+        } => {
+            result.preconditions.push(
+                "The machine must be up, have a retained disk and no active disk latency.".into(),
+            );
+            result.limitations.push(
+                "Requests complete in submission order, so later requests also wait behind delayed ones; a crash loses requests still pending.".into(),
+            );
+            let op = match op {
+                seedbox_control::DiskOp::Read => "reads",
+                seedbox_control::DiskOp::Write => "writes",
+                seedbox_control::DiskOp::Flush => "flushes",
+                seedbox_control::DiskOp::Any => "reads, writes and flushes",
+            };
+            format!(
+                "Complete the machine's disk {op} {latency_ns} ns late, plus a seeded draw up to {jitter_ns} ns, until healed."
+            )
+        }
+        Action::Preempt { ppm, .. } => {
+            result
+                .preconditions
+                .push("The machine must be up and its scheduling not already perturbed.".into());
+            result.limitations.push(
+                "A yield only switches threads when another is runnable; single-threaded work is unaffected apart from timing.".into(),
+            );
+            format!(
+                "Yield the machine's CPU at {ppm} per million syscalls and progress calls, drawn on a seeded stream, until healed."
+            )
         }
         Action::Throttle { speed_hz, .. } => {
             result
@@ -251,6 +330,9 @@ fn healable_handle(action: &Action) -> Option<&str> {
         | Action::ClockSkew { handle, .. }
         | Action::ClockDrift { handle, .. }
         | Action::Throttle { handle, .. }
+        | Action::DiskError { handle, .. }
+        | Action::DiskLatency { handle, .. }
+        | Action::Preempt { handle, .. }
         | Action::DropConnection { handle, .. } => Some(handle),
         _ => None,
     }
@@ -319,6 +401,7 @@ mod tests {
     fn heal_resolves_active_original_targets_even_when_link_layer_is_masked() {
         let (configuration, mut world) = fixture();
         world.faults.push(FaultState {
+            counts: None,
             id: 1,
             input_key: None,
             action: "partition".into(),
@@ -379,6 +462,7 @@ mod tests {
             }]
         );
         world.faults.push(FaultState {
+            counts: None,
             id: 1,
             input_key: None,
             action: "drop_connection".into(),

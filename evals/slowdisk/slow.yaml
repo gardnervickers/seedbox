@@ -1,0 +1,15 @@
+# Crash the store at random, and sometimes slow its disk for a while. A write
+# whose fsync outlasts the store's acknowledgement bound is acknowledged
+# before it is durable; a crash before the fsync completes loses it. Latency
+# stays low enough for a restarted store to recover within the oracle's
+# reconnection window.
+start: 1s
+end: 18s
+interval: 1s
+faults:
+  - kind: crash
+    downtime: {min: 900ms, max: 1100ms}
+  - kind: disk_latency
+    weight: 2
+    duration: {min: 1s, max: 3s}
+    latency: {min: 25ms, max: 40ms}

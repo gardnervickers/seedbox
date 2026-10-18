@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 default-members = ["crates/seedbox"]
 # The VMM is its own workspace (see its Cargo.toml).
-exclude = ["crates/seedbox-vmm", "crates/seedbox-arm64"]
+exclude = ["crates/seedbox-vmm", "crates/seedbox-arm64", "crates/seedbox-jepsen"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,6 +20,7 @@ seedbox-api = { path = "crates/seedbox-api" }
 seedbox-client = { path = "crates/seedbox-client" }
 seedbox-tui = { path = "crates/seedbox-tui" }
 seedbox-spec = { path = "crates/seedbox-spec" }
+seedbox-explore = { path = "crates/seedbox-explore" }
 tokio = { version = "1", features = ["rt", "time", "fs", "macros", "sync"] }
 thiserror = "2"
 futures-util = "0.3"
@@ -32,6 +33,7 @@ clap = { version = "4", features = ["derive", "env"] }
 seedbox-engine-core = { path = "crates/seedbox-engine-core" }
 serde = { version = "1", features = ["derive"] }
 seedbox-control = { path = "crates/seedbox-control" }
+seedbox-control-client = { path = "crates/seedbox-control-client" }
 libc = "0.2"
 serde_json = "1"
 sha2 = "0.11"

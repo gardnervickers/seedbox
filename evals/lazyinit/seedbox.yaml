@@ -1,0 +1,16 @@
+name: lazyinit-eval
+machines:
+  app:
+    build:
+      context: ../..
+      dockerfile: evals/lazyinit/Dockerfile
+    entrypoint: [/lazyinit-app]
+    environment:
+      LAZYINIT_BUG: "1"
+oracle:
+  build:
+    context: ../..
+    dockerfile: evals/lazyinit/Dockerfile
+  entrypoint: [/lazyinit-oracle]
+network:
+  latency: 1ms

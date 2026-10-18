@@ -284,7 +284,8 @@ mod tests {
                 handle: "p".into(),
                 left: vec!["a".into()],
                 right: vec!["b".into()],
-            },
+            }
+            .into(),
             timeout_ns: 100,
         };
         let mut program = crate::input_program::Program::new(vec![input.clone()], 300, 0).unwrap();
@@ -298,7 +299,7 @@ mod tests {
                     id: 0,
                     at_ns: 20,
                     deadline_ns: 120,
-                    action: input.action,
+                    action: input.action.fault().expect("a fault input").clone(),
                 },
             )
             .unwrap_err();

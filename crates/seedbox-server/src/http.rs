@@ -60,6 +60,15 @@ pub fn router(state: ApiState) -> Router {
             get(describe).delete(delete_simulation),
         )
         .route("/v1/simulations/{id}/stop", post(stop))
+        .route("/v1/campaigns", get(campaigns).post(submit_campaign))
+        .route("/v1/campaigns/{id}", get(campaign))
+        .route("/v1/campaigns/{id}/stop", post(stop_campaign))
+        .route("/v1/campaigns/{id}/encounters", get(campaign_encounters))
+        .route("/v1/simulations/{id}/shrink", post(submit_shrink))
+        .route("/v1/shrinks/{id}", get(shrink))
+        .route("/v1/simulations/{id}/analyze", post(submit_analysis))
+        .route("/v1/analyses/{id}", get(analysis))
+        .route("/v1/simulations/{id}/exec", post(submit_exec))
         .route("/v1/simulations/{id}/compare/{other}", get(compare))
         .route("/v1/simulations/{id}/diagnostics", get(diagnostics))
         .route(
@@ -69,6 +78,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/simulations/{id}/watch", get(watch))
         .route("/v1/simulations/{id}/playback", get(playback))
         .route("/v1/simulations/{id}/timeline", get(timeline))
+        .route("/v1/simulations/{id}/explanation", get(explanation))
         .route("/v1/simulations/{id}/derive", post(derive))
         .route("/v1/simulations/{id}/checkpoints", get(checkpoints))
         .route(
@@ -496,6 +506,42 @@ async fn timeline(
     })
     .await
     .map_err(|_| HttpError::internal("timeline task failed"))?
+}
+
+async fn explanation(
+    State(state): State<ApiState>,
+    id: Result<Path<SimulationId>, PathRejection>,
+) -> Result<Json<seedbox_api::Explanation>, HttpError> {
+    use crate::stream::Delivery;
+    let Path(id) = id.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let manager = state.manager.clone();
+    let subscribed = id.clone();
+    let mut receiver = tokio::task::spawn_blocking(move || manager.events(&subscribed, false))
+        .await
+        .map_err(|_| HttpError::internal("event subscription task failed"))??;
+    let (mut events, mut gaps) = (Vec::new(), 0);
+    loop {
+        match receiver.recv().await {
+            Delivery::Record(record) => events.push(record.payload.clone()),
+            Delivery::Gap { first, last } => gaps += last - first + 1,
+            Delivery::Closed => break,
+        }
+    }
+    tokio::task::spawn_blocking(move || {
+        let execution = state.execution.ok_or_else(|| {
+            HttpError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::Unavailable,
+                "execution evidence is unavailable",
+            )
+        })?;
+        execution
+            .explanation(&id, &events, gaps)
+            .map(Json)
+            .map_err(HttpError::from)
+    })
+    .await
+    .map_err(|_| HttpError::internal("explanation task failed"))?
 }
 
 async fn describe(
@@ -979,6 +1025,136 @@ async fn checkpoint_definition(
     })
     .await
     .map_err(|_| HttpError::internal("checkpoint export task failed"))?
+}
+
+/// Run a blocking job-service call off the async runtime.
+async fn jobs<T: Send + 'static>(
+    state: ApiState,
+    call: impl FnOnce(&crate::execution::ExecutionService) -> Result<T, crate::execution::Error>
+        + Send
+        + 'static,
+) -> Result<Json<T>, HttpError> {
+    let execution = state
+        .execution
+        .ok_or_else(|| HttpError::invalid("campaigns are unavailable"))?;
+    tokio::task::spawn_blocking(move || call(&execution).map(Json).map_err(HttpError::from))
+        .await
+        .map_err(|_| HttpError::internal("campaign task failed"))?
+}
+
+async fn submit_campaign(
+    State(state): State<ApiState>,
+    body: Result<Json<seedbox_api::CampaignRequest>, JsonRejection>,
+) -> Result<Json<seedbox_api::Campaign>, HttpError> {
+    let Json(request) = body.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.submit_campaign(request)).await
+}
+
+async fn campaigns(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<seedbox_api::CampaignSummary>>, HttpError> {
+    jobs(state, |e| e.campaigns()).await
+}
+
+async fn campaign(
+    State(state): State<ApiState>,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Json<seedbox_api::Campaign>, HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.campaign(&id)).await
+}
+
+async fn stop_campaign(
+    State(state): State<ApiState>,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Json<seedbox_api::Campaign>, HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.stop_campaign(&id)).await
+}
+
+async fn campaign_encounters(
+    State(state): State<ApiState>,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<seedbox_api::FindingQuery>, QueryRejection>,
+) -> Result<Json<seedbox_api::EncounterPage>, HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let Query(query) = query.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.campaign_encounters(&id, &query)).await
+}
+
+async fn submit_shrink(
+    State(state): State<ApiState>,
+    path: Result<Path<SimulationId>, PathRejection>,
+    body: Result<Json<seedbox_api::ShrinkRequest>, JsonRejection>,
+) -> Result<Json<seedbox_api::Shrink>, HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let Json(request) = body.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.submit_shrink(&id, request)).await
+}
+
+async fn shrink(
+    State(state): State<ApiState>,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Json<seedbox_api::Shrink>, HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.shrink(&id)).await
+}
+
+async fn submit_analysis(
+    State(state): State<ApiState>,
+    path: Result<Path<SimulationId>, PathRejection>,
+    body: Result<Json<seedbox_api::AnalysisRequest>, JsonRejection>,
+) -> Result<Json<seedbox_api::Analysis>, HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let Json(request) = body.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.submit_analysis(&id, request)).await
+}
+
+async fn submit_exec(
+    State(state): State<ApiState>,
+    path: Result<Path<SimulationId>, PathRejection>,
+    body: Result<Json<seedbox_api::ExecRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<Simulation>), HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let Json(request) = body.map_err(|e| HttpError::invalid(e.body_text()))?;
+    let execution = state
+        .execution
+        .clone()
+        .ok_or_else(|| HttpError::invalid("exec is unavailable"))?;
+    let permit = state.submissions.try_reserve_owned().map_err(|_| {
+        HttpError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Unavailable,
+            "execution queue unavailable; retry with the same request ID",
+        )
+    })?;
+    tokio::task::spawn_blocking(move || {
+        let submission = execution
+            .exec_submission(&id, request)
+            .map_err(HttpError::from)?;
+        let (simulation, created) = state.manager.submit(submission)?;
+        if created {
+            permit.send(simulation.metadata.id.clone());
+        }
+        Ok((
+            if created {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            },
+            Json(simulation),
+        ))
+    })
+    .await
+    .map_err(|_| HttpError::internal("exec task failed"))?
+}
+
+async fn analysis(
+    State(state): State<ApiState>,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Json<seedbox_api::Analysis>, HttpError> {
+    let Path(id) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
+    jobs(state, move |e| e.analysis(&id)).await
 }
 
 #[cfg(test)]

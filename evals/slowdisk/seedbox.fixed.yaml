@@ -1,0 +1,19 @@
+name: slowdisk-eval-fixed
+machines:
+  store:
+    build:
+      context: ../..
+      dockerfile: evals/slowdisk/Dockerfile
+    entrypoint: [/slowdisk-server]
+    environment:
+      SLOWDISK_BUG: "0"
+    volumes:
+      data:
+        target: /data
+oracle:
+  build:
+    context: ../..
+    dockerfile: evals/slowdisk/Dockerfile
+  entrypoint: [/slowdisk-oracle]
+network:
+  latency: 1ms

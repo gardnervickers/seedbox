@@ -716,6 +716,7 @@ pub fn run(
         control: control::Control::from_config(None, names.clone(), latency, early)?,
         macs,
         machines,
+        expected_crashes: cfg.expected_crashes(),
     })?
     .with_observations(observations);
     if let Some(path) = &options.resume_checkpoint {
@@ -1060,6 +1061,7 @@ fn network_witness(world: &World) -> sha2::digest::Output<Sha256> {
 fn world_witness_prefix(world: &World, network_witness: &[u8]) -> Result<Sha256, String> {
     let mut world_witness = Sha256::new();
     world.control().triggers.hash_into(&mut world_witness)?;
+    world.choices().hash_into(&mut world_witness)?;
     // Only a run that uses link policy carries the network witness, so a run
     // without it keeps the world witness it had before link policy existed.
     if world.faults().links.in_use() || world.faults().connections.used {
@@ -1328,6 +1330,11 @@ fn report(
         world_witness
             .update(serde_json::to_vec(world.input_rejections()).map_err(|e| e.to_string())?);
     }
+    // Only a run with property records hashes them, keeping earlier witnesses.
+    let properties = (world.properties().records > 0).then(|| world.properties().clone());
+    if let Some(properties) = &properties {
+        world_witness.update(serde_json::to_vec(properties).map_err(|e| e.to_string())?);
+    }
     Ok(EngineReport {
         report_version: REPORT_VERSION,
         seed,
@@ -1339,9 +1346,13 @@ fn report(
             fault_error,
             input_admissions: world.input_admissions().to_vec(),
             input_rejections: world.input_rejections().to_vec(),
+            input_branches: world.input_branches().to_vec(),
+            input_armed: world.input_armed().to_vec(),
             control_history,
             control_latency_ns: world.control().latency,
             triggers,
+            properties,
+            choices: world.choices().evidence().cloned(),
         },
         sim_seconds,
         host_seconds,

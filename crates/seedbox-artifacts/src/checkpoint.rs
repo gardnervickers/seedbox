@@ -17,24 +17,55 @@ struct CapturedProgram {
     admissions: Vec<InputAdmission>,
     failed: bool,
     rejections: Vec<InputRejection>,
+    /// Generated starts skipped so far; carried through projection unchanged.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    skipped: std::collections::BTreeSet<String>,
+    /// Consumed anchors and reseeds, which allocate no fault IDs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    branches: Vec<seedbox_engine_protocol::input_program::BranchReceipt>,
+    /// Consumed trigger inputs and the trigger IDs they armed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    armed: Vec<seedbox_engine_protocol::input_program::ArmReceipt>,
 }
 impl CapturedProgram {
     fn validate(&self) -> Result<()> {
         validate_program(&self.inputs, u64::MAX).map_err(Error::Integrity)?;
         if self.failed
             || self.next > self.inputs.len()
-            || self.next != self.admissions.len() + self.rejections.len()
+            || self.next
+                != self.admissions.len()
+                    + self.rejections.len()
+                    + self.branches.len()
+                    + self.armed.len()
         {
             return Err(Error::Integrity(
                 "checkpoint has an invalid consumed input cursor".into(),
             ));
         }
-        let (mut admitted, mut rejected, mut previous) = (
+        let (mut admitted, mut rejected, mut branched, mut previous) = (
             self.admissions.iter().peekable(),
             self.rejections.iter().peekable(),
+            self.branches.iter(),
             0,
         );
+        let (mut armed, mut previous_trigger) = (self.armed.iter(), 0);
         for input in &self.inputs[..self.next] {
+            if let seedbox_engine_protocol::input_program::InputAction::Branch(action) =
+                &input.action
+            {
+                let receipt = branched.next().ok_or_else(|| {
+                    Error::Integrity("checkpoint consumed branch input lacks its receipt".into())
+                })?;
+                if receipt.key != input.key
+                    || receipt.at_ns != input.at_ns
+                    || &receipt.action != action
+                {
+                    return Err(Error::Integrity(
+                        "checkpoint branch receipt disagrees with consumed input".into(),
+                    ));
+                }
+                continue;
+            }
             if rejected.peek().is_some_and(|r| r.key == input.key) {
                 let row = rejected.next().expect("peeked");
                 if row.at_ns != input.at_ns || row.reason.is_empty() {
@@ -42,13 +73,26 @@ impl CapturedProgram {
                         "checkpoint input rejection disagrees with consumption".into(),
                     ));
                 }
+            } else if let seedbox_engine_protocol::input_program::InputAction::Rule(_) =
+                &input.action
+            {
+                let receipt = armed.next().ok_or_else(|| {
+                    Error::Integrity("checkpoint consumed rule input lacks its receipt".into())
+                })?;
+                receipt
+                    .validate(input, &mut previous_trigger)
+                    .map_err(|_| {
+                        Error::Integrity(
+                            "checkpoint rule receipt disagrees with consumed input".into(),
+                        )
+                    })?;
             } else {
                 let row = admitted.next().ok_or_else(|| {
                     Error::Integrity("checkpoint consumed input lacks admission evidence".into())
                 })?;
                 if row.key != input.key
                     || row.plan.at_ns != input.at_ns
-                    || row.plan.action != input.action
+                    || input.action.fault() != Some(&row.plan.action)
                     || row.plan.id <= previous
                     || Some(row.plan.deadline_ns) != input.at_ns.checked_add(input.timeout_ns)
                 {
@@ -107,7 +151,7 @@ pub fn project(start: &mut Start, overrides: &[Override], frozen: &History) -> R
             .ok_or_else(|| {
                 Error::Integrity("frozen checkpoint input lacks admission evidence".into())
             })?;
-        if input.action != entry.plan.action
+        if input.action.fault() != Some(&entry.plan.action)
             || input.at_ns != entry.plan.at_ns
             || input.at_ns.checked_add(input.timeout_ns) != Some(entry.plan.deadline_ns)
             || admission.plan != entry.plan
@@ -157,7 +201,8 @@ mod tests {
             at_ns,
             action: Action::PauseProcess {
                 machine: "oracle".into(),
-            },
+            }
+            .into(),
             timeout_ns: 100,
         }
     }
@@ -166,7 +211,7 @@ mod tests {
             id,
             at_ns: input.at_ns,
             deadline_ns: input.at_ns + input.timeout_ns,
-            action: input.action.clone(),
+            action: input.action.fault().expect("a fault input").clone(),
         }
     }
     fn fixture() -> (Start, Vec<Override>, History, Faults) {
@@ -177,13 +222,34 @@ mod tests {
         let later = input("later-host-at-same-boundary", 30);
         let pending = input("pending-authored", 40);
         let mut faults = Faults::new(Vec::new(), vec!["oracle".into()]).unwrap();
+        let mut triggers = seedbox_engine_core::triggers::Triggers::default();
         let mut program = Program::new(vec![authored, rejected, pending], u64::MAX, 0).unwrap();
         program
             .commit_live(&mut faults, host.key.clone(), plan(1, &host), 10)
             .unwrap();
-        program.admit_due(&mut faults, 20, &|_| Ok(())).unwrap();
         program
-            .admit_due(&mut faults, 25, &|_| Err("portable rejected input".into()))
+            .admit_due(
+                &mut faults,
+                &mut triggers,
+                20,
+                seedbox_engine_core::input_program::Gate {
+                    ready: true,
+                    quiet_until: 0,
+                },
+                &|_| Ok(()),
+            )
+            .unwrap();
+        program
+            .admit_due(
+                &mut faults,
+                &mut triggers,
+                25,
+                seedbox_engine_core::input_program::Gate {
+                    ready: true,
+                    quiet_until: 0,
+                },
+                &|_| Err("portable rejected input".into()),
+            )
             .unwrap();
         program
             .commit_live(&mut faults, future.key.clone(), plan(3, &future), 25)
@@ -271,14 +337,36 @@ mod tests {
         );
         assert_eq!(restored.admissions().len(), 3);
         assert_eq!(restored.rejections().len(), 1);
-        restored.admit_due(&mut faults, 30, &|_| Ok(())).unwrap();
+        restored
+            .admit_due(
+                &mut faults,
+                &mut seedbox_engine_core::triggers::Triggers::default(),
+                30,
+                seedbox_engine_core::input_program::Gate {
+                    ready: true,
+                    quiet_until: 0,
+                },
+                &|_| Ok(()),
+            )
+            .unwrap();
         assert_eq!(
             restored.admissions().last().unwrap().key,
             "later-host-at-same-boundary"
         );
         assert_eq!(restored.admissions().last().unwrap().plan.id, 4);
         assert_eq!(restored.next_time(), 40);
-        restored.admit_due(&mut faults, 40, &|_| Ok(())).unwrap();
+        restored
+            .admit_due(
+                &mut faults,
+                &mut seedbox_engine_core::triggers::Triggers::default(),
+                40,
+                seedbox_engine_core::input_program::Gate {
+                    ready: true,
+                    quiet_until: 0,
+                },
+                &|_| Ok(()),
+            )
+            .unwrap();
         assert_eq!(
             restored.admissions().last().unwrap().key,
             "pending-authored"
@@ -352,25 +440,37 @@ mod same_time_tests {
         let authored = TimedInput {
             key: "authored".into(),
             at_ns: 10,
-            action: action.clone(),
+            action: action.clone().into(),
             timeout_ns: 100,
         };
         let host = TimedInput {
             key: "host".into(),
             at_ns: 10,
-            action: action.clone(),
+            action: action.clone().into(),
             timeout_ns: 100,
         };
         let pending = TimedInput {
             key: "pending".into(),
             at_ns: 20,
-            action: action.clone(),
+            action: action.clone().into(),
             timeout_ns: 100,
         };
         let mut program =
             Program::new(vec![authored.clone(), pending.clone()], u64::MAX, 0).unwrap();
         let mut faults = Faults::new(Vec::new(), vec!["oracle".into()]).unwrap();
-        program.admit_due(&mut faults, 10, &|_| Ok(())).unwrap();
+        let mut triggers = seedbox_engine_core::triggers::Triggers::default();
+        program
+            .admit_due(
+                &mut faults,
+                &mut triggers,
+                10,
+                seedbox_engine_core::input_program::Gate {
+                    ready: true,
+                    quiet_until: 0,
+                },
+                &|_| Ok(()),
+            )
+            .unwrap();
         let plan = Plan {
             id: 2,
             at_ns: 10,

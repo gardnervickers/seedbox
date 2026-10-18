@@ -73,6 +73,7 @@ impl Catalogue {
         self.submit_inner(
             SubmitRequest {
                 request_id: request.request_id,
+                fault_profile: request.fault_profile,
                 spec: request.spec,
                 options: request.options,
                 metadata: request.metadata,
@@ -205,6 +206,12 @@ impl Catalogue {
         let index = range.next;
         let mut spec = entry.resource.spec.clone();
         spec.seed = Some(spec.seed.ok_or(Error::StorageFailed)? + u64::from(index));
+        // Each member samples the source's fault profile with its own seed.
+        let fault_profile = entry.request.fault_profile.clone();
+        if fault_profile.is_some() {
+            spec.program
+                .retain(|input| !input.key.starts_with(seedbox_explore::faults::KEY_PREFIX));
+        }
 
         if let InputSource::Retained { simulation } = &spec.inputs {
             spec.inputs = InputSource::Prepared {
@@ -214,6 +221,7 @@ impl Catalogue {
         let member = match self.submit_inner(
             SubmitRequest {
                 request_id: member_request_id(&id, index),
+                fault_profile,
                 options: entry.resource.options.clone(),
                 metadata: seedbox_spec::definition::Metadata {
                     name: entry.resource.metadata.name.clone(),
@@ -253,6 +261,7 @@ mod tests {
             metadata: Default::default(),
             options: Default::default(),
             request_id: name.into(),
+            fault_profile: None,
             count: 3,
             spec: SimulationSpec {
                 program: Vec::new(),
@@ -279,6 +288,88 @@ mod tests {
         catalogue.update(source).unwrap()
     }
 
+    fn faulted(name: &str) -> SeedRangeRequest {
+        let mut request = request(name);
+        request.spec.configuration = seedbox_application::config::parse(
+            "name: test\nservices:\n  n1:\n    image: example/app\n  oracle:\n    image: example/oracle\n",
+            Path::new("/project/compose.yaml"),
+            &Default::default(),
+        )
+        .unwrap();
+        request.spec.program = vec![seedbox_api::ProgramInput {
+            key: "mine".into(),
+            at_ns: 1_000_000_000,
+            action: serde_json::json!({"action": "pause", "machine": "n1"}),
+            timeout_ns: 5_000_000_000,
+        }];
+        request.fault_profile = Some(
+            serde_json::from_value(serde_json::json!({
+                "end": "30s", "interval": "3s",
+                "faults": [{"kind": "partition", "duration": {"min": "1s", "max": "2s"}}]
+            }))
+            .unwrap(),
+        );
+        request
+    }
+
+    fn generated(simulation: &Simulation) -> Vec<(String, u64)> {
+        simulation
+            .spec
+            .program
+            .iter()
+            .filter(|i| i.key.starts_with("gen-"))
+            .map(|i| (i.key.clone(), i.at_ns))
+            .collect()
+    }
+
+    #[test]
+    fn fault_profiles_generate_per_seed_and_reserve_their_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut catalogue = Catalogue::open(&temp.path().join("catalogue")).unwrap();
+        let (source, _) = catalogue.submit_seeds(faulted("faulted-range")).unwrap();
+        let first = generated(&source);
+        assert!(first.len() >= 10, "{first:?}");
+        assert!(source.spec.program.iter().any(|i| i.key == "mine"));
+        assert!(source
+            .spec
+            .program
+            .windows(2)
+            .all(|w| w[0].at_ns <= w[1].at_ns));
+        let source = complete(&mut catalogue, source);
+        let (member, _) = catalogue.advance_seeds().unwrap().unwrap();
+        assert_eq!(member.spec.seed, Some(124));
+        let second = generated(&member);
+        assert!(!second.is_empty() && second != first);
+        assert_eq!(
+            member
+                .spec
+                .program
+                .iter()
+                .filter(|i| i.key == "mine")
+                .count(),
+            1
+        );
+        drop(source);
+        // A single submission with the same seed generates the same schedule.
+        let mut single = faulted("faulted-single");
+        let request = SubmitRequest {
+            metadata: Default::default(),
+            options: Default::default(),
+            request_id: "faulted-single".into(),
+            fault_profile: single.fault_profile.take(),
+            spec: single.spec,
+        };
+        let (resource, _) = catalogue.submit(request.clone()).unwrap();
+        assert_eq!(generated(&resource), first);
+        // Authored keys may not claim the generated namespace.
+        let mut reserved = request;
+        reserved.request_id = "faulted-reserved".into();
+        reserved.spec.program[0].key = "gen-7".into();
+        assert!(
+            matches!(catalogue.submit(reserved), Err(Error::Invalid(m)) if m.contains("reserved"))
+        );
+    }
+
     #[test]
     fn member_namespace_is_reserved_and_range_failure_is_durable_and_isolated() {
         let temp = tempfile::tempdir().unwrap();
@@ -290,6 +381,7 @@ mod tests {
             metadata: Default::default(),
             options: Default::default(),
             request_id: member_request_id(&id, 1),
+            fault_profile: None,
             spec: request("unused").spec,
         };
         assert!(matches!(
@@ -301,6 +393,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: collision.request_id.clone(),
+                fault_profile: None,
                 spec: collision.spec.clone(),
                 count: 3,
             }),
@@ -345,6 +438,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: base.request_id,
+                fault_profile: None,
                 spec: base.spec,
             })
             .unwrap()
@@ -354,6 +448,7 @@ mod tests {
             metadata: Default::default(),
             options: Default::default(),
             request_id: "rerun".into(),
+            fault_profile: None,
             spec: source.spec.clone(),
         };
         rerun.spec.seed = Some(124);
@@ -370,6 +465,7 @@ mod tests {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "same-seed".into(),
+                fault_profile: None,
                 spec: source.spec,
             })
             .is_ok());

@@ -362,6 +362,18 @@ class ControlTests(unittest.TestCase):
                 world.stop("x" * 16384)
         self.assertEqual(peer.requests, [])
 
+    def test_quiet_sends_nanoseconds_and_returns_its_end(self):
+        peer = Peer(reply(result={"quiet_until_ns": 2_000_000_020}) + reply(2, result={}))
+        with World(peer) as world:
+            self.assertEqual(world.quiet(2), 2_000_000_020)
+            with self.assertRaises(ProtocolError):
+                world.quiet(1)
+        self.assertEqual(peer.requests, [
+            {"version": 1, "id": 1, "op": "quiet", "duration_ns": 2_000_000_000},
+            {"version": 1, "id": 2, "op": "quiet", "duration_ns": 1_000_000_000},
+        ])
+        self.assertTrue(peer.closed)
+
     def test_inspection_exposes_protocol_result(self):
         peer = Peer(reply(result={"services": {"server": "vm-1"}, "active_handles": []}))
         with World(peer) as world:

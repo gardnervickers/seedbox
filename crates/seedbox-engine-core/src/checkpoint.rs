@@ -111,20 +111,35 @@ pub struct LiveCheckpoint<M: crate::world::WorldMachine> {
     pub position: seedbox_engine_protocol::host_control::BoundaryPosition,
 }
 
+/// Default bytes a worker may retain for live checkpoints: machine RAM
+/// images or their on-disk artifacts, as each backend counts them.
+pub const DEFAULT_RETENTION_BYTES: u64 = 8 << 30;
+
+/// Live checkpoints a running worker retains for branching, within a byte
+/// budget rather than a fixed count. A capture that would exceed the budget
+/// fails before it is acknowledged; releasing one frees its bytes.
 pub struct LiveCheckpoints<M: crate::world::WorldMachine> {
-    held: std::collections::BTreeMap<String, LiveCheckpoint<M>>,
+    held: std::collections::BTreeMap<String, (LiveCheckpoint<M>, u64)>,
+    budget_bytes: u64,
+    used_bytes: u64,
 }
 impl<M: crate::world::WorldMachine> Default for LiveCheckpoints<M> {
     fn default() -> Self {
-        Self {
-            held: Default::default(),
-        }
+        Self::with_budget(DEFAULT_RETENTION_BYTES)
     }
 }
 impl<M: crate::world::WorldMachine> LiveCheckpoints<M> {
-    /// Fixed admission bound while the engine owns full machine snapshots.
+    pub fn with_budget(budget_bytes: u64) -> Self {
+        Self {
+            held: Default::default(),
+            budget_bytes,
+            used_bytes: 0,
+        }
+    }
+
+    /// Admit capture requests only while some budget remains.
     pub fn configure(&self, host: &mut crate::host_control::HostControl) {
-        if self.held.len() < 8 {
+        if self.used_bytes < self.budget_bytes {
             host.enable_checkpoints();
         } else {
             host.disable_checkpoints();
@@ -132,7 +147,22 @@ impl<M: crate::world::WorldMachine> LiveCheckpoints<M> {
     }
 
     pub fn get(&self, request_id: &str) -> Option<&LiveCheckpoint<M>> {
-        self.held.get(request_id)
+        self.held.get(request_id).map(|(checkpoint, _)| checkpoint)
+    }
+
+    pub fn used_bytes(&self) -> u64 {
+        self.used_bytes
+    }
+
+    /// Stop retaining a checkpoint; returns whether it was held.
+    pub fn release(&mut self, request_id: &str) -> bool {
+        match self.held.remove(request_id) {
+            Some((_, bytes)) => {
+                self.used_bytes -= bytes;
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn capture_pending(
@@ -156,8 +186,8 @@ impl<M: crate::world::WorldMachine> LiveCheckpoints<M> {
         let Some(request) = host.pending_checkpoint().cloned() else {
             return Ok(false);
         };
-        if self.held.len() >= 8 || self.held.contains_key(&request.request_id) {
-            return Err("checkpoint retention capacity or identity conflict".into());
+        if self.held.contains_key(&request.request_id) {
+            return Err("checkpoint identity conflict".into());
         }
         if world.slices != request.position.completed_rounds
             || world.boundaries != request.position.boundary_index
@@ -166,13 +196,26 @@ impl<M: crate::world::WorldMachine> LiveCheckpoints<M> {
         }
         let replay = replay.checkpoint(request.position)?;
         let snapshot = crate::world::WorldSnapshot::take_checkpoint(world)?;
+        let bytes: u64 = snapshot
+            .machine_snapshots()
+            .iter()
+            .map(M::snapshot_bytes)
+            .sum();
+        if self.used_bytes.saturating_add(bytes) > self.budget_bytes {
+            return Err(format!(
+                "checkpoint retention budget exhausted: {} of {} bytes held, capture needs {bytes}",
+                self.used_bytes, self.budget_bytes
+            ));
+        }
         let checkpoint = LiveCheckpoint {
             world: snapshot,
             replay,
             position: request.position,
         };
         publish(&request.request_id, &checkpoint)?;
-        self.held.insert(request.request_id.clone(), checkpoint);
+        self.held
+            .insert(request.request_id.clone(), (checkpoint, bytes));
+        self.used_bytes += bytes;
         host.checkpoint_captured(&request.request_id)
             .map_err(|e| e.to_string())?;
         self.configure(host);

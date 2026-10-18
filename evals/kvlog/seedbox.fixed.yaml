@@ -1,0 +1,20 @@
+name: kvlog-eval-fixed
+machines:
+  kv:
+    build:
+      context: ../..
+      dockerfile: evals/kvlog/Dockerfile
+    entrypoint: [/kvlog-server]
+    environment:
+      KVLOG_BUG: "0"
+    # The log must outlive a crash: keep it on a disk.
+    volumes:
+      data:
+        target: /data
+oracle:
+  build:
+    context: ../..
+    dockerfile: evals/kvlog/Dockerfile
+  entrypoint: [/kvlog-oracle]
+network:
+  latency: 1ms

@@ -74,11 +74,32 @@ impl<B: Backend> Machine<B> {
 
     /// The original VM must already be destroyed on HVF. The replacement has
     /// identical boot inputs and mappings, and has never entered guest code.
-    pub fn restore_snapshot(mut self, snapshot: &Snapshot) -> Result<Self> {
-        if self.boot_identity != snapshot.boot_identity
+    pub fn restore_snapshot(self, snapshot: &Snapshot) -> Result<Self> {
+        if self.ram.len() != snapshot.ram.len() {
+            return Err("checkpoint does not match replacement machine boot inputs".into());
+        }
+        self.restore_with(snapshot, true)
+    }
+
+    /// As `restore_snapshot` with guest RAM already in place (mapped from
+    /// a checkpoint file).
+    pub(crate) fn restore_snapshot_without_ram(self, snapshot: &Snapshot) -> Result<Self> {
+        self.restore_with(snapshot, false)
+    }
+
+    /// Back guest RAM with a private mapping of `file` from `offset`,
+    /// unmapping it from the backend and mapping it back around the change.
+    pub(crate) fn map_ram_from(&mut self, file: &std::fs::File, offset: u64) -> Result<()> {
+        self.backend.unmap_memory(0)?;
+        // The vCPU has never entered and the backend no longer maps the RAM.
+        unsafe { self.ram.map_file(file, offset)? };
+        self.backend.map_memory(0, RAM_BASE, Rc::clone(&self.ram))
+    }
+
+    fn restore_with(mut self, snapshot: &Snapshot, copy_ram: bool) -> Result<Self> {
+        if !self.boot_identity.same_inputs(&snapshot.boot_identity)
             || self.kernel_hash != snapshot.kernel_hash
             || self.initrd_hash != snapshot.initrd_hash
-            || self.ram.len() != snapshot.ram.len()
             || self.page.len() != snapshot.page.len()
             || self.application.is_some() != snapshot.application.is_some()
         {
@@ -88,7 +109,9 @@ impl<B: Backend> Machine<B> {
         // inventory first. Any subsequent error consumes and drops this machine.
         self.backend.restore_state(&snapshot.cpu)?;
         unsafe {
-            self.ram.write(0, &snapshot.ram)?;
+            if copy_ram {
+                self.ram.write(0, &snapshot.ram)?;
+            }
             self.page.write(0, &snapshot.page)?;
         }
         self.uart = snapshot.uart.clone();
@@ -101,6 +124,7 @@ impl<B: Backend> Machine<B> {
         self.ready = snapshot.ready;
         self.trace = snapshot.trace.clone();
         self.seed = snapshot.seed;
+        self.boot_identity = snapshot.boot_identity.clone();
         self.raw_exits = snapshot.raw_exits;
         self.powered_off = snapshot.powered_off;
         self.application = snapshot.application.clone();

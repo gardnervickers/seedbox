@@ -1,0 +1,3 @@
+#!/bin/sh
+# BEAM probes (beamfz.erl) on the image's Erlang/OTP.
+exec /usr/local/lib/erlang/bin/erl -noshell -noinput -pa /fuzz/erl -run beamfz main "$@"

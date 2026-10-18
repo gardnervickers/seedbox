@@ -1,0 +1,19 @@
+name: compact-eval-fixed
+machines:
+  store:
+    build:
+      context: ../..
+      dockerfile: evals/compact/Dockerfile
+    entrypoint: [/compact-server]
+    environment:
+      COMPACT_BUG: "0"
+    volumes:
+      data:
+        target: /data
+oracle:
+  build:
+    context: ../..
+    dockerfile: evals/compact/Dockerfile
+  entrypoint: [/compact-oracle]
+network:
+  latency: 1ms

@@ -1,7 +1,7 @@
 //! Reading a simulation without changing it: retained logs and events, the
 //! observed world and fault timeline, and waiting for a condition. Every
 //! command reads what has happened and exits unless asked to follow.
-use super::{daemon, output};
+use super::{daemon, output, output::seconds};
 use futures_util::StreamExt;
 use seedbox_api::{
     EventDelivery, FaultStatus, LogDelivery, LogEntry, MachineCondition, Phase, PlaybackRate,
@@ -232,6 +232,9 @@ pub(super) fn events(id: &SimulationId, follow: bool) -> Result<u8> {
 
 /// A short description of what a fault action targets.
 fn target(action: &serde_json::Value) -> String {
+    if action["action"] == "trigger" {
+        return trigger_rule(action);
+    }
     let Some(fields) = action.as_object() else {
         return String::new();
     };
@@ -257,9 +260,101 @@ fn target(action: &serde_json::Value) -> String {
         .join(" ")
 }
 
-fn seconds(ns: u64) -> String {
-    let text = format!("{:.3}", ns as f64 / 1e9);
-    format!("{}s", text.trim_end_matches('0').trim_end_matches('.'))
+/// A trigger rule in one line: `event name=commit nth=2 -> crash machine=b`.
+fn trigger_rule(rule: &serde_json::Value) -> String {
+    let mut when = rule["when"].clone();
+    let on = when
+        .as_object_mut()
+        .and_then(|fields| fields.remove("on"))
+        .and_then(|on| on.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let mut parts = vec![on];
+    parts.extend(Some(target(&when)).filter(|t| !t.is_empty()));
+    if let Some(nth) = rule["nth"].as_u64() {
+        parts.push(format!("nth={nth}"));
+    }
+    if let Some(delay) = rule["delay_ns"].as_u64() {
+        parts.push(format!("delay={}", seconds(delay)));
+    }
+    if let Some(within) = rule["within_ns"].as_u64() {
+        parts.push(format!("within={}", seconds(within)));
+    }
+    let then = &rule["then"];
+    parts.push(format!(
+        "-> {} {}",
+        then["action"].as_str().unwrap_or("-"),
+        target(then)
+    ));
+    parts.join(" ").trim_end().to_owned()
+}
+
+/// A trigger's receipt, with a fired trigger's effect as its fault reports it.
+fn trigger_outcome(trigger: &seedbox_api::TriggerState, world: &seedbox_api::WorldState) -> String {
+    use seedbox_api::{FaultStatus, TriggerStatus};
+    match trigger.status {
+        TriggerStatus::Armed if trigger.seen > 0 => format!("armed (seen {})", trigger.seen),
+        TriggerStatus::Fired => {
+            let fault = trigger
+                .fault_id
+                .and_then(|id| world.faults.iter().find(|f| f.id == id));
+            match fault {
+                Some(f) if f.status == FaultStatus::Applied => {
+                    with_counts("applied".into(), f.counts.as_ref())
+                }
+                Some(f) if f.status == FaultStatus::Failed => "ineffective".into(),
+                _ => "fired".into(),
+            }
+        }
+        TriggerStatus::CutOff => "cut off".into(),
+        status => output::word(&status).to_lowercase(),
+    }
+}
+
+/// Guest property results reported beside the oracle verdict.
+pub(super) fn properties(id: &SimulationId, json: bool) -> Result<u8> {
+    let client = daemon::connect(None)?;
+    let resource = super::simulations::runtime()?
+        .block_on(client.describe(id))
+        .map_err(super::simulations::client_error)?;
+    let Some(assessment) = resource.status.properties else {
+        return Err(Error::Setup(format!(
+            "{id}: no property evidence yet; it arrives with the final report"
+        )));
+    };
+    if json {
+        output::json(&assessment)?;
+        return Ok(0);
+    }
+    output::table(
+        [
+            "PROPERTY", "KIND", "STATUS", "PASSES", "FAILURES", "EXAMPLE",
+        ],
+        assessment
+            .properties
+            .iter()
+            .map(|property| {
+                [
+                    property.id.clone(),
+                    output::word(&property.kind).to_lowercase(),
+                    output::word(&property.status).to_lowercase(),
+                    property.passes.to_string(),
+                    property.failures.to_string(),
+                    property.example.as_ref().map_or_else(
+                        || "-".into(),
+                        |example| {
+                            format!(
+                                "{} at {}",
+                                example.origin.machine,
+                                seconds(example.origin.time_ns)
+                            )
+                        },
+                    ),
+                ]
+            })
+            .collect(),
+    )?;
+    super::simulations::property_fields(&assessment);
+    Ok(0)
 }
 
 /// Machines, links with their counters and faults as the server observes them now.
@@ -282,8 +377,11 @@ pub(super) fn world(id: &SimulationId, json: bool) -> Result<u8> {
                     m.name.clone(),
                     output::word(&m.condition).to_lowercase(),
                     m.incarnation.to_string(),
-                    m.exit_code
-                        .map_or_else(|| "-".into(), |code| code.to_string()),
+                    match (m.exit_code, m.exited_out_of_memory()) {
+                        (Some(code), Some(_)) => format!("{code} (out of memory)"),
+                        (Some(code), None) => code.to_string(),
+                        (None, _) => "-".into(),
+                    },
                     if m.oracle { "yes".into() } else { "-".into() },
                 ]
             })
@@ -339,7 +437,7 @@ pub(super) fn world(id: &SimulationId, json: bool) -> Result<u8> {
                             .map(target)
                             .or_else(|| f.machine.clone())
                             .unwrap_or_default(),
-                        output::word(&f.status).to_lowercase(),
+                        with_counts(output::word(&f.status).to_lowercase(), f.counts.as_ref()),
                         f.applied_time_ns.map_or_else(|| "-".into(), seconds),
                         if f.active { "yes".into() } else { "-".into() },
                     ]
@@ -352,13 +450,145 @@ pub(super) fn world(id: &SimulationId, json: bool) -> Result<u8> {
     Ok(0)
 }
 
+/// A fault status with what it matched and did, when the engine counted it:
+/// `applied (matched 3, failed 1)`. Zero counts are left out.
+fn with_counts(status: String, counts: Option<&serde_json::Value>) -> String {
+    let Some(kinds) = counts.and_then(|c| c.as_object()) else {
+        return status;
+    };
+    let parts: Vec<String> = kinds
+        .values()
+        .filter_map(|kind| kind.as_object())
+        .flat_map(|kind| kind.iter())
+        .filter_map(|(name, value)| {
+            let value = value.as_u64().filter(|v| *v > 0)?;
+            Some(format!("{} {value}", name.replace('_', " ")))
+        })
+        .collect();
+    if parts.is_empty() {
+        format!("{status} (nothing matched)")
+    } else {
+        format!("{status} ({})", parts.join(", "))
+    }
+}
+
+/// Kinds of failure-timeline entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(super) enum ExplainKind {
+    /// Anchors, reseeds, trigger and choice inputs.
+    Input,
+    /// Faults, with the input or trigger behind each.
+    Fault,
+    /// Trigger matches.
+    Trigger,
+    /// Crashes, reboots, pauses and throttles.
+    Lifecycle,
+    /// Machines becoming ready.
+    Ready,
+    /// Machine and main-process exits.
+    Exit,
+    /// Oracle control operations.
+    Control,
+    /// Answered structured choices.
+    Choice,
+    /// Workload setup completion.
+    Setup,
+    /// First occurrence of each SDK event.
+    Event,
+    /// First time each state value was reached.
+    State,
+    /// First time each state transition happened.
+    Transition,
+    /// First pass and first failure of each property.
+    Property,
+}
+
+impl ExplainKind {
+    fn of(kind: seedbox_api::ExplanationKind) -> Self {
+        use seedbox_api::ExplanationKind as K;
+        match kind {
+            K::Input => Self::Input,
+            K::Fault => Self::Fault,
+            K::Trigger => Self::Trigger,
+            K::Lifecycle => Self::Lifecycle,
+            K::Ready => Self::Ready,
+            K::Exit => Self::Exit,
+            K::Control => Self::Control,
+            K::Choice => Self::Choice,
+            K::Setup => Self::Setup,
+            K::Event => Self::Event,
+            K::State => Self::State,
+            K::Transition => Self::Transition,
+            K::Property => Self::Property,
+        }
+    }
+}
+
+/// A completed simulation's failure timeline from retained evidence.
+pub(super) fn explain(
+    id: &SimulationId,
+    kinds: &[ExplainKind],
+    machine: Option<&str>,
+    json: bool,
+) -> Result<u8> {
+    let client = daemon::connect(None)?;
+    let mut explanation = super::simulations::runtime()?
+        .block_on(client.explanation(id))
+        .map_err(super::simulations::client_error)?;
+    explanation.entries.retain(|e| {
+        (kinds.is_empty() || kinds.contains(&ExplainKind::of(e.kind)))
+            && machine.is_none_or(|m| e.machine.as_deref().is_none_or(|em| em == m))
+    });
+    if json {
+        output::json(&explanation)?;
+        return Ok(0);
+    }
+    output::table(
+        ["AT", "MACHINE", "KIND", "ID", "DETAIL"],
+        explanation
+            .entries
+            .iter()
+            .map(|e| {
+                let kind = output::word(&e.kind).to_lowercase();
+                [
+                    seconds(e.at_ns),
+                    match (&e.machine, e.incarnation) {
+                        (Some(m), Some(i)) if i > 0 => format!("{m}#{i}"),
+                        (Some(m), _) => m.clone(),
+                        (None, _) => "-".into(),
+                    },
+                    if e.violation {
+                        format!("{kind} VIOLATED")
+                    } else {
+                        kind
+                    },
+                    e.id.clone(),
+                    if e.links.is_empty() {
+                        e.detail.clone()
+                    } else {
+                        format!("{} [{}]", e.detail, e.links.join(", "))
+                    },
+                ]
+            })
+            .collect(),
+    )?;
+    for omission in &explanation.omissions {
+        output::field("omitted", omission);
+    }
+    Ok(0)
+}
+
 /// The fault timeline: recorded and scheduled faults with what became of each.
 pub(super) fn timeline(id: &SimulationId, json: bool) -> Result<u8> {
     let client = daemon::connect(None)?;
-    let (timeline, world) = super::simulations::runtime()?.block_on(async {
+    let (timeline, world, completed) = super::simulations::runtime()?.block_on(async {
         let timeline = client.timeline(id).await;
         let world = client.world(id).await.ok();
-        (timeline, world)
+        let completed = client
+            .describe(id)
+            .await
+            .is_ok_and(|r| r.status.phase == seedbox_api::Phase::Completed);
+        (timeline, world, completed)
     });
     let timeline = timeline.map_err(super::simulations::client_error)?;
     if json {
@@ -369,19 +599,52 @@ pub(super) fn timeline(id: &SimulationId, json: bool) -> Result<u8> {
         let Some(world) = &world else {
             return "-".into();
         };
-        if entry
+        if let Some(reason) = entry
             .id
             .strip_prefix("program:")
-            .is_some_and(|key| world.override_rejections.contains_key(key))
+            .and_then(|key| world.override_rejections.get(key))
         {
-            return "rejected".into();
+            // Gated generated faults were skipped by design, not refused.
+            return if reason.starts_with("skipped") {
+                "skipped"
+            } else {
+                "rejected"
+            }
+            .into();
+        }
+        if let Some(trigger) = entry
+            .id
+            .strip_prefix("program:")
+            .and_then(|key| world.triggers.get(key))
+        {
+            return trigger_outcome(trigger, world);
+        }
+        if let Some(choice) = entry
+            .id
+            .strip_prefix("program:")
+            .and_then(|key| world.choice_inputs.get(key))
+        {
+            return match &choice.chosen {
+                Some(chosen) => format!("selected {chosen}"),
+                None if completed => "unused".into(),
+                None => "armed".into(),
+            };
+        }
+        if matches!(entry.action["action"].as_str(), Some("trigger" | "choice")) {
+            return if completed { "not reached" } else { "upcoming" }.into();
         }
         entry
             .fault_id
             .and_then(|id| world.faults.iter().find(|f| f.id == id))
             .map_or_else(
-                || "upcoming".into(),
-                |fault| output::word(&fault.status).to_lowercase(),
+                // A finished run never reaches entries it had not admitted.
+                || if completed { "not reached" } else { "upcoming" }.into(),
+                |fault| {
+                    with_counts(
+                        output::word(&fault.status).to_lowercase(),
+                        fault.counts.as_ref(),
+                    )
+                },
             )
     };
     output::table(
@@ -598,6 +861,20 @@ pub(super) fn wait(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trigger_rules_render_on_one_line() {
+        let rule = serde_json::json!({
+            "action": "trigger",
+            "when": {"on": "event", "name": "commit", "machine": "a"},
+            "nth": 2,
+            "delay_ns": 500_000_000,
+            "then": {"action": "crash", "machine": "b"},
+        });
+        assert_eq!(
+            super::target(&rule),
+            "event machine=a name=commit nth=2 delay=0.5s -> crash machine=b"
+        );
+    }
     use super::*;
 
     #[test]
@@ -673,5 +950,157 @@ mod tests {
         assert!(!filter.admits(&entry(15, 0, seedbox_api::LogStream::Stderr)));
         assert!(!filter.admits(&entry(15, 1, seedbox_api::LogStream::Stdout)));
         assert!(filter.admits(&LogEntry::SourceUnavailable));
+    }
+
+    #[test]
+    fn fault_counts_summarize_nonzero_values() {
+        let counts = serde_json::json!({"disk_error_counts": {"failed": 1, "matched": 3}});
+        assert_eq!(
+            with_counts("applied".into(), Some(&counts)),
+            "applied (failed 1, matched 3)"
+        );
+        let none = serde_json::json!({"disk_error_counts": {"failed": 0, "matched": 0}});
+        assert_eq!(
+            with_counts("applied".into(), Some(&none)),
+            "applied (nothing matched)"
+        );
+        assert_eq!(with_counts("failed".into(), None), "failed");
+        let selection = serde_json::json!({"selection_counts": {"dropped": 2, "matched": 5}});
+        assert_eq!(
+            with_counts("applied".into(), Some(&selection)),
+            "applied (dropped 2, matched 5)"
+        );
+    }
+}
+
+/// Rerun a completed simulation to a moment and run a command in one of its
+/// machines there; print the command's output and exit as `EXEC_HELP` says.
+pub(super) fn exec(
+    id: &SimulationId,
+    mut request: seedbox_api::ExecRequest,
+    keep: bool,
+) -> Result<u8> {
+    use super::simulations::client_error;
+    let client = daemon::connect(None)?;
+    request.request_id = Client::request_id().map_err(client_error)?;
+    let machine = request.machine.clone();
+    let cancellation = CancellationToken::default();
+    let _signals = super::signals::Signals::interrupt(&cancellation)?;
+    super::simulations::runtime()?.block_on(async {
+        let simulation = client
+            .submit_exec(id, &request)
+            .await
+            .map_err(client_error)?;
+        let rerun = simulation.metadata.id.clone();
+        eprintln!(
+            "exec: rerun {rerun} to {} on {machine}",
+            seconds(request.at_ns)
+        );
+        let mut stream = log_stream(&client, &rerun, Some(&machine), true).await?;
+        let mut pending = Vec::new();
+        let mut outcome = None;
+        while outcome.is_none() && !cancellation.is_cancelled() {
+            let Some(next) = stream.next().await else {
+                break;
+            };
+            match next.map_err(client_error)? {
+                LogDelivery::Entry {
+                    entry:
+                        LogEntry::Bytes {
+                            stream: seedbox_api::LogStream::Stderr,
+                            bytes,
+                            ..
+                        },
+                    ..
+                } => {
+                    pending.extend(bytes);
+                    while let Some(end) = pending.iter().position(|b| *b == b'\n') {
+                        let line: Vec<u8> = pending.drain(..=end).collect();
+                        let text = String::from_utf8_lossy(&line[..line.len() - 1]);
+                        match exec_line(&text) {
+                            Some(ExecLine::Output(out)) => {
+                                output::bytes(format!("{out}\n").as_bytes())?
+                            }
+                            Some(ExecLine::Exit(code, note)) => {
+                                eprintln!("exec: {note}");
+                                outcome = Some(code);
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                LogDelivery::Closed => break,
+                _ => {}
+            }
+        }
+        if !keep {
+            let _ = client.stop(&rerun).await;
+        }
+        Ok(outcome.unwrap_or_else(|| {
+            eprintln!("exec: the rerun ended before the command ran or finished");
+            2
+        }))
+    })
+}
+
+enum ExecLine<'a> {
+    Output(&'a str),
+    /// The exit status and the supervisor's note.
+    Exit(u8, &'a str),
+}
+
+/// A supervisor line about the command: `seedbox exec ID| OUTPUT` or
+/// `seedbox exec ID: NOTE` (`exited N`, `killed by signal N`, `NAME: not
+/// found`; `start` is not an exit).
+fn exec_line(line: &str) -> Option<ExecLine<'_>> {
+    let rest = line.strip_prefix("seedbox exec ")?;
+    let digits = rest.find(|c: char| !c.is_ascii_digit())?;
+    let (number, rest) = rest.split_at(digits);
+    if number.is_empty() {
+        return None;
+    }
+    if let Some(out) = rest.strip_prefix("| ") {
+        return Some(ExecLine::Output(out));
+    }
+    let note = rest.strip_prefix(": ")?;
+    match note {
+        "exited 0" => Some(ExecLine::Exit(0, note)),
+        _ if note.starts_with("exited ") || note.starts_with("killed by signal ") => {
+            Some(ExecLine::Exit(1, note))
+        }
+        _ if note.ends_with(": not found") => Some(ExecLine::Exit(2, note)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod exec_tests {
+    use super::*;
+
+    #[test]
+    fn supervisor_exec_lines_are_output_or_an_exit() {
+        assert!(matches!(
+            exec_line("seedbox exec 4| a: b | c"),
+            Some(ExecLine::Output("a: b | c"))
+        ));
+        assert!(matches!(
+            exec_line("seedbox exec 4: exited 0"),
+            Some(ExecLine::Exit(0, _))
+        ));
+        assert!(matches!(
+            exec_line("seedbox exec 4: exited 3"),
+            Some(ExecLine::Exit(1, _))
+        ));
+        assert!(matches!(
+            exec_line("seedbox exec 4: killed by signal 9"),
+            Some(ExecLine::Exit(1, _))
+        ));
+        assert!(matches!(
+            exec_line("seedbox exec 4: ls: not found"),
+            Some(ExecLine::Exit(2, _))
+        ));
+        assert!(exec_line("seedbox exec 4: start /bin/ls").is_none());
+        assert!(exec_line("seedbox exec x| y").is_none());
+        assert!(exec_line("application line").is_none());
     }
 }

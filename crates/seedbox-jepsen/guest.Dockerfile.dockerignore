@@ -1,0 +1,3 @@
+# Only the built guest binaries enter the oracle image's build context.
+*
+!build/jepsen/*/seedbox-jepsen

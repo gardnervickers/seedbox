@@ -1,0 +1,17 @@
+# Generic faults for the RustFS object workload: power loss of one server at
+# a time, process pauses and partitions, aimed at nothing in particular. Four
+# servers with one drive each tolerate one lost server for reads and writes.
+# A rebooted server starts rustfs again by itself.
+start: 20s
+end: 80s
+interval: 3s
+faults:
+  - kind: crash
+    weight: 2
+    downtime: {min: 1s, max: 6s}
+  - kind: pause_process
+    weight: 2
+    duration: {min: 500ms, max: 8s}
+  - kind: partition
+    weight: 2
+    duration: {min: 1s, max: 8s}

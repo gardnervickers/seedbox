@@ -32,6 +32,10 @@ impl SysReg {
     pub const CNTV_CTL: Self = Self(0xdf19);
     /// Read-only EL0 thread ID register (S3_3_C13_C0_3).
     pub const TPIDRRO_EL0: Self = Self(0xde83);
+    /// S3_0_C4_C0_1: EL1 exception return address.
+    pub const ELR_EL1: Self = Self(0xc201);
+    /// S3_0_C4_C1_0: EL0 stack pointer.
+    pub const SP_EL0: Self = Self(0xc208);
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Exit {
@@ -117,6 +121,11 @@ pub trait Backend: Sized {
     }
     /// Enter once. Interrupted stops hold no operation; do not call complete().
     fn run(&mut self) -> Result<RunStop>;
+    /// After an Interrupted stop: if the backend's stall watch forced it,
+    /// how long the vCPU had run in that entry without an exit.
+    fn take_stall(&mut self) -> Option<std::time::Duration> {
+        None
+    }
     fn complete(&mut self, read: Option<u64>) -> Result<()>;
     fn inject_spi(&mut self, intid: u32, level: bool) -> Result<()>;
     fn dirty_pages(&self, slot: u32) -> Result<DirtyPages>;
