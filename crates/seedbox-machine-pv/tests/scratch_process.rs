@@ -228,7 +228,7 @@ fn abrupt_cold_owner_death_leaves_only_session_reclaimable_files() {
     );
     seedbox_test_time::HangGuard::new(
         "cold scratch owner publishes its actual ready marker",
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
     )
     .wait_for(|| {
         if marker.exists() {

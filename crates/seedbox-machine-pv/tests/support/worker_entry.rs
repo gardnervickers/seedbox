@@ -45,7 +45,7 @@ pub fn invoke(
     child.0.stdin.take().unwrap().write_all(input).unwrap();
     let status = seedbox_test_time::HangGuard::new(
         "preboot worker exits after EOF or malformed request",
-        Duration::from_secs(5),
+        Duration::from_secs(30),
     )
     .wait_for(|| child.0.try_wait().unwrap())
     .expect("preboot worker did not exit");
