@@ -43,6 +43,10 @@ seedbox-test.workspace = true
 seedbox-test-time.workspace = true
 seedbox-machine = { workspace = true, features = ["test-support"] }
 
+# Suite membership is read from Cargo metadata by seedbox-check.
+[package.metadata.seedbox-check.suites]
+linux-oci = ["oci-tests"]
+
 [features]
 test-support = []
 oci-tests = []

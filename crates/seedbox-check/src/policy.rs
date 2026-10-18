@@ -335,24 +335,73 @@ pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -
     }
     missing
 }
-pub fn features_for(package: &str, suites: &[Suite]) -> Vec<String> {
-    let pairs: &[(Suite, &str)] = match package {
-        "seedbox-application" => &[(Suite::LinuxOci, "oci-tests")],
-        "seedbox" => &[
-            (Suite::LinuxApps, "application-tests"),
-            (Suite::LinuxApps, "etcd-prep-tests"),
-            (Suite::MacApps, "application-tests"),
-            (Suite::LinuxPause, "retained-run-tests"),
-        ],
-        _ => &[],
-    };
+#[derive(Debug, PartialEq, Eq)]
+pub struct SuiteTests {
+    pub package: String,
+    pub features: Vec<String>,
+    pub targets: Vec<String>,
+}
+
+// Packages declare suite -> Cargo features in package.metadata.seedbox-check.suites.
+// Targets remain Cargo-owned: required-features determines which tests to run.
+pub fn suite_test_targets(metadata: &Value, suites: &[Suite]) -> Result<Vec<SuiteTests>, String> {
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or("Cargo metadata has no packages")?;
     let mut result = Vec::new();
-    for (suite, feature) in pairs {
-        if suites.contains(suite) && !result.iter().any(|s| s == feature) {
-            result.push((*feature).into());
+    for package in packages {
+        let declarations = &package["metadata"]["seedbox-check"]["suites"];
+        if declarations.is_null() {
+            continue;
         }
+        let name = package["name"]
+            .as_str()
+            .ok_or("Cargo package has no name")?;
+        let declarations = declarations.as_object().ok_or_else(|| {
+            format!("{name}: seedbox-check.suites must map suites to feature lists")
+        })?;
+        let mut features = BTreeSet::new();
+        for (suite, declared) in declarations {
+            let suite = SUITES
+                .iter()
+                .find(|s| s.name() == suite)
+                .ok_or_else(|| format!("{name}: unknown seedbox-check suite {suite}"))?;
+            let declared = declared.as_array().ok_or_else(|| {
+                format!("{name}: suite {} must contain a feature list", suite.name())
+            })?;
+            for feature in declared {
+                let feature = feature.as_str().ok_or_else(|| {
+                    format!("{name}: suite {} feature must be a string", suite.name())
+                })?;
+                if package["features"].get(feature).is_none() {
+                    return Err(format!(
+                        "{name}: suite {} has unknown feature {feature}",
+                        suite.name()
+                    ));
+                }
+                if suites.contains(suite) {
+                    features.insert(feature.to_owned());
+                }
+            }
+        }
+        if features.is_empty() {
+            continue;
+        }
+        let features: Vec<_> = features.into_iter().collect();
+        let targets = feature_test_targets(metadata, name, &features)?;
+        if targets.is_empty() {
+            return Err(format!(
+                "{name}: no integration targets require {features:?}"
+            ));
+        }
+        result.push(SuiteTests {
+            package: name.into(),
+            features,
+            targets,
+        });
     }
-    result
+    result.sort_by(|a, b| a.package.cmp(&b.package));
+    Ok(result)
 }
 pub fn feature_test_targets(
     metadata: &Value,

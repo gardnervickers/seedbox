@@ -713,34 +713,25 @@ fn native<C: Commands>(
         fs::copy(executable, complete.join("seedbox")).map_err(|e| e.to_string())?;
         select_build(&mut checks.environment, &complete)?;
     }
-    for package in ["seedbox", "seedbox-application"] {
+    let mut job = checks.job(
+        "test-targets",
+        words(&[
+            "cargo",
+            "metadata",
+            "--no-deps",
+            "--format-version=1",
+            "--locked",
+        ]),
+    );
+    job.capture = true;
+    let Some(output) = checks.run(job) else {
+        return Ok(());
+    };
+    let metadata = serde_json::from_str(&output).map_err(|e| e.to_string())?;
+    for tests in suite_test_targets(&metadata, suites)? {
+        let package = tests.package.as_str();
         let mut command = words(&["cargo", "test", "-p", package, "--locked"]);
-        let features = features_for(package, suites);
-        if features.is_empty() {
-            continue;
-        }
-        let mut job = checks.job(
-            "test-targets",
-            words(&[
-                "cargo",
-                "metadata",
-                "--no-deps",
-                "--format-version=1",
-                "--locked",
-            ]),
-        );
-        job.capture = true;
-        let Some(output) = checks.run(job) else {
-            return Ok(());
-        };
-        let metadata = serde_json::from_str(&output).map_err(|e| e.to_string())?;
-        let targets = feature_test_targets(&metadata, package, &features)?;
-        if targets.is_empty() {
-            return Err(format!(
-                "{package}: no integration targets require {features:?}"
-            ));
-        }
-        for target in targets {
+        for target in tests.targets {
             command.extend(["--test".into(), target]);
         }
         let engine_requires_root = host.engine_needs_root(&checks.environment);
@@ -748,7 +739,7 @@ fn native<C: Commands>(
             checks,
             package,
             command,
-            &features,
+            &tests.features,
             host.root_prefix.as_deref(),
             engine_requires_root,
         )?;

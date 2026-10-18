@@ -200,7 +200,9 @@ fn test_raw_machine_requirements_do_not_acquire_etcd_oci_or_cli_inputs() {
 
 #[test]
 fn test_etcd_smoke_target_is_discovered_only_by_oci_linux_apps_feature() {
-    let metadata = json!({"packages": [{"name":"seedbox", "targets":[
+    let metadata = json!({"packages": [{"name":"renamed-cli",
+        "metadata":{"seedbox-check":{"suites":{"linux-apps":["etcd-prep-tests"]}}},
+        "features":{"etcd-prep-tests":[]}, "targets":[
         {"name":"etcd_service_native", "kind":["test"], "required-features":["etcd-prep-tests"]}
     ]}]});
     for (names, expected) in [
@@ -208,11 +210,12 @@ fn test_etcd_smoke_target_is_discovered_only_by_oci_linux_apps_feature() {
         (vec!["machine-pv-x86", "machine-tcg"], vec![]),
         (vec!["mac-apps"], vec![]),
     ] {
-        let features = features_for("seedbox", &suites(&names));
-        assert_eq!(
-            feature_test_targets(&metadata, "seedbox", &features).unwrap(),
-            strings(&expected)
-        );
+        let discovered = suite_test_targets(&metadata, &suites(&names)).unwrap();
+        let targets: Vec<_> = discovered
+            .into_iter()
+            .flat_map(|tests| tests.targets)
+            .collect();
+        assert_eq!(targets, strings(&expected));
     }
 }
 
@@ -252,25 +255,126 @@ fn test_groups_and_implied_suites_expand_in_documented_order() {
     }
 }
 #[test]
-fn test_features_follow_suites_not_host_probes() {
-    for (package, names, expected) in [
-        (
-            "seedbox",
-            vec!["linux-apps"],
-            vec!["application-tests", "etcd-prep-tests"],
-        ),
-        ("seedbox", vec!["mac-apps"], vec!["application-tests"]),
-        ("seedbox", vec!["machine-pv-x86", "machine-tcg"], vec![]),
-        (
-            "seedbox",
-            vec!["linux-oci", "linux-pause"],
-            vec!["retained-run-tests"],
-        ),
-        ("seedbox-application", vec!["linux-oci"], vec!["oci-tests"]),
-    ] {
-        assert_eq!(features_for(package, &suites(&names)), strings(&expected));
+fn test_workspace_suite_targets_preserve_portable_linux_mac_and_pause_selection() {
+    use seedbox_exec::Guarded;
+    let output = std::process::Command::new(env!("CARGO"))
+        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .args([
+            "metadata",
+            "--no-deps",
+            "--format-version=1",
+            "--locked",
+            "--offline",
+        ])
+        .guarded_output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata = serde_json::from_slice(&output.stdout).unwrap();
+    for names in [vec!["portable"], vec!["machine-pv-x86", "machine-tcg"]] {
+        assert!(suite_test_targets(&metadata, &suites(&names))
+            .unwrap()
+            .is_empty());
     }
-    assert!(features_for("seedbox-driver", &suites(&["mac"])).is_empty());
+    for (names, expected) in [
+        (
+            vec!["linux"],
+            vec![
+                SuiteTests {
+                    package: "seedbox".into(),
+                    features: strings(&["application-tests", "etcd-prep-tests"]),
+                    targets: strings(&["applications", "etcd_service_native"]),
+                },
+                SuiteTests {
+                    package: "seedbox-application".into(),
+                    features: strings(&["oci-tests"]),
+                    targets: strings(&["oci_engine"]),
+                },
+            ],
+        ),
+        (
+            vec!["mac"],
+            vec![SuiteTests {
+                package: "seedbox".into(),
+                features: strings(&["application-tests"]),
+                targets: strings(&["applications"]),
+            }],
+        ),
+        (
+            vec!["linux-pause"],
+            vec![SuiteTests {
+                package: "seedbox".into(),
+                features: strings(&["retained-run-tests"]),
+                targets: strings(&["host_pause"]),
+            }],
+        ),
+    ] {
+        assert_eq!(
+            suite_test_targets(&metadata, &suites(&names)).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn test_suite_discovery_follows_new_packages_features_and_required_features() {
+    let metadata = json!({"packages":[
+        {"name":"unregistered", "targets":[{"name":"not-selected", "kind":["test"], "required-features":["native"]}]},
+        {"name":"new-package", "metadata":{"seedbox-check":{"suites":{
+            "linux-oci":["native"], "linux-apps":["native", "extra"], "mac-apps":["extra"]
+        }}}, "features":{"native":[], "extra":[]}, "targets":[
+            {"name":"ordinary", "kind":["test"]},
+            {"name":"native-test", "kind":["test"], "required-features":["native"]},
+            {"name":"combined", "kind":["test"], "required-features":["native", "extra"]},
+            {"name":"helper", "kind":["bin"], "required-features":["native"]}
+        ]}
+    ]});
+    assert_eq!(
+        suite_test_targets(&metadata, &suites(&["linux-oci"])).unwrap(),
+        vec![SuiteTests {
+            package: "new-package".into(),
+            features: strings(&["native"]),
+            targets: strings(&["native-test"])
+        }]
+    );
+    assert_eq!(
+        suite_test_targets(&metadata, &suites(&["linux"])).unwrap(),
+        vec![SuiteTests {
+            package: "new-package".into(),
+            features: strings(&["extra", "native"]),
+            targets: strings(&["combined", "native-test"])
+        }]
+    );
+}
+
+#[test]
+fn test_invalid_suite_declarations_fail_instead_of_silently_skipping_tests() {
+    assert!(suite_test_targets(&json!({}), &suites(&["linux"])).is_err());
+    for (declarations, error) in [
+        (json!([]), "must map suites"),
+        (
+            json!({"typo":["native"]}),
+            "unknown seedbox-check suite typo",
+        ),
+        (json!({"linux-oci":"native"}), "must contain a feature list"),
+        (json!({"linux-oci":[false]}), "feature must be a string"),
+        (json!({"linux-oci":["typo"]}), "unknown feature typo"),
+        (
+            json!({"linux-oci":["native"]}),
+            "no integration targets require",
+        ),
+    ] {
+        let metadata = json!({"packages":[{"name":"new-package", "metadata":{"seedbox-check":{"suites":declarations}}, "features":{"native":[]}, "targets":[]}]});
+        assert!(
+            suite_test_targets(&metadata, &suites(&["linux"]))
+                .unwrap_err()
+                .contains(error),
+            "{error}"
+        );
+    }
 }
 #[test]
 fn test_hardware_targets_follow_cargo_declarations() {
