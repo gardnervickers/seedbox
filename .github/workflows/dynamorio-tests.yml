@@ -1,0 +1,59 @@
+name: DynamoRIO integration
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dynamorio-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Native ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86-64
+            runner: ubuntu-24.04
+          - arch: ARM64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 100
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TARGET_DIR: '${{ github.workspace }}/target'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare the development shell
+        run: |
+          seedbox_flake=$(bash tools/dev-flake.sh)
+          nix develop "$seedbox_flake" --profile "$RUNNER_TEMP/dr-dev" --command true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dynamorio-${{ runner.arch }}-${{ hashFiles('flake.lock') }}
+          cmd-format: nix develop "git+file://${{ github.workspace }}?submodules=1" --command {0}
+          cache-bin: false
+      - name: Build native DR and public SDK fixtures
+        run: |
+          seedbox_flake=$(bash tools/dev-flake.sh)
+          fixtures=$(nix build "$seedbox_flake#dynamorioTestFixtures" --out-link "$RUNNER_TEMP/dr-fixtures" --print-out-paths)
+          echo "SEEDBOX_DYNAMORIO_FIXTURES=$fixtures" >> "$GITHUB_ENV"
+      - name: Portable prerequisites then external native tests
+        run: |
+          seedbox_flake=$(bash tools/dev-flake.sh)
+          nix develop "$seedbox_flake" --command bash harness/check.sh dynamorio

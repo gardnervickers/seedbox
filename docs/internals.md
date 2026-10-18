@@ -90,6 +90,30 @@ the Seedbox branch. Add new DR files to its index so local Nix builds include th
 The Mac builder exports tracked submodule files with local edits, excluding Git
 metadata and ignored build output, to its Linux container.
 
+## External DynamoRIO tests
+
+The `dynamorio` named suite runs native Linux x86-64/ARM64 application fixtures
+from [seedbox-machine/tests/dynamorio](../crates/seedbox-machine/tests/dynamorio),
+with native controls, the packaged `drrun`, and a public drmgr/drreg client.
+It checks signal context/vector/mask/alternate-stack restoration, live registers
+and flags under instrumentation, and ARM load/store-exclusive application semantics.
+Client execution is asserted independently. These host tests do not validate the
+Seedbox guest epoch or executable-FD handoff, nor require KVM, root or Docker.
+
+From the checkout root inside the development shell:
+
+```sh
+seedbox_flake=$(bash tools/dev-flake.sh)
+export SEEDBOX_DYNAMORIO_FIXTURES=$(nix build "$seedbox_flake#dynamorioTestFixtures" --no-link --print-out-paths)
+bash harness/check.sh dynamorio
+```
+
+The checker requires prepared fixtures before building and runs portable checks
+first; portable's `--all-features --no-run` compiles the integration entrypoint.
+Cargo discovers cases in the feature-gated target. For a focused development run,
+use `cargo test -p seedbox-machine --features dynamorio-tests --test dynamorio`.
+[Hosted CI](../.github/workflows/dynamorio-tests.yml) runs both native architectures.
+
 ## ARM idle rendezvous
 
 Making an interrupt pending while idle has interrupts masked can slide delivery past a later unmask.

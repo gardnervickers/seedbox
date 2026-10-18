@@ -230,6 +230,39 @@ fn test_missing_tcg_list_exits_two_without_probing_kvm_or_building() {
     assert!(c.commands.jobs.is_empty());
 }
 #[test]
+fn dynamorio_suite_is_unprivileged_native_and_requires_prepared_inputs() {
+    let temp = fixture();
+    let mut c = checks(&temp.0);
+    let options = options(strings(&["dynamorio", "--list"])).unwrap();
+    assert_eq!(options.suites, [Suite::Portable, Suite::Dynamorio]);
+    let observed = observe(&mut c, &options.suites).unwrap();
+    assert!(c.commands.jobs.is_empty(), "must not probe KVM or sudo");
+    assert_eq!(coordinate(&mut c, &observed, &options).unwrap(), 2);
+    assert!(
+        c.commands.jobs.is_empty(),
+        "missing fixtures fail before builds"
+    );
+    let mut h = host();
+    h.kvm = None;
+    h.tools.clear();
+    h.root_prefix = None;
+    let env = env(&[("SEEDBOX_DYNAMORIO_FIXTURES", temp.0.to_str().unwrap())]);
+    fs::create_dir_all(temp.0.join("bin")).unwrap();
+    fs::create_dir_all(temp.0.join("runtime/bin64")).unwrap();
+    fs::create_dir_all(temp.0.join("lib")).unwrap();
+    install_executable(&temp.0.join("runtime/bin64/drrun"), "fixture");
+    install_executable(&temp.0.join("bin/application"), "fixture");
+    fs::write(temp.0.join("lib/libpreserve.so"), "fixture").unwrap();
+    for arch in ["x86_64", "aarch64"] {
+        h.machine = arch.into();
+        assert!(requirements(Suite::Dynamorio, &h, &env, &temp.0).is_empty());
+    }
+    h.system = "Darwin".into();
+    assert!(requirements(Suite::Dynamorio, &h, &env, &temp.0)
+        .contains(&"requires Linux x86-64 or ARM64".into()));
+}
+
+#[test]
 fn test_default_is_portable_only() {
     assert_eq!(options(vec![]).unwrap().suites, [Suite::Portable]);
     assert_eq!(suites(&["portable"]), [Suite::Portable]);
@@ -280,6 +313,14 @@ fn test_workspace_suite_targets_preserve_portable_linux_mac_and_pause_selection(
             .is_empty());
     }
     for (names, expected) in [
+        (
+            vec!["dynamorio"],
+            vec![SuiteTests {
+                package: "seedbox-machine".into(),
+                features: strings(&["dynamorio-tests"]),
+                targets: strings(&["dynamorio"]),
+            }],
+        ),
         (
             vec!["linux"],
             vec![
@@ -1466,9 +1507,10 @@ fn oci_artifacts_follow_actual_package_feature_and_socket_permissions() {
                     "--message-format=json"
                 ])
             );
-            assert!(!c.commands.jobs[0]
-                .environment
-                .contains_key("CARGO_TARGET_DIR"));
+            assert_eq!(
+                c.commands.jobs[0].environment["CARGO_TARGET_DIR"],
+                "/workspace-cache"
+            );
             let mut expected = Vec::new();
             if !accessible {
                 expected = strings(&["sudo", "-n", "env", "PATH=/fixture/shell"]);

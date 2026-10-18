@@ -8,6 +8,7 @@ pub type Environment = BTreeMap<String, String>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Suite {
     Portable,
+    Dynamorio,
     MachineTcg,
     MachinePv,
     LinuxOci,
@@ -15,8 +16,9 @@ pub enum Suite {
     LinuxPause,
     MacApps,
 }
-pub const SUITES: [Suite; 7] = [
+pub const SUITES: [Suite; 8] = [
     Suite::Portable,
+    Suite::Dynamorio,
     Suite::MachineTcg,
     Suite::MachinePv,
     Suite::LinuxOci,
@@ -28,6 +30,7 @@ impl Suite {
     pub fn name(self) -> &'static str {
         match self {
             Self::Portable => "portable",
+            Self::Dynamorio => "dynamorio",
             Self::MachineTcg => "machine-tcg",
             Self::MachinePv => "machine-pv-x86",
             Self::LinuxOci => "linux-oci",
@@ -38,6 +41,7 @@ impl Suite {
     }
     pub fn description(self) -> &'static str {
         match self {
+        Self::Dynamorio=>"Linux x86-64/ARM64, explicit dynamorioTestFixtures; no KVM, root or engine.",
         Self::Portable=>"Any host: fmt, clippy, discovered portable tests and workload validation.",
         Self::MachineTcg=>"Linux x86-64, explicit machineTcgAssets/test fixtures and patched QEMU; no KVM.",
         Self::MachinePv=>"Linux x86-64, KVM, native PV worker and explicit machinePvAssets/test fixtures.",
@@ -253,6 +257,33 @@ pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -
             .unwrap_or("not probed")
     );
     if suite == Suite::Portable {
+        return missing;
+    }
+    if suite == Suite::Dynamorio {
+        need(
+            linux && (x86 || host.arm()),
+            "requires Linux x86-64 or ARM64".into(),
+        );
+        let fixtures = env.get("SEEDBOX_DYNAMORIO_FIXTURES").map(Path::new);
+        for file in [
+            "runtime/bin64/drrun",
+            "bin/application",
+            "lib/libpreserve.so",
+        ] {
+            need(
+                fixtures.is_some_and(|p| {
+                    let file = p.join(file);
+                    if file.extension().is_some_and(|ext| ext == "so") {
+                        file.is_file()
+                    } else {
+                        executable(&file)
+                    }
+                }),
+                format!(
+                    "set SEEDBOX_DYNAMORIO_FIXTURES to dynamorioTestFixtures containing {file}"
+                ),
+            );
+        }
         return missing;
     }
     if matches!(suite, Suite::MachineTcg | Suite::MachinePv) {

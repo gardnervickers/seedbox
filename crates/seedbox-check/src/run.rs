@@ -199,7 +199,7 @@ pub fn observe<C: Commands>(checks: &mut Checks<C>, suites: &[Suite]) -> Result<
     if host.system == "Linux"
         && suites
             .iter()
-            .any(|s| !matches!(s, Suite::Portable | Suite::MachineTcg))
+            .any(|s| !matches!(s, Suite::Portable | Suite::MachineTcg | Suite::Dynamorio))
     {
         if unsafe { libc::geteuid() } == 0 {
             host.root_prefix = Some(vec![]);
@@ -558,10 +558,8 @@ pub fn cargo_tests<C: Commands>(
     prefix: Option<&[String]>,
     engine_requires_root: bool,
 ) -> Result<(), String> {
+    // Respect the caller's private target across discovered package builds too.
     let mut env = checks.environment.clone();
-    if package != "seedbox" {
-        env.remove("CARGO_TARGET_DIR");
-    }
     if !features.is_empty() {
         command.extend(["--features".into(), features.join(",")]);
     }

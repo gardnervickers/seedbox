@@ -112,6 +112,7 @@
           tcgQemu = import ./nix/tcg.nix { inherit pkgs; };
           tcgLinux = import ./nix/tcg-linux.nix { inherit pkgs; };
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          dynamorioTestFixtures = import ./crates/seedbox-machine/dynamorio-test-fixtures.nix { inherit pkgs; };
           # Compile only: ARM native cfg with the project-managed target stdlib.
           # This does not change the host dev shell or build/run guest inputs.
           machinePvAarch64Check = pkgs.pkgsCross.aarch64-multiplatform.rustPlatform.buildRustPackage {

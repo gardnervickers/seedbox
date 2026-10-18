@@ -9,3 +9,7 @@
 - Do not add `tests/main.rs`: Cargo treats it as another integration target.
 - Guest C/headers and fixtures stay in `src/pv/`: `guest.nix` collects them and tests
   compile them by path. Follow root test rules: no sleeps or annotations.
+
+- Native DynamoRIO black-box tests live in `tests/dynamorio/`, with the single
+  `tests/dynamorio.rs` entrypoint and `dynamorio-test-fixtures.nix`. Use public
+  application/SDK behavior only; guest epoch/handoff coverage stays with guests.
