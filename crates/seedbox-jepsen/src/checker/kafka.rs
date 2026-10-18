@@ -12,6 +12,19 @@
 //! * Elle list-append cycles over the final read's version order. Kafka
 //!   transactions routinely interleave writes (Jepsen's G0 finding), so cycles
 //!   are reported but are not part of the verdict.
+//!
+//! The `queue` workload (acknowledged produces plus a consumer group) adds
+//! Jepsen's queue checks over the consumers' polls, tracking each consumer
+//! incarnation's assignment of each partition as a session:
+//! * skipped: within a session, a poll jumped over records the final read has;
+//! * nonmonotonic poll: within a session, an offset at or below the last one;
+//! * vanished: a polled value missing from the final read;
+//! * undelivered: a record below the group's final committed offset that no
+//!   consumer ever polled;
+//! * commit beyond end: a final committed offset past the partition's end.
+//!
+//! Redeliveries are counted but allowed: the group commits after it polls, so
+//! a failure between the two delivers a record again (at least once).
 use super::elle::{self, Atom, Mop};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -98,7 +111,7 @@ pub fn check(events: &[Value], workload: &str) -> Checked {
     let mut stats: BTreeMap<String, usize> = BTreeMap::new();
     let mut txns: Vec<elle::TxnOp> = Vec::new();
     let mut failed_values: HashMap<(i64, i64), Value> = HashMap::new();
-    if workload == "produce" {
+    if workload == "produce" || workload == "queue" {
         for e in events {
             if e["f"] != "send" || e["type"] == "invoke" {
                 continue;
@@ -248,6 +261,10 @@ pub fn check(events: &[Value], workload: &str) -> Checked {
             }
         }
     }
+    let queue = (workload == "queue").then(|| check_queue(events, &logs, &by_offset, &lso));
+    if let Some(queue) = &queue {
+        inconsistent.extend(queue.inconsistent.iter().cloned());
+    }
     let mut cycles = json!({});
     if !txns.is_empty() && final_read.is_some() {
         let reads = logs
@@ -268,7 +285,7 @@ pub fn check(events: &[Value], workload: &str) -> Checked {
             };
         }
     }
-    let result = json!({
+    let mut result = json!({
         "final": final_read.map(|f| f["status"].clone()),
         "records": logs.values().map(Vec::len).sum::<usize>(),
         "ops": stats,
@@ -278,7 +295,7 @@ pub fn check(events: &[Value], workload: &str) -> Checked {
         "duplicates": duplicates.len(),
         "inconsistent": inconsistent.len(), "nonmonotonic": nonmonotonic.len(), "elle": cycles,
     });
-    let violation = [
+    let mut violation = [
         &lost,
         &aborted_read,
         &aborted_poll,
@@ -289,11 +306,16 @@ pub fn check(events: &[Value], workload: &str) -> Checked {
     ]
     .iter()
     .any(|items| !items.is_empty());
-    let details = json!({
+    let mut details = json!({
         "lost": take50(&lost), "unseen": take50(&unseen), "aborted_read": take50(&aborted_read), "aborted_poll": take50(&aborted_poll),
         "torn": take50(&torn), "duplicates": take50(&duplicates), "inconsistent": take50(&inconsistent),
         "nonmonotonic": take50(&nonmonotonic),
     });
+    if let Some(queue) = queue {
+        violation |= queue.violation();
+        result["queue"] = queue.result();
+        details["queue"] = queue.details();
+    }
     Checked {
         result,
         details,
@@ -301,13 +323,202 @@ pub fn check(events: &[Value], workload: &str) -> Checked {
     }
 }
 
+/// What the queue checks found.
+#[derive(Default)]
+struct Queue {
+    drained: Option<Value>,
+    committed: BTreeMap<i64, i64>,
+    polled: usize,
+    redelivered: usize,
+    skipped: Vec<Value>,
+    nonmonotonic_poll: Vec<Value>,
+    vanished: Vec<Value>,
+    undelivered: Vec<Value>,
+    beyond_end: Vec<Value>,
+    inconsistent: Vec<Value>,
+    stats: BTreeMap<String, usize>,
+}
+
+impl Queue {
+    fn violation(&self) -> bool {
+        [
+            &self.skipped,
+            &self.nonmonotonic_poll,
+            &self.vanished,
+            &self.undelivered,
+            &self.beyond_end,
+        ]
+        .iter()
+        .any(|items| !items.is_empty())
+    }
+
+    fn result(&self) -> Value {
+        json!({
+            "drained": self.drained, "committed": self.committed, "polled": self.polled,
+            "redelivered": self.redelivered, "skipped": self.skipped.len(),
+            "nonmonotonic_poll": self.nonmonotonic_poll.len(), "vanished": self.vanished.len(),
+            "undelivered": self.undelivered.len(), "commit_beyond_end": self.beyond_end.len(),
+            "events": self.stats,
+        })
+    }
+
+    fn details(&self) -> Value {
+        json!({
+            "skipped": take50(&self.skipped), "nonmonotonic_poll": take50(&self.nonmonotonic_poll),
+            "vanished": take50(&self.vanished), "undelivered": take50(&self.undelivered),
+            "commit_beyond_end": take50(&self.beyond_end),
+        })
+    }
+}
+
+fn check_queue(
+    events: &[Value],
+    logs: &BTreeMap<i64, Vec<(i64, i64)>>,
+    by_offset: &HashMap<(i64, i64), i64>,
+    lso: &HashMap<i64, i64>,
+) -> Queue {
+    let mut q = Queue::default();
+    let values: std::collections::HashSet<(i64, i64)> = logs
+        .iter()
+        .flat_map(|(k, pairs)| pairs.iter().map(move |&(_, v)| (*k, v)))
+        .collect();
+    // (consumer, incarnation, partition) -> last polled offset in the session.
+    let mut sessions: HashMap<(i64, i64, i64), Option<i64>> = HashMap::new();
+    let mut deliveries: HashMap<(i64, i64), usize> = HashMap::new();
+    let partitions = |e: &Value| -> Vec<i64> {
+        e["partitions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(int)
+            .collect()
+    };
+    for e in events {
+        let kind = e["type"].as_str().unwrap_or("");
+        let (c, inc) = (int(&e["c"]).unwrap_or(-1), int(&e["inc"]).unwrap_or(-1));
+        match kind {
+            "assigned" => {
+                *q.stats.entry("assigned".into()).or_default() += 1;
+                for p in partitions(e) {
+                    sessions.insert((c, inc, p), None);
+                }
+            }
+            "revoked" | "lost" => {
+                *q.stats.entry(kind.into()).or_default() += 1;
+                for p in partitions(e) {
+                    sessions.remove(&(c, inc, p));
+                }
+            }
+            "consumer-closed" => sessions.retain(|(sc, si, _), _| (*sc, *si) != (c, inc)),
+            "consumer-error" => *q.stats.entry("consumer-error".into()).or_default() += 1,
+            "commit" => {
+                let result = e["result"].as_str().unwrap_or("");
+                *q.stats.entry(format!("commit-{result}")).or_default() += 1;
+            }
+            "drained" => {
+                q.drained = Some(e["status"].clone());
+                q.committed = e["committed"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(k, v)| Some((k.parse().ok()?, int(v)?)))
+                    .collect();
+            }
+            "group-offsets" => {
+                q.committed = e["committed"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(k, v)| Some((k.parse().ok()?, int(v)?)))
+                    .collect();
+            }
+            "poll" => {
+                for (p, pairs) in e["records"].as_object().into_iter().flatten() {
+                    let Ok(p) = p.parse::<i64>() else { continue };
+                    let log = logs.get(&p).map(Vec::as_slice).unwrap_or(&[]);
+                    let session = sessions.get_mut(&(c, inc, p));
+                    if session.is_none() {
+                        *q.stats.entry("unassigned-poll".into()).or_default() += 1;
+                    }
+                    let mut last = session.as_ref().and_then(|s| **s);
+                    for pair in pairs.as_array().into_iter().flatten() {
+                        let (Some(o), Some(v)) = (int(&pair[0]), int(&pair[1])) else {
+                            continue;
+                        };
+                        q.polled += 1;
+                        let count = deliveries.entry((p, v)).or_default();
+                        *count += 1;
+                        if *count == 2 {
+                            q.redelivered += 1;
+                        }
+                        match by_offset.get(&(p, o)) {
+                            Some(&have) if have != v => q.inconsistent.push(json!(
+                                {"key": p, "offset": o, "value": v, "final": have, "where": format!("poll c{c}/{inc}")})),
+                            _ => {}
+                        }
+                        if !values.contains(&(p, v)) {
+                            q.vanished.push(json!({"key": p, "offset": o, "value": v, "consumer": [c, inc], "t": e.get("t")}));
+                        }
+                        if let Some(previous) = last {
+                            if o <= previous {
+                                q.nonmonotonic_poll.push(json!({"key": p, "consumer": [c, inc], "offset": o, "after": previous, "t": e.get("t")}));
+                            } else {
+                                let start = log.partition_point(|&(lo, _)| lo <= previous);
+                                let stop = log.partition_point(|&(lo, _)| lo < o);
+                                if stop > start {
+                                    q.skipped.push(json!({"key": p, "consumer": [c, inc], "from": previous, "to": o,
+                                        "missing": log[start..stop].iter().take(10).map(|&(lo, lv)| json!([lo, lv])).collect::<Vec<_>>(),
+                                        "count": stop - start, "t": e.get("t")}));
+                                }
+                            }
+                        }
+                        last = Some(o);
+                    }
+                    if let Some(session) = sessions.get_mut(&(c, inc, p)) {
+                        *session = last;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for (p, &committed) in &q.committed {
+        let log = logs.get(p).map(Vec::as_slice).unwrap_or(&[]);
+        let end = lso
+            .get(p)
+            .copied()
+            .unwrap_or_else(|| log.last().map_or(0, |&(o, _)| o + 1));
+        if committed > end {
+            q.beyond_end
+                .push(json!({"key": p, "committed": committed, "end": end}));
+        }
+        for &(o, v) in log.iter().take_while(|&&(o, _)| o < committed) {
+            if !deliveries.contains_key(&(*p, v)) {
+                q.undelivered
+                    .push(json!({"key": p, "offset": o, "value": v, "committed": committed}));
+            }
+        }
+    }
+    q
+}
+
 /// The one-line summary a VERDICT carries.
 pub fn summarize(result: &Value, faults: u64) -> String {
+    let queue = &result["queue"];
+    let queue = if queue.is_object() {
+        format!(
+            "; queue: drained {}, {} polled, {} redelivered, {} skipped, {} nonmonotonic polls, {} vanished, {} undelivered, {} commits beyond end",
+            queue["drained"], queue["polled"], queue["redelivered"], queue["skipped"],
+            queue["nonmonotonic_poll"], queue["vanished"], queue["undelivered"], queue["commit_beyond_end"]
+        )
+    } else {
+        String::new()
+    };
     format!(
         "{} lost, {} unseen, {} aborted reads ({} in polls), {} torn, {} duplicates, {} inconsistent offsets; ops {}; elle {}; {} records; {faults} faults",
         result["lost"], result["unseen"], result["aborted_read"], result["aborted_poll"], result["torn"], result["duplicates"],
         result["inconsistent"], result["ops"], result["elle"], result["records"]
-    )
+    ) + &queue
 }
 
 #[cfg(test)]
@@ -452,6 +663,81 @@ mod tests {
         let checked = check(&events, "txn");
         assert!(!checked.violation);
         assert_eq!(checked.result["elle"]["G0"], 1);
+    }
+
+    fn ack(k: i64, v: i64, o: i64) -> Value {
+        json!({"type": "ok", "f": "send", "k": k, "v": v, "offset": o})
+    }
+
+    fn queue_final(committed: Value) -> [Value; 3] {
+        let mut last = final_read(json!({"0": [[0, 1], [1, 2], [2, 3]]}), "complete");
+        last["end-offsets"] = json!({"0": 3});
+        [
+            json!({"type": "drained", "status": "complete", "committed": committed}),
+            json!({"type": "group-offsets", "committed": committed}),
+            last,
+        ]
+    }
+
+    #[test]
+    fn queue_redelivery_after_a_rebalance_is_allowed() {
+        let mut events = vec![
+            ack(0, 1, 0),
+            ack(0, 2, 1),
+            ack(0, 3, 2),
+            json!({"type": "assigned", "c": 0, "inc": 1, "partitions": [0]}),
+            json!({"type": "poll", "c": 0, "inc": 1, "records": {"0": [[0, 1], [1, 2]]}}),
+            json!({"type": "revoked", "c": 0, "inc": 1, "partitions": [0]}),
+            json!({"type": "assigned", "c": 1, "inc": 1, "partitions": [0]}),
+            json!({"type": "poll", "c": 1, "inc": 1, "records": {"0": [[1, 2], [2, 3]]}}),
+        ];
+        events.extend(queue_final(json!({"0": 3})));
+        let checked = check(&events, "queue");
+        assert!(!checked.violation, "{}", checked.details);
+        assert_eq!(checked.result["queue"]["redelivered"], 1);
+        assert_eq!(checked.result["queue"]["drained"], "complete");
+    }
+
+    #[test]
+    fn queue_skip_within_a_session_and_undelivered_records() {
+        let mut events = vec![
+            ack(0, 1, 0),
+            ack(0, 2, 1),
+            ack(0, 3, 2),
+            json!({"type": "assigned", "c": 0, "inc": 1, "partitions": [0]}),
+            json!({"type": "poll", "c": 0, "inc": 1, "records": {"0": [[0, 1]]}}),
+            json!({"type": "poll", "c": 0, "inc": 1, "records": {"0": [[2, 3]]}}),
+        ];
+        events.extend(queue_final(json!({"0": 3})));
+        let checked = check(&events, "queue");
+        assert!(checked.violation);
+        assert_eq!(checked.result["queue"]["skipped"], 1);
+        assert_eq!(checked.result["queue"]["undelivered"], 1);
+        assert_eq!(checked.details["queue"]["undelivered"][0]["value"], 2);
+    }
+
+    #[test]
+    fn queue_nonmonotonic_vanished_and_commit_beyond_end() {
+        let mut events = vec![
+            ack(0, 1, 0),
+            ack(0, 2, 1),
+            ack(0, 3, 2),
+            json!({"type": "assigned", "c": 0, "inc": 1, "partitions": [0]}),
+            json!({"type": "poll", "c": 0, "inc": 1, "records": {"0": [[0, 1], [1, 2], [2, 3], [3, 4]]}}),
+            json!({"type": "poll", "c": 0, "inc": 1, "records": {"0": [[1, 2]]}}),
+        ];
+        events.extend(queue_final(json!({"0": 4})));
+        let checked = check(&events, "queue");
+        assert!(checked.violation);
+        let queue = &checked.result["queue"];
+        assert_eq!(
+            (
+                queue["nonmonotonic_poll"].clone(),
+                queue["vanished"].clone(),
+                queue["commit_beyond_end"].clone()
+            ),
+            (json!(1), json!(1), json!(1))
+        );
     }
 
     #[test]

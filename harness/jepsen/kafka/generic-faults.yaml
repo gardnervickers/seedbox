@@ -1,0 +1,20 @@
+# Generic faults for the Kafka 4.x scenarios (kafka4-queue, kafka4-txn): power
+# loss of one node at a time, process pauses and partitions, aimed at nothing
+# in particular. Three nodes with replication 3 and min.insync.replicas 2
+# tolerate one lost node for writes. Only the Kafka nodes are targeted, never
+# the client. Times are simulated time from boot; the cluster is ready about
+# 10 s in and the 45 s workload runs from about 15 s to 60 s.
+start: 20s
+end: 55s
+interval: 4s
+targets: [n1, n2, n3]
+faults:
+  - kind: crash
+    weight: 2
+    downtime: {min: 1s, max: 6s}
+  - kind: pause_process
+    weight: 2
+    duration: {min: 500ms, max: 8s}
+  - kind: partition
+    weight: 2
+    duration: {min: 1s, max: 8s}

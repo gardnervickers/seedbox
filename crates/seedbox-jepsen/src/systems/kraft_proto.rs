@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+pub const METADATA: i16 = 3;
 pub const INIT_PRODUCER_ID: i16 = 22;
 pub const CREATE_TOPICS: i16 = 19;
 pub const DELETE_TOPICS: i16 = 20;
@@ -630,6 +631,99 @@ pub fn describe_quorum(conn: &mut Conn) -> Result<Quorum, NoReply> {
     })
 }
 
+/// One partition as a broker's metadata describes it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PartitionMetadata {
+    pub error: i16,
+    pub index: i32,
+    pub leader: i32,
+    pub replicas: Vec<i32>,
+    pub isr: Vec<i32>,
+}
+
+/// A broker's metadata for one topic (Metadata v12): the live brokers it
+/// lists, the controller it names, and the topic's partitions.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TopicMetadata {
+    pub brokers: Vec<i32>,
+    pub controller: i32,
+    pub topic_error: i16,
+    pub partitions: Vec<PartitionMetadata>,
+}
+
+pub fn metadata(conn: &mut Conn, topic: &str) -> Result<TopicMetadata, NoReply> {
+    let mut e = Enc::default();
+    e.array(1)
+        .uuid([0; 16])
+        .compact_nullable_string(Some(topic))
+        .tags();
+    e.bool(false).bool(false).tags();
+    let body = conn.call(METADATA, 12, &e.0)?;
+    decode_metadata(&conn.node, &body, topic)
+}
+
+fn decode_metadata(node: &str, body: &[u8], topic: &str) -> Result<TopicMetadata, NoReply> {
+    decode(node, body, |d| {
+        let _throttle = d.i32()?;
+        let mut brokers = Vec::new();
+        for _ in 0..d.array()?.unwrap_or(0) {
+            brokers.push(d.i32()?);
+            let _host = d.compact_string()?;
+            let _port = d.i32()?;
+            let _rack = d.compact_nullable_string()?;
+            d.tags()?;
+        }
+        let _cluster = d.compact_nullable_string()?;
+        let controller = d.i32()?;
+        let ints = |d: &mut Dec| -> DecResult<Vec<i32>> {
+            let mut out = Vec::new();
+            for _ in 0..d.array()?.unwrap_or(0) {
+                out.push(d.i32()?);
+            }
+            Ok(out)
+        };
+        let mut found = TopicMetadata {
+            brokers,
+            controller,
+            topic_error: UNKNOWN_TOPIC_OR_PARTITION,
+            partitions: Vec::new(),
+        };
+        for _ in 0..d.array()?.unwrap_or(0) {
+            let error = d.i16()?;
+            let name = d.compact_nullable_string()?;
+            let _id = d.uuid()?;
+            let _internal = d.bool()?;
+            let mut partitions = Vec::new();
+            for _ in 0..d.array()?.unwrap_or(0) {
+                let error = d.i16()?;
+                let index = d.i32()?;
+                let leader = d.i32()?;
+                let _epoch = d.i32()?;
+                let replicas = ints(d)?;
+                let isr = ints(d)?;
+                let _offline = ints(d)?;
+                d.tags()?;
+                partitions.push(PartitionMetadata {
+                    error,
+                    index,
+                    leader,
+                    replicas,
+                    isr,
+                });
+            }
+            let _operations = d.i32()?;
+            d.tags()?;
+            if name.as_deref() == Some(topic) {
+                found.topic_error = error;
+                partitions.sort_by_key(|p| p.index);
+                found.partitions = partitions;
+            }
+        }
+        d.tags()?;
+        Ok(found)
+    })
+}
+
 /// InitProducerId v5 for an idempotent (non-transactional) producer: a broker
 /// hands out an ID from a block the active controller allocated to it.
 pub fn init_producer_id(conn: &mut Conn) -> Result<(i16, i64, i16), NoReply> {
@@ -732,6 +826,45 @@ mod tests {
             e.uvarint(v);
             assert_eq!(Dec::new(&e.0).uvarint().unwrap(), v);
         }
+    }
+
+    #[test]
+    fn metadata_v12_decodes_brokers_and_partitions() {
+        let mut e = Enc::default();
+        e.i32(0).array(2);
+        for id in [1, 2] {
+            e.i32(id).compact_string(&format!("n{id}")).i32(9092);
+            e.compact_nullable_string(None).tags();
+        }
+        e.compact_nullable_string(Some("cluster")).i32(1).array(1);
+        e.i16(0)
+            .compact_nullable_string(Some("jq"))
+            .uuid([1; 16])
+            .bool(false);
+        e.array(2);
+        for (index, isr) in [(1, vec![2]), (0, vec![1, 2])] {
+            e.i16(0)
+                .i32(index)
+                .i32(isr[0])
+                .i32(5)
+                .array(2)
+                .i32(1)
+                .i32(2);
+            e.array(isr.len());
+            for id in &isr {
+                e.i32(*id);
+            }
+            e.array(0).tags();
+        }
+        e.i32(-2147483648).tags().tags();
+        let meta = decode_metadata("n1", &e.0, "jq").unwrap();
+        assert_eq!(meta.brokers, vec![1, 2]);
+        assert_eq!(meta.controller, 1);
+        assert_eq!(meta.topic_error, NONE);
+        assert_eq!(meta.partitions[0].index, 0);
+        assert_eq!(meta.partitions[0].isr, vec![1, 2]);
+        assert_eq!(meta.partitions[1].isr, vec![2]);
+        assert_eq!(meta.partitions[1].replicas, vec![1, 2]);
     }
 
     #[test]

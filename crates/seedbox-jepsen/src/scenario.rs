@@ -619,6 +619,168 @@ fn kafka() -> Vec<Scenario> {
         .collect()
 }
 
+// ------------------------------------------------------------ Kafka 4.x data plane
+
+/// The latest Kafka 4.x release.
+const KAFKA4: &str = "4.3.1";
+
+/// Broker settings every Kafka 4.x scenario shares: a log cleaner buffer
+/// that fits a small heap, and KIP-848 group timeouts short enough for a
+/// minute-long run.
+const KAFKA4_PROPERTIES: &str = "log.cleaner.dedupe.buffer.size=8388608;\
+     group.consumer.session.timeout.ms=10000;group.consumer.min.session.timeout.ms=6000;\
+     group.consumer.heartbeat.interval.ms=1000;group.consumer.min.heartbeat.interval.ms=1000";
+
+struct Kafka4Spec {
+    name: &'static str,
+    comment: &'static str,
+    workload: &'static str,
+    nemesis: &'static str,
+    /// Separate KRaft controllers k1..k3 (otherwise n1..n3 are combined).
+    split: bool,
+    duration: u32,
+    flush: bool,
+    oracle: &'static [&'static str],
+}
+
+fn kafka4() -> Vec<Scenario> {
+    let base = |name, comment, workload, nemesis| Kafka4Spec {
+        name,
+        comment,
+        workload,
+        nemesis,
+        split: false,
+        duration: 45,
+        flush: false,
+        oracle: &[],
+    };
+    let specs = vec![
+        Kafka4Spec { duration: 30, ..base("kafka4-healthy-queue", "Baseline: Jepsen's queue workload on Kafka 4.3.1 (the latest 4.x release), three combined\nKRaft broker+controller nodes, no faults. An idempotent acks=all producer writes unique\nvalues to 8 partitions (replication 3, min.insync.replicas 2) while two consumers in one\nKIP-848 group poll and commitSync after every poll; afterwards the group drains and every\npartition is read from offset 0. Every broker must serve the topic within 120 s.", "queue", "none") },
+        base("kafka4-queue", "Jepsen's queue workload on Kafka 4.3.1 for unknown bugs: kafka4-healthy-queue for 45 s.\nRun it with a fault profile: `harness/jepsen/kafka/generic-faults.yaml` (power loss,\nprocess pauses, partitions), `corruption-faults.yaml` (bit flips in n1's data reads and\nwrites) or `eio-data-faults.yaml` (failed data reads and writes). Every acknowledged\nrecord must be in the final read once, consumers must poll each partition in order\nwithout gaps, every record below the group's committed offset must have been delivered,\nand every broker must serve the topic again within 120 s of the faults ending.", "queue", "none"),
+        base("kafka4-txn", "Jepsen's transactional queue workload on Kafka 4.3.1 (transaction.version 2) for unknown\nbugs: two transactional producers with read_committed consumers, transaction timeout\n10 s. Run it with a fault profile (`generic-faults.yaml`, `corruption-faults.yaml`,\n`eio-data-faults.yaml`): no aborted reads, torn transactions or lost committed writes,\nand every broker must serve the topic again within 120 s of the faults ending.", "txn", "none"),
+        base("kafka4-crash-all", "Coordinated power loss on Kafka 4.3.1 with the default flush settings: during the queue\nworkload every node fails together about every 20 s and reboots 2 s later. Kafka\nacknowledges acks=all writes once the in-sync replicas have them in memory and leaves\nflushing to the OS, so losing acknowledged records here is documented behaviour; the\nflush control is kafka4-crash-all-flush.", "queue", "crash-all"),
+        Kafka4Spec { flush: true, ..base("kafka4-crash-all-flush", "Negative control for kafka4-crash-all: log.flush.interval.messages=1, so every append is\nfsynced before it is acknowledged. No acknowledged record may be lost, and consumer\noffsets must stay within the log.", "queue", "crash-all") },
+        Kafka4Spec { split: true, ..base("kafka4-controller", "Controller-targeted faults on Kafka 4.3.1 with a separate KRaft quorum (k1..k3) and three\nbrokers: every 10 s (5-15 s) crash, kill, pause or isolate the active controller for\n2-8 s (a quarter of the time another controller), during the queue workload.", "queue", "controller") },
+        Kafka4Spec { split: true, ..base("kafka4-split-queue", "The queue workload on Kafka 4.3.1 with a separate KRaft quorum (k1..k3) and three brokers,\nfor fault profiles aimed at the controllers: run it with\n`harness/jepsen/kafka/controller-faults.yaml`.", "queue", "none") },
+        Kafka4Spec { duration: 60, ..base("kafka4-jepsen", "Jepsen's untargeted nemesis on Kafka 4.3.1 (kafka-17754-jepsen's schedule on the latest\nrelease): every 10 s, pause a node's process or cut c1 off from a node for 2-10 s,\nduring the transactional queue workload.", "txn", "jepsen") },
+    ];
+    specs
+        .into_iter()
+        .map(|spec| {
+            let brokers = nodes("n", 3);
+            let controllers = if spec.split {
+                nodes("k", 3)
+            } else {
+                brokers.clone()
+            };
+            let voters: Vec<String> = controllers
+                .iter()
+                .enumerate()
+                .map(|(i, c)| format!("{}@{c}:9093", i + 1))
+                .collect();
+            let mut properties = KAFKA4_PROPERTIES.to_string();
+            if spec.flush {
+                properties.push_str(";log.flush.interval.messages=1");
+            }
+            let node = |id: usize, host: &str, roles: &str, heap: &str, memory: u32| {
+                Machine::build("image", Some(&format!("kafka-{KAFKA4}-lean.Dockerfile")))
+                    .env("KAFKA_NODE_ID", id.to_string())
+                    .env("KAFKA_HOST", host)
+                    .env("KAFKA_ROLES", roles)
+                    .env("CLUSTER_ID", "4L6g3nShT-eMCtK--X86sw")
+                    .env("KAFKA_VOTERS", voters.join(","))
+                    .env("KAFKA_RF", "3")
+                    .env("KAFKA_SUPERVISE", "1")
+                    .env("KAFKA_HEAP_OPTS", format!("-Xms{heap} -Xmx{heap}"))
+                    .env("KAFKA_JVM_PERFORMANCE_OPTS", KAFKA_JVM)
+                    .env("SEEDBOX_EXTRA_PROPERTIES", properties.clone())
+                    .data("/data")
+                    .memory(memory)
+                    .cpu("4GHz")
+            };
+            let mut machines = Vec::new();
+            if spec.split {
+                for (i, c) in controllers.iter().enumerate() {
+                    machines.push((c.clone(), node(i + 1, c, "controller", "160m", 1024)));
+                }
+            }
+            for (i, b) in brokers.iter().enumerate() {
+                let (id, roles) = if spec.split {
+                    (i + 4, "broker")
+                } else {
+                    (i + 1, "broker,controller")
+                };
+                machines.push((b.clone(), node(id, b, roles, "256m", 1536)));
+            }
+            let bootstrap: Vec<String> = brokers.iter().map(|b| format!("{b}:9092")).collect();
+            let mut command = strings(&[
+                "--name",
+                "c1",
+                "--bootstrap",
+                &bootstrap.join(","),
+                "--rf",
+                "3",
+                "--mode",
+                spec.workload,
+                "--txn-timeout-ms",
+                "10000",
+            ]);
+            if spec.workload == "queue" {
+                command.extend(strings(&[
+                    "--consumers",
+                    "2",
+                    "--group-protocol",
+                    "consumer",
+                ]));
+            }
+            machines.push((
+                "c1".into(),
+                Machine::build("image", Some(&format!("client-{KAFKA4}.Dockerfile")))
+                    .command(command)
+                    .memory(1024)
+                    .cpu("4GHz"),
+            ));
+            let mut args = strings(&[
+                "kafka",
+                "--workload",
+                spec.workload,
+                "--nemesis",
+                spec.nemesis,
+                "--brokers",
+                &brokers.join(","),
+                "--duration",
+                &spec.duration.to_string(),
+                "--recover",
+                "120",
+            ]);
+            if spec.split {
+                args.extend(strings(&["--controllers", &controllers.join(",")]));
+            }
+            if spec.nemesis == "crash-all" {
+                args.extend(strings(&["--crash-all-every", "20"]));
+            }
+            args.extend(spec.oracle.iter().map(|a| a.to_string()));
+            let topology = if spec.split {
+                "3 controllers and 3 brokers"
+            } else {
+                "3 combined broker+controller nodes"
+            };
+            Scenario {
+                name: spec.name.into(),
+                comment: spec.comment.into(),
+                generated: format!(
+                    "Kafka {KAFKA4} brokers and client, {topology}, workload {}, nemesis {}",
+                    spec.workload, spec.nemesis
+                ),
+                machines,
+                // The queue history holds every send and poll.
+                oracle: Machine::program(&args).memory(512),
+                latency: "1ms".into(),
+            }
+        })
+        .collect()
+}
+
 // ------------------------------------------------------------ KRaft
 
 struct KraftSpec {
@@ -1424,6 +1586,7 @@ pub fn all() -> Vec<(String, String)> {
         ("etcd", etcd()),
         ("postgres", postgres()),
         ("kafka", kafka()),
+        ("kafka", kafka4()),
         ("kraft", kraft()),
         ("mysql", mysql()),
         ("galera", galera()),
