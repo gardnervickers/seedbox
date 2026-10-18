@@ -122,10 +122,12 @@ fn collect(definition: &Definition, assets: &mut BTreeSet<ContentDigest>) -> Res
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct DriverClosure {
+            executable: ContentDigest,
             manifest: ContentDigest,
             objects: Vec<ContentDigest>,
         }
         let closure: DriverClosure = serde_json::from_value(closure.clone())?;
+        assets.insert(closure.executable);
         assets.insert(closure.manifest);
         assets.extend(closure.objects);
     }

@@ -232,13 +232,16 @@ fn driver_closures_without_a_record_roundtrip_into_a_fresh_store() {
     use seedbox_spec::definition::{Architecture, Asset, Definition, Start};
 
     // Metadata-only fixtures: no native body is executed or restored. Each
-    // definition owns a distinct runtime object, absent from the ordinary boot,
-    // kernel, engine and checkpoint assets, so neither can hide the other's loss.
+    // definition owns distinct runtime and executable objects, absent from the
+    // ordinary boot and checkpoint assets, so neither can hide the other's loss.
     fn driver_definition(
         definition: &mut Definition,
         store: &ContentStore,
         label: &str,
-    ) -> (ContentDigest, ContentDigest, wire::Inventory) {
+    ) -> (ContentDigest, ContentDigest, ContentDigest, wire::Inventory) {
+        let executable = store
+            .put(format!("Driver worker executable for {label}").as_bytes())
+            .unwrap();
         let contents = format!("retained Driver runtime for {label}");
         let object = store.put(contents.as_bytes()).unwrap();
         let artifact = wire::Artifact {
@@ -285,8 +288,8 @@ fn driver_closures_without_a_record_roundtrip_into_a_fresh_store() {
         definition.runtime.execution["semantic_parameters"]["engine"] =
             serde_json::to_value(DriverExecutor::descriptor("x86_64")).unwrap();
         definition.runtime.execution["driver_world"] =
-            serde_json::json!({"manifest":manifest,"objects":[object]});
-        (manifest, object, inventory)
+            serde_json::json!({"executable":executable,"manifest":manifest,"objects":[object]});
+        (manifest, object, executable, inventory)
     }
 
     let source = tempfile::tempdir().unwrap();
@@ -299,10 +302,10 @@ fn driver_closures_without_a_record_roundtrip_into_a_fresh_store() {
     let InputSource::Resolved { definition: main } = &mut snapshot.simulation.spec.inputs else {
         unreachable!()
     };
-    let (main_manifest, main_object, _) = driver_definition(main, &store, "main");
+    let (main_manifest, main_object, main_executable, _) = driver_definition(main, &store, "main");
     snapshot.simulation.spec = SimulationSpec::resolved(main.as_ref().clone()).unwrap();
     let checkpoint = snapshot.checkpoints.get_mut("capture").unwrap();
-    let (checkpoint_manifest, checkpoint_object, inventory) =
+    let (checkpoint_manifest, checkpoint_object, checkpoint_executable, inventory) =
         driver_definition(checkpoint, &store, "checkpoint");
     let body = store
         .put(b"opaque Driver and native checkpoint bodies")
@@ -376,19 +379,33 @@ fn driver_closures_without_a_record_roundtrip_into_a_fresh_store() {
     let InputSource::Resolved { definition } = &imported.spec.inputs else {
         unreachable!()
     };
-    definition::prepared(definition, &store).unwrap();
+    assert_eq!(
+        definition::prepared(definition, &store)
+            .unwrap()
+            .executable()
+            .unwrap(),
+        &main_executable
+    );
     let capture = execution
         .checkpoint_definition(&imported.metadata.id, "capture")
         .unwrap();
     let InputSource::Resolved { definition } = &capture.spec.inputs else {
         unreachable!()
     };
-    definition::prepared(definition, &store).unwrap();
+    assert_eq!(
+        definition::prepared(definition, &store)
+            .unwrap()
+            .executable()
+            .unwrap(),
+        &checkpoint_executable
+    );
     for digest in [
         main_manifest,
         main_object,
+        main_executable,
         checkpoint_manifest,
         checkpoint_object,
+        checkpoint_executable,
         factory,
     ] {
         store.verify(&digest).unwrap();
