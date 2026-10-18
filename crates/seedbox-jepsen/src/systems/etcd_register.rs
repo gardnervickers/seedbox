@@ -580,10 +580,14 @@ pub(crate) fn recovery_text(r: &Recovery, tolerate_exits: bool) -> (String, bool
 /// disagreement, or of why there was nothing to compare.
 pub(crate) fn compare_hashes(live: &[String]) -> (Option<String>, Value) {
     let mut revisions = BTreeMap::new();
+    // Applied raft index beside each revision: a member that applied as many
+    // entries as the others but holds fewer revisions skipped some.
+    let mut applied = BTreeMap::new();
     for member in live {
         for _ in 0..5 {
             if let Reply::Ok(status) = call(member, "/v3/maintenance/status", &json!({}), 5.0) {
                 revisions.insert(member.clone(), number(&status["header"]["revision"]));
+                applied.insert(member.clone(), number(&status["raftAppliedIndex"]));
                 break;
             }
             kit::pause(1.0);
@@ -609,7 +613,8 @@ pub(crate) fn compare_hashes(live: &[String]) -> (Option<String>, Value) {
             }
         }
     }
-    let details = json!({"revision": revision, "revisions": revisions, "hashes": hashes});
+    let details = json!({"revision": revision, "revisions": revisions, "applied": applied,
+                         "hashes": hashes});
     let distinct: std::collections::BTreeSet<_> = hashes.values().collect();
     if distinct.len() > 1 {
         (
