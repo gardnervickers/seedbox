@@ -9,9 +9,21 @@ use crate::{
     store::ContentStore,
     Error, Result,
 };
+use seedbox_driver_execution::driver_world::preparation::{BootArchive, OciBoot, OciBootFactory};
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 const CONFIG_LIMIT: u64 = 16 * 1024 * 1024;
+
+// Private dependency boundary: policy tests need no native factory admission.
+// The public entrypoint always binds the real validator and boot factory below.
+trait BootFactory {
+    fn boot(&self, request: OciBoot<'_>, store: &ContentStore) -> Result<BootArchive>;
+}
+impl BootFactory for OciBootFactory {
+    fn boot(&self, request: OciBoot<'_>, store: &ContentStore) -> Result<BootArchive> {
+        OciBootFactory::boot(self, request, store)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct OciPreparer {
@@ -40,17 +52,42 @@ impl OciPreparer {
         transport: &dyn crate::oci::ImageTransport,
         runtime: &seedbox_driver_execution::runtime_assets::Inputs,
     ) -> Result<PreparedInputs> {
-        context.check()?;
-        crate::driver_preparation::validate_oci_runtime(self, runtime)?;
-        self.prepare_inner(simulation, store, context, transport, runtime)
+        self.prepare_with_factory(
+            simulation,
+            store,
+            context,
+            transport,
+            runtime,
+            (
+                || crate::driver_preparation::validate_oci_runtime(self, runtime),
+                |epoch, blocks| OciBootFactory::new(&self.engine, runtime, epoch, blocks),
+            ),
+        )
     }
-    fn prepare_inner(
+    fn prepare_with_factory<F: BootFactory>(
+        &self,
+        simulation: &Simulation,
+        store: &ContentStore,
+        context: &PreparationContext,
+        transport: &dyn crate::oci::ImageTransport,
+        runtime: &seedbox_driver_execution::runtime_assets::Inputs,
+        (validate, factory): (
+            impl FnOnce() -> Result<()>,
+            impl FnOnce(u32, seedbox_spec::progress::ProgressBudget) -> Result<F>,
+        ),
+    ) -> Result<PreparedInputs> {
+        context.check()?;
+        validate()?;
+        self.prepare_inner(simulation, store, context, transport, runtime, factory)
+    }
+    fn prepare_inner<F: BootFactory>(
         &self,
         simulation: &Simulation,
         store: &ContentStore,
         context: &PreparationContext,
         transport: &dyn crate::oci::ImageTransport,
         driver_runtime: &seedbox_driver_execution::runtime_assets::Inputs,
+        factory: impl FnOnce(u32, seedbox_spec::progress::ProgressBudget) -> Result<F>,
     ) -> Result<PreparedInputs> {
         let architecture = crate::guest::Architecture::from_profile(&self.profile)?;
         for (name, service) in &simulation.services {
@@ -190,13 +227,7 @@ impl OciPreparer {
                 })?
             }
         };
-        let driver_factory =
-            seedbox_driver_execution::driver_world::preparation::OciBootFactory::new(
-                &self.engine,
-                driver_runtime,
-                wall_clock_epoch,
-                simulation.simulator.progress_budget,
-            )?;
+        let driver_factory = factory(wall_clock_epoch, simulation.simulator.progress_budget)?;
         for (name, service, mounts, imported) in launches {
             context.progress(name, PreparationStage::Guest);
             context.check()?;
@@ -321,3 +352,8 @@ fn validate_config_target(path: &str) -> Result<()> {
 }
 
 pub use crate::driver_preparation::{retain_oci_prepared, validate_oci_runtime};
+
+#[cfg(test)]
+mod test_sdk;
+#[cfg(test)]
+mod tests;
