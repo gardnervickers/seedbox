@@ -22,6 +22,7 @@ use crate::checker::models::{verdict_word, RegisterOp, RegisterRet, Timed};
 use crate::checker::realtime;
 use crate::kit::{self, http, Rng};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
@@ -91,6 +92,13 @@ pub struct Args {
     /// and asymmetric; 0 never does.
     #[arg(long, default_value_t = 0.0)]
     pub chaos_cuts: f64,
+    /// cas-register: once a register has this many writes and
+    /// compare-and-sets of unknown outcome since a node last answered an
+    /// operation on it definitely, clients only read it until one does,
+    /// which bounds what the linearizability search is exponential in.
+    /// 0 never caps.
+    #[arg(long, default_value_t = 8)]
+    pub pending_cap: usize,
     #[arg(long, default_value = "sequencer")]
     pub sequencer: String,
     /// The S3 servers, for cuts that also separate a node from some of them.
@@ -333,6 +341,7 @@ fn register_op(
     op: RegisterOp<u32>,
     history: &Mutex<KeyHistory>,
     outcomes: &Outcomes,
+    unknown: &AtomicUsize,
 ) -> Option<u32> {
     let handle = history.lock().unwrap().invoke(op.clone());
     let path = format!("/cas-register/{id}");
@@ -364,6 +373,7 @@ fn register_op(
             match value {
                 Some(value) => {
                     history.complete(handle, RegisterRet::Value(Some(value)));
+                    unknown.store(0, Relaxed);
                     return Some(value);
                 }
                 None => {
@@ -373,16 +383,23 @@ fn register_op(
             }
         }
         (RegisterOp::Read, _) => history.fail(handle),
-        (RegisterOp::Write(_), Answer::Got(200, _)) => history.complete(handle, RegisterRet::Wrote),
+        (RegisterOp::Write(_), Answer::Got(200, _)) => {
+            history.complete(handle, RegisterRet::Wrote);
+            unknown.store(0, Relaxed);
+        }
         (RegisterOp::Cas(..), Answer::Got(200, _)) => {
-            history.complete(handle, RegisterRet::Cas(true))
+            history.complete(handle, RegisterRet::Cas(true));
+            unknown.store(0, Relaxed);
         }
         (RegisterOp::Cas(..), Answer::Got(412, _)) => {
-            history.complete(handle, RegisterRet::Cas(false))
+            history.complete(handle, RegisterRet::Cas(false));
+            unknown.store(0, Relaxed);
         }
         (_, Answer::NotSent(_) | Answer::Got(400 | 412 | 500, _)) => history.fail(handle),
         // 503 and lost answers may or may not have taken effect.
-        _ => {}
+        _ => {
+            unknown.fetch_add(1, Relaxed);
+        }
     }
     None
 }
@@ -404,13 +421,17 @@ fn registers(args: Arc<Args>) -> u8 {
         json!({"workload": "cas-register", "registers": args.registers, "rng_seed": seed}),
     );
     let start = Instant::now();
+    // Per register, unknown writes since a node last answered definitely.
+    let unknown: Arc<Vec<AtomicUsize>> =
+        Arc::new(ids.iter().map(|_| AtomicUsize::new(0)).collect());
     let workers: Vec<_> = (0..args.clients)
         .map(|client| {
-            let (args, ids, histories, outcomes) = (
+            let (args, ids, histories, outcomes, unknown) = (
                 args.clone(),
                 ids.clone(),
                 histories.clone(),
                 outcomes.clone(),
+                unknown.clone(),
             );
             std::thread::spawn(move || {
                 let mut rng = Rng::stream(seed, client as u64);
@@ -418,12 +439,24 @@ fn registers(args: Arc<Args>) -> u8 {
                     let r = rng.below(ids.len() as u64) as usize;
                     let node = rng.choice(&args.nodes).clone();
                     let value = rng.range(1, 6) as u32;
-                    let op = match rng.weighted(&[4.0, 2.0, 4.0]) {
+                    let choice = rng.weighted(&[4.0, 2.0, 4.0]);
+                    let from = rng.range(0, 6) as u32;
+                    let capped =
+                        args.pending_cap > 0 && unknown[r].load(Relaxed) >= args.pending_cap;
+                    let op = match if capped { 0 } else { choice } {
                         0 => RegisterOp::Read,
                         1 => RegisterOp::Write(value),
-                        _ => RegisterOp::Cas(rng.range(0, 6) as u32, value),
+                        _ => RegisterOp::Cas(from, value),
                     };
-                    register_op(&args, &ids[r], &node, op, &histories[r], &outcomes);
+                    register_op(
+                        &args,
+                        &ids[r],
+                        &node,
+                        op,
+                        &histories[r],
+                        &outcomes,
+                        &unknown[r],
+                    );
                     std::thread::sleep(Duration::from_millis(args.think_ms));
                 }
             })
@@ -440,9 +473,15 @@ fn registers(args: Arc<Args>) -> u8 {
     for node in &args.nodes {
         for (r, id) in ids.iter().enumerate() {
             loop {
-                if let Some(value) =
-                    register_op(&args, id, node, RegisterOp::Read, &histories[r], &outcomes)
-                {
+                if let Some(value) = register_op(
+                    &args,
+                    id,
+                    node,
+                    RegisterOp::Read,
+                    &histories[r],
+                    &outcomes,
+                    &AtomicUsize::new(0),
+                ) {
                     finals.entry(id).or_default().insert(node, value);
                     break;
                 }
