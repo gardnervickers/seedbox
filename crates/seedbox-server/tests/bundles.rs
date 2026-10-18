@@ -225,7 +225,7 @@ fn encode(snapshot: &Snapshot, store: &ContentStore) -> Vec<u8> {
 
 #[test]
 fn driver_closures_without_a_record_roundtrip_into_a_fresh_store() {
-    use seedbox_application::driver_world::{DriverBackend, DriverExecutor};
+    use seedbox_driver_execution::driver_world::DriverExecutor;
     use seedbox_artifacts::store::ContentDigest;
     use seedbox_engine_protocol::driver_world as wire;
     use seedbox_spec::definition::{Architecture, Asset, Definition, Start};
@@ -282,7 +282,7 @@ fn driver_closures_without_a_record_roundtrip_into_a_fresh_store() {
         definition.architecture = Architecture::X86_64;
         definition.runtime.execution["backend"] = "driver-tcg".into();
         definition.runtime.execution["semantic_parameters"]["engine"] =
-            serde_json::to_value(DriverExecutor::descriptor(DriverBackend::Tcg, "x86_64")).unwrap();
+            serde_json::to_value(DriverExecutor::descriptor("x86_64")).unwrap();
         definition.runtime.execution["driver_world"] =
             serde_json::json!({"manifest":manifest,"objects":[object]});
         (manifest, object, inventory)

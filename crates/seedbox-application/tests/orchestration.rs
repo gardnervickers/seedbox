@@ -790,7 +790,7 @@ fn launch_descriptor_replacement_is_explicit_and_still_checks_semantics_and_witn
     let mut fixture = Fixture::new();
     let first = fixture.run();
     fixture.backend.profile.semantic_parameters.engine =
-        Some(seedbox_application::driver_world::DriverExecutor::descriptor("x86_64"));
+        Some(seedbox_driver_execution::driver_world::DriverExecutor::descriptor("x86_64"));
 
     assert_eq!(fixture.replay(&first).record.outcome, Outcome::Error);
     let options = ReplayOptions {

@@ -270,8 +270,8 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
         };
         definition.runtime.execution["backend"] = "driver-pv".into();
         definition.runtime.execution["semantic_parameters"]["engine"] = serde_json::to_value(
-            seedbox_application::driver_world::DriverExecutor::descriptor(
-                seedbox_application::driver_world::platform::architecture_name(
+            seedbox_driver_execution::driver_world::DriverExecutor::descriptor(
+                seedbox_driver_execution::driver_world::platform::architecture_name(
                     definition.architecture,
                 ),
             ),
