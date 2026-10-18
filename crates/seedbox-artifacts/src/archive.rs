@@ -118,6 +118,19 @@ fn collect(definition: &Definition, assets: &mut BTreeSet<ContentDigest>) -> Res
     };
     assets.insert(digest(&definition.runtime.kernel)?);
     assets.insert(digest(&definition.runtime.engine)?);
+    // The resolved definition owns this closure even if execution never produced
+    // a record. Checkpoint definitions can retain a different factory inventory.
+    if let Some(closure) = definition.runtime.execution.get("driver_world") {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct DriverClosure {
+            manifest: ContentDigest,
+            objects: Vec<ContentDigest>,
+        }
+        let closure: DriverClosure = serde_json::from_value(closure.clone())?;
+        assets.insert(closure.manifest);
+        assets.extend(closure.objects);
+    }
     for machine in definition
         .machines
         .values()
@@ -610,7 +623,7 @@ mod tests {
                     unreachable!()
                 };
                 definition.start = Start::Checkpoint {
-                    manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[],"failed":false}}}, "ram":{"artifact":"asset:ram", "sha256":state.hex()}}),
+                    manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[]}}}, "ram":{"artifact":"asset:ram", "sha256":state.hex()}}),
                     assets: BTreeMap::from([(
                         "ram".into(),
                         Asset(format!("sha256:{}", state.hex())),
@@ -723,7 +736,7 @@ mod tests {
             unreachable!()
         };
         definition.start = Start::Checkpoint {
-            manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[],"failed":false}}}}),
+            manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[]}}}}),
             assets: (0..=MAX_OBJECTS)
                 .map(|index| {
                     (

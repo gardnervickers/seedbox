@@ -1911,8 +1911,6 @@ dependencies = [
  "hex",
  "libc",
  "seedbox-api",
- "seedbox-control",
- "seedbox-engine-core",
  "seedbox-engine-protocol",
  "seedbox-exec",
  "seedbox-spec",
@@ -2011,7 +2009,6 @@ name = "seedbox-engine-core"
 version = "0.1.0"
 dependencies = [
  "hex",
- "rayon",
  "seedbox-control",
  "seedbox-engine-protocol",
  "seedbox-test-time",

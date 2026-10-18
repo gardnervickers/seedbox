@@ -182,7 +182,7 @@ fn fixture(store: &ContentStore, checkpoint: bool) -> Snapshot {
         let mut def = def.clone();
         let ram = store.put(b"retained checkpoint RAM").unwrap();
         def.start = seedbox_spec::definition::Start::Checkpoint {
-            manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[],"failed":false}}}, "ram":{"path":"asset:ram", "sha256":ram.hex()}}),
+            manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[]}}}, "ram":{"path":"asset:ram", "sha256":ram.hex()}}),
             assets: BTreeMap::from([(
                 "ram".into(),
                 seedbox_spec::definition::Asset(format!("sha256:{}", ram.hex())),
@@ -221,6 +221,186 @@ fn encode(snapshot: &Snapshot, store: &ContentStore) -> Vec<u8> {
     let mut bytes = Vec::new();
     archive::export(snapshot, store, &mut bytes, &Options::default()).unwrap();
     bytes
+}
+
+#[test]
+fn driver_closures_without_a_record_roundtrip_into_a_fresh_store() {
+    use seedbox_application::driver_world::{DriverBackend, DriverExecutor};
+    use seedbox_artifacts::store::ContentDigest;
+    use seedbox_engine_protocol::driver_world as wire;
+    use seedbox_spec::definition::{Architecture, Asset, Definition, Start};
+
+    // Metadata-only fixtures: no native body is executed or restored. Each
+    // definition owns a distinct runtime object, absent from the ordinary boot,
+    // kernel, engine and checkpoint assets, so neither can hide the other's loss.
+    fn driver_definition(
+        definition: &mut Definition,
+        store: &ContentStore,
+        label: &str,
+    ) -> (ContentDigest, ContentDigest, wire::Inventory) {
+        let contents = format!("retained Driver runtime for {label}");
+        let object = store.put(contents.as_bytes()).unwrap();
+        let artifact = wire::Artifact {
+            sha256: object.hex().into(),
+            length: contents.len() as u64,
+            artifact: format!("asset:{}", object.hex()),
+        };
+        let inventory = wire::Inventory::Tcg {
+            policy: None,
+            executable: artifact.clone(),
+            kernel: artifact.clone(),
+            init: artifact.clone(),
+            command_line: artifact.clone(),
+            firmware: artifact.clone(),
+            runtime: artifact.clone(),
+            formatter: None,
+            environments: BTreeMap::new(),
+            boot_archives: BTreeMap::new(),
+            epoch_seconds: definition.clock.epoch_seconds,
+        };
+        let prepared = wire::Prepared {
+            inventory: inventory.clone(),
+            oracle: wire::Machine {
+                name: "oracle".into(),
+                memory_bytes: definition.oracle.memory_bytes,
+                filesystem: artifact,
+                process: wire::Process {
+                    argv: definition.oracle.process.argv.clone(),
+                    environment: definition.oracle.process.environment.clone(),
+                    working_directory: definition.oracle.process.working_directory.clone(),
+                    user: definition.oracle.process.user.clone(),
+                },
+                disk: None,
+                interface: None,
+            },
+            machines: Vec::new(),
+            spawnable: Vec::new(),
+            quantum_ns: 1_000_000,
+            network: Default::default(),
+        };
+        let manifest = store.put(&serde_json::to_vec(&prepared).unwrap()).unwrap();
+        definition.architecture = Architecture::X86_64;
+        definition.runtime.execution["backend"] = "driver-tcg".into();
+        definition.runtime.execution["semantic_parameters"]["engine"] =
+            serde_json::to_value(DriverExecutor::descriptor(DriverBackend::Tcg, "x86_64")).unwrap();
+        definition.runtime.execution["driver_world"] =
+            serde_json::json!({"manifest":manifest,"objects":[object]});
+        (manifest, object, inventory)
+    }
+
+    let source = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(source.path());
+    let mut snapshot = fixture(&store, true);
+    snapshot.record = None;
+    snapshot
+        .omissions
+        .insert("record".into(), "not produced".into());
+    let InputSource::Resolved { definition: main } = &mut snapshot.simulation.spec.inputs else {
+        unreachable!()
+    };
+    let (main_manifest, main_object, _) = driver_definition(main, &store, "main");
+    snapshot.simulation.spec = SimulationSpec::resolved(main.as_ref().clone()).unwrap();
+    let checkpoint = snapshot.checkpoints.get_mut("capture").unwrap();
+    let (checkpoint_manifest, checkpoint_object, inventory) =
+        driver_definition(checkpoint, &store, "checkpoint");
+    let body = store
+        .put(b"opaque Driver and native checkpoint bodies")
+        .unwrap();
+    let artifact = wire::Artifact {
+        sha256: body.hex().into(),
+        length: store.size(&body).unwrap(),
+        artifact: "asset:body".into(),
+    };
+    let captured = wire::Checkpoint {
+        contract: wire::CONTRACT.into(),
+        version: wire::ENVELOPE_VERSION,
+        inventory,
+        driver: artifact.clone(),
+        machines: vec![artifact],
+        state: wire::State {
+            world: wire::World {
+                seed: checkpoint.seed,
+                machine_names: vec!["oracle".into()],
+                input_program: Default::default(),
+                intervention_next: 0,
+                readiness: wire::Readiness {
+                    initial: vec!["oracle".into()],
+                    seen: vec!["oracle".into()],
+                    latched: true,
+                },
+                publication: Default::default(),
+                position: Default::default(),
+            },
+        },
+    };
+    captured.validate().unwrap();
+    checkpoint.start = Start::Checkpoint {
+        manifest: serde_json::to_value(captured).unwrap(),
+        assets: BTreeMap::from([
+            ("body".into(), Asset(format!("sha256:{}", body.hex()))),
+            (
+                checkpoint_object.hex().into(),
+                Asset(format!("sha256:{}", checkpoint_object.hex())),
+            ),
+        ]),
+    };
+    // The checkpoint inventory uses captured assets too. Keep a further closure
+    // object outside that set to independently check checkpoint collect().
+    let factory = store.put(b"checkpoint-only future factory input").unwrap();
+    let mut prepared: wire::Prepared =
+        serde_json::from_slice(&store.read(&checkpoint_manifest).unwrap()).unwrap();
+    let mut future = prepared.oracle.clone();
+    future.name = "future".into();
+    future.filesystem = wire::Artifact {
+        sha256: factory.hex().into(),
+        length: store.size(&factory).unwrap(),
+        artifact: format!("asset:{}", factory.hex()),
+    };
+    prepared.spawnable.push(future);
+    let checkpoint_manifest = store.put(&serde_json::to_vec(&prepared).unwrap()).unwrap();
+    let closure = &mut checkpoint.runtime.execution["driver_world"];
+    closure["manifest"] = serde_json::to_value(&checkpoint_manifest).unwrap();
+    let mut objects = vec![checkpoint_object.clone(), factory.clone()];
+    objects.sort();
+    closure["objects"] = serde_json::to_value(objects).unwrap();
+    let bytes = encode(&snapshot, &store);
+    drop(store);
+    drop(source);
+
+    let destination = tempfile::tempdir().unwrap();
+    let (_, execution, store) = service(destination.path());
+    let imported = execution
+        .import_bundle(bytes.as_slice(), &Options::default())
+        .unwrap();
+    let InputSource::Resolved { definition } = &imported.spec.inputs else {
+        unreachable!()
+    };
+    definition::prepared(definition, &store).unwrap();
+    let capture = execution
+        .checkpoint_definition(&imported.metadata.id, "capture")
+        .unwrap();
+    let InputSource::Resolved { definition } = &capture.spec.inputs else {
+        unreachable!()
+    };
+    definition::prepared(definition, &store).unwrap();
+    for digest in [
+        main_manifest,
+        main_object,
+        checkpoint_manifest,
+        checkpoint_object,
+        factory,
+    ] {
+        store.verify(&digest).unwrap();
+    }
+    let mut exported = Vec::new();
+    execution
+        .export_bundle(&imported.metadata.id, &mut exported, &Options::default())
+        .unwrap();
+    let fresh = tempfile::tempdir().unwrap();
+    let (_, execution, _) = service(fresh.path());
+    execution
+        .import_bundle(exported.as_slice(), &Options::default())
+        .unwrap();
 }
 
 #[tokio::test]
@@ -400,7 +580,7 @@ fn imported_comparisons_use_complete_resolved_semantics_without_rewriting_record
             6 => definition.network.latency_ns += 1,
             7 => {
                 definition.start = seedbox_spec::definition::Start::Checkpoint {
-                    manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[],"failed":false}}}}),
+                    manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[]}}}}),
                     assets: BTreeMap::new(),
                 }
             }
@@ -667,7 +847,7 @@ fn export_captures_owned_native_checkpoint_files_and_preserves_consumed_override
     let memory = attempt.join("ram.bin");
     std::fs::write(&memory, b"retained checkpoint RAM").unwrap();
     let ram = seedbox_artifacts::store::ContentDigest::of(b"retained checkpoint RAM");
-    let native = serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[],"failed":false}}}, "ram":{"path":std::path::absolute(&memory).unwrap(), "sha256":ram.hex()}});
+    let native = serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[]}}}, "ram":{"path":std::path::absolute(&memory).unwrap(), "sha256":ram.hex()}});
     std::fs::write(
         attempt.join("output/machines/checkpoint-capture.json"),
         serde_json::to_vec(&native).unwrap(),
@@ -743,7 +923,7 @@ fn export_captures_owned_native_checkpoint_files_and_preserves_consumed_override
     let seedbox_spec::definition::Start::Checkpoint { manifest, .. } = &mut definition.start else {
         unreachable!()
     };
-    manifest["state"]["world"]["input_program"] = serde_json::json!({"inputs":[{"key":"consumed","at_ns":10,"action":action,"timeout_ns":500}],"next":1,"failed":false,"rejections":[],"admissions":[{"key":"consumed","plan":{"id":1,"at_ns":10,"deadline_ns":510,"action":"pause_process","machine":"oracle"}}]});
+    manifest["state"]["world"]["input_program"] = serde_json::json!({"inputs":[{"key":"consumed","at_ns":10,"action":action,"timeout_ns":500}],"next":1,"rejections":[],"admissions":[{"key":"consumed","plan":{"id":1,"at_ns":10,"deadline_ns":510,"action":"pause_process","machine":"oracle"}}]});
     let InputSource::Resolved { definition: main } = &mut snapshot.simulation.spec.inputs else {
         unreachable!()
     };
@@ -1099,7 +1279,7 @@ fn prepared_reference_to_imported_checkpoint_starts_fresh_before_override_valida
     };
     manifest["state"]["world"]["input_program"] = serde_json::json!({
         "inputs":[{"key":"consumed","at_ns":10,"action":action,"timeout_ns":500}],
-        "next":1,"failed":false,"rejections":[],
+        "next":1,"rejections":[],
         "admissions":[{"key":"consumed","plan":{"id":1,"at_ns":10,"deadline_ns":510,"action":"pause_process","machine":"oracle"}}]
     });
     snapshot.simulation.spec = SimulationSpec::resolved(definition).unwrap();

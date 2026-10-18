@@ -1,7 +1,5 @@
 [
   {
-    "disk_digest": "66661f1fe6f1af92ac6138163cc8704246d84c994434b383a51290bb88791354",
-    "disk_lost": 27,
     "link_witness": "346a44ea504d7362b89a7feb40eacdd247d6cfcee73077861dc54c0427026529",
     "outcome_digest": "75569292989c253c890065152a76a12e49fa146a3c5b285b9c035fb8bde5e1c4",
     "seed": 0,
@@ -25,8 +23,6 @@
     ]
   },
   {
-    "disk_digest": "c8c79e8aedc65f6effae9600e145384388bd732fcfb9ac751bce49585c1b8288",
-    "disk_lost": 33,
     "link_witness": "f13db5890099049b4665848f8f43a441c6aa29b70d873b77afe1c17ea7295349",
     "outcome_digest": "ba0ff57f61c48d441d6be31e2b35ee30a8f27759f5bc2a810d85664b7ad449a6",
     "seed": 1,
@@ -50,8 +46,6 @@
     ]
   },
   {
-    "disk_digest": "f002d95951e5b0706ea1b3279498bfaa09ba120a30828376a0015426e4fb3c6e",
-    "disk_lost": 26,
     "link_witness": "0bfe109df906bfb8499b690ca5ed514024cbfba97e8d9777c93f85276c3482f2",
     "outcome_digest": "5d4071b8ba23b710d0e0f9fbbbe41f31a76f5e932a9ca1fe7ae8579ff53f40bc",
     "seed": 2,
@@ -75,8 +69,6 @@
     ]
   },
   {
-    "disk_digest": "40bde8278edd22f8c295c361d78e54b7ea12d08cd23cb5c361e9edfd6cccae9e",
-    "disk_lost": 28,
     "link_witness": "3cfee2dfb10bcd5b489fcf59f7dd9ff41b028f619f35817715c46ff696e5d099",
     "outcome_digest": "0fc498136bf32f52ed6f12e69dede4366ad0006989d2a7d6a779f63138e62884",
     "seed": 1009,
@@ -100,8 +92,6 @@
     ]
   },
   {
-    "disk_digest": "220e723ca2145c7b77b43a2987a66f5575ababf1e664468cc8136c9720e288a5",
-    "disk_lost": 34,
     "link_witness": "5c1e29106767dceb61f68ab7d29725b1d4a91fa32f7cdf68f8963e7c28678c29",
     "outcome_digest": "c99a68408b63cec207d671966a303b562ca22dac5f53cab0de8c120cd2d0ae9d",
     "seed": 18446744073709551615,
