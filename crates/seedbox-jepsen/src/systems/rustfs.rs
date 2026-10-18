@@ -111,8 +111,9 @@ pub struct Args {
     pub reboot_before_check: bool,
     /// Corruption of a server's only copy may destroy data: report lost,
     /// unreadable and unlisted acknowledged objects, and servers that never
-    /// recover, without failing on them; fail only on bytes no client wrote
-    /// and listings of keys no client wrote.
+    /// recover (keel-s3dd refuses to start on a corrupt frame), and pass;
+    /// fail only on bytes no client wrote and listings of keys no client
+    /// wrote.
     #[arg(long)]
     pub integrity_only: bool,
     /// Register workloads: after a write or compare-and-set whose outcome is
@@ -1173,6 +1174,11 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     let lost = !missing.is_empty() || !down.is_empty() || !stale.is_empty() || !unlisted.is_empty();
     if !corrupt.is_empty() || !phantom.is_empty() || wrong || (lost && !args.integrity_only) {
         kit::verdict(kit::VIOLATION, &summary)
+    } else if args.integrity_only && !acknowledged.is_empty() {
+        // Lost, unreadable and unlisted objects, and a server that refuses
+        // to start on a corrupt frame, are the expected outcomes of
+        // corrupting the only copy; they are reported in the summary.
+        kit::verdict(kit::OK, &summary)
     } else if lost || !unreadable.is_empty() || unlistable > 0 || acknowledged.is_empty() {
         kit::verdict(kit::INCONCLUSIVE, &summary)
     } else {

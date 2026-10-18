@@ -2055,7 +2055,7 @@ fn keel() -> Vec<Scenario> {
     ));
     specs.push((
         "keel-corrupt-writes".into(),
-        "keel-objects under silent corruption of written data: run it with\n`--fault-profile harness/jepsen/keel/corruption-write-faults.yaml`. One server keeps one\ncopy, so corrupted objects may be lost; but every read must return the bytes written\nor an error, never other bytes, and a listing must hold only keys some client wrote.\nThe server is power-cycled once the faults end.".into(),
+        "keel-objects under silent corruption of written data: run it with\n`--fault-profile harness/jepsen/keel/corruption-write-faults.yaml`. One server keeps one\ncopy, so corrupted objects may be lost; but every read must return the bytes written\nor an error, never other bytes, and a listing must hold only keys some client wrote.\nThe server is power-cycled once the faults end; keel-s3dd then refuses to start on a\ncorrupt frame mid-log (exit 3) rather than discard what follows it, which is the\nexpected fail-stop for a corrupted single copy and is reported, not failed.".into(),
         "poll", "log", [objects, reboot, &["--integrity-only"], short].concat(),
     ));
     specs
