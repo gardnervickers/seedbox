@@ -11,9 +11,10 @@ simulation and compare its results.
 
 ## Try it
 
-Use an Apple Silicon Mac or Linux x86-64 host. The default PV backend needs
-`/dev/kvm` on Linux; software TCG on Linux x86-64 does not.
-Install Nix and start Docker or Podman. Macs also need Apple's Command Line Tools.
+Start on Linux x86-64 with Nix and Docker or Podman running. The default PV
+backend needs access to `/dev/kvm`; the software TCG backend does not.
+Apple Silicon builds also need Apple's Command Line Tools and Docker Desktop
+or Podman. Mac execution and replay still need hardware verification.
 
 ```sh
 nix develop
@@ -30,17 +31,15 @@ replay command; it should print `MATCH: <sim-id>`. The etcd example runs three
 members and a short consistency check with eight writers and 20 writes per
 writer. Allow extra time for the initial image downloads and build.
 
-The build embeds the Driver runtime: guest kernels, init, progress client and helpers. `doctor` checks
-the local runtime inputs and host access before any application images are prepared.
-Running Seedbox does not invoke Nix or a compiler. Docker or Podman prepares
-application images.
+The build embeds the runtime: guest kernels, init, progress client and helpers.
+`doctor` checks the local runtime inputs and host access before any application
+images are prepared. Running Seedbox does not invoke Nix or a compiler. Docker
+or Podman prepares application images; replay uses retained inputs without the
+image engine or source project.
 
-Runtime inputs come from the complete build. The old `--vmm`, `--kernel`,
-`--runtime-assets`, `--guest-init`, and `--mke2fs` overrides are no longer
-accepted; their `SEEDBOX_*` environment variables are not read by the CLI.
-Build tools may still use those environment names. To relocate a complete Driver
-package, set `SEEDBOX_ASSET_DIR` to the directory containing its host-architecture
-subdirectory (for example, `x86_64/driver-runtime.tar.gz`).
+To use a separate complete runtime package, set `SEEDBOX_ASSET_DIR` to the
+directory containing its host-architecture subdirectory (for example,
+`x86_64/driver-runtime.tar.gz`).
 
 If no server is running, the CLI asks before starting a persistent local one.
 For scripts, start `seedbox serve` explicitly. `seedbox shutdown` stops the server
@@ -50,9 +49,7 @@ and its simulations. Keep the server running between `run` and `replay`.
 
 The animation above shows the [etcd example](examples/etcd/seedbox.yaml).
 For longer fault experiments, increase the oracle's `--writes` and `--duration`
-arguments in your generated `seedbox.yaml` before starting. The larger workload
-with 20,000 writes per writer and `--duration 100000s` took about **21 minutes
-on Linux x86-64 PV** on our test host; TCG can take longer. The short defaults
+arguments in your generated `seedbox.yaml` before starting. The short defaults
 are intended for the first PASS and replay, not an extended fault session.
 
 ```sh
@@ -82,13 +79,14 @@ Start with [the etcd example](examples/etcd/seedbox.yaml), or generate a project
 the test and checks its results. Oracle exit code zero means pass; nonzero means
 fail. An execution that ends without an oracle exit has no completed test verdict.
 Set `memoryMiB` on a machine or the oracle to choose its RAM independently.
-Omission uses 1024 MiB; supported sizes are 64–3072 MiB on Apple Silicon and
-64–65536 MiB on Linux x86-64. Preparation checks the image archive’s boot memory
+Omission uses 1024 MiB; supported sizes are 64–3072 MiB for ARM64 guests and
+64–65536 MiB for x86-64 guests. Preparation checks the image archive’s boot memory
 requirement; applications may need more.
 
-Images must match the guest architecture: `linux/arm64` on Apple Silicon,
-`linux/amd64` on Linux x86-64. Pull private images with Docker or Podman first;
-Seedbox does not integrate registry credential helpers.
+Images must match the guest architecture: PV uses `linux/arm64` on Apple
+Silicon and `linux/amd64` on Linux x86-64; TCG uses `linux/amd64` on either
+host. Pull private images with Docker or Podman first; Seedbox does not integrate
+registry credential helpers.
 
 ## Inspect and repeat
 
@@ -114,8 +112,8 @@ also compares retained results and reports `MATCH`, `MISMATCH`, or
 `NOT_COMPARABLE`.
 
 `run` and `explore` use `--backend pv` by default. On Linux x86-64, select the
-software CPU with `seedbox run examples/etcd --backend tcg`; it is slower but
-does not require KVM. The run records its backend. `rerun`, `replay`, and saved
+software CPU with `seedbox run ~/seedbox-quickstart --backend tcg`; it is slower
+but does not require KVM. The run records its backend. `rerun`, `replay`, and saved
 resolved definitions keep that recorded backend when the flag is omitted;
 a conflicting explicit `--backend` is rejected. To choose a different backend,
 run the original project again. There is no backend environment variable or
