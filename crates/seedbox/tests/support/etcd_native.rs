@@ -8,6 +8,7 @@ use seedbox_test_time::HangGuard;
 use std::{
     ffi::OsString,
     fs,
+    io::Read,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -108,6 +109,74 @@ impl Cli {
                 "captured resource {id} before shutdown: {:?}",
                 resource.status
             );
+        }
+        Ok(())
+    }
+
+    /// Copy only small retained execution metadata and per-page hashes before
+    /// shutdown removes the session. Never retain native RAM or disk images.
+    fn capture_failure_evidence(&self) -> Result<()> {
+        const FILE_LIMIT: u64 = 16 * 1024 * 1024;
+        const TOTAL_LIMIT: u64 = 64 * 1024 * 1024;
+        let root = self.state.join("sessions");
+        if !root.exists() {
+            return Ok(());
+        }
+        let destination = self.directory.join("failure-evidence");
+        let mut pending = vec![root.clone()];
+        let mut total = 0u64;
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let kind = entry.file_type().map_err(|e| e.to_string())?;
+                if kind.is_dir() {
+                    pending.push(entry.path());
+                    continue;
+                }
+                if !kind.is_file() {
+                    continue;
+                }
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let page_hashes = name
+                    .strip_prefix("state-")
+                    .and_then(|name| name.strip_suffix(".pages"))
+                    .is_some_and(|ordinal| {
+                        !ordinal.is_empty() && ordinal.bytes().all(|b| b.is_ascii_digit())
+                    });
+                if !matches!(
+                    name.as_ref(),
+                    "driver-state.json"
+                        | "state-report.json"
+                        | "driver-policy.json"
+                        | "manifest.json"
+                        | "vmm.stderr"
+                ) && !page_hashes
+                {
+                    continue;
+                }
+                let path = entry.path();
+                let mut bytes = Vec::new();
+                fs::File::open(&path)
+                    .map_err(|e| e.to_string())?
+                    .take(FILE_LIMIT + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| e.to_string())?;
+                if bytes.len() as u64 > FILE_LIMIT || total + bytes.len() as u64 > TOTAL_LIMIT {
+                    eprintln!(
+                        "omitting diagnostic {}: retained evidence size limit",
+                        path.display()
+                    );
+                    continue;
+                }
+                let relative = path.strip_prefix(&root).map_err(|e| e.to_string())?;
+                let target = destination.join(relative);
+                fs::create_dir_all(target.parent().ok_or("missing evidence parent")?)
+                    .map_err(|e| e.to_string())?;
+                fs::write(&target, &bytes).map_err(|e| e.to_string())?;
+                total += bytes.len() as u64;
+                eprintln!("retained diagnostic {}", target.display());
+            }
         }
         Ok(())
     }
@@ -260,6 +329,10 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
         );
     }
     require_match(&compared)?;
+    if std::env::var_os("SEEDBOX_DIAG_COMPARE_ONLY").is_some() {
+        cli.capture_failure_evidence()?;
+        return Ok(());
+    }
     // Reports are already retained; bound memory by releasing completed native
     // worlds rather than accumulating five four-machine executions.
     cli.invoke(
@@ -390,6 +463,9 @@ pub fn run(backend: Backend) {
             Duration::from_secs(120),
         );
         if result.is_err() {
+            if let Err(error) = cli.capture_failure_evidence() {
+                eprintln!("execution diagnostic capture failed (original error retained): {error}");
+            }
             if let Err(error) = cli.capture_failure_resources(&cleanup).await {
                 eprintln!("resource diagnostic capture failed (original error retained): {error}");
             }

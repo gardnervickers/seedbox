@@ -13,11 +13,14 @@ def collect(root):
     for source in (root / "target/check-reports",):
         if source.is_symlink() or not source.is_dir():
             continue
-        for path in sorted(source.rglob("*")):
+        paths = sorted(source.rglob("*"), key=lambda path: (
+            "failure-evidence" not in path.parts, path.suffix == ".pages",
+            -path.lstat().st_mtime))
+        for path in paths:
             if count >= 128 or remaining <= 0:
                 break
             if path.is_symlink() or not path.is_file() or path.suffix not in (
-                    ".json", ".txt", ".log", ".out", ".stderr", ".stdout"):
+                    ".json", ".txt", ".log", ".out", ".stderr", ".stdout", ".pages"):
                 continue
             relative = path.relative_to(source)
             if any(parent.is_symlink() for parent in path.parents if parent != source):

@@ -81,7 +81,7 @@ impl Native {
         // request_interrupt_window affects the next architectural entry. Do not
         // include immediate_exit/last exit_reason or other host scheduling fields.
         let window = self.cpu.get_kvm_run().request_interrupt_window;
-        Ok(vec![
+        let parts = vec![
             part(
                 "regs",
                 &[
@@ -109,7 +109,12 @@ impl Native {
                 &json!({"mp_state":mp.mp_state,"injected":self.injected,"interrupt_window":window}),
             )?,
             part("cpuid", &cpuid)?,
-        ])
+        ];
+        eprintln!(
+            "pr320-cpu {}",
+            json!({"rip":r.rip,"msrs":msrs,"events":{"exception":exception_evidence(&e),"interrupt":interrupt_evidence(&e),"nmi":[e.nmi.injected,e.nmi.pending,e.nmi.masked],"sipi":e.sipi_vector,"flags":e.flags,"smi":[e.smi.smm,e.smi.pending,e.smi.smm_inside_nmi,e.smi.latched_init],"triple_fault":e.triple_fault.pending}})
+        );
+        Ok(parts)
     }
     pub(super) fn read_xsave(&self) -> Result<Vec<u8>> {
         // XSAVE2 includes dynamically sized banks (e.g. AMX), not the legacy
@@ -228,6 +233,11 @@ impl Native {
         if active & !seen != 0 {
             return Err("PV XSAVE active bank absent from guest CPUID layout".into());
         }
-        Ok(hex(&h.finalize()))
+        let digest = hex(&h.finalize());
+        eprintln!(
+            "pr320-vectors {}",
+            json!({"active":active,"digest":digest,"bytes":hex(&bytes)})
+        );
+        Ok(digest)
     }
 }

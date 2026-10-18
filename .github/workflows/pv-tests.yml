@@ -89,6 +89,7 @@ jobs:
               os.close(vm)
           print('KVM VM creation succeeded')
           PYTHON
+          lscpu
           docker info
       - uses: cachix/install-nix-action@v31
         with:
@@ -130,8 +131,23 @@ jobs:
             echo "Cargo exact cache hit: $CARGO_HIT"
             du -sh /nix/store
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Portable prerequisites and PV application acceptance
-        run: nix develop --command bash harness/check.sh linux-apps
+      - name: Focused PR 320 etcd state diagnostic (not full validation)
+        run: |
+          nix develop --command bash -euc '
+            export TMPDIR
+            TMPDIR=$(mktemp -d /tmp/pr320.XXXXXX)
+            trap "rmdir -- $TMPDIR 2>/dev/null || true" EXIT
+            cargo xtask build-assets
+            cargo build --release --locked -p seedbox
+            export SEEDBOX_TEST_CLI="$PWD/target/release/seedbox"
+            export SEEDBOX_TEST_REPORT_DIR="$PWD/target/check-reports/pr320"
+            export SEEDBOX_DIAG_COMPARE_ONLY=1
+            mkdir -p "$SEEDBOX_TEST_REPORT_DIR"
+            for attempt in 1 2 3 4 5; do
+              echo "PR320 diagnostic attempt $attempt"
+              cargo test --locked -p seedbox --features etcd-prep-tests --test etcd_service_native pv_etcd_preparation_smoke_through_normal_cli_service -- --exact --nocapture --test-threads=1
+            done
+          '
       - name: Bound diagnostic artifact storage
         if: always()
         # Privileged KVM tests leave root-owned manifests and logs.

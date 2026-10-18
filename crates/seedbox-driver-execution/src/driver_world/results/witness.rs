@@ -52,6 +52,7 @@ where
         native.validate().map_err(|error| {
             Error::Integrity(format!("native execution witness for {name}: {error}"))
         })?;
+        eprintln!("pr320-native-witness {name} {}", native.witness);
         let capture = full_state
             .map(|s| {
                 s.machines
