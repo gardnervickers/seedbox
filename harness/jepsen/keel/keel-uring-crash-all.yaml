@@ -8,7 +8,7 @@ machines:
     # run-s3dd.sh restarts keel-s3dd whenever it exits, as a supervisor would.
     image: localhost/seedbox-jepsen/keel-s3dd:current
     entrypoint: ["/bin/sh", "/run-s3dd.sh"]
-    command: ["--listen", "0.0.0.0:9000", "--data-dir", "/data", "--access-key", "jepsen", "--secret-key", "jepsen-secret", "--region", "us-east-1", "--io-backend", "uring", "--object-placement", "log", "--store-segments", "32", "--watchdog-wedge-ms", "12000"]
+    command: ["--listen", "0.0.0.0:9000", "--data-dir", "/data", "--access-key", "jepsen", "--secret-key", "jepsen-secret", "--region", "us-east-1", "--io-backend", "uring", "--object-placement", "log", "--store-segments", "64", "--watchdog-wedge-ms", "12000"]
     memoryMiB: 512
     files:
     - source: run-s3dd.sh
@@ -16,7 +16,7 @@ machines:
     volumes:
       data:
         target: /data
-        size: 2GiB
+        size: 3GiB
 oracle:
   build:
     context: ../../..

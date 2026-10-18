@@ -1869,7 +1869,7 @@ const KEEL_S3DD: &str = "localhost/seedbox-jepsen/keel-s3dd:current";
 
 /// One keel-s3dd server, its store on a volume, restarted by run-s3dd.sh
 /// whenever it exits. The segment log never reclaims space, so the store has
-/// 32 segments of 16 MiB (512 MiB of writes) instead of the default 8. Its
+/// 64 segments of 16 MiB (1 GiB of writes) instead of the default 8. Its
 /// wedge watchdog's bound is 12 s instead of 2 s, so the below-pause profiles
 /// (up to 10 s) cross no bound and the above-pause ones (13-20 s) do.
 fn keel_server(backend: &str, placement: &str) -> Machine {
@@ -1892,31 +1892,35 @@ fn keel_server(backend: &str, placement: &str) -> Machine {
             "--object-placement",
             placement,
             "--store-segments",
-            "32",
+            "64",
             "--watchdog-wedge-ms",
             "12000",
         ]))
         .file("run-s3dd.sh", "/run-s3dd.sh")
         .memory(512)
-        .data_sized("/data", "2GiB")
+        .data_sized("/data", "3GiB")
 }
 
 #[allow(clippy::type_complexity)]
 fn keel() -> Vec<Scenario> {
     let objects: &[&str] = &["--size", "4096"];
-    let register: &[&str] = &[
-        "--workload",
-        "cas-register",
-        "--size",
-        "1024",
-        "--keys",
-        "4",
-    ];
+    let register: &[&str] = &["--workload", "cas-register", "--keys", "4"];
+    // Small objects for the 60 s scenarios.
+    let small: &[&str] = &["--size", "1024"];
     let crash: &[&str] = &["--crash-all-every", "15"];
     let reboot: &[&str] = &["--reboot-before-check"];
     // Long enough for the above-pause profiles' 13-20 s freezes, with load
     // enough that a freeze often lands while keel-s3dd is mid-tick.
-    let long: &[&str] = &["--duration", "120", "--clients", "8", "--think-ms", "10"];
+    let long: &[&str] = &[
+        "--duration",
+        "120",
+        "--clients",
+        "12",
+        "--think-ms",
+        "5",
+        "--size",
+        "16384",
+    ];
     let short: &[&str] = &["--duration", "60"];
     // (suffix, backend, placement, what the variant is)
     let variants = [
@@ -1943,12 +1947,12 @@ fn keel() -> Vec<Scenario> {
     for (suffix, backend, placement, what) in variants {
         specs.push((
             format!("keel{suffix}-objects"),
-            format!("One keel-s3dd server with {what}.\nLooking for unknown bugs: S3 PUTs of unique 4 KiB objects from eight clients for\n120 s with reads of acknowledged objects, then a read-back and a listing of every\nacknowledged object. keel-s3dd acknowledges a write only once it is synced, so\nnothing acknowledged may be lost. Run it without a fault profile for a baseline,\nor with `--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or\n`above-pause-faults.yaml`."),
-            backend, placement, [objects, long].concat(),
+            format!("One keel-s3dd server with {what}.\nLooking for unknown bugs: S3 PUTs of unique 16 KiB objects from twelve clients for\n120 s with reads of acknowledged objects, then a read-back and a listing of every\nacknowledged object. keel-s3dd acknowledges a write only once it is synced, so\nnothing acknowledged may be lost. Run it without a fault profile for a baseline,\nor with `--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or\n`above-pause-faults.yaml`."),
+            backend, placement, long.to_vec(),
         ));
         specs.push((
             format!("keel{suffix}-register"),
-            format!("One keel-s3dd server with {what}.\nFour registers: reads, PUTs, DELETEs and compare-and-set by conditional PUT (a GET,\nthen If-Match on its ETag, or If-None-Match from absent) from eight clients for 120 s,\nthen a read of each key. Every key's history must be linearizable. Run it with\n`--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or `above-pause-faults.yaml`."),
+            format!("One keel-s3dd server with {what}.\nFour registers: reads, PUTs, DELETEs and compare-and-set by conditional PUT (a GET,\nthen If-Match on its ETag, or If-None-Match from absent) from twelve clients for 120 s,\nthen a read of each key. Every key's history must be linearizable. Run it with\n`--fault-profile harness/jepsen/keel/below-pause-faults.yaml` or `above-pause-faults.yaml`."),
             backend, placement, [register, long].concat(),
         ));
         specs.push((
@@ -1959,7 +1963,7 @@ fn keel() -> Vec<Scenario> {
         specs.push((
             format!("keel{suffix}-crash-all-register"),
             format!("keel{suffix}-register under the same power loss: no acknowledged write or\ncompare-and-set may be lost, and every key's history must stay linearizable."),
-            backend, placement, [register, crash, short].concat(),
+            backend, placement, [register, small, crash, short].concat(),
         ));
     }
     specs.push((
@@ -1970,7 +1974,7 @@ fn keel() -> Vec<Scenario> {
     specs.push((
         "keel-eio-register".into(),
         "keel-register under failed disk requests, power-cycled before the checks like\nkeel-eio: run it with `--fault-profile harness/jepsen/keel/eio-data-faults.yaml`. A\nwedged keel-s3dd answers every write with an ambiguous 500, so a client waits 1 s\nafter each unknown outcome to keep the history checkable.".into(),
-        "poll", "log", [register, reboot, &["--unknown-backoff-ms", "1000"], short].concat(),
+        "poll", "log", [register, small, reboot, &["--unknown-backoff-ms", "1000"], short].concat(),
     ));
     specs.push((
         "keel-corrupt-writes".into(),
