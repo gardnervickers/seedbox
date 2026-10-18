@@ -421,6 +421,10 @@ fn register_op(
         // Refused before it could take effect: never sent, or rejected as a
         // malformed or unauthenticated request.
         (_, Exchange::NotSent(_) | Exchange::Answered(400 | 403, ..)) => history.fail(id),
+        // A bare 503 with no error document is keel-s3dd refusing a request
+        // before running it (its store still recovering, or no task slot);
+        // S3 errors that may follow an effect carry a document.
+        (_, Exchange::Answered(503, data, _)) if data.is_empty() => history.fail(id),
         // Anything else may or may not have taken effect: leave it pending.
         _ => observed.unknown = true,
     }
