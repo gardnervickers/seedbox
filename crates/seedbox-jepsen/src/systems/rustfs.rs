@@ -350,7 +350,8 @@ struct Observed {
     unwritten: Option<String>,
     /// A write or compare-and-set whose outcome is unknown.
     unknown: bool,
-    /// ... answered 500 (an error that may follow an effect).
+    /// ... answered 500 (an error that may follow an effect), or refused
+    /// by a wedged keel-s3dd (503 StorageWedged): the server failing stop.
     refused: bool,
     /// The server answered definitely: a read, a write or a refused
     /// compare-and-set completed.
@@ -441,6 +442,13 @@ fn register_op(
         // before running it (its store still recovering, or no task slot);
         // S3 errors that may follow an effect carry a document.
         (_, Exchange::Answered(503, data, _)) if data.is_empty() => history.fail(id),
+        // keel-s3dd refusing new requests once its engine has wedged after
+        // an I/O error: nothing applied. (A request already committing when
+        // the wedge hit gets an ambiguous 500 instead.)
+        (_, Exchange::Answered(503, data, _)) if s3_code(&data) == "StorageWedged" => {
+            observed.refused = true;
+            history.fail(id)
+        }
         // Anything else may or may not have taken effect: leave it pending.
         (_, Exchange::Answered(500, ..)) => {
             observed.unknown = true;
@@ -706,7 +714,8 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     }
 }
 
-/// The spans in which writes were answered with an ambiguous 500 (times in
+/// The spans in which writes were answered with an ambiguous 500, or
+/// refused as StorageWedged (times in
 /// seconds; a gap of more than 5 s starts a new span), recorded as
 /// `fail-stop` evidence and described for the verdict: a server that stops
 /// accepting writes after an I/O error is failing stop, which is allowed as
