@@ -79,36 +79,6 @@ pub fn python(tool: &str) -> Command {
     command
 }
 
-// The notice build helper exposes a function, not a CLI. This is only an
-// invocation bridge: archive generation, cases and all assertions are Rust.
-pub fn notices(sources: &Path, component: Option<&str>) -> Output {
-    let mut command = Command::new("python3");
-    command
-        .arg("-c")
-        .arg("import pathlib, runpy, sys; m = runpy.run_path(sys.argv[1]); sys.stdout.buffer.write(m['notices'](pathlib.Path(sys.argv[2]), (sys.argv[3],)) if len(sys.argv) > 3 else m['notices'](pathlib.Path(sys.argv[2])))")
-        .arg(root().join("tools/runtime/notices.py"))
-        .arg(sources);
-    if let Some(component) = component {
-        command.arg(component);
-    }
-    run(&mut command, 30)
-}
-
-pub fn notice_components() -> Vec<String> {
-    let output = success(
-        Command::new("python3")
-            .arg("-c")
-            .arg("import runpy, sys; print('\\n'.join(runpy.run_path(sys.argv[1])['NOTICES']))")
-            .arg(root().join("tools/runtime/notices.py")),
-        30,
-    );
-    String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .map(str::to_owned)
-        .collect()
-}
-
 #[derive(Debug)]
 pub struct Member {
     pub name: String,
