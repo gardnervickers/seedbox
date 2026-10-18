@@ -318,23 +318,36 @@ pub fn run(args: Args) -> u8 {
         down,
         restarted,
     } = recover(&args.members, args.recover, "final", true);
-    // A final read of every key touched, as one read-only transaction.
+    // A final read of every key touched, in read-only transactions of at
+    // most 100 keys (etcd allows 128 operations per txn by default).
     let touched: Vec<i64> = run.keys.lock().unwrap().touched.iter().copied().collect();
-    let reads: Vec<Mop> = touched
-        .iter()
-        .map(|k| Mop::Read(Atom::Int(*k), None))
-        .collect();
-    let mut final_read = false;
-    'read: for attempt in 0..3u64 {
-        for member in &live {
-            let t0 = kit::now_us();
-            if let Outcome::Ok(value) = execute(member, &reads, 10.0) {
-                run.record(usize::MAX / 2, "ok", &reads, Some(value), t0, None);
-                final_read = true;
-                break 'read;
+    let mut final_read = !live.is_empty();
+    for chunk in touched.chunks(100).filter(|_| !live.is_empty()) {
+        let reads: Vec<Mop> = chunk
+            .iter()
+            .map(|k| Mop::Read(Atom::Int(*k), None))
+            .collect();
+        let mut read = false;
+        'read: for attempt in 0..3u64 {
+            for member in &live {
+                let t0 = kit::now_us();
+                match execute(member, &reads, 10.0) {
+                    Outcome::Ok(value) => {
+                        run.record(usize::MAX / 2, "ok", &reads, Some(value), t0, None);
+                        read = true;
+                        break 'read;
+                    }
+                    Outcome::Fail(error) | Outcome::Info(error) => {
+                        kit::evidence(
+                            "final-read-error",
+                            json!({"member": member, "error": error}),
+                        );
+                    }
+                }
             }
+            kit::pause(1.0 + attempt as f64);
         }
-        kit::pause(1.0 + attempt as f64);
+        final_read &= read;
     }
     let (diverged, hashes) = compare_hashes(&live);
     kit::evidence("hashkv", hashes);
