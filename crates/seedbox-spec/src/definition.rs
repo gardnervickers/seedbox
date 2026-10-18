@@ -162,7 +162,8 @@ impl Start {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Simulator {
-    pub blocks_per_progress_call: std::num::NonZeroU32,
+    #[serde(rename = "blocksPerProgressCall")]
+    pub progress_budget: crate::progress::ProgressBudget,
     pub schedule: crate::Schedule,
     pub disk: crate::DiskOptions,
     /// The oracle exposes the world control API.
@@ -190,7 +191,7 @@ impl Definition {
         self.oracle.name.as_deref().unwrap_or(Self::ORACLE)
     }
     pub fn configuration(&self, name: &str) -> Result<crate::Simulation, String> {
-        let backend = self.runtime.driver_backend()?.unwrap_or_default();
+        self.runtime.driver_backend()?;
         let mut services = BTreeMap::new();
         for (name, machine) in self
             .machines
@@ -261,16 +262,15 @@ impl Definition {
             },
             disk: self.simulator.disk.clone(),
             simulator: crate::project::SimulatorDefaults {
-                backend,
-                blocks_per_progress_call: self.simulator.blocks_per_progress_call,
+                progress_budget: self.simulator.progress_budget,
             },
         })
     }
 }
 
 impl Runtime {
-    pub fn driver_backend(&self) -> Result<Option<crate::project::CpuBackend>, String> {
-        crate::project::CpuBackend::from_recorded_name(
+    pub fn driver_backend(&self) -> Result<Option<crate::backend::CpuBackend>, String> {
+        crate::backend::CpuBackend::from_recorded_name(
             self.execution["backend"].as_str().unwrap_or_default(),
         )
     }

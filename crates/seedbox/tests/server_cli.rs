@@ -107,10 +107,10 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
         );
     }
 
-    let compose = root.join("compose.yaml");
+    let compose = root.join("seedbox.yaml");
     std::fs::write(
         &compose,
-        "name: server-test\nservices:\n  oracle:\n    image: example/oracle\n",
+        "name: server-test\nmachines: {}\noracle:\n  image: example/oracle\n",
     )
     .unwrap();
     let result = cli(root)

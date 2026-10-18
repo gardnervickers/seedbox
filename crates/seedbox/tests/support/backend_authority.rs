@@ -33,7 +33,7 @@ fn resource(tag: &str) -> serde_json::Value {
         },
         network: project.configuration.network,
         simulator: d::Simulator {
-            blocks_per_progress_call: project.configuration.simulator.blocks_per_progress_call,
+            progress_budget: project.configuration.simulator.progress_budget,
             schedule: Default::default(),
             disk: Default::default(),
             oracle_control: true,
@@ -196,13 +196,18 @@ fn backend_authority_replay_and_rerun_reject_unknown_cpu() {
 #[test]
 fn backend_authority_matching_metadata_reconstructs_the_recorded_cpu() {
     for (tag, cpu) in [
-        ("driver-pv", seedbox_spec::project::CpuBackend::Pv),
-        ("driver-tcg", seedbox_spec::project::CpuBackend::Tcg),
+        ("driver-pv", seedbox_spec::backend::CpuBackend::Pv),
+        ("driver-tcg", seedbox_spec::backend::CpuBackend::Tcg),
     ] {
         let value = resource(tag);
         let simulation: Simulation = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(simulation.spec.configuration.simulator.backend, cpu);
+        assert_eq!(simulation.options.backend, None);
         let saved: seedbox_api::SimulationDocument = serde_json::from_value(value).unwrap();
-        assert_eq!(saved.spec.configuration.simulator.backend, cpu);
+        for spec in [simulation.spec, saved.spec] {
+            let seedbox_api::InputSource::Resolved { definition } = spec.inputs else {
+                panic!("resolved fixture")
+            };
+            assert_eq!(definition.runtime.driver_backend().unwrap(), Some(cpu));
+        }
     }
 }

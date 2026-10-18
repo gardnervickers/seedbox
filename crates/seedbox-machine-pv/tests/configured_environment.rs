@@ -321,7 +321,7 @@ fn explicit_progress_budget_is_in_both_launch_paths_and_retained_after_source_te
         fs::write(&executable, b"data").unwrap();
         let mut factory = Factory::new(&executable, dir.path(), 123456)
             .unwrap()
-            .with_blocks_per_progress_call(std::num::NonZeroU32::new(budget).unwrap());
+            .with_progress_budget(std::num::NonZeroU32::new(budget).unwrap());
         let definition = factory_definition::definition(0);
         let mut records = vec![];
         for configured in [false, true] {

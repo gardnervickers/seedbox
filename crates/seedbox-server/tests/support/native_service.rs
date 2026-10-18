@@ -247,6 +247,7 @@ impl BackendProvider for NativeProvider {
     fn project(
         &self,
         _: &seedbox_application::config::Simulation,
+        _: seedbox_spec::backend::CpuBackend,
         _: &ContentStore,
         _: &CancellationToken,
     ) -> seedbox_application::Result<Backends> {
@@ -477,7 +478,7 @@ fn fixture_submission(
             946_684_800,
         )
         .unwrap()
-        .with_blocks_per_progress_call(NonZeroU32::new(32).unwrap())
+        .with_progress_budget(NonZeroU32::new(32).unwrap())
         .boot_archive_configured(&definition, &environment)
         .unwrap(),
         DriverBackend::Tcg => seedbox_machine_tcg::machine::tcg::Factory::new(
@@ -574,7 +575,7 @@ fn fixture_submission(
             epoch_seconds: 946_684_800,
             executable: artifact(&executable),
             progress: artifact(&assets.join("progress.tar")),
-            blocks_per_progress_call: NonZeroU32::new(32).unwrap(),
+            progress_budget: NonZeroU32::new(32).unwrap().into(),
         },
         DriverBackend::Tcg => wire::Inventory::Tcg {
             policy: None,
@@ -641,19 +642,30 @@ fn fixture_submission(
     } else {
         "fixture/cpu-loop"
     };
-    let services: String = std::iter::once(oracle)
-        .chain(fixture.extra_machines.iter().copied())
+    let services: String = fixture
+        .extra_machines
+        .iter()
+        .copied()
         .map(|name| format!("  {name}:\n    image: {image}\n"))
         .collect();
+    let services = if services.is_empty() {
+        " {}\n".into()
+    } else {
+        format!("\n{services}")
+    };
     let mut configuration = seedbox_application::config::parse(
         &format!(
-            "name: native-{}-service\nservices:\n{services}",
+            "name: native-{}-service\nmachines:{services}oracle: {{image: {image}}}\n",
             label(backend)
         ),
-        Path::new("/fixture/compose.yaml"),
+        Path::new("/fixture/seedbox.yaml"),
         &Default::default(),
     )
     .unwrap();
+    if oracle != "oracle" {
+        let service = configuration.services.remove("oracle").unwrap();
+        configuration.services.insert(oracle.into(), service);
+    }
     configuration.check.service = oracle.into();
     configuration.machine.memory_mb = memory_mb;
     configuration.control = fixture.control.then(|| seedbox_spec::Control {
@@ -1732,7 +1744,7 @@ fn network_world_submission(
             DriverBackend::Pv => {
                 seedbox_machine_pv::machine::pv::Factory::new(&executable, assets, 946_684_800)
                     .unwrap()
-                    .with_blocks_per_progress_call(NonZeroU32::new(32).unwrap())
+                    .with_progress_budget(NonZeroU32::new(32).unwrap())
                     .boot_archive_configured(&definition, &environment)
                     .unwrap()
             }
@@ -1858,7 +1870,7 @@ fn network_world_submission(
             epoch_seconds: 946_684_800,
             executable: artifact(&executable),
             progress: artifact(&assets.join("progress.tar")),
-            blocks_per_progress_call: NonZeroU32::new(32).unwrap(),
+            progress_budget: NonZeroU32::new(32).unwrap().into(),
         },
         DriverBackend::Tcg => wire::Inventory::Tcg {
             policy: None,
@@ -1886,6 +1898,7 @@ fn network_world_submission(
     driver_world::retain_prepared(&mut inputs, &prepared, store).unwrap();
     let services: String = machines
         .iter()
+        .filter(|(machine, ..)| machine.name != "oracle")
         .map(|(machine, ..)| {
             let image = if machine.binary == "SEEDBOX_PV_CLOCK_APPLICATION" {
                 "fixture/clock-faults"
@@ -1895,12 +1908,22 @@ fn network_world_submission(
             format!("  {}:\n    image: {image}\n", machine.name)
         })
         .collect();
+    let services = if services.is_empty() {
+        " {}\n".into()
+    } else {
+        format!("\n{services}")
+    };
+    let oracle_image = if machines[0].0.binary == "SEEDBOX_PV_CLOCK_APPLICATION" {
+        "fixture/clock-faults"
+    } else {
+        "fixture/network-probe"
+    };
     let mut configuration = seedbox_application::config::parse(
         &format!(
-            "name: native-{}-in-flight\nservices:\n{services}",
+            "name: native-{}-in-flight\nmachines:{services}oracle: {{image: {oracle_image}}}\n",
             label(backend)
         ),
-        Path::new("/fixture/compose.yaml"),
+        Path::new("/fixture/seedbox.yaml"),
         &Default::default(),
     )
     .unwrap();

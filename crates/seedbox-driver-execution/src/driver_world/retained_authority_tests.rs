@@ -31,7 +31,7 @@ fn inventory(backend: DriverBackend, artifact: &Artifact) -> wire::Inventory {
             formatter: None,
             environments: Default::default(),
             boot_archives: Default::default(),
-            blocks_per_progress_call: std::num::NonZeroU32::new(32).unwrap(),
+            progress_budget: std::num::NonZeroU32::new(32).unwrap().into(),
             epoch_seconds: 86400,
         },
         DriverBackend::Tcg => wire::Inventory::Tcg {

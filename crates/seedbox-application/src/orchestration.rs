@@ -114,7 +114,7 @@ impl Orchestrator {
             .or(simulation.seed)
             .ok_or_else(|| Error::Validation {
                 path: "seed".into(),
-                message: "provide a seed in RunOptions or x-seedbox.seed".into(),
+                message: "provide a seed in RunOptions".into(),
             })?;
         preparer.validate_runtime_inputs()?;
         executor.preflight(None)?;
@@ -160,7 +160,7 @@ impl Orchestrator {
             .or(simulation.seed)
             .ok_or_else(|| Error::Validation {
                 path: "seed".into(),
-                message: "provide a seed in RunOptions or x-seedbox.seed".into(),
+                message: "provide a seed in RunOptions".into(),
             })?;
         let identity = RunIdentity {
             interventions: self.replay_history.clone(),

@@ -574,7 +574,12 @@ mod tests {
                 }
             });
             let directory = tempfile::tempdir().unwrap();
-            let simulation = crate::config::parse("name: fixture\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n", &directory.path().join("compose.yaml"), &BTreeMap::new()).unwrap();
+            let simulation = crate::config::parse(
+                "name: fixture\nmachines: {}\noracle: {image: example/app}\n",
+                &directory.path().join("seedbox.yaml"),
+                &BTreeMap::new(),
+            )
+            .unwrap();
             let transport = ContainerTransport {
                 docker: Docker::connect_with_http(
                     &format!("http://{address}"),
@@ -588,7 +593,7 @@ mod tests {
             };
             let store = ContentStore::new(directory.path().join("store"));
             let result = transport.import(
-                &simulation.services["app"],
+                &simulation.services["oracle"],
                 &directory.path().join("image"),
                 &store,
                 None,
@@ -669,7 +674,12 @@ mod tests {
             }
         });
         let directory = tempfile::tempdir().unwrap();
-        let simulation = crate::config::parse("name: fixture\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n", &directory.path().join("compose.yaml"), &BTreeMap::new()).unwrap();
+        let simulation = crate::config::parse(
+            "name: fixture\nmachines: {}\noracle: {image: example/app}\n",
+            &directory.path().join("seedbox.yaml"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let store = ContentStore::new(directory.path().join("store"));
         let import = |engine: &[u8], name: &str| {
             let transport = ContainerTransport {
@@ -685,7 +695,7 @@ mod tests {
             };
             let imported = transport
                 .import(
-                    &simulation.services["app"],
+                    &simulation.services["oracle"],
                     &directory.path().join(name),
                     &store,
                     None,

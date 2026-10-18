@@ -1280,8 +1280,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let manager = Manager::new(Catalogue::open(&directory.path().join("catalogue")).unwrap());
         let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            std::path::Path::new("/project/compose.yaml"),
+            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+            std::path::Path::new("/project/seedbox.yaml"),
             &Default::default(),
         )
         .unwrap();
@@ -1340,8 +1340,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let manager = Manager::new(Catalogue::open(&directory.path().join("catalogue")).unwrap());
         let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            std::path::Path::new("/project/compose.yaml"),
+            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+            std::path::Path::new("/project/seedbox.yaml"),
             &Default::default(),
         )
         .unwrap();
@@ -1486,8 +1486,8 @@ mod tests {
             let catalogue = directory.path().join("catalogue");
             let manager = Manager::new(Catalogue::open(&catalogue).unwrap());
             let configuration = seedbox_application::config::parse(
-                "name: test\nservices:\n  oracle:\n    image: example/oracle\n  other:\n    image: example/other\n",
-                std::path::Path::new("/project/compose.yaml"),
+                "name: test\nmachines:\n  other:\n    image: example/other\noracle:\n  image: example/oracle\n",
+                std::path::Path::new("/project/seedbox.yaml"),
                 &Default::default(),
             )
             .unwrap();
@@ -1571,8 +1571,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let manager = Manager::new(Catalogue::open(&directory.path().join("catalogue")).unwrap());
         let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            std::path::Path::new("/project/compose.yaml"),
+            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+            std::path::Path::new("/project/seedbox.yaml"),
             &Default::default(),
         )
         .unwrap();

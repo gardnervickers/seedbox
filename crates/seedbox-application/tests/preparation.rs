@@ -84,8 +84,20 @@ fn fixture(root: &Path) -> (FixturePreparer, config::Simulation, ContentStore) {
     fs::copy(runtime.guest_assets.join("kernel"), &kernel).unwrap();
     let engine = std::env::current_exe().unwrap();
     let store = ContentStore::new(root.join("store"));
-    let simulation = config::parse_for_architecture("name: preparation-test\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 10\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n", &root.join("compose.yaml"), &BTreeMap::new(), if cfg!(target_arch = "aarch64") { seedbox_application::guest::Architecture::Arm64 } else { seedbox_application::guest::Architecture::Amd64 }).unwrap();
-    let executor = DriverExecutor::for_preparation(&simulation, WitnessMode::Exits).unwrap();
+    let simulation = config::parse_for_architecture(
+        "name: preparation-test\nmachines: {}\noracle: {image: example/app}\n",
+        &root.join("seedbox.yaml"),
+        &BTreeMap::new(),
+        if cfg!(target_arch = "aarch64") {
+            seedbox_application::guest::Architecture::Arm64
+        } else {
+            seedbox_application::guest::Architecture::Amd64
+        },
+    )
+    .unwrap();
+    let executor =
+        DriverExecutor::for_preparation(&simulation, WitnessMode::Exits, Default::default())
+            .unwrap();
     let inner = OciPreparer {
         kernel,
         engine,
@@ -185,7 +197,7 @@ fn preparation_retains_kernel_before_transport_changes_source() {
 }
 
 #[test]
-fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it() {
+fn preparation_derives_the_epoch_from_image_build_times_unless_resolved_configuration_sets_it() {
     // Each image config records its own build time; the latest one wins.
     struct Transport;
     impl seedbox_application::oci::ImageTransport for Transport {
@@ -231,7 +243,7 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
     }
     let root = tempfile::tempdir().unwrap();
     let (preparer, mut simulation, store) = fixture(root.path());
-    let mut late = simulation.services["app"].clone();
+    let mut late = simulation.services["oracle"].clone();
     late.source = config::ImageSource::Registry {
         reference: "example/late".into(),
     };
@@ -243,7 +255,7 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
         .prepare_with_transport(&simulation, &store, &context, &Transport)
         .unwrap();
     assert_eq!(prepared.wall_clock_epoch, Some(1_791_518_733));
-    simulation.simulator.blocks_per_progress_call = std::num::NonZeroU32::new(1).unwrap();
+    simulation.simulator.progress_budget = std::num::NonZeroU32::new(1).unwrap().into();
     let budget_context = PreparationContext::new(
         root.path().join("changed-budget"),
         CancellationToken::default(),
@@ -263,7 +275,7 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it()
         .into_iter()
         .zip([10_000, 1, 17, u32::MAX])
     {
-        simulation.simulator.blocks_per_progress_call = std::num::NonZeroU32::new(budget).unwrap();
+        simulation.simulator.progress_budget = std::num::NonZeroU32::new(budget).unwrap().into();
         simulation.wall_clock_epoch = requested;
         let label = requested.map_or("derived".into(), |epoch| epoch.to_string());
         let context = PreparationContext::new(
@@ -401,19 +413,19 @@ fn cold_driver_factory(backend: seedbox_driver_execution::runtime_assets::Backen
     }
     let root = tempfile::tempdir().unwrap();
     let (mut preparer, mut simulation, store) = fixture(root.path());
-    simulation.simulator.backend = match backend {
-        runtime_assets::Backend::Pv => seedbox_spec::project::CpuBackend::Pv,
-        runtime_assets::Backend::Tcg => seedbox_spec::project::CpuBackend::Tcg,
+    let cpu_backend = match backend {
+        runtime_assets::Backend::Pv => seedbox_spec::backend::CpuBackend::Pv,
+        runtime_assets::Backend::Tcg => seedbox_spec::backend::CpuBackend::Tcg,
     };
     simulation
         .services
-        .insert("side".into(), simulation.services["app"].clone());
+        .insert("side".into(), simulation.services["oracle"].clone());
     // A per-machine RAM override reaches the retained Driver machine.
     simulation.services.get_mut("side").unwrap().memory_mb = Some(512);
     let config = root.path().join("config");
     fs::write(&config, b"kept config").unwrap();
     simulation.configs.insert("settings".into(), config);
-    let service = simulation.services.get_mut("app").unwrap();
+    let service = simulation.services.get_mut("oracle").unwrap();
     service.configs.push(seedbox_spec::ConfigMount {
         source: "settings".into(),
         target: "/etc/settings".into(),
@@ -430,9 +442,10 @@ fn cold_driver_factory(backend: seedbox_driver_execution::runtime_assets::Backen
     preparer.mke2fs = Some(selected.guest_assets.join("mke2fs"));
     preparer.engine = std::env::current_exe().unwrap();
     simulation.control = Some(seedbox_application::config::Control {
-        service: "app".into(),
+        service: "oracle".into(),
     });
-    let executor = DriverExecutor::for_preparation(&simulation, WitnessMode::Exits).unwrap();
+    let executor =
+        DriverExecutor::for_preparation(&simulation, WitnessMode::Exits, cpu_backend).unwrap();
     preparer.profile = executor.profile();
     let context =
         PreparationContext::new(root.path().join("evidence"), Default::default()).unwrap();
@@ -497,7 +510,7 @@ fn cold_driver_factory(backend: seedbox_driver_execution::runtime_assets::Backen
         .collect::<BTreeMap<_, _>>();
     assert_eq!(links[Path::new("app-hard")], Path::new("app"));
     assert_eq!(links[Path::new("app-link")], Path::new("/app"));
-    assert_eq!(prepared.oracle.name, "app");
+    assert_eq!(prepared.oracle.name, "oracle");
     assert_eq!(prepared.machines[0].name, "side");
     assert_eq!(
         inputs.machine_memory_mb,
@@ -513,7 +526,7 @@ fn cold_driver_factory(backend: seedbox_driver_execution::runtime_assets::Backen
     );
     assert_eq!(
         prepared.oracle.process.argv,
-        inputs.images["app"].launch.argv
+        inputs.images["oracle"].launch.argv
     );
     assert_eq!(
         prepared
@@ -573,17 +586,20 @@ fn cold_driver_factory(backend: seedbox_driver_execution::runtime_assets::Backen
         kernel.sha256,
         ContentDigest::of(&fs::read(selected.guest_assets.join("kernel")).unwrap()).hex()
     );
-    assert_eq!(boot_archives["app"].sha256, inputs.guests["app"].hex());
-    assert_eq!(environments["app"].named_volumes[0].name, "data");
-    assert_eq!(environments["app"].anonymous_volumes, vec!["/scratch"]);
     assert_eq!(
-        environments["app"].configs["/etc/settings"].sha256,
+        boot_archives["oracle"].sha256,
+        inputs.guests["oracle"].hex()
+    );
+    assert_eq!(environments["oracle"].named_volumes[0].name, "data");
+    assert_eq!(environments["oracle"].anonymous_volumes, vec!["/scratch"]);
+    assert_eq!(
+        environments["oracle"].configs["/etc/settings"].sha256,
         ContentDigest::of(b"kept config").hex()
     );
-    assert!(environments["app"].hosts.contains("10.0.0.2 side"));
-    assert!(environments["app"].control_socket);
+    assert!(environments["oracle"].hosts.contains("10.0.0.2 side"));
+    assert!(environments["oracle"].control_socket);
     assert!(!environments["side"].control_socket);
-    assert_eq!(prepared.oracle.name, "app");
+    assert_eq!(prepared.oracle.name, "oracle");
     assert!(prepared
         .inventory
         .artifacts()

@@ -109,7 +109,7 @@ fn retained_driver_acquires_only_recorded_runtime_and_owns_it_until_executor_dro
             formatter: Some(asset(&guest.join("mke2fs"))),
             environments: BTreeMap::new(),
             boot_archives: BTreeMap::new(),
-            blocks_per_progress_call: std::num::NonZeroU32::new(32).unwrap(),
+            progress_budget: std::num::NonZeroU32::new(32).unwrap().into(),
             epoch_seconds: 86400,
         },
         oracle: wire::Machine {

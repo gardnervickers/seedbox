@@ -4,6 +4,7 @@
 
 A clock-reading loop must not outrun its next event, but a computation-only loop must advance too.
 PV bounds clock reads; translated application blocks periodically charge kernel progress.
+The shared [budget](../crates/seedbox-spec/src/progress.rs) owns validation, defaults and translator arguments.
 Neither host elapsed time nor watchdog interruptions count as guest progress.
 [Mechanics](internals.md#bounded-clock-reads-and-progress) cover the paths outside instrumentation.
 

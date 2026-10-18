@@ -168,7 +168,7 @@ impl OciPreparer {
 
             launches.push((name, service, mounts, imported));
         }
-        // The guest clock starts at the Compose file's x-seedbox.wall_clock_epoch,
+        // The guest clock starts at the resolved epoch,
         // or else at the latest build time recorded in any prepared image, so
         // certificates minted during a build are already valid and the same
         // images always start at the same time. Linux cannot set a time earlier
@@ -185,7 +185,7 @@ impl OciPreparer {
                 }
                 u32::try_from(latest).map_err(|_| {
                     Error::Integrity(
-                        "image created time exceeds the supported wall-clock epoch; set x-seedbox.wall_clock_epoch".into(),
+                        "image created time exceeds the supported wall-clock epoch".into(),
                     )
                 })?
             }
@@ -195,7 +195,7 @@ impl OciPreparer {
                 &self.engine,
                 driver_runtime,
                 wall_clock_epoch,
-                simulation.simulator.blocks_per_progress_call,
+                simulation.simulator.progress_budget,
             )?;
         for (name, service, mounts, imported) in launches {
             context.progress(name, PreparationStage::Guest);
@@ -224,7 +224,7 @@ impl OciPreparer {
             let memory_mb = service.memory_mb.unwrap_or(simulation.machine.memory_mb);
             let minimum = minimum_memory_mb(fs::metadata(&archive)?.len())?;
             if memory_mb < minimum {
-                return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase memoryMiB for this machine (legacy Compose: x-seedbox.machine.memory_mb; application memory may require more)")));
+                return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase memoryMiB for this machine (application memory may require more)")));
             }
 
             context.check()?;

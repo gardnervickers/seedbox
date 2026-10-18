@@ -11,7 +11,7 @@ pub use seedbox_engine_protocol::trace;
 pub mod network_faults;
 
 pub mod checkpoint;
-pub use seedbox_engine_protocol::world_config;
+pub use seedbox_engine_protocol::policy_config;
 
 use sha2::{Digest, Sha256};
 

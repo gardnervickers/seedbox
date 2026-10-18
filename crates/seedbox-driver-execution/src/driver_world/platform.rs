@@ -48,10 +48,10 @@ impl Host {
     /// The simulation-wide guest ISA a server on this host resolves for an
     /// omitted project architecture. Driver hosts follow the selected backend
     /// (TCG is always x86-64); other hosts keep their native ISA.
-    pub fn project_architecture(self, backend: seedbox_spec::project::CpuBackend) -> Architecture {
+    pub fn project_architecture(self, backend: seedbox_spec::backend::CpuBackend) -> Architecture {
         let backend = match backend {
-            seedbox_spec::project::CpuBackend::Pv => DriverBackend::Pv,
-            seedbox_spec::project::CpuBackend::Tcg => DriverBackend::Tcg,
+            seedbox_spec::backend::CpuBackend::Pv => DriverBackend::Pv,
+            seedbox_spec::backend::CpuBackend::Tcg => DriverBackend::Tcg,
         };
         self.guest(backend).unwrap_or(if self.arch == "aarch64" {
             Architecture::Aarch64
@@ -142,7 +142,7 @@ mod tests {
     }
     #[test]
     fn project_architecture_follows_backend_on_driver_hosts_and_isa_elsewhere() {
-        use seedbox_spec::project::CpuBackend;
+        use seedbox_spec::backend::CpuBackend;
         let linux_arm = Host {
             os: "linux",
             arch: "aarch64",

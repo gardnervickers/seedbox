@@ -76,6 +76,7 @@ impl DriverExecutor {
     pub fn for_preparation(
         simulation: &crate::config::Simulation,
         witness_mode: crate::execution::WitnessMode,
+        cpu_backend: seedbox_spec::backend::CpuBackend,
     ) -> Result<Self> {
         if simulation
             .control
@@ -83,13 +84,13 @@ impl DriverExecutor {
             .is_some_and(|control| control.service != simulation.check.service)
         {
             return Err(Error::Validation {
-                path: "$.x-seedbox.control.service".into(),
+                path: "configuration.control.service".into(),
                 message: "controller must also be the check service".into(),
             });
         }
-        let backend = match simulation.simulator.backend {
-            seedbox_spec::project::CpuBackend::Pv => DriverBackend::Pv,
-            seedbox_spec::project::CpuBackend::Tcg => DriverBackend::Tcg,
+        let backend = match cpu_backend {
+            seedbox_spec::backend::CpuBackend::Pv => DriverBackend::Pv,
+            seedbox_spec::backend::CpuBackend::Tcg => DriverBackend::Tcg,
         };
         let memory_mb = simulation.machine.memory_mb;
         if !(64..=65536).contains(&memory_mb) {

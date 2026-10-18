@@ -56,7 +56,7 @@ impl OciBootFactory {
         engine: &Path,
         runtime: &Inputs,
         epoch: u32,
-        blocks: std::num::NonZeroU32,
+        blocks: seedbox_spec::progress::ProgressBudget,
     ) -> Result<Self> {
         #[cfg(any(
             all(target_os = "linux", target_arch = "x86_64"),
@@ -79,7 +79,7 @@ impl OciBootFactory {
                         &runtime.guest_assets,
                         epoch,
                     )?
-                    .with_blocks_per_progress_call(blocks),
+                    .with_progress_budget(blocks),
                 )
             };
             Ok(Self { factory })
@@ -346,7 +346,7 @@ pub fn retain_oci_prepared(
             formatter: Some(artifact(&root.join("mke2fs"))?),
             environments,
             boot_archives: boots,
-            blocks_per_progress_call: simulation.simulator.blocks_per_progress_call,
+            progress_budget: simulation.simulator.progress_budget,
             epoch_seconds: inputs
                 .wall_clock_epoch
                 .ok_or_else(|| Error::Integrity("prepared realtime epoch missing".into()))?,

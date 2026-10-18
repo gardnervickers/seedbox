@@ -334,8 +334,8 @@ fn request() -> SubmitRequest {
             seed: Some(123),
             inputs: InputSource::Project,
             configuration: seedbox_application::config::parse(
-                "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-                std::path::Path::new("/project/compose.yaml"),
+                "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+                std::path::Path::new("/project/seedbox.yaml"),
                 &Default::default(),
             )
             .unwrap(),
