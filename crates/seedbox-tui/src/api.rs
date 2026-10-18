@@ -1062,7 +1062,7 @@ mod tests {
         let asset = format!("sha256:{}", "a".repeat(64));
         resource.spec = serde_json::from_value(serde_json::json!({
             "architecture":"aarch64", "seed":7, "clock":{"epochSeconds":86400},
-            "runtime":{"kernel":asset,"engine":asset,"execution":{}},
+            "runtime":{"execution":{}},
             "machines":{}, "oracle":{"bootArchive":asset,"memoryBytes":1073741824_u64,
                 "process":{"argv":["/test"],"environment":{},"workingDirectory":"/","user":"0"},"volumes":{}},
             "network":{"name":"default","latency_ns":1000000,"jitter_ns":0},
