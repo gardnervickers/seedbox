@@ -1,9 +1,0 @@
-#!/bin/busybox sh
-# RDRAND/RDSEED as the guest sees them (harness/worlds/rdrand*.json). With
-# seedbox.rdrand=raw on the command line, also execute them without CPUID.
-/bin/busybox --install -s
-mount -t proc proc /proc
-rdrandprobe cpuid
-rdrandprobe honest
-grep -q 'seedbox.rdrand=raw' /proc/cmdline && rdrandprobe raw
-sbx exit 0

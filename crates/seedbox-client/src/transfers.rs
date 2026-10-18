@@ -338,6 +338,7 @@ mod tests {
             let listener = UnixListener::bind(&socket).unwrap();
             let cancelled = Arc::new(AtomicBool::new(false));
             let flag = cancelled.clone();
+            let (returned, client_returned) = std::sync::mpsc::channel();
             let thread = std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
                 assert_eq!(headers(&mut stream), if import { 5 } else { 0 });
@@ -345,8 +346,11 @@ mod tests {
                     write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {BUNDLE_CONTENT_TYPE}\r\nContent-Length: 10\r\n\r\nhello").unwrap();
                 }
                 flag.store(true, Ordering::Release);
-                // Keep the connection open until client cancellation is observed.
-                std::thread::sleep(Duration::from_millis(100));
+                // Keep the connection open until the client has returned; any
+                // retry would already be queued on the listener by then.
+                client_returned
+                    .recv_timeout(Duration::from_secs(30))
+                    .unwrap();
                 listener.set_nonblocking(true).unwrap();
                 assert!(
                     listener.accept().is_err(),
@@ -370,6 +374,7 @@ mod tests {
                     .await
                     .map(|_| ())
             };
+            returned.send(()).unwrap();
             assert!(matches!(result, Err(Error::Cancelled)));
             thread.join().unwrap();
         }
@@ -383,6 +388,7 @@ mod tests {
             let listener = UnixListener::bind(&socket).unwrap();
             let cancelled = Arc::new(AtomicBool::new(false));
             let flag = cancelled.clone();
+            let (returned, client_returned) = std::sync::mpsc::channel();
             let thread = std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
                 assert_eq!(headers(&mut stream), 0);
@@ -390,17 +396,21 @@ mod tests {
                     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{").unwrap();
                 }
                 flag.store(true, Ordering::Release);
-                std::thread::sleep(Duration::from_millis(100));
+                // Hold the stalled connection until the client has returned.
+                client_returned
+                    .recv_timeout(Duration::from_secs(30))
+                    .unwrap();
             });
             let client = Client::connect_to(&socket).unwrap();
             let result = tokio::time::timeout(
-                Duration::from_secs(1),
+                Duration::from_secs(30),
                 client.diagnostics(&"k7m2p9qx".parse().unwrap(), || {
                     cancelled.load(Ordering::Acquire)
                 }),
             )
             .await
             .unwrap();
+            returned.send(()).unwrap();
             assert!(matches!(result, Err(Error::Cancelled)));
             thread.join().unwrap();
         }
@@ -419,11 +429,15 @@ mod tests {
         let root = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
         let socket = root.path().join("api.sock");
         let listener = UnixListener::bind(&socket).unwrap();
+        let (returned, client_returned) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             assert_eq!(headers(&mut stream), 5);
             drop(stream);
-            std::thread::sleep(Duration::from_millis(100));
+            // Once the client has returned, any retry would already be queued.
+            client_returned
+                .recv_timeout(Duration::from_secs(30))
+                .unwrap();
             listener.set_nonblocking(true).unwrap();
             assert!(listener.accept().is_err());
         });
@@ -431,6 +445,7 @@ mod tests {
         let mut file = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
         file.write_all(b"hello").await.unwrap();
         let error = client.import_bundle(file, 10, || false).await.unwrap_err();
+        returned.send(()).unwrap();
         assert!(matches!(error, Error::ImportUncertain(_)), "{error}");
         assert!(error.to_string().contains("inspect simulations"));
         thread.join().unwrap();

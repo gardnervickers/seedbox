@@ -234,10 +234,18 @@ struct State {
     /// Observed worlds outlive their workers until the simulation is deleted.
     worlds: BTreeMap<SimulationId, crate::world::Tracker>,
     imported_worlds: BTreeMap<SimulationId, seedbox_api::WorldState>,
+    results: BTreeMap<SimulationId, ResultEvidence>,
     accepting: bool,
 }
 
 pub struct Manager(Mutex<State>);
+
+/// Completed evidence owned by the server session, independent of worker paths.
+#[derive(Clone)]
+pub(crate) struct ResultEvidence {
+    pub definition: Box<seedbox_spec::definition::Definition>,
+    pub record: seedbox_artifacts::record::RunRecord,
+}
 
 pub(crate) struct DeletionTarget {
     pub id: SimulationId,
@@ -526,7 +534,9 @@ impl Manager {
     /// The manager mutex is released before waiting for the worker connection.
     pub(crate) fn retire_worker(&self, id: &SimulationId) -> Result<(), Error> {
         if let Some(worker) = self.worker(id)? {
-            worker.lock().map_err(|_| Error::StorageFailed)?.retire();
+            crate::worker::lock_for_retirement(&worker)
+                .map_err(|_| Error::StorageFailed)?
+                .retire();
         }
         Ok(())
     }
@@ -584,6 +594,7 @@ impl Manager {
             accepting: true,
             worlds: BTreeMap::new(),
             imported_worlds: BTreeMap::new(),
+            results: BTreeMap::new(),
         }))
     }
 
@@ -678,7 +689,42 @@ impl Manager {
         state.retained_logs.remove(id);
         state.worlds.remove(id);
         state.imported_worlds.remove(id);
+        state.results.remove(id);
         Ok(())
+    }
+
+    /// Retain a completed execution's resolved semantics and result before
+    /// publishing completion. The execution owner supplies the sealed projection;
+    /// comparison never rediscovers evidence through a worker's attempt paths.
+    pub fn retain_result(
+        &self,
+        id: &SimulationId,
+        definition: Box<seedbox_spec::definition::Definition>,
+        record: seedbox_artifacts::record::RunRecord,
+    ) -> Result<(), Error> {
+        let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        let resource = state.catalogue.get(id)?;
+        if resource.status.phase == Phase::Completed || state.results.contains_key(id) {
+            return Err(Error::Invalid(
+                "completed result evidence is immutable".into(),
+            ));
+        }
+        state
+            .results
+            .insert(id.clone(), ResultEvidence { definition, record });
+        Ok(())
+    }
+
+    pub(crate) fn result_evidence(
+        &self,
+        id: &SimulationId,
+    ) -> Result<Option<ResultEvidence>, Error> {
+        let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        let resource = state.catalogue.get(id)?;
+        if resource.status.phase != Phase::Completed {
+            return Err(Error::Invalid(format!("simulation {id} is not complete")));
+        }
+        Ok(state.results.get(id).cloned())
     }
 
     pub(crate) fn import_bundle(
@@ -769,6 +815,17 @@ impl Manager {
             });
             Ok(())
         })?;
+        if let (seedbox_api::InputSource::Resolved { definition }, Some(record)) =
+            (&resource.spec.inputs, &snapshot.record)
+        {
+            state.results.insert(
+                resource.metadata.id.clone(),
+                ResultEvidence {
+                    definition: definition.clone(),
+                    record: record.clone(),
+                },
+            );
+        }
         let mut world = snapshot.world.clone();
         world.simulation = resource.metadata.id.clone();
         state
@@ -1223,8 +1280,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let manager = Manager::new(Catalogue::open(&directory.path().join("catalogue")).unwrap());
         let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            std::path::Path::new("/project/compose.yaml"),
+            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+            std::path::Path::new("/project/seedbox.yaml"),
             &Default::default(),
         )
         .unwrap();
@@ -1283,8 +1340,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let manager = Manager::new(Catalogue::open(&directory.path().join("catalogue")).unwrap());
         let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            std::path::Path::new("/project/compose.yaml"),
+            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+            std::path::Path::new("/project/seedbox.yaml"),
             &Default::default(),
         )
         .unwrap();
@@ -1429,8 +1486,8 @@ mod tests {
             let catalogue = directory.path().join("catalogue");
             let manager = Manager::new(Catalogue::open(&catalogue).unwrap());
             let configuration = seedbox_application::config::parse(
-                "name: test\nservices:\n  oracle:\n    image: example/oracle\n  other:\n    image: example/other\n",
-                std::path::Path::new("/project/compose.yaml"),
+                "name: test\nmachines:\n  other:\n    image: example/other\noracle:\n  image: example/oracle\n",
+                std::path::Path::new("/project/seedbox.yaml"),
                 &Default::default(),
             )
             .unwrap();
@@ -1514,8 +1571,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let manager = Manager::new(Catalogue::open(&directory.path().join("catalogue")).unwrap());
         let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            std::path::Path::new("/project/compose.yaml"),
+            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+            std::path::Path::new("/project/seedbox.yaml"),
             &Default::default(),
         )
         .unwrap();

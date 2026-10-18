@@ -1,0 +1,559 @@
+// Checks declared local dependency edges, including disabled features, other
+// targets, build dependencies and dev dependencies. No guests are started.
+use serde_json::Value;
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Normal,
+    Build,
+    Dev,
+}
+
+#[derive(Debug)]
+struct Package {
+    name: String,
+    edges: Vec<(PathBuf, Kind)>,
+}
+type Graph = BTreeMap<PathBuf, Package>;
+
+fn local_graph(manifest: &Path) -> Result<Graph, String> {
+    let mut graph = Graph::new();
+    let mut pending = VecDeque::from([manifest.to_path_buf()]);
+    let mut visited = BTreeSet::new();
+    while let Some(manifest) = pending.pop_front() {
+        let manifest = manifest
+            .canonicalize()
+            .map_err(|error| format!("cannot resolve manifest {}: {error}", manifest.display()))?;
+        if graph.contains_key(&manifest) || !visited.insert(manifest.clone()) {
+            continue;
+        }
+        // no-deps avoids registry resolution; recursively inspect every local
+        // path edge as well, so excluded standalone workspaces cannot hide an
+        // indirect forbidden dependency. Do not filter features or platforms.
+        let output = Command::new(env!("CARGO"))
+            .args([
+                "metadata",
+                "--locked",
+                "--offline",
+                "--no-deps",
+                "--format-version=1",
+                "--manifest-path",
+            ])
+            .arg(&manifest)
+            .output()
+            .map_err(|error| format!("metadata {}: {error}", manifest.display()))?;
+        if !output.status.success() {
+            return Err(format!(
+                "metadata {} failed ({}): {}",
+                manifest.display(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        let metadata: Value = serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("metadata {}: {error}", manifest.display()))?;
+        for package in metadata["packages"].as_array().ok_or("missing packages")? {
+            let name = package["name"].as_str().ok_or("missing package name")?;
+            let path = Path::new(
+                package["manifest_path"]
+                    .as_str()
+                    .ok_or("missing package manifest")?,
+            )
+            .canonicalize()
+            .map_err(|error| format!("{name} manifest: {error}"))?;
+            let mut edges = Vec::new();
+            for dependency in package["dependencies"]
+                .as_array()
+                .ok_or("missing dependencies")?
+            {
+                let Some(directory) = dependency["path"].as_str() else {
+                    continue;
+                };
+                let destination = Path::new(directory)
+                    .join("Cargo.toml")
+                    .canonicalize()
+                    .map_err(|error| format!("{name} dependency {directory}: {error}"))?;
+                let kind = match dependency["kind"].as_str() {
+                    None => Kind::Normal,
+                    Some("build") => Kind::Build,
+                    Some("dev") => Kind::Dev,
+                    Some(other) => return Err(format!("unknown dependency kind {other}")),
+                };
+                pending.push_back(destination.clone());
+                edges.push((destination, kind));
+            }
+            graph.insert(
+                path,
+                Package {
+                    name: name.to_owned(),
+                    edges,
+                },
+            );
+        }
+    }
+    Ok(graph)
+}
+
+fn named<'a>(graph: &'a Graph, name: &str) -> Result<&'a PathBuf, String> {
+    let matches: Vec<_> = graph
+        .iter()
+        .filter(|(_, package)| package.name == name)
+        .map(|(path, _)| path)
+        .collect();
+    match matches.as_slice() {
+        [path] => Ok(path),
+        _ => Err(format!(
+            "expected one local {name}, found {}",
+            matches.len()
+        )),
+    }
+}
+
+fn verify(graph: &Graph) -> Result<(), String> {
+    let common = named(graph, "seedbox-machine")?;
+    let pv = named(graph, "seedbox-machine-pv")?;
+    let tcg = named(graph, "seedbox-machine-tcg")?;
+    let driver = named(graph, "seedbox-driver")?;
+    for (source, target) in [
+        (driver, common),
+        (driver, pv),
+        (driver, tcg),
+        (pv, common),
+        (tcg, common),
+    ] {
+        if !graph[source]
+            .edges
+            .iter()
+            .any(|(path, kind)| path == target && *kind == Kind::Normal)
+        {
+            return Err(format!(
+                "{} must declare a normal dependency on {}",
+                graph[source].name, graph[target].name
+            ));
+        }
+    }
+    for (source, forbidden) in [
+        (common, driver),
+        (common, pv),
+        (common, tcg),
+        (pv, driver),
+        (tcg, driver),
+    ] {
+        let mut pending = VecDeque::from([(source.clone(), graph[source].name.clone())]);
+        let mut visited = BTreeSet::new();
+        while let Some((path, trace)) = pending.pop_front() {
+            if &path == forbidden {
+                return Err(format!("forbidden dependency path: {trace}"));
+            }
+            if !visited.insert(path.clone()) {
+                continue;
+            }
+            let package = graph
+                .get(&path)
+                .ok_or_else(|| format!("uninspected local dependency {}", path.display()))?;
+            for (next, kind) in &package.edges {
+                // Cargo builds a package's dev-dependencies only for that
+                // package itself, never for its dependents.
+                if *kind == Kind::Dev && &path != source {
+                    continue;
+                }
+                let next_package = graph
+                    .get(next)
+                    .ok_or_else(|| format!("uninspected local dependency {}", next.display()))?;
+                pending.push_back((
+                    next.clone(),
+                    format!("{trace} --{kind:?}--> {}", next_package.name),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn repository_dependency_direction() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+    let graph = local_graph(&manifest).unwrap_or_else(|error| panic!("{error}"));
+    verify(&graph).unwrap_or_else(|error| panic!("{error}"));
+    verify_exec(&graph).unwrap_or_else(|error| panic!("{error}"));
+    verify_driver_execution(&graph).unwrap_or_else(|error| panic!("{error}"));
+}
+
+/// The exec-file lock is shared by production, worker and test code, so it
+/// must stay dependency-free; the shared test library must stay light enough
+/// for every crate to dev-depend on.
+fn verify_exec(graph: &Graph) -> Result<(), String> {
+    let exec = named(graph, "seedbox-exec")?;
+    if !graph[exec].edges.is_empty() {
+        return Err("seedbox-exec must have no local dependencies".into());
+    }
+    let test = named(graph, "seedbox-test")?;
+    for (path, kind) in &graph[test].edges {
+        if *kind != Kind::Dev && path != exec {
+            return Err(format!(
+                "seedbox-test's library may depend only on seedbox-exec, not {}",
+                graph[path].name
+            ));
+        }
+    }
+    for user in [
+        "seedbox-artifacts",
+        "seedbox-machine-pv",
+        "seedbox-machine-tcg",
+    ] {
+        let user = named(graph, user)?;
+        if !graph[user]
+            .edges
+            .iter()
+            .any(|(path, kind)| path == exec && *kind == Kind::Normal)
+        {
+            return Err(format!(
+                "{} must spawn through seedbox-exec",
+                graph[user].name
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn exec_policy_rejects_dependencies_of_the_lock_crate() {
+    let mut graph = fixture();
+    for name in ["seedbox-exec", "seedbox-test", "seedbox-artifacts"] {
+        graph.insert(
+            PathBuf::from(name),
+            Package {
+                name: name.into(),
+                edges: vec![],
+            },
+        );
+    }
+    for user in [
+        "seedbox-artifacts",
+        "seedbox-machine-pv",
+        "seedbox-machine-tcg",
+    ] {
+        graph
+            .get_mut(Path::new(user))
+            .unwrap()
+            .edges
+            .push((PathBuf::from("seedbox-exec"), Kind::Normal));
+    }
+    verify_exec(&graph).unwrap();
+    graph
+        .get_mut(Path::new("seedbox-exec"))
+        .unwrap()
+        .edges
+        .push((PathBuf::from("seedbox-machine"), Kind::Normal));
+    assert!(verify_exec(&graph)
+        .unwrap_err()
+        .contains("no local dependencies"));
+    graph
+        .get_mut(Path::new("seedbox-exec"))
+        .unwrap()
+        .edges
+        .clear();
+    graph
+        .get_mut(Path::new("seedbox-test"))
+        .unwrap()
+        .edges
+        .push((PathBuf::from("seedbox-machine"), Kind::Normal));
+    assert!(verify_exec(&graph)
+        .unwrap_err()
+        .contains("may depend only on seedbox-exec"));
+}
+
+fn fixture() -> Graph {
+    let names = [
+        "seedbox-machine",
+        "seedbox-machine-pv",
+        "seedbox-machine-tcg",
+        "seedbox-driver",
+        "outside-workspace-helper",
+    ];
+    let mut graph: Graph = names
+        .into_iter()
+        .map(|name| {
+            (
+                PathBuf::from(name),
+                Package {
+                    name: name.into(),
+                    edges: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    for (source, target) in [
+        ("seedbox-driver", "seedbox-machine"),
+        ("seedbox-driver", "seedbox-machine-pv"),
+        ("seedbox-driver", "seedbox-machine-tcg"),
+        ("seedbox-machine-pv", "seedbox-machine"),
+        ("seedbox-machine-tcg", "seedbox-machine"),
+    ] {
+        graph
+            .get_mut(Path::new(source))
+            .unwrap()
+            .edges
+            .push((PathBuf::from(target), Kind::Normal));
+    }
+    graph
+}
+
+#[test]
+fn policy_accepts_the_required_graph() {
+    verify(&fixture()).unwrap();
+}
+
+#[test]
+fn policy_requires_all_four_packages() {
+    for name in [
+        "seedbox-machine",
+        "seedbox-machine-pv",
+        "seedbox-machine-tcg",
+        "seedbox-driver",
+    ] {
+        let mut graph = fixture();
+        graph.remove(Path::new(name));
+        assert!(verify(&graph).unwrap_err().contains(name));
+    }
+}
+
+#[test]
+fn policy_rejects_reverse_edges_of_every_kind() {
+    for source in [
+        "seedbox-machine",
+        "seedbox-machine-pv",
+        "seedbox-machine-tcg",
+    ] {
+        for kind in [Kind::Normal, Kind::Build, Kind::Dev] {
+            let mut graph = fixture();
+            graph
+                .get_mut(Path::new(source))
+                .unwrap()
+                .edges
+                .push((PathBuf::from("seedbox-driver"), kind));
+            let error = verify(&graph).unwrap_err();
+            assert!(error.contains("forbidden dependency path"), "{error}");
+            assert!(error.contains(&format!("--{kind:?}-->")), "{error}");
+        }
+    }
+}
+
+#[test]
+fn policy_rejects_indirect_dev_dependency() {
+    let mut graph = fixture();
+    graph
+        .get_mut(Path::new("seedbox-machine-pv"))
+        .unwrap()
+        .edges
+        .push((PathBuf::from("outside-workspace-helper"), Kind::Dev));
+    graph
+        .get_mut(Path::new("outside-workspace-helper"))
+        .unwrap()
+        .edges
+        .push((PathBuf::from("seedbox-driver"), Kind::Normal));
+    let error = verify(&graph).unwrap_err();
+    assert!(error.contains("outside-workspace-helper --Normal--> seedbox-driver"));
+}
+
+#[test]
+fn policy_ignores_dev_dependencies_of_dependencies() {
+    // seedbox-machine-pv dev-depends on a test helper that itself
+    // dev-depends on the driver: cargo never builds that second edge.
+    let mut graph = fixture();
+    graph
+        .get_mut(Path::new("seedbox-machine-pv"))
+        .unwrap()
+        .edges
+        .push((PathBuf::from("outside-workspace-helper"), Kind::Dev));
+    graph
+        .get_mut(Path::new("outside-workspace-helper"))
+        .unwrap()
+        .edges
+        .push((PathBuf::from("seedbox-driver"), Kind::Dev));
+    verify(&graph).unwrap();
+}
+
+#[test]
+fn policy_common_cannot_instantiate_backend_specs_via_dev_dependencies() {
+    for target in ["seedbox-machine-pv", "seedbox-machine-tcg"] {
+        let mut graph = fixture();
+        graph
+            .get_mut(Path::new("seedbox-machine"))
+            .unwrap()
+            .edges
+            .push((PathBuf::from(target), Kind::Dev));
+        assert!(verify(&graph).unwrap_err().contains(target));
+    }
+}
+
+#[test]
+fn policy_required_edges_cannot_be_dev_only() {
+    let mut graph = fixture();
+    graph.get_mut(Path::new("seedbox-driver")).unwrap().edges[0].1 = Kind::Dev;
+    assert!(verify(&graph).unwrap_err().contains("normal dependency"));
+}
+
+/// Driver execution is below application orchestration and the server. Neither
+/// production nor test edges may turn it into an application-internals adapter.
+fn verify_driver_execution(graph: &Graph) -> Result<(), String> {
+    let execution = named(graph, "seedbox-driver-execution")?;
+    let application = named(graph, "seedbox-application")?;
+    let server = named(graph, "seedbox-server")?;
+    for (source, target) in [
+        (application, execution),
+        (server, execution),
+        (execution, named(graph, "seedbox-driver")?),
+    ] {
+        if !graph[source]
+            .edges
+            .iter()
+            .any(|(path, kind)| path == target && *kind == Kind::Normal)
+        {
+            return Err(format!(
+                "{} must declare a normal dependency on {}",
+                graph[source].name, graph[target].name
+            ));
+        }
+    }
+    for target in [
+        "seedbox-driver",
+        "seedbox-machine",
+        "seedbox-machine-pv",
+        "seedbox-machine-tcg",
+    ] {
+        let target = named(graph, target)?;
+        if graph[application]
+            .edges
+            .iter()
+            .any(|(path, kind)| path == target && *kind != Kind::Dev)
+        {
+            return Err(format!(
+                "application must use Driver execution, not depend directly on {}",
+                graph[target].name
+            ));
+        }
+    }
+    let forbidden: BTreeSet<_> = [application, server, named(graph, "seedbox-cli")?]
+        .into_iter()
+        .collect();
+    let mut pending = VecDeque::from([(execution.clone(), graph[execution].name.clone())]);
+    let mut visited = BTreeSet::new();
+    while let Some((path, trace)) = pending.pop_front() {
+        if forbidden.contains(&path) {
+            return Err(format!(
+                "forbidden Driver execution dependency path: {trace}"
+            ));
+        }
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        for (next, kind) in &graph[&path].edges {
+            if *kind == Kind::Dev && &path != execution {
+                continue;
+            }
+            pending.push_back((
+                next.clone(),
+                format!("{trace} --{kind:?}--> {}", graph[next].name),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn service_fixture() -> Graph {
+    let mut graph = fixture();
+    for name in [
+        "seedbox-driver-execution",
+        "seedbox-application",
+        "seedbox-server",
+        "seedbox-cli",
+    ] {
+        graph.insert(
+            PathBuf::from(name),
+            Package {
+                name: name.into(),
+                edges: vec![],
+            },
+        );
+    }
+    for (from, to) in [
+        ("seedbox-application", "seedbox-driver-execution"),
+        ("seedbox-server", "seedbox-driver-execution"),
+        ("seedbox-driver-execution", "seedbox-driver"),
+    ] {
+        graph
+            .get_mut(Path::new(from))
+            .unwrap()
+            .edges
+            .push((PathBuf::from(to), Kind::Normal));
+    }
+    graph
+}
+
+#[test]
+fn driver_execution_policy_accepts_downward_service_edges() {
+    verify_driver_execution(&service_fixture()).unwrap();
+}
+
+#[test]
+fn driver_execution_policy_rejects_upward_edges_including_test_helpers() {
+    for target in ["seedbox-application", "seedbox-server", "seedbox-cli"] {
+        for kind in [Kind::Normal, Kind::Build, Kind::Dev] {
+            let mut graph = service_fixture();
+            graph
+                .get_mut(Path::new("seedbox-driver-execution"))
+                .unwrap()
+                .edges
+                .push((PathBuf::from("outside-workspace-helper"), kind));
+            graph
+                .get_mut(Path::new("outside-workspace-helper"))
+                .unwrap()
+                .edges
+                .push((PathBuf::from(target), Kind::Normal));
+            assert!(verify_driver_execution(&graph)
+                .unwrap_err()
+                .contains("forbidden Driver execution dependency path"));
+        }
+    }
+}
+
+#[test]
+fn application_cannot_reacquire_native_execution_dependencies() {
+    for target in [
+        "seedbox-driver",
+        "seedbox-machine",
+        "seedbox-machine-pv",
+        "seedbox-machine-tcg",
+    ] {
+        let mut graph = service_fixture();
+        graph
+            .get_mut(Path::new("seedbox-application"))
+            .unwrap()
+            .edges
+            .push((PathBuf::from(target), Kind::Normal));
+        assert!(verify_driver_execution(&graph)
+            .unwrap_err()
+            .contains("application must use Driver execution"));
+    }
+}
+
+#[test]
+fn service_execution_edges_cannot_be_dev_only() {
+    for source in [
+        "seedbox-application",
+        "seedbox-server",
+        "seedbox-driver-execution",
+    ] {
+        let mut graph = service_fixture();
+        graph.get_mut(Path::new(source)).unwrap().edges[0].1 = Kind::Dev;
+        assert!(verify_driver_execution(&graph)
+            .unwrap_err()
+            .contains("normal dependency"));
+    }
+}

@@ -2691,8 +2691,7 @@ pub(crate) mod tests {
                 incarnation: 0,
                 condition: MachineCondition::Ready,
                 exit_code: None,
-                cpu_speed_hz: Some(1_000_000_000),
-                throttle_speed_hz: None,
+                throttle_permille: None,
                 oracle: *n == "oracle",
                 last_transition: None,
                 last_transition_at_ns: None,
@@ -2838,9 +2837,11 @@ pub(crate) mod tests {
             .is_empty());
         assert!(app.fault_menu.is_none());
         for c in [' ', '.', '+', '=', '-', 'c', 'f', ':'] {
+            app.notice = None;
             assert!(app.input(key(c)).is_empty());
             assert!(app
-                .notice(Instant::now())
+                .notice
+                .as_ref()
                 .unwrap()
                 .text
                 .contains("simulation completed"));
@@ -3593,14 +3594,8 @@ pub(crate) mod tests {
 
     #[test]
     fn editing_save_failure_survives_refresh_and_retry_persists_edits() {
-        let directory = std::env::temp_dir().join(format!(
-            "seedbox-model-timeline-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let directory_owner = tempfile::tempdir().unwrap();
+        let directory = directory_owner.path().join("timeline");
         std::fs::write(&directory, b"block directory creation").unwrap();
         let mut app = edited_timeline_app();
         app.timeline_directory = Some(directory.clone());
@@ -3626,14 +3621,8 @@ pub(crate) mod tests {
 
     #[test]
     fn unknown_admitted_fault_is_persisted_before_immediate_quit() {
-        let directory = std::env::temp_dir().join(format!(
-            "seedbox-immediate-timeline-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let directory_owner = tempfile::tempdir().unwrap();
+        let directory = directory_owner.path().join("timeline");
         let mut app = app(&["a"]);
         app.focus.as_mut().unwrap().resource = Some(timeline_resource(10));
         app.timeline_directory = Some(directory.clone());

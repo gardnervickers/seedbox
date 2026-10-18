@@ -849,6 +849,7 @@ pub async fn drive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seedbox_test_time::HangGuard;
     use std::cell::RefCell;
 
     #[tokio::test]
@@ -857,29 +858,30 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
         let read = Arc::new(AtomicUsize::new(0));
         let observed = read.clone();
+        let (backpressured, reached_capacity) = std::sync::mpsc::channel();
         let task = tokio::spawn(follow(
             tx,
             Arc::new(AtomicBool::new(true)),
             "test",
             move || {
                 let read = read.clone();
+                let backpressured = backpressured.clone();
                 async move {
                     Ok(
                         futures_util::stream::iter((0..100).map(Ok)).inspect(move |_| {
-                            read.fetch_add(1, Ordering::Relaxed);
+                            if read.fetch_add(1, Ordering::Relaxed) == 2 {
+                                backpressured.send(()).unwrap();
+                            }
                         }),
                     )
                 }
             },
             |value| Update::Notice(format!("{value}")),
         ));
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while observed.load(Ordering::Relaxed) < 3 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        let guard = HangGuard::new("observed stream backpressure", Duration::from_secs(30));
+        tokio::task::spawn_blocking(move || guard.recv(&reached_capacity).unwrap())
+            .await
+            .unwrap();
         // Two queued updates and one awaiting capacity; the rest stays unread.
         assert_eq!(observed.load(Ordering::Relaxed), 3);
         for expected in 0..100 {
@@ -1003,23 +1005,20 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let mut requests = Vec::new();
             for response in responses {
-                let deadline = std::time::Instant::now() + Duration::from_secs(5);
-                let mut stream = loop {
-                    match listener.accept() {
-                        Ok((stream, _)) => break stream,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(
-                                std::time::Instant::now() < deadline,
-                                "expected timeline HTTP request"
-                            );
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
+                let accept_guard =
+                    HangGuard::new("timeline HTTP connection", Duration::from_secs(30));
+                let mut stream = accept_guard
+                    .wait_for(|| match listener.accept() {
+                        Ok((stream, _)) => Some(stream),
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => None,
                         Err(error) => panic!("accept: {error}"),
-                    }
-                };
+                    })
+                    .expect("expected timeline HTTP request");
                 stream.set_nonblocking(false).unwrap();
+                let read_guard =
+                    HangGuard::new("timeline HTTP request bytes", Duration::from_secs(30));
                 stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .set_read_timeout(Some(read_guard.remaining().unwrap()))
                     .unwrap();
                 let mut bytes = Vec::new();
                 let body_offset = loop {
@@ -1063,11 +1062,11 @@ mod tests {
         let asset = format!("sha256:{}", "a".repeat(64));
         resource.spec = serde_json::from_value(serde_json::json!({
             "architecture":"aarch64", "seed":7, "clock":{"epochSeconds":86400},
-            "runtime":{"kernel":asset,"execution":{}},
-            "machines":{}, "oracle":{"cpu":{"speed":"800MHz","jitter":"5%"},"bootArchive":asset,"memoryBytes":1073741824_u64,
+            "runtime":{"execution":{}},
+            "machines":{}, "oracle":{"bootArchive":asset,"memoryBytes":1073741824_u64,
                 "process":{"argv":["/test"],"environment":{},"workingDirectory":"/","user":"0"},"volumes":{}},
             "network":{"name":"default","latency_ns":1000000,"jitter_ns":0},
-            "simulator":{"schedule":{"timer_jitter_ns":0,"stop_tolerance_ns":0},
+            "simulator":{"blocksPerProgressCall":17,"schedule":{"timer_jitter_ns":0,"stop_tolerance_ns":0},
                 "disk":{"torn_writes":false},"oracleControl":false},
             "start":{"kind":"fresh"},
             "overrides":[{"id":"external","atNs":42,"action":{"action":"future"}}]

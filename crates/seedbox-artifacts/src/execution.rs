@@ -1,5 +1,5 @@
 //! Retained execution inputs and outcomes; no machine execution dependencies.
-use crate::{image::Launch, store::ContentDigest};
+use crate::{engine::ExecutableKind, image::Launch, store::ContentDigest};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -11,25 +11,17 @@ use std::{
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionProfile {
-    pub backend: Backend,
+    /// Recorded CPU backend (`driver-pv` or `driver-tcg`); test doubles may name themselves.
+    pub backend: String,
     pub witness_mode: WitnessMode,
     /// Settings that change results, hashed into the run identity.
-    /// Schedule controls live in Simulation.
     pub semantic_parameters: SemanticParameters,
 }
 
-/// The execution backend that records and replays a run.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Backend {
-    /// Linux KVM engine (`seedbox-vmm`).
-    #[serde(rename = "seedbox-kvm")]
-    Kvm,
-    /// Apple Hypervisor.framework ARM world (`seedbox-arm64`).
-    #[serde(rename = "seedbox-hvf")]
-    Hvf,
-    /// Another `ExecutionBackend` implementation, such as a test double.
-    #[serde(untagged)]
-    Other(String),
+impl ExecutionProfile {
+    pub fn driver_backend(&self) -> Result<Option<seedbox_spec::backend::CpuBackend>, String> {
+        seedbox_spec::backend::CpuBackend::from_recorded_name(&self.backend)
+    }
 }
 
 /// Settings recorded in a run's identity because they change its results.
@@ -37,87 +29,50 @@ pub enum Backend {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticParameters {
-    pub guest_abi: GuestAbi,
-    pub control_channel: ControlChannel,
-    /// Guest RAM of every machine.
-    pub memory_mb: u32,
-    /// Guest timer deadlines are read from the shared time page.
-    pub page_timer: bool,
-    /// Virtio-net TX kicks are deferred to deterministic polls.
-    pub deferred_tx: bool,
     /// Seeded survival of the latest unflushed 512-byte sectors on crash.
     pub torn_writes: bool,
     /// Runtime checkpoint and the branch seed after it.
     pub checkpoint: Option<Checkpoint>,
-    /// Inputs of the HVF backend only.
-    pub hvf: Option<HvfParameters>,
+    /// Driver executable descriptor. Non-executing test backends may omit it.
+    pub engine: Option<EngineDescriptor>,
+}
+
+impl Default for SemanticParameters {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SemanticParameters {
     /// Every option off.
-    pub fn new(memory_mb: u32) -> Self {
+    pub fn new() -> Self {
         Self {
-            guest_abi: GuestAbi::OciInitV1,
-            control_channel: ControlChannel::VirtioConsoleV1,
-            memory_mb,
-            page_timer: false,
-            deferred_tx: false,
             torn_writes: false,
             checkpoint: None,
-            hvf: None,
+            engine: None,
         }
     }
 
-    /// Names of the settings that differ.
+    /// The executable contract that launches the retained engine.
+    pub fn launch(&self) -> Option<ExecutableKind> {
+        self.engine.as_ref().map(|engine| engine.kind)
+    }
+
+    /// Names of the settings that differ, ignoring the executable descriptor,
+    /// which a replacement engine may change.
     pub fn differences(&self, other: &Self) -> Vec<&'static str> {
         let Self {
-            guest_abi,
-            control_channel,
-            memory_mb,
-            page_timer,
-            deferred_tx,
             torn_writes,
             checkpoint,
-            hvf,
+            engine: _,
         } = self;
         [
-            (guest_abi != &other.guest_abi, "guest_abi"),
-            (control_channel != &other.control_channel, "control_channel"),
-            (memory_mb != &other.memory_mb, "memory_mb"),
-            (page_timer != &other.page_timer, "page_timer"),
-            (deferred_tx != &other.deferred_tx, "deferred_tx"),
             (torn_writes != &other.torn_writes, "torn_writes"),
             (checkpoint != &other.checkpoint, "checkpoint"),
-            (hvf != &other.hvf, "hvf"),
         ]
         .into_iter()
         .filter_map(|(differs, name)| differs.then_some(name))
         .collect()
-    }
-}
-
-/// How the guest launches its application.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GuestAbi {
-    /// One OCI application per machine, started by the Seedbox init.
-    #[serde(rename = "oci-init-v1")]
-    OciInitV1,
-}
-
-/// How the control service talks to the world.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ControlChannel {
-    /// A virtio console port to the management endpoint.
-    #[serde(rename = "virtio-console-v1")]
-    VirtioConsoleV1,
-}
-
-impl ControlChannel {
-    /// The name the engine's world configuration uses.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::VirtioConsoleV1 => "virtio-console-v1",
-        }
     }
 }
 
@@ -129,38 +84,24 @@ pub struct Checkpoint {
     pub branch_seed: u64,
 }
 
-/// Which engine build executed a run. Provenance only: nothing gates or
-/// compares on it, and replay always uses the current engine.
+/// The retained executable's launch contract plus descriptive build metadata.
+/// `kind` and `owner_pipe` describe the launch protocol; build metadata is informational.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineDescriptor {
+    pub kind: ExecutableKind,
+    /// The executable accepts `--owner-pipe` after its private contract. EOF on
+    /// stdin then terminates its process group if the owning server disappears.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner_pipe: bool,
+    /// Supports the private nonblocking observation socket launch argument.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub live_observations: bool,
     pub simulator_version: String,
-    /// Source revision the engine was built from, `-dirty` when the checkout
-    /// had uncommitted changes; absent when the build had no Git metadata.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision: Option<String>,
     pub host_os: String,
     pub host_arch: String,
     pub guest_arch: String,
-    pub engine_backend: String,
     pub engine_timebase: String,
-}
-
-/// HVF world inputs: boot, entropy and device policies, the host it was
-/// admitted on, the guest kernel and the launch skew cap.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HvfParameters {
-    pub boot_policy: String,
-    pub entropy_policy: String,
-    pub device_policy: String,
-    pub host_release: String,
-    /// Digest of the sampled CPU feature registers.
-    pub cpu_features: String,
-    pub guest_kernel: ContentDigest,
-    /// Largest seeded offset of each machine's initial launch, before it is
-    /// clipped to the network lookahead.
-    pub launch_max_skew_ns: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,14 +128,12 @@ pub struct PreparedInputs {
     /// Historical prepared inputs omit this and retain their original boot bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_clock_epoch: Option<u32>,
-    pub kernel: ContentDigest,
     pub images: BTreeMap<String, PreparedImage>,
     /// Every service maps to one machine; services may share a machine.
     pub placement: BTreeMap<String, String>,
     /// Machine name to prepared boot filesystem/archive and launch helpers.
     pub guests: BTreeMap<String, ContentDigest>,
-    /// Per-machine RAM overrides in MiB; older inputs use the profile default.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// Complete machine RAM inventory in MiB, with no profile-wide fallback.
     pub machine_memory_mb: BTreeMap<String, u32>,
     pub profile: ExecutionProfile,
     /// Config files, source/build snapshots, and other replay dependencies.
@@ -204,16 +143,24 @@ pub struct PreparedInputs {
 }
 
 impl PreparedInputs {
-    pub fn memory_mb(&self, machine: &str) -> u32 {
-        self.machine_memory_mb
-            .get(machine)
-            .copied()
-            .unwrap_or(self.profile.semantic_parameters.memory_mb)
+    pub fn memory_mb(&self, machine: &str) -> crate::Result<u32> {
+        self.machine_memory_mb.get(machine).copied().ok_or_else(|| {
+            crate::Error::Integrity(format!("prepared memory missing for machine {machine}"))
+        })
+    }
+
+    /// Driver process executable is retained with its manifest closure, never in the profile.
+    pub fn executable(&self) -> crate::Result<&ContentDigest> {
+        self.auxiliary
+            .get("driver-world/executable")
+            .ok_or_else(|| {
+                crate::Error::Integrity("Driver executable missing from retained closure".into())
+            })
     }
 
     pub fn digests(&self) -> impl Iterator<Item = &ContentDigest> {
-        std::iter::once(&self.kernel)
-            .chain(self.auxiliary.values())
+        self.auxiliary
+            .values()
             .chain(self.guests.values())
             .chain(self.images.values().flat_map(|image| {
                 [&image.manifest, &image.config]
@@ -285,7 +232,7 @@ pub struct ExecutionReport {
     /// Runtime-only accounting; never part of serialized result comparisons.
     #[serde(skip)]
     pub host_wait_ns: u64,
-    /// Final scheduler position (furthest machine clock for legacy reports).
+    /// Final canonical simulation time.
     /// Absent when execution produced no report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simulated_time_ns: Option<u64>,

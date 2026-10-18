@@ -47,10 +47,10 @@ def scenario():
     with World.connect() as world:
         work()  # Warm the interpreter's code paths before measuring.
         before = work()
-        slow = world.throttle("worker", "500MHz")  # a quarter of the worker's configured 2 GHz
+        slow = world.throttle("worker", 4)
         assert slow.handle in world.inspect()["active_handles"]
         try:
-            world.throttle("worker", "1GHz")
+            world.throttle("worker", 2)
         except FaultError as error:
             assert error.code == "invalid_state", error
         else:

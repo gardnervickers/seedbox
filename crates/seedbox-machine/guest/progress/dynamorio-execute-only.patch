@@ -1,0 +1,108 @@
+--- a/core/unix/injector.c
++++ b/core/unix/injector.c
+@@ -70,6 +70,8 @@
+ #include <stdio.h>
+ #include <string.h> /* for strerror */
+ #include <sys/mman.h>
++#include <sys/stat.h>
++#include <limits.h>
+ #include <sys/ptrace.h>
+ #if defined(LINUX) && defined(AARCH64)
+ #    include <linux/ptrace.h> /* for struct user_pt_regs */
+@@ -455,7 +457,30 @@
+ module_get_platform_path(const char *exe_path, dr_platform_t *platform,
+                          dr_platform_t *alt_platform)
+ {
+-    file_t fd = os_open(exe_path, OS_OPEN_READ);
++    file_t fd;
++    const char *handoff = getenv("SEEDBOX_DR_EXECUTABLE_FD");
++    if (handoff != NULL) {
++        /* Seedbox PID1 authorized the target under its final credentials and
++         * opened this same inode while privileged. Never substitute another
++         * path or retain the readable descriptor in application code. */
++        char *end;
++        long inherited = strtol(handoff, &end, 10);
++        struct stat opened, selected;
++        if (*handoff == '\0' || *end != '\0' || inherited <= 2 ||
++            inherited > INT_MAX || fstat((int)inherited, &opened) != 0 ||
++            stat(exe_path, &selected) != 0 || !S_ISREG(opened.st_mode) ||
++            opened.st_dev != selected.st_dev || opened.st_ino != selected.st_ino ||
++            access(exe_path, X_OK) != 0) {
++            errno = EACCES;
++            return PLATFORM_ERROR_CANNOT_OPEN;
++        }
++        fd = dup((int)inherited);
++        if (fd != INVALID_FILE && lseek(fd, 0, SEEK_SET) < 0) {
++            close(fd);
++            fd = INVALID_FILE;
++        }
++    } else
++        fd = os_open(exe_path, OS_OPEN_READ);
+     platform_status_t res = PLATFORM_SUCCESS;
+     if (fd == INVALID_FILE)
+         res = PLATFORM_ERROR_CANNOT_OPEN;
+--- a/core/unix/loader.c
++++ b/core/unix/loader.c
+@@ -2211,7 +2211,32 @@
+      */
+     set_app_args((int *)argc, argv);
+ 
+-    success = elf_loader_read_headers(&exe_ld, exe_path);
++    /* Only Seedbox's initial launch supplies this private read descriptor.
++     * Keep its original across a DR address-conflict reload, while each loader
++     * instance owns a duplicate. Close both before client or application entry. */
++    const char *handoff = getenv("SEEDBOX_DR_EXECUTABLE_FD");
++    file_t executable_fd = INVALID_FILE;
++    if (handoff != NULL) {
++        const char *digit = handoff;
++        uint number = 0;
++        bool valid = *digit != '\0';
++        for (; *digit != '\0'; ++digit) {
++            if (*digit < '0' || *digit > '9' || number > (INT_MAX - 9) / 10) {
++                valid = false;
++                break;
++            }
++            number = number * 10 + (*digit - '0');
++        }
++        apicheck(valid && number > 2, "Invalid Seedbox executable descriptor");
++        executable_fd = (file_t)number;
++        memset(&exe_ld, 0, sizeof(exe_ld));
++        exe_ld.filename = exe_path;
++        exe_ld.fd = (file_t)dynamorio_syscall(SYS_dup, 1, executable_fd);
++        success = exe_ld.fd != INVALID_FILE && os_seek(exe_ld.fd, 0, SEEK_SET) &&
++            elf_loader_read_ehdr(&exe_ld) != NULL &&
++            elf_loader_read_phdrs(&exe_ld) != NULL;
++    } else
++        success = elf_loader_read_headers(&exe_ld, exe_path);
+     apicheck(success,
+              "Failed to read app ELF headers.  Check path and "
+              "architecture.");
+@@ -2331,6 +2356,28 @@
+     privload_setup_auxv(envp, exe_map, exe_ld.load_delta, interp_map, exe_path);
+ 
+     elf_loader_destroy(&exe_ld);
++    if (executable_fd != INVALID_FILE) {
++        os_close(executable_fd);
++        /* The application receives this original kernel stack, not a libc
++         * environment copy. Removing an entry must move the trailing auxv too,
++         * or its startup code would read the old terminating NULL as AT_NULL. */
++        char **slot = envp;
++        while (*slot != NULL) {
++            if (strncmp(*slot, "SEEDBOX_DR_EXECUTABLE_FD=", 25) == 0) {
++                char **end = slot;
++                while (*end != NULL)
++                    ++end;
++                ELF_AUXV_TYPE *auxv = (ELF_AUXV_TYPE *)(end + 1);
++                ELF_AUXV_TYPE *auxv_end = auxv;
++                while (auxv_end->a_type != AT_NULL)
++                    ++auxv_end;
++                ++auxv_end;
++                memset(*slot, 0, strlen(*slot));
++                memmove(slot, slot + 1, (byte *)auxv_end - (byte *)(slot + 1));
++            } else
++                ++slot;
++        }
++    }
+ 
+     /* Initialize the rest of DR *after* we map the app and interp images.  This is
+      * consistent with our old behavior, and allows the client to do things like call

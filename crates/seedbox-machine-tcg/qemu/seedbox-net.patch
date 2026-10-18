@@ -1,0 +1,754 @@
+--- a/hw/net/meson.build
++++ b/hw/net/meson.build
+@@ -46,6 +46,7 @@ system_ss.add(when: 'CONFIG_XILINX_ETHLITE', if_true: files('xilinx_ethlite.c'))
+ 
+ system_ss.add(when: 'CONFIG_VIRTIO_NET', if_true: files('net_rx_pkt.c'))
+ system_ss.add(when: 'CONFIG_VIRTIO_NET', if_true: files('virtio-net.c'))
++system_ss.add(when: ['CONFIG_VIRTIO', 'CONFIG_TCG'], if_true: files('seedbox-net.c'))
+ 
+ if have_vhost_net
+   system_ss.add(when: 'CONFIG_VIRTIO_NET', if_true: files('vhost_net.c'))
+--- /dev/null
++++ b/hw/net/seedbox-net.c
+@@ -0,0 +1,663 @@
++/*
++ * Seedbox network device: a minimal virtio-net personality whose frames
++ * cross only Seedbox's stopped QMP boundary. There is no NetClientState,
++ * NetQueue, host socket, bottom half or timer.
++ *
++ * Each kick runs synchronously in the vCPU thread at the guest's MMIO write
++ * (Seedbox sets virtio-mmio.ioeventfd=off). Transmission records every valid
++ * frame with its icount time; the coordinator drains those records while
++ * stopped. Received frames arrive only while stopped: they are dropped until
++ * the driver is ready, fill available buffers, or wait in a backlog of 256
++ * that the guest's receive refill drains. Device reset clears that backlog.
++ *
++ * The guest may hand over frames that are too short or long, or that carry
++ * offload metadata: those are completed and dropped. A structurally valid
++ * receive buffer too short for a frame is completed empty and that frame is
++ * dropped. A malformed ring, a descriptor in the wrong direction, or a buffer
++ * outside guest RAM marks the device broken (no further interrupts) and
++ * fails the machine; completed earlier entries remain in the used ring. Migration carries the backlog and undrained transmissions.
++ * Offered features are exactly MAC and MTU; there are no indirect
++ * descriptors, event index, offloads, merged buffers or control queue.
++ */
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qapi/qapi-commands-net.h"
++#include "hw/virtio/virtio.h"
++#include "hw/virtio/virtio-access.h"
++#include "hw/core/qdev-properties.h"
++#include "hw/core/qdev-properties-system.h"
++#include "hw/core/cpu.h"
++#include "system/cpus.h"
++#include "migration/vmstate.h"
++#include "migration/qemu-file-types.h"
++#include "net/net.h"
++#include "system/runstate.h"
++#include "system/memory.h"
++#include "qemu/iov.h"
++#include "qemu/queue.h"
++#include "qemu/rcu.h"
++#include "exec/icount.h"
++#include "qemu/module.h"
++#include "standard-headers/linux/virtio_ids.h"
++#include "standard-headers/linux/virtio_net.h"
++
++#define TYPE_SEEDBOX_NET "seedbox-net-device"
++OBJECT_DECLARE_SIMPLE_TYPE(SeedboxNet, SEEDBOX_NET)
++
++#define QUEUE_SIZE 256
++#define HEADER 10       /* Legacy struct virtio_net_hdr, no merged buffers. */
++#define MIN_FRAME 14    /* Ethernet header; no FCS, VLAN tag or offload. */
++#define MAX_FRAME 1514
++#define MTU 1500
++#define BACKLOG 256
++#define RECEIVE_LIMIT 64
++#define DRAIN_LIMIT 256
++/* Seedbox's config view: mac, status (unused), max pairs (unused), mtu. */
++#define CONFIG_SIZE (offsetof(struct virtio_net_config, mtu) + 2)
++
++typedef struct SeedboxFrame {
++    QSIMPLEQ_ENTRY(SeedboxFrame) next;
++    int64_t time;               /* Transmission only. */
++    uint16_t length;
++    uint8_t bytes[];
++} SeedboxFrame;
++
++typedef QSIMPLEQ_HEAD(, SeedboxFrame) SeedboxFrames;
++
++struct SeedboxNet {
++    VirtIODevice parent_obj;
++    VirtQueue *rx;
++    VirtQueue *tx;
++    MACAddr mac;
++    SeedboxFrames backlog;
++    uint32_t backlog_length;
++    /* Unbounded within a run; the coordinator drains it in chunks. */
++    SeedboxFrames outbox;
++};
++
++/* One NIC per machine; QMP addresses it. */
++static SeedboxNet *seedbox_net;
++
++static SeedboxFrame *frame_new(const uint8_t *bytes, uint16_t length)
++{
++    SeedboxFrame *frame = g_malloc(sizeof(*frame) + length);
++    frame->time = 0;
++    frame->length = length;
++    if (bytes) {
++        memcpy(frame->bytes, bytes, length);
++    }
++    return frame;
++}
++
++static void frames_clear(SeedboxFrames *frames)
++{
++    SeedboxFrame *frame;
++    while ((frame = QSIMPLEQ_FIRST(frames))) {
++        QSIMPLEQ_REMOVE_HEAD(frames, next);
++        g_free(frame);
++    }
++}
++
++static void backlog_clear(SeedboxNet *s)
++{
++    frames_clear(&s->backlog);
++    s->backlog_length = 0;
++}
++
++/* Like Seedbox's PV transport, accept only buffers backed by guest RAM;
++ * QEMU would otherwise bounce DMA to device or unassigned memory. */
++static bool in_ram(VirtIODevice *vdev, const hwaddr *addresses,
++                   const struct iovec *segments, unsigned count, bool is_write)
++{
++    RCU_READ_LOCK_GUARD();
++    for (unsigned i = 0; i < count; i++) {
++        hwaddr offset, length = segments[i].iov_len;
++        MemoryRegion *region = address_space_translate(
++            vdev->dma_as, addresses[i], &offset, &length, is_write,
++            MEMTXATTRS_UNSPECIFIED);
++        if (!memory_region_is_ram(region) || length < segments[i].iov_len) {
++            return false;
++        }
++    }
++    return true;
++}
++
++static bool driver_ok(VirtIODevice *vdev)
++{
++    return vdev->status & VIRTIO_CONFIG_S_DRIVER_OK;
++}
++
++/* Pop one receive buffer. Returns NULL with *malformed false when none is
++ * available. A malformed chain is detached and reported. */
++static VirtQueueElement *receive_buffer(SeedboxNet *s, bool *malformed)
++{
++    VirtIODevice *vdev = VIRTIO_DEVICE(s);
++    VirtQueueElement *elem = virtqueue_pop(s->rx, sizeof(VirtQueueElement));
++    *malformed = vdev->broken;
++    if (!elem) {
++        return NULL;
++    }
++    if (elem->out_num || !elem->in_num ||
++        !in_ram(vdev, elem->in_addr, elem->in_sg, elem->in_num, true)) {
++        virtqueue_detach_element(s->rx, elem, 0);
++        g_free(elem);
++        /* Mark the device broken, like virtqueue_pop's own ring checks. */
++        virtio_error(vdev, "seedbox-net: malformed receive buffer");
++        *malformed = true;
++        return NULL;
++    }
++    return elem;
++}
++
++/* Place one frame. Returns 1 when the frame was consumed (delivered, or
++ * dropped into a structurally valid but short buffer), 0 when no buffer is
++ * available, and -1 for a malformed ring. */
++static int put_frame(SeedboxNet *s, const uint8_t *bytes, uint16_t length)
++{
++    static const uint8_t header[HEADER];
++    bool malformed;
++    VirtQueueElement *elem = receive_buffer(s, &malformed);
++    unsigned written = 0;
++
++    if (!elem) {
++        return malformed ? -1 : 0;
++    }
++    if (iov_size(elem->in_sg, elem->in_num) >= HEADER + (size_t)length) {
++        iov_from_buf(elem->in_sg, elem->in_num, 0, header, HEADER);
++        iov_from_buf(elem->in_sg, elem->in_num, HEADER, bytes, length);
++        written = HEADER + length;
++    }
++    virtqueue_push(s->rx, elem, written);
++    g_free(elem);
++    return 1;
++}
++
++/* Move backlog frames into available buffers in FIFO order. */
++static int drain_backlog(SeedboxNet *s, bool *completed)
++{
++    SeedboxFrame *frame;
++    while ((frame = QSIMPLEQ_FIRST(&s->backlog))) {
++        int placed = put_frame(s, frame->bytes, frame->length);
++        if (placed <= 0) {
++            return placed;
++        }
++        *completed = true;
++        QSIMPLEQ_REMOVE_HEAD(&s->backlog, next);
++        s->backlog_length--;
++        g_free(frame);
++    }
++    return 0;
++}
++
++/* Accept one stopped-boundary frame. False reports a malformed ring. */
++static bool receive_frame(SeedboxNet *s, const uint8_t *bytes,
++                          uint16_t length, bool *completed)
++{
++    VirtIODevice *vdev = VIRTIO_DEVICE(s);
++    int placed;
++
++    if (!driver_ok(vdev) || !virtio_queue_ready(s->rx)) {
++        return true;
++    }
++    if (drain_backlog(s, completed) < 0) {
++        return false;
++    }
++    if (QSIMPLEQ_EMPTY(&s->backlog)) {
++        placed = put_frame(s, bytes, length);
++        if (placed < 0) {
++            return false;
++        }
++        if (placed > 0) {
++            *completed = true;
++            return true;
++        }
++    }
++    if (s->backlog_length < BACKLOG) {
++        /* Queue macros evaluate their element argument more than once. */
++        SeedboxFrame *frame = frame_new(bytes, length);
++        QSIMPLEQ_INSERT_TAIL(&s->backlog, frame, next);
++        s->backlog_length++;
++    }
++    return true;
++}
++
++static void handle_rx(VirtIODevice *vdev, VirtQueue *vq)
++{
++    SeedboxNet *s = SEEDBOX_NET(vdev);
++    bool completed = false;
++    int result;
++
++    if (!driver_ok(vdev)) {
++        return;
++    }
++    result = drain_backlog(s, &completed);
++    if (result < 0) {
++        seedbox_icount_device_error();
++    } else if (completed) {
++        virtio_notify(vdev, vq);
++    }
++}
++
++/* Read one transmit chain. Returns false for a malformed chain. Invalid
++ * payloads are completed without a frame. */
++static bool transmit(SeedboxNet *s, VirtQueueElement *elem)
++{
++    VirtIODevice *vdev = VIRTIO_DEVICE(s);
++    uint8_t header[HEADER];
++    size_t size;
++    SeedboxFrame *frame;
++
++    if (elem->in_num ||
++        !in_ram(vdev, elem->out_addr, elem->out_sg, elem->out_num, false)) {
++        return false;
++    }
++    size = iov_size(elem->out_sg, elem->out_num);
++    if (size < HEADER + MIN_FRAME || size > HEADER + MAX_FRAME) {
++        return true;
++    }
++    iov_to_buf(elem->out_sg, elem->out_num, 0, header, HEADER);
++    /* flags and gso_type: no offload is negotiated. */
++    if (header[0] || header[1]) {
++        return true;
++    }
++    frame = frame_new(NULL, size - HEADER);
++    iov_to_buf(elem->out_sg, elem->out_num, HEADER, frame->bytes,
++               frame->length);
++    frame->time = icount_get();
++    QSIMPLEQ_INSERT_TAIL(&s->outbox, frame, next);
++    return true;
++}
++
++static void handle_tx(VirtIODevice *vdev, VirtQueue *vq)
++{
++    SeedboxNet *s = SEEDBOX_NET(vdev);
++    bool completed = false;
++
++    if (!driver_ok(vdev)) {
++        return;
++    }
++    for (;;) {
++        VirtQueueElement *elem = virtqueue_pop(vq, sizeof(VirtQueueElement));
++        if (!elem) {
++            break;
++        }
++        if (!transmit(s, elem)) {
++            virtqueue_detach_element(vq, elem, 0);
++            g_free(elem);
++            virtio_error(vdev, "seedbox-net: malformed transmit chain");
++            seedbox_icount_device_error();
++            return;
++        }
++        virtqueue_push(vq, elem, 0);
++        g_free(elem);
++        completed = true;
++    }
++    if (completed) {
++        virtio_notify(vdev, vq);
++    }
++    /* virtqueue_pop marks a malformed ring broken instead of failing. */
++    if (vdev->broken) {
++        seedbox_icount_device_error();
++    }
++}
++
++/* QEMU classifies every CPU as idle while the VM is stopped. Ask instead
++ * whether a halted CPU has deliverable work, such as a receive interrupt. */
++static bool cpus_runnable(void)
++{
++    CPUState *cpu;
++    CPU_FOREACH(cpu) {
++        if (!cpu_work_list_empty(cpu) || !cpu->halted || cpu_has_work(cpu)) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static int hex_digit(char c)
++{
++    if (c >= '0' && c <= '9') {
++        return c - '0';
++    }
++    if (c >= 'a' && c <= 'f') {
++        return c - 'a' + 10;
++    }
++    return -1;
++}
++
++static uint8_t *hex_decode(const char *hex, uint16_t *length)
++{
++    size_t digits = strlen(hex);
++    uint8_t *bytes;
++
++    if (digits % 2 || digits / 2 < MIN_FRAME || digits / 2 > MAX_FRAME) {
++        return NULL;
++    }
++    bytes = g_malloc(digits / 2);
++    for (size_t i = 0; i < digits / 2; i++) {
++        int high = hex_digit(hex[2 * i]), low = hex_digit(hex[2 * i + 1]);
++        if (high < 0 || low < 0) {
++            g_free(bytes);
++            return NULL;
++        }
++        bytes[i] = high << 4 | low;
++    }
++    *length = digits / 2;
++    return bytes;
++}
++
++static char *hex_encode(const uint8_t *bytes, uint16_t length)
++{
++    static const char digits[] = "0123456789abcdef";
++    char *hex = g_malloc(2 * (size_t)length + 1);
++    for (size_t i = 0; i < length; i++) {
++        hex[2 * i] = digits[bytes[i] >> 4];
++        hex[2 * i + 1] = digits[bytes[i] & 15];
++    }
++    hex[2 * (size_t)length] = 0;
++    return hex;
++}
++
++SeedboxNetReceiveResult *qmp_seedbox_net_receive(strList *frames,
++                                                 Error **errp)
++{
++    VirtIODevice *vdev;
++    g_autoptr(GPtrArray) decoded = g_ptr_array_new_with_free_func(g_free);
++    g_autoptr(GArray) lengths = g_array_new(false, false, sizeof(uint16_t));
++    SeedboxNetReceiveResult *result;
++    bool completed = false;
++
++    if (runstate_is_running() || !seedbox_net) {
++        error_setg(errp, "seedbox-net-receive needs a stopped machine with "
++                   "a seedbox-net device");
++        return NULL;
++    }
++    vdev = VIRTIO_DEVICE(seedbox_net);
++    if (vdev->broken) {
++        error_setg(errp, "seedbox-net-receive: the device has failed");
++        return NULL;
++    }
++    /* Validate the whole request before any frame changes device state. */
++    for (strList *item = frames; item; item = item->next) {
++        uint16_t length;
++        uint8_t *bytes = hex_decode(item->value, &length);
++        if (!bytes || decoded->len == RECEIVE_LIMIT) {
++            g_free(bytes);
++            error_setg(errp, "seedbox-net-receive takes at most %d frames, "
++                       "each %d..%d bytes of lowercase hex", RECEIVE_LIMIT,
++                       MIN_FRAME, MAX_FRAME);
++            return NULL;
++        }
++        g_ptr_array_add(decoded, bytes);
++        g_array_append_val(lengths, length);
++    }
++    for (guint i = 0; i < decoded->len; i++) {
++        if (!receive_frame(seedbox_net, g_ptr_array_index(decoded, i),
++                           g_array_index(lengths, uint16_t, i), &completed)) {
++            /* Stopped, on the main thread: no CPU to stop, but bounded
++             * execution must never resume this machine. */
++            seedbox_icount_device_error();
++            error_setg(errp, "seedbox-net-receive: malformed receive ring");
++            return NULL;
++        }
++    }
++    if (completed) {
++        virtio_notify(vdev, seedbox_net->rx);
++    }
++    result = g_new0(SeedboxNetReceiveResult, 1);
++    result->runnable = cpus_runnable();
++    return result;
++}
++
++SeedboxNetDrain *qmp_seedbox_net_drain(Error **errp)
++{
++    SeedboxNetDrain *result;
++    SeedboxNetFrameList **tail;
++    SeedboxFrame *frame;
++
++    if (runstate_is_running() || !seedbox_net) {
++        error_setg(errp, "seedbox-net-drain needs a stopped machine with "
++                   "a seedbox-net device");
++        return NULL;
++    }
++    result = g_new0(SeedboxNetDrain, 1);
++    tail = &result->frames;
++    for (int count = 0; count < DRAIN_LIMIT &&
++         (frame = QSIMPLEQ_FIRST(&seedbox_net->outbox)); count++) {
++        SeedboxNetFrame *item = g_new0(SeedboxNetFrame, 1);
++        item->time = frame->time;
++        item->bytes = hex_encode(frame->bytes, frame->length);
++        QAPI_LIST_APPEND(tail, item);
++        QSIMPLEQ_REMOVE_HEAD(&seedbox_net->outbox, next);
++        g_free(frame);
++    }
++    result->more = !QSIMPLEQ_EMPTY(&seedbox_net->outbox);
++    return result;
++}
++
++static uint64_t get_features(VirtIODevice *vdev, uint64_t features,
++                             Error **errp)
++{
++    /* An allowlist: drop every common transport bit (indirect descriptors,
++     * event index, notify-on-empty, any-layout, queue reset) and offer MAC
++     * and MTU explicitly. VERSION_1 is the transport's, never set legacy. */
++    uint64_t offered = features & (1ULL << VIRTIO_F_VERSION_1);
++    virtio_add_feature(&offered, VIRTIO_NET_F_MAC);
++    virtio_add_feature(&offered, VIRTIO_NET_F_MTU);
++    return offered;
++}
++
++static void get_config(VirtIODevice *vdev, uint8_t *config)
++{
++    SeedboxNet *s = SEEDBOX_NET(vdev);
++    struct virtio_net_config net = { 0 };
++
++    memcpy(net.mac, s->mac.a, sizeof(net.mac));
++    virtio_stw_p(vdev, &net.mtu, MTU);
++    memcpy(config, &net, CONFIG_SIZE);
++}
++
++static void reset(VirtIODevice *vdev)
++{
++    backlog_clear(SEEDBOX_NET(vdev));
++}
++
++static void realize(DeviceState *dev, Error **errp)
++{
++    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
++    SeedboxNet *s = SEEDBOX_NET(dev);
++    static const uint8_t zero[6];
++
++    if (seedbox_net) {
++        error_setg(errp, "seedbox-net: only one device is supported");
++        return;
++    }
++    if (!memcmp(s->mac.a, zero, sizeof(zero)) || s->mac.a[0] & 1) {
++        error_setg(errp, "seedbox-net: mac must be a nonzero unicast address");
++        return;
++    }
++    QSIMPLEQ_INIT(&s->backlog);
++    QSIMPLEQ_INIT(&s->outbox);
++    s->backlog_length = 0;
++    virtio_init(vdev, VIRTIO_ID_NET, CONFIG_SIZE);
++    s->rx = virtio_add_queue(vdev, QUEUE_SIZE, handle_rx);
++    s->tx = virtio_add_queue(vdev, QUEUE_SIZE, handle_tx);
++    seedbox_net = s;
++}
++
++static void unrealize(DeviceState *dev)
++{
++    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
++    SeedboxNet *s = SEEDBOX_NET(dev);
++
++    virtio_delete_queue(s->rx);
++    virtio_delete_queue(s->tx);
++    virtio_cleanup(vdev);
++    backlog_clear(s);
++    frames_clear(&s->outbox);
++    seedbox_net = NULL;
++}
++
++/* Read one frame record without trusting more than its bounded length. */
++static SeedboxFrame *load_frame(QEMUFile *f, bool timed, Error **errp)
++{
++    int64_t time = timed ? (int64_t)qemu_get_be64(f) : 0;
++    uint16_t length = qemu_get_be16(f);
++    SeedboxFrame *frame;
++
++    if (qemu_file_get_error(f) || length < MIN_FRAME || length > MAX_FRAME) {
++        error_setg(errp, "seedbox-net: invalid frame record");
++        return NULL;
++    }
++    frame = frame_new(NULL, length);
++    frame->time = time;
++    if (qemu_get_buffer(f, frame->bytes, length) != length) {
++        g_free(frame);
++        error_setg(errp, "seedbox-net: truncated frame record");
++        return NULL;
++    }
++    return frame;
++}
++
++static void save_frame(QEMUFile *f, const SeedboxFrame *frame, bool timed)
++{
++    if (timed) {
++        qemu_put_be64(f, frame->time);
++    }
++    qemu_put_be16(f, frame->length);
++    qemu_put_buffer(f, frame->bytes, frame->length);
++}
++
++/* Backlog: count (<= 256) then untimed records. Outbox: 64-bit count then
++ * timed records; memory grows only with records actually present. */
++static bool save_frames(QEMUFile *f, void *pv, size_t size,
++                        const VMStateField *field, JSONWriter *vmdesc,
++                        Error **errp)
++{
++    SeedboxNet *s = pv;
++    SeedboxFrame *frame;
++    uint64_t count = 0;
++
++    qemu_put_be32(f, s->backlog_length);
++    QSIMPLEQ_FOREACH(frame, &s->backlog, next) {
++        save_frame(f, frame, false);
++    }
++    QSIMPLEQ_FOREACH(frame, &s->outbox, next) {
++        count++;
++    }
++    qemu_put_be64(f, count);
++    QSIMPLEQ_FOREACH(frame, &s->outbox, next) {
++        save_frame(f, frame, true);
++    }
++    return true;
++}
++
++/* Decode into private lists and install them only after every record is
++ * valid: a failed load leaves the device's frames unchanged. */
++static bool load_frames(QEMUFile *f, void *pv, size_t size,
++                        const VMStateField *field, Error **errp)
++{
++    SeedboxNet *s = pv;
++    SeedboxFrames backlog = QSIMPLEQ_HEAD_INITIALIZER(backlog);
++    SeedboxFrames outbox = QSIMPLEQ_HEAD_INITIALIZER(outbox);
++    uint32_t backlog_length = qemu_get_be32(f);
++    uint64_t outbox_length;
++    SeedboxFrame *frame;
++
++    if (qemu_file_get_error(f) || backlog_length > BACKLOG) {
++        error_setg(errp, "seedbox-net: invalid backlog length");
++        return false;
++    }
++    for (uint32_t i = 0; i < backlog_length; i++) {
++        if (!(frame = load_frame(f, false, errp))) {
++            goto fail;
++        }
++        QSIMPLEQ_INSERT_TAIL(&backlog, frame, next);
++    }
++    outbox_length = qemu_get_be64(f);
++    if (qemu_file_get_error(f)) {
++        error_setg(errp, "seedbox-net: truncated outbox length");
++        goto fail;
++    }
++    for (uint64_t i = 0; i < outbox_length; i++) {
++        if (!(frame = load_frame(f, true, errp))) {
++            goto fail;
++        }
++        QSIMPLEQ_INSERT_TAIL(&outbox, frame, next);
++    }
++    backlog_clear(s);
++    frames_clear(&s->outbox);
++    QSIMPLEQ_CONCAT(&s->backlog, &backlog);
++    QSIMPLEQ_CONCAT(&s->outbox, &outbox);
++    s->backlog_length = backlog_length;
++    return true;
++
++fail:
++    frames_clear(&backlog);
++    frames_clear(&outbox);
++    return false;
++}
++
++static const VMStateInfo vmstate_info_seedbox_frames = {
++    .name = "seedbox-net-frames",
++    .load = load_frames,
++    .save = save_frames,
++};
++
++static const VMStateDescription vmstate_seedbox_net_device = {
++    .name = "seedbox-net-device",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (const VMStateField[]) {
++        {
++            .name = "frames",
++            .info = &vmstate_info_seedbox_frames,
++            .flags = VMS_SINGLE,
++        },
++        VMSTATE_END_OF_LIST()
++    },
++};
++
++static const VMStateDescription vmstate_seedbox_net = {
++    .name = "seedbox-net",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (const VMStateField[]) {
++        VMSTATE_VIRTIO_DEVICE,
++        VMSTATE_END_OF_LIST()
++    },
++};
++
++static const Property properties[] = {
++    DEFINE_PROP_MACADDR("mac", SeedboxNet, mac),
++};
++
++static void class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    VirtioDeviceClass *vdc = VIRTIO_DEVICE_CLASS(klass);
++
++    device_class_set_props(dc, properties);
++    dc->vmsd = &vmstate_seedbox_net;
++    set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
++    vdc->realize = realize;
++    vdc->unrealize = unrealize;
++    vdc->get_features = get_features;
++    vdc->get_config = get_config;
++    vdc->reset = reset;
++    vdc->vmsd = &vmstate_seedbox_net_device;
++}
++
++static const TypeInfo seedbox_net_info = {
++    .name = TYPE_SEEDBOX_NET,
++    .parent = TYPE_VIRTIO_DEVICE,
++    .instance_size = sizeof(SeedboxNet),
++    .class_init = class_init,
++};
++
++static void seedbox_net_register_types(void)
++{
++    type_register_static(&seedbox_net_info);
++}
++
++type_init(seedbox_net_register_types)
+--- a/qapi/net.json
++++ b/qapi/net.json
+@@ -1261,3 +1261,75 @@
+ ##
+ { 'event': 'NETDEV_VHOST_USER_DISCONNECTED',
+   'data': { 'netdev-id': 'str' } }
++
++##
++# @SeedboxNetReceiveResult:
++#
++# Stopped scheduling state after Seedbox frame delivery.
++#
++# @runnable: A CPU is runnable after delivery.
++#
++# Since: 11.1
++##
++{ 'struct': 'SeedboxNetReceiveResult', 'data': { 'runnable': 'bool' },
++  'if': 'CONFIG_TCG' }
++
++##
++# @seedbox-net-receive:
++#
++# Deliver Ethernet frames, in order, to a stopped machine's Seedbox
++# network device.  Each frame is dropped while the driver or receive
++# queue is not ready, fills an available buffer, or waits in a
++# backlog of 256 frames; a frame arriving at a full backlog is
++# dropped.  Guest instructions and virtual time remain stopped.
++#
++# @frames: At most 64 frames, each 14 to 1514 bytes as lowercase
++#     hexadecimal, without FCS.
++#
++# Returns: Stopped scheduling state after delivery.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-net-receive', 'data': { 'frames': ['str'] },
++  'returns': 'SeedboxNetReceiveResult', 'if': 'CONFIG_TCG' }
++
++##
++# @SeedboxNetFrame:
++#
++# One transmitted Ethernet frame.
++#
++# @time: Simulation nanoseconds at the guest's transmit notification.
++# @bytes: The frame as lowercase hexadecimal, without FCS.
++#
++# Since: 11.1
++##
++{ 'struct': 'SeedboxNetFrame', 'data': { 'time': 'uint64', 'bytes': 'str' },
++  'if': 'CONFIG_TCG' }
++
++##
++# @SeedboxNetDrain:
++#
++# A chunk of transmitted frames.
++#
++# @frames: At most 256 frames in transmission order.
++# @more: Further frames remain to be drained.
++#
++# Since: 11.1
++##
++{ 'struct': 'SeedboxNetDrain',
++  'data': { 'frames': ['SeedboxNetFrame'], 'more': 'bool' },
++  'if': 'CONFIG_TCG' }
++
++##
++# @seedbox-net-drain:
++#
++# Transfer the oldest pending transmitted frames exactly once while
++# stopped.  Pending frames are migrated until drained.  This command
++# executes no guest work.
++#
++# Returns: The drained chunk.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-net-drain', 'returns': 'SeedboxNetDrain',
++  'if': 'CONFIG_TCG' }

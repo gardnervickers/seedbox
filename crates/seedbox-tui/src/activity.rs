@@ -86,7 +86,7 @@ pub enum Change {
     Resumed,
     Rebooted,
     Ready,
-    Throttled(Option<u64>),
+    Throttled(u64),
 }
 
 impl Change {
@@ -96,7 +96,7 @@ impl Change {
             MachineTransition::Resumed => Change::Resumed,
             MachineTransition::Crashed => Change::Crashed,
             MachineTransition::Rebooted => Change::Rebooted,
-            MachineTransition::Throttled { speed_hz } => Change::Throttled(*speed_hz),
+            MachineTransition::Throttled { factor_permille } => Change::Throttled(*factor_permille),
         }
     }
 }
@@ -382,6 +382,9 @@ pub fn derive(
     for (index, transition) in transitions.iter().enumerate() {
         let (action, recovers): (String, &[Change]) = match &transition.change {
             Change::Crashed => ("crashed".into(), &[Change::Rebooted, Change::Ready]),
+            // Successful lifecycle completion is not downtime or a fault.
+            // Explicit injected stop/crash actions remain in world.faults.
+            Change::Exited(0) => continue,
             Change::Exited(code) => (format!("exited {code}"), &[Change::Rebooted, Change::Ready]),
             Change::Paused => ("paused".into(), &[Change::Resumed]),
             _ => continue,
@@ -578,6 +581,31 @@ mod tests {
     }
 
     #[test]
+    fn normal_exits_are_not_fault_activity_but_injected_stops_remain() {
+        let transitions = ["app", "oracle"].map(|machine| Transition {
+            at_ns: 100,
+            machine: machine.into(),
+            incarnation: 0,
+            change: Change::Exited(0),
+        });
+        let normal = derive(None, &[], &transitions, 100);
+        assert_eq!(normal, Activity::default());
+
+        let w = world(vec![fault(
+            7,
+            "stop",
+            serde_json::json!({"action":"stop","machine":"app"}),
+            100,
+            false,
+        )]);
+        let stopped = derive(Some(&w), &[], &transitions, 100);
+        assert!(stopped.active.is_empty());
+        assert_eq!(stopped.history.len(), 1);
+        assert_eq!(stopped.history[0].key, Key::Fault(7));
+        assert_eq!(stopped.history[0].action, "stop");
+    }
+
+    #[test]
     fn departed_machines_keep_their_lane_after_present_ones() {
         let mut w = world(vec![
             fault(
@@ -600,8 +628,7 @@ mod tests {
             incarnation: 0,
             condition: seedbox_api::MachineCondition::Ready,
             exit_code: None,
-            cpu_speed_hz: Some(1_000_000_000),
-            throttle_speed_hz: None,
+            throttle_permille: None,
             oracle: false,
             last_transition: None,
             last_transition_at_ns: None,

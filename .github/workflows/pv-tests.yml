@@ -68,12 +68,24 @@ jobs:
           df -h /
       - name: Verify usable KVM before building
         run: |
+          grep -m1 '^vendor_id' /proc/cpuinfo
+          grep -m1 '^model name' /proc/cpuinfo
+          uname -r
           sudo chmod a+rw /dev/kvm
           python3 - <<'PYTHON'
           import fcntl, os
+          # Globally disabled PMU yields no per-VM disable capability, also on AMD.
+          try:
+              with open('/sys/module/kvm/parameters/enable_pmu') as parameter:
+                  print(f'KVM enable_pmu={parameter.read().strip()}')
+          except OSError as error:
+              print(f'KVM enable_pmu evidence unavailable: {error}')
           with open('/dev/kvm', 'rb') as kvm:
               assert fcntl.ioctl(kvm, 0xAE00, 0) == 12, 'unsupported KVM API'
               vm = fcntl.ioctl(kvm, 0xAE01, 0)
+              # KVM_CHECK_EXTENSION(KVM_CAP_PMU_CAPABILITY), disable bit = 1.
+              pmu = fcntl.ioctl(vm, 0xAE03, 212)
+              print(f'KVM PMU capability={pmu}; disable supported={bool(pmu & 1)}')
               os.close(vm)
           print('KVM VM creation succeeded')
           PYTHON
@@ -84,7 +96,7 @@ jobs:
       - uses: nix-community/cache-nix-action/restore@v7
         id: nix-cache
         with:
-          primary-key: pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**', 'kernel/**', 'kernel-arm64/**', 'guest/**', 'tools/runtime/**', 'crates/xtask/**') }}
+          primary-key: pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**', 'crates/seedbox-machine/**/*.nix', 'crates/seedbox-machine/guest/**', 'crates/xtask/**') }}
           restore-prefixes-first-match: |
             pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-
             pv-nix-${{ runner.os }}-${{ runner.arch }}-
@@ -98,12 +110,10 @@ jobs:
           workspaces: |
             . -> target
             . -> build/cargo
-            crates/seedbox-vmm -> target
-            crates/seedbox-arm64 -> target
           cache-bin: false
       - name: Build and root guest assets from the checkout
         run: |
-          nix build .#guestKernel .#runtimeArchive --out-link "$RUNNER_TEMP/pv-assets"
+          nix build .#machinePvAssets .#machineTcgAssets .#machineGuestFormatter .#machineGuestFormatterX86 --out-link "$RUNNER_TEMP/pv-assets"
       # Save expensive dependencies before tests, so a test failure does not
       # force the next run to rebuild the kernel or download the toolchain.
       - uses: nix-community/cache-nix-action/save@v7

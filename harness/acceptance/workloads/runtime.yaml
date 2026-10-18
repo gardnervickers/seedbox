@@ -2,8 +2,8 @@ name: guest-runtime
 machines: {}
 oracle:
   build:
-    context: "../../../guest"
-    dockerfile: acceptance-runtime.Dockerfile
+    context: "../images/runtime"
+    dockerfile: Dockerfile
   user: 123:456
   volumes:
     data:

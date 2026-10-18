@@ -2,8 +2,6 @@
 resolver = "2"
 members = ["crates/*"]
 default-members = ["crates/seedbox"]
-# The VMM is its own workspace (see its Cargo.toml).
-exclude = ["crates/seedbox-vmm", "crates/seedbox-arm64"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,9 +9,21 @@ edition = "2021"
 publish = false
 
 [workspace.dependencies]
+seedbox-test-time = { path = "crates/seedbox-test-time" }
+# Parser features are activated only by the seedbox-check consumer.
+syn = "2"
+proc-macro2 = "1"
+seedbox-cli = { path = "crates/seedbox-cli" }
+seedbox-machine = { path = "crates/seedbox-machine" }
+seedbox-machine-pv = { path = "crates/seedbox-machine-pv" }
+seedbox-machine-tcg = { path = "crates/seedbox-machine-tcg" }
+seedbox-driver-execution = { path = "crates/seedbox-driver-execution" }
+seedbox-driver = { path = "crates/seedbox-driver" }
 bollard = { version = "0.21", features = ["buildkit", "chrono"] }
 hex = "0.4"
 seedbox-artifacts = { path = "crates/seedbox-artifacts" }
+seedbox-exec = { path = "crates/seedbox-exec" }
+seedbox-test = { path = "crates/seedbox-test" }
 seedbox-application = { path = "crates/seedbox-application" }
 seedbox-server = { path = "crates/seedbox-server" }
 seedbox-api = { path = "crates/seedbox-api" }
@@ -26,6 +36,7 @@ futures-util = "0.3"
 getrandom = "0.4"
 tempfile = "3"
 tar = "0.4"
+flate2 = "1"
 serde_yaml_ng = "0.10"
 seedbox-engine-protocol = { path = "crates/seedbox-engine-protocol" }
 clap = { version = "4", features = ["derive", "env"] }
@@ -34,7 +45,17 @@ serde = { version = "1", features = ["derive"] }
 seedbox-control = { path = "crates/seedbox-control" }
 libc = "0.2"
 serde_json = "1"
+rayon = "1"
 sha2 = "0.11"
+
+[profile.dev]
+debug = "line-tables-only"
 
 [profile.release]
 debug = 1
+
+# Content-store digests hash whole checkpoint and asset files. Unoptimized
+# SHA-256 makes in-process debug services (native service tests) spend tens
+# of seconds per checkpoint export; optimize only this leaf crate.
+[profile.dev.package.sha2]
+opt-level = 3

@@ -1,7 +1,0 @@
-{
-  "kernel": "../../artifacts/bzImage",
-  "mem_mb": 256,
-  "duration_ns": 10000000000,
-  "end_on_exit": "n1",
-  "machines": [{"name": "n1", "initrd": "../../artifacts/rdrand.cpio", "cmdline": "seedbox.rdrand=raw"}]
-}

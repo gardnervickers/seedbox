@@ -1,0 +1,10 @@
+[package]
+name = "seedbox-exec"
+description = "Process-wide ordering between writing executables and forking"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# Deliberately dependency-free: production crates, worker-only machine crates,
+# the standalone arm64 workspace and test support all depend on it.
+[dependencies]

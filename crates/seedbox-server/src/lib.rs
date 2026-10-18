@@ -61,8 +61,11 @@ pub async fn serve(
     });
     let seeds = run_seeds(manager.clone(), sender.clone(), shutdown.clone());
     let controls = controls::run(manager.clone(), shutdown.clone());
-    let router =
-        http::router(http::ApiState::new(manager, sender).with_execution(execution.clone()));
+    let router = http::router(
+        http::ApiState::new(manager, sender)
+            .with_execution(execution.clone())
+            .with_shutdown(shutdown.clone()),
+    );
     let http_shutdown = shutdown.clone();
     let http_finished = shutdown.clone();
     let http = async move {

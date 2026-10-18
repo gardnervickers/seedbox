@@ -1,13 +1,6 @@
-# Run from the repository root. These isolated standalone engines support
-# low-level fixtures. The public CLI links its platform engine directly.
+# Run from the repository root.
 [alias]
 xtask = "run --quiet -p xtask --"
-# Keep standalone engine outputs separate from workspace builds; do not set a
-# global target-dir in [build].
-build-vmm = "build --release --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target"
-test-vmm = "test --release --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target"
-build-arm64 = "build --release --locked --manifest-path crates/seedbox-arm64/Cargo.toml --target-dir crates/seedbox-arm64/target"
-test-arm64 = "test --release --locked --manifest-path crates/seedbox-arm64/Cargo.toml --target-dir crates/seedbox-arm64/target"
 
 # Build-only checkout input for shared-source package watchers. Cargo otherwise
 # reuses relative dep-info across worktrees even when older sources differ.

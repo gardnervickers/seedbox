@@ -2,5 +2,5 @@ name: exclusives
 machines: {}
 oracle:
   build:
-    context: "../../../guest/progress/fixtures"
+    context: "../images/exclusives"
     dockerfile: Dockerfile

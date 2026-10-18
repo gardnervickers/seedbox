@@ -545,18 +545,17 @@ pub(super) fn semantic_definition(
     if let Some(value) = definition
         .runtime
         .execution
-        .pointer_mut("/semantic_parameters/hvf")
+        .pointer_mut("/semantic_parameters/engine")
         .filter(|value| !value.is_null())
     {
-        #[derive(serde::Deserialize)]
-        struct HostProvenance {
-            host_release: String,
-            cpu_features: String,
-        }
-        let provenance: HostProvenance = serde_json::from_value(value.clone())?;
-        let _ = (provenance.host_release, provenance.cpu_features);
-        value["host_release"] = "".into();
-        value["cpu_features"] = "".into();
+        let mut descriptor: seedbox_artifacts::execution::EngineDescriptor =
+            serde_json::from_value(value.clone())?;
+        descriptor.simulator_version.clear();
+        descriptor.host_os.clear();
+        descriptor.host_arch.clear();
+        descriptor.guest_arch.clear();
+        descriptor.engine_timebase.clear();
+        *value = serde_json::to_value(descriptor)?;
     }
     Ok(definition)
 }

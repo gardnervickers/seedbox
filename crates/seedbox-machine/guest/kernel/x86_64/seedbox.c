@@ -1,0 +1,294 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Single-CPU PV ABI 3 for x86-64. Matches the seedbox-machine stopped worker:
+ * the same shared time page and event registers as the arm64 kernel, with
+ * the 8259 PIC as the only interrupt controller. No LAPIC, HPET, PIT or RTC is
+ * used. Kernel TSC reads return PV time; application RDTSC/RDTSCP trap through
+ * CR4.TSD and are emulated here.
+ */
+#include <linux/build_bug.h>
+#include <linux/clockchips.h>
+#include <linux/clocksource.h>
+#include <linux/init.h>
+#include <linux/interrupt.h>
+#include <linux/ioport.h>
+#include <linux/kernel.h>
+#include <linux/platform_device.h>
+#include <linux/pm.h>
+#include <linux/stddef.h>
+#include <asm/cpufeature.h>
+#include <asm/fixmap.h>
+#include <asm/insn-eval.h>
+#include <asm/irqflags.h>
+#include <asm/seedbox.h>
+#include <asm/time.h>
+#include <asm/tlbflush.h>
+#include <asm/x86_init.h>
+
+struct seedbox_page {
+	u64 now, last, bound, abi, deferred_irq_pending, exclusive_epoch;
+	u64 syscall_ns;
+};
+
+enum {
+	EVENT_DEADLINE = 0,
+	EVENT_ACK = 8,
+	EVENT_YIELD = 24,
+	EVENT_READY = 32,
+	EVENT_POWER_OFF = 40,
+};
+
+static struct seedbox_page *page;
+static volatile u64 *event;
+static u64 early_last;
+static struct clock_event_device ce;
+
+static __always_inline void event_write(unsigned int offset, u64 value)
+{
+	/* Uncached fixmap: every store is a stopped worker rendezvous. */
+	WRITE_ONCE(event[offset / 8], value);
+}
+
+u64 noinstr seedbox_read(void)
+{
+	struct seedbox_page *p;
+	unsigned long flags;
+	u64 value, last;
+
+	/* Serialize reads against IRQ clock reads on the one guest CPU. */
+	flags = arch_local_irq_save();
+	p = READ_ONCE(page);
+	if (unlikely(!p)) {
+		value = ++early_last;
+		goto out;
+	}
+again:
+	value = READ_ONCE(p->now);
+	last = READ_ONCE(p->last);
+	if (value <= last)
+		value = last + 1;
+	if (unlikely(!value))
+		__builtin_trap();
+	if (value > READ_ONCE(p->bound) ||
+	    (!arch_irqs_disabled_flags(flags) &&
+	     READ_ONCE(p->deferred_irq_pending))) {
+		/*
+		 * Yield to the stopped worker at the published bound. A caller
+		 * that permits IRQs takes a due interrupt right at this
+		 * rendezvous; masked callers keep it pending until they unmask,
+		 * where the worker's interrupt-window exit delivers it exactly.
+		 */
+		if (!arch_irqs_disabled_flags(flags)) {
+			arch_local_irq_restore(flags);
+			event_write(EVENT_YIELD, 1);
+			arch_local_irq_disable();
+		} else {
+			event_write(EVENT_YIELD, 1);
+		}
+		goto again;
+	}
+	WRITE_ONCE(p->last, value);
+out:
+	arch_local_irq_restore(flags);
+	return value;
+}
+
+unsigned long long noinstr seedbox_rdtsc(void)
+{
+	return seedbox_read();
+}
+
+/*
+ * cpu_relax/rep_nop can run with locks held and interrupts disabled. Reuse the
+ * bounded clock read: no allocation, scheduling, locking or interrupt enabling.
+ * Before the page is mapped this is a no-op.
+ */
+void noinstr seedbox_cpu_relax(void)
+{
+	if (READ_ONCE(page))
+		(void)seedbox_read();
+}
+
+/* Charge syscall work through the bounded clock rendezvous. Load the charge
+ * once; a price change at a rendezvous affects the next syscall only. */
+void seedbox_syscall_progress(void)
+{
+	struct seedbox_page *p = READ_ONCE(page);
+	u64 remaining = p ? READ_ONCE(p->syscall_ns) : 1000;
+
+	while (remaining) {
+		(void)seedbox_read();
+		--remaining;
+	}
+}
+
+bool seedbox_emulate_user_tsc(struct pt_regs *regs)
+{
+	unsigned char buf[MAX_INSN_SIZE];
+	unsigned long long v;
+	int n, len;
+	bool tscp;
+
+	n = insn_fetch_from_user(regs, buf);
+	if (n >= 2 && buf[0] == 0x0f && buf[1] == 0x31) {
+		len = 2;
+		tscp = false;
+	} else if (n >= 3 && buf[0] == 0x0f && buf[1] == 0x01 && buf[2] == 0xf9) {
+		len = 3;
+		tscp = true;
+	} else {
+		return false;
+	}
+	v = seedbox_read();
+	regs->ax = (u32)v;
+	regs->dx = (u32)(v >> 32);
+	if (tscp)
+		regs->cx = 0;
+	regs->ip += len;
+	return true;
+}
+
+/* The virtual TSC runs at exactly 1 GHz: no calibration against hardware. */
+unsigned long seedbox_tsc_khz(void)
+{
+	setup_force_cpu_cap(X86_FEATURE_TSC_KNOWN_FREQ);
+	setup_force_cpu_cap(X86_FEATURE_TSC_RELIABLE);
+	return SEEDBOX_TSC_KHZ;
+}
+
+static void seedbox_power_off(void)
+{
+	event_write(EVENT_POWER_OFF, 1);
+	for (;;)
+		native_halt();
+}
+
+static void seedbox_get_wallclock(struct timespec64 *now)
+{
+	/* Like the arm64 PV machine: no RTC, so wall time starts at the epoch. */
+	now->tv_sec = 0;
+	now->tv_nsec = 0;
+}
+
+static int seedbox_set_wallclock(const struct timespec64 *now)
+{
+	return -ENODEV;
+}
+
+void __init seedbox_time_init(void)
+{
+	struct seedbox_page *p;
+
+	BUILD_BUG_ON(offsetof(struct seedbox_page, syscall_ns) != 6 * sizeof(u64));
+	/*
+	 * setup_arch calls us before tsc_early_init selects TSC delays. Permanent
+	 * fixmaps need no allocator and survive the boot page-table switch.
+	 */
+	set_fixmap(FIX_SEEDBOX_TIME, SEEDBOX_TIME_PHYS);
+	set_fixmap_nocache(FIX_SEEDBOX_EVENT, SEEDBOX_EVENT_PHYS);
+	p = (struct seedbox_page *)fix_to_virt(FIX_SEEDBOX_TIME);
+	event = (volatile u64 *)fix_to_virt(FIX_SEEDBOX_EVENT);
+	if (READ_ONCE(p->abi) != SEEDBOX_ABI)
+		panic("seedbox: PV ABI 3 page unavailable");
+	WRITE_ONCE(p->last, early_last);
+	WRITE_ONCE(page, p);
+	event_write(EVENT_READY, SEEDBOX_ABI);
+	x86_platform.get_wallclock = seedbox_get_wallclock;
+	x86_platform.set_wallclock = seedbox_set_wallclock;
+	pm_power_off = seedbox_power_off;
+	pr_info("seedbox: PV ABI 3 time page active\n");
+}
+
+static u64 cs_read(struct clocksource *cs)
+{
+	return seedbox_read();
+}
+
+static struct clocksource cs = {
+	.name = "seedbox-pv",
+	.rating = 500,
+	.read = cs_read,
+	.mask = CLOCKSOURCE_MASK(64),
+	.flags = CLOCK_SOURCE_IS_CONTINUOUS,
+	/* vdso_clock_mode stays NONE: vDSO clock calls use syscalls. */
+};
+
+static int next_event(unsigned long delta, struct clock_event_device *dev)
+{
+	u64 now = seedbox_read();
+
+	if (U64_MAX - now < delta)
+		panic("seedbox: deadline overflow");
+	event_write(EVENT_DEADLINE, now + delta);
+	return 0;
+}
+
+static int shutdown_event(struct clock_event_device *dev)
+{
+	event_write(EVENT_DEADLINE, 0);
+	event_write(EVENT_ACK, 1);
+	return 0;
+}
+
+static int oneshot_event(struct clock_event_device *dev)
+{
+	return 0;
+}
+
+static irqreturn_t timer_irq(int irq, void *dev)
+{
+	/* Deassert before invoking the clock core; it may arm another deadline. */
+	event_write(EVENT_ACK, 1);
+	ce.event_handler(&ce);
+	return IRQ_HANDLED;
+}
+
+/* Replaces hpet_time_init: PV clocksource and oneshot clockevent on IRQ 0. */
+void __init seedbox_timer_init(void)
+{
+	int err;
+
+	if (!READ_ONCE(page))
+		panic("seedbox: timer before PV initialization");
+	err = clocksource_register_hz(&cs, NSEC_PER_SEC);
+	if (err)
+		panic("seedbox: clocksource registration %d", err);
+	ce.name = "seedbox-pv";
+	ce.features = CLOCK_EVT_FEAT_ONESHOT;
+	ce.rating = 500;
+	ce.set_next_event = next_event;
+	ce.set_state_shutdown = shutdown_event;
+	ce.set_state_oneshot = oneshot_event;
+	ce.cpumask = cpumask_of(0);
+	ce.irq = 0;
+	err = request_irq(0, timer_irq, IRQF_TIMER | IRQF_NOBALANCING,
+			  "seedbox-pv", &ce);
+	if (err)
+		panic("seedbox: request_irq %d", err);
+	global_clock_event = &ce;
+	clockevents_config_and_register(&ce, NSEC_PER_SEC, 1, 0x7fffffff);
+	pr_info("seedbox: PV clock and IRQ 0 ready\n");
+}
+
+/* There is no device tree on x86: describe the fixed lifecycle port here. */
+static int __init seedbox_devices_init(void)
+{
+	struct resource resources[] = {
+		DEFINE_RES_MEM(SEEDBOX_LIFECYCLE_PHYS, SEEDBOX_LIFECYCLE_BYTES),
+		DEFINE_RES_IRQ(SEEDBOX_LIFECYCLE_IRQ),
+	};
+	struct platform_device *device;
+
+	device = platform_device_register_simple("virtio-mmio", 0, resources,
+						 ARRAY_SIZE(resources));
+	return PTR_ERR_OR_ZERO(device);
+}
+arch_initcall(seedbox_devices_init);
+
+static int __init seedbox_user_tsc_init(void)
+{
+	/* cpu_init clears TSD after setup_arch; enable user traps afterwards. */
+	cr4_set_bits(X86_CR4_TSD);
+	return 0;
+}
+early_initcall(seedbox_user_tsc_init);

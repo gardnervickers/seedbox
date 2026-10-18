@@ -1,3 +1,4 @@
+use seedbox_test::process::Guarded;
 use std::{collections::BTreeMap, path::Path, process::Command};
 
 #[test]
@@ -8,24 +9,24 @@ fn python_projects_share_client_and_use_a_dedicated_runtime_controller() {
     assert!(Command::new("python3")
         .arg(examples.join("generate.py"))
         .arg(&destination)
-        .status()
+        .guarded_status()
         .unwrap()
         .success());
     let fixed = seedbox_application::config::load(
-        &destination.join("fixed/compose.yaml"),
+        &destination.join("fixed/seedbox.yaml"),
         &BTreeMap::new(),
     )
     .unwrap();
     let broken = seedbox_application::config::load(
-        &destination.join("broken/compose.yaml"),
+        &destination.join("broken/seedbox.yaml"),
         &BTreeMap::new(),
     )
     .unwrap();
     assert_eq!(fixed.services.len(), 3);
-    assert_eq!(fixed.control.as_ref().unwrap().service, "scenario");
-    assert_eq!(fixed.check.service, "scenario");
+    assert_eq!(fixed.control.as_ref().unwrap().service, "oracle");
+    assert_eq!(fixed.check.service, "oracle");
     assert_eq!(fixed.seed, broken.seed);
-    for name in ["client", "scenario"] {
+    for name in ["client", "oracle"] {
         assert_eq!(fixed.services[name].command, broken.services[name].command);
     }
     assert!(!fixed.services["server"]
@@ -40,11 +41,11 @@ fn python_projects_share_client_and_use_a_dedicated_runtime_controller() {
         .contains(&"--broken".into()));
     assert_eq!(fixed.schedule.stop_tolerance_ns, 0);
     let no_faults = seedbox_application::config::load(
-        &destination.join("broken-no-faults/compose.yaml"),
+        &destination.join("broken-no-faults/seedbox.yaml"),
         &BTreeMap::new(),
     )
     .unwrap();
-    assert!(no_faults.services["scenario"]
+    assert!(no_faults.services["oracle"]
         .command
         .as_ref()
         .unwrap()
@@ -77,17 +78,12 @@ fn python_projects_share_client_and_use_a_dedicated_runtime_controller() {
     }
 }
 
+#[path = "fault_examples/portable.rs"]
+mod portable;
+
 #[test]
 fn actual_python_services_and_independent_client_verify_two_restarts() {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/faults/portable.py");
-    let result = Command::new("python3").arg(script).output().unwrap();
-    assert!(
-        result.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&result.stdout).contains("portable Python workload checks passed")
-    );
+    portable::retry_controls();
+    portable::scenarios();
+    println!("portable Python workload checks passed");
 }

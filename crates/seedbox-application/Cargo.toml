@@ -1,6 +1,5 @@
 [package]
 name = "seedbox-application"
-build = "build-runtime.rs"
 description = "Seedbox simulation configuration and orchestration"
 version.workspace = true
 edition.workspace = true
@@ -11,6 +10,7 @@ hex.workspace = true
 seedbox-artifacts.workspace = true
 seedbox-spec.workspace = true
 seedbox-engine-protocol.workspace = true
+seedbox-driver-execution.workspace = true
 serde.workspace = true
 seedbox-control.workspace = true
 seedbox-engine-core.workspace = true
@@ -21,7 +21,7 @@ shell-words = "1"
 tempfile.workspace = true
 tar.workspace = true
 walkdir = "2"
-flate2 = "1"
+flate2.workspace = true
 xattr = "1"
 bollard.workspace = true
 futures-util.workspace = true
@@ -31,12 +31,15 @@ tokio.workspace = true
 libc.workspace = true
 ocirender = "0.2.2"
 
-[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
-seedbox-vmm = { path = "../seedbox-vmm" }
 
-[target.'cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))'.dependencies]
-seedbox-arm64 = { path = "../seedbox-arm64" }
+[dev-dependencies]
+seedbox-test.workspace = true
+seedbox-test-time.workspace = true
+seedbox-machine = { workspace = true, features = ["test-support"] }
 
+# Suite membership is read from Cargo metadata by seedbox-check.
+[package.metadata.seedbox-check.suites]
+linux-oci = ["oci-tests"]
 
 [features]
 oci-tests = []

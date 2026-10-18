@@ -4,10 +4,9 @@ fn fixture() -> sb::record::RunRecord {
     use std::collections::BTreeMap;
     let digest = ContentDigest::of(b"fixture");
     let configuration = config::Simulation {
-        name: "diff".into(), source: "/fixture/compose.yaml".into(),
+        name: "diff".into(), source: "/fixture/seedbox.yaml".into(),
         services: BTreeMap::from([("workload".into(), config::Service {
             memory_mb: None,
-            cpu: Default::default(),
             source: config::ImageSource::Registry { reference: "fixture:v1".into() },
             platform: "linux/amd64".into(), entrypoint: None, command: None,
             environment: BTreeMap::new(), working_dir: None, user: None,
@@ -15,6 +14,7 @@ fn fixture() -> sb::record::RunRecord {
         })]), configs: BTreeMap::new(),
         network: config::Network { name: "default".into(), latency_ns: 1_000_000,
             jitter_ns: 0, bandwidth_bps: None, queue_bound_ns: None, links: vec![] },
+        simulator: Default::default(),
         schedule: config::Schedule::default(), control: None,
         limits: config::Limits { simulated_time_ns: 1_000_000_000, wall_time_ns: 60_000_000_000 },
         check: config::Check { service: "workload".into(), exit_code: 0 },
@@ -28,16 +28,15 @@ fn fixture() -> sb::record::RunRecord {
         seed: 0,
         configuration,
         inputs: PreparedInputs {
-            machine_memory_mb: Default::default(),
+            machine_memory_mb: BTreeMap::from([("workload".into(),512)]),
             wall_clock_epoch: None,
-            kernel: digest.clone(),
             images: BTreeMap::new(),
             placement: BTreeMap::from([("workload".into(), "workload".into())]),
             guests: BTreeMap::from([("workload".into(), digest.clone())]),
             profile: ExecutionProfile {
-                backend: Backend::Kvm,
+                backend: "fixture".into(),
                 witness_mode: WitnessMode::Exits,
-                semantic_parameters: SemanticParameters::new(512),
+                semantic_parameters: SemanticParameters::new(),
             },
             auxiliary: BTreeMap::new(),
             provenance: BTreeMap::new(),
@@ -48,7 +47,7 @@ fn fixture() -> sb::record::RunRecord {
         identity,
         attempt: "fixture".into(),
         performance_parameters: BTreeMap::new(),
-        engine: None,
+        allow_engine_change: false,
         log_policy: LogPolicy::default(),
         omitted_logs: BTreeMap::new(),
         outcome: Outcome::Pass,
@@ -134,8 +133,36 @@ fn write_fixture_logs(
 ) {
     use sb::store::ContentDigest;
     std::fs::create_dir_all(path.join("output/machines")).unwrap();
-    let raw = raw.map(|v| serde_json::to_vec(v).unwrap());
-    let logs = std::iter::once(("vmm.json", raw.as_deref())).chain(logs.iter().copied());
+    // Synthetic fixture descriptions are encoded into the CURRENT retained
+    // formats here. No production legacy world-report decoder participates.
+    let state = raw.and_then(|raw| {
+        use std::collections::BTreeMap;
+        if let Some(report) = record.report.as_mut() {
+            report.witness = raw.get("world_witness").map(|value| serde_json::from_value(value.clone()).unwrap());
+        }
+        let machines = raw["machines"].as_array().unwrap().iter().filter_map(|machine| {
+            let digest = machine.get("state_digest").filter(|value| !value.is_null())?;
+            let name = machine["name"].as_str().unwrap();
+            let regions = vec![sb::evidence::RamRegion { base: 0, length: 512 * 1024 * 1024 }];
+            let mut encoded = Vec::new();encoded.extend(0_u64.to_le_bytes());encoded.extend((512_u64*1024*1024).to_le_bytes());
+            let mut parts: BTreeMap<String, sb::store::ContentDigest> = machine.get("state_digest_parts").and_then(|value| value.as_object()).into_iter().flatten().map(|(name,value)| {
+                let value = value.as_str().unwrap();
+                (name.clone(), sb::store::ContentDigest::try_from(value.to_owned()).unwrap_or_else(|_| sb::store::ContentDigest::of(value.as_bytes())))
+            }).collect();
+            parts.entry("ram".into()).or_insert_with(|| sb::store::ContentDigest::of(b"fixture RAM"));
+            parts.insert("ram_regions".into(), sb::store::ContentDigest::of(&encoded));
+            let disposition = if let Some(code) = machine["guest_exit_code"].as_i64() { sb::evidence::StateDisposition::Exited { code: code as i32 } } else { sb::evidence::StateDisposition::Shutdown };
+            Some((name.to_owned(), sb::evidence::StateCapture {
+                boot: 0, disposition, digest: serde_json::from_value(digest.clone()).unwrap(), parts, regions,
+                page_log: format!("machines/{name}.pages"),
+            }))
+        }).collect::<BTreeMap<_,_>>();
+        if let Some(report) = record.report.as_mut() {
+            report.full_state = (!machines.is_empty()).then(|| machines.iter().map(|(name,state)| (name.clone(),state.digest.clone())).collect());
+        }
+        (!machines.is_empty()).then(|| serde_json::to_vec(&sb::evidence::StateReport { version: 1, machines }).unwrap())
+    });
+    let logs = std::iter::once((sb::evidence::STATE_REPORT, state.as_deref())).chain(logs.iter().copied());
     for (name, bytes) in logs {
         if let Some(bytes) = bytes {
             std::fs::write(path.join("output").join(name), bytes).unwrap();

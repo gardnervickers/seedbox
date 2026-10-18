@@ -80,9 +80,7 @@ pub struct RunRecord {
     pub attempt: String,
     pub identity: RunIdentity,
     pub performance_parameters: BTreeMap<String, String>,
-    /// The engine build that executed this attempt. Provenance only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine: Option<crate::execution::EngineDescriptor>,
+    pub allow_engine_change: bool,
     pub log_policy: LogPolicy,
     pub omitted_logs: BTreeMap<String, String>,
     pub outcome: Outcome,

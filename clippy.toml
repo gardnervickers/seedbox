@@ -1,0 +1,15 @@
+# A fork copies every open descriptor until the child execs, so a fork while
+# another thread writes an executable makes that file's first exec fail with
+# ETXTBSY. Processes that write executables spawn only through
+# seedbox_exec::spawn (see crates/seedbox-exec/src/lib.rs).
+# Worker-only and test/tool code opts out with a scoped allow and a reason.
+disallowed-methods = [
+    { path = "std::process::Command::spawn", reason = "use seedbox_exec::spawn: forks must not copy a descriptor to an executable being written" },
+    { path = "std::process::Command::output", reason = "use seedbox_exec::spawn and wait: forks must not copy a descriptor to an executable being written" },
+    { path = "std::process::Command::status", reason = "use seedbox_exec::spawn and wait: forks must not copy a descriptor to an executable being written" },
+    { path = "libc::fork", reason = "fork only through seedbox_exec::spawn" },
+    # The macOS libc crate has no vfork; allow-invalid keeps that target quiet.
+    { path = "libc::vfork", reason = "fork only through seedbox_exec::spawn", allow-invalid = true },
+    { path = "libc::posix_spawn", reason = "fork only through seedbox_exec::spawn" },
+    { path = "libc::posix_spawnp", reason = "fork only through seedbox_exec::spawn" },
+]

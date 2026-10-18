@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 hex.workspace = true
 seedbox-spec.workspace = true
+seedbox-exec.workspace = true
 seedbox-api.workspace = true
 seedbox-engine-protocol.workspace = true
 serde.workspace = true
@@ -17,7 +18,3 @@ serde_yaml_ng.workspace = true
 tempfile.workspace = true
 libc.workspace = true
 tar.workspace = true
-
-[dev-dependencies]
-seedbox-control.workspace = true
-seedbox-engine-core.workspace = true

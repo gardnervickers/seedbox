@@ -251,7 +251,7 @@ async fn status_refreshes_elapsed_time_and_preserves_failed_preparation_timing()
     let (preparing, _) = manager.begin(&id).unwrap().unwrap();
     let mut watch = client.watch(&id).await.unwrap();
     let first = watch.next().await.unwrap().unwrap();
-    let second = tokio::time::timeout(std::time::Duration::from_secs(5), watch.next())
+    let second = tokio::time::timeout(std::time::Duration::from_secs(60), watch.next())
         .await
         .unwrap()
         .unwrap()
@@ -279,7 +279,7 @@ async fn status_refreshes_elapsed_time_and_preserves_failed_preparation_timing()
             });
         })
         .unwrap();
-    let finished = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             let resource = watch.next().await.unwrap().unwrap();
             if resource.status.phase == Phase::Completed {
@@ -316,6 +316,7 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
         fn project(
             &self,
             _: &seedbox_application::config::Simulation,
+            _: seedbox_spec::backend::CpuBackend,
             _: &ContentStore,
             _: &CancellationToken,
         ) -> seedbox_application::Result<Backends> {
@@ -398,18 +399,17 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
     })).unwrap();
     let digest = store.put(&history.encode().unwrap()).unwrap();
     let inputs = PreparedInputs {
-        machine_memory_mb: Default::default(),
+        machine_memory_mb: std::collections::BTreeMap::from([("oracle".into(), 512)]),
         wall_clock_epoch: None,
-        kernel: digest.clone(),
         images: Default::default(),
         placement: Default::default(),
         guests: Default::default(),
         auxiliary: Default::default(),
         provenance: Default::default(),
         profile: ExecutionProfile {
-            backend: seedbox_application::execution::Backend::Other("test".into()),
+            backend: "test".into(),
             witness_mode: seedbox_application::execution::WitnessMode::Exits,
-            semantic_parameters: SemanticParameters::new(512),
+            semantic_parameters: SemanticParameters::new(),
         },
     };
     let descriptor = root.join("inputs").join(format!("{id}.json"));

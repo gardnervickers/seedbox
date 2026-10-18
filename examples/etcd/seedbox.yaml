@@ -57,6 +57,8 @@ machines:
 oracle:
   build:
     context: ./workload
-  command: [--endpoints, "n1:2379,n2:2379,n3:2379", --duration, 100000s, --concurrency, "8", --writes, "20000"]
+  command: [--endpoints, "n1:2379,n2:2379,n3:2379", --duration, 10s, --concurrency, "8", --writes, "20"]
 network:
   latency: 1ms
+simulator:
+  blocksPerProgressCall: 10000

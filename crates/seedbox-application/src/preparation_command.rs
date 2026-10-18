@@ -61,12 +61,13 @@ impl PreparationContext {
     pub(crate) fn setup_inputs(
         &self,
         auxiliary: &BTreeMap<String, ContentDigest>,
+        engine: &ContentDigest,
         kernel: &ContentDigest,
     ) -> Result<()> {
         self.check()?;
         let mut file = tempfile::NamedTempFile::new_in(&self.directory)?;
         file.write_all(&serde_json::to_vec_pretty(
-            &serde_json::json!({"auxiliary": auxiliary, "kernel": kernel}),
+            &serde_json::json!({"auxiliary": auxiliary, "engine": engine, "kernel": kernel}),
         )?)?;
         file.persist(self.directory.join("setup.json"))
             .map_err(|e| e.error)?;

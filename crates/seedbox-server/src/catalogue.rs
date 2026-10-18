@@ -465,9 +465,18 @@ impl Catalogue {
             | InputSource::Prepared { simulation }
             | InputSource::Checkpoint { simulation, .. } => Some(simulation),
         };
-        if reference.is_some_and(|id| self.entries.get(id).is_some_and(|entry| entry.deleting)) {
-            return Err(Error::Invalid("source simulation is being deleted".into()));
-        }
+        let referenced_backend = if let Some(source) = reference {
+            let entry = self
+                .entries
+                .get(source)
+                .ok_or_else(|| Error::NotFound(source.clone()))?;
+            if entry.deleting {
+                return Err(Error::Invalid("source simulation is being deleted".into()));
+            }
+            entry.resource.options.backend
+        } else {
+            None
+        };
         let parent = match &spec.inputs {
             InputSource::Resolved { definition } => {
                 definition
@@ -489,11 +498,10 @@ impl Catalogue {
                     ));
                 }
 
-                if config.machine.page_timer
-                    || config.machine.deferred_tx
-                    || config.schedule.stop_tolerance_ns != 0
-                {
-                    return Err(Error::Invalid("new simulations use default page timer, deferred TX and stop tolerance settings".into()));
+                if config.schedule.stop_tolerance_ns != 0 {
+                    return Err(Error::Invalid(
+                        "new simulations use default stop tolerance settings".into(),
+                    ));
                 }
                 None
             }
@@ -572,9 +580,27 @@ impl Catalogue {
                     .start
                     .validate_overrides(&definition.overrides)
                     .map_err(Error::Invalid)?;
-                spec = seedbox_api::SimulationSpec::resolved(definition);
+                spec = seedbox_api::SimulationSpec::resolved(definition).map_err(Error::Invalid)?;
             }
         }
+        let recorded_backend = match &spec.inputs {
+            InputSource::Resolved { definition } => definition
+                .runtime
+                .driver_backend()
+                .map_err(Error::Invalid)?,
+            _ => referenced_backend,
+        };
+        if recorded_backend
+            .zip(request.options.backend)
+            .is_some_and(|(recorded, requested)| recorded != requested)
+        {
+            return Err(Error::Invalid(
+                "requested backend differs from retained backend".into(),
+            ));
+        }
+        let backend = recorded_backend
+            .or(request.options.backend)
+            .unwrap_or_default();
         let created_at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
@@ -602,6 +628,7 @@ impl Catalogue {
             spec,
         );
         resource.options = request.options.clone();
+        resource.options.backend = Some(backend);
         let entry = Entry {
             request,
             imported_checkpoints: None,
@@ -1020,7 +1047,7 @@ pub(crate) fn resolve_program(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    seedbox_application::engine_adapter::validate_input_program(&spec.configuration, &program)
+    seedbox_application::fault_inputs::validate_input_program(&spec.configuration, &program)
         .map_err(|error| Error::Invalid(error.to_string()))?;
     Ok(program)
 }

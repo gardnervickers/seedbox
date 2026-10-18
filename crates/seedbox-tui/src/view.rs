@@ -267,7 +267,10 @@ fn pad_left(text: &str, width: usize) -> String {
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    let now = Instant::now();
+    draw_at(frame, app, Instant::now());
+}
+
+fn draw_at(frame: &mut Frame, app: &App, now: Instant) {
     app.hitboxes.borrow_mut().clear();
     app.map_bottom.set(None);
     let area = frame.area();
@@ -1876,27 +1879,11 @@ fn condition(focus: &Focus, m: &MachineState) -> (String, Color) {
             if m.exit_code == Some(0) { DIM } else { RED },
         ),
     };
-    if let Some(hz) = m.throttle_speed_hz.or(m.cpu_speed_hz) {
-        text.0.push_str(&format!(" {}", frequency(hz)));
+    if let Some(permille) = m.throttle_permille {
+        text.0
+            .push_str(&format!(" ×{:.1}", permille as f64 / 1000.0));
     }
     text
-}
-
-/// A CPU speed in its largest unit, with up to two decimals: `2GHz`,
-/// `1.5GHz`, `333.33MHz`, `800kHz`.
-pub fn frequency(hz: u64) -> String {
-    for (unit, scale) in [
-        ("GHz", 1_000_000_000u64),
-        ("MHz", 1_000_000),
-        ("kHz", 1_000),
-    ] {
-        if hz >= scale {
-            let hundredths = (hz * 100).div_ceil(scale);
-            let text = format!("{}.{:02}", hundredths / 100, hundredths % 100);
-            return format!("{}{unit}", text.trim_end_matches('0').trim_end_matches('.'));
-        }
-    }
-    format!("{hz}Hz")
 }
 
 fn tabbed_title(active: Panel) -> Line<'static> {
@@ -1953,23 +1940,14 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
         .unwrap_or(4)
         .clamp(4, 14)
         + 1;
-    // Every state carries the machine's CPU speed, so size the column to the
-    // longest one rather than cutting a speed short.
-    let states: Vec<(String, Color)> = world.machines.iter().map(|m| condition(focus, m)).collect();
-    let state_width = states
-        .iter()
-        .map(|(state, _)| state.chars().count() + 1)
-        .max()
-        .unwrap_or(14)
-        .clamp(14, 24);
-    let base = name_width + 2 + state_width + 7 + 7;
+    let base = name_width + 2 + 14 + 7 + 7;
     let show_drop = width >= base + 13;
     let show_spark = width >= base + 13 + 10;
     let mut header = vec![Span::styled(
         format!(
             "  {}{}{}{}",
             pad("NAME", name_width),
-            pad("STATE", state_width),
+            pad("STATE", 14),
             pad_left("TX/S", 7),
             pad_left("RX/S", 7)
         ),
@@ -1986,8 +1964,9 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
     }
     let mut lines = vec![Line::from(header)];
     let spark_width = width.saturating_sub(base + 13 + 2);
-    for (index, (m, (state, color))) in world.machines.iter().zip(states).enumerate() {
+    for (index, m) in world.machines.iter().enumerate() {
         let selected = focus.selected.as_deref() == Some(m.name.as_str());
+        let (state, color) = condition(focus, m);
         let dropped = focus.traffic.dropped_rate(&m.name);
         let mut spans = vec![
             Span::styled(if selected { "▸ " } else { "  " }, Style::new().fg(ICE)),
@@ -2005,7 +1984,7 @@ fn machines(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, tabbed: Opt
                         Modifier::empty()
                     }),
             ),
-            Span::styled(pad(&state, state_width), Style::new().fg(color)),
+            Span::styled(pad(&state, 14), Style::new().fg(color)),
             Span::styled(
                 pad_left(&rate(focus.traffic.sent_rate(&m.name)), 7),
                 Style::new().fg(TEXT),
@@ -3540,8 +3519,17 @@ mod tests {
     };
 
     fn render(app: &App) -> String {
+        render_with_time(app, None)
+    }
+
+    fn render_with_time(app: &App, now: Option<Instant>) -> String {
         let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();
-        terminal.draw(|frame| draw(frame, app)).unwrap();
+        terminal
+            .draw(|frame| match now {
+                Some(now) => draw_at(frame, app, now),
+                None => draw(frame, app),
+            })
+            .unwrap();
         let buffer = terminal.backend().buffer().clone();
         let mut text = String::new();
         for y in 0..buffer.area.height {
@@ -3617,52 +3605,6 @@ mod tests {
         }));
         assert_eq!(app.screen, Screen::Timeline);
         assert_eq!(app.fault_menu, None);
-    }
-
-    #[test]
-    fn every_machine_shows_its_configured_or_throttled_speed() {
-        assert_eq!(frequency(2_000_000_000), "2GHz");
-        assert_eq!(frequency(1_500_000_000), "1.5GHz");
-        assert_eq!(frequency(333_000_000), "333MHz");
-        assert_eq!(frequency(333_333_333), "333.34MHz");
-        assert_eq!(frequency(800_000), "800kHz");
-        assert_eq!(frequency(999), "999Hz");
-        let mut app = app(&["app", "oracle"]);
-        let text = render(&app);
-        assert!(text.matches("● ready 1GHz").count() >= 2, "{text}");
-        let mut baseline = world(&["app", "oracle"]);
-        baseline.machines[0].cpu_speed_hz = Some(2_000_000_000);
-        app.apply(Update::World(baseline.clone()));
-        let text = render(&app);
-        assert!(text.contains("● ready 2GHz"), "{text}");
-        assert!(text.contains("● ready 1GHz"), "{text}");
-        // Observations carry the effective speed, including a saturated
-        // throttle: a 2 GHz CPU requested at 1 kHz actually runs at 2 MHz.
-        for (effective, label) in [(500_000_000, "500MHz"), (2_000_000, "2MHz")] {
-            let mut w = baseline.clone();
-            w.machines[0].throttle_speed_hz = Some(effective);
-            app.apply(Update::World(w));
-            let text = render(&app);
-            assert!(text.contains(&format!("● ready {label}")), "{text}");
-            assert!(text.contains("● ready 1GHz"), "{text}");
-        }
-        app.apply(Update::World(baseline.clone()));
-        let text = render(&app);
-        assert!(text.contains("● ready 2GHz"), "{text}");
-        assert!(text.contains("● ready 1GHz"), "{text}");
-        assert!(!text.contains("2MHz"), "{text}");
-        // The machines table widens its state column instead of cutting a
-        // longer state's speed short.
-        let mut exited = baseline.clone();
-        exited.machines[1].condition = MachineCondition::Exited;
-        exited.machines[1].exit_code = Some(0);
-        app.apply(Update::World(exited));
-        let text = render(&app);
-        let row = text
-            .lines()
-            .find(|line| line.contains("oracle") && line.contains("exited"))
-            .unwrap_or_else(|| panic!("{text}"));
-        assert!(row.contains("exited 0 1GHz "), "{row}");
     }
 
     #[test]
@@ -3947,7 +3889,7 @@ mod tests {
             at: Instant::now(),
         });
         app.details = false;
-        let failed = render(&app);
+        let failed = render_with_time(&app, Some(app.inspector.as_ref().unwrap().at));
         assert!(failed.contains("connection lost"));
         assert!(!failed.contains("raw-payload-secret-to-operator-view"));
     }
@@ -3968,6 +3910,106 @@ mod tests {
         assert_eq!(control_summary(&receipt).1, RED);
         receipt["state"]["type"] = "interrupted".into();
         assert!(control_summary(&receipt).0.contains("outcome unknown"));
+    }
+
+    // FIXTURE: TestBackend rendering of the public events a successful Driver
+    // run publishes. This is not the separate LIVE PTY acceptance capture.
+    fn completed_normal_exits_fixture() -> App {
+        let mut app = app(&["app", "oracle"]);
+        let mut resource = crate::model::tests::timeline_resource(10);
+        resource.metadata.name = "fixture-normal-exits".into();
+        resource.status.phase = Phase::Completed;
+        resource.status.stage = None;
+        resource.status.oracle_exit_code = Some(0);
+        resource.status.termination = Some(seedbox_api::ExecutionTermination::OracleExited);
+        resource.status.simulated_time_ns = 100_000_000_000;
+        app.apply(Update::Resource(resource));
+        let mut w = world(&["app", "oracle"]);
+        w.simulated_time_ns = 100_000_000_000;
+        for machine in &mut w.machines {
+            machine.condition = MachineCondition::Exited;
+            machine.exit_code = Some(0);
+        }
+        app.apply(Update::World(w));
+        for (index, machine) in ["app", "oracle"].into_iter().enumerate() {
+            app.apply(Update::Event(EventDelivery::Event {
+                sequence: index as u64 + 1,
+                observation: SimulationEvent {
+                    simulation: "k7m2p9qx".parse().unwrap(),
+                    revision: 1,
+                    simulated_time_ns: Some(100_000_000_000),
+                    position: None,
+                    event: EventKind::MachineExited {
+                        machine: machine.into(),
+                        incarnation: 0,
+                        code: 0,
+                    },
+                },
+            }));
+        }
+        app.apply(Update::Playback(seedbox_api::PlaybackObservation {
+            state: seedbox_api::PlaybackStatus {
+                position: seedbox_api::BoundaryPosition {
+                    boundary_index: 10,
+                    completed_rounds: 10,
+                    simulated_time_ns: 100_000_000_000,
+                },
+                rate: PlaybackRate::Unlimited,
+                achieved_rate: None,
+                stepping: false,
+                terminal: true,
+                application_ready: true,
+            },
+            age_ns: 0,
+        }));
+        app
+    }
+
+    #[test]
+    fn fixture_completed_normal_exits_are_not_active_faults() {
+        let app = completed_normal_exits_fixture();
+        assert_eq!(
+            app.focus.as_ref().unwrap().activity(),
+            crate::activity::Activity::default()
+        );
+        let text = render(&app);
+        assert!(text.contains("0 active"), "{text}");
+        assert!(text.contains("nothing active"), "{text}");
+        assert!(!text.contains("2 active"), "{text}");
+        assert!(
+            text.contains("exited 0"),
+            "lifecycle inspection remains: {text}"
+        );
+        assert!(text.contains("passed"), "{text}");
+        println!("BEGIN FIXTURE completed-normal-exits (TestBackend, NOT LIVE)\n{text}END FIXTURE completed-normal-exits");
+    }
+
+    #[test]
+    fn fixture_injected_stop_and_crash_remain_in_fault_history() {
+        let mut app = completed_normal_exits_fixture();
+        let w = app.focus.as_mut().unwrap().world.as_mut().unwrap();
+        for (index, action) in ["stop", "crash"].into_iter().enumerate() {
+            w.faults.push(FaultState {
+                id: index as u32 + 1,
+                input_key: None,
+                action: action.into(),
+                machine: Some("app".into()),
+                status: FaultStatus::Applied,
+                applied_time_ns: Some(1_000_000),
+                plan: Some(serde_json::json!({"action":action,"machine":"app"})),
+                active: false,
+            });
+        }
+        let activity = app.focus.as_ref().unwrap().activity();
+        assert!(activity.active.is_empty());
+        assert_eq!(activity.history.len(), 2);
+        for action in ["stop", "crash"] {
+            assert!(activity.history.iter().any(|item| item.action == action));
+        }
+        let text = render(&app);
+        assert!(text.contains("HISTORY"), "{text}");
+        assert!(text.contains("stop app"), "{text}");
+        assert!(text.contains("crash app"), "{text}");
     }
 
     #[test]

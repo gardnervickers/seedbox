@@ -21,14 +21,11 @@ pub struct ContainerTransport {
     pub docker: Docker,
     pub cancellation: CancellationToken,
     pub progress: fn(&str),
-    /// Reuse an image's exported filesystem. An image ID names fixed content,
-    /// so the same export format yields the same bytes. `false` exports every time.
-    pub export_cache: bool,
+    /// Engine digest that keys reuse of an image's exported filesystem. An
+    /// image ID names fixed content, so the same engine merging the same
+    /// image yields the same bytes. `None` exports every time.
+    pub export_cache: Option<ContentDigest>,
 }
-
-/// Keys cached image exports. Change it whenever export or layer merging
-/// changes the bytes produced for the same image.
-const EXPORT_FORMAT: &str = "image-export-v2";
 fn setup(error: impl std::fmt::Display) -> Error {
     Error::Setup(format!("container image preparation: {error}"))
 }
@@ -282,9 +279,9 @@ impl ImageTransport for ContainerTransport {
             .build()
             .map_err(setup)?;
         let (docker, image) = runtime.block_on(self.resolve(service, directory, architecture))?;
-        let record = self.export_cache.then(|| {
+        let record = self.export_cache.as_ref().map(|engine| {
             ContentDigest::of(
-                serde_json::json!([EXPORT_FORMAT, architecture.platform(), image])
+                serde_json::json!(["image-export", engine, architecture.platform(), image])
                     .to_string()
                     .as_bytes(),
             )
@@ -523,8 +520,12 @@ mod tests {
                 let mut requests = Vec::new();
                 loop {
                     let (mut connection, _) = listener.accept().unwrap();
+                    let guard = seedbox_test_time::HangGuard::new(
+                        "image-export fixture receives an actual HTTP request",
+                        Duration::from_secs(30),
+                    );
                     connection
-                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .set_read_timeout(Some(guard.remaining().unwrap()))
                         .unwrap();
                     let mut reader = std::io::BufReader::new(connection.try_clone().unwrap());
                     let mut line = String::new();
@@ -573,7 +574,12 @@ mod tests {
                 }
             });
             let directory = tempfile::tempdir().unwrap();
-            let simulation = crate::config::parse("name: fixture\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n", &directory.path().join("compose.yaml"), &BTreeMap::new()).unwrap();
+            let simulation = crate::config::parse(
+                "name: fixture\nmachines: {}\noracle: {image: example/app}\n",
+                &directory.path().join("seedbox.yaml"),
+                &BTreeMap::new(),
+            )
+            .unwrap();
             let transport = ContainerTransport {
                 docker: Docker::connect_with_http(
                     &format!("http://{address}"),
@@ -583,11 +589,11 @@ mod tests {
                 .unwrap(),
                 cancellation: token,
                 progress: |_| {},
-                export_cache: false,
+                export_cache: None,
             };
             let store = ContentStore::new(directory.path().join("store"));
             let result = transport.import(
-                &simulation.services["app"],
+                &simulation.services["oracle"],
                 &directory.path().join("image"),
                 &store,
                 None,
@@ -668,9 +674,14 @@ mod tests {
             }
         });
         let directory = tempfile::tempdir().unwrap();
-        let simulation = crate::config::parse("name: fixture\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n", &directory.path().join("compose.yaml"), &BTreeMap::new()).unwrap();
+        let simulation = crate::config::parse(
+            "name: fixture\nmachines: {}\noracle: {image: example/app}\n",
+            &directory.path().join("seedbox.yaml"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let store = ContentStore::new(directory.path().join("store"));
-        let import = |cache: bool, name: &str| {
+        let import = |engine: &[u8], name: &str| {
             let transport = ContainerTransport {
                 docker: Docker::connect_with_http(
                     &format!("http://{address}"),
@@ -680,11 +691,11 @@ mod tests {
                 .unwrap(),
                 cancellation: CancellationToken::default(),
                 progress: |_| {},
-                export_cache: cache,
+                export_cache: Some(ContentDigest::of(engine)),
             };
             let imported = transport
                 .import(
-                    &simulation.services["app"],
+                    &simulation.services["oracle"],
                     &directory.path().join(name),
                     &store,
                     None,
@@ -696,17 +707,17 @@ mod tests {
             };
             (imported.image, fs::read(path).unwrap())
         };
-        let exported = import(true, "first");
+        let exported = import(b"engine", "first");
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 1);
-        let reused = import(true, "second");
+        let reused = import(b"engine", "second");
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(reused, exported);
-        // Without the cache every import exports again.
-        assert_eq!(import(false, "third"), exported);
+        // Another engine exports again rather than trusting this one's merge.
+        assert_eq!(import(b"other engine", "third"), exported);
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 2);
         // A record whose objects are gone is a miss, not an error.
         fs::remove_dir_all(directory.path().join("store/sha256")).unwrap();
-        assert_eq!(import(true, "fourth"), exported);
+        assert_eq!(import(b"engine", "fourth"), exported);
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 }

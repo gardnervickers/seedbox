@@ -17,3 +17,6 @@ tempfile.workspace = true
 sha2.workspace = true
 hex.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+
+[dev-dependencies]
+seedbox-test-time.workspace = true

@@ -1,0 +1,365 @@
+diff --git a/include/exec/icount.h b/include/exec/icount.h
+index 588761e2..1630d169 100644
+--- a/include/exec/icount.h
++++ b/include/exec/icount.h
+@@ -89,5 +89,12 @@ void seedbox_icount_device_error(void);
+ /* Actual guest native interactions only; the x86 witness installs this sink.
+  * Not a QMP/window event stream. Callers retain existing completion semantics. */
+ void seedbox_native_record(uint8_t kind, uint8_t size, uint64_t a, uint64_t b);
+-void seedbox_native_set_sink(void (*sink)(uint8_t, uint8_t, uint64_t, uint64_t));
++void seedbox_native_set_sink(void (*sink)(uint8_t, uint8_t, uint64_t,
++                                          uint64_t, uint64_t));
++/* INIT clears CPU icount bookkeeping: stamp before, append after effect. */
++uint64_t seedbox_native_time(void);
++void seedbox_native_record_at(uint8_t kind, uint8_t size, uint64_t time,
++                              uint64_t a, uint64_t b);
++void seedbox_native_set_reset_sink(void (*sink)(uint8_t));
++void seedbox_native_guest_reset(uint8_t cause);
+ #endif /* EXEC_ICOUNT_H */
+diff --git a/accel/tcg/icount-common.c b/accel/tcg/icount-common.c
+index 7019f4e1..8afb946f 100644
+--- a/accel/tcg/icount-common.c
++++ b/accel/tcg/icount-common.c
+@@ -55,15 +55,38 @@ bool icount_align_option;
+ ICountMode use_icount = ICOUNT_DISABLED;
+ 
+ /* Seedbox owns idle-time advancement once it starts bounded execution. */
+-static void (*native_sink)(uint8_t, uint8_t, uint64_t, uint64_t);
+-void seedbox_native_set_sink(void (*sink)(uint8_t, uint8_t, uint64_t, uint64_t))
++static void (*native_sink)(uint8_t, uint8_t, uint64_t, uint64_t, uint64_t);
++static void (*native_reset_sink)(uint8_t);
++void seedbox_native_set_sink(void (*sink)(uint8_t, uint8_t, uint64_t,
++                                          uint64_t, uint64_t))
+ {
+     native_sink = sink;
+ }
++uint64_t seedbox_native_time(void)
++{
++    return native_sink ? qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) : 0;
++}
++void seedbox_native_record_at(uint8_t kind, uint8_t size, uint64_t time,
++                              uint64_t a, uint64_t b)
++{
++    if (native_sink) {
++        native_sink(kind, size, time, a, b);
++    }
++}
+ void seedbox_native_record(uint8_t kind, uint8_t size, uint64_t a, uint64_t b)
+ {
+     if (native_sink) {
+-        native_sink(kind, size, a, b);
++        seedbox_native_record_at(kind, size, seedbox_native_time(), a, b);
++    }
++}
++void seedbox_native_set_reset_sink(void (*sink)(uint8_t))
++{
++    native_reset_sink = sink;
++}
++void seedbox_native_guest_reset(uint8_t cause)
++{
++    if (native_reset_sink) {
++        native_reset_sink(cause);
+     }
+ }
+ static bool seedbox_controlled;
+diff --git a/target/i386/seedbox-witness.c b/target/i386/seedbox-witness.c
+index e95e2489..e6724139 100644
+--- a/target/i386/seedbox-witness.c
++++ b/target/i386/seedbox-witness.c
+@@ -11,15 +11,18 @@
+ #include "system/runstate.h"
+ #include "exec/icount.h"
+ #include "seedbox-witness-chain.h"
++#include "seedbox-witness-delivery.h"
+ 
+ typedef struct SeedboxWitness {
+     bool configured;
+     bool failed;
++    bool reset_seen;
+     uint8_t chain[32];
+ } SeedboxWitness;
+ static SeedboxWitness witness;
+ 
+-static void native_record(uint8_t kind, uint8_t size, uint64_t a, uint64_t b)
++static void native_record(uint8_t kind, uint8_t size, uint64_t time,
++                          uint64_t a, uint64_t b)
+ {
+     uint8_t next[32];
+     Error *error = NULL;
+@@ -27,7 +30,7 @@ static void native_record(uint8_t kind, uint8_t size, uint64_t a, uint64_t b)
+         return;
+     }
+     if (!seedbox_witness_record_hash(witness.chain, kind, size,
+-                                     qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
++                                     time,
+                                      a, b, next, &error)) {
+         witness.failed = true;
+         error_report_err(error);
+@@ -37,6 +40,20 @@ static void native_record(uint8_t kind, uint8_t size, uint64_t a, uint64_t b)
+     memcpy(witness.chain, next, sizeof(next));
+ }
+ 
++static void native_guest_reset(uint8_t cause)
++{
++    /* Production reboot=shutdown: a physical boot accepts at most one reset.
++     * Persist the latch so a restored pending terminal request is not repeated. */
++    if (seedbox_witness_accept_reset(&witness.reset_seen, cause)) {
++        seedbox_native_record('G', 0, cause, 0);
++    }
++}
++static int witness_loaded(void *opaque, int version)
++{
++    seedbox_native_set_sink(witness.configured && !witness.failed ? native_record : NULL);
++    seedbox_native_set_reset_sink(witness.configured && !witness.failed ? native_guest_reset : NULL);
++    return 0;
++}
+ static char *hex32(const uint8_t bytes[32])
+ {
+     char *s = g_malloc(65);
+@@ -71,10 +88,11 @@ void qmp_seedbox_witness_start(const char *chain, uint64_t boot, bool forced,
+     }
+     memcpy(witness.chain, initial, sizeof(initial));
+     witness.configured = true;
++    witness_loaded(NULL, 2);
+     if (forced) {
+-        native_record('C', 0, 0, 0);
++        seedbox_native_record('C', 0, 0, 0);
+     }
+-    native_record('N', 0, boot, 0);
++    seedbox_native_record('N', 0, boot, 0);
+     if (witness.failed) {
+         error_setg(errp, "seedbox witness initialization failed");
+     }
+@@ -97,11 +115,13 @@ SeedboxNativeChain *qmp_seedbox_witness_chain(Error **errp)
+ 
+ static const VMStateDescription vmstate_witness = {
+     .name = "seedbox-native-witness",
+-    .version_id = 1,
+-    .minimum_version_id = 1,
++    .version_id = 2,
++    .minimum_version_id = 2,
++    .post_load = witness_loaded,
+     .fields = (const VMStateField[]) {
+         VMSTATE_BOOL(configured, SeedboxWitness),
+         VMSTATE_BOOL(failed, SeedboxWitness),
++        VMSTATE_BOOL(reset_seen, SeedboxWitness),
+         VMSTATE_UINT8_ARRAY(chain, SeedboxWitness, 32),
+         VMSTATE_END_OF_LIST()
+     }
+@@ -109,6 +129,6 @@ static const VMStateDescription vmstate_witness = {
+ static void register_witness(void)
+ {
+     vmstate_register(NULL, 0, &vmstate_witness, &witness);
+-    seedbox_native_set_sink(native_record);
++    /* Sinks enable only at fresh start or exact incoming witness load. */
+ }
+ type_init(register_witness)
+diff --git a/target/i386/seedbox-witness-delivery.h b/target/i386/seedbox-witness-delivery.h
+new file mode 100644
+index 00000000..ebc7ab98
+--- /dev/null
++++ b/target/i386/seedbox-witness-delivery.h
+@@ -0,0 +1,9 @@
++/* Private x86 witness source mapping. Stable categories, not QEMU enum bits. */
++#ifndef SEEDBOX_WITNESS_DELIVERY_H
++#define SEEDBOX_WITNESS_DELIVERY_H
++#include "qemu/osdep.h"
++/* G: 1=accepted CPU shutdown/triple fault, 2=ACPI GED reset write.
++ * A production physical boot stops after its first accepted reset request.
++ * The latch migrates; invalid source codes and duplicates change nothing. */
++bool seedbox_witness_accept_reset(bool *seen, uint8_t cause);
++#endif
+diff --git a/target/i386/seedbox-witness-delivery.c b/target/i386/seedbox-witness-delivery.c
+new file mode 100644
+index 00000000..1f08bc31
+--- /dev/null
++++ b/target/i386/seedbox-witness-delivery.c
+@@ -0,0 +1,11 @@
++#include "qemu/osdep.h"
++#include "seedbox-witness-delivery.h"
++
++bool seedbox_witness_accept_reset(bool *seen, uint8_t cause)
++{
++    if (*seen || (cause != 1 && cause != 2)) {
++        return false;
++    }
++    *seen = true;
++    return true;
++}
+diff --git a/target/i386/tcg/system/seg_helper.c b/target/i386/tcg/system/seg_helper.c
+index bab7c806..9dc85972 100644
+--- a/target/i386/tcg/system/seg_helper.c
++++ b/target/i386/tcg/system/seg_helper.c
+@@ -190,6 +190,7 @@ bool x86_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
+         cpu_svm_check_intercept_param(env, SVM_EXIT_SMI, 0, 0);
+         cpu_reset_interrupt(cs, CPU_INTERRUPT_SMI);
+         do_smm_enter(cpu);
++        seedbox_native_record('J', 0, 1, 0);
+         break;
+     case CPU_INTERRUPT_NMI:
+         cpu_svm_check_intercept_param(env, SVM_EXIT_NMI, 0, 0);
+diff --git a/target/i386/tcg/tcg-cpu.c b/target/i386/tcg/tcg-cpu.c
+index 6f5dc06b..f155fa0e 100644
+--- a/target/i386/tcg/tcg-cpu.c
++++ b/target/i386/tcg/tcg-cpu.c
+@@ -18,6 +18,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "exec/icount.h"
+ #include "cpu.h"
+ #include "helper-tcg.h"
+ #include "qemu/accel.h"
+@@ -146,7 +147,9 @@ static void x86_cpu_exec_reset(CPUState *cs)
+     CPUArchState *env = cpu_env(cs);
+ 
+     cpu_svm_check_intercept_param(env, SVM_EXIT_INIT, 0, 0);
++    uint64_t native_time = seedbox_native_time();
+     do_cpu_init(env_archcpu(env));
++    seedbox_native_record_at('J', 0, native_time, 2, 0);
+     cs->exception_index = EXCP_HALTED;
+ }
+ 
+diff --git a/target/i386/tcg/excp_helper.c b/target/i386/tcg/excp_helper.c
+index 1eaa602c..b435bc1f 100644
+--- a/target/i386/tcg/excp_helper.c
++++ b/target/i386/tcg/excp_helper.c
+@@ -18,6 +18,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "exec/icount.h"
+ #include "accel/tcg/cpu-loop.h"
+ #include "cpu.h"
+ #include "qemu/log.h"
+@@ -62,6 +63,7 @@ static int check_exception(CPUX86State *env, int intno, int *error_code,
+ 
+         qemu_log_mask(CPU_LOG_RESET, "Triple fault\n");
+ 
++        seedbox_native_guest_reset(1); /* accepted CPU shutdown/triple fault */
+         qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+         return EXCP_HLT;
+     }
+diff --git a/hw/intc/apic.c b/hw/intc/apic.c
+index f19ceb82..1815d4bf 100644
+--- a/hw/intc/apic.c
++++ b/hw/intc/apic.c
+@@ -17,6 +17,7 @@
+  * License along with this library; if not, see <http://www.gnu.org/licenses/>
+  */
+ #include "qemu/osdep.h"
++#include "exec/icount.h"
+ #include "qemu/thread.h"
+ #include "qemu/error-report.h"
+ #include "hw/i386/apic_internal.h"
+@@ -639,6 +640,9 @@ void apic_sipi(APICCommonState *s)
+     if (!s->wait_for_sipi)
+         return;
+     cpu_x86_load_seg_cache_sipi(s->cpu, s->sipi_vector);
++#ifdef CONFIG_TCG
++    seedbox_native_record('J', 0, 3, (uint8_t)s->sipi_vector);
++#endif
+     s->wait_for_sipi = 0;
+ }
+ 
+diff --git a/hw/acpi/generic_event_device.c b/hw/acpi/generic_event_device.c
+index 9e9416d4..39a42bc4 100644
+--- a/hw/acpi/generic_event_device.c
++++ b/hw/acpi/generic_event_device.c
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "exec/icount.h"
+ #include "qapi/error.h"
+ #include "hw/acpi/acpi.h"
+ #include "hw/acpi/pcihp.h"
+@@ -233,6 +234,9 @@ static void ged_regs_write(void *opaque, hwaddr addr, uint64_t data,
+         return;
+     case ACPI_GED_REG_RESET:
+         if (data == ACPI_GED_RESET_VALUE) {
++#ifdef CONFIG_TCG
++            seedbox_native_guest_reset(2); /* accepted ACPI GED reset write */
++#endif
+             qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+         }
+         return;
+diff --git a/target/i386/meson.build b/target/i386/meson.build
+index 3854ed02..55d504e7 100644
+--- a/target/i386/meson.build
++++ b/target/i386/meson.build
+@@ -25,6 +25,7 @@ i386_system_ss.add(files(
+   'seedbox-policy.c',
+   'seedbox-witness.c',
+   'seedbox-witness-chain.c',
++  'seedbox-witness-delivery.c',
+   'seedbox-timer-rng.c',
+   'cpu-apic.c',
+   'cpu-system.c',
+diff --git a/tests/unit/meson.build b/tests/unit/meson.build
+index 5e532a5e..abfb580f 100644
+--- a/tests/unit/meson.build
++++ b/tests/unit/meson.build
+@@ -79,7 +79,7 @@ if have_block
+     'test-block-iothread': [testblock],
+     'test-write-threshold': [testblock],
+     'test-crypto-hash': [crypto],
+-    'test-seedbox-witness-chain': [crypto, '../../target/i386/seedbox-witness-chain.c'],
++    'test-seedbox-witness-chain': [crypto, '../../target/i386/seedbox-witness-chain.c', '../../target/i386/seedbox-witness-delivery.c'],
+     'test-seedbox-timer-rng': [crypto, '../../target/i386/seedbox-timer-rng.c'],
+     'test-seedbox-evidence-pages': [crypto, '../../target/i386/seedbox-evidence-pages.c'],
+     'test-crypto-hmac': [crypto],
+diff --git a/tests/unit/test-seedbox-witness-chain.c b/tests/unit/test-seedbox-witness-chain.c
+index b4c977f6..be30de6f 100644
+--- a/tests/unit/test-seedbox-witness-chain.c
++++ b/tests/unit/test-seedbox-witness-chain.c
+@@ -2,6 +2,7 @@
+ #include "qemu/osdep.h"
+ #include "qapi/error.h"
+ #include "target/i386/seedbox-witness-chain.h"
++#include "target/i386/seedbox-witness-delivery.h"
+ 
+ static void equal_hex(const uint8_t value[32], const char *expected)
+ {
+@@ -46,9 +47,41 @@ static void goldens(void)
+     g_assert_nonnull(err);
+     error_free(err);
+ }
++static void delivery_frames(void)
++{
++    uint8_t h[32], value[32];
++    const struct { uint8_t kind; uint64_t a, b; const char *hex; } v[] = {
++        { 'J', 1, 0, "fe97db2f78e759c8620b6c5a1387b55496ec625469582822e40ea8d3c0b2bf31" },
++        { 'J', 2, 0, "fde5621fa9c29a6f59401df00f07b99f01f13519644ead788571df2936df6a14" },
++        { 'J', 3, 0x7a, "a1e2123708f463f39b59e1b6e1e833faba4258bccd3388581c67f94bcfd19908" },
++        { 'G', 1, 0, "db3d671534c4512ab6266a14732869d7b9d352251e8289255e795efc7b33731d" },
++        { 'G', 2, 0, "9e02f171353fca073065a378c49ef1704a1926e1cee77d481d938dbdeeb03095" },
++    };
++    g_assert_true(seedbox_witness_initial(h, &error_abort));
++    for (unsigned i = 0; i < G_N_ELEMENTS(v); i++) {
++        g_assert_true(seedbox_witness_record_hash(h, v[i].kind, 0, 123,
++                                                 v[i].a, v[i].b, value, &error_abort));
++        equal_hex(value, v[i].hex);
++    }
++    bool seen = false;
++    g_assert_false(seedbox_witness_accept_reset(&seen, 0));
++    g_assert_false(seedbox_witness_accept_reset(&seen, 3));
++    g_assert_false(seen);
++    g_assert_true(seedbox_witness_accept_reset(&seen, 1));
++    g_assert_true(seen);
++    g_assert_false(seedbox_witness_accept_reset(&seen, 1));
++    g_assert_false(seedbox_witness_accept_reset(&seen, 2));
++    /* Restored latch: do not append a second request for the same physical boot. */
++    bool restored = seen;
++    g_assert_false(seedbox_witness_accept_reset(&restored, 1));
++    g_assert_false(seedbox_witness_accept_reset(&restored, 2));
++    seen = false;
++    g_assert_true(seedbox_witness_accept_reset(&seen, 2));
++}
+ int main(int argc, char **argv)
+ {
+     g_test_init(&argc, &argv, NULL);
+     g_test_add_func("/seedbox/witness/common-goldens", goldens);
++    g_test_add_func("/seedbox/witness/delivery-frames-and-reset-latch", delivery_frames);
+     return g_test_run();
+ }

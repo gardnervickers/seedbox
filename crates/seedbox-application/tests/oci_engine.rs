@@ -21,7 +21,7 @@ fn import(service: &config::Service, directory: &Path, store: &ContentStore) -> 
         docker: engine(),
         cancellation: CancellationToken::default(),
         progress: |line| eprintln!("{line}"),
-        export_cache: false,
+        export_cache: None,
     }
     .import(
         service,
@@ -71,7 +71,7 @@ fn registry_images_export_the_expected_files() {
         ),
     ] {
         let image = import(
-            &simulation(reference).services["app"],
+            &simulation(reference).services["oracle"],
             &directory.path().join(name),
             &store,
         );
@@ -81,6 +81,73 @@ fn registry_images_export_the_expected_files() {
         }
     }
 }
+/// Real image preparation only: no container application or guest is started.
+/// Export into a fresh child of the caller-owned report root and remove only
+/// that exact child on success or failure; do not retain large OCI scratch.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn canonical_etcd_member_and_go_oracle_export_real_image_closures() {
+    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/etcd/seedbox.yaml");
+    let simulation = config::load(&project, &BTreeMap::new()).unwrap();
+    let report_root = std::env::var_os("SEEDBOX_TEST_REPORT_DIR")
+        .expect("set SEEDBOX_TEST_REPORT_DIR to a caller-owned directory");
+    let export_directory = tempfile::Builder::new()
+        .prefix("etcd-oci-")
+        .tempdir_in(report_root)
+        .unwrap();
+    let directory = export_directory.path();
+    eprintln!(
+        "temporary etcd OCI fixture inputs (RAII cleanup): {}",
+        directory.display()
+    );
+    let store = ContentStore::new(directory.join("store"));
+    // All members share the immutable image, but retain distinct launch/data-dir
+    // and volume declarations for the subsequent end-to-end service proof.
+    assert_eq!(
+        simulation.services["n1"].source,
+        simulation.services["n2"].source
+    );
+    assert_eq!(
+        simulation.services["n1"].source,
+        simulation.services["n3"].source
+    );
+    for (name, executable, argv0) in [
+        ("n1", "rootfs/usr/local/bin/etcd", "/usr/local/bin/etcd"),
+        ("oracle", "rootfs/client", "/client"),
+    ] {
+        let image = import(&simulation.services[name], &directory.join(name), &store);
+        let files = entries(&image);
+        let binary = &files[Path::new(executable)].1;
+        assert!(
+            binary.starts_with(b"\x7fELF"),
+            "{name} must retain its real ELF"
+        );
+        assert_eq!(binary[4], 2, "{name} must be ELF64");
+        assert_eq!(binary[5], 1, "{name} must be little-endian");
+        assert_eq!(
+            u16::from_le_bytes([binary[18], binary[19]]),
+            62,
+            "{name} must be x86-64"
+        );
+        assert_eq!(image.image.launch.argv[0], argv0);
+        if name == "oracle" {
+            assert_eq!(
+                &image.image.launch.argv[1..],
+                simulation.services[name].command.as_ref().unwrap()
+            );
+        }
+        store.verify(&image.image.config).unwrap();
+        for digest in image.image.layers.iter().chain(image.auxiliary.values()) {
+            store.verify(digest).unwrap();
+        }
+        fs::write(
+            directory.join(format!("{name}-image.json")),
+            serde_json::to_vec_pretty(&image.image).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
 #[test]
 fn build_honors_ignore_whiteouts_and_launch_metadata() {
     let directory = tempfile::tempdir().unwrap();
@@ -90,7 +157,7 @@ fn build_honors_ignore_whiteouts_and_launch_metadata() {
     fs::write(context.join(".dockerignore"), "ignored\n").unwrap();
     fs::write(context.join("ignored"), "must not upload").unwrap();
     fs::write(context.join("resolver"), "image-owned resolver\n").unwrap();
-    let mut service = simulation("unused:test").services.remove("app").unwrap();
+    let mut service = simulation("unused:test").services.remove("oracle").unwrap();
     service.source = config::ImageSource::Build {
         context: context.clone(),
         dockerfile: context.join("Dockerfile"),
@@ -126,5 +193,5 @@ fn build_honors_ignore_whiteouts_and_launch_metadata() {
     assert_eq!(image.image.launch.environment["MESSAGE"], "hello");
 }
 fn simulation(image: &str) -> config::Simulation {
-    config::parse(&format!("name: image-test\nservices:\n  app:\n    image: {image}\n    entrypoint: [/bin/sh]\n    command: [-c, 'exit 0']\nx-seedbox:\n  version: 1\n  limits: {{simulated_time: 1s, wall_time: 1m}}\n  check: {{service: app}}\n"), Path::new("/fixture/compose.yaml"), &BTreeMap::new()).unwrap()
+    config::parse(&format!("name: image-test\nmachines: {{}}\noracle:\n  image: {image}\n  entrypoint: [/bin/sh]\n  command: [-c, 'exit 0']\n"), Path::new("/fixture/seedbox.yaml"), &BTreeMap::new()).unwrap()
 }

@@ -11,3 +11,5 @@ oracle:
     SEEDBOX_PLANT_FAILURE: "0"
 network:
   latency: 1ms
+simulator:
+  blocksPerProgressCall: 10000

@@ -7,6 +7,8 @@ pub mod config;
 pub mod diff;
 pub mod engine;
 pub mod evidence;
+/// Process-wide exec-file ordering, re-exported with its original path.
+pub use seedbox_exec as exec_files;
 pub mod execution;
 pub mod image;
 pub mod interventions;

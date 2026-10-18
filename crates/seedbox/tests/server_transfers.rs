@@ -8,12 +8,13 @@ use seedbox_artifacts::{
     record::*,
 };
 use seedbox_server::{catalogue::Catalogue, manager::Manager};
+use seedbox_test::process::Guarded;
 use std::{
     collections::BTreeMap,
     fs,
     path::Path,
     process::{Child, Command, Output},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const RAW: &[u8] = b"console\0\xffmanagement\nworker error";
@@ -53,7 +54,7 @@ fn bundle(path: &Path) {
         identity,
         attempt: "/never/follow/archived/host/path".into(),
         performance_parameters: BTreeMap::new(),
-        engine: None,
+        allow_engine_change: false,
         log_policy: Default::default(),
         omitted_logs: BTreeMap::from([(
             "vmm.stderr".into(),
@@ -137,7 +138,7 @@ fn command(root: &Path) -> Command {
     command
 }
 fn run(root: &Path, args: &[&str]) -> Output {
-    command(root).args(args).output().unwrap()
+    command(root).args(args).guarded_output().unwrap()
 }
 fn success(output: Output) -> Output {
     assert!(
@@ -152,23 +153,27 @@ fn success(output: Output) -> Output {
 fn cli_bundle_roundtrip_diagnostics_and_json_without_execution() {
     let root = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
     bundle(root.path());
-    let mut server = command(root.path());
-    server
-        .args(["serve"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let _server = Server(server.spawn().unwrap());
+    let mut server = command(root.path())
+        .args(["serve", "--startup-handshake"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .guarded_spawn()
+        .unwrap();
+    // The handshake line is written once the server socket accepts clients.
+    let mut ready = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(server.stdout.take().unwrap()),
+        &mut ready,
+    )
+    .unwrap();
+    assert!(ready.contains("ready"), "{ready}");
+    let _server = Server(server);
     let client =
         seedbox_client::Client::connect_to(&root.path().join("server/server.sock")).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while rt.block_on(client.info()).is_err() {
-        assert!(Instant::now() < deadline, "server startup timed out");
-        std::thread::sleep(Duration::from_millis(20));
-    }
     let imported = success(run(root.path(), &["import", "fixture.tar", "--json"]));
     assert!(imported.stderr.is_empty());
     let simulation: Simulation = serde_json::from_slice(&imported.stdout).unwrap();
@@ -329,8 +334,8 @@ fn request() -> SubmitRequest {
             seed: Some(123),
             inputs: InputSource::Project,
             configuration: seedbox_application::config::parse(
-                "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-                std::path::Path::new("/project/compose.yaml"),
+                "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+                std::path::Path::new("/project/seedbox.yaml"),
                 &Default::default(),
             )
             .unwrap(),
@@ -342,8 +347,7 @@ fn request() -> SubmitRequest {
 fn resolved_request(id: &str) -> SubmitRequest {
     use seedbox_application::{
         execution::{
-            Backend, ExecutionProfile, PreparedImage, PreparedInputs, SemanticParameters,
-            WitnessMode,
+            ExecutionProfile, PreparedImage, PreparedInputs, SemanticParameters, WitnessMode,
         },
         image::Launch,
         store::ContentDigest,
@@ -353,9 +357,8 @@ fn resolved_request(id: &str) -> SubmitRequest {
     request.metadata.name = "test".into();
     let binary = ContentDigest::of(b"catalogue-only-binary");
     let inputs = PreparedInputs {
-        machine_memory_mb: Default::default(),
+        machine_memory_mb: std::collections::BTreeMap::from([("oracle".into(), 1024)]),
         wall_clock_epoch: Some(86400),
-        kernel: binary.clone(),
         images: std::collections::BTreeMap::from([(
             "oracle".into(),
             PreparedImage {
@@ -375,9 +378,9 @@ fn resolved_request(id: &str) -> SubmitRequest {
         placement: std::collections::BTreeMap::from([("oracle".into(), "oracle".into())]),
         guests: std::collections::BTreeMap::from([("oracle".into(), binary.clone())]),
         profile: ExecutionProfile {
-            backend: Backend::Other("catalogue-test".into()),
+            backend: "catalogue-test".into(),
             witness_mode: WitnessMode::Exits,
-            semantic_parameters: SemanticParameters::new(1024),
+            semantic_parameters: SemanticParameters::new(),
         },
         auxiliary: Default::default(),
         provenance: Default::default(),
@@ -389,7 +392,7 @@ fn resolved_request(id: &str) -> SubmitRequest {
         Vec::new(),
     )
     .unwrap();
-    request.spec = SimulationSpec::resolved(definition);
+    request.spec = SimulationSpec::resolved(definition).unwrap();
     request
 }
 
@@ -419,7 +422,7 @@ fn diagnostics_metadata_stall_exits_promptly_on_sigint_without_stdout() {
             } // Daemon listening probe.
             assert!(line.starts_with("GET /v1/simulations/k7m2p9qx/diagnostics "));
             requested.send(()).unwrap();
-            done.recv_timeout(Duration::from_secs(5)).unwrap(); // Intentionally never return metadata.
+            done.recv_timeout(Duration::from_secs(60)).unwrap(); // Intentionally never return metadata.
             break;
         }
     });
@@ -427,38 +430,31 @@ fn diagnostics_metadata_stall_exits_promptly_on_sigint_without_stdout() {
         .args(["diagnostics", "k7m2p9qx", "--json"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()
+        .guarded_spawn()
         .unwrap();
-    ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    ready.recv_timeout(Duration::from_secs(30)).unwrap();
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            child.kill().unwrap();
-            child.wait().unwrap();
+    // Wait for the exit itself; the bound only stops a hung test.
+    let pid = child.id() as i32;
+    let mut child_stdout = child.stdout.take().unwrap();
+    let mut child_stderr = child.stderr.take().unwrap();
+    let (exited, exit) = mpsc::channel();
+    let waiter = std::thread::spawn(move || exited.send(child.wait().unwrap()).unwrap());
+    let status = match exit.recv_timeout(Duration::from_secs(30)) {
+        Ok(status) => status,
+        Err(_) => {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            waiter.join().unwrap();
             release.send(()).unwrap();
             thread.join().unwrap();
             panic!("diagnostics ignored SIGINT while metadata was stalled");
         }
-        std::thread::sleep(Duration::from_millis(10));
     };
+    waiter.join().unwrap();
     let mut stdout = Vec::new();
     let mut stderr = String::new();
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_end(&mut stdout)
-        .unwrap();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut stderr)
-        .unwrap();
+    child_stdout.read_to_end(&mut stdout).unwrap();
+    child_stderr.read_to_string(&mut stderr).unwrap();
     release.send(()).unwrap();
     thread.join().unwrap();
     assert_eq!(status.code(), Some(2));

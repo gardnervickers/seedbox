@@ -1,5 +1,7 @@
 //! Resolved configuration retained in run identities.
+pub mod backend;
 pub mod definition;
+pub mod progress;
 pub mod project;
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +20,9 @@ pub struct Simulation {
     pub services: BTreeMap<String, Service>,
     pub configs: BTreeMap<String, PathBuf>,
     pub network: Network,
+    /// PV instrumentation semantics retained with the simulation.
+    #[serde(default)]
+    pub simulator: project::SimulatorDefaults,
     pub schedule: Schedule,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<Control>,
@@ -40,19 +45,11 @@ pub struct Simulation {
 pub struct MachineOptions {
     /// Guest RAM per service, in MiB.
     pub memory_mb: u32,
-    /// Arm clockevents through the time page (ABI 4, aimed at PV; Linux KVM only).
-    pub page_timer: bool,
-    /// Defer virtio-net TX kicks to deterministic polls (Linux KVM only).
-    pub deferred_tx: bool,
 }
 
 impl Default for MachineOptions {
     fn default() -> Self {
-        Self {
-            memory_mb: 1024,
-            page_timer: false,
-            deferred_tx: false,
-        }
+        Self { memory_mb: 1024 }
     }
 }
 
@@ -82,8 +79,6 @@ pub struct Service {
     /// Guest RAM override in MiB; omission inherits MachineOptions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_mb: Option<u32>,
-    #[serde(default)]
-    pub cpu: project::Cpu,
     pub source: ImageSource,
     pub platform: String,
     /// None inherits image defaults; Some([]) explicitly clears them.
@@ -184,10 +179,6 @@ mod tests {
     fn machine_defaults_remain_ordinary_configuration() {
         assert!(MachineOptions::default().is_default());
         assert!(DiskOptions::default().is_default());
-        assert!(!MachineOptions {
-            memory_mb: 512,
-            ..Default::default()
-        }
-        .is_default());
+        assert!(!MachineOptions { memory_mb: 512 }.is_default());
     }
 }

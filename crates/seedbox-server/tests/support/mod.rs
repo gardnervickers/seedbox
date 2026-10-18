@@ -11,8 +11,8 @@ pub fn request() -> SubmitRequest {
             seed: Some(123),
             inputs: InputSource::Project,
             configuration: seedbox_application::config::parse(
-                "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-                std::path::Path::new("/project/compose.yaml"),
+                "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+                std::path::Path::new("/project/seedbox.yaml"),
                 &Default::default(),
             )
             .unwrap(),
@@ -24,8 +24,7 @@ pub fn request() -> SubmitRequest {
 pub fn resolved_request(id: &str) -> SubmitRequest {
     use seedbox_application::{
         execution::{
-            Backend, ExecutionProfile, PreparedImage, PreparedInputs, SemanticParameters,
-            WitnessMode,
+            ExecutionProfile, PreparedImage, PreparedInputs, SemanticParameters, WitnessMode,
         },
         image::Launch,
         store::ContentDigest,
@@ -35,9 +34,8 @@ pub fn resolved_request(id: &str) -> SubmitRequest {
     request.metadata.name = "test".into();
     let binary = ContentDigest::of(b"catalogue-only-binary");
     let inputs = PreparedInputs {
-        machine_memory_mb: Default::default(),
+        machine_memory_mb: std::collections::BTreeMap::from([("oracle".into(), 1024)]),
         wall_clock_epoch: Some(86400),
-        kernel: binary.clone(),
         images: std::collections::BTreeMap::from([(
             "oracle".into(),
             PreparedImage {
@@ -57,20 +55,24 @@ pub fn resolved_request(id: &str) -> SubmitRequest {
         placement: std::collections::BTreeMap::from([("oracle".into(), "oracle".into())]),
         guests: std::collections::BTreeMap::from([("oracle".into(), binary.clone())]),
         profile: ExecutionProfile {
-            backend: Backend::Other("catalogue-test".into()),
+            backend: "catalogue-test".into(),
             witness_mode: WitnessMode::Exits,
-            semantic_parameters: SemanticParameters::new(1024),
+            semantic_parameters: SemanticParameters::new(),
         },
         auxiliary: Default::default(),
         provenance: Default::default(),
     };
-    let definition = seedbox_application::definition::resolve(
+    let mut definition = seedbox_application::definition::resolve(
         &request.spec.configuration,
         &inputs,
         123,
         Vec::new(),
     )
     .unwrap();
-    request.spec = SimulationSpec::resolved(definition);
+    // Resolve for this host's PV server, as a real submission would: the
+    // descriptor-free profile defaults to x86-64, which arm64 PV rejects.
+    definition.architecture = seedbox_driver_execution::driver_world::platform::Host::current()
+        .project_architecture(seedbox_spec::backend::CpuBackend::Pv);
+    request.spec = SimulationSpec::resolved(definition).unwrap();
     request
 }

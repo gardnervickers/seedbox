@@ -1,0 +1,1144 @@
+--- a/accel/tcg/icount-common.c
++++ b/accel/tcg/icount-common.c
+@@ -242,6 +242,10 @@
+ void qmp_seedbox_advance(int64_t time, Error **errp)
+ {
+     int64_t now = icount_get();
++    if (qemu_guest_timer_failed) {
++        error_setg(errp, "seedbox advance after a failed timer");
++        return;
++    }
+     if (runstate_is_running() || seedbox_active || time < now) {
+         error_setg(errp, "advance requires a stopped VM and monotonic time");
+         return;
+@@ -263,6 +267,11 @@
+                              &timers_state.vm_clock_lock);
+     }
+     qemu_clock_run_timers(QEMU_CLOCK_VIRTUAL);
++    /* A blocked/zero-budget adoption may arm a timer in its callback. Report
++     * its failure in THIS command, not only at a later CPU run. */
++    if (qemu_guest_timer_failed) {
++        error_setg(errp, "seedbox timer failed while advancing stopped time");
++    }
+ }
+ 
+ void qmp_seedbox_capture_complete(Error **errp)
+@@ -333,6 +342,10 @@
+ SeedboxRunResult *qmp_query_seedbox_run(Error **errp)
+ {
+     SeedboxRunResult *result;
++    if (qemu_guest_timer_failed) {
++        error_setg(errp, "seedbox result after a failed timer");
++        return NULL;
++    }
+     if (runstate_is_running() || seedbox_active) {
+         error_setg(errp, "seedbox result requires a completed stop");
+         return NULL;
+--- a/hw/intc/apic.c
++++ b/hw/intc/apic.c
+@@ -756,7 +756,8 @@
+ static void apic_timer_update(APICCommonState *s, int64_t current_time)
+ {
+     if (apic_next_timer(s, current_time)) {
+-        timer_mod(s->timer, s->next_time);
++        s->next_time = timer_mod_guest_ns(s->timer, s->next_time);
++        s->timer_expiry = s->next_time;
+     } else {
+         timer_del(s->timer);
+     }
+--- a/hw/rtc/mc146818rtc.c
++++ b/hw/rtc/mc146818rtc.c
+@@ -217,7 +217,14 @@
+ 
+     next_irq_clock = cur_clock + period - lost_clock;
+     s->next_periodic_time = periodic_clock_to_ns(next_irq_clock) + 1;
+-    timer_mod(s->periodic_timer, s->next_periodic_time);
++    if (rtc_clock == QEMU_CLOCK_VIRTUAL) {
++        /* Keep the logical oscillator deadline on its original grid.
++         * Only IRQ eligibility is jittered; the callback must not add that
++         * delay again when calculating the following periodic deadline. */
++        timer_mod_guest_ns(s->periodic_timer, s->next_periodic_time);
++    } else {
++        timer_mod(s->periodic_timer, s->next_periodic_time);
++    }
+ }
+ 
+ static void rtc_periodic_timer(void *opaque)
+@@ -289,7 +296,16 @@
+          * the alarm time.  */
+         next_update_time = s->next_alarm_time;
+     }
+-    if (next_update_time != timer_expire_time_ns(s->update_timer)) {
++    /* Compare logical arms, not the already-jittered expiry. Status reads
++     * can revisit this path without programming a fresh guest deadline. */
++    if (qemu_guest_timer_transform && rtc_clock == QEMU_CLOCK_VIRTUAL) {
++        if (!timer_pending(s->update_timer) ||
++            next_update_time != s->seedbox_update_requested) {
++            s->seedbox_update_requested = next_update_time;
++            timer_mod_guest_ns(s->update_timer, next_update_time);
++        }
++    } else if (next_update_time != timer_expire_time_ns(s->update_timer)) {
++        s->seedbox_update_requested = next_update_time;
+         timer_mod(s->update_timer, next_update_time);
+     }
+ }
+@@ -774,7 +790,10 @@
+      * so there is no need to update it after loading the vmstate.
+      * Reading RTC here would misalign record and replay.
+      */
+-    if (replay_mode == REPLAY_MODE_NONE) {
++    /* A configured Seedbox clock restores the exact already-jittered timer.
++     * Recalculating it here would discard that deadline and redraw at load. */
++    if (replay_mode == REPLAY_MODE_NONE &&
++        !(rtc_clock == QEMU_CLOCK_VIRTUAL && qemu_guest_timer_transform)) {
+         uint64_t now = qemu_clock_get_ns(rtc_clock);
+         if (now < s->next_periodic_time ||
+             now > (s->next_periodic_time + get_max_clock_jump())) {
+@@ -803,6 +822,22 @@
+     .needed = rtc_irq_reinject_on_ack_count_needed,
+     .fields = (const VMStateField[]) {
+         VMSTATE_UINT16(irq_reinject_on_ack_count, MC146818RtcState),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++static bool rtc_seedbox_needed(void *opaque)
++{
++    return rtc_clock == QEMU_CLOCK_VIRTUAL && qemu_guest_timer_transform;
++}
++
++static const VMStateDescription vmstate_rtc_seedbox = {
++    .name = "mc146818rtc/seedbox-deadline",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .needed = rtc_seedbox_needed,
++    .fields = (const VMStateField[]) {
++        VMSTATE_INT64(seedbox_update_requested, MC146818RtcState),
+         VMSTATE_END_OF_LIST()
+     }
+ };
+@@ -831,6 +866,7 @@
+     },
+     .subsections = (const VMStateDescription * const []) {
+         &vmstate_rtc_irq_reinject_on_ack_count,
++        &vmstate_rtc_seedbox,
+         NULL
+     }
+ };
+--- a/hw/timer/hpet.c
++++ b/hw/timer/hpet.c
+@@ -360,7 +360,7 @@
+     }
+ 
+     t->last = ns;
+-    timer_mod(t->qemu_timer, ns);
++    timer_mod_guest_ns(t->qemu_timer, ns);
+ }
+ 
+ /*
+--- a/hw/timer/i8254.c
++++ b/hw/timer/i8254.c
+@@ -274,10 +274,11 @@
+            (double)(expire_time - current_time) / NANOSECONDS_PER_SECOND);
+ #endif
+     s->next_transition_time = expire_time;
+-    if (expire_time != -1)
+-        timer_mod(s->irq_timer, expire_time);
+-    else
++    if (expire_time != -1) {
++        s->next_transition_time = timer_mod_guest_ns(s->irq_timer, expire_time);
++    } else {
+         timer_del(s->irq_timer);
++    }
+ }
+ 
+ static void pit_irq_timer(void *opaque)
+--- a/include/hw/rtc/mc146818rtc.h
++++ b/include/hw/rtc/mc146818rtc.h
+@@ -38,6 +38,8 @@
+     int64_t next_periodic_time;
+     /* update-ended timer */
+     QEMUTimer *update_timer;
++    /* Unjittered request: repeated status checks do not freshly arm a timer. */
++    int64_t seedbox_update_requested;
+     uint64_t next_alarm_time;
+     uint16_t irq_reinject_on_ack_count;
+     uint32_t irq_coalesced;
+--- a/include/qemu/timer.h
++++ b/include/qemu/timer.h
+@@ -651,6 +651,14 @@
+  * freed while this function is running.
+  */
+ void timer_mod_ns(QEMUTimer *ts, int64_t expire_time);
++
++/* Seedbox's opt-in device-arm transform. Default NULL is the upstream path.
++ * Migration/post-load always use timer_mod[_ns], never this fresh-arm helper.
++ * The returned effective expiry must update a device's cached wakeup time. */
++extern int64_t (*qemu_guest_timer_transform)(int64_t deadline);
++/* Sticky process-local failure: stopped QMP callers must reject it too. */
++extern bool qemu_guest_timer_failed;
++int64_t timer_mod_guest_ns(QEMUTimer *ts, int64_t expire_time);
+ 
+ /**
+  * timer_mod_anticipate_ns:
+--- a/qapi/misc-i386.json
++++ b/qapi/misc-i386.json
+@@ -470,3 +470,79 @@
+ ##
+ { 'command': 'xen-event-inject',
+   'data': { 'port': 'uint32' } }
++
++##
++# @SeedboxRamRegion:
++#
++# @base: Guest physical base of actual mapped machine RAM.
++# @length: Actual RAM bytes, excluding holes and device memory.
++#
++# Since: 11.1
++##
++{ 'struct': 'SeedboxRamRegion',
++  'data': { 'base': 'uint64', 'length': 'uint64' } }
++
++##
++# @SeedboxX86Evidence:
++#
++# Explicit stopped architectural SHA-256 parts, not VMState hashes.
++#
++# @regs: LE64 integer, control, debug and segment-register projection.
++# @vectors: LE64 scalar projection of x87 and complete vector
++#     registers.
++# @events: Pending execution/interrupt state.
++# @msrs: Explicit architectural MSRs and XCR0.
++# @timers: Fixed board timer and interrupt-controller scalar state.
++# @timer-policy: Dedicated timer stream key, cursor and policy.
++# @ram: SHA-256 of actual mapped machine RAM, concatenated in GPA
++#     order.
++# @ram-regions: SHA-256 of consecutive LE64 base/length pairs.
++# @regions: Actual RAM extents in ascending GPA order.
++# @page-bytes: Bytes written to the caller's unique page-file.
++#     Records are the first eight SHA-256 bytes per 4 KiB region
++#     chunk.  A partial final chunk is not padded.
++#
++# Since: 11.1
++##
++{ 'struct': 'SeedboxX86Evidence',
++  'data': { 'regs': 'str', 'vectors': 'str', 'events': 'str', 'msrs': 'str',
++            'timers': 'str', 'timer-policy': 'str',
++            'ram': 'str', 'ram-regions': 'str',
++            'regions': ['SeedboxRamRegion'], 'page-bytes': 'uint64' } }
++
++##
++# @seedbox-x86-evidence:
++#
++# Read actual architectural state and RAM of a stopped single-CPU
++# machine.
++# Executes no guest instructions and performs no virtual memory
++# accesses, device reads, output draining, disk flushes or migration
++# encoding.
++#
++# @page-file: New file beneath caller-owned scratch for raw page
++#     records.  An existing file or symlink is refused.  Failure
++#     removes only this command's own partial file.
++#
++# Returns: Explicit architectural and actual RAM evidence.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-x86-evidence', 'data': { 'page-file': 'str' },
++  'returns': 'SeedboxX86Evidence' }
++
++##
++# @seedbox-timer-policy:
++#
++# Configure fresh guest-timer jitter before execution or incoming
++# migration.  Repeating an identical configuration never resets the
++# stream.
++# Incoming policy must match this caller-owned authority.
++#
++# @seed: Policy seed, independent of guest entropy.
++# @domain: Named per-machine boot timer domain.
++# @jitter: Inclusive maximum delay, at most one hour in nanoseconds.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-timer-policy',
++  'data': { 'seed': 'uint64', 'domain': 'str', 'jitter': 'uint64' } }
+--- a/target/i386/meson.build
++++ b/target/i386/meson.build
+@@ -20,6 +20,10 @@
+   'arch_memory_mapping.c',
+   'machine.c',
+   'monitor.c',
++  'seedbox-evidence.c',
++  'seedbox-evidence-pages.c',
++  'seedbox-policy.c',
++  'seedbox-timer-rng.c',
+   'cpu-apic.c',
+   'cpu-system.c',
+ ))
+--- /dev/null
++++ b/target/i386/seedbox-evidence-pages.c
+@@ -0,0 +1,32 @@
++/* Exact legacy 4 KiB page records from actual stopped RAM bytes. */
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "crypto/hash.h"
++#include "seedbox-evidence-pages.h"
++
++bool seedbox_evidence_pages(int fd, const uint8_t *bytes, uint64_t length,
++                            uint64_t *written, Error **errp)
++{
++    uint64_t offset = 0;
++    while (offset < length) {
++        uint8_t digest[32], *out = digest;
++        size_t digest_length = sizeof(digest);
++        uint64_t chunk = MIN(4096, length - offset);
++        if (*written > UINT64_MAX - 8) {
++            error_setg(errp, "seedbox evidence page count overflow");
++            return false;
++        }
++        if (qcrypto_hash_bytes(QCRYPTO_HASH_ALGO_SHA256, bytes + offset,
++                               chunk, &out, &digest_length, errp) < 0) {
++            return false;
++        }
++        if (qemu_write_full(fd, digest, 8) != 8) {
++            error_setg_errno(errp, errno ? errno : EIO,
++                             "seedbox evidence page write");
++            return false;
++        }
++        *written += 8;
++        offset += chunk;
++    }
++    return true;
++}
+--- /dev/null
++++ b/target/i386/seedbox-evidence-pages.h
+@@ -0,0 +1,7 @@
++/* Private stopped-RAM page records; no CPU, time or migration dependency. */
++#ifndef TARGET_I386_SEEDBOX_EVIDENCE_PAGES_H
++#define TARGET_I386_SEEDBOX_EVIDENCE_PAGES_H
++#include "qemu/typedefs.h"
++bool seedbox_evidence_pages(int fd, const uint8_t *bytes, uint64_t length,
++                            uint64_t *written, Error **errp);
++#endif
+--- /dev/null
++++ b/target/i386/seedbox-evidence.c
+@@ -0,0 +1,382 @@
++/* Stopped architectural evidence. No HMP, GDB, migration or guest execution. */
++#include "qemu/osdep.h"
++#include "cpu.h"
++#include "qapi/error.h"
++#include "qapi/qapi-commands-misc-i386.h"
++#include "crypto/hash.h"
++#include "hw/core/boards.h"
++#include "exec/cpu-common.h"
++#include "system/address-spaces.h"
++#include "system/hw_accel.h"
++#include "system/memory.h"
++#include "system/runstate.h"
++#include "qemu/timer.h"
++#include "hw/i386/apic_internal.h"
++#include "hw/isa/i8259_internal.h"
++#include "hw/timer/i8254_internal.h"
++#include "hw/rtc/mc146818rtc.h"
++#include "hw/intc/ioapic_internal.h"
++#include "seedbox-policy.h"
++#include "seedbox-evidence-pages.h"
++
++/* Explicit LE scalar projection, never C struct/padding or VMState bytes. */
++static void scalar(GByteArray *bytes, uint64_t value)
++{
++    uint8_t encoded[8];
++    stq_le_p(encoded, value);
++    g_byte_array_append(bytes, encoded, sizeof(encoded));
++}
++
++static void segment(GByteArray *bytes, const SegmentCache *seg)
++{
++    scalar(bytes, seg->selector);
++    scalar(bytes, seg->base);
++    scalar(bytes, seg->limit);
++    scalar(bytes, seg->flags);
++}
++
++static char *part(GByteArray *bytes, Error **errp)
++{
++    char *digest = NULL;
++    if (qcrypto_hash_digest(QCRYPTO_HASH_ALGO_SHA256,
++                            bytes->data, bytes->len, &digest, errp) < 0) {
++        return NULL;
++    }
++    g_byte_array_set_size(bytes, 0);
++    return digest;
++}
++
++typedef struct SeedboxBoard {
++    PICCommonState *pic[2];
++    PITCommonState *pit;
++    MC146818RtcState *rtc;
++    IOAPICCommonState *ioapic;
++    bool duplicate;
++} SeedboxBoard;
++
++/* Fixed board types only; no guest access, device read, or generic inspector. */
++static int find_board(Object *obj, void *opaque)
++{
++    SeedboxBoard *board = opaque;
++    if (object_dynamic_cast(obj, TYPE_PIC_COMMON)) {
++        PICCommonState *pic = PIC_COMMON(obj);
++        unsigned index = !!pic->master;
++        board->duplicate |= board->pic[index] != NULL;
++        board->pic[index] = pic;
++    } else if (object_dynamic_cast(obj, TYPE_PIT_COMMON)) {
++        board->duplicate |= board->pit != NULL;
++        board->pit = PIT_COMMON(obj);
++    } else if (object_dynamic_cast(obj, TYPE_MC146818_RTC)) {
++        board->duplicate |= board->rtc != NULL;
++        board->rtc = MC146818_RTC(obj);
++    } else if (object_dynamic_cast(obj, TYPE_IOAPIC_COMMON)) {
++        board->duplicate |= board->ioapic != NULL;
++        board->ioapic = IOAPIC_COMMON(obj);
++    }
++    return 0;
++}
++
++static void timer_state(GByteArray *bytes, QEMUTimer *timer)
++{
++    scalar(bytes, timer != NULL);
++    scalar(bytes, timer ? timer_expire_time_ns(timer) : UINT64_MAX);
++}
++
++static bool board_state(GByteArray *bytes, X86CPU *cpu, Error **errp)
++{
++    SeedboxBoard board = { 0 };
++    APICCommonState *apic = cpu->apic_state;
++    unsigned i;
++    object_child_foreach_recursive(object_get_root(), find_board, &board);
++    if (board.duplicate) {
++        error_setg(errp, "seedbox evidence: ambiguous board timer/controller");
++        return false;
++    }
++    scalar(bytes, apic != NULL);
++    if (apic) {
++        scalar(bytes, apic->apicbase);
++        scalar(bytes, apic->id);
++        scalar(bytes, apic->tpr);
++        scalar(bytes, apic->spurious_vec);
++        scalar(bytes, apic->log_dest);
++        scalar(bytes, apic->dest_mode);
++        for (i = 0; i < ARRAY_SIZE(apic->isr); i++) {
++            scalar(bytes, apic->isr[i]);
++            scalar(bytes, apic->tmr[i]);
++            scalar(bytes, apic->irr[i]);
++        }
++        for (i = 0; i < ARRAY_SIZE(apic->lvt); i++) {
++            scalar(bytes, apic->lvt[i]);
++        }
++        scalar(bytes, apic->esr);
++        scalar(bytes, apic->icr[0]);
++        scalar(bytes, apic->icr[1]);
++        scalar(bytes, apic->divide_conf);
++        scalar(bytes, apic->count_shift);
++        scalar(bytes, apic->initial_count);
++        scalar(bytes, apic->initial_count_load_time);
++        scalar(bytes, apic->next_time);
++        scalar(bytes, apic->sipi_vector);
++        scalar(bytes, apic->wait_for_sipi);
++        timer_state(bytes, apic->timer);
++    }
++    for (i = 0; i < 2; i++) {
++        PICCommonState *pic = board.pic[i];
++        scalar(bytes, pic != NULL);
++        if (pic) {
++#define PIC_FIELD(name) scalar(bytes, pic->name)
++            PIC_FIELD(last_irr); PIC_FIELD(irr); PIC_FIELD(imr); PIC_FIELD(isr);
++            PIC_FIELD(priority_add); PIC_FIELD(irq_base); PIC_FIELD(read_reg_select);
++            PIC_FIELD(poll); PIC_FIELD(special_mask); PIC_FIELD(init_state);
++            PIC_FIELD(auto_eoi); PIC_FIELD(rotate_on_auto_eoi);
++            PIC_FIELD(special_fully_nested_mode); PIC_FIELD(init4);
++            PIC_FIELD(single_mode); PIC_FIELD(elcr); PIC_FIELD(elcr_mask);
++            PIC_FIELD(ltim);
++#undef PIC_FIELD
++        }
++    }
++    scalar(bytes, board.ioapic != NULL);
++    if (board.ioapic) {
++        scalar(bytes, board.ioapic->id);
++        scalar(bytes, board.ioapic->ioregsel);
++        scalar(bytes, board.ioapic->irr);
++        for (i = 0; i < IOAPIC_NUM_PINS; i++) {
++            scalar(bytes, board.ioapic->ioredtbl[i]);
++        }
++    }
++    scalar(bytes, board.pit != NULL);
++    if (board.pit) {
++        for (i = 0; i < 3; i++) {
++            PITChannelState *c = &board.pit->channels[i];
++#define PIT_FIELD(name) scalar(bytes, c->name)
++            PIT_FIELD(count); PIT_FIELD(latched_count); PIT_FIELD(count_latched);
++            PIT_FIELD(status_latched); PIT_FIELD(status); PIT_FIELD(read_state);
++            PIT_FIELD(write_state); PIT_FIELD(write_latch); PIT_FIELD(rw_mode);
++            PIT_FIELD(mode); PIT_FIELD(bcd); PIT_FIELD(gate);
++            PIT_FIELD(count_load_time); PIT_FIELD(next_transition_time);
++            PIT_FIELD(irq_disabled);
++#undef PIT_FIELD
++            timer_state(bytes, c->irq_timer);
++        }
++    }
++    scalar(bytes, board.rtc != NULL);
++    if (board.rtc) {
++        MC146818RtcState *rtc = board.rtc;
++        g_byte_array_append(bytes, rtc->cmos_data, sizeof(rtc->cmos_data));
++#define RTC_FIELD(name) scalar(bytes, rtc->name)
++        RTC_FIELD(cmos_index); RTC_FIELD(base_rtc); RTC_FIELD(last_update);
++        RTC_FIELD(offset); RTC_FIELD(next_periodic_time); RTC_FIELD(next_alarm_time);
++        RTC_FIELD(irq_coalesced); RTC_FIELD(period); RTC_FIELD(irq_reinject_on_ack_count);
++        scalar(bytes, qemu_guest_timer_transform ? rtc->seedbox_update_requested : 0);
++#undef RTC_FIELD
++        timer_state(bytes, rtc->periodic_timer);
++        timer_state(bytes, rtc->update_timer);
++        timer_state(bytes, rtc->coalesced_timer);
++    }
++    scalar(bytes, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
++    return true;
++}
++
++SeedboxX86Evidence *qmp_seedbox_x86_evidence(const char *page_file, Error **errp)
++{
++    g_autoptr(GByteArray) bytes = g_byte_array_new();
++    g_autoptr(QCryptoHash) ram = NULL;
++    SeedboxX86Evidence *result = g_new0(SeedboxX86Evidence, 1);
++    SeedboxRamRegionList **tail = &result->regions;
++    CPUState *cs = first_cpu;
++    CPUX86State *env;
++    MachineState *machine = MACHINE(qdev_get_machine());
++    uint64_t address = 0;
++    int i, j, page_fd = -1;
++    bool page_created = false;
++
++    if (qemu_guest_timer_failed) {
++        error_setg(errp, "seedbox evidence after a failed timer");
++        goto fail;
++    }
++    if (runstate_is_running() || !cs || CPU_NEXT(cs) || !machine->ram) {
++        error_setg(errp, "seedbox evidence requires a stopped single-CPU RAM machine");
++        goto fail;
++    }
++    /* The caller owns this unique scratch path. Never overwrite an existing
++     * file or symlink, and remove only our own partial file on failure. Page
++     * bytes do not fit QMP's packet budget for large configured guests. */
++    page_fd = qemu_create(page_file, O_WRONLY | O_EXCL, 0600, errp);
++    if (page_fd < 0) {
++        goto fail;
++    }
++    page_created = true;
++    cpu_synchronize_state(cs);
++    env = &X86_CPU(cs)->env;
++    for (i = 0; i < CPU_NB_REGS; i++) {
++        scalar(bytes, env->regs[i]);
++    }
++    scalar(bytes, env->eip);
++    scalar(bytes, cpu_compute_eflags(env));
++    for (i = 0; i < ARRAY_SIZE(env->cr); i++) {
++        scalar(bytes, env->cr[i]);
++    }
++    for (i = 0; i < ARRAY_SIZE(env->dr); i++) {
++        scalar(bytes, env->dr[i]);
++    }
++    for (i = 0; i < ARRAY_SIZE(env->segs); i++) {
++        segment(bytes, &env->segs[i]);
++    }
++    segment(bytes, &env->ldt);
++    segment(bytes, &env->tr);
++    segment(bytes, &env->gdt);
++    segment(bytes, &env->idt);
++    result->regs = part(bytes, errp);
++    if (!result->regs) {
++        goto fail;
++    }
++    scalar(bytes, env->fpstt);
++    scalar(bytes, env->fpus);
++    scalar(bytes, env->fpuc);
++    scalar(bytes, env->fpop);
++    scalar(bytes, env->fpip);
++    scalar(bytes, env->fpdp);
++    for (i = 0; i < ARRAY_SIZE(env->fpregs); i++) {
++        scalar(bytes, env->fptags[i]);
++        scalar(bytes, env->fpregs[i].d.low);
++        scalar(bytes, env->fpregs[i].d.high);
++    }
++    scalar(bytes, env->mxcsr);
++    for (i = 0; i < CPU_NB_EREGS; i++) {
++        for (j = 0; j < 8; j++) {
++            scalar(bytes, env->xmm_regs[i].ZMM_Q(j));
++        }
++    }
++    for (i = 0; i < NB_OPMASK_REGS; i++) {
++        scalar(bytes, env->opmask_regs[i]);
++    }
++    result->vectors = part(bytes, errp);
++    if (!result->vectors) {
++        goto fail;
++    }
++    /* EXITTB, DEBUG, HALT, APIC polling and TPR reevaluation are host
++     * execution requests, not pending guest interrupts. Never hash them. */
++    scalar(bytes, cs->interrupt_request &
++           (CPU_INTERRUPT_HARD | CPU_INTERRUPT_NMI | CPU_INTERRUPT_SMI |
++            CPU_INTERRUPT_INIT | CPU_INTERRUPT_SIPI | CPU_INTERRUPT_MCE |
++            CPU_INTERRUPT_VIRQ));
++    /* halted is guest HLT eligibility, unlike CPUState.stopped/stop. */
++    scalar(bytes, cs->halted);
++    /* TCG uses exception_index >= EXCP_INTERRUPT for host rendezvous. */
++    scalar(bytes, cs->exception_index >= 0 && cs->exception_index < EXCP_INTERRUPT);
++    if (cs->exception_index >= 0 && cs->exception_index < EXCP_INTERRUPT) {
++        scalar(bytes, cs->exception_index);
++        scalar(bytes, env->error_code);
++        scalar(bytes, env->exception_is_int);
++        scalar(bytes, env->exception_next_eip);
++    }
++    scalar(bytes, env->hflags & HF_INHIBIT_IRQ_MASK);
++    scalar(bytes, env->hflags2 &
++           (HF2_GIF_MASK | HF2_HIF_MASK | HF2_NMI_MASK | HF2_VINTR_MASK |
++            HF2_SMM_INSIDE_NMI_MASK | HF2_NPT_MASK | HF2_VGIF_MASK));
++    result->events = part(bytes, errp);
++    if (!result->events) {
++        goto fail;
++    }
++    scalar(bytes, env->efer);
++    scalar(bytes, env->pat);
++    scalar(bytes, env->star);
++    scalar(bytes, env->sysenter_cs);
++    scalar(bytes, env->sysenter_esp);
++    scalar(bytes, env->sysenter_eip);
++    scalar(bytes, env->tsc_aux);
++    scalar(bytes, env->tsc_adjust);
++    scalar(bytes, env->tsc_deadline);
++    scalar(bytes, env->xcr0);
++#ifdef TARGET_X86_64
++    scalar(bytes, env->kernelgsbase);
++    scalar(bytes, env->lstar);
++    scalar(bytes, env->cstar);
++    scalar(bytes, env->fmask);
++#endif
++    result->msrs = part(bytes, errp);
++    if (!result->msrs) {
++        goto fail;
++    }
++    if (!board_state(bytes, X86_CPU(cs), errp)) {
++        goto fail;
++    }
++    result->timers = part(bytes, errp);
++    result->timer_policy = seedbox_timer_policy_digest(errp);
++    if (!result->timers || !result->timer_policy) {
++        goto fail;
++    }
++    ram = qcrypto_hash_new(QCRYPTO_HASH_ALGO_SHA256, errp);
++    if (!ram) {
++        goto fail;
++    }
++    while (address < UINT64_MAX) {
++            MemoryRegionSection section = memory_region_find(
++                get_system_memory(), address, UINT64_MAX - address);
++            uint64_t length, base;
++            uint8_t *data;
++            bool is_ram;
++            SeedboxRamRegionList *node;
++            if (!section.mr) {
++                break;
++            }
++            length = int128_get64(section.size);
++            base = section.offset_within_address_space;
++            is_ram = section.mr == machine->ram;
++            data = is_ram ? memory_region_get_ram_ptr(section.mr) +
++                            section.offset_within_region : NULL;
++            memory_region_unref(section.mr);
++            if (!length || base < address || length > UINT64_MAX - base) {
++                error_setg(errp, "seedbox evidence: invalid memory extent");
++                goto fail;
++            }
++            address = base + length;
++            if (!is_ram) {
++                continue;
++            }
++            if (base & 4095) {
++                error_setg(errp, "seedbox evidence: unaligned RAM region");
++                goto fail;
++            }
++            node = g_new0(SeedboxRamRegionList, 1);
++            node->value = g_new0(SeedboxRamRegion, 1);
++            node->value->base = base;
++            node->value->length = length;
++            *tail = node;
++            tail = &node->next;
++            if (qcrypto_hash_update(ram, data, length, errp) < 0) {
++                goto fail;
++            }
++            scalar(bytes, node->value->base);
++            scalar(bytes, length);
++            if (!seedbox_evidence_pages(page_fd, data, length,
++                                        &result->page_bytes, errp)) {
++                goto fail;
++            }
++    }
++    if (!result->regions) {
++        error_setg(errp, "seedbox evidence: no actual mapped machine RAM");
++        goto fail;
++    }
++    result->ram_regions = part(bytes, errp);
++    if (!result->ram_regions ||
++        qcrypto_hash_finalize_digest(ram, &result->ram, errp) < 0) {
++        goto fail;
++    }
++    if (close(page_fd) < 0) {
++        page_fd = -1;
++        error_setg_errno(errp, errno, "seedbox evidence page close");
++        goto fail;
++    }
++    page_fd = -1;
++    return result;
++fail:
++    if (page_fd >= 0) {
++        close(page_fd);
++    }
++    if (page_created) {
++        unlink(page_file);
++    }
++    qapi_free_SeedboxX86Evidence(result);
++    return NULL;
++}
+--- /dev/null
++++ b/target/i386/seedbox-policy.c
+@@ -0,0 +1,121 @@
++/* Dedicated stopped-configured timer randomness, independent of guest entropy. */
++#include "qemu/osdep.h"
++#include "qemu/module.h"
++#include "qemu/bswap.h"
++#include "qemu/timer.h"
++#include "qapi/error.h"
++#include "qapi/qapi-commands-misc-i386.h"
++#include "crypto/hash.h"
++#include "migration/vmstate.h"
++#include "system/runstate.h"
++#include "exec/icount.h"
++#include "seedbox-policy.h"
++#include "seedbox-timer-rng.h"
++
++#define HOUR_NS UINT64_C(3600000000000)
++
++typedef struct SeedboxTimerPolicy {
++    bool configured;
++    uint64_t jitter;
++    uint8_t key[32];
++    uint64_t counter;
++} SeedboxTimerPolicy;
++
++static SeedboxTimerPolicy policy;
++/* External factory authority, not overwritten by incoming migration. */
++static SeedboxTimerPolicy expected;
++
++static int policy_loaded(void *opaque, int version)
++{
++    SeedboxTimerPolicy *saved = opaque;
++    if (saved->configured != expected.configured ||
++        saved->jitter != expected.jitter ||
++        memcmp(saved->key, expected.key, sizeof(saved->key))) {
++        return -EINVAL;
++    }
++    return 0;
++}
++
++static const VMStateDescription vmstate_seedbox_policy = {
++    .name = "seedbox-timer-policy",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .post_load = policy_loaded,
++    .fields = (const VMStateField[]) {
++        VMSTATE_BOOL(configured, SeedboxTimerPolicy),
++        VMSTATE_UINT64(jitter, SeedboxTimerPolicy),
++        VMSTATE_UINT8_ARRAY(key, SeedboxTimerPolicy, 32),
++        VMSTATE_UINT64(counter, SeedboxTimerPolicy),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++/* Called only for fresh guest-device arms, never timer-load or post-load. */
++static int64_t transform(int64_t deadline)
++{
++    Error *error = NULL;
++    int64_t effective;
++    if (!policy.configured) {
++        return deadline;
++    }
++    if (seedbox_timer_delay(policy.key, &policy.counter, policy.jitter,
++                           deadline, &effective, &error)) {
++        return effective;
++    }
++    error_report_err(error);
++    qemu_guest_timer_failed = true;
++    /* Latch the existing bounded-run device error as well as the runstate:
++     * no subsequent run can turn a timer failure into ordinary completion. */
++    seedbox_icount_device_error();
++    vm_stop(RUN_STATE_INTERNAL_ERROR);
++    return deadline;
++}
++
++void qmp_seedbox_timer_policy(uint64_t seed, const char *domain,
++                             uint64_t jitter, Error **errp)
++{
++    SeedboxTimerPolicy proposed = { .configured = true, .jitter = jitter };
++    if (qemu_guest_timer_failed) {
++        error_setg(errp, "seedbox timer policy cannot recover a failed timer");
++        return;
++    }
++    if (runstate_is_running() || jitter > HOUR_NS || !*domain) {
++        error_setg(errp, "seedbox timer policy requires a stopped machine, "
++                   "a nonempty domain and jitter no greater than one hour");
++        return;
++    }
++    if (!seedbox_timer_key(seed, domain, proposed.key, errp)) {
++        return;
++    }
++    if (expected.configured) {
++        if (expected.jitter != proposed.jitter ||
++            memcmp(expected.key, proposed.key, sizeof(proposed.key))) {
++            error_setg(errp, "seedbox timer policy is already configured differently");
++        }
++        return; /* An identical call must never reset the stream. */
++    }
++    expected = proposed;
++    policy = proposed;
++    qemu_guest_timer_transform = transform;
++}
++
++char *seedbox_timer_policy_digest(Error **errp)
++{
++    uint8_t fields[49];
++    char *out = NULL;
++    fields[0] = policy.configured;
++    stq_le_p(fields + 1, policy.jitter);
++    memcpy(fields + 9, policy.key, 32);
++    stq_le_p(fields + 41, policy.counter);
++    if (qcrypto_hash_digest(QCRYPTO_HASH_ALGO_SHA256, fields, sizeof(fields),
++                            &out, errp) < 0) {
++        return NULL;
++    }
++    return out;
++}
++
++static void register_policy(void)
++{
++    vmstate_register(NULL, 0, &vmstate_seedbox_policy, &policy);
++}
++type_init(register_policy)
+--- /dev/null
++++ b/target/i386/seedbox-policy.h
+@@ -0,0 +1,5 @@
++/* Private Seedbox timer-policy evidence, never VMState serialization. */
++#ifndef TARGET_I386_SEEDBOX_POLICY_H
++#define TARGET_I386_SEEDBOX_POLICY_H
++char *seedbox_timer_policy_digest(Error **errp);
++#endif
+--- /dev/null
++++ b/target/i386/seedbox-timer-rng.c
+@@ -0,0 +1,64 @@
++/* Byte-for-byte seedbox-v1 SHA256 streams, not guest entropy. */
++#include "qemu/osdep.h"
++#include "qemu/bswap.h"
++#include "qapi/error.h"
++#include "crypto/hash.h"
++#include "seedbox-timer-rng.h"
++
++static bool digest(const uint8_t *data, size_t length, uint8_t output[32],
++                   Error **errp)
++{
++    size_t size = 32;
++    uint8_t *out = output;
++    return qcrypto_hash_bytes(QCRYPTO_HASH_ALGO_SHA256, data, length,
++                              &out, &size, errp) == 0;
++}
++
++bool seedbox_timer_key(uint64_t seed, const char *domain, uint8_t key[32],
++                       Error **errp)
++{
++    g_autoptr(GByteArray) input = g_byte_array_new();
++    uint8_t seed_bytes[8];
++    g_byte_array_append(input, (const uint8_t *)"seedbox-v1", 10);
++    stq_le_p(seed_bytes, seed);
++    g_byte_array_append(input, seed_bytes, sizeof(seed_bytes));
++    g_byte_array_append(input, (const uint8_t *)domain, strlen(domain));
++    return digest(input->data, input->len, key, errp);
++}
++
++bool seedbox_timer_delay(const uint8_t key[32], uint64_t *counter,
++                         uint64_t jitter, int64_t deadline,
++                         int64_t *effective, Error **errp)
++{
++    uint64_t n, zone, value;
++    uint8_t input[40], output[32];
++    if (!jitter || deadline < 0) {
++        *effective = deadline;
++        return true;
++    }
++    if (jitter > UINT64_C(3600000000000)) {
++        error_setg(errp, "seedbox timer jitter exceeds one hour");
++        return false;
++    }
++    n = jitter + 1;
++    zone = UINT64_MAX - UINT64_MAX % n;
++    memcpy(input, key, 32);
++    do {
++        if (*counter == UINT64_MAX) {
++            error_setg(errp, "seedbox timer RNG counter overflow");
++            return false;
++        }
++        stq_le_p(input + 32, (*counter)++);
++        if (!digest(input, sizeof(input), output, errp)) {
++            return false;
++        }
++        value = ldq_le_p(output);
++    } while (value >= zone);
++    value %= n;
++    if (value > INT64_MAX - deadline) {
++        error_setg(errp, "seedbox timer jitter deadline overflow");
++        return false;
++    }
++    *effective = deadline + value;
++    return true;
++}
+--- /dev/null
++++ b/target/i386/seedbox-timer-rng.h
+@@ -0,0 +1,10 @@
++/* Private dedicated Seedbox timer stream; no VMState or CPU dependency. */
++#ifndef TARGET_I386_SEEDBOX_TIMER_RNG_H
++#define TARGET_I386_SEEDBOX_TIMER_RNG_H
++#include "qemu/typedefs.h"
++bool seedbox_timer_key(uint64_t seed, const char *domain, uint8_t key[32],
++                       Error **errp);
++bool seedbox_timer_delay(const uint8_t key[32], uint64_t *counter,
++                         uint64_t jitter, int64_t deadline,
++                         int64_t *effective, Error **errp);
++#endif
+--- a/tests/unit/meson.build
++++ b/tests/unit/meson.build
+@@ -79,6 +79,8 @@
+     'test-block-iothread': [testblock],
+     'test-write-threshold': [testblock],
+     'test-crypto-hash': [crypto],
++    'test-seedbox-timer-rng': [crypto, '../../target/i386/seedbox-timer-rng.c'],
++    'test-seedbox-evidence-pages': [crypto, '../../target/i386/seedbox-evidence-pages.c'],
+     'test-crypto-hmac': [crypto],
+     'test-crypto-cipher': [crypto],
+     'test-crypto-akcipher': [crypto],
+--- /dev/null
++++ b/tests/unit/test-seedbox-evidence-pages.c
+@@ -0,0 +1,88 @@
++/* Portable production page-writer tests. No QEMU process or guest. */
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "target/i386/seedbox-evidence-pages.h"
++
++static int new_file(char **path)
++{
++    GError *error = NULL;
++    int fd = g_file_open_tmp("seedbox-pages-XXXXXX", path, &error);
++    g_assert_no_error(error);
++    g_assert_cmpint(fd, >=, 0);
++    return fd;
++}
++
++static void golden_and_partial(void)
++{
++    static const uint8_t expected[] = {
++        0xad, 0x7f, 0xac, 0xb2, 0x58, 0x6f, 0xc6, 0xe9,
++        0xc9, 0xac, 0x7b, 0x06, 0x24, 0x82, 0x4f, 0x84,
++        0x0a, 0x88, 0x11, 0x18, 0x52, 0x09, 0x5c, 0xae
++    };
++    uint8_t ram[4096 * 2 + 17] = { 0 }, actual[sizeof(expected)];
++    g_autofree char *path = NULL;
++    uint64_t written = 0;
++    int fd = new_file(&path);
++    memset(ram + 4096, 7, 4096);
++    g_assert_true(seedbox_evidence_pages(fd, ram, sizeof(ram), &written,
++                                        &error_abort));
++    g_assert_cmpuint(written, ==, sizeof(expected));
++    g_assert_cmpint(lseek(fd, 0, SEEK_SET), ==, 0);
++    g_assert_cmpint(read(fd, actual, sizeof(actual)), ==, sizeof(actual));
++    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
++    g_assert_cmpint(close(fd), ==, 0);
++    g_assert_cmpint(unlink(path), ==, 0);
++}
++
++static void regions_are_not_joined_or_padded(void)
++{
++    static const uint8_t expected[] = {
++        0x0a, 0x88, 0x11, 0x18, 0x52, 0x09, 0x5c, 0xae,
++        0x75, 0xc8, 0xfd, 0x04, 0xad, 0x91, 0x6a, 0xec
++    };
++    uint8_t first[17] = { 0 }, second[3] = { 1, 1, 1 }, actual[16];
++    g_autofree char *path = NULL;
++    uint64_t written = 0;
++    int fd = new_file(&path);
++    g_assert_true(seedbox_evidence_pages(fd, first, sizeof(first), &written,
++                                        &error_abort));
++    g_assert_true(seedbox_evidence_pages(fd, second, sizeof(second), &written,
++                                        &error_abort));
++    g_assert_cmpuint(written, ==, sizeof(expected));
++    g_assert_cmpint(lseek(fd, 0, SEEK_SET), ==, 0);
++    g_assert_cmpint(read(fd, actual, sizeof(actual)), ==, sizeof(actual));
++    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
++    g_assert_cmpint(close(fd), ==, 0);
++    g_assert_cmpint(unlink(path), ==, 0);
++}
++
++static void io_and_count_errors(void)
++{
++    uint8_t ram[17] = { 0 };
++    uint64_t written = 0;
++    Error *error = NULL;
++    g_autofree char *path = NULL;
++    int fd = new_file(&path);
++    g_assert_false(seedbox_evidence_pages(-1, ram, sizeof(ram), &written, &error));
++    g_assert_nonnull(error);
++    error_free(error);
++    error = NULL;
++    g_assert_cmpuint(written, ==, 0);
++    written = UINT64_MAX - 1;
++    g_assert_false(seedbox_evidence_pages(fd, ram, sizeof(ram), &written, &error));
++    g_assert_nonnull(error);
++    error_free(error);
++    g_assert_cmpuint(written, ==, UINT64_MAX - 1);
++    g_assert_cmpint(lseek(fd, 0, SEEK_END), ==, 0);
++    g_assert_cmpint(close(fd), ==, 0);
++    g_assert_cmpint(unlink(path), ==, 0);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    g_test_add_func("/seedbox/pages/golden-partial", golden_and_partial);
++    g_test_add_func("/seedbox/pages/region-boundaries", regions_are_not_joined_or_padded);
++    g_test_add_func("/seedbox/pages/errors", io_and_count_errors);
++    return g_test_run();
++}
+--- /dev/null
++++ b/tests/unit/test-seedbox-timer-rng.c
+@@ -0,0 +1,99 @@
++/* Portable tests of the actual production timer-stream helper. No VM. */
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "target/i386/seedbox-timer-rng.h"
++
++static void golden(void)
++{
++    static const int64_t expected[] = { 1552, 1466, 1610, 1008,
++                                        1462, 1615, 1343, 1097 };
++    uint8_t key[32];
++    uint64_t counter = 0;
++    int64_t effective;
++    unsigned i;
++    g_assert_true(seedbox_timer_key(42, "timer-jitter/node", key, &error_abort));
++    for (i = 0; i < G_N_ELEMENTS(expected); i++) {
++        g_assert_true(seedbox_timer_delay(key, &counter, 1000, 1000,
++                                         &effective, &error_abort));
++        g_assert_cmpint(effective, ==, expected[i]);
++    }
++    g_assert_cmpuint(counter, ==, G_N_ELEMENTS(expected));
++}
++
++static void zero_and_disarmed(void)
++{
++    uint8_t key[32] = { 0 };
++    uint64_t counter = 91;
++    int64_t effective;
++    g_assert_true(seedbox_timer_delay(key, &counter, 0, 123,
++                                     &effective, &error_abort));
++    g_assert_cmpint(effective, ==, 123);
++    g_assert_cmpuint(counter, ==, 91);
++    g_assert_true(seedbox_timer_delay(key, &counter, 100, -1,
++                                     &effective, &error_abort));
++    g_assert_cmpint(effective, ==, -1);
++    g_assert_cmpuint(counter, ==, 91);
++}
++
++static void domains_and_continuation(void)
++{
++    uint8_t a[32], b[32];
++    uint64_t counter = 0, restored;
++    int64_t effective, resumed;
++    unsigned i;
++    g_assert_true(seedbox_timer_key(42, "timer-jitter/node", a, &error_abort));
++    g_assert_true(seedbox_timer_key(42, "disk-loss/node/1", b, &error_abort));
++    g_assert_cmpint(memcmp(a, b, sizeof(a)), !=, 0);
++    for (i = 0; i < 17; i++) {
++        g_assert_true(seedbox_timer_delay(a, &counter, 1000, i,
++                                         &effective, &error_abort));
++    }
++    restored = counter;
++    for (i = 0; i < 100; i++) {
++        g_assert_true(seedbox_timer_delay(a, &counter, 1000, i,
++                                         &effective, &error_abort));
++        g_assert_true(seedbox_timer_delay(a, &restored, 1000, i,
++                                         &resumed, &error_abort));
++        g_assert_cmpint(effective, ==, resumed);
++        g_assert_cmpint(effective, >=, i);
++        g_assert_cmpint(effective, <=, i + 1000);
++    }
++    g_assert_cmpuint(counter, ==, restored);
++}
++
++static void errors(void)
++{
++    uint8_t key[32];
++    uint64_t counter = UINT64_MAX;
++    int64_t effective = 99;
++    Error *error = NULL;
++    g_assert_true(seedbox_timer_key(42, "timer-jitter/node", key, &error_abort));
++    g_assert_false(seedbox_timer_delay(key, &counter, 1000, 1, &effective, &error));
++    g_assert_nonnull(error);
++    error_free(error);
++    error = NULL;
++    g_assert_cmpint(effective, ==, 99);
++    counter = 0;
++    g_assert_false(seedbox_timer_delay(key, &counter, 1000, INT64_MAX - 100,
++                                      &effective, &error));
++    g_assert_nonnull(error);
++    error_free(error);
++    error = NULL;
++    g_assert_cmpint(effective, ==, 99);
++    counter = 0;
++    g_assert_false(seedbox_timer_delay(key, &counter, UINT64_C(3600000000001),
++                                      1, &effective, &error));
++    g_assert_nonnull(error);
++    error_free(error);
++    g_assert_cmpuint(counter, ==, 0);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    g_test_add_func("/seedbox/timer/golden", golden);
++    g_test_add_func("/seedbox/timer/zero-disarmed", zero_and_disarmed);
++    g_test_add_func("/seedbox/timer/domains-continuation", domains_and_continuation);
++    g_test_add_func("/seedbox/timer/errors", errors);
++    return g_test_run();
++}
+--- a/util/qemu-timer.c
++++ b/util/qemu-timer.c
+@@ -457,6 +457,17 @@
+ 
+ /* modify the current timer so that it will be fired when current_time
+    >= expire_time. The corresponding callback will be called. */
++int64_t (*qemu_guest_timer_transform)(int64_t deadline);
++bool qemu_guest_timer_failed;
++
++int64_t timer_mod_guest_ns(QEMUTimer *ts, int64_t expire_time)
++{
++    int64_t effective = qemu_guest_timer_transform ?
++        qemu_guest_timer_transform(expire_time) : expire_time;
++    timer_mod_ns(ts, effective);
++    return effective;
++}
++
+ void timer_mod_ns(QEMUTimer *ts, int64_t expire_time)
+ {
+     QEMUTimerList *timer_list = ts->timer_list;

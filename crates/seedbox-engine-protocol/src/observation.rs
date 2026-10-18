@@ -1,6 +1,7 @@
 //! Best-effort live worker observations, separate from execution reports and
-//! deterministic evidence. Logs and events consume a sequence even when lost;
-//! optional frame batches consume one only when accepted by the socket.
+//! deterministic evidence. Logs and events consume a sequence even when lost.
+//! Frame publishers may reserve missing sequence slots to report bounded-buffer
+//! or transport loss; optional frames never contribute to execution evidence.
 use crate::application_log::Chunk;
 use serde::{Deserialize, Serialize};
 
@@ -58,7 +59,7 @@ pub enum Kind {
         id: u32,
         action: String,
         machine: Option<String>,
-        status: crate::report::RowStatus,
+        status: crate::fault_status::FaultStatus,
         applied_time_ns: Option<u64>,
         /// The admitted plan's action, so observers can tell which links or
         /// machines it affects. Absent from workers that predate it.
@@ -127,8 +128,5 @@ pub enum MachineTransition {
     Resumed,
     Crashed,
     Rebooted,
-    /// Effective nominal speed after throttle rounding and clamping; None is healed.
-    Throttled {
-        speed_hz: Option<u64>,
-    },
+    Throttled { factor_permille: u64 },
 }

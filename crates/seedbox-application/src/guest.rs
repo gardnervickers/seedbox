@@ -13,7 +13,7 @@ use std::{
 };
 
 /// Guest ISA comes from the retained execution profile, never host tools or an
-/// inherited image-platform setting. Historical profiles retain amd64.
+/// inherited image-platform setting. Descriptorless non-native helpers use amd64.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Architecture {
     Amd64,
@@ -21,10 +21,15 @@ pub enum Architecture {
 }
 impl Architecture {
     pub fn from_profile(profile: &crate::execution::ExecutionProfile) -> Result<Self> {
-        Ok(match profile.backend {
-            crate::execution::Backend::Hvf => Self::Arm64,
-            _ => Self::Amd64,
-        })
+        let engine = profile.semantic_parameters.engine.as_ref();
+        match engine.map(|engine| engine.guest_arch.as_str()) {
+            None => Ok(Self::Amd64),
+            Some("x86_64") => Ok(Self::Amd64),
+            Some("aarch64") => Ok(Self::Arm64),
+            value => Err(Error::Integrity(format!(
+                "unsupported guest architecture {value:?}"
+            ))),
+        }
     }
     pub fn oci_name(self) -> &'static str {
         match self {
@@ -80,7 +85,7 @@ pub fn minimum_memory_mb(archive_bytes: u64) -> Result<u32> {
 }
 
 /// The boot recipe format this build writes; the guest supervisor must accept it.
-pub const LAUNCH_MAGIC: &[u8; 10] = b"SBXLAUNCH6";
+pub const LAUNCH_MAGIC: &[u8; 10] = b"SBXLAUNCH5";
 
 /// Linux rejects a CLOCK_REALTIME earlier than the guest's uptime, so an epoch
 /// below this would stop every guest at the launch barrier.
@@ -88,8 +93,6 @@ pub const MIN_WALL_CLOCK_EPOCH: u32 = 86400;
 
 /// This binary recipe is consumed by the small static Linux guest init. Length
 /// prefixes avoid shell evaluation of command, environment or config contents.
-/// The progress instrumentation's constants ride along, so the guest and the
-/// simulator agree on what one progress call stands for.
 pub fn launch_recipe(
     launch: &Launch,
     ip: &str,
@@ -97,6 +100,27 @@ pub fn launch_recipe(
     hostname: &str,
     configs: &BTreeMap<String, Vec<u8>>,
     wall_clock_epoch: u32,
+) -> Result<Vec<u8>> {
+    launch_recipe_with_progress(
+        launch,
+        ip,
+        hosts,
+        hostname,
+        configs,
+        wall_clock_epoch,
+        seedbox_spec::project::SimulatorDefaults::default().progress_budget,
+    )
+}
+
+/// Encode the explicit PV block budget with the prepared guest inputs.
+pub fn launch_recipe_with_progress(
+    launch: &Launch,
+    ip: &str,
+    hosts: &str,
+    hostname: &str,
+    configs: &BTreeMap<String, Vec<u8>>,
+    wall_clock_epoch: u32,
+    progress_budget: seedbox_spec::progress::ProgressBudget,
 ) -> Result<Vec<u8>> {
     if wall_clock_epoch < MIN_WALL_CLOCK_EPOCH {
         return Err(Error::Setup(format!(
@@ -110,8 +134,7 @@ pub fn launch_recipe(
     // A guest-wide default per service VM, retained with the launch inputs.
     bytes.extend_from_slice(&262144_u32.to_le_bytes()); // vm.max_map_count
     bytes.extend_from_slice(&wall_clock_epoch.to_le_bytes());
-    bytes.extend_from_slice(&seedbox_spec::project::PROGRESS_INSTRUCTIONS.to_le_bytes());
-    bytes.extend_from_slice(&seedbox_spec::project::PROGRESS_POINTS.to_le_bytes());
+    bytes.extend_from_slice(&progress_budget.get().to_le_bytes());
     list(&mut bytes, &launch.argv)?;
     list(
         &mut bytes,
@@ -162,11 +185,6 @@ fn list(output: &mut Vec<u8>, items: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Check the private runtime before importing application images. Only regular,
-/// relative files are accepted; extraction never follows archive links.
-pub(crate) fn validate_progress(path: &Path, architecture: Architecture) -> Result<()> {
-    check_progress(path, Some(architecture))
-}
 fn check_progress(path: &Path, architecture: Option<Architecture>) -> Result<()> {
     let bad = || {
         Error::Setup(format!(

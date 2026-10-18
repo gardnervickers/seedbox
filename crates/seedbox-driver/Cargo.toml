@@ -1,0 +1,34 @@
+[package]
+name = "seedbox-driver"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# TODO: Re-evaluate: canonical pure connection/link policy stays shared with
+# standalone engines; no legacy scheduler or RNG implementation is adopted.
+seedbox-engine-core.workspace = true
+seedbox-control.workspace = true
+seedbox-machine.workspace = true
+seedbox-machine-tcg.workspace = true
+seedbox-machine-pv.workspace = true
+rayon.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+seedbox-test.workspace = true
+tempfile.workspace = true
+seedbox-test-time.workspace = true
+seedbox-machine = { workspace = true, features = ["test-support"] }
+seedbox-machine-pv = { workspace = true, features = ["test-support"] }
+# Native TCG scenarios run under the backend's test run watchdog.
+seedbox-machine-tcg = { workspace = true, features = ["test-support"] }
+
+tar.workspace = true
+hex.workspace = true
+
+[[test]]
+name = "native_driver"
+path = "tests/native_driver/mod.rs"

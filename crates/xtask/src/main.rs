@@ -5,19 +5,34 @@ use std::{
     process::{Command, Stdio},
 };
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+mod runtime;
+
+// Spawns and executable writes go through the process-wide seedbox_exec scope
+// (runtime.rs writes the QEMU launcher and copies its closure). Production
+// build-assets is sequential; the unit tests share one descriptor table.
+fn guarded_status(command: &mut Command) -> io::Result<std::process::ExitStatus> {
+    seedbox_exec::spawn(command)?.wait()
+}
+/// Like `Command::output` with stdin null and stdout captured; stderr is
+/// whatever the caller set (std's default would capture it).
+fn guarded_output(command: &mut Command) -> io::Result<std::process::Output> {
+    command.stdin(Stdio::null()).stdout(Stdio::piped());
+    seedbox_exec::spawn(command)?.wait_with_output()
+}
 
 fn run(command: &mut Command) -> Result<()> {
-    let status = command
-        .stdout(Stdio::from(io::stderr()))
-        .stderr(Stdio::inherit())
-        .status()?;
+    let status = guarded_status(
+        command
+            .stdout(Stdio::from(io::stderr()))
+            .stderr(Stdio::inherit()),
+    )?;
     if !status.success() {
         return Err(format!("{command:?}: {status}").into());
     }
     Ok(())
 }
 fn capture(command: &mut Command) -> Result<String> {
-    let output = command.stderr(Stdio::inherit()).output()?;
+    let output = guarded_output(command.stderr(Stdio::inherit()))?;
     if !output.status.success() {
         return Err(format!("{command:?}: {}", output.status).into());
     }
@@ -29,25 +44,7 @@ fn command(program: &str, root: &Path) -> Command {
     command
 }
 fn linux(root: &Path, output: &Path) -> Result<()> {
-    let kernel = capture(command("nix", root).args([
-        "build",
-        "--no-link",
-        "--print-out-paths",
-        ".#guestKernel",
-    ]))?;
-    let runtime = capture(command("nix", root).args([
-        "build",
-        "--no-link",
-        "--print-out-paths",
-        ".#runtimeArchive",
-    ]))?;
-    let image = match env::consts::ARCH {
-        "x86_64" => "bzImage",
-        "aarch64" => "Image",
-        arch => return Err(format!("unsupported architecture {arch}").into()),
-    };
-    fs::copy(Path::new(&kernel).join(image), output.join("kernel"))?;
-    fs::copy(runtime, output.join("runtime.tar.gz"))?;
+    runtime::guest(root, &output.join("driver"), env::consts::ARCH)?;
     Ok(())
 }
 fn mac(root: &Path, output: &Path) -> Result<()> {
@@ -57,12 +54,13 @@ fn mac(root: &Path, output: &Path) -> Result<()> {
     let client = candidates
         .into_iter()
         .find(|p| {
-            Command::new(p)
-                .arg("info")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
+            guarded_status(
+                Command::new(p)
+                    .arg("info")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .is_ok_and(|s| s.success())
         })
         .ok_or("start Podman or Docker Desktop to build Mac guest inputs")?;
     let image = "docker.io/nixos/nix:latest";
@@ -80,15 +78,17 @@ fn mac(root: &Path, output: &Path) -> Result<()> {
         return Err("invalid builder image ID".into());
     }
     let source = tempfile::tempdir_in(output)?;
-    let listed = command("git", root)
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ])
-        .output()?;
+    let listed = guarded_output(
+        command("git", root)
+            .args([
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ])
+            .stderr(Stdio::piped()),
+    )?;
     if !listed.status.success() {
         return Err("cannot list checkout files".into());
     }
@@ -111,10 +111,15 @@ fn mac(root: &Path, output: &Path) -> Result<()> {
  cd /source
  export NIX_CONFIG="experimental-features = nix-command flakes
 sandbox = false"
- kernel=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#guestKernel)
- runtime=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#runtimeArchive)
- cp "$kernel/Image" /output/kernel
- cp "$runtime" /output/runtime.tar.gz
+ pv=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#machinePvAssets)
+ tcg=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#machineTcgAssets)
+ formatter=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#machineGuestFormatter)
+ formatter_x86=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#machineGuestFormatterX86)
+ mkdir -p /output/driver/pv/aarch64 /output/driver/tcg/x86_64
+ cp "$pv/kernel" "$pv/init" "$pv/command-line" "$pv/progress.tar" /output/driver/pv/aarch64/
+ cp "$tcg/kernel" "$tcg/init" "$tcg/command-line" "$tcg/firmware" /output/driver/tcg/x86_64/
+ cp "$formatter/bin/mke2fs" /output/driver/pv/aarch64/mke2fs
+ cp "$formatter_x86/bin/mke2fs" /output/driver/tcg/x86_64/mke2fs
 "#;
     let container = capture(command(&client, root).args([
         "create",
@@ -144,10 +149,29 @@ sandbox = false"
     result.and(cleanup)
 }
 fn build(root: &Path) -> Result<PathBuf> {
-    publish(root, |output| match (env::consts::OS, env::consts::ARCH) {
-        ("linux", "x86_64" | "aarch64") => linux(root, output),
-        ("macos", "aarch64") => mac(root, output),
-        _ => Err("requires Linux x86-64/AArch64 or Apple Silicon macOS".into()),
+    publish(root, |output| {
+        match (env::consts::OS, env::consts::ARCH) {
+            ("linux", "x86_64" | "aarch64") => linux(root, output)?,
+            ("macos", "aarch64") => mac(root, output)?,
+            _ => return Err("requires Linux x86-64/AArch64 or Apple Silicon macOS".into()),
+        }
+        let driver = output.join("driver");
+        runtime::host(root, &driver)?;
+        fs::write(
+            driver.join("host-system"),
+            format!(
+                "{}-{}",
+                env::consts::ARCH,
+                if cfg!(target_os = "macos") {
+                    "darwin"
+                } else {
+                    "linux"
+                }
+            ),
+        )?;
+        runtime::archive(root, &driver, &output.join("driver-runtime.tar.gz"))?;
+        fs::remove_dir_all(driver)?;
+        Ok(())
     })
 }
 

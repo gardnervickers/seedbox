@@ -51,7 +51,6 @@ pub struct Clock {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Runtime {
-    pub kernel: Asset,
     /// Inline backend launch contract and resolved semantic policies.
     pub execution: serde_json::Value,
 }
@@ -79,8 +78,6 @@ pub struct Image {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Machine {
-    #[serde(default)]
-    pub cpu: crate::project::Cpu,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<Image>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -165,6 +162,8 @@ impl Start {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Simulator {
+    #[serde(rename = "blocksPerProgressCall")]
+    pub progress_budget: crate::progress::ProgressBudget,
     pub schedule: crate::Schedule,
     pub disk: crate::DiskOptions,
     /// The oracle exposes the world control API.
@@ -191,7 +190,8 @@ impl Definition {
     pub fn oracle_name(&self) -> &str {
         self.oracle.name.as_deref().unwrap_or(Self::ORACLE)
     }
-    pub fn configuration(&self, name: &str) -> crate::Simulation {
+    pub fn configuration(&self, name: &str) -> Result<crate::Simulation, String> {
+        self.runtime.driver_backend()?;
         let mut services = BTreeMap::new();
         for (name, machine) in self
             .machines
@@ -205,7 +205,6 @@ impl Definition {
                     memory_mb: Some(
                         u32::try_from(machine.memory_bytes / (1024 * 1024)).unwrap_or(u32::MAX),
                     ),
-                    cpu: machine.cpu.clone(),
                     source: crate::ImageSource::Registry {
                         reference: "resolved-binary-input".into(),
                     },
@@ -237,7 +236,7 @@ impl Definition {
                 },
             );
         }
-        crate::Simulation {
+        Ok(crate::Simulation {
             name: name.into(),
             source: std::path::PathBuf::new(),
             services,
@@ -260,10 +259,20 @@ impl Definition {
             machine: crate::MachineOptions {
                 memory_mb: u32::try_from(self.oracle.memory_bytes / (1024 * 1024))
                     .unwrap_or(u32::MAX),
-                ..Default::default()
             },
             disk: self.simulator.disk.clone(),
-        }
+            simulator: crate::project::SimulatorDefaults {
+                progress_budget: self.simulator.progress_budget,
+            },
+        })
+    }
+}
+
+impl Runtime {
+    pub fn driver_backend(&self) -> Result<Option<crate::backend::CpuBackend>, String> {
+        crate::backend::CpuBackend::from_recorded_name(
+            self.execution["backend"].as_str().unwrap_or_default(),
+        )
     }
 }
 

@@ -3,12 +3,12 @@
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
 ))]
+use seedbox_test::process::Guarded;
 use std::{
     fs,
     io::{BufRead, BufReader},
     path::Path,
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
 };
 
 fn invoke(
@@ -24,11 +24,12 @@ fn invoke(
     let mut command = Command::new(cli);
     command
         .args(args)
+        .env_remove("SEEDBOX_VMM")
         .env("SEEDBOX_STATE", state)
         .stdout(log.try_clone().map_err(|error| error.to_string())?)
         .stderr(log);
     let status = command
-        .status()
+        .guarded_status()
         .map_err(|error| format!("{}: {error}", cli.display()))?;
     if !status.success() {
         // CI keeps only the console, so show the end of the failing log there.
@@ -231,7 +232,7 @@ impl Server {
                 .args(["serve", "--startup-handshake", "--full-state"])
                 .env("SEEDBOX_STATE", state)
                 .stdout(Stdio::piped())
-                .spawn()
+                .guarded_spawn()
                 .map_err(|e| e.to_string())?,
         );
         let mut ready = String::new();
@@ -260,14 +261,40 @@ impl Drop for Server {
         unsafe {
             libc::kill(self.0.id() as i32, libc::SIGTERM);
         }
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
-            if self.0.try_wait().ok().flatten().is_some() {
-                return;
+        let pid = self.0.id();
+        std::thread::scope(|scope| {
+            let (done, completed) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                // Observe exit without reaping: the PID stays owned until the
+                // main thread has decided whether it must send SIGKILL.
+                let result = loop {
+                    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
+                    // SAFETY: info is writable and pid names our unreaped child.
+                    let rc = unsafe {
+                        libc::waitid(
+                            libc::P_PID,
+                            pid,
+                            info.as_mut_ptr(),
+                            libc::WEXITED | libc::WNOWAIT,
+                        )
+                    };
+                    if rc == 0 {
+                        break Ok(());
+                    }
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() != std::io::ErrorKind::Interrupted {
+                        break Err(error);
+                    }
+                };
+                let _ = done.send(result);
+            });
+            if !matches!(
+                completed.recv_timeout(std::time::Duration::from_secs(30)),
+                Ok(Ok(()))
+            ) {
+                let _ = self.0.kill();
             }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        });
+        self.0.wait().expect("reap owned application server");
     }
 }

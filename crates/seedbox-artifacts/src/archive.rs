@@ -116,7 +116,21 @@ fn collect(definition: &Definition, assets: &mut BTreeSet<ContentDigest>) -> Res
             .to_owned()
             .try_into()
     };
-    assets.insert(digest(&definition.runtime.kernel)?);
+    // The resolved definition owns this closure even if execution never produced
+    // a record. Checkpoint definitions can retain a different factory inventory.
+    if let Some(closure) = definition.runtime.execution.get("driver_world") {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct DriverClosure {
+            executable: ContentDigest,
+            manifest: ContentDigest,
+            objects: Vec<ContentDigest>,
+        }
+        let closure: DriverClosure = serde_json::from_value(closure.clone())?;
+        assets.insert(closure.executable);
+        assets.insert(closure.manifest);
+        assets.extend(closure.objects);
+    }
     for machine in definition
         .machines
         .values()
@@ -473,16 +487,16 @@ pub fn import(input: impl Read, store: &ContentStore, options: &Options) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execution::{Backend, ExecutionProfile, SemanticParameters, WitnessMode};
+    use crate::execution::{ExecutionProfile, SemanticParameters, WitnessMode};
     use seedbox_spec::definition::*;
 
     fn fixture(store: &ContentStore) -> Snapshot {
         let binary = store.put(b"guest-binary").unwrap();
         let asset = Asset(format!("sha256:{}", binary.hex()));
         let profile = ExecutionProfile {
-            backend: Backend::Other("archive-test".into()),
+            backend: "archive-test".into(),
             witness_mode: WitnessMode::Exits,
-            semantic_parameters: SemanticParameters::new(16),
+            semantic_parameters: SemanticParameters::new(),
         };
         let definition = Definition {
             architecture: Architecture::X86_64,
@@ -491,12 +505,10 @@ mod tests {
                 epoch_seconds: 86400,
             },
             runtime: Runtime {
-                kernel: asset.clone(),
                 execution: serde_json::to_value(profile).unwrap(),
             },
             machines: BTreeMap::new(),
             oracle: Machine {
-                cpu: Default::default(),
                 image: None,
                 name: None,
                 boot_archive: asset,
@@ -519,6 +531,7 @@ mod tests {
                 links: Vec::new(),
             },
             simulator: Simulator {
+                progress_budget: std::num::NonZeroU32::new(10_000).unwrap().into(),
                 schedule: Default::default(),
                 disk: Default::default(),
                 oracle_control: false,
@@ -539,7 +552,7 @@ mod tests {
                 parent: None,
                 checkpoint: None,
             },
-            seedbox_api::SimulationSpec::resolved(definition),
+            seedbox_api::SimulationSpec::resolved(definition).unwrap(),
         );
         simulation.status.phase = Phase::Completed;
         let world = WorldState {
@@ -607,7 +620,7 @@ mod tests {
                     unreachable!()
                 };
                 definition.start = Start::Checkpoint {
-                    manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[],"failed":false}}}, "ram":{"artifact":"asset:ram", "sha256":state.hex()}}),
+                    manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[]}}}, "ram":{"artifact":"asset:ram", "sha256":state.hex()}}),
                     assets: BTreeMap::from([(
                         "ram".into(),
                         Asset(format!("sha256:{}", state.hex())),
@@ -720,7 +733,7 @@ mod tests {
             unreachable!()
         };
         definition.start = Start::Checkpoint {
-            manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[],"failed":false}}}}),
+            manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[]}}}}),
             assets: (0..=MAX_OBJECTS)
                 .map(|index| {
                     (

@@ -1,7 +1,8 @@
 //! Server-owned retry driver. HTTP connection lifetime never owns a mutation.
 use crate::{catalogue::Error, manager::Manager};
 use seedbox_api::{ControlRequest, ControlState, SimulationId};
-use seedbox_application::{execution::CancellationToken, host_control::ClientError};
+use seedbox_application::execution::CancellationToken;
+use seedbox_driver_execution::host_control::ClientError;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, TryLockError},
@@ -71,6 +72,8 @@ fn drive(
     }
     match drive_worker(manager, id, request, &mut worker) {
         Err(Error::WorkerControl(message)) => {
+            #[cfg(test)]
+            worker.await_failure_publication();
             // Keep the worker gate until failure is durable. Completion and
             // deletion cannot retire this connection and overtake the error.
             manager.record_worker_control_failure(id, message)?;
@@ -150,8 +153,8 @@ mod tests {
         let mut simulations = Vec::new();
         for (name, malformed) in [("broken", true), ("healthy", false)] {
             let configuration = seedbox_application::config::parse(
-                "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-                std::path::Path::new("/project/compose.yaml"),
+                "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+                std::path::Path::new("/project/seedbox.yaml"),
                 &Default::default(),
             )
             .unwrap();
@@ -179,9 +182,7 @@ mod tests {
             fs::create_dir_all(run.join("output")).unwrap();
             let endpoint = directory.path().join(format!("{name}.sock"));
             let socket = UnixDatagram::bind(&endpoint).unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_millis(50)))
-                .unwrap();
+            socket.set_nonblocking(true).unwrap();
             fs::write(
                 run.join("output/host-control"),
                 endpoint.as_os_str().as_encoded_bytes(),
@@ -194,23 +195,29 @@ mod tests {
             peers.push(std::thread::spawn(move || {
                 let mut buffer = [0; MAX_DATAGRAM + 1];
                 while !stop.load(Ordering::Acquire) {
-                    let (count, peer) = match socket.recv_from(&mut buffer) {
-                        Ok(received) => received,
-                        Err(error)
-                            if matches!(
-                                error.kind(),
-                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                            ) =>
-                        {
-                            continue
+                    let received = seedbox_test_time::HangGuard::new(
+                        "wait for the fixture cancellation or socket signal",
+                        Duration::from_secs(60),
+                    )
+                    .wait_for(|| {
+                        if stop.load(Ordering::Acquire) {
+                            return Some(None);
                         }
-                        Err(error) => panic!("fake worker: {error}"),
+                        match socket.recv_from(&mut buffer) {
+                            Ok(received) => Some(Some(received)),
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => None,
+                            Err(error) => panic!("fake worker: {error}"),
+                        }
+                    })
+                    .unwrap();
+                    let Some((count, peer)) = received else {
+                        break;
                     };
                     let request: Request = serde_json::from_slice(&buffer[..count]).unwrap();
                     let bytes = if malformed {
                         if let Some(gate) = gate.take() {
                             request_seen.send(()).unwrap();
-                            gate.recv_timeout(Duration::from_secs(2)).unwrap();
+                            gate.recv_timeout(Duration::from_secs(60)).unwrap();
                         }
                         b"malformed reply".to_vec()
                     } else {
@@ -254,18 +261,50 @@ mod tests {
                 code: 0,
             },
         );
+        let (failure_entered, failure_observed) = std::sync::mpsc::channel();
+        let (publish_failure, failure_gate) = std::sync::mpsc::channel();
+        manager
+            .worker(broken)
+            .unwrap()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .gate_failure_publication(failure_entered, failure_gate);
         let driver = tokio::spawn(run(manager.clone(), shutdown.clone()));
-        tokio::task::spawn_blocking(move || seen.recv_timeout(Duration::from_secs(2)).unwrap())
+        tokio::task::spawn_blocking(move || seen.recv_timeout(Duration::from_secs(60)).unwrap())
             .await
             .unwrap();
+        release_reply.send(()).unwrap();
+        // Wait for actual malformed-wire decoding, not merely request dispatch.
+        // This timeout is only a hang guard. Once observed, no RPC deadline can
+        // release the gate before the test explicitly permits publication.
+        tokio::task::spawn_blocking(move || {
+            failure_observed
+                .recv_timeout(Duration::from_secs(60))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(manager
+            .describe(broken)
+            .unwrap()
+            .status
+            .termination
+            .is_none());
         let (retired_tx, retired_rx) = std::sync::mpsc::channel();
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
         let (finish_tx, finish_rx) = std::sync::mpsc::channel();
         let owner = manager.clone();
         let completing = broken.clone();
         let cleanup = std::thread::spawn(move || {
+            crate::worker::observe_retirement_blocked(blocked_tx);
             owner.retire_worker(&completing).unwrap();
-            retired_tx.send(()).unwrap();
-            finish_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            // Capture the error at retirement, rather than inferring its order
+            // from a later observation after the error eventually appears.
+            retired_tx
+                .send(owner.describe(&completing).unwrap().status.termination)
+                .unwrap();
+            finish_rx.recv_timeout(Duration::from_secs(60)).unwrap();
             owner
                 .update(&completing, |resource| {
                     resource.status.phase = Phase::Completed;
@@ -273,31 +312,42 @@ mod tests {
                 })
                 .unwrap();
         });
-        // Completion is trying to retire the very connection awaiting this reply.
-        assert!(retired_rx.recv_timeout(Duration::from_millis(30)).is_err());
-        release_reply.send(()).unwrap();
+        // Hang guard only: this signal follows a failed acquisition of the
+        // actual gate held at failure publication, under explicit test control.
+        blocked_rx.recv_timeout(Duration::from_secs(60)).unwrap();
+        assert_eq!(
+            retired_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        );
+        publish_failure.send(()).unwrap();
 
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let mut failures = manager.watch(broken).unwrap();
+            while !matches!(
+                failures.borrow_and_update().status.termination,
+                Some(ExecutionTermination::Error { .. })
+            ) {
+                failures.changed().await.unwrap();
+            }
+            let mut events = manager.events(healthy, true).unwrap();
             loop {
-                let failed = manager.describe(broken).unwrap();
                 let acknowledged = manager
                     .read(|catalogue| {
                         Ok(matches!(
                             catalogue
                                 .control_receipt(healthy, "step")?
-                                .map(|receipt| &receipt.state),
+                                .map(|r| &r.state),
                             Some(ControlState::Acknowledged { .. })
                         ))
                     })
                     .unwrap();
-                if matches!(
-                    failed.status.termination,
-                    Some(ExecutionTermination::Error { .. })
-                ) && acknowledged
-                {
+                if acknowledged {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                assert!(matches!(
+                    events.recv().await,
+                    crate::stream::Delivery::Record(_)
+                ));
             }
         })
         .await
@@ -316,7 +366,8 @@ mod tests {
             .any(|(id, _)| id == broken));
         // Execution retains ownership through cleanup and completion. Its ordinary
         // cancellation reason must not overwrite the observed operational error.
-        retired_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let retired_termination = retired_rx.recv_timeout(Duration::from_secs(60)).unwrap();
+        assert_eq!(retired_termination, failed.status.termination);
         // Retirement cannot finish until the error was durably recorded under
         // the same worker gate, even if execution cleanup raced the reply.
         assert_eq!(

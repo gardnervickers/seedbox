@@ -1,0 +1,56 @@
+#!/bin/sh
+# PID 1 for the Linux reference example. The sleep forces real kernel idle and
+# timer wakeup before shutdown, rather than merely testing early boot output.
+set -eu
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+exec </dev/console >/dev/console 2>&1
+/bin/busybox modprobe virtio_mmio
+/bin/busybox modprobe virtio_console
+
+# This small PID1 policy is independent of the simulated application: a machine
+# lifecycle request terminates the application group, waits for cleanup, syncs,
+# and asks Linux to power off. A child that ignores TERM may hang indefinitely;
+# the host caller owns any later crash decision.
+shutdown() {
+    trap '' USR1
+    echo 'seedbox: shutdown requested'
+    /bin/busybox kill -TERM "-$application" 2>/dev/null || true
+    wait "$application" || true
+    /bin/busybox sync
+    echo 'seedbox: shutdown cleanup complete'
+    /bin/busybox poweroff -f
+}
+trap shutdown USR1
+cat >/application <<'APPLICATION'
+#!/bin/sh
+trap 'echo "seedbox: application cleaned up"; exit 0' TERM
+touch /application-ready
+/bin/busybox sleep "${seedbox_sleep:-100}" &
+wait "$!"
+echo "seedbox: Linux timer woke name=${seedbox_name:-machine} sleep=${seedbox_sleep:-100}"
+APPLICATION
+chmod +x /application
+/bin/busybox setsid /application &
+application=$!
+while [ ! -e /application-ready ]; do /bin/busybox sleep 0.001; done
+(
+    # Port discovery may finish after an early shutdown request. The device
+    # retains that request until this reader opens the named standard port.
+    while :; do
+        for name in /sys/class/virtio-ports/*/name; do
+            [ -f "$name" ] || continue
+            [ "$(cat "$name")" = seedbox-lifecycle ] || continue
+            port=${name%/name}
+            exec <"/dev/${port##*/}"
+            while read -r request; do
+                [ "$request" = shutdown ] && kill -USR1 1
+            done
+        done
+        /bin/busybox sleep 0.01
+    done
+) &
+echo 'seedbox: Linux userspace booted'
+wait "$application" || true
+/bin/busybox poweroff -f

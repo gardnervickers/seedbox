@@ -22,6 +22,8 @@ mod status;
 pub use playback::{
     BoundaryPosition, PlaybackObservation, PlaybackRate, PlaybackStatus, RateMeasurement,
 };
+mod checkpoint_export;
+pub use checkpoint_export::CheckpointExport;
 mod controls;
 pub use controls::{
     CheckpointState, CheckpointStatus, ControlCommand, ControlReceipt, ControlRequest,
@@ -34,8 +36,8 @@ pub use events::{
 pub use http::{ApiError, ErrorCode, ServerInfo, SimulationList, SimulationSummary};
 pub use id::{InvalidSimulationId, SimulationId};
 pub use resource::{
-    ApiVersion, EngineBuild, ExecutionOptions, InputSource, Metadata, ProgramInput, ResourceKind,
-    Simulation, SimulationDocument, SimulationSpec, SimulationStatus, SubmitRequest,
+    ApiVersion, ExecutionOptions, InputSource, Metadata, ProgramInput, ResourceKind, Simulation,
+    SimulationDocument, SimulationSpec, SimulationStatus, SubmitRequest,
 };
 pub use status::{ExecutionTermination, Phase, Stage, StageTiming, TestVerdict};
 

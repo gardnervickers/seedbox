@@ -2,6 +2,7 @@ use seedbox_application::{
     guest::{build_initramfs, launch_recipe},
     image::Launch,
 };
+use seedbox_test::process::Guarded;
 use std::{
     collections::BTreeMap,
     fs,
@@ -50,8 +51,11 @@ fn initramfs_round_trip_preserves_image_files_modes_and_hardlinks() {
         .args(["-idm", "--no-absolute-filenames", "--no-preserve-owner"])
         .current_dir(&output)
         .stdin(fs::File::open(archive).unwrap())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        // Not guarded_output: that forces stdin to null.
+        .guarded_spawn()
+        .and_then(|child| child.wait_with_output())
         .expect("cpio from nix develop");
     assert!(
         status.status.success(),
@@ -133,15 +137,14 @@ fn binary_recipe_keeps_arguments_and_config_bytes_literal() {
         *cursor += n;
         data
     }
-    assert_eq!(&recipe[..10], b"SBXLAUNCH6");
+    assert_eq!(&recipe[..10], b"SBXLAUNCH5");
     assert!(launch_recipe(&launch, "10.0.0.1/24", "", "app", &BTreeMap::new(), 86399).is_err());
     for expected in ["10.0.0.1/24", "10.0.0.1 app\n", "app", "123:456", "/"] {
         assert_eq!(field(&recipe, &mut cursor), expected.as_bytes());
     }
     assert_eq!(count(&recipe, &mut cursor), 262144);
     assert_eq!(count(&recipe, &mut cursor), 1791500000);
-    assert_eq!(count(&recipe, &mut cursor), 50000);
-    assert_eq!(count(&recipe, &mut cursor), 1);
+    assert_eq!(count(&recipe, &mut cursor), 10000);
     assert_eq!(count(&recipe, &mut cursor), 2);
     for expected in &launch.argv {
         assert_eq!(field(&recipe, &mut cursor), expected.as_bytes());

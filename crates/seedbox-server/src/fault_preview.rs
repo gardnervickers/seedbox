@@ -8,7 +8,7 @@ pub(crate) fn preview(
     configuration: &seedbox_spec::Simulation,
     action: &Action,
 ) -> Result<FaultPreview, Error> {
-    let targets = seedbox_application::engine_adapter::fault_action_targets(configuration, action)
+    let targets = seedbox_application::fault_inputs::fault_action_targets(configuration, action)
         .map_err(|error| Error::Invalid(error.to_string()))?;
     let mut result = FaultPreview {
         simulation: world.simulation.clone(),
@@ -95,7 +95,7 @@ pub(crate) fn preview(
                 .filter_map(|plan| serde_json::from_value::<Action>(plan).ok())
                 .find(|plan| healable_handle(plan) == Some(handle.as_str()));
             if let Some(original) = original {
-                let original_targets = seedbox_application::engine_adapter::fault_action_targets(
+                let original_targets = seedbox_application::fault_inputs::fault_action_targets(
                     configuration,
                     &original,
                 )
@@ -191,13 +191,13 @@ pub(crate) fn preview(
                 None => format!("Change clock rate by a seeded amount within ±{} ppb. The draw occurs only during execution; heal restores the nominal rate.", max_rate_ppb.unwrap_or(0)),
             }
         }
-        Action::Throttle { speed_hz, .. } => {
+        Action::Throttle {
+            factor_permille, ..
+        } => {
             result
                 .preconditions
                 .push("The machine must not already be throttled.".into());
-            format!(
-                "Run the machine's CPU at {speed_hz} Hz, below the machine's configured speed, until healed."
-            )
+            format!("Scale the machine's seeded CPU cost to {factor_permille} thousandths until healed.")
         }
     };
     if action.is_process() || action.is_lifecycle() {
@@ -266,8 +266,8 @@ mod tests {
 
     fn fixture() -> (seedbox_spec::Simulation, WorldState) {
         let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  n1:\n    image: example/n1\n  n2:\n    image: example/n2\n  oracle:\n    image: example/oracle\n",
-            std::path::Path::new("/project/compose.yaml"), &Default::default(),
+            "name: test\nmachines:\n  n1:\n    image: example/n1\n  n2:\n    image: example/n2\noracle:\n  image: example/oracle\n",
+            std::path::Path::new("/project/seedbox.yaml"), &Default::default(),
         ).unwrap();
         let world =
             crate::world::Tracker::new("abcdefgh".parse().unwrap(), &configuration).snapshot();

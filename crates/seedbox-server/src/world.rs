@@ -77,8 +77,8 @@ impl Tracker {
             machine_pauses: BTreeMap::new(),
             before_pause: BTreeMap::new(),
         };
-        for (name, service) in &configuration.services {
-            tracker.machine(name).cpu_speed_hz = Some(service.cpu.speed_hz);
+        for name in configuration.services.keys() {
+            tracker.machine(name);
         }
         tracker.revision = 1;
         tracker
@@ -94,8 +94,7 @@ impl Tracker {
                     incarnation: 0,
                     condition: MachineCondition::Starting,
                     exit_code: None,
-                    cpu_speed_hz: None,
-                    throttle_speed_hz: None,
+                    throttle_permille: None,
                     oracle: name == self.oracle,
                     last_transition: None,
                     last_transition_at_ns: None,
@@ -199,8 +198,9 @@ impl Tracker {
                             exit_code: None,
                         };
                     }
-                    MachineTransition::Throttled { speed_hz } => {
-                        m.throttle_speed_hz = *speed_hz;
+                    MachineTransition::Throttled { factor_permille } => {
+                        m.throttle_permille =
+                            (*factor_permille != 1000).then_some(*factor_permille);
                     }
                 }
                 if matches!(
@@ -460,16 +460,8 @@ mod tests {
     }
 
     fn tracker_with_bandwidth(bandwidth_bps: Option<u64>) -> Tracker {
-        let service = |name| seedbox_spec::Service {
+        let service = |_| seedbox_spec::Service {
             memory_mb: None,
-            cpu: seedbox_spec::project::Cpu {
-                speed_hz: match name {
-                    "a" => 800_000_000,
-                    "b" => 2_000_000_000,
-                    _ => 1_000_000_000,
-                },
-                jitter_percent: 0,
-            },
             source: seedbox_spec::ImageSource::Registry {
                 reference: "example".into(),
             },
@@ -485,7 +477,7 @@ mod tests {
         };
         let mut spec = seedbox_spec::Simulation {
             name: "test".into(),
-            source: "/project/compose.yaml".into(),
+            source: "/project/seedbox.yaml".into(),
             services: ["a", "b", "oracle"]
                 .into_iter()
                 .map(|name| (name.to_owned(), service(name)))
@@ -499,6 +491,7 @@ mod tests {
                 queue_bound_ns: None,
                 links: Vec::new(),
             },
+            simulator: Default::default(),
             schedule: Default::default(),
             control: None,
             limits: seedbox_spec::Limits {
@@ -800,7 +793,7 @@ mod tests {
                 FaultAction::Throttle {
                     handle: "slow".into(),
                     machine: "a".into(),
-                    speed_hz: 1_000_000_000,
+                    factor_permille: 2000,
                 },
             ),
         ] {
@@ -847,14 +840,6 @@ mod tests {
             world
                 .machines
                 .iter()
-                .map(|m| m.cpu_speed_hz)
-                .collect::<Vec<_>>(),
-            [Some(800_000_000), Some(2_000_000_000), Some(1_000_000_000)]
-        );
-        assert_eq!(
-            world
-                .machines
-                .iter()
                 .map(|m| m.name.as_str())
                 .collect::<Vec<_>>(),
             ["a", "b", "oracle"]
@@ -874,26 +859,6 @@ mod tests {
         assert_eq!(world.links.len(), 6);
         assert_eq!(link(&world, "a", "b").policy.latency_ns, 7);
         assert_eq!(link(&world, "b", "a").policy.latency_ns, 1_000_000);
-    }
-
-    #[test]
-    fn throttle_and_heal_preserve_each_machines_configured_speed() {
-        let mut tracker = tracker();
-        for (time, speed_hz) in [(10, Some(200_000_000)), (20, None)] {
-            tracker.event(
-                time,
-                &EventKind::MachineLifecycle {
-                    machine: "a".into(),
-                    incarnation: 0,
-                    transition: MachineTransition::Throttled { speed_hz },
-                },
-            );
-            let world = tracker.snapshot();
-            assert_eq!(world.machines[0].cpu_speed_hz, Some(800_000_000));
-            assert_eq!(world.machines[0].throttle_speed_hz, speed_hz);
-            assert_eq!(world.machines[1].cpu_speed_hz, Some(2_000_000_000));
-            assert_eq!(world.machines[1].throttle_speed_hz, None);
-        }
     }
 
     #[test]

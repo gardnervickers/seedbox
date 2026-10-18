@@ -1,0 +1,40 @@
+[package]
+name = "seedbox-machine-tcg"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+test-support = ["seedbox-machine/test-support", "dep:hex"]
+
+[dependencies]
+hex = { workspace = true, optional = true }
+seedbox-machine.workspace = true
+seedbox-exec.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+
+[[bin]]
+name = "seedbox-tcg-scratch-fixture"
+path = "tests/support/scratch_fixture.rs"
+required-features = ["test-support"]
+test = false
+bench = false
+harness = false
+
+[dev-dependencies]
+seedbox-test-time.workspace = true
+# Integration targets (including the native suite, run without features) use
+# this crate's own test-support fixtures, such as the x86 raw-program builder.
+seedbox-machine-tcg = { workspace = true, features = ["test-support"] }
+tar.workspace = true
+seedbox-machine = { workspace = true, features = ["test-support"] }
+seedbox-test.workspace = true
+hex.workspace = true
+libc.workspace = true
+
+[[test]]
+name = "native_machine"
+path = "tests/native_machine/mod.rs"

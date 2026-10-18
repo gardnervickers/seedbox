@@ -1003,15 +1003,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "iced-x86"
-version = "1.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c447cff8c7f384a7d4f741cfcff32f75f3ad02b406432e8d6c878d56b1edf6b"
-dependencies = [
- "lazy_static",
-]
-
-[[package]]
 name = "icu_collections"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1216,9 +1207,7 @@ version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11cf0ca75d59e9d298647c59cf6c5286fa048120caa77972a7a504a0824d234f"
 dependencies = [
- "serde",
  "vmm-sys-util",
- "zerocopy",
 ]
 
 [[package]]
@@ -1232,24 +1221,6 @@ dependencies = [
  "libc",
  "vmm-sys-util",
 ]
-
-[[package]]
-name = "kvm-ioctls"
-version = "0.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06ac372c120eb893b086d1a12027669cf2b478d1f71204021ffa7adf57948d63"
-dependencies = [
- "bitflags 2.13.2",
- "kvm-bindings",
- "libc",
- "vmm-sys-util",
-]
-
-[[package]]
-name = "lazy_static"
-version = "1.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "libbz2-rs-sys"
@@ -1866,25 +1837,22 @@ dependencies = [
 name = "seedbox"
 version = "0.1.0"
 dependencies = [
- "bollard",
- "clap",
- "futures-util",
  "libc",
  "seedbox-api",
  "seedbox-application",
- "seedbox-arm64",
  "seedbox-artifacts",
+ "seedbox-cli",
  "seedbox-client",
+ "seedbox-driver-execution",
  "seedbox-engine-core",
  "seedbox-engine-protocol",
+ "seedbox-machine-pv",
  "seedbox-server",
  "seedbox-spec",
- "seedbox-tui",
- "seedbox-vmm",
- "serde",
+ "seedbox-test",
+ "seedbox-test-time",
  "serde_json",
  "serde_yaml_ng",
- "signal-hook",
  "tar",
  "tempfile",
  "tokio",
@@ -1913,13 +1881,15 @@ dependencies = [
  "hex",
  "libc",
  "ocirender",
- "seedbox-arm64",
  "seedbox-artifacts",
  "seedbox-control",
+ "seedbox-driver-execution",
  "seedbox-engine-core",
  "seedbox-engine-protocol",
+ "seedbox-machine",
  "seedbox-spec",
- "seedbox-vmm",
+ "seedbox-test",
+ "seedbox-test-time",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -1934,64 +1904,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "seedbox-arm64"
-version = "0.1.0"
-dependencies = [
- "cc",
- "clap",
- "hex",
- "kvm-bindings",
- "kvm-ioctls 0.24.0",
- "libc",
- "seedbox-arm64-control",
- "seedbox-arm64-engine-core",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
-name = "seedbox-arm64-control"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "seedbox-arm64-engine-core"
-version = "0.1.0"
-dependencies = [
- "hex",
- "rayon",
- "seedbox-arm64-control",
- "seedbox-arm64-protocol",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "seedbox-arm64-protocol"
-version = "0.1.0"
-dependencies = [
- "libc",
- "seedbox-arm64-control",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "seedbox-artifacts"
 version = "0.1.0"
 dependencies = [
  "hex",
  "libc",
  "seedbox-api",
- "seedbox-control",
- "seedbox-engine-core",
  "seedbox-engine-protocol",
+ "seedbox-exec",
  "seedbox-spec",
  "serde",
  "serde_json",
@@ -2003,6 +1923,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-check"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "proc-macro2",
+ "seedbox-exec",
+ "seedbox-test-time",
+ "serde_json",
+ "syn 2.0.119",
+ "tempfile",
+]
+
+[[package]]
+name = "seedbox-cli"
+version = "0.1.0"
+dependencies = [
+ "bollard",
+ "clap",
+ "futures-util",
+ "libc",
+ "seedbox-api",
+ "seedbox-application",
+ "seedbox-client",
+ "seedbox-driver-execution",
+ "seedbox-engine-protocol",
+ "seedbox-server",
+ "seedbox-spec",
+ "seedbox-test",
+ "seedbox-tui",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "signal-hook",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "seedbox-client"
 version = "0.1.0"
 dependencies = [
@@ -2011,6 +1969,7 @@ dependencies = [
  "hex",
  "reqwest",
  "seedbox-api",
+ "seedbox-test-time",
  "serde",
  "serde_json",
  "sha2",
@@ -2023,8 +1982,58 @@ dependencies = [
 name = "seedbox-control"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "seedbox-test",
+ "seedbox-test-time",
  "serde",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "seedbox-driver"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "rayon",
+ "seedbox-control",
+ "seedbox-engine-core",
+ "seedbox-machine",
+ "seedbox-machine-pv",
+ "seedbox-machine-tcg",
+ "seedbox-test",
+ "seedbox-test-time",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+]
+
+[[package]]
+name = "seedbox-driver-execution"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "hex",
+ "libc",
+ "seedbox-artifacts",
+ "seedbox-control",
+ "seedbox-driver",
+ "seedbox-engine-core",
+ "seedbox-engine-protocol",
+ "seedbox-machine",
+ "seedbox-machine-pv",
+ "seedbox-machine-tcg",
+ "seedbox-spec",
+ "seedbox-test",
+ "seedbox-test-time",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -2032,9 +2041,9 @@ name = "seedbox-engine-core"
 version = "0.1.0"
 dependencies = [
  "hex",
- "rayon",
  "seedbox-control",
  "seedbox-engine-protocol",
+ "seedbox-test-time",
  "serde",
  "serde_json",
  "sha2",
@@ -2047,8 +2056,68 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "seedbox-control",
+ "seedbox-spec",
+ "seedbox-test",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "seedbox-exec"
+version = "0.1.0"
+
+[[package]]
+name = "seedbox-machine"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "libc",
+ "seedbox-test",
+ "seedbox-test-time",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+]
+
+[[package]]
+name = "seedbox-machine-pv"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "hex",
+ "kvm-bindings",
+ "kvm-ioctls",
+ "libc",
+ "seedbox-exec",
+ "seedbox-machine",
+ "seedbox-spec",
+ "seedbox-test",
+ "seedbox-test-time",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+]
+
+[[package]]
+name = "seedbox-machine-tcg"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "libc",
+ "seedbox-exec",
+ "seedbox-machine",
+ "seedbox-machine-tcg",
+ "seedbox-test",
+ "seedbox-test-time",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
 ]
 
 [[package]]
@@ -2064,10 +2133,17 @@ dependencies = [
  "seedbox-artifacts",
  "seedbox-client",
  "seedbox-control",
+ "seedbox-driver",
+ "seedbox-driver-execution",
  "seedbox-engine-protocol",
+ "seedbox-machine",
+ "seedbox-machine-pv",
+ "seedbox-machine-tcg",
  "seedbox-spec",
+ "seedbox-test-time",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2083,6 +2159,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-test"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "libc",
+ "seedbox-exec",
+ "seedbox-test-time",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "seedbox-test-time"
+version = "0.1.0"
+
+[[package]]
 name = "seedbox-tui"
 version = "0.1.0"
 dependencies = [
@@ -2092,59 +2185,12 @@ dependencies = [
  "seedbox-api",
  "seedbox-client",
  "seedbox-spec",
+ "seedbox-test-time",
  "serde",
  "serde_json",
  "serde_yaml_ng",
- "tokio",
-]
-
-[[package]]
-name = "seedbox-vmm"
-version = "0.1.0"
-dependencies = [
- "clap",
- "hex",
- "iced-x86",
- "kvm-bindings",
- "kvm-ioctls 0.25.0",
- "libc",
- "seedbox-vmm-control",
- "seedbox-vmm-engine-core",
- "serde",
- "serde_json",
- "sha2",
  "tempfile",
-]
-
-[[package]]
-name = "seedbox-vmm-control"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "seedbox-vmm-engine-core"
-version = "0.1.0"
-dependencies = [
- "hex",
- "rayon",
- "seedbox-vmm-control",
- "seedbox-vmm-protocol",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "seedbox-vmm-protocol"
-version = "0.1.0"
-dependencies = [
- "libc",
- "seedbox-vmm-control",
- "serde",
- "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2471,6 +2517,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
@@ -3032,6 +3079,11 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "seedbox-exec",
+ "seedbox-test",
+ "seedbox-test-time",
+ "serde_json",
+ "tar",
  "tempfile",
 ]
 
@@ -3065,26 +3117,6 @@ dependencies = [
  "quote",
  "syn 3.0.6",
  "synstructure",
-]
-
-[[package]]
-name = "zerocopy"
-version = "0.8.59"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6df92bf3d9227be3d53173901ddbffac2babc27ae50f397776ffd6dc33f800cb"
-dependencies = [
- "zerocopy-derive",
-]
-
-[[package]]
-name = "zerocopy-derive"
-version = "0.8.59"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac4f328cf2f05d084e496c3e9c3f33ed0a183656a16e1fcec4d464d8373aec82"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]

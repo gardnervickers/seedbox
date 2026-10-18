@@ -68,7 +68,8 @@ def scenario():
         trigger = state["triggers"][cut.id - 1]
         assert trigger["status"] == "fired" and trigger["fault_id"] == 1
         assert trigger["effect_at_ns"] > trigger["matched_at_ns"]
-        assert state["active_handles"] == [cut.partition.handle]
+        partition = world.trigger_partition(cut)
+        assert state["active_handles"] == [partition.handle]
         try:
             world.cancel_trigger(cut)
             raise AssertionError("matched trigger cancelled")
@@ -77,7 +78,7 @@ def scenario():
         assert exchange("peer:7000", "probe") == "BLOCKED"
         state = world.inspect()
         assert any(c["partition_dropped"] > 0 for c in state["network_counters"].values())
-        world.heal(cut.partition)
+        world.heal(partition)
         assert exchange("peer:7000", "probe") == "PONG"
         expired = world.arm_console_stop("source", b"MISSING_EXPIRE", "source", match_timeout=0.001)
         world.sleep(0.01)

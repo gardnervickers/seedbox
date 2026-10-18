@@ -1,0 +1,472 @@
+--- a/accel/tcg/icount-common.c
++++ b/accel/tcg/icount-common.c
+@@ -62,6 +62,8 @@ static SeedboxStopReason seedbox_reason = SEEDBOX_STOP_REASON_BOUNDARY;
+ static int64_t seedbox_deadline = -1;
+ static bool (*seedbox_shutdown_handler)(void);
+ static void (*seedbox_console_handler)(uint8_t);
++/* Sticky: a failed device leaves no valid simulation state to continue. */
++static bool seedbox_device_failed;
+ 
+ /* Cause of the guest stop request, recorded by QEMU's shutdown notifiers just
+  * before the machine stops in RUN_STATE_SHUTDOWN. Seedbox runs with
+@@ -105,6 +107,21 @@ SeedboxShutdownResult *qmp_seedbox_request_shutdown(Error **errp)
+     return result;
+ }
+ 
++/* Record a malformed device request or ring; the failure is sticky and
++ * bounded execution never resumes. Called by the executing vCPU (an MMIO
++ * kick), it stops that CPU at the requesting instruction and the next poll
++ * reports an error, ahead of any boundary, idle or guest-shutdown
++ * classification. Called while stopped (a QMP command on the main thread,
++ * with no current vCPU), cpu_stop_current stops nothing: that caller fails
++ * its own command, and any later seedbox-run is refused. */
++void seedbox_icount_device_error(void)
++{
++    seedbox_device_failed = true;
++    if (seedbox_controlled) {
++        cpu_stop_current();
++    }
++}
++
+ /* Guest MMIO shutdown must stop its CPU at the requesting instruction,
+  * rather than running until the main thread happens to process the request. */
+ void seedbox_icount_shutdown(void)
+@@ -264,6 +281,10 @@ void qmp_seedbox_run(int64_t time, int64_t budget, int64_t factor, Error **errp)
+     int64_t now = icount_get();
+     int64_t count = icount_get_raw();
+ 
++    if (seedbox_device_failed) {
++        error_setg(errp, "seedbox-run after a failed seedbox device");
++        return;
++    }
+     /* Single CPU keeps this first implementation's instruction/time mapping
+      * explicit. Multi-CPU scheduling is not part of the reference contract. */
+     if (icount_enabled() != ICOUNT_PRECISE ||
+@@ -345,6 +366,12 @@ void seedbox_icount_poll(void)
+     if (!seedbox_active || !runstate_is_running()) {
+         return;
+     }
++    if (seedbox_device_failed) {
++        seedbox_reason = SEEDBOX_STOP_REASON_ERROR;
++        seedbox_active = false;
++        vm_stop(RUN_STATE_PAUSED);
++        return;
++    }
+     /* A guest shutdown or reset stopped the CPU at its requesting
+      * instruction. Let the main loop classify that stop by its cause instead
+      * of reporting a boundary or idle stop first. */
+--- a/hw/block/meson.build
++++ b/hw/block/meson.build
+@@ -13,6 +13,14 @@ system_ss.add(when: 'CONFIG_SSI_M25P80', if_true: files('m25p80_sfdp.c'))
+ system_ss.add(when: 'CONFIG_SWIM', if_true: files('swim.c'))
+ system_ss.add(when: 'CONFIG_XEN_BUS', if_true: files('xen-block.c'))
+ 
++# Seedbox's Rust disk store: libseedbox_disk.a and seedbox_disk.link (the
++# host's rustc --print native-static-libs) are built from the Seedbox
++# repository and copied here before configuration (see its nix/tcg.nix).
++seedbox_disk = declare_dependency(link_args:
++  [meson.current_source_dir() / 'libseedbox_disk.a'] +
++  fs.read('seedbox_disk.link').strip().split())
++system_ss.add(when: ['CONFIG_VIRTIO', 'CONFIG_TCG'],
++              if_true: [files('seedbox-blk.c'), seedbox_disk])
+ system_ss.add(when: 'CONFIG_VIRTIO_BLK', if_true: files('virtio-blk.c'))
+ system_ss.add(when: 'CONFIG_VIRTIO_BLK', if_true: files('virtio-blk-common.c'))
+ system_ss.add(when: 'CONFIG_VHOST_USER_BLK', if_true: files('vhost-user-blk.c'))
+--- /dev/null
++++ b/hw/block/seedbox-blk.c
+@@ -0,0 +1,328 @@
++/*
++ * Seedbox block device: a virtio-blk personality over Seedbox's Rust disk
++ * store, with no BlockBackend, AIO, host flush or host timing.
++ *
++ * Each kick runs synchronously in the vCPU thread at the guest's MMIO write
++ * (Seedbox sets virtio-mmio.ioeventfd=off): every available request executes
++ * in ring order and completes before the instruction retires. Request
++ * semantics, overlays and their SBXSTOR1 encoding belong to the shared Rust
++ * store; this file only moves descriptors, used entries and interrupts. A
++ * malformed request or ring, including a buffer outside guest RAM, stops
++ * bounded execution with an error, after the requests completed before it. Migration carries the overlays, never the
++ * base image, which the snapshot's owner retains. It offers FLUSH and
++ * SEG_MAX only, without indirect descriptors or event index.
++ */
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qapi/qapi-commands-run-state.h"
++#include "hw/virtio/virtio.h"
++#include "hw/virtio/virtio-access.h"
++#include "hw/core/qdev-properties.h"
++#include "migration/vmstate.h"
++#include "migration/qemu-file-types.h"
++#include "system/runstate.h"
++#include "system/memory.h"
++#include "qemu/rcu.h"
++#include "exec/icount.h"
++#include "qemu/module.h"
++#include "standard-headers/linux/virtio_ids.h"
++#include "standard-headers/linux/virtio_blk.h"
++#include "seedbox-disk.h"
++
++#define TYPE_SEEDBOX_BLK "seedbox-blk-device"
++OBJECT_DECLARE_SIMPLE_TYPE(SeedboxBlk, SEEDBOX_BLK)
++
++#define QUEUE_SIZE 256
++/* Seedbox's private config view: capacity, size_max (unused), seg_max. */
++#define CONFIG_SIZE (offsetof(struct virtio_blk_config, seg_max) + 4)
++
++QEMU_BUILD_BUG_ON(sizeof(struct iovec) != 2 * sizeof(void *));
++QEMU_BUILD_BUG_ON(offsetof(struct iovec, iov_len) != sizeof(void *));
++
++struct SeedboxBlk {
++    VirtIODevice parent_obj;
++    VirtQueue *vq;
++    uint64_t sectors;
++    char *image;
++    char *overlay;
++    SeedboxDisk *disk;
++};
++
++/* One disk per machine; QMP export addresses it. */
++static SeedboxBlk *seedbox_blk;
++
++/* Like Seedbox's PV transport, accept only buffers backed by guest RAM;
++ * QEMU would otherwise bounce DMA to device or unassigned memory. */
++static bool seedbox_blk_in_ram(VirtIODevice *vdev, const hwaddr *addresses,
++                               const struct iovec *segments, unsigned count,
++                               bool is_write)
++{
++    RCU_READ_LOCK_GUARD();
++    for (unsigned i = 0; i < count; i++) {
++        hwaddr offset, length = segments[i].iov_len;
++        MemoryRegion *region = address_space_translate(
++            vdev->dma_as, addresses[i], &offset, &length, is_write,
++            MEMTXATTRS_UNSPECIFIED);
++        if (!memory_region_is_ram(region) || length < segments[i].iov_len) {
++            return false;
++        }
++    }
++    return true;
++}
++
++static void seedbox_blk_handle(VirtIODevice *vdev, VirtQueue *vq)
++{
++    SeedboxBlk *s = SEEDBOX_BLK(vdev);
++    bool completed = false;
++
++    for (;;) {
++        VirtQueueElement *elem = virtqueue_pop(vq, sizeof(VirtQueueElement));
++        uint32_t written;
++        uint8_t status;
++
++        if (!elem) {
++            break;
++        }
++        if (!seedbox_blk_in_ram(vdev, elem->out_addr, elem->out_sg,
++                                elem->out_num, false) ||
++            !seedbox_blk_in_ram(vdev, elem->in_addr, elem->in_sg,
++                                elem->in_num, true) ||
++            !seedbox_disk_execute(s->disk, elem->out_sg, elem->out_num,
++                                  elem->in_sg, elem->in_num,
++                                  &written, &status)) {
++            virtqueue_detach_element(vq, elem, 0);
++            g_free(elem);
++            if (completed) {
++                virtio_notify(vdev, vq);
++            }
++            seedbox_icount_device_error();
++            return;
++        }
++        virtqueue_push(vq, elem, written);
++        g_free(elem);
++        completed = true;
++    }
++    if (completed) {
++        virtio_notify(vdev, vq);
++    }
++    /* virtqueue_pop marks a malformed ring broken instead of failing. */
++    if (vdev->broken) {
++        seedbox_icount_device_error();
++    }
++}
++
++static uint64_t seedbox_blk_get_features(VirtIODevice *vdev,
++                                         uint64_t features, Error **errp)
++{
++    virtio_add_feature(&features, VIRTIO_BLK_F_SEG_MAX);
++    virtio_add_feature(&features, VIRTIO_BLK_F_FLUSH);
++    virtio_clear_feature(&features, VIRTIO_RING_F_INDIRECT_DESC);
++    virtio_clear_feature(&features, VIRTIO_RING_F_EVENT_IDX);
++    return features;
++}
++
++static void seedbox_blk_get_config(VirtIODevice *vdev, uint8_t *config)
++{
++    SeedboxBlk *s = SEEDBOX_BLK(vdev);
++    struct virtio_blk_config blk = { 0 };
++
++    virtio_stq_p(vdev, &blk.capacity, s->sectors);
++    virtio_stl_p(vdev, &blk.seg_max, QUEUE_SIZE - 2);
++    memcpy(config, &blk, CONFIG_SIZE);
++}
++
++static bool seedbox_blk_read_file(const char *path, gchar **contents,
++                                  gsize *length, Error **errp)
++{
++    g_autoptr(GError) error = NULL;
++
++    if (!g_file_get_contents(path, contents, length, &error)) {
++        error_setg(errp, "seedbox-blk: %s", error->message);
++        return false;
++    }
++    return true;
++}
++
++static void seedbox_blk_realize(DeviceState *dev, Error **errp)
++{
++    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
++    SeedboxBlk *s = SEEDBOX_BLK(dev);
++    g_autofree gchar *image = NULL;
++    g_autofree gchar *overlay = NULL;
++    gsize image_length = 0, overlay_length = 0;
++
++    if (seedbox_blk) {
++        error_setg(errp, "seedbox-blk: only one device is supported");
++        return;
++    }
++    if (s->image && !seedbox_blk_read_file(s->image, &image, &image_length,
++                                           errp)) {
++        return;
++    }
++    s->disk = seedbox_disk_open(s->sectors, (const uint8_t *)image,
++                                image_length);
++    if (!s->disk) {
++        error_setg(errp, "seedbox-blk: sectors must be nonzero and an image "
++                   "exactly sectors * 512 bytes");
++        return;
++    }
++    if (s->overlay) {
++        if (!seedbox_blk_read_file(s->overlay, &overlay, &overlay_length,
++                                   errp)) {
++            goto fail;
++        }
++        if (!seedbox_disk_replace_overlays(s->disk, (const uint8_t *)overlay,
++                                           overlay_length)) {
++            error_setg(errp, "seedbox-blk: invalid overlay %s", s->overlay);
++            goto fail;
++        }
++    }
++    virtio_init(vdev, VIRTIO_ID_BLOCK, CONFIG_SIZE);
++    s->vq = virtio_add_queue(vdev, QUEUE_SIZE, seedbox_blk_handle);
++    seedbox_blk = s;
++    return;
++
++fail:
++    seedbox_disk_close(s->disk);
++    s->disk = NULL;
++}
++
++static void seedbox_blk_unrealize(DeviceState *dev)
++{
++    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
++    SeedboxBlk *s = SEEDBOX_BLK(dev);
++
++    virtio_delete_queue(s->vq);
++    virtio_cleanup(vdev);
++    seedbox_disk_close(s->disk);
++    s->disk = NULL;
++    seedbox_blk = NULL;
++}
++
++void qmp_seedbox_disk_export(const char *path, Error **errp)
++{
++    g_autoptr(GError) error = NULL;
++    uint8_t *bytes;
++    size_t length;
++    bool written;
++
++    if (runstate_is_running() || !seedbox_blk) {
++        error_setg(errp, "seedbox-disk-export needs a stopped machine with "
++                   "a seedbox-blk device");
++        return;
++    }
++    if (!seedbox_disk_encode(seedbox_blk->disk, &bytes, &length)) {
++        error_setg(errp, "seedbox-disk-export: encoding failed");
++        return;
++    }
++    written = g_file_set_contents(path, (const gchar *)bytes, length, &error);
++    seedbox_disk_bytes_free(bytes, length);
++    if (!written) {
++        error_setg(errp, "seedbox-disk-export: %s", error->message);
++    }
++}
++
++static bool seedbox_blk_save_overlays(QEMUFile *f, void *pv, size_t size,
++                                      const VMStateField *field,
++                                      JSONWriter *vmdesc, Error **errp)
++{
++    SeedboxBlk *s = pv;
++    uint8_t *bytes;
++    size_t length;
++
++    if (!seedbox_disk_encode(s->disk, &bytes, &length)) {
++        error_setg(errp, "seedbox-blk: overlay encoding failed");
++        return false;
++    }
++    qemu_put_be64(f, length);
++    qemu_put_buffer(f, bytes, length);
++    seedbox_disk_bytes_free(bytes, length);
++    return true;
++}
++
++static size_t seedbox_blk_read_stream(void *file, uint8_t *buffer,
++                                      size_t length)
++{
++    return qemu_get_buffer(file, buffer, length);
++}
++
++/* The Rust store pulls the declared length in bounded chunks and validates
++ * it against the device capacity before reading. */
++static bool seedbox_blk_load_overlays(QEMUFile *f, void *pv, size_t size,
++                                      const VMStateField *field, Error **errp)
++{
++    SeedboxBlk *s = pv;
++    uint64_t length = qemu_get_be64(f);
++
++    if (!seedbox_disk_replace_overlays_from(s->disk, length,
++                                            seedbox_blk_read_stream, f)) {
++        error_setg(errp, "seedbox-blk: invalid or truncated overlay stream");
++        return false;
++    }
++    return true;
++}
++
++static const VMStateInfo vmstate_info_seedbox_overlays = {
++    .name = "seedbox-disk-overlays",
++    .load = seedbox_blk_load_overlays,
++    .save = seedbox_blk_save_overlays,
++};
++
++static const VMStateDescription vmstate_seedbox_blk_device = {
++    .name = "seedbox-blk-device",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (const VMStateField[]) {
++        {
++            .name = "overlays",
++            .info = &vmstate_info_seedbox_overlays,
++            .flags = VMS_SINGLE,
++        },
++        VMSTATE_END_OF_LIST()
++    },
++};
++
++static const VMStateDescription vmstate_seedbox_blk = {
++    .name = "seedbox-blk",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (const VMStateField[]) {
++        VMSTATE_VIRTIO_DEVICE,
++        VMSTATE_END_OF_LIST()
++    },
++};
++
++static const Property seedbox_blk_properties[] = {
++    DEFINE_PROP_UINT64("sectors", SeedboxBlk, sectors, 0),
++    DEFINE_PROP_STRING("image", SeedboxBlk, image),
++    DEFINE_PROP_STRING("overlay", SeedboxBlk, overlay),
++};
++
++static void seedbox_blk_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    VirtioDeviceClass *vdc = VIRTIO_DEVICE_CLASS(klass);
++
++    device_class_set_props(dc, seedbox_blk_properties);
++    dc->vmsd = &vmstate_seedbox_blk;
++    set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
++    vdc->realize = seedbox_blk_realize;
++    vdc->unrealize = seedbox_blk_unrealize;
++    vdc->get_features = seedbox_blk_get_features;
++    vdc->get_config = seedbox_blk_get_config;
++    vdc->vmsd = &vmstate_seedbox_blk_device;
++}
++
++static const TypeInfo seedbox_blk_info = {
++    .name = TYPE_SEEDBOX_BLK,
++    .parent = TYPE_VIRTIO_DEVICE,
++    .instance_size = sizeof(SeedboxBlk),
++    .class_init = seedbox_blk_class_init,
++};
++
++static void seedbox_blk_register_types(void)
++{
++    type_register_static(&seedbox_blk_info);
++}
++
++type_init(seedbox_blk_register_types)
+--- /dev/null
++++ b/hw/block/seedbox-disk.h
+@@ -0,0 +1,29 @@
++/*
++ * Private C ABI of Seedbox's Rust disk store. The normative contract is the
++ * rustdoc in Seedbox's crates/seedbox-machine/src/machine/disk/abi.rs.
++ * Durability policy stays in Rust: flushes happen only inside execute and
++ * nothing here discards unflushed data.
++ */
++#ifndef HW_BLOCK_SEEDBOX_DISK_H
++#define HW_BLOCK_SEEDBOX_DISK_H
++
++typedef struct SeedboxDisk SeedboxDisk;
++
++SeedboxDisk *seedbox_disk_open(uint64_t sectors, const uint8_t *image,
++                               size_t image_len);
++void seedbox_disk_close(SeedboxDisk *disk);
++uint64_t seedbox_disk_capacity(const SeedboxDisk *disk);
++bool seedbox_disk_execute(SeedboxDisk *disk,
++                          const struct iovec *out, size_t out_count,
++                          const struct iovec *in, size_t in_count,
++                          uint32_t *written, uint8_t *status);
++bool seedbox_disk_encode(const SeedboxDisk *disk, uint8_t **bytes,
++                         size_t *len);
++void seedbox_disk_bytes_free(uint8_t *bytes, size_t len);
++bool seedbox_disk_replace_overlays(SeedboxDisk *disk, const uint8_t *bytes,
++                                   size_t len);
++typedef size_t (*SeedboxRead)(void *context, uint8_t *buffer, size_t length);
++bool seedbox_disk_replace_overlays_from(SeedboxDisk *disk, uint64_t length,
++                                        SeedboxRead read, void *context);
++
++#endif
+--- a/include/exec/icount.h
++++ b/include/exec/icount.h
+@@ -81,5 +81,9 @@ void seedbox_icount_set_shutdown_handler(bool (*handler)(void));
+ 
+ void seedbox_icount_set_console_handler(void (*handler)(uint8_t));
+ void seedbox_icount_console(uint8_t byte);
++/* A Seedbox device could not answer the guest. Sticky: the executing vCPU
++ * stops with an error result; a stopped (QMP) caller must fail its command.
++ * Every later seedbox-run is refused. Shared by all Seedbox devices. */
++void seedbox_icount_device_error(void);
+ 
+ #endif /* EXEC_ICOUNT_H */
+--- a/qapi/run-state.json
++++ b/qapi/run-state.json
+@@ -834,6 +834,20 @@
+ ##
+ { 'command': 'seedbox-capture-complete', 'if': 'CONFIG_TCG' }
+ 
++##
++# @seedbox-disk-export:
++#
++# Write the Seedbox block device's durable and unflushed overlays, in
++# the private SBXSTOR1 encoding, to a new file.  The machine must be
++# stopped; exporting never flushes or changes the disk.
++#
++# @path: Destination file; it is replaced.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-disk-export', 'data': { 'path': 'str' },
++  'if': 'CONFIG_TCG' }
++
+ ##
+ # @SeedboxShutdownResult:
+ #

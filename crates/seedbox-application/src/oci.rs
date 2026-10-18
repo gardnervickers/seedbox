@@ -15,7 +15,10 @@ use std::{
 /// Linux filesystems stay on Linux; a container transport returns an archive.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootFilesystem {
+    /// An application-root directory, without a transport prefix.
     Directory(PathBuf),
+    /// Transport tar with rootfs/ on entries and hard-link targets. The legacy
+    /// boot assembler consumes it directly; SDK builders need the logical root.
     Archive(PathBuf),
 }
 

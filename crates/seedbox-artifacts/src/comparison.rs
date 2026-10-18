@@ -5,7 +5,12 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageHashDiff {
     pub differing_pfns: u64,
+    /// Guest physical frame numbers, never sparse-vector indices.
     pub first_pfns: Vec<u64>,
+    /// Explicit guest physical chunk addresses when retained region metadata is
+    /// present. Empty for the legacy flat-page format and omitted on its wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub first_gpas: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

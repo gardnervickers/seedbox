@@ -12,6 +12,8 @@ pub use seedbox_artifacts::record::*;
 #[derive(Clone, Debug, Default)]
 pub struct ReplayOptions {
     pub cancellation: CancellationToken,
+    /// Semantic settings must still match. A new engine gives a new identity.
+    pub allow_engine_change: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -21,6 +23,9 @@ pub struct RunOptions {
     /// An explicit override wins over the resolved seed.
     pub seed: Option<u64>,
     pub cancellation: CancellationToken,
+    /// Machine worker threads for this attempt. Performance only; never part
+    /// of the experiment identity. `None` keeps the executor default.
+    pub machine_workers: Option<u32>,
 }
 
 pub enum RunProgress<'a> {
@@ -109,7 +114,7 @@ impl Orchestrator {
             .or(simulation.seed)
             .ok_or_else(|| Error::Validation {
                 path: "seed".into(),
-                message: "provide a seed in RunOptions or x-seedbox.seed".into(),
+                message: "provide a seed in RunOptions".into(),
             })?;
         preparer.validate_runtime_inputs()?;
         executor.preflight(None)?;
@@ -155,7 +160,7 @@ impl Orchestrator {
             .or(simulation.seed)
             .ok_or_else(|| Error::Validation {
                 path: "seed".into(),
-                message: "provide a seed in RunOptions or x-seedbox.seed".into(),
+                message: "provide a seed in RunOptions".into(),
             })?;
         let identity = RunIdentity {
             interventions: self.replay_history.clone(),
@@ -165,7 +170,7 @@ impl Orchestrator {
             configuration: simulation.clone(),
             inputs,
         };
-        self.execute(identity, executor, &options, None, progress)
+        self.execute(identity, executor, &options, None, false, progress)
     }
 
     /// Fresh execution with the original seed and retained artifacts. There is
@@ -181,6 +186,7 @@ impl Orchestrator {
             executor,
             ReplayOptions {
                 cancellation: cancellation.clone(),
+                ..Default::default()
             },
         )
     }
@@ -192,11 +198,14 @@ impl Orchestrator {
         options: ReplayOptions,
     ) -> Result<Run> {
         let baseline = inspect(directory)?;
-        // Refuse settings drift before creating an attempt or executing anything.
         let requested = executor.profile();
-        drift(&baseline.identity.inputs.profile, &requested)?;
-        // Replay always runs the current engine; its build is provenance.
-        let identity = baseline.identity.clone();
+        let mut identity = baseline.identity.clone();
+        if options.allow_engine_change {
+            // A new executable can use different argv without changing the
+            // simulation's retained memory, timebase, faults or other settings.
+            identity.inputs.profile.semantic_parameters.engine =
+                requested.semantic_parameters.engine;
+        }
         let mut run = self.execute(
             identity,
             executor,
@@ -205,6 +214,7 @@ impl Orchestrator {
                 ..Default::default()
             },
             Some(&baseline),
+            options.allow_engine_change,
             |_| Ok(()),
         )?;
         if let Some(comparison) = &mut run.record.replay {
@@ -240,6 +250,7 @@ impl Orchestrator {
         executor: &dyn ExecutionBackend,
         options: &RunOptions,
         baseline: Option<&RunRecord>,
+        allow_engine_change: bool,
         mut progress: impl FnMut(RunProgress<'_>) -> Result<()>,
     ) -> Result<Run> {
         let cancellation = &options.cancellation;
@@ -257,8 +268,8 @@ impl Orchestrator {
                 .to_string_lossy()
                 .into_owned(),
             identity,
-            performance_parameters: executor.performance_parameters(),
-            engine: executor.engine(),
+            performance_parameters: performance_parameters(executor, options.machine_workers),
+            allow_engine_change,
             log_policy: self.log_policy.clone(),
             omitted_logs: BTreeMap::new(),
             outcome: Outcome::Incomplete,
@@ -272,6 +283,10 @@ impl Orchestrator {
         write_record(&directory, &record)?;
         let output = directory.join("output");
         let execution = (|| -> Result<ExecutionReport> {
+            executor.preflight_resume(
+                self.resume_checkpoint.as_deref(),
+                record.identity.configuration.control.as_ref(),
+            )?;
             let replay_interventions = record
                 .identity
                 .interventions
@@ -301,9 +316,22 @@ impl Orchestrator {
             for digest in executor.runtime_inputs(&record.identity.inputs) {
                 if !artifacts.contains_key(digest) {
                     let inputs = directory.join("inputs");
-                    let path = match &self.shared_inputs {
-                        Some(shared) => self.store.materialize_linked(digest, shared, &inputs)?,
-                        None => self.store.materialize(digest, &inputs)?,
+                    // The retained engine is the one host-executed input; guest
+                    // inputs are read as bytes (see Runtime::select).
+                    let executable = record
+                        .identity
+                        .inputs
+                        .executable()
+                        .is_ok_and(|engine| digest == engine);
+                    let path = match (&self.shared_inputs, executable) {
+                        (Some(shared), true) => self
+                            .store
+                            .materialize_linked_executable(digest, shared, &inputs)?,
+                        (Some(shared), false) => {
+                            self.store.materialize_linked(digest, shared, &inputs)?
+                        }
+                        (None, true) => self.store.materialize_executable(digest, &inputs)?,
+                        (None, false) => self.store.materialize(digest, &inputs)?,
                     };
                     artifacts.insert(digest.clone(), path);
                 }
@@ -338,13 +366,6 @@ impl Orchestrator {
                 program: &record.identity.program,
                 limits: &limits,
                 network: &record.identity.configuration.network,
-                cpus: &record
-                    .identity
-                    .configuration
-                    .services
-                    .iter()
-                    .map(|(name, service)| (name.clone(), service.cpu.clone()))
-                    .collect(),
                 schedule: &record.identity.configuration.schedule,
                 control: record.identity.configuration.control.as_ref(),
                 check: &record.identity.configuration.check,
@@ -358,18 +379,9 @@ impl Orchestrator {
             // This additional guard prevents a late return from being a success.
             // Keep explicit backend/cleanup failures visible even when a
             // cancellation or deadline races with the completed report.
-            if report.reason != StopReason::Error {
-                if cancellation.is_cancelled() {
-                    report.reason = StopReason::Cancelled;
-                } else if start
-                    .elapsed()?
-                    .saturating_sub(std::time::Duration::from_nanos(report.host_wait_ns))
-                    .as_nanos()
-                    >= u128::from(limits.wall_time_ns)
-                {
-                    report.reason = StopReason::WallTimeLimit;
-                }
-            }
+            apply_final_deadline(&mut report, cancellation, limits.wall_time_ns, || {
+                Ok(start.elapsed()?)
+            })?;
             Ok(report)
         })();
         progress(RunProgress::Finalizing {
@@ -440,7 +452,7 @@ impl Orchestrator {
 }
 
 fn validate_inputs(identity: &RunIdentity, executor: &dyn ExecutionBackend) -> Result<()> {
-    crate::engine_adapter::validate_input_program(&identity.configuration, &identity.program)?;
+    crate::fault_inputs::validate_input_program(&identity.configuration, &identity.program)?;
     let inputs = &identity.inputs;
     let machines: BTreeSet<_> = inputs.placement.values().collect();
     if inputs
@@ -607,31 +619,126 @@ fn retain_logs(
     Ok(())
 }
 
-/// Refuse, before any attempt exists, a KVM executor whose result-changing
-/// settings differ from the recorded run, naming a TX-mode difference first,
-/// then the first other one. The executable descriptor may differ; it only
-/// selects argv.
-fn drift(recorded: &ExecutionProfile, requested: &ExecutionProfile) -> Result<()> {
-    if recorded.backend != Backend::Kvm {
-        return Ok(());
+// Keep the fallible elapsed read lazy: an explicit error or cancellation must
+// retain its existing precedence without consulting the clock at all.
+fn apply_final_deadline(
+    report: &mut ExecutionReport,
+    cancellation: &CancellationToken,
+    wall_time_ns: u64,
+    elapsed: impl FnOnce() -> Result<std::time::Duration>,
+) -> Result<()> {
+    if report.reason != StopReason::Error {
+        if cancellation.is_cancelled() {
+            report.reason = StopReason::Cancelled;
+        } else if elapsed()?
+            .saturating_sub(std::time::Duration::from_nanos(report.host_wait_ns))
+            .as_nanos()
+            >= u128::from(wall_time_ns)
+        {
+            report.reason = StopReason::WallTimeLimit;
+        }
     }
-    let (was, now) = (
-        &recorded.semantic_parameters,
-        &requested.semantic_parameters,
-    );
-    let differences = was.differences(now);
-    let first = if differences.contains(&"deferred_tx") {
-        "deferred_tx"
-    } else {
-        let Some(&first) = differences.first() else {
-            return Ok(());
-        };
-        first
-    };
-    Err(Error::Integrity(match first {
-        "deferred_tx" => "executor TX mode does not match the recorded --deferred-tx; use an executor with the recorded TX mode".into(),
-        setting => format!(
-            "executor {setting} does not match the recorded run; use an executor with the recorded settings"
-        ),
-    }))
+    Ok(())
+}
+
+/// Applies a per-run machine-worker override to an executor that has the setting.
+fn performance_parameters(
+    executor: &dyn ExecutionBackend,
+    machine_workers: Option<u32>,
+) -> BTreeMap<String, String> {
+    let mut parameters = executor.performance_parameters();
+    if let Some(workers) = machine_workers {
+        if let Some(value) = parameters.get_mut("SEEDBOX_MACHINE_WORKERS") {
+            *value = workers.to_string();
+        }
+    }
+    parameters
+}
+
+#[cfg(test)]
+fn incomplete(reason: crate::execution::StopReason) -> crate::execution::ExecutionReport {
+    crate::execution::ExecutionReport {
+        reason,
+        workload_exit: None,
+        detail: None,
+        witness: None,
+        full_state: None,
+        host_wait_ns: 0,
+        simulated_time_ns: None,
+        faults: vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use seedbox_test_time::ControlledClock;
+    use std::time::Duration;
+
+    #[test]
+    fn final_deadline_excludes_accounted_wait_and_keeps_the_exact_boundary() {
+        let elapsed = ControlledClock::default();
+        elapsed.advance_by(Duration::from_millis(150)).unwrap();
+        for (waited_ms, expected) in [
+            (150, StopReason::Completed),
+            (51, StopReason::Completed),
+            (50, StopReason::WallTimeLimit),
+            (0, StopReason::WallTimeLimit),
+            (200, StopReason::Completed),
+        ] {
+            let waited = ControlledClock::new(Duration::from_millis(waited_ms));
+            let mut report = incomplete(StopReason::Completed);
+            report.host_wait_ns = waited.now().as_nanos().try_into().unwrap();
+            report.detail = Some("preserved backend report".into());
+            apply_final_deadline(
+                &mut report,
+                &CancellationToken::default(),
+                100_000_000,
+                || Ok(elapsed.now()),
+            )
+            .unwrap();
+            assert_eq!(report.reason, expected, "accounted wait: {waited_ms}ms");
+            assert_eq!(report.detail.as_deref(), Some("preserved backend report"));
+            assert_eq!(report.host_wait_ns, waited_ms * 1_000_000);
+        }
+    }
+
+    #[test]
+    fn final_deadline_preserves_error_and_cancellation_without_sampling_elapsed() {
+        for (reason, cancelled, expected) in [
+            (StopReason::Error, false, StopReason::Error),
+            (StopReason::Error, true, StopReason::Error),
+            (StopReason::Completed, true, StopReason::Cancelled),
+            (StopReason::WallTimeLimit, true, StopReason::Cancelled),
+        ] {
+            let cancellation = CancellationToken::default();
+            if cancelled {
+                cancellation.cancel();
+            }
+            let mut report = incomplete(reason);
+            report.detail = Some("preserved backend report".into());
+            report.host_wait_ns = 123;
+            apply_final_deadline(&mut report, &cancellation, 0, || {
+                panic!("error/cancellation must not sample the elapsed clock")
+            })
+            .unwrap();
+            assert_eq!(report.reason, expected);
+            assert_eq!(report.detail.as_deref(), Some("preserved backend report"));
+            assert_eq!(report.host_wait_ns, 123);
+        }
+    }
+
+    #[test]
+    fn final_deadline_propagates_elapsed_failure_without_rewriting_the_report() {
+        let mut report = incomplete(StopReason::Completed);
+        let error = apply_final_deadline(
+            &mut report,
+            &CancellationToken::default(),
+            100_000_000,
+            || Err(Error::Execution("elapsed sample failed".into())),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("elapsed sample failed"));
+        assert_eq!(report.reason, StopReason::Completed);
+    }
 }

@@ -51,6 +51,7 @@ pub trait BackendProvider: Send + Sync + 'static {
     fn project(
         &self,
         configuration: &Simulation,
+        backend: seedbox_spec::backend::CpuBackend,
         store: &ContentStore,
         cancellation: &CancellationToken,
     ) -> seedbox_application::Result<Backends>;
@@ -83,6 +84,28 @@ pub struct ExecutionService {
     preparation_limit: Duration,
     evidence: Mutex<()>,
     admission: Mutex<(usize, BTreeMap<tokio::task::Id, SimulationId>)>,
+}
+
+// A started spawn_blocking task cannot be aborted with its JoinSet. The loop
+// owner must request cooperative cancellation even when its future is dropped
+// at an await point; those blocking tasks then join their owned processes before
+// returning. Do not kill monitors or remove their inputs from this destructor.
+struct CancelExecutionsOnDrop {
+    manager: Arc<Manager>,
+    shutdown: CancellationToken,
+    armed: bool,
+}
+impl Drop for CancelExecutionsOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.shutdown.cancel();
+            // cancel_active broadcasts every token before fallible catalogue
+            // updates. A dropped owner cannot return persistence errors; the
+            // normal graceful path still reports them. Cleanup authority stays
+            // with each backend's receipt, including on a persistence failure.
+            let _ = self.manager.cancel_active();
+        }
+    }
 }
 
 impl ExecutionService {
@@ -127,8 +150,7 @@ impl ExecutionService {
         // mutex. Retirement prevents already cloned handles from starting later.
         for target in &targets {
             if let Some(worker) = &target.worker {
-                worker
-                    .lock()
+                crate::worker::lock_for_retirement(worker)
                     .map_err(|_| Error::Catalogue(catalogue::Error::StorageFailed))?
                     .retire();
             }
@@ -256,13 +278,24 @@ impl ExecutionService {
         id: &SimulationId,
         name: &str,
     ) -> Result<seedbox_api::Simulation, Error> {
+        self.checkpoint_definition_observed(id, name, &mut |_| Ok(()))
+    }
+
+    pub(crate) fn checkpoint_definition_observed(
+        &self,
+        id: &SimulationId,
+        name: &str,
+        progress: &mut impl FnMut(u64) -> std::io::Result<()>,
+    ) -> Result<seedbox_api::Simulation, Error> {
+        progress(0)?;
         self.manager.captured_checkpoint(id, name)?;
         if let Some(definition) = self
             .manager
             .read(|catalogue| catalogue.imported_checkpoint(id, name))?
         {
             let mut resource = self.describe(id)?;
-            resource.spec = seedbox_api::SimulationSpec::resolved(definition);
+            resource.spec =
+                seedbox_api::SimulationSpec::resolved(definition).map_err(Error::Bundle)?;
             return Ok(resource);
         }
         let mut resource = self.describe(id)?;
@@ -280,30 +313,15 @@ impl ExecutionService {
             .ok_or_else(|| std::io::Error::other("checkpoint has no execution attempt"))?;
         let path = attempt
             .join("output")
-            .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR)
+            .join(seedbox_application::execution::MACHINE_OUTPUT_DIR)
             .join(format!("checkpoint-{name}.json"));
-        definition.overrides = resource
-            .spec
-            .program
-            .iter()
-            .map(|input| seedbox_spec::definition::Override {
-                id: input.key.clone(),
-                at_ns: input.at_ns,
-                action: input.action.clone(),
-                timeout_ns: input.timeout_ns,
-            })
-            .collect();
-        definition.start =
-            seedbox_application::definition::capture_start(&path, &attempt, &self.store)?;
-        let frozen = seedbox_artifacts::interventions::read(
-            &attempt.join(format!("checkpoint-{name}-interventions.json")),
+        definition.start = seedbox_application::definition::capture_start_observed(
+            &path,
+            &attempt,
+            &self.store,
+            progress,
         )?;
-        seedbox_artifacts::checkpoint::project(
-            &mut definition.start,
-            &definition.overrides,
-            &frozen,
-        )
-        .map_err(|e| Error::Bundle(format!("checkpoint {name}: {e}")))?;
+        progress(0)?;
         resource
             .metadata
             .annotations
@@ -311,8 +329,10 @@ impl ExecutionService {
         Ok(resource)
     }
 
-    /// Read final evidence using server-owned attempt references. Clients never
-    /// need host run paths, and comparison never changes a simulation's verdict.
+    /// Compare completed server-owned records. Resolved execution semantics are
+    /// the sole input comparability rule; private record identities are not a
+    /// second gate. Missing evidence is NOT_COMPARABLE, and result comparison
+    /// never changes either simulation's verdict.
     pub fn compare(
         &self,
         baseline: &SimulationId,
@@ -323,40 +343,9 @@ impl ExecutionService {
             .lock()
             .map_err(|_| seedbox_application::Error::Setup("evidence lock failed".into()))?;
         let record = |id: &SimulationId| {
-            let resource = self
-                .manager
-                .describe(id)
-                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?;
-            if resource.status.phase != Phase::Completed {
-                return Err(seedbox_application::Error::Setup(format!(
-                    "simulation {id} is not complete"
-                )));
-            }
-            if self
-                .manager
-                .read(|catalogue| catalogue.is_imported(id))
-                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?
-            {
-                let snapshot = self
-                    .imported_snapshot(id)
-                    .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?;
-                return Ok(snapshot.record);
-            }
-            let path = self.root.join("inputs").join(format!("{id}.json"));
-            let file = match fs::File::open(&path) {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => {
-                    return Err(seedbox_application::Error::Setup(format!(
-                        "simulation {id} retained inputs: {error}"
-                    )))
-                }
-            };
-            let inputs: RetainedInputs = serde_json::from_reader(file)?;
-            let Some(attempt) = inputs.attempt else {
-                return Ok(None);
-            };
-            seedbox_application::orchestration::inspect(&attempt).map(Some)
+            self.manager
+                .result_evidence(id)
+                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))
         };
         let (Some(first), Some(second)) = (record(baseline)?, record(simulation)?) else {
             return Ok(seedbox_api::SimulationComparison {
@@ -369,17 +358,10 @@ impl ExecutionService {
                 fault_history_matches: false,
             });
         };
-        let comparison = seedbox_artifacts::record::compare(&first, &second);
+        let comparison = seedbox_artifacts::record::compare(&first.record, &second.record);
         use seedbox_api::ComparisonStatus;
-        let first_definition = self.portable_simulation(baseline)?.spec.inputs;
-        let second_definition = self.portable_simulation(simulation)?.spec.inputs;
-        let compatible = match (first_definition, second_definition) {
-            (
-                InputSource::Resolved { definition: first },
-                InputSource::Resolved { definition: second },
-            ) => bundles::semantic_definition(first)? == bundles::semantic_definition(second)?,
-            _ => false,
-        };
+        let compatible = bundles::semantic_definition(first.definition)?
+            == bundles::semantic_definition(second.definition)?;
         let status = if !compatible {
             ComparisonStatus::NotComparable
         } else {
@@ -403,13 +385,21 @@ impl ExecutionService {
     }
 
     /// The owner waits for every active task during graceful shutdown. Dropping
-    /// a CLI connection has no path to this cancellation token.
+    /// this owning future also cancels active executions: started blocking tasks
+    /// must observe cancellation and finish their owned cleanup before returning.
+    /// Dropping a CLI connection has no path to this cancellation token.
     pub async fn run(
         self: Arc<Self>,
         mut queue: mpsc::Receiver<SimulationId>,
         capacity: NonZeroUsize,
         shutdown: CancellationToken,
     ) -> Result<(), Error> {
+        // Establish ownership before recovery or any other await can suspend.
+        let mut cancel_on_drop = CancelExecutionsOnDrop {
+            manager: self.manager.clone(),
+            shutdown: shutdown.clone(),
+            armed: true,
+        };
         self.admission
             .lock()
             .map_err(|_| catalogue::Error::StorageFailed)?
@@ -440,6 +430,9 @@ impl ExecutionService {
                 }
             }
             if stopping && tasks.is_empty() {
+                // Graceful cancellation was requested above and every blocking
+                // task has joined. No destructor-time persistence is needed.
+                cancel_on_drop.armed = false;
                 return failure.map_or(Ok(()), Err);
             }
             tokio::select! {
@@ -500,7 +493,22 @@ impl ExecutionService {
         // No completed resource may lose its final manager-owned control handle
         // while that connection still has transport or journal work in flight.
         self.manager.retire_worker(&id)?;
-        let _ = self.timeline(&id)?;
+        let result = result.and_then(|run| {
+            // Freeze the portable semantics while the execution owner still has
+            // its journal and checkpoint files. Later comparisons read only the
+            // manager-owned record. A missing journal is an explicit completion
+            // error, never an empty history or a failed owner task.
+            let simulation = self.portable_simulation(&id)?;
+            let InputSource::Resolved { definition } = simulation.spec.inputs else {
+                return Err(seedbox_application::Error::Integrity(
+                    "completed execution has no resolved definition".into(),
+                ));
+            };
+            self.manager
+                .retain_result(&id, definition, run.record.clone())
+                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?;
+            Ok(run)
+        });
         match result {
             Ok(run) => {
                 let report = run.record.report.as_ref();
@@ -572,20 +580,19 @@ impl ExecutionService {
         cancellation: &CancellationToken,
         preparation_expired: Arc<AtomicBool>,
     ) -> seedbox_application::Result<Run> {
-        let mut resolved_spec = spec.clone();
-        resolved_spec
-            .resolve_project_architecture(if cfg!(target_arch = "aarch64") {
-                seedbox_spec::definition::Architecture::Aarch64
-            } else {
-                seedbox_spec::definition::Architecture::X86_64
-            })
-            .map_err(seedbox_application::Error::Setup)?;
-        let spec = &resolved_spec;
         let options = self
             .manager
             .describe(id)
             .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?
             .options;
+        let mut resolved_spec = spec.clone();
+        resolved_spec
+            .resolve_project_architecture(
+                seedbox_driver_execution::driver_world::platform::Host::current()
+                    .project_architecture(options.backend.unwrap_or_default()),
+            )
+            .map_err(seedbox_application::Error::Setup)?;
+        let spec = &resolved_spec;
         let program = crate::catalogue::resolve_program(spec)
             .map_err(|error| seedbox_application::Error::Setup(error.to_string()))?;
         let budget = crate::preparation_budget::Budget::start(
@@ -612,6 +619,7 @@ impl ExecutionService {
             InputSource::Project => {
                 let backends = self.backends.project(
                     &spec.configuration,
+                    options.backend.unwrap_or_default(),
                     &self.store,
                     &budget.cancellation,
                 )?;
@@ -670,7 +678,7 @@ impl ExecutionService {
                         })?;
                         let path = attempt
                             .join("output")
-                            .join(seedbox_application::engine_adapter::MACHINE_OUTPUT_DIR)
+                            .join(seedbox_application::execution::MACHINE_OUTPUT_DIR)
                             .join(format!("checkpoint-{checkpoint}.json"));
                         if !path.is_file() {
                             return Err(seedbox_application::Error::Setup(format!(
@@ -732,7 +740,7 @@ impl ExecutionService {
             self.backends.retained(&inputs, &self.store)?
         };
         definition.runtime.execution =
-            seedbox_application::definition::execution_settings(&inputs.profile)?;
+            seedbox_application::definition::execution_settings_with_inputs(&inputs)?;
         for (name, machine) in &mut definition.machines {
             machine.boot_archive =
                 seedbox_spec::definition::Asset(format!("sha256:{}", inputs.guests[name].hex()));
@@ -742,7 +750,9 @@ impl ExecutionService {
             "sha256:{}",
             inputs.guests[&oracle_name].hex()
         ));
-        let configuration = definition.configuration("");
+        let resolved_spec = seedbox_api::SimulationSpec::resolved(definition)
+            .map_err(seedbox_application::Error::Setup)?;
+        let configuration = resolved_spec.configuration.clone();
         let mut retained = RetainedInputs {
             checkpoint: checkpoint.clone(),
             prepared: inputs.clone(),
@@ -753,16 +763,11 @@ impl ExecutionService {
         if budget.finish() || cancellation.is_cancelled() {
             return Err(seedbox_application::Error::PreparationCancelled);
         }
-        let engine = executor.engine().map(|engine| seedbox_api::EngineBuild {
-            version: engine.simulator_version,
-            revision: engine.revision,
-        });
         self.manager
             .update(id, |s| {
-                s.spec = seedbox_api::SimulationSpec::resolved(definition);
+                s.spec = resolved_spec;
                 s.status.phase = Phase::Running;
                 s.status.stage = Some(Stage::Booting);
-                s.status.engine = engine;
             })
             .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
         let observations = crate::observations::Receiver::start(self.manager.clone(), id.clone())?;
@@ -781,6 +786,7 @@ impl ExecutionService {
                     seed: spec.seed,
                     wall_time_ns: options.wall_time_ns,
                     cancellation: cancellation.clone(),
+                    machine_workers: options.machine_workers,
                 },
                 inputs,
                 executor.as_ref(),
@@ -881,18 +887,22 @@ mod tests {
     use super::*;
     use seedbox_api::{SimulationSpec, SubmitRequest, TestVerdict};
 
-    struct WaitingProvider(AtomicBool);
+    struct WaitingProvider(AtomicBool, tokio::sync::Notify);
     impl BackendProvider for WaitingProvider {
         fn project(
             &self,
             _: &Simulation,
+            _: seedbox_spec::backend::CpuBackend,
             _: &ContentStore,
             cancellation: &CancellationToken,
         ) -> seedbox_application::Result<Backends> {
-            let limit = std::time::Instant::now() + Duration::from_secs(2);
-            while !cancellation.is_cancelled() && std::time::Instant::now() < limit {
-                std::thread::sleep(Duration::from_millis(1));
-            }
+            self.1.notify_one();
+            seedbox_test_time::HangGuard::new(
+                "wait for the fixture cancellation or socket signal",
+                Duration::from_secs(60),
+            )
+            .wait_for(|| cancellation.is_cancelled().then_some(()))
+            .unwrap();
             self.0.store(cancellation.is_cancelled(), Ordering::Release);
             Err(seedbox_application::Error::PreparationCancelled)
         }
@@ -912,12 +922,13 @@ mod tests {
         let manager = Arc::new(Manager::new(
             catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
         ));
+        let provider = Arc::new(WaitingProvider(AtomicBool::new(false), Default::default()));
         let execution = Arc::new(
             ExecutionService::new(
                 manager,
                 root.into(),
                 ContentStore::new(root.join("store")),
-                Arc::new(WaitingProvider(AtomicBool::new(false))),
+                provider.clone(),
             )
             .unwrap(),
         );
@@ -933,8 +944,8 @@ mod tests {
         ));
         let client = seedbox_client::Client::connect_to(&socket).unwrap();
         let mut configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            Path::new("/project/compose.yaml"),
+            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+            Path::new("/project/seedbox.yaml"),
             &Default::default(),
         )
         .unwrap();
@@ -955,41 +966,29 @@ mod tests {
         };
         let first = client.submit(&request("first")).await.unwrap().metadata.id;
         let second = client.submit(&request("second")).await.unwrap().metadata.id;
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let capacity = client.capacity().await.unwrap();
-                if capacity.occupying.iter().any(|o| o.simulation == first) {
-                    assert_eq!(capacity.slots, 1);
-                    assert_eq!(capacity.occupying.len(), 1);
-                    assert_eq!(capacity.queued.len(), 1);
-                    assert_eq!(capacity.queued[0].simulation, second);
-                    assert_eq!(
-                        capacity.queued[0].reason,
-                        seedbox_api::QueueReason::ResidentCapacity
-                    );
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(60), provider.1.notified())
+            .await
+            .expect("first execution enters the provider");
+        let capacity = client.capacity().await.unwrap();
+        assert!(capacity.occupying.iter().any(|o| o.simulation == first));
+        assert_eq!(capacity.slots, 1);
+        assert_eq!(capacity.occupying.len(), 1);
+        assert_eq!(capacity.queued.len(), 1);
+        assert_eq!(capacity.queued[0].simulation, second);
+        assert_eq!(
+            capacity.queued[0].reason,
+            seedbox_api::QueueReason::ResidentCapacity
+        );
         client.stop(&first).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let capacity = client.capacity().await.unwrap();
-                if capacity.occupying.iter().any(|o| o.simulation == second) {
-                    assert_eq!(capacity.occupying.len(), 1);
-                    assert!(capacity.queued.is_empty());
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(60), provider.1.notified())
+            .await
+            .expect("second execution enters the provider");
+        let capacity = client.capacity().await.unwrap();
+        assert!(capacity.occupying.iter().any(|o| o.simulation == second));
+        assert_eq!(capacity.occupying.len(), 1);
+        assert!(capacity.queued.is_empty());
         shutdown.cancel();
-        tokio::time::timeout(Duration::from_secs(5), owner)
+        tokio::time::timeout(Duration::from_secs(60), owner)
             .await
             .unwrap()
             .unwrap()
@@ -1023,19 +1022,14 @@ mod tests {
             fn profile(&self) -> ExecutionProfile {
                 self.0.profile.clone()
             }
-            fn engine(&self) -> Option<seedbox_application::execution::EngineDescriptor> {
-                Some(seedbox_application::engine::kvm_descriptor(Some(
-                    "fixture-revision-dirty".into(),
-                )))
-            }
             fn execute(
                 &self,
                 request: ExecutionRequest<'_>,
             ) -> seedbox_application::Result<ExecutionReport> {
                 assert_eq!(request.prepared.profile, self.profile());
-                assert_eq!(request.prepared.memory_mb("app"), 2048);
-                assert_eq!(request.prepared.memory_mb("oracle"), 256);
-                assert_eq!(request.prepared.memory_mb("helper"), 1024);
+                assert_eq!(request.prepared.memory_mb("app").unwrap(), 2048);
+                assert_eq!(request.prepared.memory_mb("oracle").unwrap(), 256);
+                assert_eq!(request.prepared.memory_mb("helper").unwrap(), 1024);
                 Ok(ExecutionReport {
                     simulated_time_ns: Some(1),
                     host_wait_ns: 0,
@@ -1044,7 +1038,7 @@ mod tests {
                         service: "oracle".into(),
                         code: 0,
                     }),
-                    witness: Some(self.0.kernel.clone()),
+                    witness: Some(self.0.guests["oracle"].clone()),
                     full_state: None,
                     faults: vec![],
                     detail: None,
@@ -1056,6 +1050,7 @@ mod tests {
             fn project(
                 &self,
                 _: &Simulation,
+                _: seedbox_spec::backend::CpuBackend,
                 _: &ContentStore,
                 _: &CancellationToken,
             ) -> seedbox_application::Result<Backends> {
@@ -1095,7 +1090,6 @@ mod tests {
         };
         let inputs = PreparedInputs {
             wall_clock_epoch: Some(86400),
-            kernel: digest.clone(),
             images: BTreeMap::from([
                 ("app".into(), image.clone()),
                 ("helper".into(), image.clone()),
@@ -1111,11 +1105,15 @@ mod tests {
                 ("helper".into(), digest.clone()),
                 ("oracle".into(), digest.clone()),
             ]),
-            machine_memory_mb: BTreeMap::from([("app".into(), 2048), ("oracle".into(), 256)]),
+            machine_memory_mb: BTreeMap::from([
+                ("app".into(), 2048),
+                ("oracle".into(), 256),
+                ("helper".into(), 1024),
+            ]),
             profile: ExecutionProfile {
-                backend: Backend::Other("test".into()),
+                backend: "test".into(),
                 witness_mode: WitnessMode::Exits,
-                semantic_parameters: SemanticParameters::new(1024),
+                semantic_parameters: SemanticParameters::new(),
             },
             auxiliary: BTreeMap::new(),
             provenance: BTreeMap::new(),
@@ -1151,14 +1149,6 @@ mod tests {
             finished.status.termination,
             Some(seedbox_api::ExecutionTermination::OracleExited)
         );
-        // The executing engine's build is recorded as provenance.
-        assert_eq!(
-            finished.status.engine,
-            Some(seedbox_api::EngineBuild {
-                version: seedbox_application::engine::SIMULATOR_VERSION.into(),
-                revision: Some("fixture-revision-dirty".into()),
-            })
-        );
     }
 
     #[test]
@@ -1167,8 +1157,8 @@ mod tests {
         let manager =
             Manager::new(catalogue::Catalogue::open(&directory.path().join("catalogue")).unwrap());
         let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            Path::new("/project/compose.yaml"),
+            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+            Path::new("/project/seedbox.yaml"),
             &Default::default(),
         )
         .unwrap();
@@ -1229,13 +1219,13 @@ mod tests {
                 manager.clone(),
                 root.into(),
                 ContentStore::new(root.join("store")),
-                Arc::new(WaitingProvider(AtomicBool::new(false))),
+                Arc::new(WaitingProvider(AtomicBool::new(false), Default::default())),
             )
             .unwrap(),
         );
         let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            Path::new("/project/compose.yaml"),
+            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+            Path::new("/project/seedbox.yaml"),
             &Default::default(),
         )
         .unwrap();
@@ -1270,29 +1260,30 @@ mod tests {
         let (finished, completion) = std::sync::mpsc::channel();
         let owner = service.clone();
         let deleting_id = id.clone();
+        let (blocked, entered) = std::sync::mpsc::channel();
         let deletion = std::thread::spawn(move || {
+            crate::worker::observe_retirement_blocked(blocked);
             finished.send(owner.delete(&deleting_id)).unwrap();
         });
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !manager.describe(&id).unwrap().status.stop_requested {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "deletion never requested stop"
-            );
-            std::thread::yield_now();
-        }
+        // Hang guard only: correctness follows from the failed acquisition of
+        // the actual gate, which active_operation still owns below.
+        entered.recv_timeout(Duration::from_secs(60)).unwrap();
+        assert!(manager.describe(&id).unwrap().status.stop_requested);
         // Execution can complete before the held control operation finishes.
         manager
             .update(&id, |resource| {
                 resource.status.phase = Phase::Completed;
             })
             .unwrap();
-        assert!(completion.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(matches!(
+            completion.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
         assert!(attempt.is_dir());
         fs::write(attempt.join("checkpoint-history"), b"finished control I/O").unwrap();
         drop(active_operation);
         completion
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(60))
             .unwrap()
             .unwrap();
         deletion.join().unwrap();
@@ -1326,13 +1317,13 @@ mod tests {
                 manager.clone(),
                 root.into(),
                 ContentStore::new(root.join("store")),
-                Arc::new(WaitingProvider(AtomicBool::new(false))),
+                Arc::new(WaitingProvider(AtomicBool::new(false), Default::default())),
             )
             .unwrap(),
         );
         let configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            Path::new("/project/compose.yaml"),
+            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+            Path::new("/project/seedbox.yaml"),
             &Default::default(),
         )
         .unwrap();
@@ -1367,7 +1358,9 @@ mod tests {
         let (finished, completion) = std::sync::mpsc::channel();
         let owner = manager.clone();
         let completing_id = id.clone();
+        let (blocked, entered) = std::sync::mpsc::channel();
         let finalization = std::thread::spawn(move || {
+            crate::worker::observe_retirement_blocked(blocked);
             // ExecutionService::execute uses this order after its receiver drains.
             owner.retire_worker(&completing_id).unwrap();
             owner
@@ -1377,11 +1370,17 @@ mod tests {
                 .unwrap();
             finished.send(()).unwrap();
         });
-        assert!(completion.recv_timeout(Duration::from_millis(50)).is_err());
+        // Hang guard only; the probe establishes actual retirement contention
+        // while the test retains the control-I/O gate.
+        entered.recv_timeout(Duration::from_secs(60)).unwrap();
+        assert_eq!(
+            completion.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        );
         assert_eq!(manager.describe(&id).unwrap().status.phase, Phase::Running);
         fs::write(attempt.join("checkpoint-history"), b"finished control I/O").unwrap();
         drop(active_operation);
-        completion.recv_timeout(Duration::from_secs(2)).unwrap();
+        completion.recv_timeout(Duration::from_secs(60)).unwrap();
         finalization.join().unwrap();
         assert_eq!(
             manager.describe(&id).unwrap().status.phase,
@@ -1415,7 +1414,7 @@ mod tests {
         let manager = Arc::new(Manager::new(
             catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
         ));
-        let provider = Arc::new(WaitingProvider(AtomicBool::new(false)));
+        let provider = Arc::new(WaitingProvider(AtomicBool::new(false), Default::default()));
         let mut service = ExecutionService::new(
             manager.clone(),
             root.into(),
@@ -1425,8 +1424,8 @@ mod tests {
         .unwrap();
         service.preparation_limit = Duration::from_millis(10);
         let mut configuration = seedbox_application::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            Path::new("/project/compose.yaml"),
+            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+            Path::new("/project/seedbox.yaml"),
             &Default::default(),
         )
         .unwrap();

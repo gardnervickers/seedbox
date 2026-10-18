@@ -2,8 +2,8 @@
 //! participate in the simulation's verdict or deterministic inputs.
 
 use crate::{Phase, Stage};
+pub use seedbox_engine_protocol::fault_status::FaultStatus;
 pub use seedbox_engine_protocol::observation::MachineTransition;
-pub use seedbox_engine_protocol::report::RowStatus as FaultStatus;
 use serde::{Deserialize, Serialize};
 
 /// Coarse preparation milestones; no container-engine text enters events.
