@@ -558,14 +558,20 @@ pub(crate) fn recovery_text(r: &Recovery, tolerate_exits: bool) -> (String, bool
             }
         ));
     }
+    // Without a majority of running members nobody can serve a
+    // linearizable read: the hung ones are then excused.
+    let members = r.live.len() + r.down.len();
+    let quorum = members - r.exited.len() > members / 2;
     if !hung.is_empty() {
         let names: Vec<&str> = hung.iter().map(|m| m.as_str()).collect();
         text.push_str(&format!(
-            "; {} running but never served a read again after the faults ended",
-            names.join(", ")
+            "; {} running but never served a read again after the faults ended{}",
+            names.join(", "),
+            if quorum { "" } else { " (no quorum left)" }
         ));
     }
-    let violated = !hung.is_empty() || (!r.exited.is_empty() && !tolerate_exits);
+    let violated = (!hung.is_empty() && (quorum || !tolerate_exits))
+        || (!r.exited.is_empty() && !tolerate_exits);
     (text, violated)
 }
 
@@ -1034,6 +1040,14 @@ mod tests {
         };
         assert!(!recovery_text(&r, true).1);
         assert!(recovery_text(&r, false).1);
+        // Three of five refuse to start: the other two cannot serve.
+        let r = Recovery {
+            live: vec![],
+            down: ["n1", "n2", "n3", "n4", "n5"].map(String::from).to_vec(),
+            restarted: vec![],
+            exited: ["n1", "n2", "n3"].map(String::from).to_vec(),
+        };
+        assert!(!recovery_text(&r, true).1);
     }
 
     #[test]
