@@ -84,6 +84,44 @@ pub struct Args {
     /// Anomaly examples printed per type.
     #[arg(long, default_value_t = 5)]
     pub examples: usize,
+    /// Cut nodes off from the sequencer now and then (it keeps running): one
+    /// node, all of them, or one node from it and from some S3 servers.
+    #[arg(long)]
+    pub sequencer_cuts: bool,
+    #[arg(long, default_value = "sequencer")]
+    pub sequencer: String,
+    /// The S3 servers, for cuts that also separate a node from some of them.
+    #[arg(long, value_delimiter = ',', default_value = "s3-a,s3-b,s3-c")]
+    pub s3: Vec<String>,
+    /// Seconds after each sequencer heal within which some request must
+    /// succeed again (a separate liveness property).
+    #[arg(long, default_value_t = 10.0)]
+    pub liveness_window: f64,
+}
+
+/// The liveness property `--sequencer-cuts` evaluates.
+pub const RESUMES: &str = "delores-node: requests succeed again soon after each sequencer heal";
+
+/// When each request answered 200 completed.
+static OKS: Mutex<Vec<f64>> = Mutex::new(Vec::new());
+
+/// The sequencer cuts applied, with `--sequencer-cuts`.
+static CUTS: std::sync::OnceLock<Arc<Mutex<Vec<crate::nemesis::SequencerCut>>>> =
+    std::sync::OnceLock::new();
+
+/// Evaluate [`RESUMES`] over the cuts so far, once the operations end.
+fn report_cuts(args: &Args) {
+    let Some(cuts) = CUTS.get() else { return };
+    let cuts = cuts.lock().unwrap().clone();
+    let oks = OKS.lock().unwrap().clone();
+    let (report, stuck) =
+        crate::nemesis::recovery_after_cuts(&cuts, &oks, args.liveness_window, kit::now());
+    kit::evidence("sequencer-cuts", json!({"cuts": report, "stuck": stuck}));
+    seedbox_sdk::always(
+        RESUMES,
+        stuck.is_empty(),
+        json!({"cuts": report.len(), "stuck": stuck.len(), "window": args.liveness_window}),
+    );
 }
 
 /// One request's outcome.
@@ -136,6 +174,9 @@ fn call(args: &Args, node: &str, method: &str, path: &str, body: Option<&Value>)
 type Outcomes = Mutex<BTreeMap<String, u64>>;
 
 fn count(outcomes: &Outcomes, kind: &str, answer: &Answer) {
+    if matches!(answer, Answer::Got(200, _)) {
+        OKS.lock().unwrap().push(kit::now());
+    }
     *outcomes
         .lock()
         .unwrap()
@@ -175,6 +216,16 @@ pub fn run(args: Args) -> u8 {
     seedbox_sdk::setup_complete(
         json!({"nodes": args.nodes, "workload": format!("{:?}", args.workload)}),
     );
+    if args.sequencer_cuts {
+        seedbox_sdk::declare(RESUMES, seedbox_sdk::Kind::Always);
+        let _ = CUTS.set(crate::nemesis::sequencer_cuts(
+            args.nodes.clone(),
+            args.s3.clone(),
+            args.sequencer.clone(),
+            (12.0, 20.0),
+            args.duration as f64,
+        ));
+    }
     match args.workload {
         Workload::CasRegister => registers(Arc::new(args)),
         Workload::ListAppend => list_append(Arc::new(args)),
@@ -302,6 +353,7 @@ fn registers(args: Arc<Args>) -> u8 {
     for worker in workers {
         let _ = worker.join();
     }
+    report_cuts(&args);
     kit::evidence("progress", json!({"outcomes": *outcomes.lock().unwrap()}));
     kit::pause(args.quiet as f64);
     let deadline = Instant::now() + Duration::from_secs(args.recover);
@@ -542,6 +594,7 @@ fn list_append(args: Arc<Args>) -> u8 {
     for worker in workers {
         let _ = worker.join();
     }
+    report_cuts(&args);
     kit::evidence(
         "progress",
         json!({"outcomes": *run.outcomes.lock().unwrap()}),

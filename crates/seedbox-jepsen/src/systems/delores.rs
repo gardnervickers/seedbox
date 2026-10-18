@@ -67,7 +67,20 @@ pub struct Args {
     /// Seconds the cluster has to serve a first write and read.
     #[arg(long, default_value_t = 180)]
     pub setup: u64,
+    /// Cut replicas off from the sequencer now and then (it keeps running):
+    /// one replica, all of them, or one replica from it and from S3.
+    #[arg(long)]
+    pub sequencer_cuts: bool,
+    #[arg(long, default_value = "sequencer")]
+    pub sequencer: String,
+    /// Seconds after each sequencer heal within which some operation must
+    /// succeed again (a separate liveness property).
+    #[arg(long, default_value_t = 10.0)]
+    pub liveness_window: f64,
 }
+
+/// The liveness property `--sequencer-cuts` evaluates.
+pub const RESUMES: &str = "delores: operations succeed again soon after each sequencer heal";
 
 /// One request's outcome.
 enum Answer {
@@ -114,6 +127,8 @@ struct Tally {
     outcomes: BTreeMap<String, u64>,
     /// Reads of bytes no client wrote.
     unwritten: Vec<String>,
+    /// When each operation that succeeded completed.
+    oks: Vec<f64>,
 }
 
 /// One operation on key `k` through `replica`, recorded in `history`.
@@ -145,6 +160,7 @@ fn operate(
         (RegisterOp::Read, Answer::Got(200, data)) => match value_of(&data) {
             Some(value) => {
                 history.complete(id, RegisterRet::Value(Some(value)));
+                tally.lock().unwrap().oks.push(kit::now());
                 return Some(value);
             }
             None => {
@@ -158,13 +174,16 @@ fn operate(
         },
         (RegisterOp::Read, Answer::Got(404, _)) => {
             history.complete(id, RegisterRet::Value(Some(0)));
+            tally.lock().unwrap().oks.push(kit::now());
             return Some(0);
         }
         // A failed read has no effect.
         (RegisterOp::Read, _) => history.fail(id),
         (RegisterOp::Write(_), Answer::Got(200, _)) => {
             history.complete(id, RegisterRet::Wrote);
-            tally.lock().unwrap().acknowledged += 1;
+            let mut t = tally.lock().unwrap();
+            t.acknowledged += 1;
+            t.oks.push(kit::now());
         }
         // Never sent, or refused before it reached the log.
         (_, Answer::NotSent(_) | Answer::Got(400..=499, _)) => history.fail(id),
@@ -244,6 +263,16 @@ pub fn run(args: Args) -> u8 {
         return kit::verdict(kit::INCONCLUSIVE, &error);
     }
     seedbox_sdk::setup_complete(json!({"replicas": args.replicas, "keys": args.keys}));
+    let cuts = args.sequencer_cuts.then(|| {
+        seedbox_sdk::declare(RESUMES, seedbox_sdk::Kind::Always);
+        crate::nemesis::sequencer_cuts(
+            args.replicas.clone(),
+            vec![args.s3.clone()],
+            args.sequencer.clone(),
+            (12.0, 20.0),
+            args.duration as f64,
+        )
+    });
     let keys: Vec<String> = (0..args.keys).map(|k| format!("k{k}")).collect();
     let histories: Arc<Vec<Mutex<KeyHistory>>> =
         Arc::new(keys.iter().map(|_| Mutex::new(KeyHistory::new())).collect());
@@ -289,6 +318,18 @@ pub fn run(args: Args) -> u8 {
         .collect();
     for worker in workers {
         let _ = worker.join();
+    }
+    if let Some(cuts) = &cuts {
+        let cuts = cuts.lock().unwrap().clone();
+        let oks = tally.lock().unwrap().oks.clone();
+        let (report, stuck) =
+            crate::nemesis::recovery_after_cuts(&cuts, &oks, args.liveness_window, kit::now());
+        kit::evidence("sequencer-cuts", json!({"cuts": report, "stuck": stuck}));
+        seedbox_sdk::always(
+            RESUMES,
+            stuck.is_empty(),
+            json!({"cuts": report.len(), "stuck": stuck.len(), "window": args.liveness_window}),
+        );
     }
     {
         let t = tally.lock().unwrap();
