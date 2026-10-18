@@ -3,7 +3,7 @@
 # disk itself keeps the right bytes. keel-s3dd checksums its log frames and
 # object blocks, so a corrupted read must fail rather than return other bytes,
 # and since nothing on disk changes, no acknowledged object may be lost, even
-# across the power failures mixed in (recovery reads the log back through the
+# across the power failures and short (under 2 s) process pauses mixed in (recovery reads the log back through the
 # same corrupting disk). Pair it with keel-objects or keel-register.
 start: 15s
 end: 70s
@@ -21,4 +21,4 @@ faults:
     downtime: {min: 1s, max: 4s}
   - kind: pause_process
     weight: 1
-    duration: {min: 500ms, max: 4s}
+    duration: {min: 200ms, max: 1500ms}

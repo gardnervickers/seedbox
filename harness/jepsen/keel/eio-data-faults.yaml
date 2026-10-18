@@ -1,6 +1,7 @@
 # Failed disk reads and writes (EIO) on the server, restricted to requests
 # clear of ext4's metadata (an unscoped error also fails the journal and leaves
-# the filesystem unusable), with power loss and process pauses. keel-s3dd
+# the filesystem unusable), with power loss and process pauses (under 2 s: keel-s3dd's watchdog aborts it
+# after a longer SIGSTOP, see generic-faults.yaml). keel-s3dd
 # wedges for good on a failed write or sync (fail-stop by design); pair this
 # with keel-eio or keel-eio-register, which power-cycle the server once the
 # faults end. A write whose sync failed must never have been acknowledged.
@@ -19,4 +20,4 @@ faults:
     downtime: {min: 1s, max: 4s}
   - kind: pause_process
     weight: 1
-    duration: {min: 500ms, max: 4s}
+    duration: {min: 200ms, max: 1500ms}
