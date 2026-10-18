@@ -84,8 +84,7 @@ fn fixture(root: &Path) -> (FixturePreparer, config::Simulation, ContentStore) {
     let engine = std::env::current_exe().unwrap();
     let store = ContentStore::new(root.join("store"));
     let simulation = config::parse_for_architecture("name: preparation-test\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 10\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n", &root.join("compose.yaml"), &BTreeMap::new(), if cfg!(target_arch = "aarch64") { seedbox_application::guest::Architecture::Arm64 } else { seedbox_application::guest::Architecture::Amd64 }).unwrap();
-    let executor =
-        DriverExecutor::for_preparation(&engine, &store, &simulation, WitnessMode::Exits).unwrap();
+    let executor = DriverExecutor::for_preparation(&simulation, WitnessMode::Exits).unwrap();
     let inner = OciPreparer {
         kernel,
         engine,
@@ -117,15 +116,15 @@ fn cancelled_preparation_never_imports_images() {
     assert!(!context.directory.join("setup.json").exists());
 }
 #[test]
-fn invalid_profile_fails_before_image_import() {
+fn invalid_machine_memory_fails_before_image_import() {
     let root = tempfile::tempdir().unwrap();
-    let (mut preparer, simulation, store) = fixture(root.path());
-    preparer.profile.semantic_parameters.memory_mb = 32;
+    let (preparer, mut simulation, store) = fixture(root.path());
+    simulation.machine.memory_mb = 32;
     assert!(preparer
         .prepare(&simulation, &store)
         .unwrap_err()
         .to_string()
-        .contains("admitted profile requires memory_mb in 64..65536"));
+        .contains("memoryMiB must be 64..65536"));
 }
 #[test]
 fn preparation_retains_kernel_before_transport_changes_source() {
@@ -170,13 +169,17 @@ fn preparation_retains_kernel_before_transport_changes_source() {
     let inputs = preparer
         .prepare_with_transport(&simulation, &store, &context, &Transport(&preparer.kernel))
         .unwrap();
+    assert!(inputs.auxiliary.contains_key("driver-world/manifest"));
     assert_eq!(fs::read(&preparer.kernel).unwrap(), b"changed");
-    assert_eq!(store.read(&inputs.kernel).unwrap(), original_kernel);
+    assert_eq!(
+        store.read(&ContentDigest::of(&original_kernel)).unwrap(),
+        original_kernel
+    );
     let receipt: serde_json::Value =
         serde_json::from_slice(&fs::read(context.directory.join("setup.json")).unwrap()).unwrap();
     assert_eq!(
         receipt["kernel"],
-        serde_json::to_value(inputs.kernel).unwrap()
+        serde_json::to_value(ContentDigest::of(&original_kernel)).unwrap()
     );
 }
 
@@ -430,9 +433,7 @@ fn cold_driver_factory(backend: seedbox_application::runtime_assets::Backend) {
     simulation.control = Some(seedbox_application::config::Control {
         service: "app".into(),
     });
-    let executor =
-        DriverExecutor::for_preparation(&preparer.engine, &store, &simulation, WitnessMode::Exits)
-            .unwrap();
+    let executor = DriverExecutor::for_preparation(&simulation, WitnessMode::Exits).unwrap();
     preparer.profile = executor.profile();
     let context =
         PreparationContext::new(root.path().join("evidence"), Default::default()).unwrap();
@@ -450,6 +451,14 @@ fn cold_driver_factory(backend: seedbox_application::runtime_assets::Backend) {
     let original_boots = inputs.guests.clone();
     driver_world::retain_oci_prepared(&mut inputs, &simulation, &selected, &store, &context)
         .unwrap();
+    for runtime_asset in [
+        "guest-init",
+        "guest-progress",
+        "guest-firmware",
+        "guest-mke2fs",
+    ] {
+        assert!(!inputs.auxiliary.contains_key(runtime_asset));
+    }
     assert_eq!(
         inputs.guests, original_boots,
         "actual OCI boot bytes must not be replaced"
@@ -487,7 +496,10 @@ fn cold_driver_factory(backend: seedbox_application::runtime_assets::Backend) {
     assert_eq!(prepared.machines[0].name, "side");
     assert_eq!(
         inputs.machine_memory_mb,
-        BTreeMap::from([("side".into(), 512)])
+        BTreeMap::from([
+            ("app".into(), simulation.machine.memory_mb),
+            ("side".into(), 512)
+        ])
     );
     assert_eq!(prepared.machines[0].memory_bytes, 512 << 20);
     assert_eq!(
@@ -541,7 +553,10 @@ fn cold_driver_factory(backend: seedbox_application::runtime_assets::Backend) {
             ..
         } => {
             assert_eq!(backend, runtime_assets::Backend::Tcg);
-            assert_eq!(firmware.sha256, inputs.auxiliary["guest-firmware"].hex());
+            assert_eq!(
+                firmware.sha256,
+                ContentDigest::of(&fs::read(selected.guest_assets.join("firmware")).unwrap()).hex()
+            );
             assert_eq!(
                 executable.sha256,
                 ContentDigest::of(&fs::read(selected.qemu.as_ref().unwrap()).unwrap()).hex()
@@ -549,7 +564,10 @@ fn cold_driver_factory(backend: seedbox_application::runtime_assets::Backend) {
             (boot_archives, environments, kernel)
         }
     };
-    assert_eq!(kernel.sha256, inputs.kernel.hex());
+    assert_eq!(
+        kernel.sha256,
+        ContentDigest::of(&fs::read(selected.guest_assets.join("kernel")).unwrap()).hex()
+    );
     assert_eq!(boot_archives["app"].sha256, inputs.guests["app"].hex());
     assert_eq!(environments["app"].named_volumes[0].name, "data");
     assert_eq!(environments["app"].anonymous_volumes, vec!["/scratch"]);

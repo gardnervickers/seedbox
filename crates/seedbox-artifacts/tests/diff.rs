@@ -281,9 +281,14 @@ fn identity_lists_semantics_and_ignores_attempt_and_performance() {
         Status::Match
     );
     b.identity.seed = 2;
-    b.identity.inputs.kernel = ContentDigest::of(b"kernel");
-    b.identity.inputs.profile.engine = ContentDigest::of(b"engine");
-    b.identity.inputs.profile.semantic_parameters.memory_mb = 1024;
+    b.identity.inputs.auxiliary.insert(
+        "driver-world/executable".into(),
+        ContentDigest::of(b"engine"),
+    );
+    b.identity
+        .inputs
+        .machine_memory_mb
+        .insert("workload".into(), 1024);
     write_fixture(&dir.path().join("b"), &mut b, None, None);
     let result = diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
     let paths: Vec<_> = result
@@ -294,9 +299,8 @@ fn identity_lists_semantics_and_ignores_attempt_and_performance() {
     assert_eq!(
         paths,
         [
-            "/inputs/kernel",
-            "/inputs/profile/engine",
-            "/inputs/profile/semantic_parameters/memory_mb",
+            "/inputs/auxiliary/driver-world~1executable",
+            "/inputs/machine_memory_mb/workload",
             "/seed"
         ]
     );

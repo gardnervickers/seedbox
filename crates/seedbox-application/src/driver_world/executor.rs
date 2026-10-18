@@ -74,8 +74,6 @@ impl DriverExecutor {
     /// preparation, with the host's guest ISA ([`super::platform::Host`]). Runtime
     /// bytes remain explicit; legacy retained profiles are never rewritten.
     pub fn for_preparation(
-        engine: &std::path::Path,
-        store: &crate::store::ContentStore,
         simulation: &crate::config::Simulation,
         witness_mode: crate::execution::WitnessMode,
     ) -> Result<Self> {
@@ -99,24 +97,21 @@ impl DriverExecutor {
                 "guest memory must be 64..65536 MiB".into(),
             ));
         }
-        let mut semantic = crate::execution::SemanticParameters::new(memory_mb);
+        let mut semantic = crate::execution::SemanticParameters::new();
         semantic.torn_writes = simulation.disk.torn_writes;
         // The host decides the guest ISA: x86-64 on Linux KVM and for TCG,
         // aarch64 for PV on macOS HVF. Unsupported hosts are refused below.
         let guest = super::platform::Host::current()
             .guest(backend)
             .map_or("x86_64", super::platform::architecture_name);
-        semantic.engine = Some(Self::descriptor(backend, guest));
+        semantic.engine = Some(Self::descriptor(guest));
         let executor = Self::new(
             ExecutionProfile {
-                backend: crate::execution::Backend::Other(
-                    match backend {
-                        DriverBackend::Pv => "driver-pv",
-                        DriverBackend::Tcg => "driver-tcg",
-                    }
-                    .into(),
-                ),
-                engine: store.put_file(engine)?,
+                backend: match backend {
+                    DriverBackend::Pv => "driver-pv",
+                    DriverBackend::Tcg => "driver-tcg",
+                }
+                .into(),
                 witness_mode,
                 semantic_parameters: semantic,
             },
@@ -164,10 +159,7 @@ impl DriverExecutor {
     }
     /// Descriptive current-host metadata and explicit owned launch contract. No
     /// revision, source/build hash, qualification or provenance admission gate.
-    pub fn descriptor(
-        backend: DriverBackend,
-        guest_arch: &str,
-    ) -> crate::execution::EngineDescriptor {
+    pub fn descriptor(guest_arch: &str) -> crate::execution::EngineDescriptor {
         crate::execution::EngineDescriptor {
             kind: crate::engine::ExecutableKind::DriverWorld,
             owner_pipe: true,
@@ -176,11 +168,6 @@ impl DriverExecutor {
             host_os: std::env::consts::OS.into(),
             host_arch: std::env::consts::ARCH.into(),
             guest_arch: guest_arch.into(),
-            engine_backend: match backend {
-                DriverBackend::Pv => "driver-pv",
-                DriverBackend::Tcg => "driver-tcg",
-            }
-            .into(),
             engine_timebase: "driver-world-v1".into(),
         }
     }
@@ -229,7 +216,7 @@ impl ExecutionBackend for DriverExecutor {
         inputs
             .digests()
             .filter(|digest| {
-                *digest == &inputs.profile.engine
+                inputs.executable().is_ok_and(|engine| *digest == engine)
                     || self
                         .runtime
                         .as_ref()
@@ -266,7 +253,7 @@ impl ExecutionBackend for DriverExecutor {
         }
         let monitor = request
             .artifacts
-            .get(&self.profile.engine)
+            .get(request.prepared.executable()?)
             .ok_or_else(|| Error::Integrity("missing retained Driver monitor executable".into()))?;
         #[cfg(feature = "test-support")]
         let monitor = self.failure_test.as_ref().map_or(monitor, |(path, _)| path);

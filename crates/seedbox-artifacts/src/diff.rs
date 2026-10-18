@@ -654,7 +654,7 @@ fn page_file(
         {
             return Err(bad(directory, "physical RAM-region metadata is missing"));
         }
-        let memory_mb = evidence.record.identity.inputs.memory_mb(machine_name);
+        let memory_mb = evidence.record.identity.inputs.memory_mb(machine_name)?;
         if memory_mb == 0 {
             return Err(bad(directory, "page hashes require recorded memory_mb"));
         }

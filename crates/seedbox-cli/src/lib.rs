@@ -549,7 +549,7 @@ impl RuntimeInputs {
 
     fn driver_backends(
         &self,
-        store: &ContentStore,
+        _store: &ContentStore,
         simulation: &config::Simulation,
         cancellation: &CancellationToken,
         scratch: &Path,
@@ -557,7 +557,7 @@ impl RuntimeInputs {
         witness: WitnessMode,
     ) -> Result<(Preparer, Executor)> {
         let executor = seedbox_application::driver_world::DriverExecutor::for_preparation(
-            engine, store, simulation, witness,
+            simulation, witness,
         )?;
         let (backend, runtime_backend) = match simulation.simulator.backend {
             seedbox_spec::project::CpuBackend::Pv => (

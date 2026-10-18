@@ -1,7 +1,7 @@
 //! Contract tests use a test-only backend. No hardware qualification is implied.
 use seedbox_application::{
     config::{self, Simulation},
-    execution::{self, *},
+    execution::*,
     image::Launch,
     orchestration::*,
     store::{ContentDigest, ContentStore},
@@ -130,15 +130,13 @@ impl Fixture {
         let config = store.put(b"fixture image config").unwrap();
         let layer = store.put(b"fixture layer").unwrap();
         let profile = ExecutionProfile {
-            backend: execution::Backend::Other("test-only".into()),
-            engine,
+            backend: "test-only".into(),
             witness_mode: WitnessMode::Exits,
-            semantic_parameters: SemanticParameters::new(512),
+            semantic_parameters: SemanticParameters::new(),
         };
         let inputs = PreparedInputs {
-            machine_memory_mb: Default::default(),
+            machine_memory_mb: BTreeMap::from([("workload".into(), 512)]),
             wall_clock_epoch: None,
-            kernel,
             profile: profile.clone(),
             placement: BTreeMap::from([("workload".into(), "workload".into())]),
             guests: BTreeMap::from([("workload".into(), guest)]),
@@ -158,7 +156,10 @@ impl Fixture {
                     },
                 },
             )]),
-            auxiliary: BTreeMap::new(),
+            auxiliary: BTreeMap::from([
+                ("driver-world/executable".into(), engine),
+                ("fixture/kernel".into(), kernel),
+            ]),
             provenance: BTreeMap::from([("builder".into(), "fixture-v1".into())]),
         };
         let backend = Backend {
@@ -648,7 +649,11 @@ fn seed_kernel_build_and_configuration_changes_create_new_identities() {
     assert_eq!(overridden.record.identity.seed, 0);
     assert_ne!(first.record.run_id, overridden.record.run_id);
     let store = ContentStore::new(fixture.directory.path().join("store"));
-    fixture.preparer.inputs.kernel = store.put(b"new kernel").unwrap();
+    fixture
+        .preparer
+        .inputs
+        .auxiliary
+        .insert("fixture/kernel".into(), store.put(b"new kernel").unwrap());
     let new_kernel = fixture.run();
     assert_ne!(first.record.run_id, new_kernel.record.run_id);
     fixture
@@ -781,13 +786,11 @@ fn performance_changes_are_recorded_without_changing_identity_or_bypassing_compa
 }
 
 #[test]
-fn cross_engine_replay_is_explicit_retained_and_still_checks_semantics_and_witness() {
+fn launch_descriptor_replacement_is_explicit_and_still_checks_semantics_and_witness() {
     let mut fixture = Fixture::new();
     let first = fixture.run();
-    let engine = ContentStore::new(fixture.directory.path().join("store"))
-        .put(b"new engine")
-        .unwrap();
-    fixture.backend.profile.engine = engine.clone();
+    fixture.backend.profile.semantic_parameters.engine =
+        Some(seedbox_application::driver_world::DriverExecutor::descriptor("x86_64"));
 
     assert_eq!(fixture.replay(&first).record.outcome, Outcome::Error);
     let options = ReplayOptions {
@@ -800,13 +803,12 @@ fn cross_engine_replay_is_explicit_retained_and_still_checks_semantics_and_witne
         .unwrap();
     assert!(replay.record.allow_engine_change);
     assert_ne!(replay.record.run_id, first.record.run_id);
-    assert_eq!(replay.record.identity.inputs.profile.engine, engine);
     assert_eq!(
         replay.record.identity.inputs.profile,
         fixture.backend.profile
     );
     assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
-    // Switching back removes stale combined-worker dispatch metadata.
+    // Descriptor-free test backends can explicitly remove their launch metadata.
     let combined_run = replay.directory;
     fixture.backend.profile.semantic_parameters.engine = None;
     let standalone_replay = fixture
@@ -833,7 +835,7 @@ fn cross_engine_replay_is_explicit_retained_and_still_checks_semantics_and_witne
             .status,
         ReplayStatus::Mismatch
     );
-    fixture.backend.profile.semantic_parameters.memory_mb = 1024;
+    fixture.backend.profile.semantic_parameters.torn_writes = true;
     assert_eq!(
         fixture
             .orchestrator
@@ -1107,7 +1109,7 @@ fn exploration_corrupt_frozen_blob_retains_error_without_repreparing() {
                 .directory
                 .path()
                 .join("store/sha256")
-                .join(fixture.preparer.inputs.kernel.hex()),
+                .join(fixture.preparer.inputs.auxiliary["fixture/kernel"].hex()),
             b"corrupted actual retained bytes",
         )?;
         Ok(report)
@@ -2133,12 +2135,18 @@ fn only_the_backend_runtime_inputs_are_copied_into_an_attempt() {
             self.0.backend.performance_parameters()
         }
         fn runtime_inputs<'a>(&self, inputs: &'a PreparedInputs) -> Vec<&'a ContentDigest> {
-            vec![&inputs.profile.engine, &inputs.kernel]
+            vec![
+                inputs.executable().unwrap(),
+                &inputs.auxiliary["fixture/kernel"],
+            ]
         }
         fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
             let inputs = &self.0.preparer.inputs;
             assert_eq!(request.artifacts.keys().collect::<Vec<_>>(), {
-                let mut keys = vec![&inputs.profile.engine, &inputs.kernel];
+                let mut keys = vec![
+                    inputs.executable().unwrap(),
+                    &inputs.auxiliary["fixture/kernel"],
+                ];
                 keys.sort();
                 keys
             });

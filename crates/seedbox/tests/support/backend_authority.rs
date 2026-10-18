@@ -14,9 +14,7 @@ fn resource(tag: &str) -> serde_json::Value {
             epoch_seconds: 86400,
         },
         runtime: d::Runtime {
-            kernel: asset.clone(),
-            engine: asset.clone(),
-            execution: serde_json::json!({"backend":tag,"semantic_parameters":{"engine":{"kind":"driver-world-v1","engine_backend":tag}}}),
+            execution: serde_json::json!({"backend":tag,"semantic_parameters":{"engine":{"kind":"driver-world-v1"}}}),
         },
         machines: Default::default(),
         oracle: d::Machine {
@@ -59,9 +57,10 @@ fn resource(tag: &str) -> serde_json::Value {
     ))
     .unwrap()
 }
-fn contradictory(top: &str, actual: &str) -> serde_json::Value {
+fn invalid_backend_resource(top: &str, actual: &str) -> serde_json::Value {
     let mut document = resource(actual);
-    document["spec"]["runtime"]["execution"]["backend"] = top.into();
+    document["spec"]["runtime"]["execution"]["backend"] =
+        format!("driver-unsupported-{top}").into();
     document
 }
 fn directory() -> tempfile::TempDir {
@@ -71,7 +70,7 @@ fn directory() -> tempfile::TempDir {
         .unwrap()
 }
 #[test]
-fn backend_authority_saved_run_and_explore_reject_both_conflicting_directions() {
+fn backend_authority_saved_run_and_explore_reject_unknown_cpu() {
     for (top, actual, flag) in [
         ("driver-pv", "driver-tcg", "pv"),
         ("driver-tcg", "driver-pv", "tcg"),
@@ -79,7 +78,7 @@ fn backend_authority_saved_run_and_explore_reject_both_conflicting_directions() 
         for command in ["run", "explore"] {
             let root = directory();
             let path = root.path().join("saved.yaml");
-            let bytes = serde_json::to_string(&contradictory(top, actual)).unwrap();
+            let bytes = serde_json::to_string(&invalid_backend_resource(top, actual)).unwrap();
             fs::write(&path, &bytes).unwrap();
             let parse_error =
                 serde_yaml_ng::from_str::<seedbox_api::SimulationDocument>(&bytes).unwrap_err();
@@ -90,7 +89,7 @@ fn backend_authority_saved_run_and_explore_reject_both_conflicting_directions() 
             );
             assert_eq!(output.status.code(), Some(2));
             assert_eq!(stderr(&output), format!("error: {expected}\n"));
-            assert!(stderr(&output).contains("inconsistent Driver backend metadata"));
+            assert!(stderr(&output).contains("unknown Driver backend"));
             assert!(
                 !root.path().join(".local/state/seedbox").exists(),
                 "must reject before daemon connection/submission"
@@ -161,14 +160,14 @@ fn serve_resource(root: &Path, body: String) -> std::thread::JoinHandle<Vec<Stri
     })
 }
 #[test]
-fn backend_authority_replay_and_rerun_reject_both_conflicting_directions() {
+fn backend_authority_replay_and_rerun_reject_unknown_cpu() {
     for (top, actual, flag) in [
         ("driver-pv", "driver-tcg", "pv"),
         ("driver-tcg", "driver-pv", "tcg"),
     ] {
         for command in ["replay", "rerun"] {
             let root = directory();
-            let body = contradictory(top, actual).to_string();
+            let body = invalid_backend_resource(top, actual).to_string();
             let parse_error = serde_json::from_slice::<Simulation>(body.as_bytes()).unwrap_err();
             let expected = seedbox_client::Error::from(parse_error).to_string();
             let server = serve_resource(root.path(), body);
@@ -180,7 +179,7 @@ fn backend_authority_replay_and_rerun_reject_both_conflicting_directions() {
             assert_eq!(output.status.code(), Some(2));
             assert_eq!(stderr(&output), format!("error: {expected}\n"));
             assert!(
-                stderr(&output).contains("inconsistent Driver backend metadata"),
+                stderr(&output).contains("unknown Driver backend"),
                 "{}",
                 stderr(&output)
             );

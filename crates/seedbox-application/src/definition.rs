@@ -46,7 +46,7 @@ pub fn resolve(
             anonymous_volumes: image.launch.volumes.clone(),
             name: (name == oracle_name).then(|| name.clone()),
             boot_archive: asset(boot),
-            memory_bytes: u64::from(inputs.memory_mb(name)) * 1024 * 1024,
+            memory_bytes: u64::from(inputs.memory_mb(name)?) * 1024 * 1024,
             process: Process {
                 argv: image.launch.argv.clone(),
                 environment: image.launch.environment.clone(),
@@ -88,8 +88,6 @@ pub fn resolve(
                 .ok_or_else(|| Error::Integrity("prepared clock was not resolved".into()))?,
         },
         runtime: Runtime {
-            kernel: asset(&inputs.kernel),
-            engine: asset(&inputs.profile.engine),
             execution: execution_settings_with_inputs(inputs)?,
         },
         machines,
@@ -120,24 +118,16 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
         .remove("driver_world")
         .map(serde_json::from_value)
         .transpose()?;
-    settings.insert(
-        "engine".into(),
-        serde_json::to_value(digest(&definition.runtime.engine)?)?,
-    );
     if let Some(parameters) = settings
         .get_mut("semantic_parameters")
         .and_then(|v| v.as_object_mut())
     {
         parameters.insert(
-            "memory_mb".into(),
-            serde_json::json!(definition.oracle.memory_bytes / (1024 * 1024)),
-        );
-        parameters.insert(
             "torn_writes".into(),
             definition.simulator.disk.torn_writes.into(),
         );
     }
-    let mut profile: ExecutionProfile =
+    let profile: ExecutionProfile =
         serde_json::from_value(serde_json::Value::Object(settings.clone()))?;
     if profile.semantic_parameters.launch() == Some(crate::engine::ExecutableKind::DriverWorld) {
         let descriptor = profile
@@ -162,7 +152,6 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
             )?;
         }
     }
-    profile.engine = digest(&definition.runtime.engine)?;
     if definition.oracle.memory_bytes == 0
         || !definition.oracle.memory_bytes.is_multiple_of(1024 * 1024)
     {
@@ -170,9 +159,6 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
             "memoryBytes must be a positive whole number of MiB".into(),
         ));
     }
-    let memory = u32::try_from(definition.oracle.memory_bytes / (1024 * 1024))
-        .map_err(|_| Error::Setup("oracle memoryBytes exceeds supported memory".into()))?;
-    profile.semantic_parameters.memory_mb = memory;
     let mut images = BTreeMap::new();
     let mut guests = BTreeMap::new();
     let mut placement = BTreeMap::new();
@@ -197,9 +183,7 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
             ))
         })?;
         crate::preparation::validate_machine_memory(&profile, name, memory_mb)?;
-        if memory_mb != profile.semantic_parameters.memory_mb {
-            machine_memory_mb.insert(name.into(), memory_mb);
-        }
+        machine_memory_mb.insert(name.into(), memory_mb);
         for volume in machine.volumes.values() {
             if volume.size_bytes != crate::execution::VOLUME_DISK_MIB * 1024 * 1024 {
                 return Err(Error::Setup(
@@ -248,7 +232,6 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
     let inputs = PreparedInputs {
         machine_memory_mb,
         wall_clock_epoch: Some(definition.clock.epoch_seconds),
-        kernel: digest(&definition.runtime.kernel)?,
         images,
         placement,
         guests,
@@ -451,14 +434,10 @@ pub fn execution_settings_with_inputs(inputs: &PreparedInputs) -> Result<serde_j
 
 pub fn execution_settings(profile: &ExecutionProfile) -> Result<serde_json::Value> {
     let mut value = serde_json::to_value(profile)?;
-    if let Some(object) = value.as_object_mut() {
-        object.remove("engine");
-    }
     if let Some(parameters) = value
         .get_mut("semantic_parameters")
         .and_then(|v| v.as_object_mut())
     {
-        parameters.remove("memory_mb");
         parameters.remove("torn_writes");
     }
     Ok(value)
@@ -474,10 +453,9 @@ mod tests {
             .put(b"opaque already-prepared unit-fixture boot bytes")
             .unwrap();
         let profile = ExecutionProfile {
-            backend: crate::execution::Backend::Other("fixture".into()),
-            engine: store.put(b"engine").unwrap(),
+            backend: "fixture".into(),
             witness_mode: crate::execution::WitnessMode::Exits,
-            semantic_parameters: crate::execution::SemanticParameters::new(1024),
+            semantic_parameters: crate::execution::SemanticParameters::new(),
         };
         let configuration = crate::config::parse(
             "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
@@ -486,9 +464,8 @@ mod tests {
         )
         .unwrap();
         let inputs = PreparedInputs {
-            machine_memory_mb: Default::default(),
+            machine_memory_mb: BTreeMap::from([("oracle".into(), 1024)]),
             wall_clock_epoch: Some(86400),
-            kernel: store.put(b"kernel").unwrap(),
             images: BTreeMap::from([(
                 "oracle".into(),
                 PreparedImage {
@@ -517,29 +494,50 @@ mod tests {
 
     #[test]
     fn backend_authority_rejects_before_resolved_asset_materialization() {
-        for (top, actual) in [("driver-pv", "driver-tcg"), ("driver-tcg", "driver-pv")] {
+        for backend in ["driver-unknown", "driver-invalid"] {
             let (root, store, mut definition, _) = fixture();
-            definition.runtime.execution["backend"] = top.into();
-            definition.runtime.execution["semantic_parameters"]["engine"] =
-                serde_json::json!({"kind":"driver-world-v1", "engine_backend":actual});
-            definition.runtime.kernel = Asset(format!("sha256:{}", "0".repeat(64)));
+            definition.runtime.execution["backend"] = backend.into();
             let error = prepared(&definition, &store).err().unwrap().to_string();
-            assert!(
-                error.contains("inconsistent Driver backend metadata"),
-                "{error}"
-            );
+            assert!(error.contains("unknown Driver backend"), "{error}");
             assert!(definition
                 .configuration("")
                 .unwrap_err()
-                .contains("inconsistent Driver backend metadata"));
+                .contains("unknown Driver backend"));
             let output = root.path().join("not-materialized");
             assert!(materialize_start(&definition, &store, &output)
                 .err()
                 .unwrap()
                 .to_string()
-                .contains("inconsistent Driver backend metadata"));
+                .contains("unknown Driver backend"));
             assert!(!output.exists());
         }
+    }
+
+    #[test]
+    fn identity_has_no_placeholder_or_duplicate_runtime_and_memory_fields() {
+        let (_root, store, definition, _) = fixture();
+        let mut inputs = prepared(&definition, &store).unwrap();
+        let runtime = serde_json::to_value(&definition.runtime).unwrap();
+        assert_eq!(runtime.as_object().unwrap().len(), 1);
+        assert!(runtime.get("execution").is_some());
+        let identity = serde_json::to_value(&inputs).unwrap();
+        assert!(identity.get("kernel").is_none());
+        assert!(identity["profile"].get("engine").is_none());
+        for obsolete in ["guest_abi", "control_channel", "memory_mb"] {
+            assert!(identity["profile"]["semantic_parameters"]
+                .get(obsolete)
+                .is_none());
+        }
+        inputs.machine_memory_mb.clear();
+        assert!(resolve(
+            &definition.configuration("missing-memory").unwrap(),
+            &inputs,
+            1,
+            vec![]
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("prepared memory missing for machine oracle"));
     }
 
     #[test]
@@ -553,11 +551,11 @@ mod tests {
         let saved: Definition =
             serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&definition).unwrap()).unwrap();
         let inputs = prepared(&saved, &store).unwrap();
-        assert_eq!(inputs.memory_mb("app"), 2048);
-        assert_eq!(inputs.memory_mb("oracle"), 256);
+        assert_eq!(inputs.memory_mb("app").unwrap(), 2048);
+        assert_eq!(inputs.memory_mb("oracle").unwrap(), 256);
         assert_eq!(
             inputs.machine_memory_mb,
-            BTreeMap::from([("app".into(), 2048)])
+            BTreeMap::from([("app".into(), 2048), ("oracle".into(), 256)])
         );
         let configuration = saved.configuration("mixed").unwrap();
         assert_eq!(configuration.services["app"].memory_mb, Some(2048));
@@ -589,14 +587,10 @@ mod tests {
             manifest,
             assets: BTreeMap::from([("body".into(), Asset(format!("sha256:{}", "11".repeat(32))))]),
         };
-        let mut semantic = crate::execution::SemanticParameters::new(1024);
-        semantic.engine = Some(crate::driver_world::DriverExecutor::descriptor(
-            crate::driver_world::DriverBackend::Pv,
-            "x86_64",
-        ));
+        let mut semantic = crate::execution::SemanticParameters::new();
+        semantic.engine = Some(crate::driver_world::DriverExecutor::descriptor("x86_64"));
         let profile = ExecutionProfile {
-            backend: crate::execution::Backend::Other("driver-pv".into()),
-            engine: ContentDigest::of(b"engine"),
+            backend: "driver-pv".into(),
             witness_mode: crate::execution::WitnessMode::Exits,
             semantic_parameters: semantic,
         };
@@ -660,13 +654,16 @@ mod tests {
     #[test]
     fn driver_closure_survives_definition_roundtrip_and_actual_launch_request_adapts_inline_edits()
     {
-        use crate::driver_world::{DriverBackend, DriverExecutor};
+        use crate::driver_world::DriverExecutor;
         use seedbox_engine_protocol::driver_world as wire;
         let (temporary, store, mut definition, _) = fixture();
         let mut inputs = prepared(&definition, &store).unwrap();
-        inputs.profile.backend = crate::execution::Backend::Other("driver-pv".into());
-        inputs.profile.semantic_parameters.engine =
-            Some(DriverExecutor::descriptor(DriverBackend::Pv, "aarch64"));
+        inputs.auxiliary.insert(
+            "driver-world/executable".into(),
+            store.put(b"engine").unwrap(),
+        );
+        inputs.profile.backend = "driver-pv".into();
+        inputs.profile.semantic_parameters.engine = Some(DriverExecutor::descriptor("aarch64"));
         // Fixture bytes exercise retention/launch adaptation only. They are not
         // native boot inputs and this test never spawns an executable or guest.
         let directory = temporary.path().join("driver-fixture");
@@ -739,6 +736,19 @@ mod tests {
         definition.architecture = Architecture::Aarch64;
         let roundtrip = prepared(&definition, &store).unwrap();
         assert_eq!(roundtrip.auxiliary, inputs.auxiliary);
+        assert_eq!(
+            roundtrip.executable().unwrap(),
+            &ContentDigest::of(b"engine")
+        );
+        assert!(roundtrip
+            .profile
+            .semantic_parameters
+            .engine
+            .as_ref()
+            .is_some_and(|descriptor| serde_json::to_value(descriptor)
+                .unwrap()
+                .get("engine_backend")
+                .is_none()));
         assert_eq!(roundtrip.guests["oracle"], rootfs);
         assert_eq!(
             crate::driver_world::runtime_digest(&roundtrip, &store).unwrap(),
@@ -1045,9 +1055,9 @@ mod tests {
                 };
             }
             let mut tcg_inputs = inputs.clone();
-            tcg_inputs.profile.backend = crate::execution::Backend::Other("driver-tcg".into());
+            tcg_inputs.profile.backend = "driver-tcg".into();
             tcg_inputs.profile.semantic_parameters.engine =
-                Some(DriverExecutor::descriptor(DriverBackend::Tcg, "x86_64"));
+                Some(DriverExecutor::descriptor("x86_64"));
             tcg_inputs.profile.semantic_parameters.torn_writes = true;
             tcg_inputs.profile.witness_mode = crate::execution::WitnessMode::FullState;
             tcg_inputs

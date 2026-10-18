@@ -62,8 +62,8 @@ pub use seedbox_application::driver_world::DriverBackend;
 use seedbox_application::{
     driver_world::{self, DriverExecutor},
     execution::{
-        Backend, CancellationToken, ExecutionBackend, ExecutionProfile, PreparedImage,
-        PreparedInputs, SemanticParameters, WitnessMode,
+        CancellationToken, ExecutionBackend, ExecutionProfile, PreparedImage, PreparedInputs,
+        SemanticParameters, WitnessMode,
     },
     image::Launch,
     process_lifetime::{reclaim_barrier, EXECUTION_LEASE_FILE, SESSION_LEASE_FILE},
@@ -510,12 +510,11 @@ fn fixture_submission(
     );
     let assets = &selected.guest_assets;
     let filesystem_digest = store.put_file(&filesystem).unwrap();
-    let mut semantic = SemanticParameters::new(memory_mb);
-    semantic.engine = Some(DriverExecutor::descriptor(backend, "x86_64"));
+    let mut semantic = SemanticParameters::new();
+    semantic.engine = Some(DriverExecutor::descriptor("x86_64"));
     let mut inputs = PreparedInputs {
-        machine_memory_mb: Default::default(),
+        machine_memory_mb: BTreeMap::from([(oracle.into(), memory_mb)]),
         wall_clock_epoch: Some(946_684_800),
-        kernel: store.put_file(&assets.join("kernel")).unwrap(),
         images: BTreeMap::from([(
             oracle.into(),
             PreparedImage {
@@ -535,12 +534,14 @@ fn fixture_submission(
         guests: BTreeMap::from([(oracle.into(), filesystem_digest)]),
         placement: BTreeMap::from([(oracle.into(), oracle.into())]),
         profile: ExecutionProfile {
-            backend: Backend::Other(format!("driver-{}", label(backend))),
-            engine: store.put_file(&executable).unwrap(),
+            backend: format!("driver-{}", label(backend)),
             witness_mode: WitnessMode::Exits,
             semantic_parameters: semantic,
         },
-        auxiliary: BTreeMap::new(),
+        auxiliary: BTreeMap::from([(
+            "driver-world/executable".into(),
+            store.put_file(&executable).unwrap(),
+        )]),
         provenance: BTreeMap::new(),
     };
     let environments = BTreeMap::from([(
@@ -627,6 +628,11 @@ fn fixture_submission(
             .insert(name.into(), inputs.guests[oracle].clone());
         inputs.placement.insert(name.into(), name.into());
     }
+    inputs.machine_memory_mb = inputs
+        .guests
+        .keys()
+        .map(|name| (name.clone(), memory_mb))
+        .collect();
     driver_world::retain_prepared(&mut inputs, &prepared, store).unwrap();
     let image = if fixture.control {
         "fixture/prepared-fixture"
@@ -1755,8 +1761,8 @@ fn network_world_submission(
         archive.display(),
         assets.display(),
     );
-    let mut semantic = SemanticParameters::new(memory_mb);
-    semantic.engine = Some(DriverExecutor::descriptor(backend, "x86_64"));
+    let mut semantic = SemanticParameters::new();
+    semantic.engine = Some(DriverExecutor::descriptor("x86_64"));
     let mut images = BTreeMap::new();
     let mut guests = BTreeMap::new();
     let mut environments = BTreeMap::new();
@@ -1815,9 +1821,11 @@ fn network_world_submission(
         });
     }
     let mut inputs = PreparedInputs {
-        machine_memory_mb: Default::default(),
+        machine_memory_mb: guests
+            .keys()
+            .map(|name| (name.clone(), memory_mb))
+            .collect(),
         wall_clock_epoch: Some(946_684_800),
-        kernel: store.put_file(&assets.join("kernel")).unwrap(),
         placement: guests
             .keys()
             .map(|name| (name.clone(), name.clone()))
@@ -1825,12 +1833,14 @@ fn network_world_submission(
         images,
         guests,
         profile: ExecutionProfile {
-            backend: Backend::Other(format!("driver-{}", label(backend))),
-            engine: store.put_file(&executable).unwrap(),
+            backend: format!("driver-{}", label(backend)),
             witness_mode: WitnessMode::Exits,
             semantic_parameters: semantic,
         },
-        auxiliary: BTreeMap::new(),
+        auxiliary: BTreeMap::from([(
+            "driver-world/executable".into(),
+            store.put_file(&executable).unwrap(),
+        )]),
         provenance: BTreeMap::new(),
     };
     let inventory = match backend {

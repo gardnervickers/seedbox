@@ -554,7 +554,6 @@ pub(super) fn semantic_definition(
         descriptor.host_os.clear();
         descriptor.host_arch.clear();
         descriptor.guest_arch.clear();
-        descriptor.engine_backend.clear();
         descriptor.engine_timebase.clear();
         *value = serde_json::to_value(descriptor)?;
     }

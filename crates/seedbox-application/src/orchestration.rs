@@ -201,7 +201,6 @@ impl Orchestrator {
         let requested = executor.profile();
         let mut identity = baseline.identity.clone();
         if options.allow_engine_change {
-            identity.inputs.profile.engine = requested.engine;
             // A new executable can use different argv without changing the
             // simulation's retained memory, timebase, faults or other settings.
             identity.inputs.profile.semantic_parameters.engine =
@@ -319,7 +318,11 @@ impl Orchestrator {
                     let inputs = directory.join("inputs");
                     // The retained engine is the one host-executed input; guest
                     // inputs are read as bytes (see Runtime::select).
-                    let executable = *digest == record.identity.inputs.profile.engine;
+                    let executable = record
+                        .identity
+                        .inputs
+                        .executable()
+                        .is_ok_and(|engine| digest == engine);
                     let path = match (&self.shared_inputs, executable) {
                         (Some(shared), true) => self
                             .store

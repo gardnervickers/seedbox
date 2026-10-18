@@ -116,8 +116,6 @@ fn collect(definition: &Definition, assets: &mut BTreeSet<ContentDigest>) -> Res
             .to_owned()
             .try_into()
     };
-    assets.insert(digest(&definition.runtime.kernel)?);
-    assets.insert(digest(&definition.runtime.engine)?);
     // The resolved definition owns this closure even if execution never produced
     // a record. Checkpoint definitions can retain a different factory inventory.
     if let Some(closure) = definition.runtime.execution.get("driver_world") {
@@ -487,17 +485,16 @@ pub fn import(input: impl Read, store: &ContentStore, options: &Options) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execution::{Backend, ExecutionProfile, SemanticParameters, WitnessMode};
+    use crate::execution::{ExecutionProfile, SemanticParameters, WitnessMode};
     use seedbox_spec::definition::*;
 
     fn fixture(store: &ContentStore) -> Snapshot {
         let binary = store.put(b"guest-binary").unwrap();
         let asset = Asset(format!("sha256:{}", binary.hex()));
         let profile = ExecutionProfile {
-            backend: Backend::Other("archive-test".into()),
-            engine: binary,
+            backend: "archive-test".into(),
             witness_mode: WitnessMode::Exits,
-            semantic_parameters: SemanticParameters::new(16),
+            semantic_parameters: SemanticParameters::new(),
         };
         let definition = Definition {
             architecture: Architecture::X86_64,
@@ -506,8 +503,6 @@ mod tests {
                 epoch_seconds: 86400,
             },
             runtime: Runtime {
-                kernel: asset.clone(),
-                engine: asset.clone(),
                 execution: serde_json::to_value(profile).unwrap(),
             },
             machines: BTreeMap::new(),

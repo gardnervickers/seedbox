@@ -281,7 +281,7 @@ pub fn validate_oci_runtime(
     preparer: &crate::preparation::OciPreparer,
     runtime: &Inputs,
 ) -> Result<()> {
-    crate::admission::validate_profile(&preparer.profile)?;
+    super::retained::validate_contract(&preparer.profile)?;
     for (path, name) in [(&preparer.kernel, "kernel"), (&preparer.init, "init")] {
         if fs::read(path)? != fs::read(runtime.guest_assets.join(name))? {
             return Err(Error::Integrity(
@@ -301,13 +301,7 @@ pub fn validate_oci_runtime(
     } else {
         "driver-pv"
     };
-    if preparer
-        .profile
-        .semantic_parameters
-        .engine
-        .as_ref()
-        .is_none_or(|engine| engine.engine_backend != expected)
-    {
+    if preparer.profile.backend != expected {
         return Err(Error::Integrity(
             "Driver OCI backend differs from its selected runtime".into(),
         ));
@@ -333,7 +327,7 @@ pub fn retain_oci_prepared(
     super::retained::validate_contract(&inputs.profile)?;
     context.check()?;
     let scratch = tempfile::tempdir()?;
-    let engine = store.materialize(&inputs.profile.engine, &scratch.path().join("engine"))?;
+    let engine = store.materialize(inputs.executable()?, &scratch.path().join("engine"))?;
     let root = &runtime.guest_assets;
     let mut hosts = "127.0.0.1 localhost\n::1 localhost\n".to_owned();
     for (index, name) in simulation.services.keys().enumerate() {
@@ -360,7 +354,7 @@ pub fn retain_oci_prepared(
                 "OCI preparation did not produce a complete Linux boot archive".into(),
             ));
         }
-        let memory_bytes = u64::from(inputs.memory_mb(name)) * 1024 * 1024;
+        let memory_bytes = u64::from(inputs.memory_mb(name)?) * 1024 * 1024;
         if memory_bytes < super::boot::minimum_memory(bytes.len() as u64)? {
             return Err(Error::Execution(format!(
                 "service {name}: guest RAM is below the actual Driver archive boot floor"
@@ -495,6 +489,12 @@ pub fn retain_oci_prepared(
     };
     context.check()?;
     super::retain_prepared(inputs, &prepared, store)?;
+    inputs.auxiliary.retain(|name, _| {
+        !matches!(
+            name.as_str(),
+            "guest-init" | "guest-progress" | "guest-firmware" | "guest-mke2fs"
+        )
+    });
     context.check()
 }
 

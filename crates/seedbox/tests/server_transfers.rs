@@ -347,8 +347,7 @@ fn request() -> SubmitRequest {
 fn resolved_request(id: &str) -> SubmitRequest {
     use seedbox_application::{
         execution::{
-            Backend, ExecutionProfile, PreparedImage, PreparedInputs, SemanticParameters,
-            WitnessMode,
+            ExecutionProfile, PreparedImage, PreparedInputs, SemanticParameters, WitnessMode,
         },
         image::Launch,
         store::ContentDigest,
@@ -358,9 +357,8 @@ fn resolved_request(id: &str) -> SubmitRequest {
     request.metadata.name = "test".into();
     let binary = ContentDigest::of(b"catalogue-only-binary");
     let inputs = PreparedInputs {
-        machine_memory_mb: Default::default(),
+        machine_memory_mb: std::collections::BTreeMap::from([("oracle".into(), 1024)]),
         wall_clock_epoch: Some(86400),
-        kernel: binary.clone(),
         images: std::collections::BTreeMap::from([(
             "oracle".into(),
             PreparedImage {
@@ -380,10 +378,9 @@ fn resolved_request(id: &str) -> SubmitRequest {
         placement: std::collections::BTreeMap::from([("oracle".into(), "oracle".into())]),
         guests: std::collections::BTreeMap::from([("oracle".into(), binary.clone())]),
         profile: ExecutionProfile {
-            backend: Backend::Other("catalogue-test".into()),
-            engine: binary,
+            backend: "catalogue-test".into(),
             witness_mode: WitnessMode::Exits,
-            semantic_parameters: SemanticParameters::new(1024),
+            semantic_parameters: SemanticParameters::new(),
         },
         auxiliary: Default::default(),
         provenance: Default::default(),

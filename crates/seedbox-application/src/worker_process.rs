@@ -54,7 +54,7 @@ impl WorkerLaunch {
     ) -> Result<Self> {
         let engine = request
             .artifacts
-            .get(&request.prepared.profile.engine)
+            .get(request.prepared.executable()?)
             .ok_or_else(|| Error::Integrity("missing retained Driver executable".into()))?;
         if fs::metadata(engine)?.permissions().mode() & 0o7777 != 0o500 {
             fs::set_permissions(engine, fs::Permissions::from_mode(0o500))?;

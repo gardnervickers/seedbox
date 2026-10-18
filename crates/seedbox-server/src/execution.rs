@@ -1024,9 +1024,9 @@ mod tests {
                 request: ExecutionRequest<'_>,
             ) -> seedbox_application::Result<ExecutionReport> {
                 assert_eq!(request.prepared.profile, self.profile());
-                assert_eq!(request.prepared.memory_mb("app"), 2048);
-                assert_eq!(request.prepared.memory_mb("oracle"), 256);
-                assert_eq!(request.prepared.memory_mb("helper"), 1024);
+                assert_eq!(request.prepared.memory_mb("app").unwrap(), 2048);
+                assert_eq!(request.prepared.memory_mb("oracle").unwrap(), 256);
+                assert_eq!(request.prepared.memory_mb("helper").unwrap(), 1024);
                 Ok(ExecutionReport {
                     simulated_time_ns: Some(1),
                     host_wait_ns: 0,
@@ -1035,7 +1035,7 @@ mod tests {
                         service: "oracle".into(),
                         code: 0,
                     }),
-                    witness: Some(self.0.kernel.clone()),
+                    witness: Some(self.0.guests["oracle"].clone()),
                     full_state: None,
                     faults: vec![],
                     detail: None,
@@ -1086,7 +1086,6 @@ mod tests {
         };
         let inputs = PreparedInputs {
             wall_clock_epoch: Some(86400),
-            kernel: digest.clone(),
             images: BTreeMap::from([
                 ("app".into(), image.clone()),
                 ("helper".into(), image.clone()),
@@ -1102,12 +1101,15 @@ mod tests {
                 ("helper".into(), digest.clone()),
                 ("oracle".into(), digest.clone()),
             ]),
-            machine_memory_mb: BTreeMap::from([("app".into(), 2048), ("oracle".into(), 256)]),
+            machine_memory_mb: BTreeMap::from([
+                ("app".into(), 2048),
+                ("oracle".into(), 256),
+                ("helper".into(), 1024),
+            ]),
             profile: ExecutionProfile {
-                backend: Backend::Other("test".into()),
-                engine: digest,
+                backend: "test".into(),
                 witness_mode: WitnessMode::Exits,
-                semantic_parameters: SemanticParameters::new(1024),
+                semantic_parameters: SemanticParameters::new(),
             },
             auxiliary: BTreeMap::new(),
             provenance: BTreeMap::new(),

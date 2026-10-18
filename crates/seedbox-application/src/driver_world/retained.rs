@@ -59,6 +59,7 @@ const OBJECT: &str = "driver-world/object/";
 #[serde(deny_unknown_fields)]
 pub(crate) struct Closure {
     manifest: ContentDigest,
+    executable: ContentDigest,
     objects: Vec<ContentDigest>,
 }
 fn bad(message: impl Into<String>) -> Error {
@@ -94,6 +95,7 @@ pub fn retain_prepared(
     put_closure(
         inputs,
         Closure {
+            executable: inputs.executable()?.clone(),
             manifest,
             objects: objects.into_iter().collect(),
         },
@@ -104,6 +106,9 @@ fn put_closure(inputs: &mut PreparedInputs, closure: Closure) -> Result<()> {
     inputs
         .auxiliary
         .retain(|key, _| key != MANIFEST && !key.starts_with(OBJECT));
+    inputs
+        .auxiliary
+        .insert("driver-world/executable".into(), closure.executable);
     inputs.auxiliary.insert(MANIFEST.into(), closure.manifest);
     for (index, digest) in closure.objects.into_iter().enumerate() {
         inputs
@@ -138,6 +143,7 @@ impl Closure {
             .collect();
         objects.sort();
         let value = Self {
+            executable: inputs.executable()?.clone(),
             manifest: manifest.clone(),
             objects,
         };
@@ -146,7 +152,10 @@ impl Closure {
     }
     pub(crate) fn into_auxiliary(self) -> Result<BTreeMap<String, ContentDigest>> {
         self.validate()?;
-        let mut entries = BTreeMap::from([(MANIFEST.into(), self.manifest)]);
+        let mut entries = BTreeMap::from([
+            (MANIFEST.into(), self.manifest),
+            ("driver-world/executable".into(), self.executable),
+        ]);
         for (index, digest) in self.objects.into_iter().enumerate() {
             entries.insert(format!("{OBJECT}{index:08}"), digest);
         }
@@ -234,7 +243,7 @@ pub(crate) fn request(
         };
         let process_changed = machine.process != process;
         machine.process = process;
-        machine.memory_bytes = u64::from(request.prepared.memory_mb(&machine.name)) * 1024 * 1024;
+        machine.memory_bytes = u64::from(request.prepared.memory_mb(&machine.name)?) * 1024 * 1024;
         let digest = request
             .prepared
             .guests

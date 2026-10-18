@@ -970,9 +970,7 @@ mod tests {
                 epoch_seconds: 86400,
             },
             runtime: d::Runtime {
-                kernel: asset.clone(),
-                engine: asset.clone(),
-                execution: serde_json::json!({"backend":"driver-tcg", "semantic_parameters":{"engine":{"kind":"driver-world-v1", "engine_backend":"driver-tcg"}}}),
+                execution: serde_json::json!({"backend":"driver-tcg", "semantic_parameters":{"engine":{"kind":"driver-world-v1"}}}),
             },
             machines: Default::default(),
             oracle: d::Machine {
@@ -1014,14 +1012,12 @@ mod tests {
         let InputSource::Resolved { definition } = retained.inputs else {
             panic!("resolved fixture")
         };
-        for (tag, other, cpu, different) in [
-            ("driver-pv", "driver-tcg", CpuBackend::Pv, CpuBackend::Tcg),
-            ("driver-tcg", "driver-pv", CpuBackend::Tcg, CpuBackend::Pv),
+        for (tag, cpu, different) in [
+            ("driver-pv", CpuBackend::Pv, CpuBackend::Tcg),
+            ("driver-tcg", CpuBackend::Tcg, CpuBackend::Pv),
         ] {
             let mut definition = definition.as_ref().clone();
             definition.runtime.execution["backend"] = tag.into();
-            definition.runtime.execution["semantic_parameters"]["engine"]["engine_backend"] =
-                tag.into();
             let mut selected = SimulationSpec::resolved(definition).unwrap();
             select_backend(&mut selected, None).unwrap();
             select_backend(&mut selected, Some(cpu)).unwrap();
@@ -1030,12 +1026,12 @@ mod tests {
             let InputSource::Resolved { definition } = &mut selected.inputs else {
                 unreachable!()
             };
-            definition.runtime.execution["backend"] = other.into();
+            definition.runtime.execution["backend"] = "driver-unknown".into();
             for requested in [None, Some(cpu), Some(different)] {
                 assert!(select_backend(&mut selected, requested)
                     .unwrap_err()
                     .to_string()
-                    .contains("inconsistent Driver backend metadata"));
+                    .contains("unknown Driver backend"));
             }
         }
     }

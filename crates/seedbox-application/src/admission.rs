@@ -1,8 +1,6 @@
 //! Host readiness: the KVM capabilities the engine needs. It does
 //! not pin CPU vendors, models, microcode, CPUID, engines or kernels.
-use crate::{
-    execution::ExecutionProfile, limits::Size, store::ContentDigest, Context, Error, Result,
-};
+use crate::{limits::Size, store::ContentDigest, Context, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{io::Read, path::Path};
 
@@ -93,16 +91,6 @@ pub fn required_policy() -> RequiredPolicy {
         guest_debug: 1,
         sync_regs_required: 3,
     }
-}
-
-/// The ABI and channel are fixed by the profile's type; memory needs a range.
-pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
-    if !(64..=65536).contains(&profile.semantic_parameters.memory_mb) {
-        return Err(Error::Integrity(
-            "admitted profile requires memory_mb in 64..65536".into(),
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,10 +247,9 @@ mod tests {
         impl ExecutionBackend for Refused {
             fn profile(&self) -> ExecutionProfile {
                 ExecutionProfile {
-                    backend: Backend::Other("fixture".into()),
-                    engine: ContentDigest::of(b"synthetic"),
+                    backend: "fixture".into(),
                     witness_mode: WitnessMode::Exits,
-                    semantic_parameters: SemanticParameters::new(512),
+                    semantic_parameters: SemanticParameters::new(),
                 }
             }
             fn preflight(&self, _: Option<&Path>) -> Result<()> {

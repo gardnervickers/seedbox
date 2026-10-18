@@ -117,7 +117,7 @@ impl PreparationBackend for Preparer {
             docker: self.inputs.docker.clone(),
             cancellation: context.cancellation.clone(),
             progress: preparation_progress,
-            export_cache: Some(self.inputs.profile.engine.clone()),
+            export_cache: Some(store.put_file(&self.inputs.engine)?),
         };
         let mut prepared = self.inputs.prepare_driver_with_transport(
             simulation,
@@ -300,18 +300,16 @@ mod tests {
     fn backend_progress_names_tcg_from_profile_not_host() {
         use seedbox_application::{
             driver_world::{DriverBackend, DriverExecutor},
-            execution::{Backend, ExecutionProfile, SemanticParameters, WitnessMode},
-            store::ContentDigest,
+            execution::{ExecutionProfile, SemanticParameters, WitnessMode},
         };
         for (cpu, tag) in [
             (DriverBackend::Pv, "driver-pv"),
             (DriverBackend::Tcg, "driver-tcg"),
         ] {
-            let mut semantic_parameters = SemanticParameters::new(128);
-            semantic_parameters.engine = Some(DriverExecutor::descriptor(cpu, "x86_64"));
+            let mut semantic_parameters = SemanticParameters::new();
+            semantic_parameters.engine = Some(DriverExecutor::descriptor("x86_64"));
             let mut profile = ExecutionProfile {
-                backend: Backend::Other(tag.into()),
-                engine: ContentDigest::of(b"metadata fixture"),
+                backend: tag.into(),
                 witness_mode: WitnessMode::Exits,
                 semantic_parameters,
             };
@@ -323,18 +321,11 @@ mod tests {
                 "KVM"
             };
             assert_eq!(execution_backend_label(&profile).unwrap(), expected);
-            profile.backend = Backend::Other(
-                if cpu == DriverBackend::Tcg {
-                    "driver-pv"
-                } else {
-                    "driver-tcg"
-                }
-                .into(),
-            );
+            profile.backend = "driver-unknown".into();
             assert!(execution_backend_label(&profile)
                 .unwrap_err()
                 .to_string()
-                .contains("inconsistent Driver backend metadata"));
+                .contains("unknown Driver backend"));
         }
     }
 

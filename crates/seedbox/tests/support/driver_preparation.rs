@@ -166,7 +166,7 @@ impl Service {
         };
         let execution = &definition.runtime.execution;
         assert_eq!(
-            execution["semantic_parameters"]["engine"]["engine_backend"],
+            execution["backend"],
             format!("driver-{}", self.backend),
             "{execution}"
         );

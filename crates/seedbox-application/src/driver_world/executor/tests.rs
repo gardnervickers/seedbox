@@ -1,45 +1,44 @@
 use super::*;
 fn profile() -> ExecutionProfile {
-    let mut parameters = crate::execution::SemanticParameters::new(128);
-    parameters.engine = Some(DriverExecutor::descriptor(DriverBackend::Tcg, "x86_64"));
+    let mut parameters = crate::execution::SemanticParameters::new();
+    parameters.engine = Some(DriverExecutor::descriptor("x86_64"));
     ExecutionProfile {
-        backend: crate::execution::Backend::Other("driver-tcg".into()),
-        engine: crate::store::ContentDigest::of(b"fixture engine"),
+        backend: "driver-tcg".into(),
         witness_mode: crate::execution::WitnessMode::Exits,
         semantic_parameters: parameters,
     }
 }
 #[test]
-fn backend_authority_rejects_both_inconsistent_profiles_before_worker_launch() {
+fn backend_authority_rejects_conflicting_constructor_backend_before_worker_launch() {
     for (backend, tag, other) in [
         (DriverBackend::Pv, "driver-pv", "driver-tcg"),
         (DriverBackend::Tcg, "driver-tcg", "driver-pv"),
     ] {
         let mut matching = profile();
-        matching.backend = crate::execution::Backend::Other(tag.into());
-        matching.semantic_parameters.engine = Some(DriverExecutor::descriptor(backend, "x86_64"));
+        matching.backend = tag.into();
+        matching.semantic_parameters.engine = Some(DriverExecutor::descriptor("x86_64"));
         DriverExecutor::new(matching.clone(), backend, 1).unwrap();
-        matching.backend = crate::execution::Backend::Other(other.into());
+        matching.backend = other.into();
         let error = DriverExecutor::new(matching, backend, 1)
             .err()
             .unwrap()
             .to_string();
         assert!(
-            error.contains("inconsistent Driver backend metadata"),
+            error.contains("backend argument differs from validated execution profile"),
             "{error}"
         );
     }
 }
 
 #[test]
-fn backend_authority_rejects_both_conflicting_constructor_arguments() {
+fn backend_authority_requires_contract_and_matching_constructor_argument() {
     for (backend, opposite, tag) in [
         (DriverBackend::Pv, DriverBackend::Tcg, "driver-pv"),
         (DriverBackend::Tcg, DriverBackend::Pv, "driver-tcg"),
     ] {
         let mut matching = profile();
-        matching.backend = crate::execution::Backend::Other(tag.into());
-        matching.semantic_parameters.engine = Some(DriverExecutor::descriptor(backend, "x86_64"));
+        matching.backend = tag.into();
+        matching.semantic_parameters.engine = Some(DriverExecutor::descriptor("x86_64"));
         DriverExecutor::new(matching.clone(), backend, 1).unwrap();
         let mut legacy = matching.clone();
         legacy.semantic_parameters.engine = None;
@@ -51,7 +50,7 @@ fn backend_authority_rejects_both_conflicting_constructor_arguments() {
             error.contains("recorded driver-world-v1 contract"),
             "{error}"
         );
-        // Both fields inside the profile agree. Change the independent argument,
+        // Change the independent argument,
         // not a profile label: it must not choose a different actual executor.
         let error = DriverExecutor::new(matching, opposite, 1)
             .err()
@@ -119,8 +118,8 @@ fn malformed_report_or_digest_is_not_accepted_as_native_evidence() {
 #[test]
 fn controller_scope_follows_driver_host_for_pv_and_tcg() {
     let mut pv = profile();
-    pv.backend = crate::execution::Backend::Other("driver-pv".into());
-    pv.semantic_parameters.engine = Some(DriverExecutor::descriptor(DriverBackend::Pv, "x86_64"));
+    pv.backend = "driver-pv".into();
+    pv.semantic_parameters.engine = Some(DriverExecutor::descriptor("x86_64"));
     let pv = DriverExecutor::new(pv, DriverBackend::Pv, 1).unwrap();
     if crate::driver_world::platform::Host::current().runs_driver() {
         pv.preflight(None).unwrap();
@@ -180,20 +179,14 @@ fn driver_constructor_validates_contract_and_worker_range_without_running_tools(
 fn non_oracle_legacy_controller_refuses_before_retaining_engine_or_preparing_images() {
     let root = tempfile::tempdir().unwrap();
     let store_root = root.path().join("untouched-store");
-    let store = crate::store::ContentStore::new(&store_root);
     let mut simulation = crate::config::parse("name: authority\nservices:\n  app: {image: example/app}\n  other: {image: example/other}\nx-seedbox:\n  version: 1\n  check: {service: app}\n", std::path::Path::new("/project/compose.yaml"), &Default::default()).unwrap();
     simulation.control = Some(crate::config::Control {
         service: "other".into(),
     });
-    let error = DriverExecutor::for_preparation(
-        &root.path().join("missing-engine"),
-        &store,
-        &simulation,
-        crate::execution::WitnessMode::Exits,
-    )
-    .err()
-    .unwrap()
-    .to_string();
+    let error = DriverExecutor::for_preparation(&simulation, crate::execution::WitnessMode::Exits)
+        .err()
+        .unwrap()
+        .to_string();
     assert!(
         error.contains("controller must also be the check service"),
         "{error}"
@@ -207,15 +200,13 @@ fn retained_profile_drift_is_refused_before_reading_runtime_or_launching_workers
     for change in [0, 1] {
         let mut recorded = profile();
         if change == 0 {
-            recorded.semantic_parameters.memory_mb += 64;
+            recorded.witness_mode = crate::execution::WitnessMode::FullState;
         } else {
             recorded.semantic_parameters.torn_writes = true;
         }
-        let digest = crate::store::ContentDigest::of(b"unread fixture");
         let inputs = PreparedInputs {
             machine_memory_mb: Default::default(),
             wall_clock_epoch: None,
-            kernel: digest,
             images: Default::default(),
             placement: Default::default(),
             guests: Default::default(),

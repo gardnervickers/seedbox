@@ -51,8 +51,6 @@ pub struct Clock {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Runtime {
-    pub kernel: Asset,
-    pub engine: Asset,
     /// Inline backend launch contract and resolved semantic policies.
     pub execution: serde_json::Value,
 }
@@ -272,11 +270,8 @@ impl Definition {
 
 impl Runtime {
     pub fn driver_backend(&self) -> Result<Option<crate::project::CpuBackend>, String> {
-        let engine = &self.execution["semantic_parameters"]["engine"];
-        crate::project::CpuBackend::from_driver_metadata(
+        crate::project::CpuBackend::from_recorded_name(
             self.execution["backend"].as_str().unwrap_or_default(),
-            engine["kind"] == "driver-world-v1",
-            engine["engine_backend"].as_str(),
         )
     }
 }

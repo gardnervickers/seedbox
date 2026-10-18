@@ -268,9 +268,20 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
         let seedbox_api::InputSource::Resolved { definition } = &mut request.spec.inputs else {
             panic!("expected complete retained inputs");
         };
-        definition.runtime.engine = format!("sha256:{}", store.put(engine).unwrap().hex())
-            .try_into()
-            .unwrap();
+        definition.runtime.execution["backend"] = "driver-pv".into();
+        definition.runtime.execution["semantic_parameters"]["engine"] = serde_json::to_value(
+            seedbox_application::driver_world::DriverExecutor::descriptor(
+                seedbox_application::driver_world::platform::architecture_name(
+                    definition.architecture,
+                ),
+            ),
+        )
+        .unwrap();
+        definition.runtime.execution["driver_world"] = serde_json::json!({
+            "manifest": store.put(b"metadata-only Driver manifest").unwrap(),
+            "executable": store.put(engine).unwrap(),
+            "objects": [],
+        });
         let prepared = seedbox_application::definition::prepared(definition, &store).unwrap();
         let identity = RunIdentity {
             version: seedbox_artifacts::record::FORMAT_VERSION,
@@ -326,8 +337,8 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
         unreachable!();
     };
     assert_ne!(
-        old.identity.inputs.profile.engine,
-        new.identity.inputs.profile.engine
+        old.identity.inputs.executable().unwrap(),
+        new.identity.inputs.executable().unwrap()
     );
     assert_eq!(
         old.identity.inputs.profile.semantic_parameters,

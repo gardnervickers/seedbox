@@ -4,9 +4,8 @@
 use seedbox_api::{ExecutionTermination, Phase, SimulationSpec, SubmitRequest};
 use seedbox_application::{
     execution::{
-        Backend, CancellationToken, ExecutionBackend, ExecutionProfile, ExecutionReport,
-        ExecutionRequest, PreparedImage, PreparedInputs, SemanticParameters, StopReason,
-        WitnessMode,
+        CancellationToken, ExecutionBackend, ExecutionProfile, ExecutionReport, ExecutionRequest,
+        PreparedImage, PreparedInputs, SemanticParameters, StopReason, WitnessMode,
     },
     image::Launch,
     process_lifetime::{
@@ -292,9 +291,8 @@ impl Drop for FailureCleanup {
 fn request(store: &ContentStore) -> SubmitRequest {
     let binary = store.put(b"process-only-catalogue-input").unwrap();
     let inputs = PreparedInputs {
-        machine_memory_mb: Default::default(),
+        machine_memory_mb: std::collections::BTreeMap::from([("oracle".into(), 128)]),
         wall_clock_epoch: Some(86_400),
-        kernel: binary.clone(),
         images: BTreeMap::from([(
             "oracle".into(),
             PreparedImage {
@@ -314,10 +312,9 @@ fn request(store: &ContentStore) -> SubmitRequest {
         guests: BTreeMap::from([("oracle".into(), binary.clone())]),
         placement: BTreeMap::from([("oracle".into(), "oracle".into())]),
         profile: ExecutionProfile {
-            backend: Backend::Other("owned-process-host-fixture".into()),
-            engine: binary,
+            backend: "owned-process-host-fixture".into(),
             witness_mode: WitnessMode::Exits,
-            semantic_parameters: SemanticParameters::new(128),
+            semantic_parameters: SemanticParameters::new(),
         },
         auxiliary: BTreeMap::new(),
         provenance: BTreeMap::new(),

@@ -1177,11 +1177,10 @@ fn comparison_ignores_only_provenance_and_retains_launch_assets_architecture_and
             host_os: "before".into(),
             host_arch: "before".into(),
             guest_arch: "x86_64".into(),
-            engine_backend: "driver-pv".into(),
             engine_timebase: "before".into(),
         })
         .unwrap();
-    // The Driver contract keeps the two backend labels consistent.
+    // The execution backend is the sole recorded CPU selection.
     definition.runtime.execution["backend"] = "driver-pv".into();
     snapshot.simulation.spec = SimulationSpec::resolved(definition.as_ref().clone()).unwrap();
     let baseline = execution
@@ -1219,10 +1218,11 @@ fn comparison_ignores_only_provenance_and_retains_launch_assets_architecture_and
             3 => definition.runtime.execution["semantic_parameters"]["torn_writes"] = true.into(),
             4 => definition.runtime.execution["witness_mode"] = "full_state".into(),
             5 => {
-                definition.runtime.kernel = seedbox_spec::definition::Asset(format!(
-                    "sha256:{}",
-                    store.put(b"different kernel bytes").unwrap().hex()
-                ))
+                let manifest = store.put(b"different manifest bytes").unwrap();
+                let executable = store.put(b"different Driver process bytes").unwrap();
+                definition.runtime.execution["driver_world"] = serde_json::json!({
+                    "manifest": manifest, "executable": executable, "objects": [],
+                });
             }
             6 => {
                 definition.oracle.boot_archive = seedbox_spec::definition::Asset(format!(
@@ -1237,8 +1237,6 @@ fn comparison_ignores_only_provenance_and_retains_launch_assets_architecture_and
             }
             8 => {
                 definition.runtime.execution["backend"] = "driver-tcg".into();
-                definition.runtime.execution["semantic_parameters"]["engine"]["engine_backend"] =
-                    "driver-tcg".into();
             }
             _ => unreachable!(),
         }

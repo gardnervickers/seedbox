@@ -69,18 +69,11 @@ impl OciPreparer {
             validate_machine_memory(
                 &self.profile,
                 name,
-                service
-                    .memory_mb
-                    .unwrap_or(self.profile.semantic_parameters.memory_mb),
+                service.memory_mb.unwrap_or(simulation.machine.memory_mb),
             )?;
         }
         let kernel = store.put_file(&self.kernel)?;
         let engine = store.put_file(&self.engine)?;
-        if engine != self.profile.engine {
-            return Err(Error::Integrity(
-                "VMM changed after profile construction".into(),
-            ));
-        }
         architecture.validate_elf(&self.init)?;
         for (name, service) in &simulation.services {
             for mount in &service.volumes {
@@ -223,9 +216,7 @@ impl OciPreparer {
                 boot.filesystem,
             );
             fs::write(&archive, boot.bytes)?;
-            let memory_mb = service
-                .memory_mb
-                .unwrap_or(self.profile.semantic_parameters.memory_mb);
+            let memory_mb = service.memory_mb.unwrap_or(simulation.machine.memory_mb);
             let minimum = minimum_memory_mb(fs::metadata(&archive)?.len())?;
             if memory_mb < minimum {
                 return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase memoryMiB for this machine (legacy Compose: x-seedbox.machine.memory_mb; application memory may require more)")));
@@ -250,19 +241,19 @@ impl OciPreparer {
 
             context.progress(name, PreparationStage::Ready);
         }
+        auxiliary.insert("driver-world/executable".into(), engine);
         Ok(PreparedInputs {
             machine_memory_mb: simulation
                 .services
                 .iter()
-                .filter_map(|(name, service)| {
-                    service
-                        .memory_mb
-                        .filter(|memory| *memory != self.profile.semantic_parameters.memory_mb)
-                        .map(|memory| (name.clone(), memory))
+                .map(|(name, service)| {
+                    (
+                        name.clone(),
+                        service.memory_mb.unwrap_or(simulation.machine.memory_mb),
+                    )
                 })
                 .collect(),
             wall_clock_epoch: Some(wall_clock_epoch),
-            kernel,
             images,
             guests,
             placement: simulation

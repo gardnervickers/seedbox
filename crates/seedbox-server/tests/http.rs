@@ -398,19 +398,17 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
     })).unwrap();
     let digest = store.put(&history.encode().unwrap()).unwrap();
     let inputs = PreparedInputs {
-        machine_memory_mb: Default::default(),
+        machine_memory_mb: std::collections::BTreeMap::from([("oracle".into(), 512)]),
         wall_clock_epoch: None,
-        kernel: digest.clone(),
         images: Default::default(),
         placement: Default::default(),
         guests: Default::default(),
         auxiliary: Default::default(),
         provenance: Default::default(),
         profile: ExecutionProfile {
-            backend: seedbox_application::execution::Backend::Other("test".into()),
-            engine: digest.clone(),
+            backend: "test".into(),
             witness_mode: seedbox_application::execution::WitnessMode::Exits,
-            semantic_parameters: SemanticParameters::new(512),
+            semantic_parameters: SemanticParameters::new(),
         },
     };
     let descriptor = root.join("inputs").join(format!("{id}.json"));

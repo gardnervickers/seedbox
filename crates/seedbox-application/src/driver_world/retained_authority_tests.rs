@@ -2,21 +2,18 @@
 use super::*;
 use crate::{
     driver_world::{DriverBackend, DriverExecutor},
-    execution::{Backend, CancellationToken, ExecutionProfile, SemanticParameters, WitnessMode},
+    execution::{CancellationToken, ExecutionProfile, SemanticParameters, WitnessMode},
 };
 
 fn profile(backend: DriverBackend) -> ExecutionProfile {
-    let mut parameters = SemanticParameters::new(128);
-    parameters.engine = Some(DriverExecutor::descriptor(backend, "x86_64"));
+    let mut parameters = SemanticParameters::new();
+    parameters.engine = Some(DriverExecutor::descriptor("x86_64"));
     ExecutionProfile {
-        backend: Backend::Other(
-            match backend {
-                DriverBackend::Pv => "driver-pv",
-                DriverBackend::Tcg => "driver-tcg",
-            }
-            .into(),
-        ),
-        engine: ContentDigest::of(b"metadata fixture"),
+        backend: match backend {
+            DriverBackend::Pv => "driver-pv",
+            DriverBackend::Tcg => "driver-tcg",
+        }
+        .into(),
         witness_mode: WitnessMode::Exits,
         semantic_parameters: parameters,
     }
@@ -63,14 +60,13 @@ fn fixture(root: &Path, backend: DriverBackend) -> (PreparedInputs, Prepared, Ar
         artifact: source.to_str().unwrap().into(),
     };
     let inputs = PreparedInputs {
-        machine_memory_mb: Default::default(),
+        machine_memory_mb: BTreeMap::from([("oracle".into(), 128)]),
         wall_clock_epoch: None,
-        kernel: digest,
         profile: profile(backend),
         images: Default::default(),
         placement: Default::default(),
         guests: Default::default(),
-        auxiliary: Default::default(),
+        auxiliary: BTreeMap::from([("driver-world/executable".into(), digest)]),
         provenance: Default::default(),
     };
     let prepared = Prepared {
@@ -121,9 +117,10 @@ fn backend_authority_checks_actual_inventory_before_retaining_artifacts() {
         let (mut inputs, mut prepared, artifact) = fixture(root.path(), backend);
         validate_inventory(&inputs.profile, &prepared.inventory).unwrap();
         prepared.inventory = inventory(opposite, &artifact);
+        let original = inputs.auxiliary.clone();
         mismatch(retain_prepared(&mut inputs, &prepared, &store).unwrap_err());
         assert!(!store_path.exists(), "mismatch must precede retention");
-        assert!(inputs.auxiliary.is_empty());
+        assert_eq!(inputs.auxiliary, original);
     }
 }
 

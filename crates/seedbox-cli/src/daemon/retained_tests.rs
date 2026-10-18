@@ -1,9 +1,8 @@
 //! Cold retained-provider ownership, not native guest or executable proof.
 use super::*;
 use clap::Parser;
-use seedbox_application::execution::Backend;
 use seedbox_application::{
-    driver_world::{self, DriverBackend, DriverExecutor},
+    driver_world::{self, DriverExecutor},
     execution::{ExecutionProfile, SemanticParameters, WitnessMode},
     store::ContentDigest,
 };
@@ -79,25 +78,23 @@ fn retained_driver_acquires_only_recorded_runtime_and_owns_it_until_executor_dro
     fs::write(&worker, b"cold worker fixture; never executed").unwrap();
     let filesystem = root.path().join("filesystem.tar");
     fs::write(&filesystem, [0; 1024]).unwrap();
-    let mut semantic = SemanticParameters::new(256);
-    semantic.engine = Some(DriverExecutor::descriptor(
-        DriverBackend::Pv,
-        std::env::consts::ARCH,
-    ));
+    let mut semantic = SemanticParameters::new();
+    semantic.engine = Some(DriverExecutor::descriptor(std::env::consts::ARCH));
     let mut inputs = PreparedInputs {
         machine_memory_mb: Default::default(),
         wall_clock_epoch: Some(86400),
-        kernel: store.put_file(&guest.join("kernel")).unwrap(),
         images: BTreeMap::new(),
         guests: BTreeMap::new(),
         placement: BTreeMap::new(),
         profile: ExecutionProfile {
-            backend: Backend::Other("driver-pv".into()),
-            engine: store.put_file(&worker).unwrap(),
+            backend: "driver-pv".into(),
             witness_mode: WitnessMode::Exits,
             semantic_parameters: semantic,
         },
-        auxiliary: BTreeMap::new(),
+        auxiliary: BTreeMap::from([(
+            "driver-world/executable".into(),
+            store.put_file(&worker).unwrap(),
+        )]),
         provenance: BTreeMap::new(),
     };
     let prepared = wire::Prepared {
