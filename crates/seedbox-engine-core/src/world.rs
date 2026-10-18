@@ -585,6 +585,9 @@ pub struct WorldInputs<M: WorldMachine> {
     pub faults: faults::Faults,
     pub control: control::Control,
     pub macs: Vec<[u8; 6]>,
+    /// Each machine's expected crashes, from its definition; they change how
+    /// its kernel crash evidence reduces.
+    pub expected_crashes: Vec<Vec<seedbox_engine_protocol::property::ExpectedCrash>>,
 }
 
 pub struct World<M: WorldMachine> {
@@ -630,6 +633,9 @@ pub struct World<M: WorldMachine> {
     pub(crate) boundaries: u64,
     /// Reduced property evidence, in commit order.
     pub(crate) properties: seedbox_engine_protocol::property::Ledger,
+    /// Per machine, the crashes its definition expects. Configuration, not
+    /// state: a restored checkpoint keeps the world's own.
+    pub(crate) expected_crashes: Vec<Vec<seedbox_engine_protocol::property::ExpectedCrash>>,
     pub(crate) choices: crate::choices::Choices,
     /// Anchors to stop at for a capture. A runtime option, never semantic.
     pub(crate) anchor_captures: std::collections::BTreeSet<String>,
@@ -658,6 +664,7 @@ impl<M: WorldMachine> World<M> {
             faults,
             control,
             macs,
+            expected_crashes,
         } = inputs;
         let n = machines.len();
         let world = Self {
@@ -692,6 +699,7 @@ impl<M: WorldMachine> World<M> {
             slices: 0,
             boundaries: 0,
             properties: Default::default(),
+            expected_crashes,
             choices: Default::default(),
             anchor_captures: Default::default(),
             captured_anchor: None,
@@ -831,11 +839,16 @@ impl<M: WorldMachine> World<M> {
             self.events.len(),
             self.strict_events.len(),
             self.macs.len(),
+            self.expected_crashes.len(),
         ]
         .iter()
         .any(|&len| len != n)
         {
             return Err("world per-machine input lengths differ".into());
+        }
+        for (machine, expected) in self.machines.iter().zip(&self.expected_crashes) {
+            seedbox_engine_protocol::property::ExpectedCrash::validate_all(expected)
+                .map_err(|e| format!("machine {}: {e}", machine.name))?;
         }
         if self.early >= self.lookahead {
             return Err("world early slack must be below lookahead".into());
@@ -1943,7 +1956,15 @@ pub fn drain_machine_messages<M: WorldMachine>(
     }
     for (at, incarnation, line) in std::mem::take(&mut world.machines[m].committed_properties) {
         let name = world.machines[m].name.clone();
-        crate::properties::commit(&mut world.properties, &name, incarnation, at, line);
+        let expected = &world.expected_crashes[m];
+        crate::properties::commit(
+            &mut world.properties,
+            &name,
+            expected,
+            incarnation,
+            at,
+            line,
+        );
     }
     for (id, at, success) in world.machines[m].fault_effects.drain(..) {
         if id == 0 && success {

@@ -180,6 +180,7 @@ fn machine(
         initrd: artifact(request, digest)?,
         disk,
         cmdline: None,
+        expected_crashes: Vec::new(),
     })
 }
 

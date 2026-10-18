@@ -611,6 +611,7 @@ pub(crate) fn world(names: &[&str]) -> World<Mock> {
         slices: 0,
         boundaries: 0,
         properties: Default::default(),
+        expected_crashes: vec![Vec::new(); n],
         choices: Default::default(),
         anchor_captures: Default::default(),
         captured_anchor: None,

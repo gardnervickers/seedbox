@@ -358,6 +358,200 @@ fn kernel_oom_and_crash_lines_violate_their_default_properties() {
     assert_eq!(l.properties[DEFAULT_NO_OOM].failures, 1);
 }
 
+const ABORT: &str = "libdynamorio.so: keel-watchdog: potentially unexpected fatal signal 6.";
+
+fn watchdog(executable: Option<&str>) -> ExpectedCrash {
+    ExpectedCrash {
+        signal: 6,
+        command: "keel-watchdog".into(),
+        executable: executable.map(Into::into),
+    }
+}
+
+fn kernel(seq: u64, message: &str) -> Frame {
+    frame(
+        SUPERVISOR_SESSION,
+        seq,
+        json!({"kernel": {"message": message}}),
+    )
+}
+
+#[test]
+fn expected_crashes_match_only_their_exact_fatal_signal_report() {
+    let any = watchdog(None);
+    let pinned = watchdog(Some("libdynamorio.so"));
+    assert!(any.matches(ABORT));
+    assert!(pinned.matches(ABORT));
+    // A task without an executable is reported by its command alone.
+    let bare = "keel-watchdog: potentially unexpected fatal signal 6.";
+    assert!(any.matches(bare));
+    assert!(!pinned.matches(bare));
+    assert!(!watchdog(Some("keel-s3dd")).matches(ABORT));
+    for other in [
+        // Another signal, command or a command's suffix or prefix.
+        "libdynamorio.so: keel-watchdog: potentially unexpected fatal signal 11.",
+        "libdynamorio.so: keel-watchdog: potentially unexpected fatal signal 60.",
+        "libdynamorio.so: keel-s3dd: potentially unexpected fatal signal 6.",
+        "libdynamorio.so: old-keel-watchdog: potentially unexpected fatal signal 6.",
+        "libdynamorio.so: keel-watchdog2: potentially unexpected fatal signal 6.",
+        ": keel-watchdog: potentially unexpected fatal signal 6.",
+        // Truncated, extended or reworded lines.
+        "libdynamorio.so: keel-watchdog: potentially unexpected fatal signal 6",
+        "libdynamorio.so: keel-watchdog: potentially unexpected fatal signal 6. more",
+        "libdynamorio.so: keel-watchdog: potentially unexpected fatal signal +6.",
+        "libdynamorio.so: keel-watchdog: potentially unexpected fatal signal",
+        // Other crash report forms never match.
+        "keel-watchdog[77]: segfault at 0 ip 0000 sp 0000 error 4",
+        "traps: keel-watchdog[77] trap invalid opcode ip:1 sp:2 error:0",
+        "",
+    ] {
+        assert!(!any.matches(other), "{other}");
+    }
+}
+
+#[test]
+fn expected_crash_declarations_are_validated() {
+    assert_eq!(ExpectedCrash::validate_all(&[watchdog(None)]), Ok(()));
+    assert_eq!(
+        ExpectedCrash::validate_all(&[watchdog(Some("libdynamorio.so"))]),
+        Ok(())
+    );
+    let with = |signal: i32, command: &str, executable: Option<&str>| ExpectedCrash {
+        signal,
+        command: command.into(),
+        executable: executable.map(Into::into),
+    };
+    for (bad, error) in [
+        (
+            with(9, "keel-watchdog", None),
+            "expected crash signal 9 is not a core-dumping signal the kernel reports",
+        ),
+        (
+            with(6, "", None),
+            "expected crash command \"\" must be 1 to 15 printable ASCII bytes",
+        ),
+        (
+            with(6, "sixteen-bytes-xx", None),
+            "expected crash command \"sixteen-bytes-xx\" must be 1 to 15 printable ASCII bytes",
+        ),
+        (
+            with(6, "tab\there", None),
+            "expected crash command \"tab\\there\" must be 1 to 15 printable ASCII bytes",
+        ),
+        (
+            with(6, "keel-watchdog", Some("/usr/bin/keel")),
+            "expected crash executable \"/usr/bin/keel\" must be a file name of 1 to 255 printable ASCII bytes",
+        ),
+        (
+            with(6, "keel-watchdog", Some("")),
+            "expected crash executable \"\" must be a file name of 1 to 255 printable ASCII bytes",
+        ),
+    ] {
+        assert_eq!(ExpectedCrash::validate_all(&[bad]), Err(error.into()));
+    }
+    assert!(
+        ExpectedCrash::validate_all(&[watchdog(None), watchdog(None)])
+            .unwrap_err()
+            .contains("declared twice")
+    );
+    let many: Vec<_> = (0..=MAX_EXPECTED_CRASHES)
+        .map(|i| with(6, &format!("thread-{i}"), None))
+        .collect();
+    assert_eq!(
+        ExpectedCrash::validate_all(&many),
+        Err("at most 16 expected crashes per machine".into())
+    );
+    // The world document names fields exactly; unknown ones are refused.
+    let value = serde_json::to_value(watchdog(None)).unwrap();
+    assert_eq!(value, json!({"signal": 6, "command": "keel-watchdog"}));
+    assert!(serde_json::from_value::<ExpectedCrash>(
+        json!({"signal": 6, "command": "keel-watchdog", "comm": "x"})
+    )
+    .is_err());
+}
+
+#[test]
+fn an_expected_crash_passes_the_default_property_and_stays_visible() {
+    let expected = [watchdog(None)];
+    let mut l = Ledger::default();
+    l.apply_expecting(&kernel(1, ABORT), "s3", 0, 5, &expected);
+    l.apply_expecting(&kernel(2, ABORT), "s3", 0, 9, &expected);
+    let p = &l.properties[DEFAULT_NO_CRASH];
+    assert_eq!((p.passes, p.failures), (2, 0));
+    assert_eq!(p.status(), PropertyStatus::Passed);
+    let assessment = l.assessment();
+    assert_eq!(assessment.status, AssessmentStatus::Passed);
+    let result = &assessment.properties[0];
+    assert_eq!((result.id.as_str(), result.passes), (DEFAULT_NO_CRASH, 2));
+    let example = result.example.as_ref().unwrap();
+    assert_eq!(
+        (example.origin.machine.as_str(), example.origin.time_ns),
+        ("s3", 5)
+    );
+    assert_eq!(
+        example.details,
+        Some(json!({
+            "message": ABORT,
+            "expected": {"signal": 6, "command": "keel-watchdog"}
+        }))
+    );
+}
+
+#[test]
+fn unexpected_crashes_violate_and_mixed_runs_report_both() {
+    let expected = [watchdog(None)];
+    // Another machine's declarations never excuse this machine's crash.
+    let mut l = Ledger::default();
+    l.apply_expecting(&kernel(1, ABORT), "s3", 0, 5, &expected);
+    l.apply(&kernel(1, ABORT), "n1", 0, 6);
+    let segv = "libdynamorio.so: keel-s3dd: potentially unexpected fatal signal 11.";
+    l.apply_expecting(&kernel(2, segv), "s3", 0, 7, &expected);
+    let p = &l.properties[DEFAULT_NO_CRASH];
+    assert_eq!((p.passes, p.failures), (1, 2));
+    assert_eq!(p.status(), PropertyStatus::Violated);
+    assert_eq!(p.first_pass.as_ref().unwrap().origin.machine, "s3");
+    let failure = p.first_failure.as_ref().unwrap();
+    assert_eq!(failure.origin.machine, "n1");
+    assert_eq!(failure.details, Some(json!({"message": ABORT})));
+    let assessment = l.assessment();
+    assert_eq!(assessment.status, AssessmentStatus::Violated);
+    let result = &assessment.properties[0];
+    assert_eq!((result.passes, result.failures), (1, 2));
+    assert_eq!(result.example.as_ref().unwrap().origin.machine, "n1");
+}
+
+#[test]
+fn partial_or_lost_crash_evidence_never_passes() {
+    let expected = [watchdog(None)];
+    // A truncated report is an unexpected crash.
+    let mut l = Ledger::default();
+    let truncated = &ABORT[..ABORT.len() - 1];
+    l.apply_expecting(&kernel(1, truncated), "s3", 0, 5, &expected);
+    assert_eq!(status(&l, DEFAULT_NO_CRASH), PropertyStatus::Violated);
+    // An OOM kill of the watchdog's process is never expected.
+    let mut l = Ledger::default();
+    let oom = "Out of memory: Killed process 412 (keel-watchdog) total-vm:1024kB";
+    l.apply_expecting(&kernel(1, oom), "s3", 0, 5, &expected);
+    assert_eq!(status(&l, DEFAULT_NO_OOM), PropertyStatus::Violated);
+    assert!(!l.properties.contains_key(DEFAULT_NO_CRASH));
+    // A lost record beside an expected crash leaves the run incomplete.
+    let mut l = Ledger::default();
+    l.apply_expecting(&kernel(1, ABORT), "s3", 0, 5, &expected);
+    let lost = json!({"lost": {"reason": "record too large", "count": 1}});
+    l.apply_expecting(&frame(SUPERVISOR_SESSION, 2, lost), "s3", 0, 6, &expected);
+    assert_eq!(l.assessment().status, AssessmentStatus::Incomplete);
+    // A sequence gap is an evidence error even when the record matches.
+    let mut l = Ledger::default();
+    l.apply_expecting(&kernel(3, ABORT), "s3", 0, 5, &expected);
+    assert_eq!(l.assessment().status, AssessmentStatus::Incomplete);
+    // An application cannot report a kernel line, expected or not.
+    let mut l = Ledger::default();
+    let forged = frame(1, 1, json!({"kernel": {"message": ABORT}}));
+    l.apply_expecting(&forged, "s3", 0, 5, &expected);
+    assert!(l.properties.is_empty());
+    assert_eq!(l.assessment().status, AssessmentStatus::Incomplete);
+}
+
 #[test]
 fn coverage_slices_union_per_machine_and_only_from_the_supervisor() {
     let map = |set: &[usize]| {

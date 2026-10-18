@@ -1,12 +1,14 @@
 //! Commit-time acceptance of property frames. The coordinator calls this in
 //! its fixed absorb order; the reducer itself lives in the protocol crate so
 //! offline reporting applies identical semantics.
-use seedbox_engine_protocol::property::{decode, Ledger};
+use seedbox_engine_protocol::property::{decode, ExpectedCrash, Ledger};
 
 /// Reduce one committed `SBX_PROP1` line; `None` is an oversized line.
+/// `expected` holds the machine's declared crashes.
 pub fn commit(
     ledger: &mut Ledger,
     machine: &str,
+    expected: &[ExpectedCrash],
     incarnation: u32,
     at: u64,
     line: Option<Vec<u8>>,
@@ -15,7 +17,7 @@ pub fn commit(
         return ledger.malformed_frame(machine, incarnation, at, "frame too large");
     };
     match decode(&line) {
-        Ok(Some(frame)) => ledger.apply(&frame, machine, incarnation, at),
+        Ok(Some(frame)) => ledger.apply_expecting(&frame, machine, incarnation, at, expected),
         Ok(None) => ledger.malformed_frame(machine, incarnation, at, "not a property frame"),
         Err(error) => ledger.malformed_frame(machine, incarnation, at, error),
     }

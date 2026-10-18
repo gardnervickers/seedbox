@@ -754,6 +754,8 @@ struct Coord<'a, M: WorldMachine> {
     /// The block request hold installed in each machine, by trigger ID.
     holds: Vec<Option<u32>>,
     properties: &'a mut seedbox_engine_protocol::property::Ledger,
+    /// Per machine, the crashes its definition expects.
+    expected_crashes: &'a [Vec<seedbox_engine_protocol::property::ExpectedCrash>],
     choices: &'a mut crate::choices::Choices,
     /// Choice replies committed this round: when, to which machine, what.
     choice_replies: Vec<(u64, usize, Vec<u8>)>,
@@ -1115,7 +1117,14 @@ impl<M: WorldMachine> Coord<'_, M> {
                     occurrences.push((at, m, 1, j, event));
                 }
             }
-            crate::properties::commit(self.properties, &self.names[m], incarnation, at, line);
+            crate::properties::commit(
+                self.properties,
+                &self.names[m],
+                &self.expected_crashes[m],
+                incarnation,
+                at,
+                line,
+            );
             // Every earlier record of the session committed before this one,
             // so the reply confirms them; it travels like a choice's.
             let reply = match request {
@@ -2143,6 +2152,7 @@ where
         boundaries,
         scheduler_continuation,
         properties,
+        expected_crashes,
         choices,
         anchor_captures,
         captured_anchor,
@@ -2238,6 +2248,7 @@ where
             })
             .collect(),
         properties,
+        expected_crashes,
         anchor_captures,
         captured_anchor: None,
         resume_after_anchor: resume_anchor,

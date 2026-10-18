@@ -1183,6 +1183,7 @@ fn actual_arm_proxy_obeys_core_strict_reply_boundary_despite_fatal_control() {
         faults,
         control,
         macs: vec![[2, 0, 0, 0, 0, 1]],
+        expected_crashes: vec![Vec::new()],
     })
     .unwrap();
     assert_eq!(

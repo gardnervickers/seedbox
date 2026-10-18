@@ -360,8 +360,110 @@ pub const DEFAULT_FATAL_SIGNAL: &str = "seedbox.main_process_not_killed_by_signa
 /// Default property: the kernel kills no process for running out of memory.
 pub const DEFAULT_NO_OOM: &str = "seedbox.no_out_of_memory_kills";
 /// Default property: no process crashes on a fault it did not handle, as the
-/// kernel reports it (segfaults, unhandled exceptions, traps).
+/// kernel reports it (segfaults, unhandled exceptions, traps). A crash its
+/// machine's definition declares as an [`ExpectedCrash`] passes it instead.
 pub const DEFAULT_NO_CRASH: &str = "seedbox.no_crashing_processes";
+
+/// Signals whose death the kernel reports with `print-fatal-signals`: the
+/// core-dumping ones, numbered alike on x86-64 and arm64 (SIGQUIT, SIGILL,
+/// SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGSEGV, SIGXCPU, SIGXFSZ, SIGSYS).
+pub const FATAL_SIGNALS: [i32; 10] = [3, 4, 5, 6, 7, 8, 11, 24, 25, 31];
+/// Expected crashes one machine may declare.
+pub const MAX_EXPECTED_CRASHES: usize = 16;
+/// A thread's command name (the kernel's `comm`) holds at most this many bytes.
+pub const MAX_COMMAND_BYTES: usize = 15;
+/// An executable's file name holds at most this many bytes.
+pub const MAX_EXECUTABLE_BYTES: usize = 255;
+/// What separates the reporting task from the signal number in the kernel's
+/// fatal-signal line: `[EXECUTABLE: ]COMMAND: potentially unexpected fatal
+/// signal N.`, where EXECUTABLE is the file name of the task's executable.
+const FATAL_SIGNAL_REPORT: &str = ": potentially unexpected fatal signal ";
+
+/// A crash the simulation definition declares as designed behavior on one
+/// machine: the kernel's fatal-signal report of `signal`, from a thread whose
+/// command name is `command`, and, when given, whose executable's file name
+/// is `executable`. Only that report form can match; segfault, trap and
+/// unhandled-exception lines never do, and nor does an OOM kill.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectedCrash {
+    pub signal: i32,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
+}
+
+/// 1..=max printable ASCII bytes: what a kernel line carries unescaped.
+fn printable(text: &str, max: usize) -> bool {
+    !text.is_empty() && text.len() <= max && text.bytes().all(|b| (0x20..0x7f).contains(&b))
+}
+
+impl ExpectedCrash {
+    pub fn validate(&self) -> Result<(), String> {
+        if !FATAL_SIGNALS.contains(&self.signal) {
+            return Err(format!(
+                "expected crash signal {} is not a core-dumping signal the kernel reports",
+                self.signal
+            ));
+        }
+        if !printable(&self.command, MAX_COMMAND_BYTES) {
+            return Err(format!(
+                "expected crash command {:?} must be 1 to {MAX_COMMAND_BYTES} printable ASCII bytes",
+                self.command
+            ));
+        }
+        if let Some(executable) = &self.executable {
+            if !printable(executable, MAX_EXECUTABLE_BYTES) || executable.contains('/') {
+                return Err(format!(
+                    "expected crash executable {executable:?} must be a file name of 1 to {MAX_EXECUTABLE_BYTES} printable ASCII bytes"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check one machine's declarations: each valid, bounded, none repeated.
+    pub fn validate_all(expected: &[Self]) -> Result<(), String> {
+        if expected.len() > MAX_EXPECTED_CRASHES {
+            return Err(format!(
+                "at most {MAX_EXPECTED_CRASHES} expected crashes per machine"
+            ));
+        }
+        for (i, crash) in expected.iter().enumerate() {
+            crash.validate()?;
+            if expected[..i].contains(crash) {
+                return Err(format!("expected crash {crash:?} is declared twice"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a kernel line is exactly this crash's fatal-signal report.
+    /// Anything else, including a truncated or reworded line, is not.
+    pub fn matches(&self, message: &str) -> bool {
+        let Some((task, rest)) = message.rsplit_once(FATAL_SIGNAL_REPORT) else {
+            return false;
+        };
+        if rest.strip_suffix('.') != Some(self.signal.to_string().as_str()) {
+            return false;
+        }
+        match &self.executable {
+            Some(executable) => {
+                task.strip_prefix(executable.as_str())
+                    .and_then(|task| task.strip_prefix(": "))
+                    == Some(self.command.as_str())
+            }
+            // A task without an executable is reported by its command alone.
+            None => {
+                task == self.command
+                    || task
+                        .strip_suffix(self.command.as_str())
+                        .and_then(|task| task.strip_suffix(": "))
+                        .is_some_and(|executable| !executable.is_empty())
+            }
+        }
+    }
+}
 
 /// Reduced property evidence. Checkpoints retain it whole; every field is
 /// ordered, so serialization is canonical.
@@ -478,9 +580,24 @@ impl Ledger {
         self.error(format!("malformed property frame: {error}"), Some(&origin));
     }
 
-    /// Reduce one committed frame. Never fails: problems become evidence
-    /// errors, which make the assessment incomplete.
+    /// Reduce one committed frame from a machine that expects no crashes.
     pub fn apply(&mut self, frame: &Frame, machine: &str, incarnation: u32, time_ns: u64) {
+        self.apply_expecting(frame, machine, incarnation, time_ns, &[]);
+    }
+
+    /// Reduce one committed frame. Never fails: problems become evidence
+    /// errors, which make the assessment incomplete. `expected` holds the
+    /// machine's declared crashes: a kernel crash line matching one is a
+    /// passing evaluation of [`DEFAULT_NO_CRASH`] that names the declaration;
+    /// any other crash line fails it.
+    pub fn apply_expecting(
+        &mut self,
+        frame: &Frame,
+        machine: &str,
+        incarnation: u32,
+        time_ns: u64,
+        expected: &[ExpectedCrash],
+    ) {
         self.records += 1;
         let origin = Origin {
             machine: machine.into(),
@@ -602,15 +719,20 @@ impl Ledger {
                 });
             }
             Record::Kernel { message } => {
-                let id = if message.contains("Killed process") {
-                    DEFAULT_NO_OOM
+                // An OOM kill is never an expected crash.
+                let (id, expected) = if message.contains("Killed process") {
+                    (DEFAULT_NO_OOM, None)
                 } else {
-                    DEFAULT_NO_CRASH
+                    let expected = expected.iter().find(|crash| crash.matches(&message));
+                    (DEFAULT_NO_CRASH, expected)
                 };
                 let kind = Kind::AlwaysOrUnreachable;
                 if self.declare(id.into(), kind, None, true, &origin) {
-                    let details = serde_json::json!({"message": message});
-                    self.evaluate(id, false, Some(details), &origin);
+                    let mut details = serde_json::json!({"message": message});
+                    if let Some(crash) = expected {
+                        details["expected"] = serde_json::json!(crash);
+                    }
+                    self.evaluate(id, expected.is_some(), Some(details), &origin);
                 }
             }
             Record::Lost { reason, count } => {

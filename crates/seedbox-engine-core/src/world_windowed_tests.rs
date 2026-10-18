@@ -2745,6 +2745,57 @@ fn property_frames_reduce_in_commit_order_across_worker_counts_and_checkpoints()
 }
 
 #[test]
+fn expected_crashes_reduce_per_machine_across_worker_counts_and_checkpoints() {
+    use seedbox_engine_protocol::property::{
+        AssessmentStatus, ExpectedCrash, PropertyStatus, DEFAULT_NO_CRASH,
+    };
+    let abort = "libdynamorio.so: keel-watchdog: potentially unexpected fatal signal 6.";
+    let steps = |w: &mut World<Mock>| {
+        // Only machine a declares the abort; b reports the same line at 30.
+        w.expected_crashes[0] = vec![ExpectedCrash {
+            signal: 6,
+            command: "keel-watchdog".into(),
+            executable: None,
+        }];
+        for (m, at) in [(0, 10), (1, 30)] {
+            let mut step = Step::new(at, Stop::Control);
+            step.properties = vec![property_line(0, 1, json!({"kernel": {"message": abort}}))];
+            w.machines[m].steps.push_back(step);
+        }
+    };
+    let mut reference = None;
+    for workers in [0, 1, 2] {
+        let mut w = world(&["a", "b"]);
+        steps(&mut w);
+        run_with(&mut w, 100, None, workers, Duration::from_micros(10)).unwrap();
+        let ledger = w.properties().clone();
+        let p = &ledger.properties[DEFAULT_NO_CRASH];
+        assert_eq!((p.passes, p.failures), (1, 1));
+        assert_eq!(p.status(), PropertyStatus::Violated);
+        let expected = p.first_pass.as_ref().unwrap();
+        assert_eq!(expected.origin.machine, "a");
+        assert_eq!(expected.details.as_ref().unwrap()["expected"]["signal"], 6);
+        assert_eq!(p.first_failure.as_ref().unwrap().origin.machine, "b");
+        assert_eq!(ledger.assessment().status, AssessmentStatus::Violated);
+        match &reference {
+            None => reference = Some(ledger),
+            Some(reference) => assert_eq!(&ledger, reference, "workers {workers}"),
+        }
+    }
+    // Expectations are configuration: a restored checkpoint keeps the world's.
+    let mut w = world(&["a", "b"]);
+    steps(&mut w);
+    assert_eq!(
+        segment(&mut w, 100, None, None, Some(20), true).unwrap(),
+        "checkpoint"
+    );
+    let snapshot = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+    snapshot.restore(&mut w).unwrap();
+    run(&mut w, 100, None).unwrap();
+    assert_eq!(Some(w.properties().clone()), reference);
+}
+
+#[test]
 fn disk_errors_apply_at_their_boundary_survive_reboot_and_record_heal_counts() {
     let mut reference = None;
     for workers in [0, 1, 2] {
