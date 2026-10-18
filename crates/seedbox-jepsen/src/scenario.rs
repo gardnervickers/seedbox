@@ -556,7 +556,9 @@ fn postgres() -> Vec<Scenario> {
 
 /// A PostgreSQL 18 server in the image's 18+ layout: one volume at
 /// /var/lib/postgresql holding PGDATA (/var/lib/postgresql/18/docker), which
-/// outlives a power failure. pgmon.sh restarts postgres 3 s after it exits.
+/// outlives a power failure. pgmon.sh restarts postgres 3 s after it exits
+/// and reports every postgres process's state every 5 s, and the WAL from the
+/// redo point once postgres fails in a boot.
 fn pg18_server(extra: &[&str]) -> Machine {
     let mut command = strings(&["postgres", "-c", "log_min_messages=log"]);
     command.extend(strings(extra));
@@ -571,6 +573,8 @@ fn pg18_server(extra: &[&str]) -> Machine {
         .file("pg-sync.sh", "/docker-entrypoint-initdb.d/pg-sync.sh")
         .env("POSTGRES_HOST_AUTH_METHOD", "trust")
         .env("PGMON_RESTART", "3")
+        .env("PGMON_PS", "1")
+        .env("PGMON_WAL", "400")
         .data_sized("/var/lib/postgresql", "2GiB")
 }
 
@@ -656,6 +660,23 @@ fn postgres18() -> Vec<Scenario> {
             "pg18-faults at REPEATABLE READ, checked as snapshot isolation.",
             &durable, pg18_oracle("repeatable-read", 90, "18.6/faults-rr", &faulted)),
     ];
+    // Control for the 18.6 postmaster hang: the server binary rebuilt with
+    // upstream's fix (pg186-fix/Dockerfile).
+    let mut fixed = pg18_server(&durable);
+    fixed.image = None;
+    fixed.build = Some(("pg186-fix".into(), None));
+    out.push(Scenario {
+        name: "pg186-fix-faults".into(),
+        comment: "Control for the PostgreSQL 18.6 postmaster hang found by pg18-faults with eio-faults.yaml:\n\
+                  the same scenario with the server binary rebuilt from 18.6 plus upstream commit\n\
+                  6a1759a02a (REL_18_STABLE), which makes the postmaster exit when a restarted\n\
+                  startup process crashes during crash recovery instead of waiting forever."
+            .into(),
+        generated: "PostgreSQL 18.6 + 6a1759a02a, one server".into(),
+        machines: vec![("pg".into(), fixed)],
+        oracle: pg18_oracle("serializable", 90, "18.6+fix/faults", &faulted),
+        latency: "1ms".into(),
+    });
     // Primary and streaming standby, failing over at 30 s. Streaming takes
     // 50 ms more than the clients' hop, so an asynchronous standby is visibly
     // behind the commits the primary acknowledges.

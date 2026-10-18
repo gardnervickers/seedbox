@@ -12,6 +12,8 @@ machines:
     environment:
       POSTGRES_HOST_AUTH_METHOD: "trust"
       PGMON_RESTART: "3"
+      PGMON_PS: "1"
+      PGMON_WAL: "400"
     memoryMiB: 2048
     files:
     - source: pgmon.sh
