@@ -25,17 +25,17 @@ impl Fixture {
         // are never dropped, so even a shared successful build would leak.
         success(
             Command::new("rustc")
-                .arg(root().join("crates/seedbox-application/build-runtime.rs"))
+                .arg(root().join("crates/seedbox-driver-execution/build-runtime.rs"))
                 .arg("-o")
                 .arg(directory.path().join("build-script")),
             120,
         );
         let checkout = directory.path().join("checkout");
-        let manifest = checkout.join("crates/seedbox-application");
+        let manifest = checkout.join("crates/seedbox-driver-execution");
         fs::create_dir_all(&manifest).unwrap();
         fs::write(
             manifest.join("Cargo.toml"),
-            "[package]\nname = \"seedbox-application\"\nversion = \"0.0.0\"\n",
+            "[package]\nname = \"seedbox-driver-execution\"\nversion = \"0.0.0\"\n",
         )
         .unwrap();
         let output = directory.path().join("output");

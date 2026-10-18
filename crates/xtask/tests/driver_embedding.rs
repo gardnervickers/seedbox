@@ -14,7 +14,7 @@ impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("source");
-        fs::create_dir_all(root.join("crates/application")).unwrap();
+        fs::create_dir_all(root.join("crates/seedbox-driver-execution")).unwrap();
         let output = directory.path().join("output");
         fs::create_dir(&output).unwrap();
         let script = directory.path().join("build-script");
@@ -35,12 +35,12 @@ impl Fixture {
     }
     fn command(&self) -> Command {
         let mut command = Command::new(&self.script);
-        // An empty tool path proves this application build script cannot need
+        // An empty tool path proves this Driver execution build script cannot need
         // Cargo, Nix, Docker, a kernel builder, formatter or QEMU at runtime.
         command
             .env_clear()
             .env("PATH", "")
-            .env("CARGO_MANIFEST_DIR", self.root.join("crates/application"))
+            .env("CARGO_MANIFEST_DIR", self.root.join("crates/seedbox-driver-execution"))
             .env("OUT_DIR", &self.output)
             .env("SEEDBOX_BUILD_ROOT", &self.root)
             .env("CARGO_CFG_TARGET_ARCH", std::env::consts::ARCH);
@@ -54,7 +54,7 @@ impl Fixture {
     }
 }
 fn root_source() -> PathBuf {
-    root().join("crates/seedbox-application/build-runtime.rs")
+    root().join("crates/seedbox-driver-execution/build-runtime.rs")
 }
 
 #[test]
