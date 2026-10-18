@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 pub type Pair = (usize, usize);
 /// Global link latency when the network config names none: one millisecond.
-pub use seedbox_engine_protocol::world_config::DEFAULT_LATENCY_NS;
+pub use seedbox_engine_protocol::policy_config::DEFAULT_LATENCY_NS;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Policy {
     pub latency_ns: u64,

@@ -160,6 +160,8 @@ fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch
     let root_help = seedbox(&["--help"], directory.path());
     assert!(root_help.status.success());
     let help = String::from_utf8_lossy(&root_help.stdout);
+    assert!(help.contains("seedbox [RUN OPTIONS] [PROJECT]"), "{help}");
+    assert!(!help.contains("COMPOSE"), "{help}");
     assert!(!help.contains("__engine"), "{help}");
     assert!(!help.contains("seedbox-internal-worker-v1"), "{help}");
     assert!(!help.contains("arm64-fixture-v1"), "{help}");
@@ -246,13 +248,13 @@ fn driver_worker_requires_a_request_without_state_or_external_tools() {
 #[test]
 fn validation_cli_reports_structured_output_and_nonzero_errors() {
     let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("compose.yaml");
-    let yaml = "name: cli-test\nservices:\n  workload: {image: example/workload:v1}\nx-seedbox:\n  version: 1\n  seed: 0\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: workload}\n";
+    let source = directory.path().join("seedbox.yaml");
+    let yaml = "name: cli-test\noracle: {image: example/workload:v1}\n";
     fs::write(&source, yaml).unwrap();
-    let success = seedbox(&["validate", "compose.yaml", "--json"], directory.path());
+    let success = seedbox(&["validate", "seedbox.yaml", "--json"], directory.path());
     assert!(success.status.success(), "{}", stderr(&success));
     let resolved: serde_json::Value = serde_json::from_slice(&success.stdout).unwrap();
-    assert_eq!(resolved["seed"], 0);
+    assert_eq!(resolved["check"]["service"], "oracle");
     fs::write(
         &source,
         yaml.replace(
@@ -261,9 +263,9 @@ fn validation_cli_reports_structured_output_and_nonzero_errors() {
         ),
     )
     .unwrap();
-    let failure = seedbox(&["validate", "compose.yaml"], directory.path());
+    let failure = seedbox(&["validate", "seedbox.yaml"], directory.path());
     assert_eq!(failure.status.code(), Some(2));
-    assert!(stderr(&failure).contains("$.services.workload.volumes"));
+    assert!(stderr(&failure).contains("invalid type: sequence"));
     assert!(!directory.path().join("runs").exists());
 }
 
@@ -302,8 +304,7 @@ fn setup_errors_name_the_missing_input_and_the_fix() {
         ),
         (
             &["validate"],
-            "error: no project file found; searched:\n  ./seedbox.yaml\n  ./seedbox.yml\n  ./compose.yaml\n  ./compose.yml\n  \
-             ./docker-compose.yaml\n  ./docker-compose.yml\npass the file path directly\n",
+            "error: no project file found; searched:\n  ./seedbox.yaml\n  ./seedbox.yml\npass the file path directly\n",
         ),
     ];
     for (args, expected) in cases {
@@ -471,97 +472,20 @@ fn bundle_cli_validates_paths_limits_and_positional_inputs() {
 }
 
 #[test]
-fn validate_cli_resolves_directed_baselines_and_reports_each_policy_error() {
+fn validation_rejects_obsolete_compose_without_creating_state() {
     let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("compose.yaml");
-    let yaml = "name: cli-links\nservices:\n  server: {image: example/server:v1}\n  client: {image: example/client:v1}\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  network: {latency: 1ms, links: [LINKS]}\n  check: {service: client}\n";
-    let good = "{from: server, to: client, latency: 1ms}";
-    fs::write(&source, yaml.replace("LINKS", good)).unwrap();
-    let output = seedbox(&["validate", "--json"], directory.path());
-    assert!(output.status.success(), "{}", stderr(&output));
-    let resolved: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(
-        resolved["network"]["links"][0],
-        serde_json::json!({"from":"server","to":"client","latency_ns":1_000_000,"jitter_ns":0,"loss_ppm":0})
-    );
-    assert!(resolved["network"].get("bandwidth_bps").is_none());
-    let finite = yaml
-        .replace(
-            "LINKS",
-            "{from: server, to: client, latency: 1ms, bandwidth_bps: 1000000, queue_bound: 12ms}",
-        )
-        .replace(
-            "latency: 1ms, links:",
-            "latency: 1ms, bandwidth_bps: 10000000, queue_bound: 0ns, links:",
-        );
-    fs::write(&source, finite).unwrap();
-    let output = seedbox(&["validate", "--json"], directory.path());
-    assert!(output.status.success(), "{}", stderr(&output));
-    let finite: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(finite["network"]["bandwidth_bps"], 10_000_000);
-    assert_eq!(finite["network"]["queue_bound_ns"], 0);
-    assert_eq!(finite["network"]["links"][0]["bandwidth_bps"], 1_000_000);
-    assert_eq!(finite["network"]["links"][0]["queue_bound_ns"], 12_000_000);
-    for (entry, path) in [
-        (format!("{good},{good}"), "links[1]"),
-        (
-            good.replace("from: server", "from: unknown"),
-            "links[0].from",
-        ),
-        (good.replace("1ms", "999us"), "links[0].latency"),
-        (good.replace("1ms}", "1ms, jitter: 1ms}"), "links[0].jitter"),
-        (
-            good.replace("1ms}", "1ms, loss_ppm: 1000001}"),
-            "links[0].loss_ppm",
-        ),
-        (
-            good.replace("1ms}", "1ms, bandwidth_bps: 0}"),
-            "links[0].bandwidth_bps",
-        ),
-        (
-            good.replace("1ms}", "1ms, bandwidth_bps: 1.5}"),
-            "links[0].bandwidth_bps",
-        ),
-        (
-            good.replace("1ms}", "1ms, queue_bound: 12ms}"),
-            "links[0].queue_bound",
-        ),
-        (
-            good.replace("1ms}", "1ms, bandwidth_bps: 1000000, queue_bound: -1ms}"),
-            "links[0].queue_bound",
-        ),
-    ] {
-        fs::write(&source, yaml.replace("LINKS", &entry)).unwrap();
-        let output = seedbox(&["validate"], directory.path());
-        assert_eq!(output.status.code(), Some(2));
-        assert!(output.stdout.is_empty());
-        assert!(
-            stderr(&output).contains(&format!("$.x-seedbox.network.{path}")),
-            "{}",
-            stderr(&output)
-        );
-    }
-    for (options, path) in [
-        ("bandwidth_bps: 0", "bandwidth_bps"),
-        ("bandwidth_bps: true", "bandwidth_bps"),
-        ("queue_bound: 1ms", "queue_bound"),
-    ] {
-        fs::write(
-            &source,
-            yaml.replace("LINKS", good).replace(
-                "latency: 1ms, links:",
-                &format!("latency: 1ms, {options}, links:"),
-            ),
-        )
-        .unwrap();
-        let output = seedbox(&["validate"], directory.path());
-        assert_eq!(output.status.code(), Some(2));
-        assert!(
-            stderr(&output).contains(&format!("$.x-seedbox.network.{path}")),
-            "{}",
-            stderr(&output)
-        );
-    }
+    fs::write(
+        directory.path().join("compose.yaml"),
+        "services: {app: {image: example/app}}\n",
+    )
+    .unwrap();
+    let undiscovered = seedbox(&["validate"], directory.path());
+    assert_eq!(undiscovered.status.code(), Some(2));
+    assert!(stderr(&undiscovered).contains("no project file found"));
+    let explicit = seedbox(&["validate", "compose.yaml"], directory.path());
+    assert_eq!(explicit.status.code(), Some(2));
+    assert!(stderr(&explicit).contains("unknown field `services`"));
+    assert!(!directory.path().join(".seedbox").exists());
 }
 
 #[test]
@@ -772,18 +696,11 @@ fn timebase_is_no_longer_a_public_mode() {
 #[test]
 fn internal_runtime_modes_are_not_authoring_options() {
     let directory = tempfile::tempdir().unwrap();
-    for (group, option, value) in [
-        ("machine", "page_timer", "true"),
-        ("machine", "deferred_tx", "true"),
-        ("schedule", "stop_tolerance", "1ms"),
-    ] {
-        fs::write(directory.path().join("compose.yaml"), format!("name: defaults\nservices:\n  app:\n    image: busybox:1.37.0\nx-seedbox:\n  version: 1\n  {group}: {{{option}: {value}}}\n  check: {{service: app}}\n")).unwrap();
+    for option in ["page_timer", "deferred_tx", "stop_tolerance"] {
+        fs::write(directory.path().join("seedbox.yaml"), format!("name: defaults\noracle: {{image: busybox:1.37.0}}\nsimulator: {{{option}: true}}\n")).unwrap();
         let output = seedbox(&["validate", "."], directory.path());
         assert_eq!(output.status.code(), Some(2));
-        assert_eq!(
-            stderr(&output),
-            format!("error: $.x-seedbox.{group}.{option}: unsupported field\n")
-        );
+        assert!(stderr(&output).contains(&format!("unknown field `{option}`")));
         assert!(!directory.path().join(".seedbox").exists());
     }
 }
@@ -844,7 +761,11 @@ fn invalid_relocated_driver_package_is_rejected_without_downloads_or_tools() {
 #[test]
 fn removed_preparation_flags_fail_before_preparation() {
     let directory = tempfile::tempdir().unwrap();
-    fs::write(directory.path().join("compose.yaml"), "name: source-build\nservices:\n  client: {build: ./missing}\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: client}\n").unwrap();
+    fs::write(
+        directory.path().join("seedbox.yaml"),
+        "name: source-build\noracle: {build: {context: ./missing}}\n",
+    )
+    .unwrap();
     for flag in ["--builder", "--build-epoch", "--wall-clock-epoch"] {
         let output = seedbox(&["run", flag, "value"], directory.path());
         assert!(stderr(&output).contains("unexpected argument"));
@@ -852,7 +773,7 @@ fn removed_preparation_flags_fail_before_preparation() {
 }
 
 #[test]
-fn omitted_run_subcommand_accepts_the_same_compose_argument() {
+fn omitted_run_subcommand_accepts_the_same_project_argument() {
     let directory = tempfile::tempdir().unwrap();
     let explicit = seedbox(&["run", "missing.yaml"], directory.path());
     let shorthand = seedbox(&["missing.yaml"], directory.path());
@@ -1072,43 +993,6 @@ fn capacity_help_explains_resident_slots_and_accepts_json() {
     let output = seedbox(&["get", "capacity", "--unexpected"], directory.path());
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("--unexpected"));
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[test]
-fn non_oracle_controller_refuses_before_image_preparation() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("compose.yaml");
-    fs::write(&source, "name: selection\nservices:\n  controller: {image: missing/controller}\n  check: {image: missing/check}\nx-seedbox:\n  version: 1\n  control: {service: controller}\n  check: {service: check}\n").unwrap();
-    let prepared = root.path().join("prepared.json");
-    let output = Command::new(env!("CARGO_BIN_EXE_seedbox"))
-        .args([
-            "prepare",
-            source.to_str().unwrap(),
-            "--output",
-            prepared.to_str().unwrap(),
-        ])
-        .env_clear()
-        .env("HOME", root.path())
-        .env("TMPDIR", root.path())
-        .env("PATH", "")
-        .env("DOCKER_HOST", "unix:///not-an-image-engine")
-        .current_dir(root.path())
-        .guarded_output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    let error = stderr(&output);
-    assert!(
-        error.contains("$.x-seedbox.control.service")
-            && error.contains("controller must also be the check service"),
-        "{error}"
-    );
-    assert!(
-        !error.contains("cannot connect to a Docker-compatible engine"),
-        "{error}"
-    );
-    assert!(!prepared.exists());
 }
 
 #[test]

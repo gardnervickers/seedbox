@@ -113,7 +113,7 @@ pub fn validate_oci_runtime(preparer: &OciPreparer, runtime: &Inputs) -> Result<
         &preparer.engine,
         runtime,
         crate::guest::MIN_WALL_CLOCK_EPOCH,
-        std::num::NonZeroU32::new(1).unwrap(),
+        std::num::NonZeroU32::new(1).unwrap().into(),
     )?;
     Ok(())
 }

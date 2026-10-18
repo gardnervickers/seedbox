@@ -36,12 +36,17 @@ impl BackendProvider for NativeBackends {
     fn project(
         &self,
         configuration: &Simulation,
+        backend: seedbox_spec::backend::CpuBackend,
         store: &ContentStore,
         cancellation: &CancellationToken,
     ) -> Result<Backends> {
-        let (preparation, execution) =
-            self.inputs
-                .backends(store, configuration, cancellation, &self.session_root)?;
+        let (preparation, execution) = self.inputs.backends(
+            store,
+            configuration,
+            backend,
+            cancellation,
+            &self.session_root,
+        )?;
         let execution = Executor(Box::new(
             (*execution.0)
                 .with_launch_context(self.environment.clone(), Some(self.session_lease.clone())),
@@ -69,10 +74,10 @@ impl BackendProvider for NativeBackends {
         let backend = match driver_backend
             .ok_or_else(|| Error::Setup("Driver contract has no validated CPU backend".into()))?
         {
-            seedbox_spec::project::CpuBackend::Pv => {
+            seedbox_spec::backend::CpuBackend::Pv => {
                 seedbox_driver_execution::driver_world::DriverBackend::Pv
             }
-            seedbox_spec::project::CpuBackend::Tcg => {
+            seedbox_spec::backend::CpuBackend::Tcg => {
                 seedbox_driver_execution::driver_world::DriverBackend::Tcg
             }
         };

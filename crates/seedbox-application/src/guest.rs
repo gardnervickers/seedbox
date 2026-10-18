@@ -108,7 +108,7 @@ pub fn launch_recipe(
         hostname,
         configs,
         wall_clock_epoch,
-        seedbox_spec::project::SimulatorDefaults::default().blocks_per_progress_call,
+        seedbox_spec::project::SimulatorDefaults::default().progress_budget,
     )
 }
 
@@ -120,7 +120,7 @@ pub fn launch_recipe_with_progress(
     hostname: &str,
     configs: &BTreeMap<String, Vec<u8>>,
     wall_clock_epoch: u32,
-    blocks_per_progress_call: std::num::NonZeroU32,
+    progress_budget: seedbox_spec::progress::ProgressBudget,
 ) -> Result<Vec<u8>> {
     if wall_clock_epoch < MIN_WALL_CLOCK_EPOCH {
         return Err(Error::Setup(format!(
@@ -134,7 +134,7 @@ pub fn launch_recipe_with_progress(
     // A guest-wide default per service VM, retained with the launch inputs.
     bytes.extend_from_slice(&262144_u32.to_le_bytes()); // vm.max_map_count
     bytes.extend_from_slice(&wall_clock_epoch.to_le_bytes());
-    bytes.extend_from_slice(&blocks_per_progress_call.get().to_le_bytes());
+    bytes.extend_from_slice(&progress_budget.get().to_le_bytes());
     list(&mut bytes, &launch.argv)?;
     list(
         &mut bytes,

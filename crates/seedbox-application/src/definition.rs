@@ -94,7 +94,7 @@ pub fn resolve(
         oracle,
         network: configuration.network.clone(),
         simulator: Simulator {
-            blocks_per_progress_call: configuration.simulator.blocks_per_progress_call,
+            progress_budget: configuration.simulator.progress_budget,
             schedule: configuration.schedule.clone(),
             disk: configuration.disk.clone(),
             oracle_control: configuration.control.is_some(),
@@ -396,7 +396,7 @@ mod tests {
                 formatter: None,
                 environments: Default::default(),
                 boot_archives: Default::default(),
-                blocks_per_progress_call: std::num::NonZeroU32::new(32).unwrap(),
+                progress_budget: std::num::NonZeroU32::new(32).unwrap().into(),
                 epoch_seconds: 86400,
             },
             driver: artifact.clone(),
@@ -436,8 +436,8 @@ mod tests {
             semantic_parameters: crate::execution::SemanticParameters::new(),
         };
         let configuration = crate::config::parse(
-            "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-            std::path::Path::new("/project/compose.yaml"),
+            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+            std::path::Path::new("/project/seedbox.yaml"),
             &Default::default(),
         )
         .unwrap();
@@ -679,7 +679,7 @@ mod tests {
                 formatter: None,
                 environments: Default::default(),
                 boot_archives: Default::default(),
-                blocks_per_progress_call: std::num::NonZeroU32::new(32).unwrap(),
+                progress_budget: std::num::NonZeroU32::new(32).unwrap().into(),
                 epoch_seconds: 86400,
             },
             oracle: wire::Machine {

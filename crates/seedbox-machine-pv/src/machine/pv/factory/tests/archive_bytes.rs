@@ -12,7 +12,7 @@ fn pure_configured_assembly_is_exact_creation_input_including_the_pv_budget() {
             crate::machine::TEST_EPOCH_SECONDS,
         )
         .unwrap()
-        .with_blocks_per_progress_call(std::num::NonZeroU32::new(budget).unwrap());
+        .with_progress_budget(std::num::NonZeroU32::new(budget).unwrap());
         let mut definition = definition::definition(0);
         let original = definition.clone();
         let mut environment =

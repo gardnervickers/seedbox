@@ -23,8 +23,8 @@ pub(super) fn validate_contract(
         ));
     }
     let backend = match profile.driver_backend().map_err(bad)? {
-        Some(seedbox_spec::project::CpuBackend::Pv) => super::DriverBackend::Pv,
-        Some(seedbox_spec::project::CpuBackend::Tcg) => super::DriverBackend::Tcg,
+        Some(seedbox_spec::backend::CpuBackend::Pv) => super::DriverBackend::Pv,
+        Some(seedbox_spec::backend::CpuBackend::Tcg) => super::DriverBackend::Tcg,
         None => return Err(bad("Driver execution requires a recorded CPU backend")),
     };
     Ok(backend)

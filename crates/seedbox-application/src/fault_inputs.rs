@@ -43,8 +43,8 @@ mod program_tests {
     #[test]
     fn program_validates_targets_handles_order_keys_and_deadlines_without_ids() {
         let mut config = crate::config::parse(
-            "services:\n  db:\n    image: example:v1\n",
-            std::path::Path::new("/fixture/compose.yaml"),
+            "name: test\nmachines:\n  db: {image: example:v1}\noracle: {image: example/oracle}\n",
+            std::path::Path::new("/fixture/seedbox.yaml"),
             &Default::default(),
         )
         .unwrap();

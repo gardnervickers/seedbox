@@ -129,6 +129,7 @@ impl BackendProvider for Provider {
     fn project(
         &self,
         _: &seedbox_application::config::Simulation,
+        _: seedbox_spec::backend::CpuBackend,
         _: &ContentStore,
         _: &CancellationToken,
     ) -> seedbox_application::Result<Backends> {
@@ -320,8 +321,8 @@ fn request(store: &ContentStore) -> SubmitRequest {
         provenance: BTreeMap::new(),
     };
     let configuration = seedbox_application::config::parse(
-        "name: process-fixture\nservices:\n  oracle:\n    image: fixture/unused\n",
-        std::path::Path::new("/fixture/compose.yaml"),
+        "name: process-fixture\nmachines: {}\noracle:\n  image: fixture/unused\n",
+        std::path::Path::new("/fixture/seedbox.yaml"),
         &Default::default(),
     )
     .unwrap();

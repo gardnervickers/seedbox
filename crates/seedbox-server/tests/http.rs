@@ -316,6 +316,7 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
         fn project(
             &self,
             _: &seedbox_application::config::Simulation,
+            _: seedbox_spec::backend::CpuBackend,
             _: &ContentStore,
             _: &CancellationToken,
         ) -> seedbox_application::Result<Backends> {

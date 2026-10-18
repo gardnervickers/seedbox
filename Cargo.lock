@@ -2056,6 +2056,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "seedbox-control",
+ "seedbox-spec",
  "seedbox-test",
  "serde",
  "serde_json",
@@ -2091,6 +2092,7 @@ dependencies = [
  "libc",
  "seedbox-exec",
  "seedbox-machine",
+ "seedbox-spec",
  "seedbox-test",
  "seedbox-test-time",
  "serde",

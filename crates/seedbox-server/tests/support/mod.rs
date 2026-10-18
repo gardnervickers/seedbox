@@ -11,8 +11,8 @@ pub fn request() -> SubmitRequest {
             seed: Some(123),
             inputs: InputSource::Project,
             configuration: seedbox_application::config::parse(
-                "name: test\nservices:\n  oracle:\n    image: example/oracle\n",
-                std::path::Path::new("/project/compose.yaml"),
+                "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+                std::path::Path::new("/project/seedbox.yaml"),
                 &Default::default(),
             )
             .unwrap(),
@@ -72,7 +72,7 @@ pub fn resolved_request(id: &str) -> SubmitRequest {
     // Resolve for this host's PV server, as a real submission would: the
     // descriptor-free profile defaults to x86-64, which arm64 PV rejects.
     definition.architecture = seedbox_driver_execution::driver_world::platform::Host::current()
-        .project_architecture(seedbox_spec::project::CpuBackend::Pv);
+        .project_architecture(seedbox_spec::backend::CpuBackend::Pv);
     request.spec = SimulationSpec::resolved(definition).unwrap();
     request
 }

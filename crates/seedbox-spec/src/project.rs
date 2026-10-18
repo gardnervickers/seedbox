@@ -139,51 +139,11 @@ impl Default for NetworkDefaults {
     }
 }
 
-/// CPU selection supplied by the execution client, never a project/YAML knob.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CpuBackend {
-    #[default]
-    Pv,
-    Tcg,
-}
-impl CpuBackend {
-    /// Decode the single recorded backend name. Non-executing test profiles have no CPU backend.
-    pub fn from_recorded_name(backend: &str) -> Result<Option<Self>, String> {
-        match backend {
-            "driver-pv" => Ok(Some(Self::Pv)),
-            "driver-tcg" => Ok(Some(Self::Tcg)),
-            name if name.starts_with("driver-") => Err(format!("unknown Driver backend {name:?}")),
-            _ => Ok(None),
-        }
-    }
-
-    pub fn is_pv(&self) -> bool {
-        *self == Self::Pv
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SimulatorDefaults {
-    // Transport submissions carry this explicitly; native authoring does not.
-    #[serde(skip)]
-    pub backend: CpuBackend,
-    #[serde(default = "progress_budget")]
-    pub blocks_per_progress_call: NonZeroU32,
-}
-
-fn progress_budget() -> NonZeroU32 {
-    NonZeroU32::new(10_000).expect("the default progress budget is nonzero")
-}
-
-impl Default for SimulatorDefaults {
-    fn default() -> Self {
-        Self {
-            backend: CpuBackend::Pv,
-            blocks_per_progress_call: progress_budget(),
-        }
-    }
+    #[serde(default, rename = "blocksPerProgressCall")]
+    pub progress_budget: crate::progress::ProgressBudget,
 }
 
 #[cfg(test)]
@@ -204,7 +164,7 @@ mod tests {
             project.oracle.build.unwrap().dockerfile,
             PathBuf::from("Dockerfile")
         );
-        assert_eq!(project.simulator.blocks_per_progress_call.get(), 10_000);
+        assert_eq!(project.simulator.progress_budget.get(), 10_000);
         assert_eq!(project.network.latency, "1ms");
     }
 

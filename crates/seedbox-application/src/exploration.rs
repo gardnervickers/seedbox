@@ -44,7 +44,7 @@ pub fn bounds(simulation: &Simulation, options: &ExploreOptions) -> Result<(u64,
     let first = options
         .seed
         .or(simulation.seed)
-        .ok_or_else(|| Error::Setup("--seed: no Compose seed; provide --seed FIRST".into()))?;
+        .ok_or_else(|| Error::Setup("--seed: no seed supplied; provide --seed FIRST".into()))?;
     let last=options.count.checked_sub(1).and_then(|n| first.checked_add(n)).ok_or_else(||Error::Setup("--seed/--count: range is empty or overflows u64; use a positive --count and reduce the range".into()))?;
     Ok((first, last))
 }

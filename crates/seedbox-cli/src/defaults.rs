@@ -4,26 +4,19 @@ use std::{
     env,
     path::{Path, PathBuf},
 };
-const COMPOSE_FILES: [&str; 6] = [
-    "seedbox.yaml",
-    "seedbox.yml",
-    "compose.yaml",
-    "compose.yml",
-    "docker-compose.yaml",
-    "docker-compose.yml",
-];
+const PROJECT_FILES: [&str; 2] = ["seedbox.yaml", "seedbox.yml"];
 
-/// A native project file, falling back to an existing Compose project.
-pub fn compose_file(path: &Path) -> Result<PathBuf> {
+/// Resolve an explicit native project file or search the project directory.
+pub fn project_file(path: &Path) -> Result<PathBuf> {
     if !path.is_dir() {
         return existing("project file", path.to_owned());
     }
-    COMPOSE_FILES
+    PROJECT_FILES
         .iter()
         .map(|name| path.join(name))
         .find(|candidate| candidate.is_file())
         .ok_or_else(|| {
-            let searched: Vec<_> = COMPOSE_FILES.iter().map(|name| path.join(name)).collect();
+            let searched: Vec<_> = PROJECT_FILES.iter().map(|name| path.join(name)).collect();
             missing("project file", &searched, "pass the file path directly")
         })
 }
@@ -64,23 +57,23 @@ fn missing(what: &str, searched: &[PathBuf], fix: &str) -> Error {
 mod tests {
     use super::*;
     #[test]
-    fn compose_directory_resolves_to_its_compose_file() {
+    fn project_directory_resolves_only_native_files() {
         let directory = tempfile::tempdir().unwrap();
-        assert!(compose_file(directory.path()).is_err());
-        std::fs::write(directory.path().join("docker-compose.yml"), "").unwrap();
+        assert!(project_file(directory.path()).is_err());
+        std::fs::write(directory.path().join("seedbox.yml"), "").unwrap();
         assert_eq!(
-            compose_file(directory.path()).unwrap(),
-            directory.path().join("docker-compose.yml")
+            project_file(directory.path()).unwrap(),
+            directory.path().join("seedbox.yml")
         );
-        std::fs::write(directory.path().join("compose.yaml"), "").unwrap();
+        std::fs::write(directory.path().join("seedbox.yaml"), "").unwrap();
         assert_eq!(
-            compose_file(directory.path()).unwrap(),
-            directory.path().join("compose.yaml")
+            project_file(directory.path()).unwrap(),
+            directory.path().join("seedbox.yaml")
         );
         let file = directory.path().join("other.yaml");
-        assert!(compose_file(&file).is_err());
+        assert!(project_file(&file).is_err());
         std::fs::write(&file, "").unwrap();
-        assert_eq!(compose_file(&file).unwrap(), file);
+        assert_eq!(project_file(&file).unwrap(), file);
     }
 
     #[test]
