@@ -384,7 +384,8 @@ fn active_controller(controllers: &[&str]) -> Option<String> {
 
 /// Controller-targeted faults: every interval (0.5-1.5 times it), crash,
 /// kill, pause or isolate the active controller for 2-8 s, or, a quarter of
-/// the time (or with no leader), a random controller.
+/// the time (or with no leader), a random controller; a fifth of the time,
+/// power-fail it with a second controller, so the quorum is lost.
 fn controller_faults(
     ctl: &mut Ctl,
     pace: &mut Serving,
@@ -409,6 +410,22 @@ fn controller_faults(
         let rounded = (length * 1000.0).round() / 1000.0;
         let context = json!({"length": rounded, "role": role, "leader": leader});
         let target = target.as_str();
+        if rng.chance(0.2) {
+            // Lose the quorum: power-fail the target and one more controller.
+            let others: Vec<&str> = controllers
+                .iter()
+                .copied()
+                .filter(|c| *c != target)
+                .collect();
+            let second = *rng.choice(&others);
+            let mut fields = context.as_object().cloned().unwrap_or_default();
+            fields.insert("majority".into(), true.into());
+            nemesis::step_with(ctl, "crash", &[target, second], Value::Object(fields))?;
+            pace.wait(ctl, length);
+            nemesis::step(ctl, "reboot", &[target, second])?;
+            faults += 1;
+            continue;
+        }
         match *rng.choice(&["crash", "stop", "pause_process", "isolate"]) {
             "crash" => {
                 nemesis::step_with(ctl, "crash", &[target], context)?;
