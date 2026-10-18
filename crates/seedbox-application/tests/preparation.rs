@@ -515,7 +515,7 @@ fn cold_driver_factory(backend: seedbox_driver_execution::runtime_assets::Backen
     assert_eq!(
         inputs.machine_memory_mb,
         BTreeMap::from([
-            ("app".into(), simulation.machine.memory_mb),
+            ("oracle".into(), simulation.machine.memory_mb),
             ("side".into(), 512)
         ])
     );
