@@ -28,6 +28,9 @@ pub struct Machine {
     pub files: Vec<(String, String)>,
     /// (name, target, size such as `4GiB`; none takes Seedbox's default).
     pub volumes: Vec<(String, String, Option<String>)>,
+    /// (signal such as `SIGABRT`, thread command name): crashes the system
+    /// is designed to have, which pass `seedbox.no_crashing_processes`.
+    pub expected_crashes: Vec<(String, String)>,
 }
 
 impl Machine {
@@ -107,6 +110,13 @@ impl Machine {
 
     pub fn comment(mut self, text: &str) -> Self {
         self.comments.push(text.into());
+        self
+    }
+
+    /// Declare that a thread named `command` dies of `signal` (`SIGABRT`) by
+    /// design, such as a watchdog abort a supervisor restarts.
+    pub fn expected_crash(mut self, signal: &str, command: &str) -> Self {
+        self.expected_crashes.push((signal.into(), command.into()));
         self
     }
 }
@@ -191,6 +201,16 @@ fn machine(out: &mut String, indent: &str, m: &Machine) {
             if let Some(size) = size {
                 let _ = writeln!(out, "{indent}    size: {size}");
             }
+        }
+    }
+    if !m.expected_crashes.is_empty() {
+        let _ = writeln!(out, "{indent}expectedCrashes:");
+        for (signal, command) in &m.expected_crashes {
+            let _ = writeln!(
+                out,
+                "{indent}- signal: {signal}\n{indent}  command: {}",
+                quote(command)
+            );
         }
     }
 }
@@ -1957,5 +1977,19 @@ mod tests {
                 "{name} is not a DNS label"
             );
         }
+    }
+
+    #[test]
+    fn expected_crashes_render_per_machine() {
+        let m = Machine::image("example/server").expected_crash("SIGABRT", "keel-watchdog");
+        let mut out = String::new();
+        machine(&mut out, "    ", &m);
+        assert_eq!(
+            out,
+            "    image: example/server\n    expectedCrashes:\n    - signal: SIGABRT\n      command: \"keel-watchdog\"\n"
+        );
+        let mut out = String::new();
+        machine(&mut out, "    ", &Machine::image("example/server"));
+        assert!(!out.contains("expectedCrashes"));
     }
 }
