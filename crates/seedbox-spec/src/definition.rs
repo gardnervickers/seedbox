@@ -92,6 +92,10 @@ pub struct Machine {
     pub volumes: BTreeMap<String, Volume>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub anonymous_volumes: Vec<String>,
+    /// Crashes this machine is designed to have; part of the simulation's
+    /// identity because they change its property assessment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_crashes: Vec<crate::project::ExpectedCrash>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -239,6 +243,7 @@ impl Definition {
                         })
                         .collect(),
                     network: self.network.name.clone(),
+                    expected_crashes: machine.expected_crashes.clone(),
                 },
             );
         }

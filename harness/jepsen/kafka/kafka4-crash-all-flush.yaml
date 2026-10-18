@@ -79,7 +79,7 @@ oracle:
   build:
     context: ../../..
     dockerfile: crates/seedbox-jepsen/guest.Dockerfile
-  entrypoint: ["/jepsen/seedbox-jepsen", "kafka", "--workload", "queue", "--nemesis", "crash-all", "--brokers", "n1,n2,n3", "--duration", "45", "--recover", "120", "--crash-all-every", "20"]
+  entrypoint: ["/jepsen/seedbox-jepsen", "kafka", "--workload", "queue", "--nemesis", "crash-all", "--brokers", "n1,n2,n3", "--duration", "45", "--recover", "120", "--crash-all-every", "15"]
   memoryMiB: 512
 network:
   latency: 1ms

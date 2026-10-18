@@ -532,7 +532,9 @@ mod tests {
                "node": node, "value": [["r", k, list]]})
     }
 
-    fn finals(nodes: &[(&str, &[(i64, &[i64])])]) -> BTreeMap<String, BTreeMap<i64, Vec<i64>>> {
+    type NodeLists<'a> = (&'a str, &'a [(i64, &'a [i64])]);
+
+    fn finals(nodes: &[NodeLists]) -> BTreeMap<String, BTreeMap<i64, Vec<i64>>> {
         nodes
             .iter()
             .map(|(n, kv)| {

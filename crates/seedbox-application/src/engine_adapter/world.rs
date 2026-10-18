@@ -2,6 +2,7 @@
 
 use super::*;
 use seedbox_engine_protocol::disk::DiskFaultModel;
+use seedbox_engine_protocol::property::ExpectedCrash;
 use seedbox_engine_protocol::world_config::{
     CheckpointConfig, ControlChannel, ControlConfig, DiskConfig, LinkConfig, MachineConfig,
     NetworkConfig, WorldConfig,
@@ -166,6 +167,19 @@ fn machine(
                 .flatten()
         })
         .ok_or_else(|| Error::Integrity(format!("missing CPU configuration for machine {name}")))?;
+    let expected_crashes = request
+        .prepared
+        .placement
+        .iter()
+        .filter(|(_, machine)| *machine == name)
+        .filter_map(|(service, _)| request.expected_crashes.get(service))
+        .flatten()
+        .map(|crash| ExpectedCrash {
+            signal: crash.signal.number(),
+            command: crash.command.clone(),
+            executable: crash.executable.clone(),
+        })
+        .collect();
     Ok(MachineConfig {
         cpu_speed_hz: cpu.speed_hz,
         progress_ns: cpu.progress_ns(),
@@ -180,6 +194,7 @@ fn machine(
         initrd: artifact(request, digest)?,
         disk,
         cmdline: None,
+        expected_crashes,
     })
 }
 

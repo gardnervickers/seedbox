@@ -206,6 +206,7 @@ fn resolve_machine(
         configs: mounts,
         volumes,
         network: "default".into(),
+        expected_crashes: machine.expected_crashes,
     })
 }
 

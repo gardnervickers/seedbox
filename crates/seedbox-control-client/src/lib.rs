@@ -477,6 +477,21 @@ impl World {
         Ok(self.call(Operation::Sleep { duration_ns })?.1)
     }
 
+    /// Start no generated fault for this long in simulated time; teardowns
+    /// of generated faults already active still run. Returns the simulated
+    /// time, in nanoseconds, at which the quiet period ends. Unlike
+    /// `seedbox_sdk::control::quiet`, this uses the open connection: the
+    /// guest relay serves one controller connection at a time, so a second
+    /// connection waits until this one closes.
+    pub fn quiet(&mut self, duration: Duration) -> Result<u64> {
+        let duration_ns = nanoseconds(duration)?;
+        let (result, _) = self.call(Operation::Quiet { duration_ns })?;
+        match result.get("quiet_until_ns").and_then(Value::as_u64) {
+            Some(until) => Ok(until),
+            None => self.protocol("invalid quiet result"),
+        }
+    }
+
     /// Return only after the application process group has been stopped.
     pub fn stop(&mut self, target: impl IntoTarget) -> Result<Effect> {
         let target = self::target(target)?;

@@ -69,6 +69,9 @@ pub struct ExecutionRequest<'a> {
     pub network: &'a Network,
     /// Resolved virtual CPUs by service, mapped through prepared placement.
     pub cpus: &'a BTreeMap<String, seedbox_spec::project::Cpu>,
+    /// Expected crashes by service, mapped through prepared placement; a
+    /// service that expects none may be absent.
+    pub expected_crashes: &'a BTreeMap<String, Vec<seedbox_spec::project::ExpectedCrash>>,
     pub schedule: &'a Schedule,
     pub control: Option<&'a crate::config::Control>,
     pub check: &'a Check,

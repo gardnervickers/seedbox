@@ -409,6 +409,7 @@ pub fn run(options: &Options) -> Result<Value> {
         faults,
         control,
         macs,
+        expected_crashes: cfg.expected_crashes(),
     })?
     .with_observations(observations);
     seedbox_engine_core::input_program::validate_program(&cfg.input_program, cfg.duration_ns)?;

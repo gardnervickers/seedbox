@@ -315,6 +315,8 @@ pub fn parse_for_architecture(
                 configs: mounts,
                 volumes: volume_mounts,
                 network: network_name.clone(),
+                // The legacy Compose reader does not author expected crashes.
+                expected_crashes: Vec::new(),
             },
         );
     }

@@ -716,6 +716,7 @@ pub fn run(
         control: control::Control::from_config(None, names.clone(), latency, early)?,
         macs,
         machines,
+        expected_crashes: cfg.expected_crashes(),
     })?
     .with_observations(observations);
     if let Some(path) = &options.resume_checkpoint {

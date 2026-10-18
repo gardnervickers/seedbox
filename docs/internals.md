@@ -729,6 +729,24 @@ every process a core-dumping signal kills and never SIGKILL or SIGTERM, so
 injected stops and machine crashes are not evidence. The reducer turns these
 into `seedbox.no_out_of_memory_kills` and `seedbox.no_crashing_processes`.
 
+A machine's `expectedCrashes` declare crashes it is designed to have, such as a
+watchdog that aborts a stalled server for its supervisor to restart. Each names
+a core-dumping signal and the crashing thread's command name, and optionally its
+executable's file name; under the translator that is `libdynamorio.so`. They
+match only the kernel's exact fatal-signal line, `[EXECUTABLE: ]COMMAND:
+potentially unexpected fatal signal N.`: segfault, trap and unhandled-exception
+lines, truncated lines and OOM kills never match, and another machine's
+declarations never apply. A matching line is a passing evaluation of
+`seedbox.no_crashing_processes` whose example details name the declaration, so
+the property reports `passed` with its expected crashes counted as passes and
+stays `violated` beside any unexpected crash. No new status is needed: the
+declaration is part of the definition, which the resolved definition inlines,
+the world document carries per machine (`expected_crashes`) and the world
+coordinator applies at commit. It is configuration, not checkpointed state, and
+reduction stays a pure function of recorded evidence, so replay compares the
+same ledger. Code: [matching](../crates/seedbox-engine-protocol/src/property.rs),
+[authoring](../crates/seedbox-spec/src/project.rs).
+
 `flush` and `summary` are records too, relayed in order. When the engine
 commits one it has committed and reduced every earlier record of that session,
 so it replies one lookahead later on the session's reply path, like a choice:

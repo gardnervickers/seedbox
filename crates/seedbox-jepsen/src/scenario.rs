@@ -28,6 +28,9 @@ pub struct Machine {
     pub files: Vec<(String, String)>,
     /// (name, target, size such as `4GiB`; none takes Seedbox's default).
     pub volumes: Vec<(String, String, Option<String>)>,
+    /// (signal such as `SIGABRT`, thread command name): crashes the system
+    /// is designed to have, which pass `seedbox.no_crashing_processes`.
+    pub expected_crashes: Vec<(String, String)>,
 }
 
 impl Machine {
@@ -107,6 +110,13 @@ impl Machine {
 
     pub fn comment(mut self, text: &str) -> Self {
         self.comments.push(text.into());
+        self
+    }
+
+    /// Declare that a thread named `command` dies of `signal` (`SIGABRT`) by
+    /// design, such as a watchdog abort a supervisor restarts.
+    pub fn expected_crash(mut self, signal: &str, command: &str) -> Self {
+        self.expected_crashes.push((signal.into(), command.into()));
         self
     }
 }
@@ -191,6 +201,16 @@ fn machine(out: &mut String, indent: &str, m: &Machine) {
             if let Some(size) = size {
                 let _ = writeln!(out, "{indent}    size: {size}");
             }
+        }
+    }
+    if !m.expected_crashes.is_empty() {
+        let _ = writeln!(out, "{indent}expectedCrashes:");
+        for (signal, command) in &m.expected_crashes {
+            let _ = writeln!(
+                out,
+                "{indent}- signal: {signal}\n{indent}  command: {}",
+                quote(command)
+            );
         }
     }
 }
@@ -461,6 +481,27 @@ fn etcd_current() -> Vec<Scenario> {
             snapshots,
         ));
         specs.push((
+            format!("etcd{short}-crash-all-snapshot"),
+            format!("etcd{short}-crash-all with etcd{short}-register-snapshot's settings: with a fault\nprofile leaving a member behind, it catches up from a snapshot the leader sends,\nand the next coordinated power loss can land just after it adopts that snapshot\n(etcd#22498: the adopting rename is not synced, while the old database already\nrecords the snapshot's index)."),
+            version,
+            vec![register, "--crash-all-every", "10"],
+            snapshots,
+        ));
+        specs.push((
+            format!("etcd{short}-register-disk"),
+            format!("etcd{short}-register for profiles that corrupt or fail a member's disk\n(corruption-faults.yaml, eio-faults.yaml): a member whose etcd detects the damage\nand refuses to start does not fail the run, as stopping is the safe outcome; one\nthat runs but never serves, or serves wrong data, still does."),
+            version,
+            vec![register, "--tolerate-exits"],
+            &[],
+        ));
+        specs.push((
+            format!("etcd{short}-crash-all-disk"),
+            format!("etcd{short}-crash-all for disk-fault profiles: coordinated power loss makes\nmembers read back what a corrupting or failing disk wrote. A member that refuses\nto start is tolerated, as in etcd{short}-register-disk."),
+            version,
+            vec![register, "--crash-all-every", "15", "--tolerate-exits"],
+            &[],
+        ));
+        specs.push((
             format!("etcd{short}-register-serializable"),
             format!("etcd{short}-register with serializable reads, which may be stale by design: they\nstay out of the linearizability check (writes, compare-and-sets and final reads\nstill take part) but must return a value some write could have produced, at a\nrevision no member gave another value."),
             version,
@@ -556,7 +597,9 @@ fn postgres() -> Vec<Scenario> {
 
 /// A PostgreSQL 18 server in the image's 18+ layout: one volume at
 /// /var/lib/postgresql holding PGDATA (/var/lib/postgresql/18/docker), which
-/// outlives a power failure. pgmon.sh restarts postgres 3 s after it exits.
+/// outlives a power failure. pgmon.sh restarts postgres 3 s after it exits
+/// and reports every postgres process's state every 5 s, and the WAL from the
+/// redo point once postgres fails in a boot.
 fn pg18_server(extra: &[&str]) -> Machine {
     let mut command = strings(&["postgres", "-c", "log_min_messages=log"]);
     command.extend(strings(extra));
@@ -571,6 +614,8 @@ fn pg18_server(extra: &[&str]) -> Machine {
         .file("pg-sync.sh", "/docker-entrypoint-initdb.d/pg-sync.sh")
         .env("POSTGRES_HOST_AUTH_METHOD", "trust")
         .env("PGMON_RESTART", "3")
+        .env("PGMON_PS", "1")
+        .env("PGMON_WAL", "400")
         .data_sized("/var/lib/postgresql", "2GiB")
 }
 
@@ -656,6 +701,23 @@ fn postgres18() -> Vec<Scenario> {
             "pg18-faults at REPEATABLE READ, checked as snapshot isolation.",
             &durable, pg18_oracle("repeatable-read", 90, "18.6/faults-rr", &faulted)),
     ];
+    // Control for the 18.6 postmaster hang: the server binary rebuilt with
+    // upstream's fix (pg186-fix/Dockerfile).
+    let mut fixed = pg18_server(&durable);
+    fixed.image = None;
+    fixed.build = Some(("pg186-fix".into(), None));
+    out.push(Scenario {
+        name: "pg186-fix-faults".into(),
+        comment: "Control for the PostgreSQL 18.6 postmaster hang found by pg18-faults with eio-faults.yaml:\n\
+                  the same scenario with the server binary rebuilt from 18.6 plus upstream commit\n\
+                  6a1759a02a (REL_18_STABLE), which makes the postmaster exit when a restarted\n\
+                  startup process crashes during crash recovery instead of waiting forever."
+            .into(),
+        generated: "PostgreSQL 18.6 + 6a1759a02a, one server".into(),
+        machines: vec![("pg".into(), fixed)],
+        oracle: pg18_oracle("serializable", 90, "18.6+fix/faults", &faulted),
+        latency: "1ms".into(),
+    });
     // Primary and streaming standby, failing over at 30 s. Streaming takes
     // 50 ms more than the clients' hop, so an asynchronous standby is visibly
     // behind the commits the primary acknowledges.
@@ -941,9 +1003,9 @@ fn kafka4() -> Vec<Scenario> {
         Kafka4Spec { duration: 30, ..base("kafka4-healthy-queue", "Baseline: Jepsen's queue workload on Kafka 4.3.1 (the latest 4.x release), three combined\nKRaft broker+controller nodes, no faults. An idempotent acks=all producer writes unique\nvalues to 8 partitions (replication 3, min.insync.replicas 2) while two consumers in one\nKIP-848 group poll and commitSync after every poll; afterwards the group drains and every\npartition is read from offset 0. Every broker must serve the topic within 120 s.", "queue", "none") },
         base("kafka4-queue", "Jepsen's queue workload on Kafka 4.3.1 for unknown bugs: kafka4-healthy-queue for 45 s.\nRun it with a fault profile: `harness/jepsen/kafka/generic-faults.yaml` (power loss,\nprocess pauses, partitions), `corruption-faults.yaml` (bit flips in n1's data reads and\nwrites) or `eio-data-faults.yaml` (failed data reads and writes). Every acknowledged\nrecord must be in the final read once, consumers must poll each partition in order\nwithout gaps, every record below the group's committed offset must have been delivered,\nand every broker must serve the topic again within 120 s of the faults ending.", "queue", "none"),
         base("kafka4-txn", "Jepsen's transactional queue workload on Kafka 4.3.1 (transaction.version 2) for unknown\nbugs: two transactional producers with read_committed consumers, transaction timeout\n10 s. Run it with a fault profile (`generic-faults.yaml`, `corruption-faults.yaml`,\n`eio-data-faults.yaml`): no aborted reads, torn transactions or lost committed writes,\nand every broker must serve the topic again within 120 s of the faults ending.", "txn", "none"),
-        base("kafka4-crash-all", "Coordinated power loss on Kafka 4.3.1 with the default flush settings: during the queue\nworkload every node fails together about every 20 s and reboots 2 s later. Kafka\nacknowledges acks=all writes once the in-sync replicas have them in memory and leaves\nflushing to the OS, so losing acknowledged records here is documented behaviour; the\nflush control is kafka4-crash-all-flush.", "queue", "crash-all"),
+        base("kafka4-crash-all", "Coordinated power loss on Kafka 4.3.1 with the default flush settings: during the queue\nworkload every node fails together about every 15 s (7.5-22.5 s) and reboots 2 s later. Kafka\nacknowledges acks=all writes once the in-sync replicas have them in memory and leaves\nflushing to the OS, so losing acknowledged records here is documented behaviour; the\nflush control is kafka4-crash-all-flush.", "queue", "crash-all"),
         Kafka4Spec { flush: true, ..base("kafka4-crash-all-flush", "Negative control for kafka4-crash-all: log.flush.interval.messages=1, so every append is\nfsynced before it is acknowledged. No acknowledged record may be lost, and consumer\noffsets must stay within the log.", "queue", "crash-all") },
-        Kafka4Spec { split: true, ..base("kafka4-controller", "Controller-targeted faults on Kafka 4.3.1 with a separate KRaft quorum (k1..k3) and three\nbrokers: every 10 s (5-15 s) crash, kill, pause or isolate the active controller for\n2-8 s (a quarter of the time another controller), during the queue workload.", "queue", "controller") },
+        Kafka4Spec { split: true, oracle: &["--interval", "4"], ..base("kafka4-controller", "Controller-targeted faults on Kafka 4.3.1 with a separate KRaft quorum (k1..k3) and three\nbrokers: every 4 s (2-6 s) crash, kill, pause or isolate the active controller for\n2-8 s (a quarter of the time another controller; a fifth of the time power-fail it and a\nsecond controller, losing the quorum), during the queue workload.", "queue", "controller") },
         Kafka4Spec { split: true, ..base("kafka4-split-queue", "The queue workload on Kafka 4.3.1 with a separate KRaft quorum (k1..k3) and three brokers,\nfor fault profiles aimed at the controllers: run it with\n`harness/jepsen/kafka/controller-faults.yaml`.", "queue", "none") },
         Kafka4Spec { duration: 60, ..base("kafka4-jepsen", "Jepsen's untargeted nemesis on Kafka 4.3.1 (kafka-17754-jepsen's schedule on the latest\nrelease): every 10 s, pause a node's process or cut c1 off from a node for 2-10 s,\nduring the transactional queue workload.", "txn", "jepsen") },
     ];
@@ -1040,7 +1102,7 @@ fn kafka4() -> Vec<Scenario> {
                 args.extend(strings(&["--controllers", &controllers.join(",")]));
             }
             if spec.nemesis == "crash-all" {
-                args.extend(strings(&["--crash-all-every", "20"]));
+                args.extend(strings(&["--crash-all-every", "15"]));
             }
             args.extend(spec.oracle.iter().map(|a| a.to_string()));
             let topology = if spec.split {
@@ -2264,5 +2326,19 @@ mod tests {
                 "{name} is not a DNS label"
             );
         }
+    }
+
+    #[test]
+    fn expected_crashes_render_per_machine() {
+        let m = Machine::image("example/server").expected_crash("SIGABRT", "keel-watchdog");
+        let mut out = String::new();
+        machine(&mut out, "    ", &m);
+        assert_eq!(
+            out,
+            "    image: example/server\n    expectedCrashes:\n    - signal: SIGABRT\n      command: \"keel-watchdog\"\n"
+        );
+        let mut out = String::new();
+        machine(&mut out, "    ", &Machine::image("example/server"));
+        assert!(!out.contains("expectedCrashes"));
     }
 }

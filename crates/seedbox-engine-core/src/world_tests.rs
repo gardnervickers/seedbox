@@ -376,6 +376,7 @@ fn admission_rejects_invalid_worlds_before_execution() {
             faults: w.faults,
             control: w.control,
             macs: w.macs,
+            expected_crashes: w.expected_crashes,
         })
     }
     assert!(construct(world(&[]))
@@ -388,6 +389,24 @@ fn admission_rejects_invalid_worlds_before_execution() {
     let mut inputs = world(&["a"]);
     inputs.early = inputs.lookahead;
     assert!(construct(inputs).err().unwrap().contains("slack"));
+    // Expected crashes come one list per machine, each list valid.
+    let mut inputs = world(&["a"]);
+    inputs.expected_crashes.clear();
+    assert!(construct(inputs).err().unwrap().contains("lengths"));
+    let crash = |signal: i32| seedbox_engine_protocol::property::ExpectedCrash {
+        signal,
+        command: "keel-watchdog".into(),
+        executable: None,
+    };
+    let mut inputs = world(&["a"]);
+    inputs.expected_crashes[0] = vec![crash(9)];
+    assert_eq!(
+        construct(inputs).err().unwrap(),
+        "machine a: expected crash signal 9 is not a core-dumping signal the kernel reports"
+    );
+    let mut inputs = world(&["a"]);
+    inputs.expected_crashes[0] = vec![crash(6)];
+    assert!(construct(inputs).is_ok());
     let fresh = construct(world(&["a", "b"])).unwrap();
     assert_eq!(fresh.events().len(), 2);
     assert!(fresh.events().iter().all(BTreeMap::is_empty));
