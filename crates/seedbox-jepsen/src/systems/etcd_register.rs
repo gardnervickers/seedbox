@@ -415,21 +415,18 @@ pub(crate) struct Recovery {
 }
 
 /// Wait up to `seconds` for every member to serve a linearizable read, and
-/// split them into those that did and those that never did. With `ctl`,
+/// split them into those that did and those that never did. With `restart`,
 /// halfway through, start the etcd process again on every member still not
 /// serving, as a service manager would after an exit (etcd exits on a disk
-/// error by design); a member that still never serves fails the run.
-pub(crate) fn recover(
-    members: &[String],
-    seconds: u64,
-    label: &str,
-    ctl: Option<&mut kit::Ctl>,
-) -> Recovery {
+/// error by design); a member that still never serves fails the run. The
+/// World connection opens only then: the guest serves one control client at
+/// a time, and the quiet request and power-loss schedule need it too.
+pub(crate) fn recover(members: &[String], seconds: u64, label: &str, restart: bool) -> Recovery {
     let start = Instant::now();
     let mut waiting = members.to_vec();
     let mut last = BTreeMap::new();
     let mut restarted = Vec::new();
-    let mut ctl = ctl;
+    let mut restart = restart;
     while !waiting.is_empty() {
         waiting.retain(|member| match read_probe(member, "probe", 5.0) {
             Reply::Ok(_) => false,
@@ -441,8 +438,10 @@ pub(crate) fn recover(
         if waiting.is_empty() || start.elapsed() >= Duration::from_secs(seconds) {
             break;
         }
-        if start.elapsed() >= Duration::from_secs(seconds / 2) {
-            if let Some(ctl) = ctl.take() {
+        if restart && start.elapsed() >= Duration::from_secs(seconds / 2) {
+            restart = false;
+            if let Ok(mut ctl) = kit::connect_world(None) {
+                let ctl = &mut ctl;
                 if let Ok(Some(world)) = ctl.inspect() {
                     kit::evidence("inspect", json!({"label": label, "world": world}));
                 }
@@ -531,20 +530,13 @@ pub(crate) fn compare_hashes(live: &[String]) -> (Option<String>, Value) {
 pub fn run(args: Args) -> u8 {
     kit::start_clock();
     // The cluster forms once a quorum is up; wait for every member.
-    let boot = recover(&args.members, 240, "boot", None);
+    let boot = recover(&args.members, 240, "boot", false);
     if !boot.down.is_empty() {
         return kit::verdict(
             kit::INCONCLUSIVE,
             &format!("members never served a read: {}", boot.down.join(", ")),
         );
     }
-    let mut ctl = match kit::connect_world(None) {
-        Ok(ctl) => Some(ctl),
-        Err(error) => {
-            kit::evidence("world-unavailable", json!({"error": error.0}));
-            None
-        }
-    };
     let versions: BTreeMap<String, Value> = boot
         .live
         .iter()
@@ -627,7 +619,7 @@ pub fn run(args: Args) -> u8 {
         live,
         down,
         restarted,
-    } = recover(&args.members, args.recover, "final", ctl.as_mut());
+    } = recover(&args.members, args.recover, "final", true);
     // A final linearizable read of every key, retried on other members.
     let keys = book.lock().unwrap().keys.len();
     for key in (0..keys).filter(|_| !live.is_empty()) {

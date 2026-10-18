@@ -262,14 +262,13 @@ impl Run {
 
 pub fn run(args: Args) -> u8 {
     kit::start_clock();
-    let boot = recover(&args.members, 240, "boot", None);
+    let boot = recover(&args.members, 240, "boot", false);
     if !boot.down.is_empty() {
         return kit::verdict(
             kit::INCONCLUSIVE,
             &format!("members never served a read: {}", boot.down.join(", ")),
         );
     }
-    let mut ctl = kit::connect_world(None).ok();
     let seed = kit::rng::entropy_seed();
     kit::evidence(
         "start",
@@ -318,7 +317,7 @@ pub fn run(args: Args) -> u8 {
         live,
         down,
         restarted,
-    } = recover(&args.members, args.recover, "final", ctl.as_mut());
+    } = recover(&args.members, args.recover, "final", true);
     // A final read of every key touched, as one read-only transaction.
     let touched: Vec<i64> = run.keys.lock().unwrap().touched.iter().copied().collect();
     let reads: Vec<Mop> = touched
