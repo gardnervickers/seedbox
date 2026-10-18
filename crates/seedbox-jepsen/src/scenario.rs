@@ -2057,6 +2057,103 @@ fn delores() -> Vec<Scenario> {
     }]
 }
 
+/// The image `harness/jepsen/delores/node-image/build.sh` builds from a
+/// delores checkout with its own `examples/jepsen-node/Dockerfile`.
+const DELORES_NODE: &str = "localhost/seedbox-jepsen/delores-jepsen-node:current";
+
+/// A jepsen-node machine running `command`, configured for three keel-s3dd
+/// acceptors and the demo sequencer, plus `extra` settings.
+fn delores_node(command: &str, extra: &[(&str, &str)]) -> Machine {
+    let mut machine = Machine::image(DELORES_NODE)
+        .command(strings(&[command]))
+        .memory(512);
+    for (key, value) in [
+        ("RUST_LOG", "info"),
+        ("NO_COLOR", "1"),
+        (
+            "S3_ENDPOINTS",
+            "s3-a=http://s3-a:9000,s3-b=http://s3-b:9000,s3-c=http://s3-c:9000",
+        ),
+        ("S3_BUCKET", "delores"),
+        ("AWS_ACCESS_KEY_ID", "jepsen"),
+        ("AWS_SECRET_ACCESS_KEY", "jepsen-secret"),
+        ("SEQUENCER_ENDPOINT", "tcp://sequencer:7100"),
+    ]
+    .into_iter()
+    .chain(extra.iter().copied())
+    {
+        machine = machine.env(key, value);
+    }
+    machine
+}
+
+#[allow(clippy::type_complexity)]
+fn delores_nodes() -> Vec<Scenario> {
+    let machines = |node_env: &[(&str, &str)]| {
+        let mut machines = Vec::new();
+        for s3 in ["s3-a", "s3-b", "s3-c"] {
+            let mut server = keel_server("poll", "log");
+            server.files = vec![("../keel/run-s3dd.sh".into(), "/run-s3dd.sh".into())];
+            // Three nodes' S3 clients need more than the default 64 slots.
+            if let Some(command) = server.command.as_mut() {
+                command.extend(strings(&["--max-connections", "256"]));
+            }
+            machines.push((s3.to_string(), server));
+        }
+        machines.push((
+            "sequencer".into(),
+            delores_node("sequencer", &[("BIND", "0.0.0.0:7100")]).comment(
+                "The in-memory demo sequencer: never fault it (losing it is a liveness test).",
+            ),
+        ));
+        for node in nodes("n", 3) {
+            let mut env = vec![("NODE_ID", node.as_str()), ("BIND", "0.0.0.0:8080")];
+            env.extend(node_env.iter().copied());
+            machines.push((
+                node.clone(),
+                delores_node("node", &env)
+                    .comment("`node` first runs the idempotent `init` (bucket and view register)."),
+            ));
+        }
+        machines
+    };
+    let topology = "Three delores jepsen-nodes, each running SMR over a virtual log whose metadata\nregister is CASPaxos over three keel-s3dd servers (one acceptor and one log-drive\nreplica each; no acceptor processes, the conditional PUT is the primitive), with\nslots from the in-memory demo sequencer.";
+    let run = "Run it without a profile for a baseline, or with\n`--fault-profile harness/jepsen/delores/node-faults.yaml`, which never faults the\nsequencer.";
+    let specs: [(&str, String, &[(&str, &str)], &[&str]); 3] = [
+        (
+            "delores-node-cas",
+            format!("{topology}\nSix clients read, write and compare-and-set five CASPaxos registers\n(/cas-register) through random nodes for 60 s; then every node reads every\nregister. Each register's history must be linearizable and the final reads must\nagree. {run}"),
+            &[],
+            &["--workload", "cas-register"],
+        ),
+        (
+            "delores-node-cas-nopipeline",
+            "delores-node-cas with PAXOS_PIPELINE_PREPARE=false: every operation prepares first,\ntrading a round trip for fewer unknown outcomes under cross-node contention.".into(),
+            &[("PAXOS_PIPELINE_PREPARE", "false")],
+            &["--workload", "cas-register"],
+        ),
+        (
+            "delores-node-append",
+            format!("{topology}\nSix clients run Jepsen's list-append transactions (POST /txn, one log entry each)\nthrough random nodes for 60 s. The history must be strict serializable\n(serializable, with no real-time stale read), and once faults end every node's\nsynced state must hold every acknowledged append, all nodes agreeing. {run}"),
+            &[],
+            &["--workload", "list-append"],
+        ),
+    ];
+    specs
+        .into_iter()
+        .map(|(name, comment, node_env, arguments)| Scenario {
+            name: name.into(),
+            comment,
+            generated: "delores jepsen-node, three nodes, three keel-s3dd (poll, log)".into(),
+            machines: machines(node_env),
+            // The checks' searches grow with unknown outcomes.
+            oracle: Machine::program(&strings(&[&["delores-node"], arguments].concat()))
+                .memory(1024),
+            latency: "1ms".into(),
+        })
+        .collect()
+}
+
 /// Every committed scenario, as (path under `harness/jepsen`, contents).
 pub fn all() -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -2075,6 +2172,7 @@ pub fn all() -> Vec<(String, String)> {
         ("rustfs", rustfs()),
         ("keel", keel()),
         ("delores", delores()),
+        ("delores", delores_nodes()),
     ] {
         for scenario in scenarios {
             out.push((
