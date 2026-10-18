@@ -39,6 +39,12 @@ enum Command {
     },
     /// Run the Kafka queue oracle (guest).
     Kafka(systems::kafka::Args),
+    /// Run the KRaft metadata-quorum oracle (guest).
+    Kraft(systems::kraft::Args),
+    /// Send one admin request to one KRaft node repeatedly and print the answers.
+    KraftProbe(systems::kraft::ProbeArgs),
+    /// Run the KRaft workload client (guest).
+    KraftClient(systems::kraft_client::Args),
     /// Run the MySQL list-append, non-repeatable-read or MAV oracle (guest).
     Mysql(systems::mysql::Args),
     /// Run the MariaDB Galera Cluster list-append oracle (guest).
@@ -139,6 +145,8 @@ enum System {
     Postgres,
     /// A Kafka oracle log.
     Kafka,
+    /// A KRaft oracle log (its workload comes from the log).
+    Kraft,
     /// A MySQL oracle log (its workload comes from the log).
     Mysql,
     /// A Galera oracle log (stale reads and per-node loss as well).
@@ -183,6 +191,9 @@ fn main() -> ExitCode {
         Command::Postgres(args) => systems::postgres::run(args),
         Command::PgProbe { host, at } => systems::postgres::probe(&host, &at),
         Command::Kafka(args) => systems::kafka::run(args),
+        Command::Kraft(args) => systems::kraft::run(args),
+        Command::KraftClient(args) => systems::kraft_client::run(args),
+        Command::KraftProbe(args) => systems::kraft::probe(args),
         Command::Mysql(args) => systems::mysql::run(args),
         Command::Galera(args) => systems::galera::run(args),
         Command::Rustfs(args) => systems::rustfs::run(args),
@@ -283,6 +294,7 @@ fn check(system: System, log: &std::path::Path, model: &str, workload: &str) -> 
         System::Nats => systems::nats::recheck(&text),
         System::Etcd => systems::etcd::recheck(&text),
         System::Kafka => systems::kafka::recheck(&text, workload),
+        System::Kraft => systems::kraft::recheck(&text),
         System::Postgres => match systems::postgres::recheck(&text, model) {
             Ok(result) => result,
             Err(error) => return fail(&error),

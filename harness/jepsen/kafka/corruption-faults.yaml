@@ -1,0 +1,26 @@
+# generic-faults.yaml plus silent corruption of n1's data reads and writes
+# (never the filesystem's metadata). Kafka checksums every record batch, so a
+# corrupted replica must not hand corrupt records to consumers or followers, and
+# must not lose an acknowledged record while the other two replicas have it.
+start: 20s
+end: 55s
+interval: 4s
+targets: [n1, n2, n3]
+faults:
+  - kind: pause_process
+    weight: 2
+    duration: {min: 500ms, max: 6s}
+  - kind: partition
+    weight: 2
+    duration: {min: 1s, max: 6s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 5s}
+  - kind: disk_error
+    weight: 3
+    op: any
+    ppm: 20000
+    effect: corrupt
+    scope: data
+    duration: {min: 2s, max: 8s}
+    targets: [n1]

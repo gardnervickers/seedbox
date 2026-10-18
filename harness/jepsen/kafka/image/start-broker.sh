@@ -1,20 +1,39 @@
 #!/usr/bin/env bash
-# One KRaft broker+controller. Environment: KAFKA_NODE_ID, CLUSTER_ID, KAFKA_VOTERS
+# One KRaft node. Environment: KAFKA_NODE_ID, CLUSTER_ID, KAFKA_VOTERS
 # (e.g. "1@n1:9093,2@n2:9093,3@n3:9093"), KAFKA_RF (replication factor for internal
-# topics and the default), optional SEEDBOX_EXTRA_PROPERTIES (';'-separated).
+# topics and the default), optional KAFKA_ROLES (default "broker,controller"; or
+# "broker" or "controller" for a separate quorum), KAFKA_HOST (advertised name,
+# default nNODE_ID), KAFKA_SUPERVISE=1 (restart Kafka 2 s after it exits, as a
+# service manager would: a broker halts when its only log directory fails) and
+# SEEDBOX_EXTRA_PROPERTIES (';'-separated).
 set -euo pipefail
 rf=${KAFKA_RF:-3}
 isr=$(( rf > 1 ? 2 : 1 ))
+roles=${KAFKA_ROLES:-broker,controller}
+host=${KAFKA_HOST:-n${KAFKA_NODE_ID}}
 mkdir -p /data/kafka
+case "$roles" in
+  controller)
+    listeners="listeners=CONTROLLER://:9093
+advertised.listeners=CONTROLLER://${host}:9093
+listener.security.protocol.map=CONTROLLER:PLAINTEXT" ;;
+  broker)
+    listeners="listeners=PLAINTEXT://:9092
+advertised.listeners=PLAINTEXT://${host}:9092
+listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+inter.broker.listener.name=PLAINTEXT" ;;
+  *)
+    listeners="listeners=PLAINTEXT://:9092,CONTROLLER://:9093
+advertised.listeners=PLAINTEXT://${host}:9092
+listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+inter.broker.listener.name=PLAINTEXT" ;;
+esac
 cat > /tmp/server.properties <<PROPS
-process.roles=broker,controller
+process.roles=${roles}
 node.id=${KAFKA_NODE_ID}
 controller.quorum.voters=${KAFKA_VOTERS}
-listeners=PLAINTEXT://:9092,CONTROLLER://:9093
-advertised.listeners=PLAINTEXT://n${KAFKA_NODE_ID}:9092
-listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+${listeners}
 controller.listener.names=CONTROLLER
-inter.broker.listener.name=PLAINTEXT
 log.dirs=/data/kafka
 auto.create.topics.enable=false
 unclean.leader.election.enable=false
@@ -38,8 +57,18 @@ if [ -f /opt/kafka/config/log4j2.yaml ]; then
 else
   export KAFKA_LOG4J_OPTS="-Dlog4j.configuration=file:/etc/kafka-log4j.properties"
 fi
-/opt/kafka/bin/kafka-storage.sh format --ignore-formatted \
-  --cluster-id "${CLUSTER_ID}" --config /tmp/server.properties
-# meta.properties and bootstrap.checkpoint must survive a power loss.
-sync
-exec /opt/kafka/bin/kafka-server-start.sh /tmp/server.properties
+if [ ! -f /data/kafka/meta.properties ]; then
+  /opt/kafka/bin/kafka-storage.sh format --ignore-formatted \
+    --cluster-id "${CLUSTER_ID}" --config /tmp/server.properties
+  # meta.properties and bootstrap.checkpoint must survive a power loss.
+  sync
+fi
+if [ "${KAFKA_SUPERVISE:-0}" != 1 ]; then
+  exec /opt/kafka/bin/kafka-server-start.sh /tmp/server.properties
+fi
+while true; do
+  status=0
+  /opt/kafka/bin/kafka-server-start.sh /tmp/server.properties || status=$?
+  echo "@@KAFKA-EXITED status=${status}; restarting in 2 s"
+  sleep 2
+done

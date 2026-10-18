@@ -20,7 +20,13 @@
 // --mode produce is the acks=all durability workload: one non-transactional
 // idempotent producer sends batches of 20 unique values every 50 ms and reports
 // each acknowledgement.
-// Both modes end with a final read of every partition from offset 0.
+// --mode queue is Jepsen's queue workload: the produce workload plus
+// --consumers consumers in one group (--group-protocol classic or consumer,
+// KIP-848) that subscribe, poll and commitSync the offsets after each poll,
+// reporting every assignment change, poll and commit. Once stopped, the
+// consumers drain until the group's committed offsets reach every partition's
+// end, and the client reports the group's final committed offsets.
+// Every mode ends with a final read of every partition from offset 0.
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -39,7 +45,9 @@ import org.apache.kafka.common.serialization.*;
 public final class JepsenQueue {
     static String name = "c1", bootstrap = "n1:9092", oracleHost = "oracle", mode = "txn", topic = "jq";
     static int oraclePort = 7100, workers = 2, keys = 8, rf = 1, maxTxnLength = 4, endDelayMs = 50;
-    static int txnTimeoutMs = 1000, produceBatch = 20, producePauseMs = 50;
+    static int txnTimeoutMs = 1000, produceBatch = 20, producePauseMs = 50, consumers = 2, drainSeconds = 180;
+    static String groupProtocol = "classic", group = "jepsen-queue";
+    static volatile boolean drained = false;
     static double abortP = 1.0 / 32;
     static volatile boolean stop = false, started = false;
     static final AtomicLong nextValue = new AtomicLong(0), nextOp = new AtomicLong(0);
@@ -436,6 +444,163 @@ public final class JepsenQueue {
         try { producer.close(Duration.ofSeconds(1)); } catch (RuntimeException ignored) { }
     }
 
+    // ---------------------------------------------------------------- queue mode (consumer group)
+
+    static Map<String, Object> byPartition(Map<TopicPartition, OffsetAndMetadata> offsets) {
+        Map<String, Object> out = new TreeMap<>();
+        for (Map.Entry<TopicPartition, OffsetAndMetadata> e : offsets.entrySet())
+            out.put(String.valueOf(e.getKey().partition()), e.getValue() == null ? null : e.getValue().offset());
+        return out;
+    }
+
+    static List<Object> partitionList(Collection<TopicPartition> tps) {
+        List<Integer> ids = new ArrayList<>();
+        for (TopicPartition tp : tps) ids.add(tp.partition());
+        Collections.sort(ids);
+        return new ArrayList<Object>(ids);
+    }
+
+    static Properties groupConfig() {
+        Properties p = consumerConfig(false);
+        p.put(ConsumerConfig.GROUP_ID_CONFIG, group);
+        p.put("group.protocol", groupProtocol);
+        if (groupProtocol.equals("consumer")) {
+            // KIP-848 groups take their timeouts from the broker.
+            p.remove(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG);
+            p.remove(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG);
+        }
+        return p;
+    }
+
+    /** One group member: poll, report, commitSync, until the group has drained. */
+    static final class QueueConsumer implements Runnable {
+        final int c;
+        int incarnation = 0;
+
+        QueueConsumer(int c) { this.c = c; }
+
+        public void run() {
+            while (!drained) {
+                incarnation++;
+                final int inc = incarnation;
+                KafkaConsumer<Long, Long> consumer = null;
+                try {
+                    consumer = new KafkaConsumer<>(groupConfig());
+                    emit(obj("type", "consumer-open", "c", c, "inc", inc, "protocol", groupProtocol));
+                    consumer.subscribe(List.of(topic), new ConsumerRebalanceListener() {
+                        public void onPartitionsRevoked(Collection<TopicPartition> tps) {
+                            emit(obj("type", "revoked", "c", c, "inc", inc, "partitions", partitionList(tps)));
+                        }
+                        public void onPartitionsAssigned(Collection<TopicPartition> tps) {
+                            emit(obj("type", "assigned", "c", c, "inc", inc, "partitions", partitionList(tps)));
+                        }
+                        public void onPartitionsLost(Collection<TopicPartition> tps) {
+                            emit(obj("type", "lost", "c", c, "inc", inc, "partitions", partitionList(tps)));
+                        }
+                    });
+                    while (!drained) {
+                        ConsumerRecords<Long, Long> records = consumer.poll(Duration.ofMillis(200));
+                        if (records.isEmpty()) continue;
+                        Map<String, Object> byKey = new TreeMap<>();
+                        Map<TopicPartition, OffsetAndMetadata> offsets = new HashMap<>();
+                        for (TopicPartition tp : records.partitions()) {
+                            List<Object> pairs = new ArrayList<>();
+                            long last = -1;
+                            for (ConsumerRecord<Long, Long> r : records.records(tp)) {
+                                pairs.add(List.of(r.offset(), r.value()));
+                                last = r.offset();
+                            }
+                            byKey.put(String.valueOf(tp.partition()), pairs);
+                            offsets.put(tp, new OffsetAndMetadata(last + 1));
+                        }
+                        emit(obj("type", "poll", "c", c, "inc", inc, "records", byKey));
+                        try {
+                            consumer.commitSync(offsets, Duration.ofSeconds(10));
+                            emit(obj("type", "commit", "result", "ok", "c", c, "inc", inc, "offsets", byPartition(offsets)));
+                        } catch (CommitFailedException | RebalanceInProgressException | FencedInstanceIdException
+                                 | UnknownMemberIdException | IllegalGenerationException e) {
+                            emit(obj("type", "commit", "result", "fail", "c", c, "inc", inc, "offsets", byPartition(offsets), "error", err(e)));
+                        } catch (WakeupException | InterruptException e) {
+                            throw e;
+                        } catch (RuntimeException e) {
+                            emit(obj("type", "commit", "result", "info", "c", c, "inc", inc, "offsets", byPartition(offsets), "error", err(e)));
+                        }
+                    }
+                } catch (RuntimeException e) {
+                    emit(obj("type", "consumer-error", "c", c, "inc", inc, "error", err(e)));
+                    sleep(500);
+                } finally {
+                    try { if (consumer != null) consumer.close(Duration.ofSeconds(5)); } catch (RuntimeException ignored) { }
+                    emit(obj("type", "consumer-closed", "c", c, "inc", inc));
+                }
+            }
+        }
+    }
+
+    static Map<TopicPartition, Long> committedOffsets(Admin admin) throws Exception {
+        Map<TopicPartition, OffsetAndMetadata> m =
+                admin.listConsumerGroupOffsets(group).partitionsToOffsetAndMetadata().get(10, TimeUnit.SECONDS);
+        Map<TopicPartition, Long> out = new HashMap<>();
+        for (Map.Entry<TopicPartition, OffsetAndMetadata> e : m.entrySet())
+            if (e.getValue() != null) out.put(e.getKey(), e.getValue().offset());
+        return out;
+    }
+
+    static Properties adminConfig() {
+        Properties p = new Properties();
+        p.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap);
+        p.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, 10000);
+        p.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 20000);
+        return p;
+    }
+
+    /**
+     * After the producer stops: wait until the group's committed offset of every partition
+     * equals its end offset (two equal observations a second apart), then stop the consumers.
+     */
+    static void drain() {
+        long deadline = System.nanoTime() + drainSeconds * 1_000_000_000L;
+        String status = "timeout";
+        Map<TopicPartition, Long> committed = null, end = null;
+        String previous = null;
+        try (Admin admin = Admin.create(adminConfig());
+             KafkaConsumer<Long, Long> probe = new KafkaConsumer<>(consumerConfig(false))) {
+            while (System.nanoTime() < deadline) {
+                try {
+                    end = probe.endOffsets(partitions(), Duration.ofSeconds(10));
+                    committed = committedOffsets(admin);
+                    boolean done = true;
+                    for (TopicPartition tp : partitions()) {
+                        long e = end.get(tp);
+                        if (e > 0 && !Long.valueOf(e).equals(committed.get(tp))) done = false;
+                    }
+                    String now = String.valueOf(offsets(end)) + offsets(committed);
+                    if (done && now.equals(previous)) { status = "complete"; break; }
+                    previous = done ? now : null;
+                } catch (Exception e) {
+                    emit(obj("type", "drain-retry", "error", err(e)));
+                    previous = null;
+                }
+                sleep(1000);
+            }
+        }
+        emit(obj("type", "drained", "status", status, "committed", offsets(committed), "end-offsets", offsets(end)));
+        drained = true;
+    }
+
+    /** The group's committed offsets once its members have closed. */
+    static void groupOffsets() {
+        for (int attempt = 0; attempt < 10; attempt++) {
+            try (Admin admin = Admin.create(adminConfig())) {
+                emit(obj("type", "group-offsets", "committed", offsets(committedOffsets(admin))));
+                return;
+            } catch (Exception e) {
+                emit(obj("type", "group-offsets-retry", "error", err(e)));
+                sleep(1000);
+            }
+        }
+    }
+
     // ---------------------------------------------------------------- setup and final read
 
     static void createTopic() {
@@ -563,6 +728,9 @@ public final class JepsenQueue {
                 case "--end-delay-ms": endDelayMs = Integer.parseInt(v); break;
                 case "--max-txn-length": maxTxnLength = Integer.parseInt(v); break;
                 case "--produce-pause-ms": producePauseMs = Integer.parseInt(v); break;
+                case "--consumers": consumers = Integer.parseInt(v); break;
+                case "--group-protocol": groupProtocol = v; break;
+                case "--drain-seconds": drainSeconds = Integer.parseInt(v); break;
                 default: throw new IllegalArgumentException("unknown argument " + k);
             }
         }
@@ -578,6 +746,7 @@ public final class JepsenQueue {
         sink = new PrintStream(new BufferedOutputStream(socket.getOutputStream()), false, StandardCharsets.UTF_8);
         BufferedReader commands = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
         emit(obj("type", "hello", "client", name, "mode", mode, "workers", workers, "keys", keys,
+                "consumers", consumers, "group-protocol", groupProtocol,
                 "kafka-clients", AppInfoVersion.get(), "abort-p", abortP, "txn-timeout-ms", txnTimeoutMs));
         Thread reader = new Thread(() -> {
             try {
@@ -596,6 +765,18 @@ public final class JepsenQueue {
         emit(obj("type", "started"));
         if (mode.equals("produce")) {
             produce();
+        } else if (mode.equals("queue")) {
+            List<Thread> threads = new ArrayList<>();
+            for (int c = 0; c < consumers; c++) {
+                Thread t = new Thread(new QueueConsumer(c), "consumer-" + c);
+                t.start();
+                threads.add(t);
+            }
+            produce();
+            emit(obj("type", "producer-done"));
+            drain();
+            for (Thread t : threads) t.join();
+            groupOffsets();
         } else {
             List<Thread> threads = new ArrayList<>();
             for (int w = 0; w < workers; w++) {
