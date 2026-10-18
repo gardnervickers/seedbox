@@ -465,6 +465,15 @@ fn imported_comparisons_use_complete_resolved_semantics_without_rewriting_record
         .unwrap();
     let archived = archive::import(exported.as_slice(), &store, &Options::default()).unwrap();
     assert_eq!(archived.record.unwrap(), original_record);
+    // Import registers comparison evidence with the session, not via import.json.
+    std::fs::remove_dir_all(directory.path().join("runs")).unwrap();
+    assert_eq!(
+        execution
+            .compare(&baseline.metadata.id, &fresh.metadata.id)
+            .unwrap()
+            .status,
+        ComparisonStatus::Match
+    );
 }
 fn crate_program(spec: &SimulationSpec) -> Vec<seedbox_engine_protocol::input_program::TimedInput> {
     spec.program
@@ -641,8 +650,6 @@ fn export_captures_owned_native_checkpoint_files_and_preserves_consumed_override
     catalogue
         .acknowledge_control(&id, "capture", control.state)
         .unwrap();
-    simulation.status.phase = Phase::Completed;
-    catalogue.update(simulation).unwrap();
     let manager = Arc::new(Manager::new(catalogue));
     let execution = ExecutionService::new(
         manager.clone(),
@@ -667,6 +674,15 @@ fn export_captures_owned_native_checkpoint_files_and_preserves_consumed_override
     )
     .unwrap();
     let record = fixture.record.as_ref().unwrap();
+    let InputSource::Resolved { definition } = &simulation.spec.inputs else {
+        unreachable!()
+    };
+    manager
+        .retain_result(&id, definition.clone(), record.clone())
+        .unwrap();
+    manager
+        .update(&id, |resource| resource.status.phase = Phase::Completed)
+        .unwrap();
     write_record(&attempt, record).unwrap();
     seedbox_artifacts::interventions::Journal::initialize(&attempt.join("interventions.json"))
         .unwrap();
@@ -690,7 +706,9 @@ fn export_captures_owned_native_checkpoint_files_and_preserves_consumed_override
         ComparisonStatus::Match
     );
     let portable = archive::import(bytes.as_slice(), &store, &Options::default()).unwrap();
-    assert!(portable.omissions.contains_key("logs") && portable.omissions.contains_key("events"));
+    // This fixture now publishes completion through the manager, which retains
+    // its (empty) observation histories rather than claiming they are missing.
+    assert!(!portable.omissions.contains_key("logs") && !portable.omissions.contains_key("events"));
     let seedbox_spec::definition::Start::Checkpoint { manifest, .. } =
         &portable.checkpoints["capture"].start
     else {

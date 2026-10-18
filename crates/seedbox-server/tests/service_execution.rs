@@ -1,6 +1,7 @@
 //! Host-only public-service composition tests. The injected executor is NOT a
-//! native worker and produces no witness. These tests establish HTTP dispatch,
-//! retained error/verdict separation and lifecycle ownership, not determinism,
+//! native worker; comparison cases use synthetic witness digests. These tests
+//! establish HTTP dispatch, comparison composition, retained error/verdict
+//! separation and lifecycle ownership, not determinism,
 //! native backend qualification, or checkpoint restoration.
 #![cfg(unix)]
 
@@ -36,6 +37,9 @@ enum Behavior {
     MissingWitness,
     BackendError,
     UntilCancelled,
+    WithWitness,
+    ChangingWitness,
+    MissingJournal,
 }
 
 struct FixtureProvider {
@@ -81,7 +85,7 @@ impl ExecutionBackend for FixtureExecutor {
         &self,
         request: ExecutionRequest<'_>,
     ) -> seedbox_application::Result<ExecutionReport> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.seed, 123);
         assert!(request.resume_checkpoint.is_none());
         assert!(request.output.is_dir());
@@ -97,9 +101,39 @@ impl ExecutionBackend for FixtureExecutor {
             .wait_for(|| request.cancellation.is_cancelled().then_some(()))
             .unwrap();
         }
+        if matches!(self.behavior, Behavior::WithWitness) && request.program.is_empty() {
+            // Model one admitted interactive override. Replaying the exported
+            // definition authors it directly and must not add it a second time.
+            seedbox_artifacts::interventions::Journal::open(request.intervention_history.unwrap())?
+                .append(seedbox_engine_protocol::intervention::Intervention {
+                    request_id: "external".into(),
+                    position: seedbox_engine_protocol::host_control::BoundaryPosition {
+                        boundary_index: 1,
+                        completed_rounds: 1,
+                        simulated_time_ns: 10,
+                    },
+                    plan: seedbox_control::Plan {
+                        id: 1,
+                        at_ns: 10,
+                        deadline_ns: 510,
+                        action: seedbox_api::FaultAction::ClockSkew {
+                            handle: "clock-effect".into(),
+                            machine: "oracle".into(),
+                            offset_ns: Some(5),
+                            max_offset_ns: None,
+                        },
+                    },
+                })?;
+        }
+        if matches!(self.behavior, Behavior::MissingJournal) {
+            std::fs::remove_file(request.intervention_history.unwrap())?;
+        }
         Ok(ExecutionReport {
             reason: match self.behavior {
-                Behavior::MissingWitness => StopReason::Completed,
+                Behavior::MissingWitness
+                | Behavior::WithWitness
+                | Behavior::ChangingWitness
+                | Behavior::MissingJournal => StopReason::Completed,
                 Behavior::BackendError => StopReason::Error,
                 Behavior::UntilCancelled => StopReason::Cancelled,
             },
@@ -113,7 +147,13 @@ impl ExecutionBackend for FixtureExecutor {
             },
             detail: matches!(self.behavior, Behavior::BackendError)
                 .then(|| "host fixture: interaction witness unavailable".into()),
-            witness: None,
+            witness: match self.behavior {
+                Behavior::WithWitness | Behavior::MissingJournal => {
+                    Some(ContentDigest::of(b"host fixture witness"))
+                }
+                Behavior::ChangingWitness => Some(ContentDigest::of(&attempt.to_le_bytes())),
+                _ => None,
+            },
             full_state: None,
             faults: Vec::new(),
             host_wait_ns: 0,
@@ -267,22 +307,12 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
             replay_of: None,
             replay: None,
         };
-        let attempt = root.join(name);
-        std::fs::create_dir(&attempt).unwrap();
-        // Published attempts always carry an explicit (here empty) override journal.
-        seedbox_artifacts::interventions::Journal::initialize(&attempt.join("interventions.json"))
-            .unwrap();
-        seedbox_artifacts::record::write_record(&attempt, &record).unwrap();
+        let definition = definition.clone();
         let (resource, _) = manager.submit(request).unwrap();
         let id = resource.metadata.id;
-        std::fs::write(
-            root.join("inputs").join(format!("{id}.json")),
-            serde_json::to_vec(&serde_json::json!({
-                "prepared": prepared, "interventions": null, "attempt": attempt,
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        manager
+            .retain_result(&id, definition, record.clone())
+            .unwrap();
         manager
             .update(&id, |resource| {
                 resource.status.phase = Phase::Completed;
@@ -290,7 +320,7 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
                 resource.status.termination = Some(ExecutionTermination::OracleExited);
             })
             .unwrap();
-        retained.push((id, seedbox_artifacts::record::inspect(&attempt).unwrap()));
+        retained.push((id, record));
     }
     let [(old_id, old), (new_id, new)] = retained.as_slice() else {
         unreachable!();
@@ -460,6 +490,81 @@ async fn public_dispatch_retains_oracle_and_missing_witness_errors_without_compa
     })
     .await
     .expect("host service dispatch did not finish before the infrastructure hang guard expired");
+}
+
+// These are synthetic witnesses for comparison composition, not proof of native determinism.
+#[tokio::test]
+async fn completed_comparison_uses_owned_evidence_not_attempt_files() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        for behavior in [Behavior::WithWitness, Behavior::ChangingWitness] {
+            let host = HostService::start(behavior).await;
+            let accepted = host
+                .client
+                .submit(&support::resolved_request("compare-host"))
+                .await
+                .unwrap();
+            host.completed(&accepted.metadata.id).await;
+            let baseline = host.client.describe(&accepted.metadata.id).await.unwrap();
+            if matches!(behavior, Behavior::WithWitness) {
+                assert_eq!(baseline.spec.program.len(), 1);
+            }
+            let replay = host
+                .client
+                .submit_definition(&serde_json::to_value(&baseline).unwrap(), false)
+                .await
+                .unwrap();
+            host.completed(&replay.metadata.id).await;
+            let mut changed = support::resolved_request("changed-input");
+            let seedbox_api::InputSource::Resolved { definition } = &mut changed.spec.inputs else {
+                unreachable!()
+            };
+            definition.network.latency_ns += 1;
+            changed.spec =
+                seedbox_api::SimulationSpec::resolved(definition.as_ref().clone()).unwrap();
+            let changed = host.client.submit(&changed).await.unwrap();
+            host.completed(&changed.metadata.id).await;
+            // No retained-input pointer, attempt manifest or journal remains.
+            // Completed comparison must not reconstruct its evidence from any of them.
+            std::fs::remove_dir_all(host._directory.path().join("execution/inputs")).unwrap();
+            std::fs::remove_dir_all(host._directory.path().join("execution/runs")).unwrap();
+            let comparison = host
+                .client
+                .compare(&baseline.metadata.id, &replay.metadata.id)
+                .await
+                .unwrap();
+            assert_eq!(
+                comparison.status,
+                if matches!(behavior, Behavior::WithWitness) {
+                    ComparisonStatus::Match
+                } else {
+                    ComparisonStatus::Mismatch
+                }
+            );
+            assert_eq!(
+                host.client
+                    .compare(&baseline.metadata.id, &changed.metadata.id)
+                    .await
+                    .unwrap()
+                    .status,
+                ComparisonStatus::NotComparable
+            );
+            host.shutdown().await;
+        }
+    })
+    .await
+    .expect("host comparison exceeded its hang guard");
+}
+
+#[tokio::test]
+async fn missing_final_journal_completes_with_explicit_error_and_no_comparable_evidence() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let host = HostService::start(Behavior::MissingJournal).await;
+        let accepted = host.client.submit(&support::resolved_request("missing-journal")).await.unwrap();
+        let completed = host.completed(&accepted.metadata.id).await;
+        assert!(matches!(completed.status.termination, Some(ExecutionTermination::Error { ref message }) if message.contains("intervention history not found")), "{:?}", completed.status.termination);
+        assert_eq!(host.client.compare(&accepted.metadata.id, &accepted.metadata.id).await.unwrap().status, ComparisonStatus::NotComparable);
+        host.shutdown().await;
+    }).await.expect("missing journal finalization exceeded its hang guard");
 }
 
 #[tokio::test]

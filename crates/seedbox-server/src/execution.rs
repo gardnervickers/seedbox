@@ -328,8 +328,10 @@ impl ExecutionService {
         Ok(resource)
     }
 
-    /// Read final evidence using server-owned attempt references. Clients never
-    /// need host run paths, and comparison never changes a simulation's verdict.
+    /// Compare completed server-owned records. Resolved execution semantics are
+    /// the sole input comparability rule; private record identities are not a
+    /// second gate. Missing evidence is NOT_COMPARABLE, and result comparison
+    /// never changes either simulation's verdict.
     pub fn compare(
         &self,
         baseline: &SimulationId,
@@ -340,40 +342,9 @@ impl ExecutionService {
             .lock()
             .map_err(|_| seedbox_application::Error::Setup("evidence lock failed".into()))?;
         let record = |id: &SimulationId| {
-            let resource = self
-                .manager
-                .describe(id)
-                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?;
-            if resource.status.phase != Phase::Completed {
-                return Err(seedbox_application::Error::Setup(format!(
-                    "simulation {id} is not complete"
-                )));
-            }
-            if self
-                .manager
-                .read(|catalogue| catalogue.is_imported(id))
-                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?
-            {
-                let snapshot = self
-                    .imported_snapshot(id)
-                    .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?;
-                return Ok(snapshot.record);
-            }
-            let path = self.root.join("inputs").join(format!("{id}.json"));
-            let file = match fs::File::open(&path) {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => {
-                    return Err(seedbox_application::Error::Setup(format!(
-                        "simulation {id} retained inputs: {error}"
-                    )))
-                }
-            };
-            let inputs: RetainedInputs = serde_json::from_reader(file)?;
-            let Some(attempt) = inputs.attempt else {
-                return Ok(None);
-            };
-            seedbox_application::orchestration::inspect(&attempt).map(Some)
+            self.manager
+                .result_evidence(id)
+                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))
         };
         let (Some(first), Some(second)) = (record(baseline)?, record(simulation)?) else {
             return Ok(seedbox_api::SimulationComparison {
@@ -386,17 +357,10 @@ impl ExecutionService {
                 fault_history_matches: false,
             });
         };
-        let comparison = seedbox_artifacts::record::compare(&first, &second);
+        let comparison = seedbox_artifacts::record::compare(&first.record, &second.record);
         use seedbox_api::ComparisonStatus;
-        let first_definition = self.portable_simulation(baseline)?.spec.inputs;
-        let second_definition = self.portable_simulation(simulation)?.spec.inputs;
-        let compatible = match (first_definition, second_definition) {
-            (
-                InputSource::Resolved { definition: first },
-                InputSource::Resolved { definition: second },
-            ) => bundles::semantic_definition(first)? == bundles::semantic_definition(second)?,
-            _ => false,
-        };
+        let compatible = bundles::semantic_definition(first.definition)?
+            == bundles::semantic_definition(second.definition)?;
         let status = if !compatible {
             ComparisonStatus::NotComparable
         } else {
@@ -528,7 +492,22 @@ impl ExecutionService {
         // No completed resource may lose its final manager-owned control handle
         // while that connection still has transport or journal work in flight.
         self.manager.retire_worker(&id)?;
-        let _ = self.timeline(&id)?;
+        let result = result.and_then(|run| {
+            // Freeze the portable semantics while the execution owner still has
+            // its journal and checkpoint files. Later comparisons read only the
+            // manager-owned record. A missing journal is an explicit completion
+            // error, never an empty history or a failed owner task.
+            let simulation = self.portable_simulation(&id)?;
+            let InputSource::Resolved { definition } = simulation.spec.inputs else {
+                return Err(seedbox_application::Error::Integrity(
+                    "completed execution has no resolved definition".into(),
+                ));
+            };
+            self.manager
+                .retain_result(&id, definition, run.record.clone())
+                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?;
+            Ok(run)
+        });
         match result {
             Ok(run) => {
                 let report = run.record.report.as_ref();
