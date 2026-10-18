@@ -209,6 +209,7 @@ where
             rate: rate_to_wire(playback.rate),
             achieved_rate,
             stepping: !self.terminal && playback.stepping,
+            before_next_fault: playback.before_next_fault,
             error: None,
             intervention: self
                 .prepared

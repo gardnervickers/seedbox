@@ -298,11 +298,17 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
                 .collect::<BTreeMap<_, _>>())
         })
         .map_err(|e| bad(e.to_string()))?;
-    if request.start_paused {
-        driver
-            .with_barrier(|barrier| barrier.set_rate(seedbox_driver::driver::PlaybackRate::Paused))
-            .map_err(|e| bad(e.to_string()))?;
-    }
+    // Playback is a request-owned host setting. Capturing while paused must not
+    // make a new run (or replay) inherit an indefinitely paused worker.
+    driver
+        .with_barrier(|barrier| {
+            barrier.set_rate(if request.start_paused {
+                seedbox_driver::driver::PlaybackRate::Paused
+            } else {
+                seedbox_driver::driver::PlaybackRate::Unlimited
+            })
+        })
+        .map_err(|e| bad(e.to_string()))?;
     let state = envelope.state;
     Worker::new(
         driver,

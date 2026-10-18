@@ -1969,6 +1969,7 @@ dependencies = [
  "hex",
  "reqwest",
  "seedbox-api",
+ "seedbox-spec",
  "seedbox-test-time",
  "serde",
  "serde_json",

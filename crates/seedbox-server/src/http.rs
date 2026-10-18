@@ -1,6 +1,7 @@
 //! Versioned local HTTP resource interface. The execution owner drains accepted
 //! IDs from the supplied queue; it must recover queued resources on startup.
 
+mod checkpoint_bundle;
 mod checkpoint_export;
 mod export_accept;
 
@@ -58,6 +59,14 @@ impl ApiState {
 
 pub fn router(state: ApiState) -> Router {
     Router::new()
+        .route(
+            "/v1/simulations/{id}/checkpoints/{request_id}/bundle",
+            get(checkpoint_bundle::export),
+        )
+        .route(
+            "/v1/checkpoint-bundles",
+            post(checkpoint_bundle::import).layer(DefaultBodyLimit::disable()),
+        )
         .route("/v1/simulations/{id}/bundle", get(export_bundle))
         .route(
             "/v1/bundles",

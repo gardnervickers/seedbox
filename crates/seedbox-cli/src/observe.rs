@@ -1,7 +1,7 @@
 //! Reading a simulation without changing it: retained logs and events, the
 //! observed world and fault timeline, and waiting for a condition. Every
 //! command reads what has happened and exits unless asked to follow.
-use super::{daemon, output};
+use super::{daemon, output, server_args::ServerArgs};
 use futures_util::StreamExt;
 use seedbox_api::{
     EventDelivery, FaultStatus, LogDelivery, LogEntry, MachineCondition, Phase, PlaybackRate,
@@ -149,8 +149,8 @@ async fn checkpoint_history_notice(client: &Client, id: &SimulationId) -> Result
 }
 
 /// Print retained output, then keep streaming with `follow`.
-pub(super) fn logs(id: &SimulationId, request: LogRequest) -> Result<u8> {
-    let client = daemon::connect(None)?;
+pub(super) fn logs(server: &ServerArgs, id: &SimulationId, request: LogRequest) -> Result<u8> {
+    let client = daemon::connect(server)?;
     let cancellation = CancellationToken::default();
     let _signals = super::signals::Signals::interrupt(&cancellation)?;
     super::simulations::runtime()?.block_on(async {
@@ -218,8 +218,8 @@ pub(super) fn logs(id: &SimulationId, request: LogRequest) -> Result<u8> {
 }
 
 /// Print retained events as newline-delimited JSON, then follow with `follow`.
-pub(super) fn events(id: &SimulationId, follow: bool) -> Result<u8> {
-    let client = daemon::connect(None)?;
+pub(super) fn events(server: &ServerArgs, id: &SimulationId, follow: bool) -> Result<u8> {
+    let client = daemon::connect(server)?;
     let cancellation = CancellationToken::default();
     let _signals = super::signals::Signals::interrupt(&cancellation)?;
     super::simulations::runtime()?.block_on(async {
@@ -281,8 +281,8 @@ fn seconds(ns: u64) -> String {
 }
 
 /// Machines, links with their counters and faults as the server observes them now.
-pub(super) fn world(id: &SimulationId, json: bool) -> Result<u8> {
-    let client = daemon::connect(None)?;
+pub(super) fn world(server: &ServerArgs, id: &SimulationId, json: bool) -> Result<u8> {
+    let client = daemon::connect(server)?;
     let world = super::simulations::runtime()?
         .block_on(client.world(id))
         .map_err(super::simulations::client_error)?;
@@ -371,8 +371,8 @@ pub(super) fn world(id: &SimulationId, json: bool) -> Result<u8> {
 }
 
 /// The fault timeline: recorded and scheduled faults with what became of each.
-pub(super) fn timeline(id: &SimulationId, json: bool) -> Result<u8> {
-    let client = daemon::connect(None)?;
+pub(super) fn timeline(server: &ServerArgs, id: &SimulationId, json: bool) -> Result<u8> {
+    let client = daemon::connect(server)?;
     let (timeline, world) = super::simulations::runtime()?.block_on(async {
         let timeline = client.timeline(id).await;
         let world = client.world(id).await.ok();
@@ -538,12 +538,13 @@ fn fault_matches(world: &WorldState, key: &str, status: FaultStatus) -> bool {
 /// Poll until `condition` holds, the simulation can no longer meet it, or
 /// `timeout` (host time) passes.
 pub(super) fn wait(
+    server: &ServerArgs,
     id: &SimulationId,
     condition: &Condition,
     timeout_ns: Option<u64>,
     json: bool,
 ) -> Result<u8> {
-    let client = daemon::connect(None)?;
+    let client = daemon::connect(server)?;
     let cancellation = CancellationToken::default();
     let _signals = super::signals::Signals::interrupt(&cancellation)?;
     let deadline = timeout_ns.map(|ns| Instant::now() + Duration::from_nanos(ns));

@@ -11,7 +11,7 @@ use std::{
         fd::AsRawFd,
         unix::{fs::OpenOptionsExt, net::UnixStream, process::CommandExt},
     },
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
@@ -42,11 +42,21 @@ fn handshake(value: &Handshake) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn connect(state: Option<PathBuf>) -> Result<Client> {
-    let root = super::state_directory(state)?;
+pub(crate) fn connect(options: &crate::server_args::ServerArgs) -> Result<Client> {
+    connect_inner(options, false)
+}
+
+pub(super) fn background(options: &crate::server_args::ServerArgs) -> Result<()> {
+    connect_inner(options, true)?;
+    Ok(())
+}
+
+fn connect_inner(options: &crate::server_args::ServerArgs, explicit: bool) -> Result<Client> {
+    let root = super::state_directory(options.state.clone())?;
     super::prepare_directory(&root)?;
     let socket = root.join("server.sock");
     if listening(&socket)? {
+        options.existing_server_notice();
         return Client::connect_to(&socket).map_err(super::setup);
     }
     let lock_path = root.join("startup.lock");
@@ -77,13 +87,17 @@ pub(crate) fn connect(state: Option<PathBuf>) -> Result<Client> {
         std::thread::sleep(Duration::from_millis(20));
     }
     if !listening(&socket)? {
-        confirm_start()?;
-        start(&root, Instant::now() + TIMEOUT)?;
+        if !explicit {
+            confirm_start()?;
+        }
+        start(&root, options, Instant::now() + TIMEOUT)?;
+    } else {
+        options.existing_server_notice();
     }
     Client::connect_to(&socket).map_err(super::setup)
 }
 
-fn listening(socket: &Path) -> Result<bool> {
+pub(super) fn listening(socket: &Path) -> Result<bool> {
     match UnixStream::connect(socket) {
         Ok(_) => Ok(true),
         Err(e)
@@ -101,16 +115,23 @@ fn listening(socket: &Path) -> Result<bool> {
     }
 }
 
-fn start(root: &Path, deadline: Instant) -> Result<()> {
+fn start(root: &Path, options: &crate::server_args::ServerArgs, deadline: Instant) -> Result<()> {
     let executable = std::env::current_exe().map_err(super::setup)?;
     let mut command = Command::new(&executable);
     command
-        .args(["serve", "--startup-handshake", "--state"])
+        .args([
+            "server",
+            "start",
+            "--foreground",
+            "--startup-handshake",
+            "--state",
+        ])
         .arg(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
+    options.append_startup_args(&mut command);
     let mut child = seedbox_application::exec_files::spawn(&mut command)
         .map_err(|e| Error::Setup(format!("start server {}: {e}", executable.display())))?;
     let result = (|| {
@@ -128,7 +149,7 @@ fn start(root: &Path, deadline: Instant) -> Result<()> {
         loop {
             let mut buffer = [0; 1024];
             match output.read(&mut buffer) {
-                Ok(0) => return Err(Error::Setup("server exited before reporting readiness; run seedbox serve to inspect startup".into())),
+                Ok(0) => return Err(Error::Setup("server exited before reporting readiness; run seedbox server start --foreground to inspect startup".into())),
                 Ok(count) => {
                     bytes.extend_from_slice(&buffer[..count]);
                     if bytes.len() > 16 * 1024 { return Err(Error::Setup("server readiness response exceeds limit".into())); }
@@ -162,7 +183,7 @@ fn start(root: &Path, deadline: Instant) -> Result<()> {
 fn confirm_start() -> Result<()> {
     if !std::io::stdin().is_terminal() {
         return Err(Error::Setup(
-            "no local server is running; start `seedbox serve` in another terminal".into(),
+            "no local server is running; start `seedbox server start` in another terminal".into(),
         ));
     }
     eprint!(
@@ -173,7 +194,7 @@ fn confirm_start() -> Result<()> {
     std::io::stdin().read_line(&mut answer)?;
     if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
         return Err(Error::Setup(
-            "server startup declined; start `seedbox serve` when ready".into(),
+            "server startup declined; start `seedbox server start` when ready".into(),
         ));
     }
     Ok(())

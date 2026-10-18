@@ -10,15 +10,16 @@ mod faults;
 mod observe;
 mod output;
 mod playback_args;
+mod server_args;
 mod signals;
+use server_args::ServerArgs;
 mod simulations;
 use backends::{Executor, Preparer};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use seedbox_application::{
     config,
-    execution::{CancellationToken, ExecutionBackend, PreparationBackend, WitnessMode},
-    orchestration::Orchestrator,
+    execution::{CancellationToken, ExecutionBackend, WitnessMode},
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
@@ -43,50 +44,20 @@ Exit status:
 #[command(
     name = "seedbox",
     version = seedbox_application::engine::SIMULATOR_VERSION,
-    override_usage = "seedbox [RUN OPTIONS] [PROJECT]\n       seedbox <COMMAND>",
-    after_help = "Run is the default: seedbox seedbox.yaml. See `seedbox help run` for run options.",
-    about = "Deterministic simulation of applications on real Linux machines",
-    long_about = "Deterministic simulation of applications on real Linux machines.\n\n\
-                  A seed plus the retained inputs regenerate the same execution. \
-                  `run` and `replay` support Linux x86-64 KVM (KVM device access) \
-                  or native HVF on Apple Silicon Mac."
+    override_usage = "seedbox <COMMAND>\n       seedbox [RUN OPTIONS] [PROJECT | CHECKPOINT]",
+    about = "Repeatable simulations of real Linux applications.",
+    after_help = "Examples:\n  seedbox init my-test\n  seedbox run my-test\n  seedbox logs SIMULATION --follow\n  seedbox replay SIMULATION\n\n  seedbox checkpoint SIMULATION -o before-bug.seedbox\n  seedbox run before-bug.seedbox\n\nRun is the default command. With no arguments, run the project in the current directory.\nA checkpoint contains the inputs and state needed to start a new simulation without the original server.\nUse `seedbox help COMMAND` for command options."
 )]
 struct Cli {
+    #[command(flatten)]
+    server: ServerArgs,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Generate shell integration with live simulation and machine completion.
-    Completions {
-        /// Shell to generate integration for.
-        #[arg(value_enum)]
-        shell: completions::Shell,
-    },
-    #[command(name = "__complete", hide = true)]
-    Complete {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        words: Vec<String>,
-    },
-    /// Gracefully stop the local simulation server and its active work.
-    Shutdown {
-        /// Server state directory [default: user state directory].
-        #[arg(long, env = "SEEDBOX_STATE")]
-        state: Option<PathBuf>,
-    },
-    /// Serve the local simulation API in the foreground.
-    Serve {
-        /// Report startup to the launching client.
-        #[arg(long, hide = true)]
-        startup_handshake: bool,
-        /// Server state directory [default: user state directory].
-        #[arg(long, env = "SEEDBOX_STATE")]
-        state: Option<PathBuf>,
-        #[command(flatten)]
-        inputs: RuntimeInputs,
-    },
-    /// Create a self-contained example project.
+    /// Create an example project.
     Init {
         /// Directory to create.
         directory: PathBuf,
@@ -94,58 +65,57 @@ enum Command {
         #[arg(long, value_enum, default_value_t = TemplateArg::Etcd)]
         template: TemplateArg,
     },
-    /// Check native project inputs, without images or guests.
-    Validate {
+    /// Validate a project and check host readiness.
+    Check {
         #[command(flatten)]
         project: ProjectArg,
-        /// Print the resolved configuration as JSON (includes environment values).
+        /// Print project configuration and host observations as one JSON document.
         #[arg(long)]
         json: bool,
     },
-    /// Check execution-profile compatibility without images or guests (Linux KVM host; or Apple Silicon Mac).
-    #[command(
-        after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds or downloads missing runtime inputs; run `cargo xtask build-assets` then `cargo build --release`."
-    )]
-    Doctor {
-        /// Print the admitted observations as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Resolve images and build guest artifacts, without running.
-    Prepare {
-        #[command(flatten)]
-        project: ProjectArg,
-        /// Write the prepared-inputs JSON here; must not exist.
-        #[arg(long, short)]
-        output: PathBuf,
-        #[command(flatten)]
-        state: StateArg,
-        #[command(flatten)]
-        inputs: RuntimeInputs,
-    },
-    /// Prepare images and run a simulation (PV: Linux KVM or Apple Silicon; TCG: Linux x86-64, no KVM).
-    #[command(after_help = format!("{EXIT_CODES}\n\nPreparation has a 15-minute deadline, separate from the simulation execution budget.\n\nUse diagnostics ID for retained worker errors after completion."))]
+    /// Start a new simulation from a project or checkpoint.
+    #[command(after_help = EXIT_CODES)]
     Run {
+        /// Project file, project directory, or self-contained checkpoint [default: current directory].
+        #[arg(value_name = "PROJECT|CHECKPOINT", conflicts_with = "from")]
+        input: Option<PathBuf>,
+        /// Repeat the retained inputs of an existing simulation.
+        #[arg(long, conflicts_with_all = ["input", "seed", "count"])]
+        from: Option<seedbox_api::SimulationId>,
         #[command(flatten)]
         backend: BackendArgs,
-        #[command(flatten)]
-        project: ProjectArg,
-        /// Simulation seed [default: project seed, otherwise allocated once by the server].
+        /// Simulation seed [default: project seed, otherwise allocated by the server].
         #[arg(long)]
         seed: Option<u64>,
+        /// Run this many consecutive seeds using one frozen preparation [default: 1].
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=4096))]
+        count: Option<u32>,
         /// Pause before guest execution; use --detach to return immediately.
         #[arg(long)]
         paused: bool,
-        /// Return after submission while the simulation continues on the server.
+        /// Return after submission while execution continues on the server.
         #[arg(long)]
         detach: bool,
-        /// Print exactly one simulation resource as JSON.
+        /// Print one simulation document, or a seed-range document with --count.
         #[arg(long)]
         json: bool,
         #[command(flatten)]
         execution: ExecutionArgs,
     },
-    /// Compare deterministic results of two completed simulations.
+    /// Repeat a simulation and verify matching results.
+    #[command(after_help = EXIT_CODES)]
+    Replay {
+        /// Completed simulation ID.
+        id: seedbox_api::SimulationId,
+        #[command(flatten)]
+        backend: BackendArgs,
+        /// Print the comparison as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        execution: ExecutionArgs,
+    },
+    /// Compare two completed simulations.
     #[command(after_help = EXIT_CODES)]
     Compare {
         /// Baseline simulation ID.
@@ -156,197 +126,25 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Rerun a simulation using its retained inputs and original seed.
-    Rerun {
-        #[command(flatten)]
-        backend: BackendArgs,
-        /// Short simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Return after submission.
-        #[arg(long)]
-        detach: bool,
-        /// Print exactly one simulation resource as JSON.
-        #[arg(long)]
-        json: bool,
-        #[command(flatten)]
-        execution: ExecutionArgs,
-    },
-    /// Start a new simulation from a captured checkpoint.
-    Branch {
-        /// Short source simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Checkpoint request ID returned by checkpoint capture.
-        checkpoint: String,
-        /// Return after submission.
-        #[arg(long)]
-        detach: bool,
-        /// Print exactly one simulation resource as JSON.
-        #[arg(long)]
-        json: bool,
-        #[command(flatten)]
-        execution: ExecutionArgs,
-    },
-    /// List resources known to the server.
-    Get {
-        #[command(subcommand)]
-        resource: CollectionArg,
-    },
-    /// Describe a simulation or checkpoint as structured text.
-    Describe {
-        #[command(subcommand)]
-        resource: ResourceArg,
-    },
-    /// Request that a simulation stop.
-    Stop {
-        /// Short simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Stop every simulation in the seed range started by this ID.
-        #[arg(long)]
-        all_seeds: bool,
-    },
-    /// Print retained structured events as newline-delimited JSON.
-    Events {
-        /// Short simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Keep printing new events until the simulation completes or Ctrl-C.
-        #[arg(long)]
-        follow: bool,
-    },
-    /// Wait until a simulation meets a condition.
-    #[command(after_help = WAIT_HELP)]
-    Wait {
-        /// Short simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Condition to wait for (see below).
-        #[arg(long = "for", value_name = "CONDITION", value_parser = observe::condition)]
-        condition: observe::Condition,
-        /// Give up after this much host time, such as 30s or 5m [default: unlimited].
-        #[arg(long, value_parser = wall_time)]
-        timeout: Option<u64>,
-        /// Print exactly one result document as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Open the interactive simulation console.
-    Tui {
-        /// Short simulation ID to open first [default: the simulation list].
+    /// List simulations or inspect one.
+    Show {
+        /// Simulation ID [default: list simulations].
         id: Option<seedbox_api::SimulationId>,
-    },
-    /// Inspect playback state or a retained control receipt.
-    Playback {
-        /// Short simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Control request ID [default: inspect current playback state].
-        #[arg(value_parser = playback_args::request_id)]
-        request_id: Option<String>,
-        /// Print JSON instead of YAML.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Run consecutive seeds on the server using one frozen preparation.
-    #[command(after_help = EXIT_CODES)]
-    Explore {
-        #[command(flatten)]
-        backend: BackendArgs,
-        #[command(flatten)]
-        project: ProjectArg,
-        /// First simulation seed [default: project seed, otherwise allocated by the server].
-        #[arg(long)]
-        seed: Option<u64>,
-        /// Number of consecutive seeds to execute.
-        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=4096))]
-        count: u32,
-        /// Pause before guest execution; use --detach to return immediately.
-        #[arg(long)]
-        paused: bool,
-        /// Return after the server accepts the seed range.
-        #[arg(long)]
-        detach: bool,
-        /// Print one seed-range status document as JSON.
-        #[arg(long)]
-        json: bool,
-        #[command(flatten)]
-        execution: ExecutionArgs,
-    },
-    /// Rerun a simulation through the server and compare its retained results.
-    #[command(after_help = EXIT_CODES)]
-    Replay {
-        #[command(flatten)]
-        backend: BackendArgs,
-        /// Completed simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Print the comparison as JSON.
-        #[arg(long)]
-        json: bool,
-        #[command(flatten)]
-        execution: ExecutionArgs,
-    },
-    /// Delete a retained resource.
-    Delete {
-        #[command(subcommand)]
-        resource: DeleteArg,
-    },
-    /// Inject a YAML or JSON fault action at a committed simulation boundary.
-    Inject {
-        #[command(flatten)]
-        mutation: playback_args::Mutation,
-        /// Fault action file, or - to read standard input.
-        action: PathBuf,
-    },
-    /// Heal a named fault handle in a simulation.
-    Heal {
-        #[command(flatten)]
-        mutation: playback_args::Mutation,
-        /// Handle assigned by the original fault action.
-        handle: String,
-    },
-    /// Pause a simulation at its next committed boundary.
-    Pause(playback_args::Mutation),
-    /// Resume a simulation at unlimited speed.
-    Resume(playback_args::Mutation),
-    /// Advance one committed round and remain paused.
-    Step(playback_args::Mutation),
-    /// Save a checkpoint at a committed simulation boundary.
-    Checkpoint(playback_args::Mutation),
-    /// Set simulated seconds per wall-clock second; 0 pauses and unlimited removes pacing.
-    Rate {
-        #[command(flatten)]
-        mutation: playback_args::Mutation,
-        /// Playback rate: 0, a positive integer or fraction, or unlimited.
-        rate: playback_args::Rate,
-    },
-    /// Export a completed resolved simulation and its inputs, checkpoints and evidence.
-    Export {
-        /// Short simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Bundle file to create without overwriting [default: SIMULATION-ID.seedbox.tar].
-        #[arg(long, short = 'o')]
-        output: Option<PathBuf>,
+        /// Information to display [default: status].
+        #[arg(long, value_enum, requires = "id")]
+        view: Option<ShowView>,
+        /// Stream status until completion or Ctrl-C.
+        #[arg(long, requires = "id", conflicts_with_all = ["view", "file", "all_seeds"])]
+        watch: bool,
+        /// Show the seed range containing this simulation.
+        #[arg(long, requires = "id", conflicts_with_all = ["view", "file", "watch"])]
+        all_seeds: bool,
+        /// Read this exact raw diagnostic file; requires --view diagnostics.
+        #[arg(long, requires = "id")]
+        file: Option<String>,
         #[command(flatten)]
         transfer: Transfer,
-        /// Print exactly one export receipt as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Import a bundle as a fresh completed simulation, without executing it.
-    Import {
-        /// Bundle file to import.
-        bundle: PathBuf,
-        #[command(flatten)]
-        transfer: Transfer,
-        /// Print exactly one simulation document as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Show completed simulation raw diagnostics, distinct from timed application logs.
-    Diagnostics {
-        /// Short simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Exact retained file name [default: list files and omissions].
-        name: Option<String>,
-        #[command(flatten)]
-        transfer: Transfer,
-        /// Print one metadata document, or one lossless hexadecimal file document.
+        /// Print JSON instead of text; --watch emits newline-delimited documents.
         #[arg(long)]
         json: bool,
     },
@@ -378,6 +176,162 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read simulator events as newline-delimited JSON.
+    Events {
+        /// Simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Stream events until completion or Ctrl-C.
+        #[arg(long)]
+        follow: bool,
+    },
+    /// Wait for a simulation condition.
+    #[command(after_help = WAIT_HELP)]
+    Wait {
+        /// Simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Condition to wait for (see below).
+        #[arg(long = "for", value_name = "CONDITION", value_parser = observe::condition)]
+        condition: observe::Condition,
+        /// Give up after this much host time, such as 30s or 5m [default: unlimited].
+        #[arg(long, value_parser = wall_time)]
+        timeout: Option<u64>,
+        /// Print one result document as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open the interactive console.
+    Tui {
+        /// Simulation ID to open [default: simulation list].
+        id: Option<seedbox_api::SimulationId>,
+    },
+    /// Stop a simulation and retain its results.
+    Stop {
+        /// Simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Stop every simulation in this seed range.
+        #[arg(long)]
+        all_seeds: bool,
+    },
+    /// Delete a simulation and its resources.
+    Delete {
+        /// Simulation ID; active execution is stopped before deletion.
+        id: seedbox_api::SimulationId,
+    },
+    /// Pause, resume, step, change speed, or inject faults.
+    Control {
+        #[command(subcommand)]
+        command: ControlCommand,
+    },
+    /// Save a self-contained checkpoint to a file.
+    #[command(
+        after_help = "Capture requires application-ready machines. The command pauses execution for capture and restores the previous playback state.\nStart a new simulation with `seedbox run FILE`; add --paused --detach to inspect the captured state first."
+    )]
+    Checkpoint {
+        /// Simulation ID to capture.
+        id: seedbox_api::SimulationId,
+        /// Checkpoint file to create without overwriting [default: SIMULATION.seedbox].
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+        /// Print one checkpoint receipt as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start, inspect, or stop the local server.
+    Server {
+        #[command(subcommand)]
+        command: ServerCommand,
+    },
+    /// Generate shell integration.
+    Completions {
+        /// Shell to generate integration for.
+        #[arg(value_enum)]
+        shell: completions::Shell,
+    },
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        words: Vec<String>,
+    },
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+enum ShowView {
+    /// Current execution status.
+    #[default]
+    Status,
+    /// Resubmittable simulation definition as YAML.
+    Definition,
+    /// Current machines, links and faults.
+    World,
+    /// Scheduled and recorded fault inputs.
+    Timeline,
+    /// Current playback state.
+    Playback,
+    /// Retained raw worker diagnostics and omissions.
+    Diagnostics,
+}
+
+#[derive(Subcommand)]
+enum ControlCommand {
+    /// Pause at the next committed boundary.
+    Pause(playback_args::Mutation),
+    /// Resume at unlimited speed.
+    Resume(playback_args::Mutation),
+    /// Advance one committed round and remain paused.
+    Step(playback_args::Mutation),
+    /// Set simulated seconds per wall-clock second.
+    Rate {
+        #[command(flatten)]
+        mutation: playback_args::Mutation,
+        /// Playback rate: 0, a positive integer or fraction, or unlimited.
+        rate: playback_args::Rate,
+    },
+    /// Inject a fault at a committed simulation boundary.
+    Inject {
+        #[command(flatten)]
+        mutation: playback_args::Mutation,
+        /// YAML or JSON fault action file, or - for standard input.
+        action: PathBuf,
+    },
+    /// Heal a named fault.
+    Heal {
+        #[command(flatten)]
+        mutation: playback_args::Mutation,
+        /// Handle assigned by the original fault action.
+        handle: String,
+    },
+    /// Inspect whether a control request was applied.
+    Receipt {
+        /// Simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Control request ID.
+        #[arg(value_parser = playback_args::request_id)]
+        request: String,
+        /// Print JSON instead of YAML.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServerCommand {
+    /// Start the local server.
+    Start {
+        /// Keep the server in the foreground for a service manager.
+        #[arg(long)]
+        foreground: bool,
+        /// Report readiness to the launching client.
+        #[arg(long, hide = true)]
+        startup_handshake: bool,
+    },
+    /// Show server availability, occupied capacity and queued work.
+    Status {
+        /// Print one server status document as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Gracefully stop the server and its active simulations.
+    Stop,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -510,30 +464,13 @@ Exit status:
   124  TIMEOUT before the condition was met";
 
 #[derive(Args)]
-struct StateArg {
-    /// Directory holding the content store and recorded runs.
-    #[arg(long, env = "SEEDBOX_ARTIFACT_STATE", default_value = ".seedbox")]
-    state: PathBuf,
-}
-
-#[derive(Args)]
 struct Transfer {
     /// Maximum complete transfer bytes, including archive headers and padding.
     #[arg(long, default_value_t = seedbox_api::BUNDLE_MAX_BYTES, value_parser = clap::value_parser!(u64).range(1..=seedbox_api::BUNDLE_MAX_BYTES))]
     max_bytes: u64,
 }
 
-impl StateArg {
-    fn open(&self) -> Result<(ContentStore, Orchestrator)> {
-        let unusable = |error| Error::Setup(format!("--state {}: {error}", self.state.display()));
-        std::fs::create_dir_all(&self.state).map_err(unusable)?;
-        let path = self.state.canonicalize().map_err(unusable)?;
-        let store = ContentStore::new(path.join("objects"));
-        Ok((store.clone(), Orchestrator::new(store, path.join("runs"))))
-    }
-}
-
-#[derive(Args)]
+#[derive(Args, Clone, Copy, Default)]
 #[command(next_help_heading = "Runtime inputs")]
 struct RuntimeInputs {
     /// Also record and compare every machine's RAM and registers (also retains per-page hashes).
@@ -615,13 +552,7 @@ impl RuntimeInputs {
 // application/server inputs if another frontend entry is introduced.
 pub fn main() -> ExitCode {
     let mut arguments: Vec<_> = std::env::args_os().collect();
-    let first = arguments.get(1).and_then(|argument| argument.to_str());
-    use clap::CommandFactory;
-    let root = Cli::command();
-    let explicit_command = first.is_some_and(|name| {
-        root.find_subcommand(name).is_some()
-            || matches!(name, "help" | "--help" | "-h" | "--version" | "-V")
-    });
+    let explicit_command = has_explicit_command(&arguments);
     if !explicit_command {
         arguments.insert(1, "run".into());
     }
@@ -639,189 +570,158 @@ pub fn main() -> ExitCode {
     }
 }
 
+// Recognize root options before an explicit command without confusing their
+// values with project paths. Run-specific options still select implicit run.
+fn has_explicit_command(arguments: &[std::ffi::OsString]) -> bool {
+    use clap::CommandFactory;
+    let mut root = Cli::command();
+    root.build();
+    let mut words = arguments.iter().skip(1);
+    while let Some(word) = words.next() {
+        let Some(word) = word.to_str() else {
+            return false;
+        };
+        if matches!(word, "help" | "--help" | "-h" | "--version" | "-V") {
+            return true;
+        }
+        if !word.starts_with('-') {
+            return root.find_subcommand(word).is_some();
+        }
+        let (name, inline) = word
+            .split_once('=')
+            .map_or((word, false), |(name, _)| (name, true));
+        let Some(arg) = root.get_arguments().find(|arg| {
+            arg.get_long()
+                .is_some_and(|long| name.strip_prefix("--") == Some(long))
+        }) else {
+            return false;
+        };
+        if !inline && arg.get_num_args().is_some_and(|count| count.takes_values()) {
+            words.next();
+        }
+    }
+    false
+}
+
 fn run(cli: Cli) -> Result<u8> {
+    let server = &cli.server;
     match cli.command {
-        Command::Completions { shell } => completions::script(shell),
-        Command::Complete { words } => completions::complete(&words),
-        Command::Shutdown { state } => daemon::shutdown(state),
-        Command::Serve {
-            state,
-            inputs,
-            startup_handshake,
-        } => daemon::serve(state, inputs, startup_handshake),
-        Command::Inject { mutation, action } => faults::inject(mutation, &action),
-        Command::Heal { mutation, handle } => simulations::mutate_control(
-            mutation,
-            seedbox_api::ControlCommand::InjectFault {
-                action: seedbox_api::FaultAction::Heal { handle },
-            },
-        ),
-        Command::Pause(mutation) => simulations::mutate_control(
-            mutation,
-            seedbox_api::ControlCommand::SetRate {
-                rate: seedbox_api::PlaybackRate::Paused,
-            },
-        ),
-        Command::Resume(mutation) => simulations::mutate_control(
-            mutation,
-            seedbox_api::ControlCommand::SetRate {
-                rate: seedbox_api::PlaybackRate::Unlimited,
-            },
-        ),
-        Command::Step(mutation) => {
-            simulations::mutate_control(mutation, seedbox_api::ControlCommand::Step)
-        }
-        Command::Checkpoint(mutation) => {
-            simulations::mutate_control(mutation, seedbox_api::ControlCommand::Checkpoint)
-        }
-        Command::Rate { mutation, rate } => simulations::mutate_control(
-            mutation,
-            seedbox_api::ControlCommand::SetRate { rate: rate.0 },
-        ),
         Command::Init {
             directory,
             template,
         } => init(&directory, template),
-        Command::Validate { project, json } => validate(&project, json),
-        Command::Doctor { json } => doctor(json),
-        Command::Prepare {
-            project,
-            output,
-            state,
-            inputs,
-        } => prepare(&project, &output, &state, &inputs),
+        Command::Check { project, json } => check(&project, json),
         Command::Run {
+            input,
+            from,
             backend,
-            project,
             seed,
+            count,
             paused,
             detach,
             json,
             execution,
-        } => simulations::run(
-            &project,
-            seed,
-            paused,
-            detach,
-            json,
-            backend.selection(execution),
-        ),
-        Command::Branch {
+        } => {
+            let selection = backend.selection(execution);
+            if let Some(id) = from {
+                return simulations::rerun(server, &id, paused, detach, json, selection);
+            }
+            let input = input.unwrap_or_else(|| PathBuf::from("."));
+            if bundles::is_checkpoint(&input)? {
+                if seed.is_some() || count.is_some() {
+                    return Err(Error::Setup(
+                        "--seed and --count require a project, not a checkpoint".into(),
+                    ));
+                }
+                return simulations::run_checkpoint(
+                    server, &input, paused, detach, json, selection,
+                );
+            }
+            let project = ProjectArg { project: input };
+            match count {
+                Some(count) => simulations::explore(
+                    server, &project, seed, count, paused, detach, json, selection,
+                ),
+                None => simulations::run(server, &project, seed, paused, detach, json, selection),
+            }
+        }
+        Command::Replay {
             id,
-            checkpoint,
-            detach,
-            json,
-            execution,
-        } => simulations::branch(
-            &id,
-            checkpoint,
-            detach,
-            json,
-            execution.wall_time,
-            execution.machine_workers,
-        ),
-        Command::Rerun {
             backend,
-            id,
-            detach,
             json,
             execution,
-        } => simulations::rerun(&id, detach, json, backend.selection(execution)),
+        } => simulations::replay(server, &id, json, backend.selection(execution)),
         Command::Compare {
             baseline,
             simulation,
             json,
-        } => simulations::compare(&baseline, &simulation, json),
-        Command::Get { resource } => match resource {
-            CollectionArg::Simulation { id, watch, json } => {
-                if watch {
-                    simulations::watch(&id, json)
-                } else {
-                    simulations::get(&id, json)
+        } => simulations::compare(server, &baseline, &simulation, json),
+        Command::Show {
+            id,
+            view,
+            watch,
+            all_seeds,
+            file,
+            transfer,
+            json,
+        } => {
+            let view = view.unwrap_or_default();
+            if file.is_some() && view != ShowView::Diagnostics {
+                return Err(Error::Setup("--file requires --view diagnostics".into()));
+            }
+            let Some(id) = id else {
+                return simulations::list(server, json);
+            };
+            if watch {
+                return simulations::watch(server, &id, json);
+            }
+            if all_seeds {
+                return simulations::seed_range(server, &id, json);
+            }
+            match view {
+                ShowView::Status => simulations::get(server, &id, json),
+                ShowView::Definition => simulations::describe(server, &id, json),
+                ShowView::World => observe::world(server, &id, json),
+                ShowView::Timeline => observe::timeline(server, &id, json),
+                ShowView::Playback => simulations::playback(server, &id, None, json),
+                ShowView::Diagnostics => {
+                    diagnostics::diagnostics(server, &id, file.as_deref(), transfer.max_bytes, json)
                 }
             }
-            CollectionArg::Simulations { source, json } => match source {
-                Some(id) => simulations::seed_range(&id, json),
-                None => simulations::list(json),
-            },
-            CollectionArg::Capacity { json } => simulations::capacity(json),
-            CollectionArg::Checkpoints { id, json } => simulations::checkpoints(&id, None, json),
-            CollectionArg::World { id, json } => observe::world(&id, json),
-            CollectionArg::Timeline { id, json } => observe::timeline(&id, json),
-        },
-        Command::Describe { resource } => match resource {
-            ResourceArg::Simulation { id, json } => simulations::describe(&id, json),
-            ResourceArg::Checkpoint { id, name, json } => {
-                simulations::checkpoints(&id, Some(&name), json)
-            }
-        },
-        Command::Stop { id, all_seeds } => {
-            if all_seeds {
-                simulations::stop_seeds(&id)
-            } else {
-                simulations::stop(&id)
-            }
         }
-        Command::Events { id, follow } => observe::events(&id, follow),
+        Command::Events { id, follow } => observe::events(server, &id, follow),
         Command::Wait {
             id,
             condition,
             timeout,
             json,
-        } => observe::wait(&id, &condition, timeout, json),
-        Command::Tui { id } => simulations::tui(id),
-        Command::Playback {
-            id,
-            request_id,
+        } => observe::wait(server, &id, &condition, timeout, json),
+        Command::Tui { id } => simulations::tui(server, id),
+        Command::Stop { id, all_seeds } => {
+            if all_seeds {
+                simulations::stop_seeds(server, &id)
+            } else {
+                simulations::stop(server, &id)
+            }
+        }
+        Command::Delete { id } => simulations::delete(server, &id),
+        Command::Control { command } => control(server, command),
+        Command::Checkpoint { id, output, json } => bundles::checkpoint(
+            server,
+            &id,
+            output.unwrap_or_else(|| PathBuf::from(format!("{id}.seedbox"))),
             json,
-        } => simulations::playback(&id, request_id.as_deref(), json),
-        Command::Explore {
-            backend,
-            project,
-            seed,
-            count,
-            paused,
-            detach,
-            json,
-            execution,
-        } => simulations::explore(
-            &project,
-            seed,
-            count,
-            paused,
-            detach,
-            json,
-            backend.selection(execution),
         ),
-        Command::Delete {
-            resource: DeleteArg::Simulation { id },
-        } => simulations::delete(&id),
-        Command::Delete {
-            resource: DeleteArg::Checkpoint { id, name },
-        } => simulations::delete_checkpoint(&id, &name),
-        Command::Replay {
-            backend,
-            id,
-            json,
-            execution,
-        } => simulations::replay(&id, json, backend.selection(execution)),
-        Command::Export {
-            id,
-            output,
-            transfer,
-            json,
-        } => bundles::export(&id, output, transfer.max_bytes, json),
-        Command::Import {
-            bundle,
-            transfer,
-            json,
-        } => bundles::import(&bundle, transfer.max_bytes, json),
-        Command::Diagnostics {
-            id,
-            name,
-            transfer,
-            json,
-        } => diagnostics::diagnostics(&id, name.as_deref(), transfer.max_bytes, json),
+        Command::Server { command } => match command {
+            ServerCommand::Start {
+                foreground,
+                startup_handshake,
+            } => daemon::start(server, foreground, startup_handshake),
+            ServerCommand::Status { json } => daemon::status(server, json),
+            ServerCommand::Stop => daemon::shutdown(server.state.clone()),
+        },
+        Command::Completions { shell } => completions::script(shell),
+        Command::Complete { words } => completions::complete(&words),
         Command::Logs {
             id,
             machine,
@@ -833,6 +733,7 @@ fn run(cli: Cli) -> Result<u8> {
             stream,
             json,
         } => observe::logs(
+            server,
             &id,
             observe::LogRequest {
                 machine: machine.as_deref(),
@@ -850,6 +751,39 @@ fn run(cli: Cli) -> Result<u8> {
     }
 }
 
+fn control(server: &ServerArgs, command: ControlCommand) -> Result<u8> {
+    use seedbox_api::{ControlCommand as Action, PlaybackRate};
+    let (mutation, action) = match command {
+        ControlCommand::Inject { mutation, action } => {
+            return faults::inject(server, mutation, &action)
+        }
+        ControlCommand::Receipt { id, request, json } => {
+            return simulations::playback(server, &id, Some(&request), json)
+        }
+        ControlCommand::Pause(mutation) => (
+            mutation,
+            Action::SetRate {
+                rate: PlaybackRate::Paused,
+            },
+        ),
+        ControlCommand::Resume(mutation) => (
+            mutation,
+            Action::SetRate {
+                rate: PlaybackRate::Unlimited,
+            },
+        ),
+        ControlCommand::Step(mutation) => (mutation, Action::Step),
+        ControlCommand::Rate { mutation, rate } => (mutation, Action::SetRate { rate: rate.0 }),
+        ControlCommand::Heal { mutation, handle } => (
+            mutation,
+            Action::InjectFault {
+                action: seedbox_api::FaultAction::Heal { handle },
+            },
+        ),
+    };
+    simulations::mutate_control(server, mutation, action)
+}
+
 fn init(directory: &Path, template: TemplateArg) -> Result<u8> {
     if directory.exists() {
         return Err(Error::Setup(format!(
@@ -862,38 +796,24 @@ fn init(directory: &Path, template: TemplateArg) -> Result<u8> {
     Ok(0)
 }
 
-fn validate(project: &ProjectArg, json: bool) -> Result<u8> {
+fn check(project: &ProjectArg, json: bool) -> Result<u8> {
     let simulation = project.load()?;
-    if json {
-        output::json(&simulation)?;
-    } else {
-        output::status(
-            "VALID",
-            format_args!(
-                "{} ({} services; image compatibility is checked by `prepare`)",
-                simulation.name,
-                simulation.services.len()
-            ),
-        );
-    }
-    Ok(0)
-}
-
-fn doctor(json: bool) -> Result<u8> {
     let cancellation = CancellationToken::default();
     let _signals = Signals::register(&cancellation)?;
     let engine = defaults::engine()?;
     let scratch = tempfile::tempdir()
-        .map_err(|error| Error::Setup(format!("doctor runtime scratch: {error}")))?;
+        .map_err(|error| Error::Setup(format!("check runtime scratch: {error}")))?;
     let (kernel, _runtime) = backends::doctor_kernel(scratch.path())?;
     if cancellation.is_cancelled() {
-        return Err(Error::Setup("doctor cancelled".into()));
+        return Err(Error::Setup("check cancelled".into()));
     }
     let report = seedbox_driver_execution::driver_world::doctor(&engine, &kernel)?;
     if json {
-        output::json(&report)?;
+        output::json(&serde_json::json!({ "project": simulation, "host": report }))?;
     } else {
-        output::status("VALID", "compatible execution profile");
+        output::status("VALID", &simulation.name);
+        output::field("project", "valid configuration; images checked during run");
+        output::field("host", "compatible execution profile");
         output::field("simulator", &report.simulator_version);
         output::field("engine", report.engine.hex());
         output::field("kernel", report.kernel.hex());
@@ -901,132 +821,34 @@ fn doctor(json: bool) -> Result<u8> {
     Ok(0)
 }
 
-fn prepare(
-    project: &ProjectArg,
-    output: &Path,
-    state: &StateArg,
-    inputs: &RuntimeInputs,
-) -> Result<u8> {
-    if output.exists() {
-        return Err(Error::Setup(format!(
-            "--output {}: already exists",
-            output.display()
-        )));
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+
+    #[test]
+    fn root_options_do_not_hide_explicit_commands_or_turn_paths_into_commands() {
+        for (words, expected) in [
+            (vec!["seedbox", "--state", "run", "show"], true),
+            (
+                vec![
+                    "seedbox",
+                    "--state=/tmp/state",
+                    "--full-state",
+                    "server",
+                    "start",
+                ],
+                true,
+            ),
+            (vec!["seedbox", "--full-state", "example.yaml"], false),
+            (vec!["seedbox", "--state", "/tmp/state"], false),
+            (vec!["seedbox", "--seed", "3"], false),
+            (vec!["seedbox", "--state", "/tmp/state", "--help"], true),
+        ] {
+            let words = words
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>();
+            assert_eq!(has_explicit_command(&words), expected, "{words:?}");
+        }
     }
-    let simulation = project.load()?;
-    let (store, _) = state.open()?;
-    let cancellation = CancellationToken::default();
-    let _signals = Signals::register(&cancellation)?;
-    let scratch = tempfile::tempdir()?;
-    let (preparer, _) = inputs.backends(
-        &store,
-        &simulation,
-        Default::default(),
-        &cancellation,
-        scratch.path(),
-    )?;
-    if cancellation.is_cancelled() {
-        return Err(Error::PreparationCancelled);
-    }
-    let prepared = preparer.prepare(&simulation, &store)?;
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output)?;
-    serde_json::to_writer_pretty(file, &prepared)?;
-    output::status("PREPARED", output.display());
-    Ok(0)
-}
-
-#[derive(Subcommand)]
-enum DeleteArg {
-    /// Stop and delete a simulation, its descendants and their private files.
-    Simulation {
-        /// Root simulation ID.
-        id: seedbox_api::SimulationId,
-    },
-
-    /// Delete an unreferenced checkpoint from a completed simulation.
-    Checkpoint {
-        /// Source simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Checkpoint request ID.
-        name: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum CollectionArg {
-    /// Show resident execution slots, paused occupants and queue reasons.
-    Capacity {
-        /// Print JSON instead of tables.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Show one simulation and optionally watch its status.
-    Simulation {
-        /// Short simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Stream status until completion or Ctrl-C; never stop the simulation.
-        #[arg(long)]
-        watch: bool,
-        /// Print JSON; with --watch, emit newline-delimited documents.
-        #[arg(long)]
-        json: bool,
-    },
-    /// List simulations retained by the server.
-    Simulations {
-        /// Source simulation ID to restrict the result to its seed range.
-        source: Option<seedbox_api::SimulationId>,
-        /// Print JSON instead of a table.
-        #[arg(long)]
-        json: bool,
-    },
-    /// List checkpoint captures belonging to a simulation.
-    Checkpoints {
-        /// Short simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Print JSON instead of a table.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Show a simulation's machines, links and faults as observed now.
-    World {
-        /// Short simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Print the world document as JSON instead of tables.
-        #[arg(long)]
-        json: bool,
-    },
-    /// List a simulation's recorded and scheduled faults and what became of each.
-    Timeline {
-        /// Short simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Print the timeline document as JSON instead of a table.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum ResourceArg {
-    /// Describe one run of one seed as resubmittable YAML.
-    Simulation {
-        /// Short simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Print JSON instead of YAML.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Describe a checkpoint capture and its timeline position.
-    Checkpoint {
-        /// Short simulation ID.
-        id: seedbox_api::SimulationId,
-        /// Checkpoint request ID.
-        #[arg(value_parser = playback_args::request_id)]
-        name: String,
-        /// Print JSON instead of YAML.
-        #[arg(long)]
-        json: bool,
-    },
 }

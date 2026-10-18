@@ -58,10 +58,75 @@ impl Client {
     /// import. Never retry automatically: every accepted upload creates a fresh ID.
     pub async fn import_bundle(
         &self,
-        mut file: tokio::fs::File,
+        file: tokio::fs::File,
         max_bytes: u64,
         cancelled: impl Fn() -> bool,
     ) -> Result<Simulation, Error> {
+        self.upload_bundle(
+            file,
+            max_bytes,
+            cancelled,
+            "/v1/bundles",
+            BUNDLE_CONTENT_TYPE,
+        )
+        .await
+    }
+
+    /// Restore checkpoint inputs only. A caller then submits a new simulation.
+    pub async fn import_checkpoint_bundle(
+        &self,
+        file: tokio::fs::File,
+        max_bytes: u64,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<seedbox_spec::definition::Definition, Error> {
+        self.upload_bundle(
+            file,
+            max_bytes,
+            cancelled,
+            "/v1/checkpoint-bundles",
+            seedbox_api::CHECKPOINT_CONTENT_TYPE,
+        )
+        .await
+    }
+
+    /// Download a complete checkpoint file, never a server-local asset reference.
+    pub async fn export_checkpoint_bundle(
+        &self,
+        id: &SimulationId,
+        checkpoint: &str,
+        output: &mut tokio::fs::File,
+        max_bytes: u64,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<u64, Error> {
+        validate_limit(max_bytes)?;
+        let request = self
+            .request(
+                Method::GET,
+                &format!("/v1/simulations/{id}/checkpoints/{checkpoint}/bundle"),
+            )
+            .query(&BundleTransferQuery { max_bytes });
+        cancellable(&cancelled, async {
+            let response = request.send().await?;
+            self.binary(
+                response,
+                output,
+                max_bytes,
+                seedbox_api::CHECKPOINT_CONTENT_TYPE,
+                None,
+            )
+            .await
+        })
+        .await
+    }
+
+    async fn upload_bundle<T: serde::de::DeserializeOwned>(
+        &self,
+        mut file: tokio::fs::File,
+        max_bytes: u64,
+        cancelled: impl Fn() -> bool,
+        endpoint: &str,
+        content_type: &str,
+    ) -> Result<T, Error> {
         validate_limit(max_bytes)?;
         cancellable(&cancelled, async {
             let metadata = file.metadata().await?;
@@ -100,9 +165,9 @@ impl Client {
                 Ok(Some((bytes, file)))
             });
             let response = self
-                .request(Method::POST, "/v1/bundles")
+                .request(Method::POST, endpoint)
                 .query(&BundleTransferQuery { max_bytes })
-                .header(header::CONTENT_TYPE, BUNDLE_CONTENT_TYPE)
+                .header(header::CONTENT_TYPE, content_type)
                 .header(header::CONTENT_LENGTH, total)
                 .body(reqwest::Body::wrap_stream(stream))
                 .send()

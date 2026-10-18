@@ -166,9 +166,12 @@ async fn set_rate(client: &Client, id: &SimulationId, rate: PlaybackRate) -> Pla
 fn paused_start_and_resume_has_identical_witness_and_full_state() {
     let binary = std::env::var_os("SEEDBOX_TEST_CLI")
         .expect("harness/check.sh supplies the current release CLI");
-    let reports =
-        std::env::var_os("SEEDBOX_TEST_REPORT_DIR").expect("set a fresh SEEDBOX_TEST_REPORT_DIR");
-    let state = Path::new(&reports).join("pause-server");
+    // Unix socket paths must fit even when the checkout/report path is long.
+    let scratch = tempfile::Builder::new()
+        .prefix("sb-pause-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let state = scratch.path().join("state");
     let binary = Path::new(&binary);
     let _server = Server::start(binary, &state);
     let workload = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -268,13 +271,19 @@ fn paused_start_and_resume_has_identical_witness_and_full_state() {
     });
 }
 
-/// The fixture owns its server; retained reports outlive the process.
+/// The fixture stops its server before its private state directory is removed.
 struct Server(Child);
 impl Server {
     fn start(binary: &Path, state: &Path) -> Self {
         let mut server = Self(
             cli(binary, state)
-                .args(["serve", "--startup-handshake", "--full-state"])
+                .args([
+                    "server",
+                    "start",
+                    "--foreground",
+                    "--startup-handshake",
+                    "--full-state",
+                ])
                 .stdout(Stdio::piped())
                 .guarded_spawn()
                 .unwrap(),

@@ -5,7 +5,11 @@ use std::{io::Read, path::Path};
 
 const MAX_ACTION_BYTES: u64 = 64 * 1024;
 
-pub(super) fn inject(mutation: super::playback_args::Mutation, path: &Path) -> Result<u8> {
+pub(super) fn inject(
+    server: &super::server_args::ServerArgs,
+    mutation: super::playback_args::Mutation,
+    path: &Path,
+) -> Result<u8> {
     let mut bytes = Vec::new();
     let read = if path == Path::new("-") {
         std::io::stdin()
@@ -26,6 +30,7 @@ pub(super) fn inject(mutation: super::playback_args::Mutation, path: &Path) -> R
     let action: seedbox_api::FaultAction = serde_yaml_ng::from_slice(&bytes)
         .map_err(|error| Error::Setup(format!("fault {}: {error}", path.display())))?;
     super::simulations::mutate_control(
+        server,
         mutation,
         seedbox_api::ControlCommand::InjectFault { action },
     )

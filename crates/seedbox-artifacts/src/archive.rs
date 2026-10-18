@@ -273,13 +273,24 @@ pub fn export(
     options: &Options,
 ) -> Result<()> {
     options.check()?;
-    let max_bytes = options.max_bytes;
     let assets = snapshot.assets()?;
     let manifest = serde_json::to_vec(&Manifest {
         format: "seedbox-simulation-v1".into(),
         sha256: ContentDigest::of(&serde_json::to_vec(snapshot)?),
         snapshot: snapshot.clone(),
     })?;
+    export_payload(&manifest, assets, store, output, options)
+}
+
+fn export_payload(
+    manifest: &[u8],
+    assets: BTreeSet<ContentDigest>,
+    store: &ContentStore,
+    output: impl Write,
+    options: &Options,
+) -> Result<()> {
+    options.check()?;
+    let max_bytes = options.max_bytes;
     if manifest.len() as u64 > MAX_MANIFEST_BYTES {
         return Err(Error::Integrity("archive manifest exceeds 16 MiB".into()));
     }
@@ -299,12 +310,7 @@ pub fn export(
         remaining: max_bytes,
         cancellation: options.cancellation.clone(),
     });
-    append(
-        &mut archive,
-        MANIFEST,
-        manifest.len() as u64,
-        manifest.as_slice(),
-    )?;
+    append(&mut archive, MANIFEST, manifest.len() as u64, manifest)?;
     // Spooling one object avoids loading guest RAM or a kernel into memory. The
     // store verifies the source while copying; object entries use only digests.
     for asset in assets {
@@ -351,6 +357,38 @@ fn append<W: Write>(
 /// A failed publication may leave verified cache objects, but no resource is
 /// registered here. The caller registers the returned snapshot atomically.
 pub fn import(input: impl Read, store: &ContentStore, options: &Options) -> Result<Snapshot> {
+    import_payload(input, store, options, |bytes| {
+        let manifest: Manifest = serde_json::from_slice(bytes)?;
+        if manifest.format != "seedbox-simulation-v1"
+            || ContentDigest::of(&serde_json::to_vec(&manifest.snapshot)?) != manifest.sha256
+        {
+            return Err(Error::Integrity(
+                "unsupported archive format or manifest checksum mismatch".into(),
+            ));
+        }
+        let snapshot = manifest.snapshot;
+        let expected = snapshot.assets()?;
+        let mut binaries = BTreeSet::new();
+        let InputSource::Resolved { definition } = &snapshot.simulation.spec.inputs else {
+            unreachable!("validated")
+        };
+        collect(definition, &mut binaries)?;
+        for definition in snapshot.checkpoints.values() {
+            collect(definition, &mut binaries)?;
+        }
+        if let Some(record) = &snapshot.record {
+            binaries.extend(record.identity.inputs.digests().cloned());
+        }
+        Ok((snapshot, expected, binaries))
+    })
+}
+
+fn import_payload<T>(
+    input: impl Read,
+    store: &ContentStore,
+    options: &Options,
+    decode: impl FnOnce(&[u8]) -> Result<(T, BTreeSet<ContentDigest>, BTreeSet<ContentDigest>)>,
+) -> Result<T> {
     options.check()?;
     let max_bytes = options.max_bytes;
     let staging = tempfile::tempdir()?;
@@ -384,16 +422,7 @@ pub fn import(input: impl Read, store: &ContentStore, options: &Options) -> Resu
     if bytes.len() as u64 != size {
         return Err(Error::Integrity("truncated archive manifest".into()));
     }
-    let manifest: Manifest = serde_json::from_slice(&bytes)?;
-    if manifest.format != "seedbox-simulation-v1"
-        || ContentDigest::of(&serde_json::to_vec(&manifest.snapshot)?) != manifest.sha256
-    {
-        return Err(Error::Integrity(
-            "unsupported archive format or manifest checksum mismatch".into(),
-        ));
-    }
-    let snapshot = manifest.snapshot;
-    let expected = snapshot.assets()?;
+    let (payload, expected, binaries) = decode(&bytes)?;
     let mut seen = BTreeSet::new();
     let mut total = size;
     for entry in entries {
@@ -442,17 +471,6 @@ pub fn import(input: impl Read, store: &ContentStore, options: &Options) -> Resu
             "invalid archive end blocks or trailing data".into(),
         ));
     }
-    let mut binaries = BTreeSet::new();
-    let InputSource::Resolved { definition } = &snapshot.simulation.spec.inputs else {
-        unreachable!("validated")
-    };
-    collect(definition, &mut binaries)?;
-    for definition in snapshot.checkpoints.values() {
-        collect(definition, &mut binaries)?;
-    }
-    if let Some(record) = &snapshot.record {
-        binaries.extend(record.identity.inputs.digests().cloned());
-    }
     for digest in expected {
         options.check()?;
         let mut file = tempfile::tempfile()?;
@@ -481,7 +499,70 @@ pub fn import(input: impl Read, store: &ContentStore, options: &Options) -> Resu
             ));
         }
     }
-    Ok(snapshot)
+    Ok(payload)
+}
+
+/// A resumable checkpoint contains only execution inputs and their binary closure.
+/// It neither requires nor recreates the source catalogue resource.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointManifest {
+    format: String,
+    sha256: ContentDigest,
+    definition: Definition,
+}
+
+fn checkpoint_assets(definition: &Definition) -> Result<BTreeSet<ContentDigest>> {
+    if !matches!(definition.start, Start::Checkpoint { .. }) {
+        return Err(Error::Integrity(
+            "checkpoint archive requires captured state".into(),
+        ));
+    }
+    let mut assets = BTreeSet::new();
+    collect(definition, &mut assets)?;
+    if assets.len() > MAX_OBJECTS {
+        return Err(Error::Integrity(
+            "checkpoint has too many binary objects".into(),
+        ));
+    }
+    Ok(assets)
+}
+
+/// Save a checkpoint with all runtime, machine and captured-state binaries.
+pub fn export_checkpoint(
+    definition: &Definition,
+    store: &ContentStore,
+    output: impl Write,
+    options: &Options,
+) -> Result<()> {
+    let assets = checkpoint_assets(definition)?;
+    let manifest = serde_json::to_vec(&CheckpointManifest {
+        format: "seedbox-checkpoint-v1".into(),
+        sha256: ContentDigest::of(&serde_json::to_vec(definition)?),
+        definition: definition.clone(),
+    })?;
+    export_payload(&manifest, assets, store, output, options)
+}
+
+/// Validate and restore checkpoint binaries into an empty content store.
+/// Returns independent inputs for a new submission; never registers a resource.
+pub fn import_checkpoint(
+    input: impl Read,
+    store: &ContentStore,
+    options: &Options,
+) -> Result<Definition> {
+    import_payload(input, store, options, |bytes| {
+        let manifest: CheckpointManifest = serde_json::from_slice(bytes)?;
+        if manifest.format != "seedbox-checkpoint-v1"
+            || ContentDigest::of(&serde_json::to_vec(&manifest.definition)?) != manifest.sha256
+        {
+            return Err(Error::Integrity(
+                "unsupported checkpoint format or manifest checksum mismatch".into(),
+            ));
+        }
+        let assets = checkpoint_assets(&manifest.definition)?;
+        Ok((manifest.definition, assets.clone(), assets))
+    })
 }
 
 #[cfg(test)]
@@ -607,6 +688,45 @@ mod tests {
         }
         builder.into_inner().unwrap()
     }
+    #[test]
+    fn checkpoint_file_survives_source_deletion_and_rejects_missing_or_corrupt_state() {
+        let source = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(source.path());
+        let InputSource::Resolved { mut definition } = fixture(&store).simulation.spec.inputs
+        else {
+            unreachable!()
+        };
+        let state = store.put(b"checkpoint RAM and coordinator state").unwrap();
+        definition.start = Start::Checkpoint {
+            manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[]}}}, "ram":{"artifact":"asset:ram", "sha256":state.hex()}}),
+            assets: BTreeMap::from([("ram".into(), Asset(format!("sha256:{}", state.hex())))]),
+        };
+        let mut bytes = Vec::new();
+        export_checkpoint(&definition, &store, &mut bytes, &Options::default()).unwrap();
+        drop(store);
+        drop(source);
+        let destination = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(destination.path());
+        let restored = import_checkpoint(bytes.as_slice(), &store, &Options::default()).unwrap();
+        assert_eq!(restored, *definition);
+        assert_eq!(
+            store.read(&state).unwrap(),
+            b"checkpoint RAM and coordinator state"
+        );
+        for digest in checkpoint_assets(&restored).unwrap() {
+            store.verify(&digest).unwrap();
+        }
+        let mut files = entries(&bytes);
+        files[1].2[0] ^= 1;
+        assert!(import_checkpoint(pack(&files).as_slice(), &store, &Options::default()).is_err());
+        assert!(
+            import_checkpoint(pack(&files[..1]).as_slice(), &store, &Options::default()).is_err()
+        );
+        let mut cold = restored;
+        cold.start = Start::Fresh;
+        assert!(export_checkpoint(&cold, &store, Vec::new(), &Options::default()).is_err());
+    }
+
     #[test]
     fn fresh_and_checkpoint_archives_are_independent_verified_closures() {
         for checkpoint in [false, true] {

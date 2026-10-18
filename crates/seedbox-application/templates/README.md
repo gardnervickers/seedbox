@@ -1,35 +1,36 @@
 # Run this project
 
-The `etcd` template is a short three-member consistency check with eight writers
-and 20 writes per writer. The `redis` template checks 32 acknowledged writes and
-exact read-back values. Both use a separate oracle to determine the verdict.
-For longer etcd fault experiments, increase the oracle's `--writes` and
-`--duration` arguments in `seedbox.yaml`: 20,000 writes per writer with
-`--duration 100000s` took about 21 minutes on a Linux x86-64 PV test host;
-TCG can take longer.
-
-Start Docker or Podman, then run from this project directory:
+Start Docker or Podman, then run from this directory:
 
 ```sh
+seedbox check .
 seedbox run .
 seedbox replay <sim-id>
 ```
 
-`run` prints `PASS: <sim-id>` when the oracle finishes. Use that ID in the replay
-command; it should print `MATCH: <sim-id>`. The CLI asks before starting a local
-server if needed. Keep it running between the commands; `seedbox shutdown` stops
-it and its simulations. Use `seedbox tui <sim-id>` to inspect a simulation.
+`run` prints `PASS: <sim-id>`. Replay that ID to check for `MATCH`.
+The CLI asks before starting a local server; keep it running between commands.
+For scripts, start it explicitly with `seedbox server start`.
 
-The default backend is `pv`. On Linux x86-64, `seedbox run . --backend tcg`
-selects a slower software CPU without requiring KVM. The backend is recorded;
-`seedbox rerun <sim-id>` and `seedbox replay <sim-id>` reuse it when the flag
-is omitted. Select a different backend by running the original project again,
-not by changing `seedbox.yaml` or an environment variable.
+Edit `seedbox.yaml` to configure your **machines** and **oracle**. The oracle drives
+the test: exit code zero means PASS; nonzero means FAIL. For longer etcd fault
+experiments, increase the oracle's `--writes` and `--duration` arguments.
 
-Edit `seedbox.yaml` and the oracle to change the test. Oracle exit code zero
-passes; nonzero fails. After completion, `seedbox export <sim-id>` saves a portable
-bundle; `seedbox import <bundle>` restores a fresh completed resource without
-execution. Export rejects active simulations; uncertain imports must not be retried
-blindly. Bundles preserve available bounded history, not evicted logs or frames. Use `seedbox help` for commands and options.
+Use `seedbox logs <sim-id>` for application output or `seedbox tui <sim-id>`
+for the interactive console. Run more seeds with `seedbox run . --count 100`.
+Without KVM, use the slower software backend: `seedbox run . --backend tcg`.
+
+Save an application-ready simulation before a bug:
+
+```sh
+seedbox checkpoint <sim-id> -o before-bug.seedbox
+seedbox run before-bug.seedbox
+```
+
+The file contains the state and inputs needed for a new run, even on a fresh
+server. Capture briefly pauses the source and restores its previous playback.
+
+`seedbox server stop` stops the server and clears its simulations.
+Use `seedbox help` for commands and options.
 
 [Seedbox documentation](https://github.com/gardnervickers/seedbox#readme)

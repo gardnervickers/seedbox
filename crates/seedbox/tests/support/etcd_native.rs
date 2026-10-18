@@ -83,7 +83,7 @@ impl Cli {
             .invoke(
                 guard,
                 label,
-                &words(&["describe", "simulation", id, "--json"]),
+                &words(&["show", "--view", "definition", id, "--json"]),
             )
             .await?;
         serde_json::from_slice(&bytes).map_err(|e| format!("{label}: {e}"))
@@ -93,11 +93,7 @@ impl Cli {
     /// failure is diagnostic only and never replaces the original case failure.
     async fn capture_failure_resources(&self, guard: &HangGuard) -> Result<()> {
         let bytes = self
-            .invoke(
-                guard,
-                "failure-resources",
-                &words(&["get", "simulations", "--json"]),
-            )
+            .invoke(guard, "failure-resources", &words(&["show", "--json"]))
             .await?;
         for summary in parse_resource_summaries(&bytes)? {
             let id = summary.metadata.id;
@@ -138,8 +134,12 @@ impl Cli {
             .describe(guard, &format!("{label}-prepared"), &id)
             .await?;
         require_definition(&prepared, backend, seed)?;
-        self.invoke(guard, &format!("{label}-resume"), &words(&["resume", &id]))
-            .await?;
+        self.invoke(
+            guard,
+            &format!("{label}-resume"),
+            &words(&["control", "resume", &id]),
+        )
+        .await?;
         self.invoke(
             guard,
             &format!("{label}-completed"),
@@ -211,7 +211,13 @@ fn require_definition(simulation: &Simulation, backend: Backend, seed: u64) -> R
 async fn start_server(cli: &Cli, guard: &HangGuard) -> Result<Child> {
     let mut command = cli.command();
     command
-        .args(["serve", "--startup-handshake", "--full-state"])
+        .args([
+            "server",
+            "start",
+            "--foreground",
+            "--startup-handshake",
+            "--full-state",
+        ])
         .stdout(Stdio::piped())
         .stderr(fs::File::create(cli.directory.join("server.stderr")).map_err(|e| e.to_string())?);
     let mut child =
@@ -262,12 +268,8 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
     require_match(&compared)?;
     // Reports are already retained; bound memory by releasing completed native
     // worlds rather than accumulating five four-machine executions.
-    cli.invoke(
-        guard,
-        "delete-repeat",
-        &words(&["delete", "simulation", &repeated_id]),
-    )
-    .await?;
+    cli.invoke(guard, "delete-repeat", &words(&["delete", &repeated_id]))
+        .await?;
     // No new backend selection on replay: the retained runtime must own it.
     let replay: SimulationComparison = serde_json::from_slice(
         &cli.invoke(
@@ -301,15 +303,11 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
     cli.invoke(
         guard,
         "delete-replay",
-        &words(&["delete", "simulation", replay.simulation.as_str()]),
+        &words(&["delete", replay.simulation.as_str()]),
     )
     .await?;
-    cli.invoke(
-        guard,
-        "delete-baseline",
-        &words(&["delete", "simulation", &baseline_id]),
-    )
-    .await?;
+    cli.invoke(guard, "delete-baseline", &words(&["delete", &baseline_id]))
+        .await?;
     for seed in EXTRA_SEEDS {
         let completed = cli
             .fresh(guard, backend, project, seed, &format!("seed-{seed}"))
@@ -317,7 +315,7 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
         cli.invoke(
             guard,
             &format!("delete-seed-{seed}"),
-            &words(&["delete", "simulation", completed.metadata.id.as_str()]),
+            &words(&["delete", completed.metadata.id.as_str()]),
         )
         .await?;
     }
@@ -395,7 +393,7 @@ pub fn run(backend: Backend) {
             }
         }
         let shutdown = cli
-            .invoke(&cleanup, "shutdown", &words(&["shutdown"]))
+            .invoke(&cleanup, "shutdown", &words(&["server", "stop"]))
             .await;
         if let Err(error) = &shutdown {
             eprintln!("graceful shutdown command failed: {error}; terminating our owned server");

@@ -75,7 +75,7 @@ fn backend_authority_saved_run_and_explore_reject_unknown_cpu() {
         ("driver-pv", "driver-tcg", "pv"),
         ("driver-tcg", "driver-pv", "tcg"),
     ] {
-        for command in ["run", "explore"] {
+        for count in ["1", "2"] {
             let root = directory();
             let path = root.path().join("saved.yaml");
             let bytes = serde_json::to_string(&invalid_backend_resource(top, actual)).unwrap();
@@ -84,7 +84,15 @@ fn backend_authority_saved_run_and_explore_reject_unknown_cpu() {
                 serde_yaml_ng::from_str::<seedbox_api::SimulationDocument>(&bytes).unwrap_err();
             let expected = seedbox_application::Error::from(parse_error).to_string();
             let output = seedbox(
-                &[command, path.to_str().unwrap(), "--backend", flag, "--json"],
+                &[
+                    "run",
+                    path.to_str().unwrap(),
+                    "--count",
+                    count,
+                    "--backend",
+                    flag,
+                    "--json",
+                ],
                 root.path(),
             );
             assert_eq!(output.status.code(), Some(2));
@@ -165,16 +173,15 @@ fn backend_authority_replay_and_rerun_reject_unknown_cpu() {
         ("driver-pv", "driver-tcg", "pv"),
         ("driver-tcg", "driver-pv", "tcg"),
     ] {
-        for command in ["replay", "rerun"] {
+        for prefix in [vec!["replay"], vec!["run", "--from"]] {
             let root = directory();
             let body = invalid_backend_resource(top, actual).to_string();
             let parse_error = serde_json::from_slice::<Simulation>(body.as_bytes()).unwrap_err();
             let expected = seedbox_client::Error::from(parse_error).to_string();
             let server = serve_resource(root.path(), body);
-            let output = seedbox(
-                &[command, "deadbeef", "--backend", flag, "--json"],
-                root.path(),
-            );
+            let mut args = prefix;
+            args.extend(["deadbeef", "--backend", flag, "--json"]);
+            let output = seedbox(&args, root.path());
             let requests = server.join().unwrap();
             assert_eq!(output.status.code(), Some(2));
             assert_eq!(stderr(&output), format!("error: {expected}\n"));

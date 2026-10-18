@@ -328,6 +328,7 @@ fn status(reply: &Reply) -> PlaybackStatus {
         rate: reply.rate,
         achieved_rate: reply.achieved_rate,
         stepping: reply.stepping,
+        before_next_fault: reply.before_next_fault,
         terminal: reply.terminal,
         application_ready: reply.application_ready,
     }
@@ -402,6 +403,7 @@ mod tests {
             rate: PlaybackRate::Unlimited,
             achieved_rate: None,
             stepping: false,
+            before_next_fault: false,
             checkpoint: None,
             error: None,
             detail: None,

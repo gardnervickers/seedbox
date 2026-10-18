@@ -148,6 +148,7 @@ mod tests {
                 rate: PlaybackRate::Paused,
                 achieved_rate: None,
                 stepping: false,
+                before_next_fault: false,
                 terminal: false,
                 application_ready: false,
             },
