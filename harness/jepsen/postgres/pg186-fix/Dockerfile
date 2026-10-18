@@ -2,7 +2,8 @@
 # with its server binary rebuilt from the 18.6 sources plus upstream commit
 # 6a1759a02a ("Fix postmaster failing to exit when startup crashes during crash
 # restart", REL_18_STABLE, after 18.6). Everything else (initdb, libraries,
-# configuration) is the official image's.
+# configuration) is the official image's; the version string stays the image's,
+# because initdb refuses a server binary whose version string differs.
 FROM docker.io/library/postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336 AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential bison flex curl ca-certificates bzip2 patch pkg-config \
@@ -16,7 +17,7 @@ COPY 6a1759a02a.patch /src/
 RUN cd postgresql-18.6 && patch -p1 < ../6a1759a02a.patch \
  && ./configure --prefix=/usr --bindir=/usr/lib/postgresql/18/bin --datadir=/usr/share/postgresql/18 \
       --libdir=/usr/lib/aarch64-linux-gnu/ --libexecdir=/usr/lib/postgresql/ --sysconfdir=/etc/postgresql-common \
-      --includedir=/usr/include/postgresql/ --with-extra-version=" (18.6 + 6a1759a02a)" \
+      --includedir=/usr/include/postgresql/ --with-extra-version=" (Debian 18.6-1.pgdg13+2)" \
       --with-icu --with-openssl --with-lz4 --with-zstd --with-liburing --with-libnuma --with-systemd \
       --with-libxml --with-uuid=e2fs --with-gssapi --with-ldap --with-pam --with-pgport=5432 \
       --with-system-tzdata=/usr/share/zoneinfo CFLAGS="-g -O2" \
