@@ -92,6 +92,24 @@ impl<B: Backend> Machine<B> {
         parts.push(("ram".into(), hex(&ram.finalize())));
         parts.push(("ram_regions".into(), hex(&region_hash.finalize())));
         parts.push(("ram_pages".into(), hex(&pages.finalize())));
+        // Temporary PR320 probe: the reproduced oracle mismatch is at GPA
+        // 0x4591000. Preserve a bounded surrounding window for byte diagnosis.
+        if self
+            .state
+            .policy
+            .as_ref()
+            .is_some_and(|policy| policy.setup.name == "oracle")
+        {
+            const START: u64 = 0x0450_0000;
+            const LENGTH: usize = 1024 * 1024;
+            if let Ok(offset) = layout.offset(START, LENGTH) {
+                let bytes = unsafe { &self.ram.bytes()[offset..offset + LENGTH] };
+                eprintln!(
+                    "pr320-ram-window {}",
+                    json!({"base":START,"bytes":hex(bytes)})
+                );
+            }
+        }
         Ok(protocol::NativeEvidence {
             parts,
             regions: regions
