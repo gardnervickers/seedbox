@@ -1,0 +1,38 @@
+# Compound faults for the delores-node scenarios, never touching the
+# sequencer: node process pauses of 3-25 s (past the nodes' CASPaxos, S3 and
+# request timeouts, so a proposer resumes with stale state), SIGKILLs and
+# power loss of nodes and S3 servers (volumes kept), wall-clock steps of up
+# to two minutes, slow S3 disks (50-300 ms) and failed S3 data writes (keel
+# exits 4 and restarts), overlapping on different machines. Pair with the
+# scenarios' own oracle nemeses (--chaos-cuts, --sequencer-cuts) for
+# asymmetric partitions. The oracle's operations run 120 s.
+start: 15s
+end: 110s
+interval: 2s
+targets: [n1, n2, n3, s3-a, s3-b, s3-c]
+faults:
+  - kind: pause_process
+    weight: 3
+    duration: {min: 3s, max: 25s}
+  - kind: stop
+    weight: 2
+    downtime: {min: 1s, max: 6s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 5s}
+  - kind: clock_skew
+    weight: 2
+    duration: {min: 5s, max: 30s}
+    maxOffset: 120s
+  - kind: disk_latency
+    weight: 2
+    duration: {min: 5s, max: 15s}
+    latency: {min: 50ms, max: 300ms}
+    targets: [s3-a, s3-b, s3-c]
+  - kind: disk_error
+    weight: 1
+    op: write
+    ppm: 20000
+    scope: data
+    duration: {min: 2s, max: 8s}
+    targets: [s3-a, s3-b, s3-c]

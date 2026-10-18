@@ -565,3 +565,68 @@ pub fn recovery_after_cuts(
     }
     (report, stuck)
 }
+
+/// A background schedule of asymmetric link cuts: every `every` seconds or
+/// so (half to one and a half times it), cut one node off from one machine
+/// drawn from `peers` (an S3 server, the sequencer or another node) for
+/// `length` seconds (a range), so several cuts overlap and each node sees a
+/// different, partial view: node and one S3 server, node and the sequencer
+/// only, node and node. Returns at once; runs on its own thread and World
+/// connection until `end` seconds after this call, healing every cut it made.
+pub fn chaos_cuts(
+    nodes: Vec<String>,
+    peers: Vec<String>,
+    every: f64,
+    length: (f64, f64),
+    end: f64,
+) {
+    let mut ctl = match crate::kit::connect_world(None) {
+        Ok(ctl) => ctl,
+        Err(error) => {
+            evidence("nemesis-unavailable", json!({"error": error.0}));
+            return;
+        }
+    };
+    let start = Instant::now();
+    std::thread::spawn(move || {
+        let mut pace = Sleep;
+        let mut rng = Rng::new(crate::kit::rng::entropy_seed());
+        // (heal at, handle), healed in time order between new cuts.
+        let mut open: Vec<(f64, crate::kit::world::Cut)> = Vec::new();
+        loop {
+            rng.refresh();
+            let now = start.elapsed().as_secs_f64();
+            open.sort_by(|a, b| a.0.total_cmp(&b.0));
+            while open.first().is_some_and(|(at, _)| *at <= now) {
+                let (_, cut) = open.remove(0);
+                if let Err(error) = heal(&mut ctl, &cut) {
+                    evidence("nemesis-failed", json!({"error": error.0}));
+                }
+            }
+            if now >= end {
+                for (_, cut) in open.drain(..) {
+                    let _ = heal(&mut ctl, &cut);
+                }
+                return;
+            }
+            let node = rng.choice(&nodes).clone();
+            let others: Vec<&String> = peers.iter().filter(|p| **p != node).collect();
+            let peer = (*rng.choice(&others)).clone();
+            let seconds = rng.uniform(length.0, length.1).min(end - now).max(0.5);
+            match cut(
+                &mut ctl,
+                &[node.as_str()],
+                &[peer.as_str()],
+                json!({"chaos": true, "seconds": seconds}),
+            ) {
+                Ok(handle) => open.push((now + seconds, handle)),
+                Err(error) => evidence("nemesis-failed", json!({"error": error.0})),
+            }
+            let next_heal = open.iter().map(|(at, _)| *at).fold(f64::INFINITY, f64::min);
+            let wait = (rng.uniform(0.5, 1.5) * every)
+                .min(next_heal - now)
+                .max(0.05);
+            pace.wait(&mut ctl, wait);
+        }
+    });
+}

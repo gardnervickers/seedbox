@@ -2135,7 +2135,7 @@ fn delores() -> Vec<Scenario> {
                 .file("start-replica.sh", "/start-replica.sh"),
         ));
     }
-    let comment = "delores's examples/docker-kv over keel-s3dd instead of MinIO: three replicas share\none virtual log through the S3 server, with slots from the in-memory demo sequencer.\nSix clients PUT, DELETE and GET five keys through random replicas for 120 s with no\nretries; then every replica reads every key. Each key's history must be\nlinearizable and the replicas that answer must agree. docker-kv cannot reconfigure\npast a sealed log: an append with an unknown outcome seals it for good\n(delores-atomiclog abandon_after_indeterminate) and every replica, restarted or\nnot, then answers Log(Sealed). So replicas that never answer again are reported,\nnot failed (--expect-unavailable). Run it without a\nprofile for a baseline, or with `--fault-profile harness/jepsen/delores/below-pause-faults.yaml`\nor `above-pause-faults.yaml`, which never fault the sequencer.";
+    let comment = "delores's examples/docker-kv over keel-s3dd instead of MinIO: three replicas share\none virtual log through the S3 server, with slots from the in-memory demo sequencer.\nSix clients PUT, DELETE and GET five keys through random replicas for 120 s with no\nretries; then every replica reads every key. Each key's history must be\nlinearizable and the replicas that answer must agree. docker-kv cannot reconfigure\npast a sealed log: an append with an unknown outcome seals it for good\n(delores-atomiclog abandon_after_indeterminate) and every replica, restarted or\nnot, then answers Log(Sealed). So replicas that never answer again are reported,\nnot failed (--expect-unavailable). A replica that hung for good after the S3 server\nlost power, on requests left in flight on half-open connections, was a docker-kv bug:\nits S3 client had no attempt or operation timeout (2y553dxr; fixed in delores 15c0f1a). Run it without a\nprofile for a baseline, or with `--fault-profile harness/jepsen/delores/below-pause-faults.yaml`\nor `above-pause-faults.yaml`, which never fault the sequencer.";
     let seqcut = "delores-kv-register with the oracle cutting replicas off from the sequencer, which\nkeeps running with its state (no kill): one replica, all three, or one replica from\nthe sequencer and S3, for 1-4 s (under the 5 s sequencer timeout) or 10-30 s, with\n12-20 s between cuts. Safety must hold throughout; the oracle reports how long\nrecovery took after each heal, but since a cut can seal the log for good (see\ndelores-kv-register), resumption is reported, not asserted.";
     [
         (
@@ -2228,7 +2228,7 @@ fn delores_nodes() -> Vec<Scenario> {
     let topology = "Three delores jepsen-nodes, each running SMR over a virtual log whose metadata\nregister is CASPaxos over three keel-s3dd servers (one acceptor and one log-drive\nreplica each; no acceptor processes, the conditional PUT is the primitive), with\nslots from the in-memory demo sequencer.";
     let seqcut = "The sequencer keeps\nrunning with its state (no kill); a cut separates one node from it, all three, or\none node from it and from one or two S3 servers, for 1-4 s (under the nodes' 5 s\nsequencer timeout) or 10-30 s, with 12-20 s between cuts. Safety must hold\nthroughout; the oracle reports how long recovery took after each heal, and for the\nregisters a second property asks that some request succeeds within 10 s of each\none (list-append only reports it: a cut can seal the log for good).";
     let run = "Run it without a profile for a baseline, or with\n`--fault-profile harness/jepsen/delores/node-below-pause-faults.yaml` or\n`node-above-pause-faults.yaml`, which never fault the sequencer.";
-    let specs: [(&str, String, &[(&str, &str)], &[&str]); 5] = [
+    let specs: [(&str, String, &[(&str, &str)], &[&str]); 9] = [
         (
             "delores-node-cas",
             format!("{topology}\nSix clients read, write and compare-and-set five CASPaxos registers\n(/cas-register) through random nodes for 120 s; then every node reads every\nregister. Each register's history must be linearizable and the final reads must\nagree. {run}"),
@@ -2258,6 +2258,30 @@ fn delores_nodes() -> Vec<Scenario> {
             format!("delores-node-append with the oracle cutting nodes off from the sequencer. {seqcut}"),
             &[],
             &["--workload", "list-append", "--sequencer-cuts", "--expect-unavailable"],
+        ),
+        (
+            "delores-node-cas-busy",
+            "delores-node-cas with sixteen clients and no pause between requests, plus two threads\nper S3 server writing 64 KiB objects to a separate bucket (--s3-load), for\n`node-above-pause-s3-faults.yaml`: the busier the S3 servers, the more often a 13-20 s\npause lands while keel-s3dd is mid-tick and its watchdog aborts it.".into(),
+            &[],
+            &["--workload", "cas-register", "--clients", "16", "--think-ms", "0", "--s3-load", "2"],
+        ),
+        (
+            "delores-node-append-busy",
+            "delores-node-append with sixteen clients and no pause between requests, for\n`node-above-pause-s3-faults.yaml` (see delores-node-cas-busy).".into(),
+            &[],
+            &["--workload", "list-append", "--expect-unavailable", "--clients", "16", "--think-ms", "0", "--s3-load", "2"],
+        ),
+        (
+            "delores-node-cas-hot",
+            "Adversarial: one CASPaxos register, twelve clients with no think time racing reads,\nwrites and compare-and-sets through all three nodes, while the oracle cuts single\nlinks (a node from one S3 server, from the sequencer or from another node) about\nevery 4 s, overlapping. Run it with `node-adversarial-faults.yaml` for compound\nfaults. The register's history must stay linearizable.".into(),
+            &[],
+            &["--workload", "cas-register", "--registers", "1", "--clients", "12", "--think-ms", "0", "--chaos-cuts", "4"],
+        ),
+        (
+            "delores-node-append-chaos",
+            "Adversarial: list-append on four hot keys with transactions of up to eight\noperations from twelve clients, while the oracle cuts single links about every 4 s\n(see delores-node-cas-hot). Strict serializability, no lost acknowledged append and\nconvergence of the nodes that answer must hold; nodes that stop serving after a\nsealed log are reported (--expect-unavailable).".into(),
+            &[],
+            &["--workload", "list-append", "--expect-unavailable", "--key-count", "4", "--max-txn-length", "8", "--clients", "12", "--think-ms", "0", "--chaos-cuts", "4"],
         ),
     ];
     specs

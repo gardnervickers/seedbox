@@ -1,15 +1,16 @@
-# node-above-pause-faults.yaml aimed at the S3 servers alone, one at a time:
+# node-above-pause-faults.yaml aimed at the S3 servers alone:
 # 13-20 s process pauses (past keel-s3dd's 12 s watchdog bound, so it may
 # abort on resume and come back through its wrapper), power loss (volume
 # kept) and one server isolated from every node. The nodes are not faulted.
-# The oracle's operations run 120 s.
+# Pauses come often and may overlap on different servers. Pair it with the
+# -busy scenarios. The oracle's operations run 120 s.
 start: 15s
 end: 110s
-interval: 4s
+interval: 2s
 targets: [s3-a, s3-b, s3-c]
 faults:
   - kind: pause_process
-    weight: 4
+    weight: 6
     duration: {min: 13s, max: 20s}
   - kind: crash
     weight: 1

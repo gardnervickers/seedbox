@@ -217,27 +217,31 @@ impl S3 {
     }
 }
 
-/// One SigV4-signed S3 request without a body, such as a CreateBucket, for
-/// other oracles: its status, or why it got none.
+/// One SigV4-signed S3 request, such as a CreateBucket or a PUT, for other
+/// oracles: its status, or why it got none.
 pub(crate) fn signed_request(
     node: &str,
     port: u16,
     keys: (&str, &str),
     method: &str,
     path: &str,
+    body: &[u8],
     timeout: Duration,
 ) -> std::result::Result<u16, String> {
     let host = format!("{node}:{port}");
     let mut head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: 0\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
     );
-    for (name, value) in sign(keys, method, &host, path, &[], SystemTime::now()) {
+    for (name, value) in sign(keys, method, &host, path, body, SystemTime::now()) {
         head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str("\r\n");
+    let mut frame = head.into_bytes();
+    frame.extend_from_slice(body);
     let exchange = || -> Result<u16> {
         let mut stream = http::connect(node, port, timeout)?;
-        stream.write_all(head.as_bytes())?;
+        stream.write_all(&frame)?;
         stream.flush()?;
         let mut reader = BufReader::new(stream);
         let head = http::read_head(&mut reader)?;
