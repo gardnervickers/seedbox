@@ -137,7 +137,12 @@ fn codec3_policy_binding_refuses_before_native_restore_and_driver_hosts_restore_
             "valid cold restore must succeed on a Driver host"
         );
     } else {
-        assert!(restored.err().unwrap().contains("incomplete"));
+        assert_eq!(
+            restored
+                .err()
+                .expect("unsupported Driver host must refuse cold PV restore"),
+            "Driver PV execution requires Linux x86-64 (KVM) or macOS aarch64 (HVF); keep the existing legacy service path on this host"
+        );
     }
     assert!(!missing.exists());
 }
