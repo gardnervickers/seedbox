@@ -399,11 +399,16 @@ impl Run {
                 Ok(Outcome::Fail(code, broken)) => ("fail", None, Some(code), broken),
                 Err(error) => ("info", None, Some(error), true),
             };
-            // A server reporting corruption fails fast; back off so that a
-            // corrupt page does not flood the history (and the log budget).
-            let corrupt = kind == "fail" && error.as_deref().is_some_and(|e| e.starts_with("XX"));
+            // Serialization failures and deadlocks are the workload's normal
+            // aborts; any other server error (a corrupt page, a missing
+            // table) fails every transaction at once, so back off rather than
+            // flood the history and the log budget.
+            let persistent = kind == "fail"
+                && error
+                    .as_deref()
+                    .is_some_and(|e| e != "40001" && e != "40P01");
             self.record(json!(process), kind, &ops, value, t0, now_us(), error);
-            if corrupt {
+            if persistent {
                 kit::pause(0.2);
             }
             if broken {
@@ -447,6 +452,14 @@ impl Run {
         }
         Err(last)
     }
+}
+
+/// The final read when the tables are gone: every touched key reads as [].
+fn missing_tables(run: &Run) -> Vec<Mop> {
+    let keys = run.keys.lock().unwrap().touched.clone();
+    keys.into_iter()
+        .map(|k| Mop::Read(Atom::Int(k), Some(Vec::new())))
+        .collect()
 }
 
 /// Check a history; print the check, anomaly examples and their explanations.
@@ -827,6 +840,12 @@ pub fn run(args: Args) -> u8 {
                     "fail-stop: the final read reports corruption ({error})"
                 ));
                 None
+            }
+            // The tables were created (and acknowledged) before the workload:
+            // a table that no longer exists lost every row it held.
+            Err(PgError::Server { code, message }) if code == "42P01" => {
+                evidence("table-missing", json!({"code": code, "message": message}));
+                Some(missing_tables(&run))
             }
             Err(error) => {
                 unread = Some(format!("the final read failed ({error})"));
