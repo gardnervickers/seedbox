@@ -1,0 +1,22 @@
+# Generic faults for the etcd register workload, one member at a time: power
+# loss, process kills and pauses (a stalled member or GC pause), and partitions
+# that cut a member off from the other members while clients can still reach
+# it. Five members tolerate two lost ones. The oracle stops new faults when its
+# operations end, so `end` only bounds the profile.
+start: 15s
+end: 200s
+interval: 3s
+faults:
+  - kind: crash
+    weight: 2
+    downtime: {min: 1s, max: 8s}
+  - kind: stop
+    weight: 1
+    downtime: {min: 1s, max: 6s}
+  - kind: pause_process
+    weight: 2
+    duration: {min: 500ms, max: 8s}
+  - kind: partition
+    weight: 3
+    duration: {min: 1s, max: 10s}
+    from: [n1, n2, n3, n4, n5]

@@ -23,6 +23,10 @@ enum Command {
     Etcd(systems::etcd::Args),
     /// Run one etcd lock-set client (guest).
     EtcdClient(systems::etcd_client::Args),
+    /// Run the etcd register (read, write, compare-and-set) oracle (guest).
+    EtcdRegister(systems::etcd_register::Args),
+    /// Run the etcd list-append transaction oracle (guest).
+    EtcdAppend(systems::etcd_append::Args),
     /// Run the PostgreSQL list-append oracle (guest).
     Postgres(systems::postgres::Args),
     /// Report PostgreSQL backend and lock state at the given seconds (guest diagnostic).
@@ -146,6 +150,12 @@ fn check_of(command: &Command) -> Option<&'static str> {
     Some(match command {
         Command::Nats(_) => "nats: acknowledged messages survive",
         Command::Etcd(_) => "etcd: lock-protected updates are not lost",
+        Command::EtcdAppend(_) => {
+            "etcd: list-append transactions are serializable and every member recovers"
+        }
+        Command::EtcdRegister(_) => {
+            "etcd: register histories are linearizable and every member recovers"
+        }
         Command::Postgres(_) => "postgres: transactions meet their isolation level",
         Command::Kafka(_) => "kafka: the queue's checks hold",
         Command::Mysql(_) => "mysql: transactions meet their isolation level",
@@ -166,6 +176,8 @@ fn main() -> ExitCode {
         Command::Nats(args) => systems::nats::run(args),
         Command::Etcd(args) => systems::etcd::run(args),
         Command::EtcdClient(args) => systems::etcd_client::run(args),
+        Command::EtcdRegister(args) => systems::etcd_register::run(args),
+        Command::EtcdAppend(args) => systems::etcd_append::run(args),
         Command::Postgres(args) => systems::postgres::run(args),
         Command::PgProbe { host, at } => systems::postgres::probe(&host, &at),
         Command::Kafka(args) => systems::kafka::run(args),

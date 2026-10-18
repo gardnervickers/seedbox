@@ -1,0 +1,18 @@
+# Wall-clock steps of up to 30 seconds on one member at a time, with partitions
+# and process pauses. Raft elections run on ticks of the monotonic clock, and
+# leases and the leader's lease-based checks must not trust wall time either.
+start: 15s
+end: 200s
+interval: 3s
+faults:
+  - kind: clock_skew
+    weight: 4
+    duration: {min: 3s, max: 20s}
+    maxOffset: 30s
+  - kind: partition
+    weight: 2
+    duration: {min: 1s, max: 8s}
+    from: [n1, n2, n3, n4, n5]
+  - kind: pause_process
+    weight: 1
+    duration: {min: 500ms, max: 6s}

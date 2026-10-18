@@ -1,0 +1,34 @@
+# Denser faults than generic-faults.yaml, one machine per fault but often
+# several at once: whole-VM freezes (time jumps on resume), process pauses,
+# kills and power loss, partitions, lossy and slow links, and slow disks
+# (late fsyncs). Quorum is often lost for a while; it must come back, and
+# nothing acknowledged may be lost or read stale.
+start: 15s
+end: 200s
+interval: 1500ms
+faults:
+  - kind: crash
+    weight: 2
+    downtime: {min: 1s, max: 10s}
+  - kind: stop
+    weight: 1
+    downtime: {min: 500ms, max: 6s}
+  - kind: pause
+    weight: 2
+    duration: {min: 500ms, max: 8s}
+  - kind: pause_process
+    weight: 2
+    duration: {min: 200ms, max: 6s}
+  - kind: partition
+    weight: 3
+    duration: {min: 500ms, max: 12s}
+    from: [n1, n2, n3, n4, n5]
+  - kind: shape
+    weight: 1
+    duration: {min: 2s, max: 10s}
+    latency: {min: 5ms, max: 200ms}
+    lossPpm: 100000
+  - kind: disk_latency
+    weight: 1
+    duration: {min: 2s, max: 10s}
+    latency: {min: 10ms, max: 500ms}

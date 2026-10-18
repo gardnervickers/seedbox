@@ -1,0 +1,25 @@
+# Failed disk reads and writes (EIO) on any one member at a time, restricted to
+# requests clear of ext4's metadata (an unscoped error also fails the journal and
+# leaves the filesystem unusable), with crashes, pauses and partitions. A write
+# whose WAL append or fsync failed must not be acknowledged, and a member that
+# stops on an I/O error must come back after a reboot.
+start: 15s
+end: 200s
+interval: 3s
+faults:
+  - kind: disk_error
+    weight: 3
+    op: any
+    ppm: 50000
+    scope: data
+    duration: {min: 2s, max: 8s}
+  - kind: crash
+    weight: 1
+    downtime: {min: 1s, max: 5s}
+  - kind: pause_process
+    weight: 1
+    duration: {min: 500ms, max: 4s}
+  - kind: partition
+    weight: 1
+    duration: {min: 1s, max: 6s}
+    from: [n1, n2, n3, n4, n5]

@@ -370,3 +370,57 @@ pub fn console_partition(
 pub fn at() -> f64 {
     now()
 }
+
+/// A background schedule of coordinated power failures: about every `every`
+/// seconds (half to one and a half times it, from a seeded RNG), power-fail
+/// every node of `nodes` together and reboot them all after `down` seconds.
+/// With `startup_partition` above zero, 0.05-0.4 s after each reboot one
+/// random node is cut off from the others for that many seconds while they
+/// start up. No failure starts that would not finish `end` seconds after
+/// this call. Returns at once; the schedule runs on its own thread with its
+/// own World connection.
+pub fn crash_all_repeatedly(
+    nodes: Vec<String>,
+    every: f64,
+    down: f64,
+    startup_partition: f64,
+    end: f64,
+) {
+    let mut ctl = match crate::kit::connect_world(None) {
+        Ok(ctl) => ctl,
+        Err(error) => {
+            evidence("nemesis-unavailable", json!({"error": error.0}));
+            return;
+        }
+    };
+    let start = Instant::now();
+    std::thread::spawn(move || {
+        let nodes: Vec<&str> = nodes.iter().map(String::as_str).collect();
+        let mut pace = Sleep;
+        let mut rng = Rng::new(crate::kit::rng::entropy_seed());
+        loop {
+            let gap = rng.uniform(0.5, 1.5) * every;
+            let tail = down + startup_partition + 3.0;
+            if start.elapsed().as_secs_f64() + gap + tail > end {
+                return;
+            }
+            pace.wait(&mut ctl, gap);
+            if let Err(error) = crash_all(&mut ctl, &mut pace, &nodes, down, json!({})) {
+                evidence("nemesis-failed", json!({"error": error.0}));
+            }
+            if startup_partition > 0.0 {
+                pace.wait(&mut ctl, rng.uniform(0.05, 0.4));
+                let (left, right) = isolate(rng.choice(&nodes), &nodes);
+                match cut(&mut ctl, &left, &right, json!({"startup": true})) {
+                    Ok(cut) => {
+                        pace.wait(&mut ctl, startup_partition);
+                        if let Err(error) = heal(&mut ctl, &cut) {
+                            evidence("nemesis-failed", json!({"error": error.0}));
+                        }
+                    }
+                    Err(error) => evidence("nemesis-failed", json!({"error": error.0})),
+                }
+            }
+        }
+    });
+}
