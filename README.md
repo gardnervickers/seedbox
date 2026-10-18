@@ -17,7 +17,9 @@ Apple Silicon builds also need Apple's Command Line Tools and Docker Desktop
 or Podman. Mac execution and replay still need hardware verification.
 
 ```sh
-nix develop
+git clone --recurse-submodules https://github.com/gardnervickers/seedbox.git
+cd seedbox
+nix develop "git+file://$PWD?submodules=1"
 cargo xtask build-assets
 cargo build --release
 ./target/release/seedbox doctor
@@ -25,6 +27,14 @@ cargo build --release
 ./target/release/seedbox run ~/seedbox-quickstart
 ./target/release/seedbox replay <sim-id>
 ```
+
+For an existing clone or a new Git worktree, run
+`git submodule update --init --recursive vendor/dynamorio` before entering the
+development shell. The explicit Git flake reference includes local tracked DR
+edits even when Seedbox itself is clean; direnv and `cargo xtask build-assets`
+use it too. Add new DR files to its Git index before building. Nix's source
+accessor traverses DR's three nested dependencies even though Seedbox does not
+build drsyms. See [translator development](docs/internals.md#editing-dynamorio).
 
 `run` prints `PASS: <sim-id>` when the oracle finishes. Use that ID in the
 replay command; it should print `MATCH: <sim-id>`. The etcd example runs three

@@ -1,5 +1,8 @@
 {
   description = "Seedbox simulator: deterministic multi-VM world on KVM";
+  # Include translator gitlinks for consumers. Local editing entrypoints also
+  # request submodules=1 on the initial fetch; see docs/internals.md.
+  inputs.self.submodules = true;
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   outputs = { nixpkgs, ... }:
     let
@@ -114,7 +117,10 @@
           machinePvAarch64Check = pkgs.pkgsCross.aarch64-multiplatform.rustPlatform.buildRustPackage {
             pname = "seedbox-machine-pv-aarch64-check";
             version = "0.1.0";
-            src = pkgs.lib.cleanSource ./.;
+            src = pkgs.lib.cleanSourceWith {
+              src = ./.;
+              filter = path: type: path != toString ./vendor && pkgs.lib.cleanSourceFilter path type;
+            };
             cargoLock.lockFile = ./Cargo.lock;
             doCheck = false;
             buildPhase = ''

@@ -47,6 +47,45 @@ fn linux(root: &Path, output: &Path) -> Result<()> {
     runtime::guest(root, &output.join("driver"), env::consts::ARCH)?;
     Ok(())
 }
+fn checkout_files(root: &Path) -> Result<Vec<u8>> {
+    // Expand gitlinks into tracked files. Passing a submodule directory to tar
+    // would also copy its .git pointer and ignored local build output.
+    let mut files = Vec::new();
+    for options in [
+        vec!["--cached", "--recurse-submodules"],
+        vec!["--others", "--exclude-standard"],
+    ] {
+        let listed = guarded_output(
+            command("git", root)
+                .arg("ls-files")
+                .args(options)
+                .arg("-z")
+                .stderr(Stdio::piped()),
+        )?;
+        if !listed.status.success() {
+            return Err("cannot list checkout files".into());
+        }
+        for name in listed.stdout.split(|b| *b == 0).filter(|n| !n.is_empty()) {
+            let path = root.join(std::ffi::OsStr::from_bytes(name));
+            if fs::symlink_metadata(path).is_ok_and(|m| m.is_file() || m.file_type().is_symlink()) {
+                files.extend_from_slice(name);
+                files.push(0);
+            }
+        }
+    }
+    Ok(files)
+}
+fn archive_checkout(root: &Path, directory: &Path) -> Result<PathBuf> {
+    let archive = directory.join("source.tar");
+    fs::write(directory.join("files"), checkout_files(root)?)?;
+    run(command("tar", root)
+        .args(["--no-recursion", "--null", "-T"])
+        .arg(directory.join("files"))
+        .arg("-cf")
+        .arg(&archive)
+        .env("COPYFILE_DISABLE", "1"))?;
+    Ok(archive)
+}
 fn mac(root: &Path, output: &Path) -> Result<()> {
     let candidates = env::var("SEEDBOX_ASSET_BUILDER")
         .map(|s| vec![s])
@@ -78,34 +117,7 @@ fn mac(root: &Path, output: &Path) -> Result<()> {
         return Err("invalid builder image ID".into());
     }
     let source = tempfile::tempdir_in(output)?;
-    let listed = guarded_output(
-        command("git", root)
-            .args([
-                "ls-files",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-                "-z",
-            ])
-            .stderr(Stdio::piped()),
-    )?;
-    if !listed.status.success() {
-        return Err("cannot list checkout files".into());
-    }
-    let mut files = Vec::new();
-    for name in listed.stdout.split(|b| *b == 0).filter(|n| !n.is_empty()) {
-        if fs::symlink_metadata(root.join(std::ffi::OsStr::from_bytes(name))).is_ok() {
-            files.extend_from_slice(name);
-            files.push(0);
-        }
-    }
-    fs::write(source.path().join("files"), files)?;
-    run(command("tar", root)
-        .args(["--null", "-T"])
-        .arg(source.path().join("files"))
-        .arg("-cf")
-        .arg(source.path().join("source.tar"))
-        .env("COPYFILE_DISABLE", "1"))?;
+    let archive = archive_checkout(root, source.path())?;
     let script = r#"mkdir /source /output
  tar -xf - -C /source
  cd /source
@@ -140,7 +152,7 @@ sandbox = false"
     let result = (|| {
         run(command(&client, root)
             .args(["start", "--attach", "--interactive", &container])
-            .stdin(fs::File::open(source.path().join("source.tar"))?))?;
+            .stdin(fs::File::open(archive)?))?;
         run(command(&client, root)
             .args(["cp", &format!("{container}:/output/.")])
             .arg(output))
@@ -149,6 +161,9 @@ sandbox = false"
     result.and(cleanup)
 }
 fn build(root: &Path) -> Result<PathBuf> {
+    if !root.join("vendor/dynamorio/CMakeLists.txt").is_file() {
+        return Err("DynamoRIO submodule missing; run git submodule update --init --recursive vendor/dynamorio from the Seedbox checkout".into());
+    }
     publish(root, |output| {
         match (env::consts::OS, env::consts::ARCH) {
             ("linux", "x86_64" | "aarch64") => linux(root, output)?,
@@ -219,6 +234,76 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkout_archive_includes_submodule_edits_without_metadata_or_build_output() {
+        let root = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let dr = root.path().join("vendor/dynamorio");
+        fs::create_dir_all(&dr).unwrap();
+        let git = |path: &Path, args: &[&str]| capture(command("git", path).args(args)).unwrap();
+        // Local fixture repositories only; no remote or developer identity.
+        git(root.path(), &["init", "--quiet"]);
+        git(&dr, &["init", "--quiet"]);
+        fs::write(dr.join("CMakeLists.txt"), b"original").unwrap();
+        fs::write(dr.join(".gitignore"), b"build/\n").unwrap();
+        git(&dr, &["add", "."]);
+        git(
+            &dr,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        );
+        fs::write(root.path().join(".gitmodules"), b"[submodule \"vendor/dynamorio\"]\npath = vendor/dynamorio\nurl = https://example.invalid/dynamorio.git\n").unwrap();
+        git(root.path(), &["add", ".gitmodules", "vendor/dynamorio"]);
+        git(root.path(), &["submodule", "init"]);
+        git(root.path(), &["submodule", "absorbgitdirs"]);
+        fs::write(dr.join("CMakeLists.txt"), b"local edit").unwrap();
+        fs::write(dr.join("new.c"), b"new tracked source").unwrap();
+        git(&dr, &["add", "new.c"]);
+        fs::create_dir(dr.join("build")).unwrap();
+        fs::write(dr.join("build/ignored.o"), b"ignored").unwrap();
+        symlink("CMakeLists.txt", dr.join("source-link")).unwrap();
+        git(&dr, &["add", "source-link"]);
+        let archive = archive_checkout(root.path(), output.path()).unwrap();
+        let extracted = output.path().join("extracted");
+        tar::Archive::new(fs::File::open(archive).unwrap())
+            .unpack(&extracted)
+            .unwrap();
+        let exported = extracted.join("vendor/dynamorio");
+        assert_eq!(
+            fs::read(exported.join("CMakeLists.txt")).unwrap(),
+            b"local edit"
+        );
+        assert_eq!(
+            fs::read(exported.join("new.c")).unwrap(),
+            b"new tracked source"
+        );
+        assert_eq!(
+            fs::read_link(exported.join("source-link")).unwrap(),
+            Path::new("CMakeLists.txt")
+        );
+        assert!(!exported.join(".git").exists());
+        assert!(!exported.join("build").exists());
+        assert!(!extracted.join(".git").exists());
+    }
+
+    #[test]
+    fn missing_submodule_fails_before_asset_building() {
+        let root = tempfile::tempdir().unwrap();
+        let error = build(root.path()).unwrap_err().to_string();
+        assert!(error.contains("git submodule update --init --recursive vendor/dynamorio"));
+        assert!(!root.path().join("build").exists());
+    }
 
     #[test]
     fn failed_assets_preserve_previous_publication_and_success_replaces_it() {

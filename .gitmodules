@@ -1,0 +1,4 @@
+[submodule "vendor/dynamorio"]
+	path = vendor/dynamorio
+	url = https://github.com/gardnervickers/dynamorio.git
+	branch = seedbox/release_11.3.0-1-backports

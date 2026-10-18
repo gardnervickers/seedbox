@@ -1,14 +1,15 @@
 { pkgs }:
+let
+  source = ../../vendor/dynamorio;
+in
+assert pkgs.lib.assertMsg (builtins.pathExists (source + "/CMakeLists.txt"))
+  "DynamoRIO submodule missing; run git submodule update --init --recursive vendor/dynamorio from the Seedbox checkout.";
 pkgs.stdenv.mkDerivation {
   pname = "seedbox-dynamorio";
   version = "11.3.0-1";
-  src = pkgs.fetchurl {
-    # Seedbox backports on release_11.3.0-1, applied as four ordered commits.
-    url = "https://github.com/gardnervickers/dynamorio/archive/108a0c133744f500a375dfc284c6ecab1ad24d66.tar.gz";
-    hash = "sha256-CpGReIBec2OeBMCDSE67+A6BKwYWPzPElk3iUAHs6AI=";
-  };
+  src = pkgs.lib.cleanSource source;
   # BUILD_EXT configures every extension, including drsyms whose bundled
-  # elfutils submodule is absent from the release source tarball. We build
+  # elfutils dependency is not used by Seedbox. We build
   # only drreg and its drmgr/drcontainers dependencies.
   postPatch = ''
     substituteInPlace ext/CMakeLists.txt \

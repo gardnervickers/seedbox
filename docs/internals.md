@@ -54,7 +54,34 @@ The shared [store](../crates/seedbox-machine/src/machine/disk.rs) completes requ
 Host interruption can clear a hardware reservation without any guest write, making raw store-exclusive failure nondeterministic.
 Translation retains address/value/size/guest epoch and retries physical monitor loss inside the exclusive pair.
 Guest boundaries advance the epoch; watchdog and maintenance exits do not. Value equality alone misses ABA.
-The [translator](https://github.com/gardnervickers/dynamorio/blob/108a0c133744f500a375dfc284c6ecab1ad24d66/core/arch/aarchxx/mangle.c) and kernel return hook assume one guest CPU.
+The [translator](../vendor/dynamorio/core/arch/aarchxx/mangle.c) and kernel return hook assume one guest CPU.
+
+## Editing DynamoRIO
+
+[vendor/dynamorio](../vendor/dynamorio) is the maintained
+[Seedbox fork](https://github.com/gardnervickers/dynamorio/tree/seedbox/release_11.3.0-1-backports),
+based on upstream `release_11.3.0-1` with the four existing Seedbox backports.
+The gitlink selects its source; [the Nix recipe](../crates/seedbox-machine/dynamorio.nix)
+applies packaging adjustments and builds the launcher, core, drreg and dependencies.
+The progress client still uses the matching release SDK.
+
+Follow the [README setup](../README.md#try-it) after cloning or switching Seedbox
+revisions. `inputs.self.submodules` includes gitlinks for flake consumers, but
+Nix can lock a clean parent before noticing edits confined to a submodule.
+For live DR edits, use `nix build "git+file://$PWD?submodules=1#machinePvAssets"`
+from the checkout root; use the same reference without the output fragment for
+`nix develop`. Bare `.#machinePvAssets` can ignore those edits.
+Direnv and the asset builder request submodules on the initial fetch too, using
+the current checkout root, including in linked Git worktrees.
+Nix traverses the nested elfutils, libipt and zlib gitlinks, so initialize all
+three; drsyms remains excluded from the build.
+
+For coordinated edits, switch the submodule to `seedbox/release_11.3.0-1-backports`,
+edit and verify it with Seedbox's PV asset build, then commit and push DR first.
+Commit `vendor/dynamorio` in Seedbox to record the published DR commit and push
+the Seedbox branch. Add new DR files to its index so local Nix builds include them.
+The Mac builder exports tracked submodule files with local edits, excluding Git
+metadata and ignored build output, to its Linux container.
 
 ## ARM idle rendezvous
 
