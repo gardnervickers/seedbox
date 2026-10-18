@@ -66,6 +66,22 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// A valid project reaches Driver platform admission before archive lookup.
+/// Standalone DR tests also run on Linux ARM64, which has no native Driver.
+fn unavailable_driver_stderr(asset_directory: &Path) -> String {
+    if cfg!(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    )) {
+        let archive = asset_directory
+            .join(std::env::consts::ARCH)
+            .join("driver-runtime.tar.gz");
+        format!("error: driver runtime {}: {}; run cargo xtask build-assets or supply a complete runtime archive\n", archive.display(), std::io::Error::from_raw_os_error(2))
+    } else {
+        "error: Driver readiness requires Linux x86-64 or macOS aarch64\n".into()
+    }
+}
+
 #[path = "support/backend_authority.rs"]
 mod backend_authority;
 
@@ -117,10 +133,7 @@ fn explicit_asset_directory_overrides_bundled_driver_without_build_tools() {
         .guarded_output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
-    let archive = root
-        .join(std::env::consts::ARCH)
-        .join("driver-runtime.tar.gz");
-    assert_eq!(stderr(&output), format!("error: driver runtime {}: {}; run cargo xtask build-assets or supply a complete runtime archive\n", archive.display(), std::io::Error::from_raw_os_error(2)));
+    assert_eq!(stderr(&output), unavailable_driver_stderr(&root));
     assert!(output.stdout.is_empty());
     // Relocation still wins; retired runtime environment variables are ignored.
     let expected = stderr(&output);
@@ -267,10 +280,9 @@ fn check_validates_project_before_host_readiness() {
     fs::write(&source, yaml).unwrap();
     let success = seedbox(&["check", "seedbox.yaml", "--json"], directory.path());
     assert_eq!(success.status.code(), Some(2));
-    assert!(
-        stderr(&success).contains("driver runtime"),
-        "{}",
-        stderr(&success)
+    assert_eq!(
+        stderr(&success),
+        unavailable_driver_stderr(&directory.path().join("assets"))
     );
     assert!(success.stdout.is_empty());
     fs::write(
@@ -297,14 +309,20 @@ fn project_argument_defaults_to_the_project_directory() {
     for args in [&["check"][..], &["check", "."], &["check", "seedbox.yaml"]] {
         let output = seedbox(args, &project);
         assert_eq!(output.status.code(), Some(2), "{args:?}");
-        assert!(
-            stderr(&output).contains("driver runtime"),
-            "{args:?}: {}",
-            stderr(&output)
+        assert_eq!(
+            stderr(&output),
+            unavailable_driver_stderr(&project.join("assets")),
+            "{args:?}"
         );
+        assert!(output.stdout.is_empty());
     }
     let output = seedbox(&["check", "demo"], directory.path());
-    assert!(stderr(&output).contains("driver runtime"));
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        unavailable_driver_stderr(&directory.path().join("assets"))
+    );
+    assert!(output.stdout.is_empty());
 }
 
 #[test]
@@ -499,11 +517,8 @@ fn check_reports_missing_driver_inputs_without_downloads() {
         .env("GH_TOKEN", "invalid\ncredential")
         .guarded_output()
         .unwrap();
-    let archive = root
-        .join(std::env::consts::ARCH)
-        .join("driver-runtime.tar.gz");
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output), format!("error: driver runtime {}: {}; run cargo xtask build-assets or supply a complete runtime archive\n", archive.display(), std::io::Error::from_raw_os_error(2)));
+    assert_eq!(stderr(&output), unavailable_driver_stderr(root));
     assert!(output.stdout.is_empty());
     assert!(!root.join(".seedbox").exists());
     assert!(!root.join(".local/state/seedbox").exists());
@@ -559,10 +574,7 @@ fn check_ignored_legacy_environment_executes_no_tools_and_creates_no_state() {
             .guarded_output()
             .unwrap();
         assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-        let archive = root
-            .join(std::env::consts::ARCH)
-            .join("driver-runtime.tar.gz");
-        assert_eq!(stderr(&output), format!("error: driver runtime {}: {}; run cargo xtask build-assets or supply a complete runtime archive\n", archive.display(), std::io::Error::from_raw_os_error(2)));
+        assert_eq!(stderr(&output), unavailable_driver_stderr(root));
         assert!(output.stdout.is_empty());
         assert!(
             !marker.exists(),
@@ -945,11 +957,18 @@ fn native_project_discovery_prefers_seedbox_yaml_and_validates_oracle() {
     .unwrap();
     fs::write(directory.path().join("seedbox.yaml"), "name: native\nmachines:\n  app: {image: app}\noracle: {image: checker}\nnetwork: {latency: 2ms}\n").unwrap();
     let output = seedbox(&["check", ".", "--json"], directory.path());
-    assert!(
-        stderr(&output).contains("driver runtime"),
-        "{}",
-        stderr(&output)
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        unavailable_driver_stderr(&directory.path().join("assets"))
     );
+    assert!(output.stdout.is_empty());
+    // Parsing must still precede host admission, including on unsupported hosts.
+    fs::write(directory.path().join("seedbox.yaml"), "name: native\n").unwrap();
+    let invalid = seedbox(&["check", "."], directory.path());
+    assert_eq!(invalid.status.code(), Some(2));
+    assert_eq!(stderr(&invalid), "error: missing field `oracle`\n");
+    assert!(invalid.stdout.is_empty());
     let output = seedbox(&["run", ".", "--wall-time", "0s"], directory.path());
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("--wall-time"));
