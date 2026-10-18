@@ -23,9 +23,7 @@
 //!
 //! Requests are signed with AWS Signature Version 4 (path-style, region
 //! `us-east-1`, payload hashed) over the kit's HTTP/1.1 client.
-use crate::checker::models::{
-    verdict_word, RegisterOf, RegisterOp, RegisterRet, Timed, STEP_BUDGET,
-};
+use crate::checker::models::{verdict_word, RegisterOp, RegisterRet, Timed};
 use crate::kit::{self, http, Result, Rng};
 use hmac::{Hmac, Mac};
 use serde_json::json;
@@ -123,6 +121,13 @@ pub struct Args {
     /// error) leaves a history the checker can still search.
     #[arg(long, default_value_t = 0)]
     pub unknown_backoff_ms: u64,
+    /// Register workloads: once a key has this many writes and
+    /// compare-and-sets of unknown outcome since the server last answered an
+    /// operation on it definitely, clients only read it until one does. This
+    /// bounds a key's distinct unknown writes, which the linearizability
+    /// search is exponential in, whatever an outage's length. 0 never caps.
+    #[arg(long, default_value_t = 8)]
+    pub pending_cap: usize,
 }
 
 /// What one S3 request came back with.
@@ -345,6 +350,11 @@ struct Observed {
     unwritten: Option<String>,
     /// A write or compare-and-set whose outcome is unknown.
     unknown: bool,
+    /// ... answered 500 (an error that may follow an effect).
+    refused: bool,
+    /// The server answered definitely: a read, a write or a refused
+    /// compare-and-set completed.
+    answered: bool,
 }
 
 /// One register operation on `key` through `node`, recorded in `history`.
@@ -386,6 +396,7 @@ fn register_op(
                 Some(value) => {
                     history.complete(id, RegisterRet::Value(Some(value)));
                     observed.read = Some((value, etag));
+                    observed.answered = true;
                 }
                 None => {
                     // Not linearizable with any write; the checker flags it too.
@@ -401,22 +412,27 @@ fn register_op(
         (RegisterOp::Read, Exchange::Answered(404, ..)) => {
             history.complete(id, RegisterRet::Value(Some(0)));
             observed.read = Some((0, None));
+            observed.answered = true;
         }
         // A failed read has no effect.
         (RegisterOp::Read, _) => history.fail(id),
         (RegisterOp::Write(_), Exchange::Answered(200 | 204, ..)) => {
-            history.complete(id, RegisterRet::Wrote)
+            history.complete(id, RegisterRet::Wrote);
+            observed.answered = true;
         }
         (RegisterOp::Cas(..), Exchange::Answered(200, ..)) => {
-            history.complete(id, RegisterRet::Cas(true))
+            history.complete(id, RegisterRet::Cas(true));
+            observed.answered = true;
         }
         // The condition did not hold: the key held another value, or (for
         // If-Match, answered 404) none.
         (RegisterOp::Cas(..), Exchange::Answered(412, ..)) => {
-            history.complete(id, RegisterRet::Cas(false))
+            history.complete(id, RegisterRet::Cas(false));
+            observed.answered = true;
         }
         (RegisterOp::Cas(from, _), Exchange::Answered(404, ..)) if *from != 0 => {
-            history.complete(id, RegisterRet::Cas(false))
+            history.complete(id, RegisterRet::Cas(false));
+            observed.answered = true;
         }
         // Refused before it could take effect: never sent, or rejected as a
         // malformed or unauthenticated request.
@@ -426,6 +442,10 @@ fn register_op(
         // S3 errors that may follow an effect carry a document.
         (_, Exchange::Answered(503, data, _)) if data.is_empty() => history.fail(id),
         // Anything else may or may not have taken effect: leave it pending.
+        (_, Exchange::Answered(500, ..)) => {
+            observed.unknown = true;
+            observed.refused = true;
+        }
         _ => observed.unknown = true,
     }
     observed
@@ -438,6 +458,13 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     let unwritten = Arc::new(Mutex::new(Vec::<String>::new()));
     // Reads whose value came without an ETag, so no CAS could follow them.
     let no_etag = Arc::new(Mutex::new(0u64));
+    // Per key, unknown writes since the server last answered definitely.
+    let unknown: Arc<Vec<std::sync::atomic::AtomicUsize>> =
+        Arc::new(keys.iter().map(|_| Default::default()).collect());
+    // When writes were answered with an ambiguous 500.
+    let refusals = Arc::new(Mutex::new(Vec::<f64>::new()));
+    // Operations turned into reads by --pending-cap.
+    let capped = Arc::new(std::sync::atomic::AtomicU64::new(0));
     // Every register starts absent: write that before the clients start, so
     // the model's initial state (no value) is never observed.
     for history in histories.iter() {
@@ -461,6 +488,7 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
                 unwritten.clone(),
                 no_etag.clone(),
             );
+            let (unknown, refusals, capped) = (unknown.clone(), refusals.clone(), capped.clone());
             std::thread::spawn(move || {
                 let mut rng = Rng::stream(seed, client as u64);
                 let mut next = 1u32;
@@ -482,12 +510,28 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
                                 .unwrap()
                                 .push(format!("{}: {bad}", keys[k]));
                         }
+                        use std::sync::atomic::Ordering::Relaxed;
+                        if observed.refused {
+                            refusals.lock().unwrap().push(kit::now());
+                        }
+                        if observed.answered {
+                            unknown[k].store(0, Relaxed);
+                        } else if observed.unknown {
+                            unknown[k].fetch_add(1, Relaxed);
+                        }
                         if observed.unknown && args.unknown_backoff_ms > 0 {
                             std::thread::sleep(Duration::from_millis(args.unknown_backoff_ms));
                         }
                         observed.read
                     };
-                    let op = match rng.weighted(weights) {
+                    let at_cap = args.pending_cap > 0
+                        && unknown[k].load(std::sync::atomic::Ordering::Relaxed)
+                            >= args.pending_cap;
+                    let choice = rng.weighted(weights);
+                    if at_cap && choice != 0 {
+                        capped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let op = match if at_cap { 0 } else { choice } {
                         0 => RegisterOp::Read,
                         1 => RegisterOp::Write(value),
                         2 => RegisterOp::Write(0),
@@ -603,7 +647,8 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
         .collect();
     kit::evidence(
         "histories",
-        json!({"keys": sizes, "reads_without_etag": *no_etag.lock().unwrap()}),
+        json!({"keys": sizes, "reads_without_etag": *no_etag.lock().unwrap(),
+               "capped_to_reads": capped.load(std::sync::atomic::Ordering::Relaxed)}),
     );
     let mut violations = Vec::new();
     let mut exhausted = Vec::new();
@@ -615,7 +660,7 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
             .iter()
             .filter(|o| matches!(o.outcome, wgl::OpOutcome::Pending))
             .count();
-        let verdict = wgl::check_history(&RegisterOf::<u32>::default(), operations, STEP_BUDGET);
+        let verdict = crate::checker::models::check_register(key, operations);
         counts[key] =
             json!({"ops": operations.len(), "pending": pending, "verdict": verdict_word(&verdict)});
         match verdict {
@@ -641,21 +686,60 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
         json!({"keys": counts, "unwritten": unwritten.iter().take(10).collect::<Vec<_>>()}),
     );
     let summary = format!(
-        "{} of {} keys not linearizable, {} undecided; {} reads of bytes no client wrote{}",
+        "{} of {} keys not linearizable, {} undecided; {} reads of bytes no client wrote{}{}",
         violations.len(),
         keys.len(),
         exhausted.len(),
         unwritten.len(),
+        refusal_windows(&refusals.lock().unwrap()),
         unrecovered(&down)
     );
     let lost = !violations.is_empty() || !down.is_empty();
-    if !unwritten.is_empty() || (lost && !args.integrity_only) {
+    // An undecided key is a failed test (wgl treats budget exhaustion so),
+    // not an unevaluated property.
+    if !unwritten.is_empty() || !exhausted.is_empty() || (lost && !args.integrity_only) {
         kit::verdict(kit::VIOLATION, &summary)
-    } else if lost || !exhausted.is_empty() {
+    } else if lost {
         kit::verdict(kit::INCONCLUSIVE, &summary)
     } else {
         kit::verdict(kit::OK, &summary)
     }
+}
+
+/// The spans in which writes were answered with an ambiguous 500 (times in
+/// seconds; a gap of more than 5 s starts a new span), recorded as
+/// `fail-stop` evidence and described for the verdict: a server that stops
+/// accepting writes after an I/O error is failing stop, which is allowed as
+/// long as nothing acknowledged is lost.
+fn refusal_windows(times: &[f64]) -> String {
+    let mut times = times.to_vec();
+    times.sort_by(f64::total_cmp);
+    let mut spans: Vec<(f64, f64, usize)> = Vec::new();
+    for t in times {
+        match spans.last_mut() {
+            Some((_, end, count)) if t - *end <= 5.0 => {
+                *end = t;
+                *count += 1;
+            }
+            _ => spans.push((t, t, 1)),
+        }
+    }
+    let long: Vec<_> = spans.iter().filter(|(_, _, n)| *n >= 3).collect();
+    if long.is_empty() {
+        return String::new();
+    }
+    kit::evidence(
+        "fail-stop",
+        json!({"spans": long.iter().map(|(a, b, n)| json!({"from": a, "to": b, "refusals": n})).collect::<Vec<_>>()}),
+    );
+    let text: Vec<String> = long
+        .iter()
+        .map(|(a, b, n)| format!("{a:.1}-{b:.1} s ({n} refusals)"))
+        .collect();
+    format!(
+        "; writes answered with ambiguous 500s (fail-stop) at {}",
+        text.join(", ")
+    )
 }
 
 /// With `--reboot-before-check`, power-fail every server together and boot

@@ -18,9 +18,7 @@
 //! synced state (`GET /state`) must hold every acknowledged append, and all
 //! nodes must agree.
 use crate::checker::elle::{self, Atom, Mop, TxnOp};
-use crate::checker::models::{
-    verdict_word, RegisterOf, RegisterOp, RegisterRet, Timed, STEP_BUDGET,
-};
+use crate::checker::models::{verdict_word, RegisterOp, RegisterRet, Timed};
 use crate::checker::realtime;
 use crate::kit::{self, http, Rng};
 use serde_json::{json, Value};
@@ -424,7 +422,7 @@ fn registers(args: Arc<Args>) -> u8 {
             .iter()
             .filter(|o| matches!(o.outcome, wgl::OpOutcome::Pending))
             .count();
-        let verdict = wgl::check_history(&RegisterOf::<u32>::default(), operations, STEP_BUDGET);
+        let verdict = crate::checker::models::check_register(id, operations);
         counts[id] =
             json!({"ops": operations.len(), "pending": pending, "verdict": verdict_word(&verdict)});
         match verdict {
@@ -457,12 +455,14 @@ fn registers(args: Arc<Args>) -> u8 {
         divergent.len(),
         never_answered(&down)
     );
+    // An undecided register is a failed test, not an unevaluated property.
     if !violations.is_empty()
+        || !exhausted.is_empty()
         || !divergent.is_empty()
         || (!down.is_empty() && !args.expect_unavailable)
     {
         kit::verdict(kit::VIOLATION, &summary)
-    } else if !exhausted.is_empty() || acknowledged == 0 {
+    } else if acknowledged == 0 {
         kit::verdict(kit::INCONCLUSIVE, &summary)
     } else {
         kit::verdict(kit::OK, &summary)

@@ -28,7 +28,7 @@
 //! every key gets a final read, and every member's `HashKV` at a common
 //! revision has to agree.
 use super::etcd_gateway::{b64, number, unb64, Watch, CLIENT_PORT};
-use crate::checker::models::{verdict_word, RegisterOf, RegisterOp, RegisterRet, STEP_BUDGET};
+use crate::checker::models::{verdict_word, RegisterOp, RegisterRet};
 use crate::kit::{self, http, Rng};
 use serde_json::{json, Value};
 use std::{
@@ -805,7 +805,7 @@ fn conclude(
     let mut exhausted = Vec::new();
     for (key, log) in b.keys.iter().enumerate() {
         let operations = log.history.operations();
-        let verdict = wgl::check_history(&RegisterOf::<u8>::default(), operations, STEP_BUDGET);
+        let verdict = crate::checker::models::check_register(&key.to_string(), operations);
         match verdict {
             wgl::Verdict::Linearizable => {}
             wgl::Verdict::NotLinearizable(e) => {

@@ -9,6 +9,38 @@ use wgl::{SequentialModel, Verdict};
 /// reported as such, never as a pass.
 pub const STEP_BUDGET: u64 = 50_000_000;
 
+/// Memory the search's configuration cache may use per check. The cache
+/// holds up to one configuration per step, each a bitset over the history
+/// plus a model state, so a long history with many unknown outcomes would
+/// otherwise fill a guest's memory long before [`STEP_BUDGET`] ran out.
+pub const SEARCH_MEMORY: u64 = 640 << 20;
+
+/// The step budget for a history of `operations`: [`STEP_BUDGET`], or less
+/// when that many cached configurations would exceed [`SEARCH_MEMORY`], so
+/// the search reports budget exhaustion instead of the oracle being killed.
+pub fn step_budget(operations: usize) -> u64 {
+    let per_configuration = operations as u64 / 8 + 64;
+    (SEARCH_MEMORY / per_configuration).min(STEP_BUDGET)
+}
+
+/// Check one key's register history with [`step_budget`], first recording
+/// which key is being checked and how large its history is.
+pub fn check_register<V: Clone + Eq + std::hash::Hash>(
+    key: &str,
+    operations: &[wgl::Operation<RegisterOp<V>, RegisterRet<V>>],
+) -> Verdict {
+    let pending = operations
+        .iter()
+        .filter(|o| matches!(o.outcome, wgl::OpOutcome::Pending))
+        .count();
+    let budget = step_budget(operations.len());
+    crate::kit::evidence(
+        "checking",
+        serde_json::json!({"key": key, "ops": operations.len(), "pending": pending, "budget": budget}),
+    );
+    wgl::check_history(&RegisterOf::<V>::default(), operations, budget)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RegisterOp<V> {
     Read,
@@ -317,6 +349,28 @@ mod tests {
         let r = h.invoke(RegisterOp::Read);
         h.complete(r, RegisterRet::Value(Some(3)));
         assert_eq!(verdict(&model, &h), "not-linearizable");
+    }
+
+    #[test]
+    fn long_histories_get_a_budget_that_fits_in_memory() {
+        let budget = step_budget(4_000);
+        assert!(budget < step_budget(100) && step_budget(100) <= STEP_BUDGET);
+        assert!(budget * (4_000 / 8 + 64) <= SEARCH_MEMORY);
+        // A wedged server's shape: many distinct unknown writes, then a read
+        // of the value before them. The search must stop on its budget.
+        let mut h = History::new();
+        let w = h.invoke(RegisterOp::Write(0u32));
+        h.complete(w, RegisterRet::Wrote);
+        for value in 1..=40 {
+            let _ = h.invoke(RegisterOp::Write(value));
+        }
+        let r = h.invoke(RegisterOp::Read);
+        h.complete(r, RegisterRet::Value(Some(1000)));
+        let verdict = check_history(&RegisterOf::<u32>::default(), h.operations(), 200_000);
+        assert!(matches!(
+            verdict,
+            Verdict::BudgetExhausted(_) | Verdict::NotLinearizable(_)
+        ));
     }
 
     #[test]
