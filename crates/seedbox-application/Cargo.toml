@@ -11,7 +11,6 @@ seedbox-artifacts.workspace = true
 seedbox-spec.workspace = true
 seedbox-engine-protocol.workspace = true
 seedbox-driver-execution.workspace = true
-seedbox-driver.workspace = true
 serde.workspace = true
 seedbox-control.workspace = true
 seedbox-engine-core.workspace = true

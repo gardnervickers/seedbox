@@ -1,7 +1,7 @@
 //! Pure input-program validation and fault target selection.
 
 use crate::{Error, Result};
-use seedbox_driver::driver::faults::ActionTargets;
+use seedbox_driver_execution::driver_world::ActionTargets;
 
 /// Validate a client's schedule before preparing or starting a simulation.
 /// Service and machine names coincide in the current one-service-per-machine ABI.
@@ -31,8 +31,12 @@ pub fn fault_action_targets(
     action: &seedbox_control::Action,
 ) -> Result<ActionTargets> {
     let names: Vec<_> = configuration.services.keys().cloned().collect();
-    seedbox_driver::driver::faults::action_targets(action, &names, configuration.network.latency_ns)
-        .map_err(Error::Setup)
+    seedbox_driver_execution::driver_world::action_targets(
+        action,
+        &names,
+        configuration.network.latency_ns,
+    )
+    .map_err(Error::Setup)
 }
 
 #[cfg(test)]
