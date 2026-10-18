@@ -203,6 +203,9 @@ impl Definition {
             services.insert(
                 name.into(),
                 crate::Service {
+                    memory_mb: Some(
+                        u32::try_from(machine.memory_bytes / (1024 * 1024)).unwrap_or(u32::MAX),
+                    ),
                     source: crate::ImageSource::Registry {
                         reference: "resolved-binary-input".into(),
                     },

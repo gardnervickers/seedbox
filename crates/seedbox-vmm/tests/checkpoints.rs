@@ -25,7 +25,7 @@ fn runtime_checkpoint_getrandom_and_urandom_repeat_and_diverge() {
             "network": {"latency_ns": 1_000_000},
             "machines": [
                 {"name":"a", "initrd":input("SEEDBOX_TEST_INITRD", "artifacts/entropy-fork.cpio")},
-                {"name":"b", "initrd":input("SEEDBOX_TEST_INITRD", "artifacts/entropy-fork.cpio")}
+                {"name":"b", "mem_mb":512, "initrd":input("SEEDBOX_TEST_INITRD", "artifacts/entropy-fork.cpio")}
             ]
         }))
         .unwrap(),

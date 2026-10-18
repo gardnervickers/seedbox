@@ -85,6 +85,7 @@ fn retained_driver_acquires_only_recorded_runtime_and_owns_it_until_executor_dro
         std::env::consts::ARCH,
     ));
     let mut inputs = PreparedInputs {
+        machine_memory_mb: Default::default(),
         wall_clock_epoch: Some(86400),
         kernel: store.put_file(&guest.join("kernel")).unwrap(),
         images: BTreeMap::new(),

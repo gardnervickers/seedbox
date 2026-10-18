@@ -80,6 +80,47 @@ static void user_namespace(void) {
     int status; assert(waitpid(child, &status, 0) == child);
     assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
+/* Progress checkpoints leave through the translator's dispatcher on ARM, which
+ * restores every register from the saved context. Run enough blocks for
+ * hundreds of checkpoints with all vector registers live. */
+static void simd_registers_survive_progress(void) {
+#if defined(__aarch64__)
+    uint64_t before[64], after[64];
+    for (unsigned i = 0; i < 64; ++i)
+        before[i] = 0x5eedb0c500000000ull | (i * 0x01010101u);
+    uint64_t *in = before, *out = after;
+    __asm__ volatile(
+        "ld1 {v0.2d-v3.2d}, [%[in]], #64\n"
+        "ld1 {v4.2d-v7.2d}, [%[in]], #64\n"
+        "ld1 {v8.2d-v11.2d}, [%[in]], #64\n"
+        "ld1 {v12.2d-v15.2d}, [%[in]], #64\n"
+        "ld1 {v16.2d-v19.2d}, [%[in]], #64\n"
+        "ld1 {v20.2d-v23.2d}, [%[in]], #64\n"
+        "ld1 {v24.2d-v27.2d}, [%[in]], #64\n"
+        "ld1 {v28.2d-v31.2d}, [%[in]], #64\n"
+        "mov x9, %[iterations]\n"
+        "1: subs x9, x9, #1\n"
+        "b 2f\n"
+        "2: b 3f\n"
+        "3: cbnz x9, 1b\n"
+        "st1 {v0.2d-v3.2d}, [%[out]], #64\n"
+        "st1 {v4.2d-v7.2d}, [%[out]], #64\n"
+        "st1 {v8.2d-v11.2d}, [%[out]], #64\n"
+        "st1 {v12.2d-v15.2d}, [%[out]], #64\n"
+        "st1 {v16.2d-v19.2d}, [%[out]], #64\n"
+        "st1 {v20.2d-v23.2d}, [%[out]], #64\n"
+        "st1 {v24.2d-v27.2d}, [%[out]], #64\n"
+        "st1 {v28.2d-v31.2d}, [%[out]], #64\n"
+        : [in] "+r"(in), [out] "+r"(out)
+        : [iterations] "r"(3000000ul)
+        : "x9", "cc", "memory", "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8",
+          "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19",
+          "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27", "v28", "v29", "v30",
+          "v31");
+    assert(!memcmp(before, after, sizeof(before)));
+    puts("vector registers survived progress");
+#endif
+}
 int main(int argc, char **argv) {
     assert(argc == 2);
     struct stat info;
@@ -154,6 +195,7 @@ int main(int argc, char **argv) {
     assert(write(fd, "disk", 4) == 4 && !fsync(fd) && !close(fd));
     user_namespace();
     io_uring_nop();
+    simd_registers_survive_progress();
     assert(!prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
     struct sock_filter allow = BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW);
     struct sock_fprog filter = {.len = 1, .filter = &allow};

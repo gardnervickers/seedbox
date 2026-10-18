@@ -2,6 +2,7 @@
 //! connection failures never launch processes or silently change endpoints.
 #![cfg(unix)]
 mod sse;
+mod transfers;
 pub use sse::{CheckpointExportStream, LogStream};
 pub use sse::{EventStream, FrameStream, SimulationStream};
 
@@ -14,6 +15,16 @@ const RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(
+        "transfer cancelled; an uploaded import may still complete; do not retry automatically"
+    )]
+    Cancelled,
+    #[error("import result uncertain: {0}; upload may have been accepted; inspect simulations before importing again")]
+    ImportUncertain(String),
+    #[error("binary transfer: {0}")]
+    Binary(String),
+    #[error("transfer file: {0}")]
+    Io(#[from] std::io::Error),
     #[error("server stream: {0}")]
     Stream(String),
     #[error("request randomness unavailable: {0}")]
@@ -50,6 +61,7 @@ impl Client {
                 .unix_socket(socket.to_owned())
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
                 .connect_timeout(Duration::from_secs(2))
                 .build()?,
         })

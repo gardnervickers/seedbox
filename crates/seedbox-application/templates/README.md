@@ -27,6 +27,9 @@ is omitted. Select a different backend by running the original project again,
 not by changing `seedbox.yaml` or an environment variable.
 
 Edit `seedbox.yaml` and the oracle to change the test. Oracle exit code zero
-passes; nonzero fails. Use `seedbox help` for commands and options.
+passes; nonzero fails. After completion, `seedbox export <sim-id>` saves a portable
+bundle; `seedbox import <bundle>` restores a fresh completed resource without
+execution. Export rejects active simulations; uncertain imports must not be retried
+blindly. Bundles preserve available bounded history, not evicted logs or frames. Use `seedbox help` for commands and options.
 
 [Seedbox documentation](https://github.com/gardnervickers/seedbox#readme)

@@ -335,6 +335,7 @@ fn boot_inputs(fixture: &Fixture) -> worker::Boot {
         disk_sectors: Some(4),
         disk_fault_model: seedbox_arm64::disk::parse_disk_fault_model(&Value::Null).unwrap(),
         timer_policy: None,
+        progress: None,
     }
 }
 #[test]

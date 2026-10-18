@@ -63,6 +63,7 @@ fn fixture(root: &Path, backend: DriverBackend) -> (PreparedInputs, Prepared, Ar
         artifact: source.to_str().unwrap().into(),
     };
     let inputs = PreparedInputs {
+        machine_memory_mb: Default::default(),
         wall_clock_epoch: None,
         kernel: digest,
         profile: profile(backend),

@@ -1,6 +1,9 @@
 //! Server-owned application preparation and execution. Platform discovery is
 //! injected by the executable; clients never own worker lifetimes or leases.
 
+mod bundles;
+mod diagnostics;
+
 use crate::{catalogue, manager::Manager};
 use seedbox_api::{ExecutionTermination, InputSource, Phase, SimulationId, Stage};
 use seedbox_application::{
@@ -66,6 +69,8 @@ pub enum Error {
     Storage(#[from] std::io::Error),
     #[error("simulation evidence: {0}")]
     Evidence(#[from] seedbox_application::Error),
+    #[error("simulation bundle: {0}")]
+    Bundle(String),
     #[error("simulation worker task failed: {0}")]
     Task(#[from] tokio::task::JoinError),
 }
@@ -76,6 +81,7 @@ pub struct ExecutionService {
     store: ContentStore,
     backends: Arc<dyn BackendProvider>,
     preparation_limit: Duration,
+    evidence: Mutex<()>,
     admission: Mutex<(usize, BTreeMap<tokio::task::Id, SimulationId>)>,
 }
 
@@ -116,6 +122,7 @@ impl ExecutionService {
             store,
             backends,
             preparation_limit: crate::preparation_budget::DEFAULT_LIMIT,
+            evidence: Mutex::new(()),
             admission: Mutex::new((0, BTreeMap::new())),
         })
     }
@@ -133,6 +140,10 @@ impl ExecutionService {
     /// Foreground cascading deletion: stop the frozen ownership tree, wait for
     /// execution cleanup, then remove dependents before their parents.
     pub fn delete(&self, id: &SimulationId) -> Result<(), Error> {
+        let _evidence = self
+            .evidence
+            .lock()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
         let targets = self.manager.begin_delete(id)?;
         // Join control transport and journal I/O without holding the catalogue
         // mutex. Retirement prevents already cloned handles from starting later.
@@ -172,7 +183,14 @@ impl ExecutionService {
     /// Block new branches before removing the completed simulation's capture.
     /// Repeated deletion retries cleanup using the retained attempt reference.
     pub fn delete_checkpoint(&self, id: &SimulationId, name: &str) -> Result<(), Error> {
+        let _evidence = self
+            .evidence
+            .lock()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
         self.manager.delete_checkpoint(id, name)?;
+        if self.manager.read(|catalogue| catalogue.is_imported(id))? {
+            return Ok(());
+        }
         let inputs: RetainedInputs = serde_json::from_reader(fs::File::open(
             self.root.join("inputs").join(format!("{id}.json")),
         )?)
@@ -270,6 +288,15 @@ impl ExecutionService {
     ) -> Result<seedbox_api::Simulation, Error> {
         progress(0)?;
         self.manager.captured_checkpoint(id, name)?;
+        if let Some(definition) = self
+            .manager
+            .read(|catalogue| catalogue.imported_checkpoint(id, name))?
+        {
+            let mut resource = self.describe(id)?;
+            resource.spec =
+                seedbox_api::SimulationSpec::resolved(definition).map_err(Error::Bundle)?;
+            return Ok(resource);
+        }
         let mut resource = self.describe(id)?;
         let seedbox_api::InputSource::Resolved { definition } = &mut resource.spec.inputs else {
             return Err(Error::Evidence(seedbox_application::Error::Setup(
@@ -308,6 +335,10 @@ impl ExecutionService {
         baseline: &SimulationId,
         simulation: &SimulationId,
     ) -> seedbox_application::Result<seedbox_api::SimulationComparison> {
+        let _evidence = self
+            .evidence
+            .lock()
+            .map_err(|_| seedbox_application::Error::Setup("evidence lock failed".into()))?;
         let record = |id: &SimulationId| {
             let resource = self
                 .manager
@@ -318,25 +349,55 @@ impl ExecutionService {
                     "simulation {id} is not complete"
                 )));
             }
+            if self
+                .manager
+                .read(|catalogue| catalogue.is_imported(id))
+                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?
+            {
+                let snapshot = self
+                    .imported_snapshot(id)
+                    .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?;
+                return Ok(snapshot.record);
+            }
             let path = self.root.join("inputs").join(format!("{id}.json"));
-            let file = fs::File::open(&path).map_err(|error| {
-                seedbox_application::Error::Setup(format!(
-                    "simulation {id} retained inputs: {error}"
-                ))
-            })?;
+            let file = match fs::File::open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => {
+                    return Err(seedbox_application::Error::Setup(format!(
+                        "simulation {id} retained inputs: {error}"
+                    )))
+                }
+            };
             let inputs: RetainedInputs = serde_json::from_reader(file)?;
-            let attempt = inputs.attempt.ok_or_else(|| {
-                seedbox_application::Error::Setup(format!(
-                    "simulation {id} has no retained execution"
-                ))
-            })?;
-            seedbox_application::orchestration::inspect(&attempt)
+            let Some(attempt) = inputs.attempt else {
+                return Ok(None);
+            };
+            seedbox_application::orchestration::inspect(&attempt).map(Some)
         };
-        let first = record(baseline)?;
-        let second = record(simulation)?;
+        let (Some(first), Some(second)) = (record(baseline)?, record(simulation)?) else {
+            return Ok(seedbox_api::SimulationComparison {
+                baseline: baseline.clone(),
+                simulation: simulation.clone(),
+                status: seedbox_api::ComparisonStatus::NotComparable,
+                outcome_matches: false,
+                witness_matches: None,
+                full_state_matches: None,
+                fault_history_matches: false,
+            });
+        };
         let comparison = seedbox_artifacts::record::compare(&first, &second);
         use seedbox_api::ComparisonStatus;
-        let status = if first.identity != second.identity {
+        let first_definition = self.portable_simulation(baseline)?.spec.inputs;
+        let second_definition = self.portable_simulation(simulation)?.spec.inputs;
+        let compatible = match (first_definition, second_definition) {
+            (
+                InputSource::Resolved { definition: first },
+                InputSource::Resolved { definition: second },
+            ) => bundles::semantic_definition(first)? == bundles::semantic_definition(second)?,
+            _ => false,
+        };
+        let status = if !compatible {
             ComparisonStatus::NotComparable
         } else {
             match comparison.status {
@@ -690,6 +751,13 @@ impl ExecutionService {
         // The first run and every resubmission use the same resolved private representation.
         // Source paths, image transport manifests and human metadata never enter experiment identity.
         let inputs = seedbox_application::definition::prepared(&definition, &self.store)?;
+        // Resolving per-machine RAM chooses the oracle's RAM as the legacy
+        // default. Bind execution to that canonical profile as well.
+        let executor = if executor.profile() == inputs.profile {
+            executor
+        } else {
+            self.backends.retained(&inputs, &self.store)?
+        };
         definition.runtime.execution =
             seedbox_application::definition::execution_settings_with_inputs(&inputs)?;
         for (name, machine) in &mut definition.machines {
@@ -944,6 +1012,158 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(execution.capacity().unwrap().occupying.is_empty());
+    }
+
+    #[test]
+    fn project_execution_uses_the_canonical_mixed_memory_profile() {
+        use seedbox_application::{execution::*, image::Launch};
+        #[derive(Clone)]
+        struct FixtureBackend(PreparedInputs);
+        impl PreparationBackend for FixtureBackend {
+            fn prepare(
+                &self,
+                _: &Simulation,
+                _: &ContentStore,
+            ) -> seedbox_application::Result<PreparedInputs> {
+                Ok(self.0.clone())
+            }
+            fn prepare_cancellable(
+                &self,
+                simulation: &Simulation,
+                store: &ContentStore,
+                _: &PreparationContext,
+            ) -> seedbox_application::Result<PreparedInputs> {
+                self.prepare(simulation, store)
+            }
+        }
+        impl ExecutionBackend for FixtureBackend {
+            fn profile(&self) -> ExecutionProfile {
+                self.0.profile.clone()
+            }
+            fn execute(
+                &self,
+                request: ExecutionRequest<'_>,
+            ) -> seedbox_application::Result<ExecutionReport> {
+                assert_eq!(request.prepared.profile, self.profile());
+                assert_eq!(request.prepared.memory_mb("app"), 2048);
+                assert_eq!(request.prepared.memory_mb("oracle"), 256);
+                assert_eq!(request.prepared.memory_mb("helper"), 1024);
+                Ok(ExecutionReport {
+                    simulated_time_ns: Some(1),
+                    host_wait_ns: 0,
+                    reason: StopReason::Completed,
+                    workload_exit: Some(WorkloadExit {
+                        service: "oracle".into(),
+                        code: 0,
+                    }),
+                    witness: Some(self.0.kernel.clone()),
+                    full_state: None,
+                    faults: vec![],
+                    detail: None,
+                })
+            }
+        }
+        struct Provider(FixtureBackend);
+        impl BackendProvider for Provider {
+            fn project(
+                &self,
+                _: &Simulation,
+                _: &ContentStore,
+                _: &CancellationToken,
+            ) -> seedbox_application::Result<Backends> {
+                Ok(Backends {
+                    preparation: Box::new(self.0.clone()),
+                    execution: Box::new(self.0.clone()),
+                })
+            }
+            fn retained(
+                &self,
+                inputs: &PreparedInputs,
+                _: &ContentStore,
+            ) -> seedbox_application::Result<Box<dyn ExecutionBackend>> {
+                Ok(Box::new(FixtureBackend(inputs.clone())))
+            }
+        }
+        let temporary = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(temporary.path().join("store"));
+        let digest = store.put(b"test-only-binary").unwrap();
+        let configuration = seedbox_application::config::parse_for_architecture(
+            "name: mixed\nmachines:\n  app: {image: example/app, memoryMiB: 2048}\n  helper: {image: example/helper}\noracle: {image: example/oracle, memoryMiB: 256}\n",
+            Path::new("/project/seedbox.yaml"), &Default::default(),
+            if cfg!(target_arch = "aarch64") { seedbox_application::guest::Architecture::Arm64 } else { seedbox_application::guest::Architecture::Amd64 },
+        ).unwrap();
+        let image = PreparedImage {
+            manifest: digest.clone(),
+            config: digest.clone(),
+            layers: vec![],
+            launch: Launch {
+                argv: vec!["/app".into()],
+                environment: BTreeMap::new(),
+                working_dir: "/".into(),
+                user: "".into(),
+                volumes: vec![],
+                disk_volumes: vec![],
+            },
+        };
+        let inputs = PreparedInputs {
+            wall_clock_epoch: Some(86400),
+            kernel: digest.clone(),
+            images: BTreeMap::from([
+                ("app".into(), image.clone()),
+                ("helper".into(), image.clone()),
+                ("oracle".into(), image),
+            ]),
+            placement: BTreeMap::from([
+                ("app".into(), "app".into()),
+                ("helper".into(), "helper".into()),
+                ("oracle".into(), "oracle".into()),
+            ]),
+            guests: BTreeMap::from([
+                ("app".into(), digest.clone()),
+                ("helper".into(), digest.clone()),
+                ("oracle".into(), digest.clone()),
+            ]),
+            machine_memory_mb: BTreeMap::from([("app".into(), 2048), ("oracle".into(), 256)]),
+            profile: ExecutionProfile {
+                backend: Backend::Other("test".into()),
+                engine: digest,
+                witness_mode: WitnessMode::Exits,
+                semantic_parameters: SemanticParameters::new(1024),
+            },
+            auxiliary: BTreeMap::new(),
+            provenance: BTreeMap::new(),
+        };
+        let manager = Arc::new(Manager::new(catalogue::Catalogue::in_memory()));
+        let service = ExecutionService::new(
+            manager.clone(),
+            temporary.path().join("execution"),
+            store,
+            Arc::new(Provider(FixtureBackend(inputs))),
+        )
+        .unwrap();
+        let spec = SimulationSpec {
+            configuration,
+            inputs: InputSource::Project,
+            seed: Some(1),
+            program: vec![],
+            start_paused: false,
+        };
+        let resource = manager
+            .submit(SubmitRequest {
+                metadata: Default::default(),
+                options: Default::default(),
+                request_id: "mixed-memory".into(),
+                spec,
+            })
+            .unwrap()
+            .0;
+        service.execute(resource.metadata.id.clone()).unwrap();
+        let finished = manager.describe(&resource.metadata.id).unwrap();
+        assert_eq!(finished.status.oracle_exit_code, Some(0));
+        assert_eq!(
+            finished.status.termination,
+            Some(seedbox_api::ExecutionTermination::OracleExited)
+        );
     }
 
     #[test]

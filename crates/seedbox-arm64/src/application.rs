@@ -117,6 +117,22 @@ pub struct TimerPolicy {
     pub jitter_ns: u64,
 }
 
+/// The bound on the seeded extra charge the guest kernel adds to each PV
+/// progress call, and the seed of the stream it draws from. Both go to the
+/// time page at boot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Progress {
+    /// The machine's configured CPU speed in Hz, which a throttle is a fraction of.
+    pub speed_hz: u64,
+    /// Nominal charge per progress call; zero charges a call like a syscall.
+    pub ns: u64,
+    /// Bound on the seeded variation of that charge, each way; zero is off.
+    pub jitter_ns: u64,
+    /// First seed of the stream the guest kernel draws the variation from.
+    pub seed: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     Frame(Vec<u8>),

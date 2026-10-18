@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 const LIMIT: usize = 65536;
 type Result<T> = std::result::Result<T, String>;
 
-/// Preserve the two existing console contracts during extraction.
+/// Adapter checkpoint identity; admission and completion rules are shared.
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Policy {
@@ -42,7 +42,7 @@ pub struct Snapshot {
 #[derive(Default)]
 pub struct Output {
     pub irq: bool,
-    /// Application consoles preserve per-chain event boundaries.
+    /// Preserve per-chain event boundaries for adapter delivery.
     pub payloads: Vec<Vec<u8>>,
 }
 
@@ -111,24 +111,16 @@ impl Console {
         queue.validated_chain(
             memory,
             base,
-            match self.policy {
-                Policy::Application => QueuePolicy {
-                    limit: 4 << 20,
-                    direction: Direction::Any,
-                    reject_empty: true,
-                    diagnostics: Diagnostics::Virtio,
-                },
-                Policy::Console => QueuePolicy {
-                    limit: LIMIT,
-                    direction: Direction::Uniform(writable),
-                    reject_empty: true,
-                    diagnostics: Diagnostics::Console,
-                },
+            QueuePolicy {
+                limit: LIMIT,
+                direction: Direction::Uniform(writable),
+                reject_empty: true,
+                diagnostics: Diagnostics::Console,
             },
         )
     }
     fn packet(&mut self, event: u16, data: &[u8]) -> Result<()> {
-        if self.policy == Policy::Console && self.control_rx.len() >= 16 {
+        if self.control_rx.len() >= 16 {
             return Err("console control backlog full".into());
         }
         let mut bytes = 0u32.to_le_bytes().to_vec();
@@ -158,9 +150,6 @@ impl Console {
             (0, 6, 0 | 1) if self.port_ready => self.guest_open = value == 1,
             _ => return Err("invalid console control handshake".into()),
         }
-        if self.policy == Policy::Application && self.control_rx.len() > 16 {
-            return Err("console control backlog full".into());
-        }
         Ok(())
     }
     fn copy_in(
@@ -170,33 +159,17 @@ impl Console {
         bytes: &[u8],
         dirty: &mut impl FnMut(usize, usize),
     ) -> Result<()> {
-        if self.policy == Policy::Application {
-            // Direction and capacity are checked before any write.
-            chain.write(memory, bytes)?;
-            let mut reported = 0;
-            for segment in &chain.segments {
-                let n = segment.len.min(bytes.len() - reported);
-                if n > 0 {
-                    dirty(segment.offset, n);
-                    reported += n;
-                }
-                if reported == bytes.len() {
-                    break;
-                }
+        // Validate direction and capacity before any DMA, including aliases.
+        chain.write(memory, bytes)?;
+        let mut reported = 0;
+        for segment in &chain.segments {
+            let n = segment.len.min(bytes.len() - reported);
+            if n > 0 {
+                dirty(segment.offset, n);
+                reported += n;
             }
-        } else {
-            let mut copied = 0;
-            for segment in &chain.segments {
-                let n = segment.len.min(bytes.len() - copied);
-                if n > 0 {
-                    memory[segment.offset..segment.offset + n]
-                        .copy_from_slice(&bytes[copied..copied + n]);
-                    dirty(segment.offset, n);
-                    copied += n;
-                }
-                if copied == bytes.len() {
-                    break;
-                }
+            if reported == bytes.len() {
+                break;
             }
         }
         Ok(())
@@ -210,37 +183,24 @@ impl Console {
         mut dirty: impl FnMut(usize, usize),
     ) -> Result<Output> {
         let mut out = Output::default();
-        let mut batch_len = 0;
         if index == 1 || index == 3 {
             while let Some(chain) = self.chain(&transport.queues[index], memory, base, false)? {
                 let bytes = chain.read(memory)?;
-                if self.policy == Policy::Application && bytes.len() > LIMIT {
-                    return Err("console transmit chain too large".into());
-                }
                 if index == 3 {
                     self.control(&bytes)?;
                 } else {
-                    if self.policy == Policy::Application {
-                        self.tx_bytes = self
-                            .tx_bytes
-                            .checked_add(bytes.len() as u64)
-                            .ok_or("control transmit byte counter overflow")?;
-                    } else {
-                        if !self.port_ready || !self.guest_open {
-                            return Err("console transmit before port open".into());
-                        }
-                        if bytes.len() > LIMIT - batch_len {
-                            return Err("console transmit batch too large".into());
-                        }
-                        batch_len += bytes.len();
+                    if !self.port_ready || !self.guest_open {
+                        return Err("console transmit before port open".into());
                     }
+                    self.tx_bytes = self
+                        .tx_bytes
+                        .checked_add(bytes.len() as u64)
+                        .ok_or("control transmit byte counter overflow")?;
                     out.payloads.push(bytes);
                 }
                 transport.queues[index].complete_chain(memory, &chain, 0, &mut dirty);
                 out.irq = true;
-                if self.policy == Policy::Application {
-                    transport.isr |= 1;
-                }
+                transport.isr |= 1;
             }
         }
         out.irq |= self.drain(transport, memory, base, &mut dirty)?;
@@ -257,9 +217,6 @@ impl Console {
         bytes: &[u8],
         mut dirty: impl FnMut(usize, usize),
     ) -> Result<bool> {
-        if self.policy == Policy::Console && transport.status & crate::virtio_mmio::DRIVER_OK == 0 {
-            return Err("console driver not ready".into());
-        }
         if self
             .rx
             .len()
@@ -283,43 +240,30 @@ impl Console {
             let Some(chain) = self.chain(&transport.queues[2], memory, base, true)? else {
                 break;
             };
-            if self.policy == Policy::Console {
-                if chain.len < bytes.len() {
-                    return Err("console control receive buffer too small".into());
-                }
-                let bytes = self.control_rx.pop_front().expect("nonempty backlog");
-                self.copy_in(memory, &chain, &bytes, dirty)?;
-                transport.queues[2].complete_chain(memory, &chain, bytes.len(), &mut *dirty);
-            } else {
-                self.copy_in(memory, &chain, bytes, dirty)?;
-                transport.queues[2].complete_chain(memory, &chain, bytes.len(), &mut *dirty);
-                self.control_rx.pop_front();
-                transport.isr |= 1;
+            if chain.len < bytes.len() {
+                return Err("console control receive buffer too small".into());
             }
+            self.copy_in(memory, &chain, bytes, dirty)?;
+            transport.queues[2].complete_chain(memory, &chain, bytes.len(), &mut *dirty);
+            self.control_rx.pop_front();
+            transport.isr |= 1;
             irq = true;
         }
-        while !self.rx.is_empty()
-            && (self.policy == Policy::Application || self.port_ready && self.guest_open)
-        {
+        while !self.rx.is_empty() && (self.port_ready && self.guest_open) {
             let Some(chain) = self.chain(&transport.queues[0], memory, base, true)? else {
                 break;
             };
             let n = chain.len.min(self.rx.len());
-            let bytes: Vec<_> = if self.policy == Policy::Console {
-                self.rx.drain(..n).collect()
-            } else {
-                self.rx.iter().take(n).copied().collect()
-            };
+            let total = self
+                .rx_dma_bytes
+                .checked_add(n as u64)
+                .ok_or("control DMA byte counter overflow")?;
+            let bytes: Vec<_> = self.rx.iter().take(n).copied().collect();
             self.copy_in(memory, &chain, &bytes, dirty)?;
             transport.queues[0].complete_chain(memory, &chain, n, &mut *dirty);
-            if self.policy == Policy::Application {
-                self.rx_dma_bytes = self
-                    .rx_dma_bytes
-                    .checked_add(n as u64)
-                    .ok_or("control DMA byte counter overflow")?;
-                self.rx.drain(..n);
-                transport.isr |= 1;
-            }
+            self.rx_dma_bytes = total;
+            self.rx.drain(..n);
+            transport.isr |= 1;
             irq = true;
         }
         if irq {

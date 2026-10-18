@@ -406,6 +406,8 @@ fn cold_driver_factory(backend: seedbox_application::runtime_assets::Backend) {
     simulation
         .services
         .insert("side".into(), simulation.services["app"].clone());
+    // A per-machine RAM override reaches the retained Driver machine.
+    simulation.services.get_mut("side").unwrap().memory_mb = Some(512);
     let config = root.path().join("config");
     fs::write(&config, b"kept config").unwrap();
     simulation.configs.insert("settings".into(), config);
@@ -483,6 +485,15 @@ fn cold_driver_factory(backend: seedbox_application::runtime_assets::Backend) {
     assert_eq!(links[Path::new("app-link")], Path::new("/app"));
     assert_eq!(prepared.oracle.name, "app");
     assert_eq!(prepared.machines[0].name, "side");
+    assert_eq!(
+        inputs.machine_memory_mb,
+        BTreeMap::from([("side".into(), 512)])
+    );
+    assert_eq!(prepared.machines[0].memory_bytes, 512 << 20);
+    assert_eq!(
+        prepared.oracle.memory_bytes,
+        u64::from(simulation.machine.memory_mb) << 20
+    );
     assert_eq!(
         prepared.oracle.process.argv,
         inputs.images["app"].launch.argv

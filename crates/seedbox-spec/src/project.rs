@@ -26,6 +26,10 @@ pub struct Project {
     try_from = "MachineFields"
 )]
 pub struct Machine {
+    /// Guest RAM in MiB; omission uses the backend default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "memoryMiB")]
+    pub memory_mib: Option<NonZeroU32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,6 +50,8 @@ pub struct Machine {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MachineFields {
+    #[serde(rename = "memoryMiB")]
+    memory_mib: Option<NonZeroU32>,
     image: Option<String>,
     build: Option<Build>,
     entrypoint: Option<Vec<String>>,
@@ -75,6 +81,7 @@ impl TryFrom<MachineFields> for Machine {
             );
         }
         Ok(Self {
+            memory_mib: fields.memory_mib,
             image: fields.image,
             build: fields.build,
             entrypoint: fields.entrypoint,

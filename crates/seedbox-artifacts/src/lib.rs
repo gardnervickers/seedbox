@@ -1,6 +1,7 @@
-//! Offline retained-run storage, inspection, comparison and transfer.
+//! Retained-run storage, inspection, comparison and portable server archives.
 //! No image engine, asynchronous runtime or hypervisor dependency.
-pub mod bundle;
+pub mod archive;
+pub mod checkpoint;
 pub mod comparison;
 pub mod config;
 pub mod diff;

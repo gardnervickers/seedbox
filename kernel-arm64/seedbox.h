@@ -7,5 +7,7 @@
 u64 notrace seedbox_read(void);
 void __init seedbox_time_init(void);
 void seedbox_idle(void);
-void seedbox_syscall_progress(void);
+void notrace seedbox_cpu_relax(void);
+struct pt_regs;
+void seedbox_syscall_progress(struct pt_regs *regs, int scno);
 #endif

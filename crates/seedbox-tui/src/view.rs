@@ -150,7 +150,8 @@ fn rate(per_second: f64) -> String {
     }
 }
 
-fn latency(ns: u64) -> String {
+/// A link delay in milliseconds, or microseconds below one.
+pub fn latency(ns: u64) -> String {
     if ns >= 1_000_000 {
         format!("{}ms", ns as f64 / 1e6)
     } else {
@@ -602,6 +603,7 @@ fn footer(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
                     Panel::Faults => "faults",
                     Panel::Links => "links",
                     Panel::Logs => "logs",
+                    Panel::Oracle => "oracle",
                 };
                 push("tab", format!("focus: {panel}"));
                 push("v", "details".into());
@@ -678,12 +680,15 @@ fn help(frame: &mut Frame, app: &App, area: Rect) {
             ("h", "heal the selected (or oldest) active fault"),
             ("c / b", "checkpoint · branch from the newest checkpoint"),
             ("r", "rerun with the same retained inputs"),
-            ("tab", "move focus: machines · faults · logs"),
+            (
+                "tab",
+                "move focus: machines · faults · links · logs · oracle",
+            ),
             ("↑ ↓  j k", "move within the focused panel"),
             ("a", "show every machine's logs"),
             ("e", "switch logs and raw server events"),
             ("[ ]", "zoom the time bar out / in"),
-            ("PgUp PgDn", "scroll logs · End follows again"),
+            ("PgUp PgDn", "scroll logs or the oracle · End follows again"),
             ("v", "technical details and request payloads"),
             ("1 2 3", "catalogue · simulation · timeline"),
             ("q", "quit"),
@@ -740,8 +745,10 @@ fn simulation(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, now: Inst
         }
     }
     let wide = area.width >= 130 && area.height >= 34;
+    // Tall terminals give the time bar room for more lanes; what still does
+    // not fit is named on its last lane row.
     let timebar_height = if area.height >= 30 {
-        (lanes.len() as u16 + 4).clamp(5, 10)
+        (lanes.len() as u16 + 4).clamp(5, (area.height / 4).max(10))
     } else {
         (lanes.len() as u16 + 3).clamp(4, 5)
     };
@@ -827,7 +834,7 @@ fn simulation(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, now: Inst
     app.logs_exclude.replace(oracle.clone());
     app.hitboxes.borrow_mut().push((logs_area, HitTarget::Logs));
     if let (Some(name), Some(area)) = (&oracle, oracle_area) {
-        oracle_logs(frame, focus, name, area);
+        oracle_logs(frame, app, focus, name, area);
     }
     match failure {
         Some(inspector) => {
@@ -872,6 +879,7 @@ fn simulation(frame: &mut Frame, app: &App, focus: &Focus, area: Rect, now: Inst
         checkpoints: &focus.checkpoints,
         traffic: &focus.traffic.history,
         selected: focus.fault_selected.as_ref(),
+        selected_machine: focus.selected.as_deref(),
         now: sim_now,
         zoom: app.zoom,
         focused: app.panel == Panel::Faults,
@@ -2425,7 +2433,13 @@ fn logs(frame: &mut Frame, app: &App, focus: &Focus, area: Rect) {
 }
 
 /// The oracle's own output with its state and the simulation's verdict.
-fn oracle_logs(frame: &mut Frame, focus: &Focus, name: &str, area: Rect) {
+/// It scrolls like the log pane: rows back from the newest, 0 following.
+fn oracle_logs(frame: &mut Frame, app: &App, focus: &Focus, name: &str, area: Rect) {
+    let focused = app.panel == Panel::Oracle;
+    app.hitboxes.borrow_mut().push((area, HitTarget::Oracle));
+    let height = area.height.saturating_sub(2) as usize;
+    let rows = log_rows(focus, area.width.saturating_sub(2), LogScope::Only(name));
+    let scroll = app.oracle_scroll.min(rows.len().saturating_sub(height));
     let mut right = Vec::new();
     if let Some(m) = focus
         .world
@@ -2445,7 +2459,11 @@ fn oracle_logs(frame: &mut Frame, focus: &Focus, name: &str, area: Rect) {
     }
     let b = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(Color::Rgb(91, 63, 122)))
+        .border_style(Style::new().fg(if focused {
+            BORDER_HI
+        } else {
+            Color::Rgb(91, 63, 122)
+        }))
         .title(Line::from(vec![
             Span::styled(
                 format!(" {name} "),
@@ -2454,12 +2472,23 @@ fn oracle_logs(frame: &mut Frame, focus: &Focus, name: &str, area: Rect) {
             Span::styled("◆ ", Style::new().fg(MAGENTA)),
         ]))
         .title(Line::from(right).right_aligned());
-    let height = area.height.saturating_sub(2) as usize;
-    let rows = log_rows(focus, area.width.saturating_sub(2), LogScope::Only(name));
+    // The top border is full with the name, state and verdict.
+    let b = if scroll > 0 {
+        b.title_bottom(
+            Line::styled(
+                format!(" ↑ {scroll} rows back · End follows "),
+                Style::new().fg(AMBER),
+            )
+            .right_aligned(),
+        )
+    } else {
+        b
+    };
     let lines = if rows.is_empty() {
         vec![Line::styled("no oracle output yet", Style::new().fg(DIM))]
     } else {
-        rows[rows.len().saturating_sub(height)..].to_vec()
+        let end = rows.len() - scroll;
+        rows[end.saturating_sub(height)..end].to_vec()
     };
     frame.render_widget(Paragraph::new(lines).block(b), area);
 }
@@ -3689,6 +3718,64 @@ mod tests {
             let text = render_at(&app, width, height);
             assert!(text.contains(&format!(" of {} links", all.len())));
         }
+    }
+
+    #[test]
+    fn the_oracle_panel_scrolls_back_and_holds_still_while_output_arrives() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = app(&["a", "b", "oracle"]);
+        app.focus.as_mut().unwrap().selected = None;
+        let line = |sequence: u64| {
+            Update::Log(
+                "k7m2p9qx".parse().unwrap(),
+                LogDelivery::Entry {
+                    sequence,
+                    entry: LogEntry::Bytes {
+                        machine: "oracle".into(),
+                        incarnation: 0,
+                        simulated_time_ns: 0,
+                        stream: LogStream::Stdout,
+                        bytes: format!("step {sequence:03}\n").into_bytes(),
+                    },
+                },
+            )
+        };
+        for sequence in 1..=80 {
+            app.apply(line(sequence));
+        }
+        let press = |app: &mut App, code| {
+            app.input(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        };
+        let text = render(&app);
+        assert!(text.contains("step 080"));
+        // Tab reaches the oracle panel once it is shown.
+        while app.panel != Panel::Oracle {
+            press(&mut app, KeyCode::Tab);
+        }
+        press(&mut app, KeyCode::PageUp);
+        press(&mut app, KeyCode::PageUp);
+        press(&mut app, KeyCode::PageUp);
+        press(&mut app, KeyCode::PageUp);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.oracle_scroll, 41);
+        // The application log pane did not move.
+        assert_eq!(app.logs_scroll, 0);
+        let text = render(&app);
+        assert!(!text.contains("step 080"));
+        assert!(text.contains("step 039"));
+        assert!(text.contains("41 rows back"));
+        // New output does not move the rows being read.
+        app.apply(line(81));
+        assert_eq!(app.oracle_scroll, 42);
+        assert!(render(&app).contains("step 039"));
+        // Scrolling stops at the first row; End follows again.
+        for _ in 0..20 {
+            press(&mut app, KeyCode::PageUp);
+        }
+        assert!(render(&app).contains("step 001"));
+        press(&mut app, KeyCode::End);
+        assert_eq!(app.oracle_scroll, 0);
+        assert!(render(&app).contains("step 081"));
     }
 
     #[test]

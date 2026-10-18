@@ -606,3 +606,54 @@ fn minimal_project_resolves_oracle_and_limits_without_tuning() {
     ).unwrap_err();
     assert!(bad.to_string().contains("unsupported field"));
 }
+
+#[test]
+fn native_projects_resolve_memory_per_machine_and_validate_the_architecture_range() {
+    let document = "name: mixed\nmachines:\n  app: {image: example/app, memoryMiB: 2048}\noracle: {image: example/oracle, memoryMiB: 256}\n";
+    for architecture in [
+        seedbox_application::guest::Architecture::Amd64,
+        seedbox_application::guest::Architecture::Arm64,
+    ] {
+        let configuration = config::parse_for_architecture(
+            document,
+            Path::new("/project/seedbox.yaml"),
+            &Default::default(),
+            architecture,
+        )
+        .unwrap();
+        assert_eq!(configuration.services["app"].memory_mb, Some(2048));
+        assert_eq!(configuration.services["oracle"].memory_mb, Some(256));
+        assert_eq!(configuration.machine.memory_mb, 1024);
+        for memory in [0, 63, 65537] {
+            assert!(config::parse_for_architecture(
+                &document.replace("2048", &memory.to_string()),
+                Path::new("/project/seedbox.yaml"),
+                &Default::default(),
+                architecture
+            )
+            .is_err());
+        }
+    }
+    assert!(config::parse_for_architecture(
+        &document.replace("2048", "3073"),
+        Path::new("/project/seedbox.yaml"),
+        &Default::default(),
+        seedbox_application::guest::Architecture::Arm64
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("memoryMiB"));
+    let defaults = config::parse_for_architecture(
+        &document
+            .replace(", memoryMiB: 2048", "")
+            .replace(", memoryMiB: 256", ""),
+        Path::new("/project/seedbox.yaml"),
+        &Default::default(),
+        seedbox_application::guest::Architecture::Arm64,
+    )
+    .unwrap();
+    assert!(defaults
+        .services
+        .values()
+        .all(|service| service.memory_mb.is_none()));
+}

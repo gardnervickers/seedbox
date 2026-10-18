@@ -98,6 +98,18 @@ fn resolve_machine(
     architecture: crate::guest::Architecture,
     configs: &mut BTreeMap<String, PathBuf>,
 ) -> Result<Service> {
+    if let Some(memory) = machine.memory_mib {
+        let maximum = match architecture {
+            crate::guest::Architecture::Arm64 => 3072,
+            crate::guest::Architecture::Amd64 => 65536,
+        };
+        if !(64..=maximum).contains(&memory.get()) {
+            return invalid(
+                &format!("{path}.memoryMiB"),
+                format!("expected 64..{maximum} MiB"),
+            );
+        }
+    }
     let source = match (machine.image, machine.build) {
         (Some(reference), None) => ImageSource::Registry { reference },
         (None, Some(build)) => {
@@ -175,6 +187,7 @@ fn resolve_machine(
         });
     }
     Ok(Service {
+        memory_mb: machine.memory_mib.map(|memory| memory.get()),
         source,
         platform: architecture.platform().into(),
         entrypoint: machine.entrypoint,

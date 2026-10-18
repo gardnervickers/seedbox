@@ -234,8 +234,7 @@ pub(crate) fn request(
         };
         let process_changed = machine.process != process;
         machine.process = process;
-        machine.memory_bytes =
-            u64::from(request.prepared.profile.semantic_parameters.memory_mb) * 1024 * 1024;
+        machine.memory_bytes = u64::from(request.prepared.memory_mb(&machine.name)) * 1024 * 1024;
         let digest = request
             .prepared
             .guests

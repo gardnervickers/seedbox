@@ -213,6 +213,7 @@ fn retained_profile_drift_is_refused_before_reading_runtime_or_launching_workers
         }
         let digest = crate::store::ContentDigest::of(b"unread fixture");
         let inputs = PreparedInputs {
+            machine_memory_mb: Default::default(),
             wall_clock_epoch: None,
             kernel: digest,
             images: Default::default(),

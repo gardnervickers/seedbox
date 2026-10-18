@@ -292,6 +292,7 @@ impl Drop for FailureCleanup {
 fn request(store: &ContentStore) -> SubmitRequest {
     let binary = store.put(b"process-only-catalogue-input").unwrap();
     let inputs = PreparedInputs {
+        machine_memory_mb: Default::default(),
         wall_clock_epoch: Some(86_400),
         kernel: binary.clone(),
         images: BTreeMap::from([(

@@ -168,6 +168,11 @@ impl ContentStore {
     /// the same bytes unsynced again replaces such an object. Inputs
     /// that later runs replay from keep using the synced `put*` calls. With
     /// `with_ephemeral_evidence`, these objects live only in the session store.
+    /// Stream session-owned evidence without promoting it into the binary cache.
+    pub fn put_reader_unsynced(&self, reader: impl Read) -> Result<ContentDigest> {
+        self.put_reader_with(reader, false)
+    }
+
     pub fn put_unsynced(&self, bytes: &[u8]) -> Result<ContentDigest> {
         self.put_reader_with(bytes, false)
     }

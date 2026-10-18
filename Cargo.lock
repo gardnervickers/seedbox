@@ -1840,6 +1840,7 @@ dependencies = [
  "libc",
  "seedbox-api",
  "seedbox-application",
+ "seedbox-artifacts",
  "seedbox-cli",
  "seedbox-client",
  "seedbox-engine-core",
@@ -1909,6 +1910,9 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "libc",
+ "seedbox-api",
+ "seedbox-control",
+ "seedbox-engine-core",
  "seedbox-engine-protocol",
  "seedbox-exec",
  "seedbox-spec",
@@ -1964,11 +1968,14 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "getrandom 0.4.3",
+ "hex",
  "reqwest",
  "seedbox-api",
  "seedbox-test-time",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror",
  "tokio",
 ]

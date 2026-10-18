@@ -46,7 +46,7 @@ pub fn resolve(
             anonymous_volumes: image.launch.volumes.clone(),
             name: (name == oracle_name).then(|| name.clone()),
             boot_archive: asset(boot),
-            memory_bytes: u64::from(inputs.profile.semantic_parameters.memory_mb) * 1024 * 1024,
+            memory_bytes: u64::from(inputs.memory_mb(name)) * 1024 * 1024,
             process: Process {
                 argv: image.launch.argv.clone(),
                 environment: image.launch.environment.clone(),
@@ -176,6 +176,7 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
     let mut images = BTreeMap::new();
     let mut guests = BTreeMap::new();
     let mut placement = BTreeMap::new();
+    let mut machine_memory_mb = BTreeMap::new();
     for (name, machine) in definition
         .machines
         .iter()
@@ -185,10 +186,19 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
             &definition.oracle,
         )))
     {
-        if machine.memory_bytes != definition.oracle.memory_bytes {
-            return Err(Error::Setup(
-                "this backend requires equal memoryBytes for every machine".into(),
-            ));
+        if machine.memory_bytes == 0 || !machine.memory_bytes.is_multiple_of(1024 * 1024) {
+            return Err(Error::Setup(format!(
+                "machine {name}: memoryBytes must be a positive whole number of MiB"
+            )));
+        }
+        let memory_mb = u32::try_from(machine.memory_bytes / (1024 * 1024)).map_err(|_| {
+            Error::Setup(format!(
+                "machine {name}: memoryBytes exceeds supported memory"
+            ))
+        })?;
+        crate::preparation::validate_machine_memory(&profile, name, memory_mb)?;
+        if memory_mb != profile.semantic_parameters.memory_mb {
+            machine_memory_mb.insert(name.into(), memory_mb);
         }
         for volume in machine.volumes.values() {
             if volume.size_bytes != crate::execution::VOLUME_DISK_MIB * 1024 * 1024 {
@@ -236,6 +246,7 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
         .transpose()?
         .unwrap_or_default();
     let inputs = PreparedInputs {
+        machine_memory_mb,
         wall_clock_epoch: Some(definition.clock.epoch_seconds),
         kernel: digest(&definition.runtime.kernel)?,
         images,
@@ -475,6 +486,7 @@ mod tests {
         )
         .unwrap();
         let inputs = PreparedInputs {
+            machine_memory_mb: Default::default(),
             wall_clock_epoch: Some(86400),
             kernel: store.put(b"kernel").unwrap(),
             images: BTreeMap::from([(
@@ -527,6 +539,39 @@ mod tests {
                 .to_string()
                 .contains("inconsistent Driver backend metadata"));
             assert!(!output.exists());
+        }
+    }
+
+    #[test]
+    fn mixed_memory_roundtrips_through_saved_definitions_and_prepared_inputs() {
+        let (_temporary, store, mut definition, _) = fixture();
+        let mut app = definition.oracle.clone();
+        app.name = None;
+        app.memory_bytes = 2048 * 1024 * 1024;
+        definition.machines.insert("app".into(), app);
+        definition.oracle.memory_bytes = 256 * 1024 * 1024;
+        let saved: Definition =
+            serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&definition).unwrap()).unwrap();
+        let inputs = prepared(&saved, &store).unwrap();
+        assert_eq!(inputs.memory_mb("app"), 2048);
+        assert_eq!(inputs.memory_mb("oracle"), 256);
+        assert_eq!(
+            inputs.machine_memory_mb,
+            BTreeMap::from([("app".into(), 2048)])
+        );
+        let configuration = saved.configuration("mixed").unwrap();
+        assert_eq!(configuration.services["app"].memory_mb, Some(2048));
+        assert_eq!(configuration.services["oracle"].memory_mb, Some(256));
+        let resolved =
+            resolve(&configuration, &inputs, saved.seed, saved.overrides.clone()).unwrap();
+        assert_eq!(
+            resolved.machines["app"].memory_bytes,
+            saved.machines["app"].memory_bytes
+        );
+        assert_eq!(resolved.oracle.memory_bytes, saved.oracle.memory_bytes);
+        for memory in [0, 64 * 1024 * 1024 + 1, 65537 * 1024 * 1024] {
+            definition.machines.get_mut("app").unwrap().memory_bytes = memory;
+            assert!(prepared(&definition, &store).is_err(), "{memory}");
         }
     }
     #[test]

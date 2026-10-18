@@ -9,8 +9,7 @@ Changes that touch the user interface must include screenshots in the PR
 showing what changed. This includes TUI screens and user-facing CLI output.
 Capture and inspect the changed interface; include before/after views when they
 help explain the change. Label fixture or test-rendered screenshots clearly.
-Every PR must reference its originating issue. Use `Closes #N` only when the
-issue is fully resolved; otherwise use `Refs #N`. Keep PR descriptions short.
+Keep PR descriptions short.
 Open review-ready PRs as non-drafts; reviews and merges go through the user.
 
 ## Workspace
@@ -110,17 +109,18 @@ length, direction and diagnostic policy. ARM queue field names and serialization
 order remain part of retained state evidence. KVM console and block completion
 feed every used-ring write to their existing dirty-range journals; do not drop
 or reorder those entries. The shared MMIO transport serves ARM devices and KVM
-console/block/network; its compatibility profiles are defined in
-`crates/seedbox-engine-core/src/virtio_mmio.rs`. Preserve error precedence, cursor resets and the
+console/block/network; its adapter identities and common register contract are
+defined in `crates/seedbox-engine-core/src/virtio_mmio.rs`. Preserve error
+precedence, cursor resets and the
 explicit ARM state projection. Adapters handle typed Notify/Reset effects and
 retain model-reset ownership. The shared console owns handshake, backlogs, counters
 and queue processing; adapters supply GPA base, dirty callbacks and event projection.
 Preserve partial-error mutation and IRQ timing in `virtio_console.rs`.
-The shared block model owns request decoding, disk effects and DMA, with descriptor
-profiles and partial-error semantics in `virtio_block.rs`. Use explicit disk
+The shared block model owns request decoding, disk effects and DMA, with shared
+descriptor admission and completed-prefix semantics in `virtio_block.rs`. Use explicit disk
 and statistics accessors in platform callers.
-The shared network model owns packet DMA, backlogs and counters; preserve the
-profile-specific admission, partial-error and IRQ order in `virtio_network.rs`.
+The shared network model owns packet DMA, backlogs and counters; use the common
+admission and completed-prefix contract in `virtio_network.rs`.
 The x86 PV watchdog (`machine/pv.rs`) is a diagnostic: it interrupts a run
 with no exit to report where the guest is and resumes it, and must never
 publish a plan, inject an interrupt or adopt guest time at that landing.
@@ -248,7 +248,8 @@ The CLI lives in `crates/seedbox-cli/src/`:
 - `output.rs`: status lines, `key: value` fields and their value formats.
 - `defaults.rs`: how each runtime input is found when no flag is given.
 - `backends.rs`: platform backend selection and guest-asset lookup.
-- `diagnostics.rs`: excerpts of local execution diagnostics for text output.
+- `diagnostics.rs`: completed server-owned raw console/management/worker evidence.
+- `bundles.rs`: server export/import and atomic no-clobber output publication.
 - `signals.rs`: cancellation.
 - `simulations.rs`: server-client commands and durable control receipts.
 - `observe.rs`: read-only observation (`logs`, `events`, `get world`, `get timeline`, `wait`).
@@ -269,12 +270,14 @@ deliberately change one.
 - Required flags are a last resort. Every runtime input needs a sensible
   default or a search, so `seedbox run` works with no arguments on a set-up
   host. The only required inputs are those with no possible default (`init
-  DIRECTORY`, `prepare --output`, `diff RUN_A RUN_B`).
-- A command's main object is positional: the Compose path (default `.`,
-  and a directory resolves to its `compose.yaml`), a simulation ID, or an offline run directory.
+  DIRECTORY`, `prepare --output`, `compare BASELINE SIMULATION`, `import BUNDLE`).
+- A command's main object is positional: the project path (default `.`,
+  and a directory resolves to its `seedbox.yaml`), a simulation ID, or an import bundle file.
   `run`, `explore`, `rerun` and `replay` submit through the server; clients never
   launch execution directly. `replay ID` reruns then compares; `rerun ID` reports
-  the oracle verdict. Offline bundle catalogue import is still pending.
+  the oracle verdict. `export ID` saves a completed resolved resource; `import BUNDLE`
+  registers a fresh independent completed resource without executing it. Imports
+  are non-idempotent; never automatically retry an uncertain upload.
 - Flags are long kebab-case. Don't add short flags except `-o`/`-h`/`-V`.
   Boolean flags are presence-only (`--json`, `--detach`).
 - A choice from a fixed set uses `#[derive(ValueEnum)]` with a doc comment on
@@ -322,7 +325,7 @@ complete Driver-package relocation, with a host-architecture subdirectory.
   options, "Runtime inputs", and "Performance (never changes results)". A flag
   takes the heading of the group declared before it, so flatten
   general-purpose groups (`StateArg`) before `RuntimeInputs`.
-- `run`, `replay` and `diff` show `EXIT_CODES` in `after_help`.
+- `run`, `replay` and `compare` show `EXIT_CODES` in `after_help`.
 - Check the result with `cargo run -- help <command>`.
 
 ### Output
@@ -343,7 +346,9 @@ complete Driver-package relocation, with a host-architecture subdirectory.
   Logs keep bounded history in a shared 64 MiB server budget and events in their
   own 16 MiB budget, for completed simulations too. Observation commands never
   block by default; `wait ID --for CONDITION` is the explicit way to block.
-  The legacy `retained-logs RUN` reader retains its single JSON document contract.
+  `diagnostics ID [NAME]` lists completed raw evidence or streams the exact retained
+  file bytes. Its `--json` prints one metadata or lossless hex-payload document.
+  Diagnostic names are allowlisted record keys, never client host paths.
 - `run` and `rerun` print `OUTCOME: simulation-id`; detached submission prints
   `CREATED: simulation-id`. `replay` and `compare` print
   `MATCH|MISMATCH|NOT_COMPARABLE: simulation-id`. Exactly one status line is
@@ -397,6 +402,9 @@ images or executes guests. Compatibility readiness is not replay qualification.
 
 ## Current stage
 
+Obsolete formats, APIs and CLI commands are replaced outright. There is no backward
+compatibility requirement; do not add legacy readers, aliases or migration shims.
+
 - Seedbox is under heavy development. Don't add pins, allowlists,
   qualification lists, admission policies, provenance markers or similar
   gates; #142 and #143 removed the engine, kernel, CPU and host-policy pins.
@@ -412,8 +420,10 @@ images or executes guests. Compatibility readiness is not replay qualification.
   application-specific flags or environment overrides to make replay succeed.
   ARM uses guest-epoch software exclusive reservations; host interruptions and
   backend maintenance must not advance their epoch. Keep the shared PV word,
-  kernel EL0 return hook and translator commit checks aligned. Kernel polling
-  without PV progress remains a limitation documented in `docs/internals.md`.
+  kernel EL0 return hook and translator commit checks aligned. The Driver's
+  x86 kernel polling through `cpu_relax` makes bounded PV progress; other
+  kernel polling and raw assembly retry loops remain outside that coverage
+  (see `docs/internals.md`).
   `.github/workflows/pv-tests.yml` runs its checks on GitHub-hosted Ubuntu
   x86-64 runners.
 - `crates/seedbox-vmm` builds only on Linux x86-64, so a Mac pre-check covers

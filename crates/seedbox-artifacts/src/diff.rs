@@ -621,6 +621,7 @@ struct PageFile {
 fn page_file(
     directory: &Path,
     evidence: &Evidence,
+    machine_name: &str,
     machine: &Machine,
     name: &str,
 ) -> Result<Option<PageFile>> {
@@ -653,13 +654,7 @@ fn page_file(
         {
             return Err(bad(directory, "physical RAM-region metadata is missing"));
         }
-        let memory_mb = evidence
-            .record
-            .identity
-            .inputs
-            .profile
-            .semantic_parameters
-            .memory_mb;
+        let memory_mb = evidence.record.identity.inputs.memory_mb(machine_name);
         if memory_mb == 0 {
             return Err(bad(directory, "page hashes require recorded memory_mb"));
         }
@@ -696,8 +691,8 @@ fn ram_pages(a: &Path, left: &Evidence, b: &Path, right: &Evidence) -> Result<Ra
         }
         let name = x.page_log.clone().unwrap_or_else(|| page_hash_log(machine));
         let other_name = y.page_log.clone().unwrap_or_else(|| page_hash_log(machine));
-        let x = page_file(a, left, x, &name)?;
-        let y = page_file(b, right, y, &other_name)?;
+        let x = page_file(a, left, machine, x, &name)?;
+        let y = page_file(b, right, machine, y, &other_name)?;
         if let (Some(x), Some(y)) = (x, y) {
             if x.regions != y.regions {
                 return Err(bad(a, "compared page-hash physical RAM layouts differ"));

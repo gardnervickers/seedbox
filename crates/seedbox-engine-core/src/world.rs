@@ -271,6 +271,16 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
 
     fn supports_speed_reseed(&self) -> bool;
     fn seed_speed(&mut self, seed: u64, domain: &str) -> Result<(), String>;
+    /// Restart the stream the guest kernel draws progress jitter from, at a
+    /// time fork (`seed_progress_jitter`) or in a checkpoint branch and at a
+    /// reboot (`seed_progress_jitter_branch`), next to the timer stream.
+    fn seed_progress_jitter(&mut self, seed: u64, domain: &str) -> Result<(), String>;
+    fn seed_progress_jitter_branch(
+        &mut self,
+        seed: u64,
+        identity: Option<&str>,
+        domain: &str,
+    ) -> Result<(), String>;
     /// Whether `throttle` can scale this machine's CPU cost.
     fn supports_throttle(&self) -> bool {
         false
@@ -985,11 +995,20 @@ pub(crate) fn crash_machine<M: WorldMachine>(
         );
         // A failed constructor owns cleanup of any partially booted worker.
         let mut fresh = M::boot(factory, &name, boot, false, seed)?;
-        if let Err(mut error) = fresh.seed_timer_branch(
-            run_seed,
-            branch_identity,
-            &format!("timer-jitter/{name}/{next}"),
-        ) {
+        if let Err(mut error) = fresh
+            .seed_timer_branch(
+                run_seed,
+                branch_identity,
+                &format!("timer-jitter/{name}/{next}"),
+            )
+            .and_then(|()| {
+                fresh.seed_progress_jitter_branch(
+                    run_seed,
+                    branch_identity,
+                    &format!("progress-jitter/{name}/{next}"),
+                )
+            })
+        {
             note_cleanup(&mut error, "fresh", fresh.terminate_worker());
             return Err(error);
         }
@@ -1241,6 +1260,7 @@ pub fn release_plan<M: WorldMachine>(
         }
         reseed.insert(names[i].clone(), json!(how.as_str()));
         mach.seed_timer(seed, &format!("timer-jitter/{}", names[i]))?;
+        mach.seed_progress_jitter(seed, &format!("progress-jitter/{}", names[i]))?;
         if mach.supports_speed_reseed() {
             mach.seed_speed(seed, &format!("pv-speed/{}", names[i]))?;
         }
@@ -1285,6 +1305,11 @@ pub fn reseed_checkpoint<M: WorldMachine>(
             seed,
             Some(identity),
             &format!("timer-jitter/{name}/{}", mach.incarnation),
+        )?;
+        mach.seed_progress_jitter_branch(
+            seed,
+            Some(identity),
+            &format!("progress-jitter/{name}/{}", mach.incarnation),
         )?;
         let status = if mach.down || matches!(mach.state, State::Exited(_)) {
             "not_up"

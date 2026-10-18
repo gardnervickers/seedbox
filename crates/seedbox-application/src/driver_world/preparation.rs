@@ -199,7 +199,15 @@ impl OciBootFactory {
             let definition = MachineDefinition {
                 name: request.name.into(),
                 resources: Resources {
-                    memory_bytes: u64::from(request.simulation.machine.memory_mb) * 1024 * 1024,
+                    memory_bytes: u64::from(
+                        request
+                            .simulation
+                            .services
+                            .get(request.name)
+                            .and_then(|service| service.memory_mb)
+                            .unwrap_or(request.simulation.machine.memory_mb),
+                    ) * 1024
+                        * 1024,
                 },
                 application: PreparedApplication {
                     filesystem,
@@ -352,7 +360,7 @@ pub fn retain_oci_prepared(
                 "OCI preparation did not produce a complete Linux boot archive".into(),
             ));
         }
-        let memory_bytes = u64::from(inputs.profile.semantic_parameters.memory_mb) * 1024 * 1024;
+        let memory_bytes = u64::from(inputs.memory_mb(name)) * 1024 * 1024;
         if memory_bytes < super::boot::minimum_memory(bytes.len() as u64)? {
             return Err(Error::Execution(format!(
                 "service {name}: guest RAM is below the actual Driver archive boot floor"

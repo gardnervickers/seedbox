@@ -398,6 +398,7 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
     })).unwrap();
     let digest = store.put(&history.encode().unwrap()).unwrap();
     let inputs = PreparedInputs {
+        machine_memory_mb: Default::default(),
         wall_clock_epoch: None,
         kernel: digest.clone(),
         images: Default::default(),

@@ -513,6 +513,7 @@ fn fixture_submission(
     let mut semantic = SemanticParameters::new(memory_mb);
     semantic.engine = Some(DriverExecutor::descriptor(backend, "x86_64"));
     let mut inputs = PreparedInputs {
+        machine_memory_mb: Default::default(),
         wall_clock_epoch: Some(946_684_800),
         kernel: store.put_file(&assets.join("kernel")).unwrap(),
         images: BTreeMap::from([(
@@ -1814,6 +1815,7 @@ fn network_world_submission(
         });
     }
     let mut inputs = PreparedInputs {
+        machine_memory_mb: Default::default(),
         wall_clock_epoch: Some(946_684_800),
         kernel: store.put_file(&assets.join("kernel")).unwrap(),
         placement: guests

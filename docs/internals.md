@@ -772,3 +772,64 @@ use identical resolved inputs, including the initial clock.
 
 Code: [Rust test coordinator](../crates/seedbox-check/src/main.rs),
 [Cargo aliases](../.cargo/config.toml).
+## Portable simulation archives
+
+The server captures a completed resolved resource under the same evidence lock
+used by deletion and comparison. Export spools a binary tar before streaming it;
+the client spools downloads and atomically links the completed file into a pinned
+parent directory without replacing files or symlinks. Import spools the upload,
+validates a strict manifest and digest closure in an isolated store, then publishes
+a fresh completed catalogue resource without admitting execution. No archive name
+or original attempt path is followed as a host path. The sole format is
+`seedbox-simulation-v1`; obsolete formats have no compatibility reader.
+
+Export staging uses a pinned private directory; ownership, permissions and absence
+of extended ACLs must be verified before payload creation. Cleanup unlinks only a
+successfully created exclusive payload. Automatic directory removal is limited to
+current-user-owned output parents with no group/other write bits and proven absent
+ACLs, excluding same-UID/root mutation from the threat boundary. An identity check
+avoids already-substituted names; it is not an atomic stat/remove guarantee.
+Shared or unprovable parents retain an empty staging directory after payload cleanup
+and emit a lowercase stderr warning for manual inspection/removal. Rejected or
+unopenable staging directories never receive destructive cleanup. Unsupported ACL
+inspection is conservative; inherited staging ACLs are rejected, never modified.
+
+The HTTP/client wire bound defaults to 64 GiB, including tar headers, padding and
+end blocks. Manifest metadata is bounded (16 MiB); large assets and diagnostic
+payloads use bounded buffers and disk spools. Transfers are not resumable or
+idempotent. After a full upload, disconnect/cancellation cannot guarantee that
+import was not accepted; clients never automatically retry it. Failed validation
+publishes no resource, but verified cache objects may remain after publication
+failure. This is not cache pruning.
+
+Logs and events preserve their independent aggregate/per-machine sequences,
+source unavailability and delivery gaps. Restoration uses the shared 64 MiB log
+and 16 MiB event budgets, so importing can evict older observations. Frames are
+not retained. Raw diagnostic names, digests and omission reasons come from the
+retained record; file access uses only exact allowlisted keys, verifies the digest
+while spooling under the evidence lock, then streams the spool. `diagnostics ID NAME`
+prints raw bytes; its JSON document contains the descriptor and lossless hex bytes.
+It is distinct from time-filtered application `logs ID`.
+
+Checkpoint definitions include captured binary state independently of the source.
+Projection validates the frozen intervention history against the captured consumed
+input prefix, including admissions and rejections, before merging external
+overrides. Only the pending suffix can change: the cursor, consumed prefix,
+assigned fault IDs and captured world state cannot. Effects scheduled for later
+by already-admitted inputs remain consumed; oracle calls are not reinjected.
+Unavailable captures remain explicit receipts, not fabricated checkpoints.
+
+Server comparison uses complete resolved execution definitions plus ordered
+external overrides. It ignores only image reference provenance, descriptive
+EngineDescriptor version/platform/backend/timebase fields, and HVF host release
+and CPU features. Actual architecture/backend, runtime asset digests, engine launch
+kind/owner-pipe/live-observation settings, clock, policies, configuration, overrides
+and checkpoint state/cursor/assets still participate. Original records are not
+rewritten. Compatible inputs still need actual witness/full-state/fault evidence;
+missing evidence yields NOT_COMPARABLE and differing results yield MISMATCH.
+
+Code: [archives](../crates/seedbox-artifacts/src/archive.rs),
+[checkpoint projection](../crates/seedbox-artifacts/src/checkpoint.rs),
+[server bundles](../crates/seedbox-server/src/execution/bundles.rs),
+[comparison](../crates/seedbox-server/src/execution.rs),
+[client transfers](../crates/seedbox-client/src/transfers.rs).

@@ -215,6 +215,17 @@ impl WorldMachine for Mock {
     fn seed_speed(&mut self, _: u64, _: &str) -> Result<(), String> {
         Ok(())
     }
+    fn seed_progress_jitter(&mut self, _: u64, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn seed_progress_jitter_branch(
+        &mut self,
+        _: u64,
+        _: Option<&str>,
+        _: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     fn supports_throttle(&self) -> bool {
         self.throttleable
     }

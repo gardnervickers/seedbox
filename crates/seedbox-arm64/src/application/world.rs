@@ -209,7 +209,13 @@ pub fn run(options: &Options) -> Result<Value> {
     if cfg.machines.is_empty() || cfg.machines.len() > 254 {
         return Err("world requires 1..254 machines".into());
     }
-    if !(64..=3072).contains(&cfg.mem_mb) || cfg.duration_ns == 0 || cfg.duration_ns == u64::MAX {
+    if cfg
+        .machines
+        .iter()
+        .any(|machine| !(64..=3072).contains(&machine.memory_mb(&cfg)))
+        || cfg.duration_ns == 0
+        || cfg.duration_ns == u64::MAX
+    {
         return Err("invalid ARM memory or duration".into());
     }
     if cfg.timer_jitter_ns > 3_600_000_000_000 {
@@ -311,7 +317,7 @@ pub fn run(options: &Options) -> Result<Value> {
             kernel: base.join(&cfg.kernel),
             initrd: base.join(&m.initrd),
             seed: entropy.next(),
-            memory_bytes: cfg.mem_mb * 1024 * 1024,
+            memory_bytes: m.memory_mb(&cfg) * 1024 * 1024,
             command_line,
             mac,
             disk_image: m
@@ -325,6 +331,13 @@ pub fn run(options: &Options) -> Result<Value> {
                 seed: options.seed,
                 domain: format!("timer-jitter/{}", m.name),
                 jitter_ns: cfg.timer_jitter_ns,
+            }),
+            progress: Some(super::Progress {
+                speed_hz: m.cpu_speed_hz,
+                ns: m.progress_ns,
+                jitter_ns: m.progress_jitter_ns,
+                seed: crate::rng::Rng::new(options.seed, &format!("progress-jitter/{}", m.name))
+                    .next(),
             }),
         };
         machines.push(ArmMachine::boot(

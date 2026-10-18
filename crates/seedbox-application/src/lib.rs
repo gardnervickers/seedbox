@@ -6,7 +6,6 @@
 
 pub mod admission;
 mod build_context;
-pub use seedbox_artifacts::bundle;
 pub mod config;
 pub mod container_images;
 pub mod definition;
