@@ -503,6 +503,7 @@ fn nemesis(
                 break;
             }
             Mode::PauseRandomMember => {
+                rng.refresh();
                 let target = *rng.choice(&MEMBERS);
                 let leader = leader_member(0.5);
                 let mut serving = Serving { server, store };

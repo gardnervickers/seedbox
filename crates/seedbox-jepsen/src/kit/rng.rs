@@ -16,18 +16,20 @@ fn splitmix(seed: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// A 32-bit seed from the operating system's entropy (`/dev/urandom`); in a
-/// Seedbox guest this is the simulation's seeded stream.
-pub fn entropy_seed() -> u64 {
+/// `N` bytes of the operating system's entropy (`/dev/urandom`), if it has
+/// any; in a Seedbox guest this is the simulation's seeded stream.
+fn entropy<const N: usize>() -> Option<[u8; N]> {
     use std::io::Read;
-    let mut bytes = [0u8; 4];
-    if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
-        if file.read_exact(&mut bytes).is_ok() {
-            return u64::from(u32::from_le_bytes(bytes));
-        }
-    }
+    let mut bytes = [0u8; N];
+    let mut file = std::fs::File::open("/dev/urandom").ok()?;
+    file.read_exact(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+/// A 32-bit seed from the operating system's entropy.
+pub fn entropy_seed() -> u64 {
     // No entropy device: a fixed seed keeps the run reproducible.
-    1
+    entropy::<4>().map_or(1, |bytes| u64::from(u32::from_le_bytes(bytes)))
 }
 
 impl Rng {
@@ -41,6 +43,22 @@ impl Rng {
                 splitmix(&mut s),
             ],
         }
+    }
+
+    /// Mix fresh operating-system entropy into the state, so every later draw
+    /// depends on it. Nemeses call this before each fault decision. A branch
+    /// from a checkpoint restores this generator with the rest of the guest,
+    /// and a branch's reseed reaches the guest's entropy, so the decisions after
+    /// a refresh differ from the parent's. Without an entropy device this does
+    /// nothing.
+    pub fn refresh(&mut self) {
+        if let Some(bytes) = entropy::<8>() {
+            self.mix(u64::from_le_bytes(bytes));
+        }
+    }
+
+    fn mix(&mut self, word: u64) {
+        *self = Self::new(self.next_u64() ^ word);
     }
 
     /// A generator for one of several independent streams of one seed.
@@ -153,6 +171,18 @@ mod tests {
         };
         assert_eq!(draws(7), draws(7));
         assert_ne!(draws(7), draws(8));
+    }
+
+    #[test]
+    fn mixed_entropy_decides_later_draws() {
+        let after = |word| {
+            let mut rng = Rng::new(7);
+            rng.mix(word);
+            rng.next_u64()
+        };
+        assert_eq!(after(1), after(1));
+        assert_ne!(after(1), after(2));
+        assert_ne!(after(1), Rng::new(7).next_u64());
     }
 
     #[test]

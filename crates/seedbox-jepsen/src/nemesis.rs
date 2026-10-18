@@ -173,12 +173,14 @@ pub fn kill_restart(
     let end = Instant::now() + std::time::Duration::from_secs_f64(hold.max(0.0));
     let mut rounds = 0;
     while Instant::now() < end {
+        rng.refresh();
         let subset = *rng.choice(&Subset::ALL);
         let victims = pick(rng, nodes, subset);
         before();
         step_with(ctl, "stop", &victims, json!({"subset": subset.name()}))?;
         pace.wait(ctl, rng.seconds(down.0, down.1));
         step(ctl, "restart", &victims)?;
+        rng.refresh();
         pace.wait(ctl, rng.seconds(up.0, up.1));
         rounds += 1;
     }
@@ -201,6 +203,7 @@ pub fn random_pauses(
     let end = Instant::now() + std::time::Duration::from_secs_f64(hold.max(0.0));
     let mut count = 0;
     while Instant::now() < end {
+        rng.refresh();
         let target = *rng.choice(nodes);
         step_with(ctl, "pause_process", &[target], context(target))?;
         pace.wait(ctl, length);
@@ -227,6 +230,7 @@ pub fn partitions(
     let end = Instant::now() + std::time::Duration::from_secs_f64(hold.max(0.0));
     let mut count = 0;
     while Instant::now() < end {
+        rng.refresh();
         let leader_name = if split == Split::Leader {
             leader()
         } else {
@@ -247,6 +251,7 @@ pub fn partitions(
         pace.wait(ctl, rng.seconds(length.0, length.1));
         heal(ctl, &handle)?;
         count += 1;
+        rng.refresh();
         pace.wait(ctl, rng.seconds(gap.0, gap.1));
     }
     Ok(count)
@@ -399,6 +404,7 @@ pub fn crash_all_repeatedly(
         let mut pace = Sleep;
         let mut rng = Rng::new(crate::kit::rng::entropy_seed());
         loop {
+            rng.refresh();
             let gap = rng.uniform(0.5, 1.5) * every;
             let tail = down + startup_partition + 3.0;
             if start.elapsed().as_secs_f64() + gap + tail > end {
@@ -409,6 +415,7 @@ pub fn crash_all_repeatedly(
                 evidence("nemesis-failed", json!({"error": error.0}));
             }
             if startup_partition > 0.0 {
+                rng.refresh();
                 pace.wait(&mut ctl, rng.uniform(0.05, 0.4));
                 let (left, right) = isolate(rng.choice(&nodes), &nodes);
                 match cut(&mut ctl, &left, &right, json!({"startup": true})) {

@@ -548,6 +548,7 @@ fn crash_repeatedly(args: Args, started: Instant) -> Option<thread::JoinHandle<(
         let host = args.host.as_str();
         let mut crashes = 0;
         loop {
+            rng.refresh();
             let gap = rng.uniform(0.5, 1.5) * args.crash_every;
             if started.elapsed().as_secs_f64() + gap + args.crash_down + 3.0 > args.duration {
                 break;

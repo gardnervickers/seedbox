@@ -530,11 +530,13 @@ fn run_nemesis(
 ) -> kit::Result<u64> {
     let mut faults = 0;
     loop {
+        nemesis.rng.refresh();
         let gap = nemesis.rng.uniform(0.5, 1.5) * nemesis.args.interval;
         pace.wait(ctl, gap);
         if Instant::now() >= end {
             break;
         }
+        nemesis.rng.refresh();
         let kind = nemesis.rng.choice(&nemesis.kinds).clone();
         let undo = nemesis.apply(ctl, &kind)?;
         faults += 1;

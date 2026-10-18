@@ -243,6 +243,7 @@ fn end_partition(
             left: left.clone(),
             right: right.clone(),
         });
+        rng.refresh();
         let cut = rng.uniform(args.cut.0, args.cut.1);
         let recent = pace
             .history
@@ -262,6 +263,7 @@ fn end_partition(
             json!({"action": "heal", "targets": [[args.client], brokers]}),
         );
         faults += 1;
+        rng.refresh();
         pace.wait(ctl, rng.uniform(args.gap.0, args.gap.1));
     }
     Ok(faults)
@@ -281,6 +283,7 @@ fn jepsen_mix(
         if Instant::now() >= end {
             break;
         }
+        rng.refresh();
         let length = rng.uniform(2.0, 10.0);
         let target = *rng.choice(brokers);
         let rounded = (length * 1000.0).round() / 1000.0;
@@ -336,6 +339,7 @@ fn crash_all_every(
 ) -> kit::Result<u64> {
     let mut crashes = 0;
     loop {
+        rng.refresh();
         let gap = rng.uniform(0.5, 1.5) * args.crash_all_every;
         let tail = Duration::from_secs_f64(gap + args.crash_all_down + 5.0);
         if Instant::now() + tail > end {
@@ -396,10 +400,12 @@ fn controller_faults(
 ) -> kit::Result<u64> {
     let mut faults = 0;
     while Instant::now() < end {
+        rng.refresh();
         pace.wait(ctl, rng.uniform(0.5, 1.5) * args.interval);
         if Instant::now() >= end {
             break;
         }
+        rng.refresh();
         let leader = active_controller(controllers);
         let (target, role) = match &leader {
             Some(leader) if rng.chance(0.75) => (leader.clone(), "leader"),
