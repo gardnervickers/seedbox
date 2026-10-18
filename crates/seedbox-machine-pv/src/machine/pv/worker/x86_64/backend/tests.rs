@@ -28,32 +28,47 @@ fn pmu_disable_capability_requires_explicit_disable() {
             assert_eq!(
                 pmu_needs_disable(
                     KVM_PMU_CAP_DISABLE as i32,
-                    &[vendor_cpuid(vendor), pmu_cpuid(version)]
+                    &[vendor_cpuid(vendor), pmu_cpuid(version)],
+                    false,
                 ),
                 Ok(true)
             );
         }
     }
-    assert_eq!(pmu_needs_disable(KVM_PMU_CAP_DISABLE as i32, &[]), Ok(true));
+    assert_eq!(
+        pmu_needs_disable(KVM_PMU_CAP_DISABLE as i32, &[], false),
+        Ok(true)
+    );
 }
 
 #[test]
 fn absent_pmu_disable_capability_accepts_only_intel_with_no_vpmu() {
     let intel = vendor_cpuid(b"GenuineIntel");
     // Non-version EAX bits do not advertise an Intel PMU when version is zero.
-    assert_eq!(pmu_needs_disable(0, &[intel, pmu_cpuid(0)]), Ok(false));
-    assert_eq!(pmu_needs_disable(2, &[intel, pmu_cpuid(0)]), Ok(false));
+    assert_eq!(
+        pmu_needs_disable(0, &[intel, pmu_cpuid(0)], false),
+        Ok(false)
+    );
+    assert_eq!(
+        pmu_needs_disable(2, &[intel, pmu_cpuid(0)], false),
+        Ok(false)
+    );
     for version in [1, 2, 5, 255] {
         assert_eq!(
-            pmu_needs_disable(0, &[intel, pmu_cpuid(version)]),
+            pmu_needs_disable(0, &[intel, pmu_cpuid(version)], false),
             Err("PV KVM cannot disable the guest PMU".into())
         );
     }
-    assert!(pmu_needs_disable(0, &[]).is_err());
-    assert!(pmu_needs_disable(0, &[intel]).is_err());
-    assert!(pmu_needs_disable(0, &[pmu_cpuid(0)]).is_err());
-    assert!(pmu_needs_disable(0, &[intel, pmu_cpuid(0), pmu_cpuid(2)]).is_err());
-    assert!(pmu_needs_disable(0, &[intel, vendor_cpuid(b"AuthenticAMD"), pmu_cpuid(0)]).is_err());
+    assert!(pmu_needs_disable(0, &[], false).is_err());
+    assert!(pmu_needs_disable(0, &[intel], false).is_err());
+    assert!(pmu_needs_disable(0, &[pmu_cpuid(0)], false).is_err());
+    assert!(pmu_needs_disable(0, &[intel, pmu_cpuid(0), pmu_cpuid(2)], false).is_err());
+    assert!(pmu_needs_disable(
+        0,
+        &[intel, vendor_cpuid(b"AuthenticAMD"), pmu_cpuid(0)],
+        false
+    )
+    .is_err());
 }
 
 #[test]
@@ -61,9 +76,49 @@ fn absent_pmu_disable_capability_rejects_amd_legacy_counters_with_leaf_a_zero() 
     // KVM's AMD PMU can expose K7 counters/MSRs/RDPMC despite a zero leaf A.
     for vendor in [b"AuthenticAMD", b"UnknownCPU!!"] {
         assert_eq!(
-            pmu_needs_disable(0, &[vendor_cpuid(vendor), pmu_cpuid(0)]),
+            pmu_needs_disable(0, &[vendor_cpuid(vendor), pmu_cpuid(0)], false),
             Err("PV KVM cannot disable the guest PMU".into())
         );
+    }
+}
+
+#[test]
+fn globally_disabled_pmu_is_authoritative_for_every_vendor() {
+    for vendor in [b"GenuineIntel", b"AuthenticAMD", b"UnknownCPU!!"] {
+        for version in [0, 2, 5] {
+            let cpuid = [vendor_cpuid(vendor), pmu_cpuid(version)];
+            assert_eq!(pmu_needs_disable(0, &cpuid, true), Ok(false));
+            // Explicit VM disable remains preferred whenever supported.
+            assert_eq!(
+                pmu_needs_disable(KVM_PMU_CAP_DISABLE as i32, &cpuid, true),
+                Ok(true)
+            );
+        }
+    }
+    assert_eq!(pmu_needs_disable(0, &[], true), Ok(false));
+}
+
+#[test]
+fn module_pmu_parameter_requires_explicit_disabled_evidence() {
+    for parameter in [Some("N\n"), Some("N")] {
+        assert!(module_pmu_disabled(parameter));
+    }
+    for parameter in [
+        None,
+        Some(""),
+        Some("Y\n"),
+        Some("0\n"),
+        Some("n\n"),
+        Some(" N\n"),
+        Some("N\nY\n"),
+    ] {
+        assert!(!module_pmu_disabled(parameter), "{parameter:?}");
+        assert!(pmu_needs_disable(
+            0,
+            &[vendor_cpuid(b"AuthenticAMD"), pmu_cpuid(0)],
+            module_pmu_disabled(parameter),
+        )
+        .is_err());
     }
 }
 

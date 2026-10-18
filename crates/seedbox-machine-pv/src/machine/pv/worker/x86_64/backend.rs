@@ -161,14 +161,30 @@ fn guest_cpuid(mut cpuid: CpuId) -> CpuId {
     cpuid
 }
 
-/// Without the disable capability, Intel's architectural PMU version zero
-/// proves KVM has no vPMU. This is not true of AMD's legacy K7 counters, which
+/// The read-only KVM module parameter is authoritative for every x86 vendor:
+/// when disabled, KVM creates VMs without a PMU and reports no disable capability.
+/// Accept only the kernel boolean's exact disabled representation; inaccessible
+/// or unexpected contents are not evidence. An open KVM fd prevents module unload.
+fn module_pmu_disabled(parameter: Option<&str>) -> bool {
+    matches!(parameter, Some("N\n" | "N"))
+}
+
+/// Without the disable capability or a globally disabled PMU, Intel's
+/// architectural PMU version zero proves KVM has no vPMU. This is not true of
+/// AMD's legacy K7 counters, which
 /// KVM may expose through MSRs/RDPMC even with leaf A zero. Unknown vendors and
 /// missing evidence fail closed. Inspect KVM's supported CPUID, not our masked
 /// guest CPUID: hiding a feature alone does not disable its counters.
-fn pmu_needs_disable(capability: i32, supported_cpuid: &[kvm_cpuid_entry2]) -> Result<bool> {
+fn pmu_needs_disable(
+    capability: i32,
+    supported_cpuid: &[kvm_cpuid_entry2],
+    module_disabled: bool,
+) -> Result<bool> {
     if capability & KVM_PMU_CAP_DISABLE as i32 != 0 {
         return Ok(true);
+    }
+    if module_disabled {
+        return Ok(false);
     }
     let mut vendor_leaves = supported_cpuid.iter().filter(|entry| entry.function == 0);
     let intel = vendor_leaves.next().is_some_and(|entry| {
@@ -287,9 +303,11 @@ impl Backend for Native {
         )?;
         // Host performance counters are not guest time sources: no vPMU.
         // KVM with its PMU disabled globally may offer no disable capability.
+        let pmu_parameter = std::fs::read_to_string("/sys/module/kvm/parameters/enable_pmu").ok();
         if pmu_needs_disable(
             vm.check_extension_raw(KVM_CAP_PMU_CAPABILITY.into()),
             supported_cpuid.as_slice(),
+            module_pmu_disabled(pmu_parameter.as_deref()),
         )? {
             checked(
                 "disable guest PMU",

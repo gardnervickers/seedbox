@@ -74,6 +74,12 @@ jobs:
           sudo chmod a+rw /dev/kvm
           python3 - <<'PYTHON'
           import fcntl, os
+          # Globally disabled PMU yields no per-VM disable capability, also on AMD.
+          try:
+              with open('/sys/module/kvm/parameters/enable_pmu') as parameter:
+                  print(f'KVM enable_pmu={parameter.read().strip()}')
+          except OSError as error:
+              print(f'KVM enable_pmu evidence unavailable: {error}')
           with open('/dev/kvm', 'rb') as kvm:
               assert fcntl.ioctl(kvm, 0xAE00, 0) == 12, 'unsupported KVM API'
               vm = fcntl.ioctl(kvm, 0xAE01, 0)
