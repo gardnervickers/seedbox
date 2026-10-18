@@ -1,6 +1,5 @@
-# faults.yaml with process pauses capped at 1.5 s, so keel-s3dd's wedge
-# watchdog (which aborts it on resume after a SIGSTOP of 2 s or more, a known
-# keel issue) does not mask other crashes.
+# Process pauses in the short band, 0.5-1.8 s: under keel-s3dd's 2 s watchdog
+# bound, so no keel-s3dd may crash (seedbox.no_crashing_processes must pass).
 #
 # Faults for delores-kv-register, never touching the in-memory demo sequencer
 # (losing it loses slot state: a liveness test, out of scope): replicas cut off
@@ -27,7 +26,7 @@ faults:
     downtime: {min: 1s, max: 6s}
   - kind: pause_process
     weight: 2
-    duration: {min: 200ms, max: 1500ms}
+    duration: {min: 500ms, max: 1800ms}
   - kind: crash
     weight: 1
     downtime: {min: 1s, max: 5s}

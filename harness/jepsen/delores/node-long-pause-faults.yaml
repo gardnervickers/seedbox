@@ -1,3 +1,9 @@
+# Process pauses in the long band, 2.2-6 s: past keel-s3dd's default 2 s watchdog
+# bound, so keel-s3dd may abort by design (KEEL-EMERGENCY envelope wedged) when a
+# pause lands mid-tick, and comes back through its restart wrapper; the data and
+# recovery checks decide the verdict. With --watchdog-wedge-ms 10000 (the
+# *-wedge10s scenarios) the same pauses must not crash it.
+#
 # Faults for the delores-node scenarios, never touching the in-memory demo
 # sequencer (rung 7, out of scope) and never wiping an S3 volume: one S3
 # server isolated from every node, a node cut off from every S3 server,
@@ -23,7 +29,7 @@ faults:
     downtime: {min: 1s, max: 6s}
   - kind: pause_process
     weight: 2
-    duration: {min: 500ms, max: 6s}
+    duration: {min: 2200ms, max: 6s}
   - kind: crash
     weight: 1
     downtime: {min: 1s, max: 5s}

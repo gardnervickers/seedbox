@@ -20,4 +20,4 @@ faults:
     downtime: {min: 1s, max: 4s}
   - kind: pause_process
     weight: 1
-    duration: {min: 200ms, max: 1500ms}
+    duration: {min: 500ms, max: 1800ms}

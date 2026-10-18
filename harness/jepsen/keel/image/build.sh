@@ -5,6 +5,9 @@
 #
 #   harness/jepsen/keel/image/build.sh [KEEL_CHECKOUT]   # default ../keel
 #
+# The *-wedge10s scenarios need keel-s3dd's --watchdog-wedge-ms flag (keel
+# b55b6d26, branch feat/s3dd-watchdog-wedge, on master).
+#
 # keel's workspace has private git dependencies (dev-dependencies, but cargo
 # resolves the whole workspace), so the host vendors every crate into the
 # context first and the build runs offline.

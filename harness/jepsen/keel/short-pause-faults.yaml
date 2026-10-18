@@ -1,7 +1,5 @@
-# generic-faults.yaml with process pauses capped at 1.5 s. keel-s3dd's wedge
-# watchdog (2 s) counts a SIGSTOP as a stall and aborts the process on resume
-# after a longer pause (a known keel issue); keeping pauses shorter leaves any
-# other crash visible as seedbox.no_crashing_processes.
+# Process pauses in the short band, 0.5-1.8 s: under keel-s3dd's 2 s watchdog
+# bound, so no keel-s3dd may crash (seedbox.no_crashing_processes must pass).
 #
 # Generic faults for one keel-s3dd server, aimed at nothing in particular:
 # power loss (the volume is kept; page cache and unflushed sectors are lost),
@@ -17,7 +15,7 @@ faults:
     downtime: {min: 1s, max: 5s}
   - kind: pause_process
     weight: 2
-    duration: {min: 200ms, max: 1500ms}
+    duration: {min: 500ms, max: 1800ms}
   - kind: partition
     weight: 2
     duration: {min: 1s, max: 8s}

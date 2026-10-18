@@ -1989,6 +1989,49 @@ fn keel() -> Vec<Scenario> {
         .collect()
 }
 
+/// `scenario` with every keel-s3dd server's watchdog bound raised to 10 s
+/// (`--watchdog-wedge-ms 10000`): the control for `long-pause-faults.yaml`
+/// profiles, whose 2.2-6 s process pauses then cross no bound.
+fn wedge10s(scenario: &Scenario) -> Scenario {
+    let machines = scenario
+        .machines
+        .iter()
+        .map(|(name, machine)| {
+            let mut machine = machine.clone();
+            if machine.image.as_deref() == Some(KEEL_S3DD) {
+                if let Some(command) = machine.command.as_mut() {
+                    command.extend(strings(&["--watchdog-wedge-ms", "10000"]));
+                }
+            }
+            (name.clone(), machine)
+        })
+        .collect();
+    Scenario {
+        name: format!("{}-wedge10s", scenario.name),
+        comment: format!(
+            "{} with keel-s3dd's watchdog bound raised from 2 s to 10 s\n(--watchdog-wedge-ms 10000): the control for the long-pause profiles, whose 2.2-6 s\nprocess pauses must then crash nothing.",
+            scenario.name
+        ),
+        generated: format!("{}, --watchdog-wedge-ms 10000", scenario.generated),
+        machines,
+        oracle: scenario.oracle.clone(),
+        latency: scenario.latency.clone(),
+    }
+}
+
+/// Each scenario named in `names`, followed by its [`wedge10s`] control.
+fn with_wedge10s(scenarios: Vec<Scenario>, names: &[&str]) -> Vec<Scenario> {
+    let mut out = Vec::new();
+    for scenario in scenarios {
+        let control = names
+            .contains(&scenario.name.as_str())
+            .then(|| wedge10s(&scenario));
+        out.push(scenario);
+        out.extend(control);
+    }
+    out
+}
+
 // ------------------------------------------------------------ delores
 
 /// The image `harness/jepsen/delores/image/build.sh` builds from a delores
@@ -2048,7 +2091,7 @@ fn delores() -> Vec<Scenario> {
     }
     vec![Scenario {
         name: "delores-kv-register".into(),
-        comment: "delores's examples/docker-kv over keel-s3dd instead of MinIO: three replicas share\none virtual log through the S3 server, with slots from the in-memory demo sequencer.\nSix clients PUT, DELETE and GET five keys through random replicas for 60 s with no\nretries; then every replica reads every key. Each key's history must be\nlinearizable, every replica must answer again and all must agree. Run it without a\nprofile for a baseline, or with `--fault-profile harness/jepsen/delores/faults.yaml`,\nwhich never faults the sequencer.".into(),
+        comment: "delores's examples/docker-kv over keel-s3dd instead of MinIO: three replicas share\none virtual log through the S3 server, with slots from the in-memory demo sequencer.\nSix clients PUT, DELETE and GET five keys through random replicas for 60 s with no\nretries; then every replica reads every key. Each key's history must be\nlinearizable, every replica must answer again and all must agree. Run it without a\nprofile for a baseline, or with `--fault-profile harness/jepsen/delores/short-pause-faults.yaml`\nor `long-pause-faults.yaml`, which never fault the sequencer.".into(),
         generated: "delores docker-kv, three replicas, keel-s3dd (poll, log)".into(),
         machines,
         // The register check's search grows with unacknowledged writes.
@@ -2118,7 +2161,7 @@ fn delores_nodes() -> Vec<Scenario> {
         machines
     };
     let topology = "Three delores jepsen-nodes, each running SMR over a virtual log whose metadata\nregister is CASPaxos over three keel-s3dd servers (one acceptor and one log-drive\nreplica each; no acceptor processes, the conditional PUT is the primitive), with\nslots from the in-memory demo sequencer.";
-    let run = "Run it without a profile for a baseline, or with\n`--fault-profile harness/jepsen/delores/node-faults.yaml`, which never faults the\nsequencer.";
+    let run = "Run it without a profile for a baseline, or with\n`--fault-profile harness/jepsen/delores/node-short-pause-faults.yaml` or\n`node-long-pause-faults.yaml`, which never fault the sequencer.";
     let specs: [(&str, String, &[(&str, &str)], &[&str]); 3] = [
         (
             "delores-node-cas",
@@ -2170,9 +2213,21 @@ pub fn all() -> Vec<(String, String)> {
         ("galera", galera()),
         ("tigerbeetle", tigerbeetle()),
         ("rustfs", rustfs()),
-        ("keel", keel()),
-        ("delores", delores()),
-        ("delores", delores_nodes()),
+        (
+            "keel",
+            with_wedge10s(keel(), &["keel-objects", "keel-register"]),
+        ),
+        (
+            "delores",
+            with_wedge10s(delores(), &["delores-kv-register"]),
+        ),
+        (
+            "delores",
+            with_wedge10s(
+                delores_nodes(),
+                &["delores-node-cas", "delores-node-append"],
+            ),
+        ),
     ] {
         for scenario in scenarios {
             out.push((

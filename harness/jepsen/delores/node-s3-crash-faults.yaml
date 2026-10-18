@@ -1,0 +1,18 @@
+# Power loss of the S3 servers only (volumes kept), often and briefly, and
+# now and then one server cut off from every node. keel-s3dd can serve a
+# write that is not yet synced to a reader before acknowledging it, so a power
+# failure can roll back an acceptor record or log entry a node has already
+# read; this asks whether CASPaxos and the quorum log drive stay safe when
+# that happens. Each fault takes one server, so two of three usually stay up.
+start: 15s
+end: 70s
+interval: 2s
+targets: [s3-a, s3-b, s3-c]
+faults:
+  - kind: crash
+    weight: 3
+    downtime: {min: 500ms, max: 3s}
+  - kind: partition
+    weight: 1
+    duration: {min: 1s, max: 5s}
+    from: [n1, n2, n3]
