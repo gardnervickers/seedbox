@@ -19,7 +19,7 @@ or Podman. Mac execution and replay still need hardware verification.
 ```sh
 git clone --recurse-submodules https://github.com/gardnervickers/seedbox.git
 cd seedbox
-nix develop "git+file://$PWD?submodules=1"
+seedbox_flake=$(bash tools/dev-flake.sh) && nix develop "$seedbox_flake"
 cargo xtask build-assets
 cargo build --release
 ./target/release/seedbox doctor
@@ -28,13 +28,14 @@ cargo build --release
 ./target/release/seedbox replay <sim-id>
 ```
 
-For an existing clone or a new Git worktree, run
-`git submodule update --init --recursive vendor/dynamorio` before entering the
-development shell. The explicit Git flake reference includes local tracked DR
-edits even when Seedbox itself is clean; direnv and `cargo xtask build-assets`
-use it too. Add new DR files to its Git index before building. Nix's source
-accessor traverses DR's three nested dependencies even though Seedbox does not
-build drsyms. See [translator development](docs/internals.md#editing-dynamorio).
+Direnv and `tools/dev-flake.sh` initialize missing submodules, including DR's three
+nested dependencies, before Nix. Existing checkouts keep their current commits,
+branches and edits. On failure, fix the reported checkout or URL/access problem
+and rerun the helper. Dependency updates remain explicit.
+The encoded Git flake reference includes local tracked DR edits even when Seedbox
+itself is clean; `cargo xtask build-assets` uses it too. Add new DR files to its
+Git index before building. Nix traverses the nested dependencies even though
+Seedbox does not build drsyms. See [translator development](docs/internals.md#editing-dynamorio).
 
 `run` prints `PASS: <sim-id>` when the oracle finishes. Use that ID in the
 replay command; it should print `MATCH: <sim-id>`. The etcd example runs three

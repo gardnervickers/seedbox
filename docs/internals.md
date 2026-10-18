@@ -68,13 +68,20 @@ The progress client still uses the matching release SDK.
 Follow the [README setup](../README.md#try-it) after cloning or switching Seedbox
 revisions. `inputs.self.submodules` includes gitlinks for flake consumers, but
 Nix can lock a clean parent before noticing edits confined to a submodule.
-For live DR edits, use `nix build "git+file://$PWD?submodules=1#machinePvAssets"`
-from the checkout root; use the same reference without the output fragment for
-`nix develop`. Bare `.#machinePvAssets` can ignore those edits.
+From the checkout root, obtain a URL-encoded reference and build live DR edits:
+`seedbox_flake=$(bash tools/dev-flake.sh) && nix build "$seedbox_flake#machinePvAssets"`.
+For shell entry, see the README. Bare `.#machinePvAssets` can ignore those edits.
 Direnv and the asset builder request submodules on the initial fetch too, using
-the current checkout root, including in linked Git worktrees.
+the current checkout root, including linked Git worktrees and paths containing
+spaces or URL syntax characters.
 Nix traverses the nested elfutils, libipt and zlib gitlinks, so initialize all
 three; drsyms remains excluded from the build.
+
+Direnv's [helper](../tools/dev-flake.sh) reads NUL-delimited index gitlinks and
+initializes each missing checkout separately, then visits its descendants.
+Initialized checkouts are never updated, even when their HEAD differs from the
+gitlink. To deliberately align all sources with a Seedbox revision, first save
+local work, then run `git submodule update --init --recursive vendor/dynamorio`.
 
 For coordinated edits, switch the submodule to `seedbox/release_11.3.0-1-backports`,
 edit and verify it with Seedbox's PV asset build, then commit and push DR first.
