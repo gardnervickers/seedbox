@@ -2459,7 +2459,7 @@ fn resume_preflight_runs_before_interventions_or_execution_inputs_are_materializ
 }
 
 mod admission_ordering {
-    use app::{store::ContentDigest, Error, Result};
+    use app::{Error, Result};
     use seedbox_application as app;
     use std::{collections::BTreeMap, path::Path};
     #[test]
@@ -2475,10 +2475,9 @@ mod admission_ordering {
         impl ExecutionBackend for Refused {
             fn profile(&self) -> ExecutionProfile {
                 ExecutionProfile {
-                    backend: Backend::Other("fixture".into()),
-                    engine: ContentDigest::of(b"synthetic"),
+                    backend: "fixture".into(),
                     witness_mode: WitnessMode::Exits,
-                    semantic_parameters: SemanticParameters::new(512),
+                    semantic_parameters: SemanticParameters::new(),
                 }
             }
             fn preflight(&self, _: Option<&Path>) -> Result<()> {

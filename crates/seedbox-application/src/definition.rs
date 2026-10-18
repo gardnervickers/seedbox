@@ -114,10 +114,11 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
     let settings = settings
         .as_object_mut()
         .ok_or_else(|| Error::Integrity("runtime.execution must be an inline object".into()))?;
-    let driver_closure: Option<seedbox_driver_execution::driver_world::retained::Closure> = settings
-        .remove("driver_world")
-        .map(serde_json::from_value)
-        .transpose()?;
+    let driver_closure: Option<seedbox_driver_execution::driver_world::retained::Closure> =
+        settings
+            .remove("driver_world")
+            .map(serde_json::from_value)
+            .transpose()?;
     if let Some(parameters) = settings
         .get_mut("semantic_parameters")
         .and_then(|v| v.as_object_mut())
@@ -567,7 +568,8 @@ mod tests {
             assets: BTreeMap::from([("body".into(), Asset(format!("sha256:{}", "11".repeat(32))))]),
         };
         let mut semantic = crate::execution::SemanticParameters::new();
-        semantic.engine = Some(seedbox_driver_execution::driver_world::DriverExecutor::descriptor("x86_64"));
+        semantic.engine =
+            Some(seedbox_driver_execution::driver_world::DriverExecutor::descriptor("x86_64"));
         let profile = ExecutionProfile {
             backend: "driver-pv".into(),
             witness_mode: crate::execution::WitnessMode::Exits,

@@ -14,7 +14,7 @@ use std::{
     path::Path,
 };
 pub(super) const MANIFEST: &str = "driver-world/manifest";
-pub(super) fn validate_contract(
+pub fn validate_contract(
     profile: &crate::execution::ExecutionProfile,
 ) -> Result<super::DriverBackend> {
     if profile.semantic_parameters.launch() != Some(crate::engine::ExecutableKind::DriverWorld) {

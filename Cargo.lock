@@ -1883,6 +1883,7 @@ dependencies = [
  "ocirender",
  "seedbox-artifacts",
  "seedbox-control",
+ "seedbox-driver",
  "seedbox-driver-execution",
  "seedbox-engine-core",
  "seedbox-engine-protocol",

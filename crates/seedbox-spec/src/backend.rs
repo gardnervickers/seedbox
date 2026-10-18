@@ -31,9 +31,17 @@ mod backend_authority_tests {
     use super::CpuBackend;
     #[test]
     fn backend_authority_decodes_one_recorded_name() {
-        assert_eq!(CpuBackend::from_recorded_name("driver-pv").unwrap(), Some(CpuBackend::Pv));
-        assert_eq!(CpuBackend::from_recorded_name("driver-tcg").unwrap(), Some(CpuBackend::Tcg));
-        assert!(CpuBackend::from_recorded_name("driver-unknown").unwrap_err().contains("unknown Driver backend"));
+        assert_eq!(
+            CpuBackend::from_recorded_name("driver-pv").unwrap(),
+            Some(CpuBackend::Pv)
+        );
+        assert_eq!(
+            CpuBackend::from_recorded_name("driver-tcg").unwrap(),
+            Some(CpuBackend::Tcg)
+        );
+        assert!(CpuBackend::from_recorded_name("driver-unknown")
+            .unwrap_err()
+            .contains("unknown Driver backend"));
         assert_eq!(CpuBackend::from_recorded_name("fixture").unwrap(), None);
     }
 }

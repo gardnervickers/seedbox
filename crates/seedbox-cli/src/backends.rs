@@ -298,9 +298,7 @@ mod tests {
 
     #[test]
     fn backend_progress_names_tcg_from_profile_not_host() {
-        use seedbox_application::{
-            execution::{ExecutionProfile, SemanticParameters, WitnessMode},
-        };
+        use seedbox_application::execution::{ExecutionProfile, SemanticParameters, WitnessMode};
         use seedbox_driver_execution::driver_world::{DriverBackend, DriverExecutor};
         for (cpu, tag) in [
             (DriverBackend::Pv, "driver-pv"),

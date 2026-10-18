@@ -566,7 +566,9 @@ impl RuntimeInputs {
             WitnessMode::Exits
         };
         let executor = seedbox_driver_execution::driver_world::DriverExecutor::for_preparation(
-            simulation, witness, cpu_backend,
+            simulation,
+            witness,
+            cpu_backend,
         )?;
         let (backend, runtime_backend) = match cpu_backend {
             seedbox_spec::backend::CpuBackend::Pv => (

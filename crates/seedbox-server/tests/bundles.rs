@@ -226,8 +226,8 @@ fn encode(snapshot: &Snapshot, store: &ContentStore) -> Vec<u8> {
 
 #[test]
 fn driver_closures_without_a_record_roundtrip_into_a_fresh_store() {
-    use seedbox_driver_execution::driver_world::DriverExecutor;
     use seedbox_artifacts::store::ContentDigest;
+    use seedbox_driver_execution::driver_world::DriverExecutor;
     use seedbox_engine_protocol::driver_world as wire;
     use seedbox_spec::definition::{Architecture, Asset, Definition, Start};
 

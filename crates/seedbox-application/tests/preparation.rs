@@ -95,12 +95,9 @@ fn fixture(root: &Path) -> (FixturePreparer, config::Simulation, ContentStore) {
         },
     )
     .unwrap();
-    let executor = DriverExecutor::for_preparation(
-        &simulation,
-        WitnessMode::Exits,
-        Default::default(),
-    )
-    .unwrap();
+    let executor =
+        DriverExecutor::for_preparation(&simulation, WitnessMode::Exits, Default::default())
+            .unwrap();
     let inner = OciPreparer {
         kernel,
         engine,
@@ -447,12 +444,8 @@ fn cold_driver_factory(backend: seedbox_driver_execution::runtime_assets::Backen
     simulation.control = Some(seedbox_application::config::Control {
         service: "oracle".into(),
     });
-    let executor = DriverExecutor::for_preparation(
-        &simulation,
-        WitnessMode::Exits,
-        cpu_backend,
-    )
-    .unwrap();
+    let executor =
+        DriverExecutor::for_preparation(&simulation, WitnessMode::Exits, cpu_backend).unwrap();
     preparer.profile = executor.profile();
     let context =
         PreparationContext::new(root.path().join("evidence"), Default::default()).unwrap();

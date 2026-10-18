@@ -83,7 +83,7 @@ pub(crate) fn filesystem(rootfs: &crate::oci::RootFilesystem) -> Result<Vec<u8>>
 /// Validate the explicit SDK bootstrap package without legacy-format assumptions
 /// and without opening a hypervisor, starting a worker or contacting OCI.
 pub fn validate_oci_runtime(preparer: &OciPreparer, runtime: &Inputs) -> Result<()> {
-    seedbox_driver_execution::admission::validate_profile(&preparer.profile)?;
+    seedbox_driver_execution::driver_world::retained::validate_contract(&preparer.profile)?;
     for (path, name) in [(&preparer.kernel, "kernel"), (&preparer.init, "init")] {
         if fs::read(path)? != fs::read(runtime.guest_assets.join(name))? {
             return Err(Error::Integrity(
@@ -103,8 +103,7 @@ pub fn validate_oci_runtime(preparer: &OciPreparer, runtime: &Inputs) -> Result<
     } else {
         "driver-pv"
     };
-    if preparer.profile.backend != expected
-    {
+    if preparer.profile.backend != expected {
         return Err(Error::Integrity(
             "Driver OCI backend differs from its selected runtime".into(),
         ));
