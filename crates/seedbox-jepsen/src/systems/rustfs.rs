@@ -961,10 +961,15 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
     if live.is_empty() {
         unreadable.clone_from(&acknowledged);
     }
+    // Once many keys in a row are unreadable, try each remaining key once:
+    // a server that answers every read with an error would otherwise cost
+    // seconds of retries per object.
+    let mut unreadable_run = 0;
     for key in acknowledged.iter().filter(|_| !live.is_empty()) {
         let expected = contents(key, args.size);
         let mut outcome = None;
-        for attempt in 0..3 {
+        let attempts = if unreadable_run >= 10 { 1 } else { 3 };
+        for attempt in 0..attempts {
             for node in &live {
                 match s3.request(node, "GET", &format!("{bucket}/{key}"), &[]) {
                     Reply::Status(200, data) => {
@@ -979,11 +984,16 @@ fn objects(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
                     _ => {}
                 }
             }
-            if outcome.is_some() {
+            if outcome.is_some() || attempt + 1 == attempts {
                 break;
             }
             std::thread::sleep(Duration::from_secs(1 + attempt));
         }
+        unreadable_run = if outcome.is_none() {
+            unreadable_run + 1
+        } else {
+            0
+        };
         match outcome {
             Some(true) => {}
             Some(false) if missing.last() == Some(key) => {}
