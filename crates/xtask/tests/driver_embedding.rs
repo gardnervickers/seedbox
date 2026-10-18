@@ -40,7 +40,10 @@ impl Fixture {
         command
             .env_clear()
             .env("PATH", "")
-            .env("CARGO_MANIFEST_DIR", self.root.join("crates/seedbox-driver-execution"))
+            .env(
+                "CARGO_MANIFEST_DIR",
+                self.root.join("crates/seedbox-driver-execution"),
+            )
             .env("OUT_DIR", &self.output)
             .env("SEEDBOX_BUILD_ROOT", &self.root)
             .env("CARGO_CFG_TARGET_ARCH", std::env::consts::ARCH);
