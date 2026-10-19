@@ -28,9 +28,13 @@ use std::{
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct Args {
-    /// Jobs as SCENARIO.yaml:SEEDS, where SEEDS is `N`, `A-B` or `A,B,C`.
-    #[arg(required = true)]
+    /// Jobs as SCENARIO.yaml[@PROFILE.yaml]:SEEDS, where SEEDS is `N`, `A-B`
+    /// or `A,B,C` and PROFILE generates faults from each run's seed.
     pub jobs: Vec<String>,
+    /// More jobs, one per line in the same form; `#` starts a comment, and
+    /// relative paths resolve against the file's directory.
+    #[arg(long)]
+    pub jobs_file: Option<PathBuf>,
     /// The seedbox CLI to run.
     #[arg(long, default_value = "seedbox")]
     pub seedbox: PathBuf,
@@ -73,6 +77,7 @@ pub struct Args {
 #[derive(Clone, Debug)]
 struct Job {
     scenario: PathBuf,
+    profile: Option<PathBuf>,
     seed: u64,
     replay: bool,
     label: String,
@@ -95,31 +100,79 @@ fn seeds(text: &str) -> Result<Vec<u64>, String> {
     Ok(out)
 }
 
-fn plan(args: &Args) -> Result<Vec<Job>, String> {
-    let mut jobs = Vec::new();
-    for spec in &args.jobs {
-        let (path, list) = spec
-            .rsplit_once(':')
-            .ok_or_else(|| format!("{spec}: expected SCENARIO.yaml:SEEDS"))?;
-        let scenario = PathBuf::from(path);
-        if !scenario.is_file() {
-            return Err(format!("{path}: not found"));
-        }
-        let stem = scenario
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        for (index, seed) in seeds(list)?.into_iter().enumerate() {
-            jobs.push(Job {
-                label: format!("{stem}-s{seed}"),
-                scenario: scenario.clone(),
-                seed,
-                replay: index < args.replay_first,
-            });
+/// Job specs from the command line, then the jobs file, with the file's
+/// relative paths resolved against its directory.
+fn specs(args: &Args) -> Result<Vec<(String, PathBuf)>, String> {
+    let mut specs: Vec<(String, PathBuf)> = args
+        .jobs
+        .iter()
+        .map(|spec| (spec.clone(), PathBuf::new()))
+        .collect();
+    if let Some(file) = &args.jobs_file {
+        let text = fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        let base = file.parent().map(Path::to_path_buf).unwrap_or_default();
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            if !line.is_empty() {
+                specs.push((line.to_string(), base.clone()));
+            }
         }
     }
-    Ok(jobs)
+    if specs.is_empty() {
+        return Err("no jobs: give SCENARIO.yaml:SEEDS arguments or --jobs-file".into());
+    }
+    Ok(specs)
+}
+
+fn stem(path: &Path) -> String {
+    path.file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Every job of every spec, interleaved by seed index so each scenario runs
+/// early instead of after all the seeds of the specs before it.
+fn plan(args: &Args) -> Result<Vec<Job>, String> {
+    let mut per_spec = Vec::new();
+    for (spec, base) in specs(args)? {
+        let (paths, list) = spec
+            .rsplit_once(':')
+            .ok_or_else(|| format!("{spec}: expected SCENARIO.yaml[@PROFILE.yaml]:SEEDS"))?;
+        let (scenario, profile) = match paths.split_once('@') {
+            Some((scenario, profile)) => (base.join(scenario), Some(base.join(profile))),
+            None => (base.join(paths), None),
+        };
+        for path in std::iter::once(&scenario).chain(profile.as_ref()) {
+            if !path.is_file() {
+                return Err(format!("{}: not found", path.display()));
+            }
+        }
+        let name = match &profile {
+            Some(profile) => format!("{}@{}", stem(&scenario), stem(profile)),
+            None => stem(&scenario),
+        };
+        let jobs: Vec<Job> = seeds(list)?
+            .into_iter()
+            .enumerate()
+            .map(|(index, seed)| Job {
+                label: format!("{name}-s{seed}"),
+                scenario: scenario.clone(),
+                profile: profile.clone(),
+                seed,
+                replay: index < args.replay_first,
+            })
+            .collect();
+        per_spec.push(jobs.into_iter());
+    }
+    let mut jobs = Vec::new();
+    loop {
+        let before = jobs.len();
+        jobs.extend(per_spec.iter_mut().filter_map(Iterator::next));
+        if jobs.len() == before {
+            return Ok(jobs);
+        }
+    }
 }
 
 struct Cli<'a> {
@@ -609,7 +662,11 @@ fn execute(cli: &Cli, job: &Job, out: &Path, args: &Args) -> Value {
     let scenario = job.scenario.to_string_lossy().to_string();
     let seed = job.seed.to_string();
     let started = Instant::now();
-    let submit = [
+    let profile = job
+        .profile
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
+    let mut submit = vec![
         "run",
         &scenario,
         "--seed",
@@ -619,9 +676,12 @@ fn execute(cli: &Cli, job: &Job, out: &Path, args: &Args) -> Value {
         "--detach",
         "--json",
     ];
+    if let Some(profile) = &profile {
+        submit.extend(["--fault-profile", profile.as_str()]);
+    }
     let observed = observe(cli, &submit, &dir, "run");
     let run_wall = started.elapsed().as_secs_f64();
-    let mut row = json!({"label": job.label, "scenario": scenario, "seed": job.seed,
+    let mut row = json!({"label": job.label, "scenario": scenario, "profile": profile, "seed": job.seed,
                          "wall_s": (run_wall * 10.0).round() / 10.0});
     let observed = match observed {
         Ok(observed) => observed,
@@ -735,7 +795,7 @@ fn ensure_server(cli: &Cli, args: &Args) -> Result<(), String> {
     }
     let log = fs::File::create(args.out.join("serve.log")).map_err(|e| e.to_string())?;
     cli.command()
-        .arg("serve")
+        .args(["serve", "--capacity", &args.lanes.max(1).to_string()])
         .stdin(Stdio::null())
         .stdout(log.try_clone().map_err(|e| e.to_string())?)
         .stderr(log)
@@ -754,10 +814,10 @@ fn ensure_server(cli: &Cli, args: &Args) -> Result<(), String> {
 pub fn summary(rows: &[Value]) -> String {
     let mut by: BTreeMap<String, [usize; 8]> = BTreeMap::new();
     for row in rows {
-        let name = Path::new(row["scenario"].as_str().unwrap_or(""))
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let mut name = stem(Path::new(row["scenario"].as_str().unwrap_or("")));
+        if let Some(profile) = row["profile"].as_str() {
+            name = format!("{name}@{}", stem(Path::new(profile)));
+        }
         let entry = by.entry(name).or_default();
         entry[0] += 1;
         entry[1] += usize::from(row["hit"] == true);
@@ -926,6 +986,53 @@ pub fn run(args: Args) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse(argv: &[&str]) -> Args {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: Args,
+        }
+        <Cli as clap::Parser>::parse_from(std::iter::once("campaign").chain(argv.iter().copied()))
+            .args
+    }
+
+    #[test]
+    fn jobs_interleave_and_resolve_profiles_against_the_jobs_file() {
+        let dir = scratch("plan");
+        for name in ["a.yaml", "b.yaml", "p.yaml"] {
+            fs::write(dir.join(name), "").unwrap();
+        }
+        fs::write(
+            dir.join("jobs"),
+            "# comment\na.yaml@p.yaml:1-3\n\nb.yaml:7 # trailing\n",
+        )
+        .unwrap();
+        let jobs_file = dir.join("jobs");
+        let args = parse(&[
+            "--jobs-file",
+            jobs_file.to_str().unwrap(),
+            "--state",
+            "s",
+            "--out",
+            "o",
+            "--replay-first",
+            "1",
+        ]);
+        let jobs = plan(&args).unwrap();
+        let labels: Vec<&str> = jobs.iter().map(|j| j.label.as_str()).collect();
+        assert_eq!(labels, ["a@p-s1", "b-s7", "a@p-s2", "a@p-s3"]);
+        assert_eq!(
+            jobs[0].profile.as_deref(),
+            Some(dir.join("p.yaml").as_path())
+        );
+        assert_eq!(jobs[1].profile, None);
+        assert!(jobs[0].replay && jobs[1].replay && !jobs[2].replay);
+        let missing = parse(&["x.yaml@y.yaml:1", "--state", "s", "--out", "o"]);
+        assert!(plan(&missing).unwrap_err().contains("not found"));
+        let none = parse(&["--state", "s", "--out", "o"]);
+        assert!(plan(&none).unwrap_err().contains("no jobs"));
+    }
 
     #[test]
     fn seed_lists_expand() {

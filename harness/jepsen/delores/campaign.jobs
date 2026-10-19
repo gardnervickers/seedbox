@@ -1,0 +1,61 @@
+# Every delores and keel-s3dd scenario with the fault profiles it is tested
+# under, for `cargo jepsen campaign --jobs-file`. Paths are relative to this
+# directory. Seeds 10000 and up have not been run; extend the ranges, or
+# start a fresh range, to keep testing. The campaign interleaves the lines by
+# seed, so every scenario runs early.
+#
+# Images: the scenarios name local tags. Build them first, from the keel and
+# delores checkouts under test:
+#   harness/jepsen/keel/image/build.sh KEEL_CHECKOUT
+#   harness/jepsen/delores/image/build.sh DELORES_CHECKOUT
+#   harness/jepsen/delores/node-image/build.sh DELORES_CHECKOUT
+#   cargo jepsen build-oracle
+# keel-s3dd machines declare its watchdog abort as an expected crash, which
+# needs a seedbox build with expectedCrashes support.
+
+# delores jepsen-node over three keel-s3dd: CASPaxos registers.
+delores-node-cas.yaml@node-below-pause-faults.yaml:10000-10199
+delores-node-cas.yaml@node-above-pause-s3-faults.yaml:10000-10199
+delores-node-cas.yaml@node-s3-crash-faults.yaml:10000-10199
+delores-node-cas.yaml@node-adversarial-faults.yaml:10000-10199
+delores-node-cas-nopipeline.yaml@node-s3-crash-faults.yaml:10000-10199
+delores-node-cas-hot.yaml@node-adversarial-faults.yaml:10000-10199
+delores-node-cas-busy.yaml@node-above-pause-s3-faults.yaml:10000-10199
+delores-node-cas-seqcut.yaml:10000-10199
+
+# delores jepsen-node: list-append transactions over the replicated log.
+delores-node-append.yaml@node-below-pause-faults.yaml:10000-10199
+delores-node-append.yaml@node-above-pause-s3-faults.yaml:10000-10199
+delores-node-append.yaml@node-s3-crash-faults.yaml:10000-10199
+delores-node-append.yaml@node-adversarial-faults.yaml:10000-10199
+delores-node-append-chaos.yaml@node-adversarial-faults.yaml:10000-10199
+delores-node-append-busy.yaml@node-above-pause-s3-faults.yaml:10000-10199
+delores-node-append-seqcut.yaml:10000-10199
+
+# delores docker-kv over one keel-s3dd.
+delores-kv-register.yaml@below-pause-faults.yaml:10000-10199
+delores-kv-register.yaml@above-pause-s3-faults.yaml:10000-10199
+delores-kv-register.yaml@s3-crash-faults.yaml:10000-10199
+delores-kv-seqcut.yaml:10000-10199
+
+# keel-s3dd alone, the S3 store under delores.
+../keel/keel-register.yaml@../keel/generic-faults.yaml:10000-10049
+../keel/keel-register.yaml@../keel/below-pause-faults.yaml:10000-10049
+../keel/keel-register.yaml@../keel/above-pause-faults.yaml:10000-10049
+../keel/keel-register.yaml@../keel/crash-faults.yaml:10000-10049
+../keel/keel-register.yaml@../keel/latency-crash-faults.yaml:10000-10049
+../keel/keel-uring-register.yaml@../keel/generic-faults.yaml:10000-10049
+../keel/keel-uring-register.yaml@../keel/above-pause-faults.yaml:10000-10049
+../keel/keel-file-register.yaml@../keel/generic-faults.yaml:10000-10049
+../keel/keel-objects.yaml@../keel/above-pause-faults.yaml:10000-10049
+../keel/keel-objects.yaml@../keel/crash-faults.yaml:10000-10049
+../keel/keel-file-objects.yaml@../keel/crash-faults.yaml:10000-10049
+../keel/keel-crash-all.yaml:10000-10049
+../keel/keel-crash-all-register.yaml:10000-10049
+../keel/keel-file-crash-all.yaml:10000-10049
+../keel/keel-uring-crash-all-register.yaml:10000-10049
+../keel/keel-corrupt-reads.yaml@../keel/corruption-faults.yaml:10000-10049
+../keel/keel-corrupt-reads.yaml@../keel/corrupt-recovery-faults.yaml:10000-10049
+../keel/keel-corrupt-writes.yaml@../keel/corruption-write-faults.yaml:10000-10049
+../keel/keel-eio-register.yaml@../keel/eio-data-faults.yaml:10000-10049
+../keel/keel-eio.yaml@../keel/eio-data-faults.yaml:10000-10049
