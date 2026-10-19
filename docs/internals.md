@@ -123,7 +123,11 @@ first; portable's `--all-features --no-run` compiles the integration entrypoint.
 Cargo discovers cases in the feature-gated target. For a focused development run,
 use `cargo test -p seedbox-machine --features dynamorio-tests --test dynamorio`.
 The separate debug fixture package builds its public SDK, runtime and clients
-from the same source with `Debug`; `prof_pcs` cases require that explicit input.
+from the same source with `Debug`; `prof_pcs` and replay controls require that
+explicit input. Shared IR and A64 selector controls run in public decoder and
+standalone-core modes against both profiles. The original 50 saved inputs and
+full eight transform populations require public decoder mode; their full
+standalone populations remain manual supplemental diagnostics.
 Signal storm and interval-timer models retain their source populations and pure
 clock-input oracles. Live elapsed-clock timing equivalence remains incomplete.
 [Hosted CI](../.github/workflows/dynamorio-tests.yml) runs both native architectures.

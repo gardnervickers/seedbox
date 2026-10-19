@@ -8,10 +8,15 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-fn fixtures() -> PathBuf {
-    PathBuf::from(std::env::var_os("SEEDBOX_DYNAMORIO_FIXTURES").expect("prepared DR fixtures"))
+const RELEASE_FIXTURES: &str = "SEEDBOX_DYNAMORIO_FIXTURES";
+const DEBUG_FIXTURES: &str = "SEEDBOX_DYNAMORIO_DEBUG_FIXTURES";
+
+fn fixtures(variable: &str) -> PathBuf {
+    let path = std::env::var_os(variable)
+        .unwrap_or_else(|| panic!("set {variable} to the matching prepared DR fixture root"));
+    PathBuf::from(path)
         .canonicalize()
-        .expect("fixture root")
+        .unwrap_or_else(|error| panic!("{variable}: prepared fixture root: {error}"))
 }
 
 struct OwnedProcess(std::process::Child);
@@ -61,12 +66,12 @@ fn run(mut command: Command, label: &str, expected: &str) -> Result<String, Stri
     }
 }
 
-#[test]
-fn shared_public_ir_transforms_and_negative_controls() {
+fn shared_controls(variable: &str) {
+    let root = fixtures(variable);
     for suffix in ["", "_standalone"] {
         run(
-            Command::new(fixtures().join(format!("bin/translator_replay_shared{suffix}"))),
-            &format!("shared public IR controls{suffix} (supplemental A64 coverage)"),
+            Command::new(root.join(format!("bin/translator_replay_shared{suffix}"))),
+            &format!("{variable}: shared public IR controls{suffix} (supplemental A64 coverage)"),
             "shared-public-ir: PASS cases=256 properties=8 negative-controls=256",
         )
         .unwrap();
@@ -74,8 +79,18 @@ fn shared_public_ir_transforms_and_negative_controls() {
 }
 
 #[test]
+fn shared_public_ir_transforms_and_negative_controls() {
+    shared_controls(RELEASE_FIXTURES);
+}
+
+#[test]
+fn debug_shared_public_ir_transforms_and_negative_controls() {
+    shared_controls(DEBUG_FIXTURES);
+}
+
+#[test]
 fn retained_replay_inputs_match_original_bytes() {
-    let root = fixtures();
+    let root = fixtures(RELEASE_FIXTURES);
     let rows: Vec<_> = include_str!("replay/cases.tsv").lines().skip(1).collect();
     assert_eq!(rows.len(), 50);
     for row in rows {
@@ -93,7 +108,7 @@ fn retained_replay_inputs_match_original_bytes() {
 #[cfg(target_arch = "aarch64")]
 #[test]
 fn a64_fifty_saved_inputs_public_replay() {
-    let root = fixtures();
+    let root = fixtures(RELEASE_FIXTURES);
     let mut failures = Vec::new();
     for row in include_str!("replay/cases.tsv").lines().skip(1) {
         let fields: Vec<_> = row.split('\t').collect();
@@ -109,7 +124,7 @@ fn a64_fifty_saved_inputs_public_replay() {
 #[cfg(target_arch = "aarch64")]
 #[test]
 fn a64_original_eight_ir_transform_populations() {
-    let root = fixtures();
+    let root = fixtures(RELEASE_FIXTURES);
     let mut command = Command::new(root.join("bin/translator_replay_ir_transform"));
     // The original transform used drdecode's host-independent encoding eligibility.
     // Original fixed population and all original floors remain enabled.
@@ -140,15 +155,26 @@ fn a64_original_eight_ir_transform_populations() {
 }
 
 #[cfg(target_arch = "aarch64")]
-#[test]
-fn a64_original_selector_forward_reverse_and_aliases() {
-    let root = fixtures();
+fn a64_selector_controls(variable: &str) {
+    let root = fixtures(variable);
     for suffix in ["", "_standalone"] {
         run(
             Command::new(root.join(format!("bin/translator_replay_selectors{suffix}"))),
-            &format!("original A64 selector consistency{suffix}"),
+            &format!("{variable}: original A64 selector consistency{suffix}"),
             "source-selectors: PASS registers=410 restored=5 aliases=36 opcodes=4",
         )
         .unwrap();
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn a64_original_selector_forward_reverse_and_aliases() {
+    a64_selector_controls(RELEASE_FIXTURES);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn debug_a64_original_selector_forward_reverse_and_aliases() {
+    a64_selector_controls(DEBUG_FIXTURES);
 }

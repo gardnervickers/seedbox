@@ -74,12 +74,8 @@ fn real_pids_eagain_rolls_back_creation_and_recovers_capacity() {
             out.stdout,
             "OK eagain: fillers acknowledged, EAGAIN, flush 100/100, joined, thread recovered, clone3 exit 7\n"
         );
-        let hits = out.stderr.lines().find_map(|line| {
-            line.strip_prefix("isolate:pids-limit-hits=")
-                .and_then(|n| n.parse::<u64>().ok())
-        });
         assert!(
-            hits.is_some_and(|n| n > 0),
+            pids_limit_hits(&out.stderr).is_some_and(|n| n > 0),
             "must attribute EAGAIN to owned pids.max: {}",
             out.stderr
         );
@@ -112,5 +108,33 @@ fn original_nested_pid_namespace_reaps_orphans_and_rejects_fork_after_init_exit(
                 out.stdout
             );
         }
+    }
+}
+
+fn pids_limit_hits(stderr: &str) -> Option<u64> {
+    stderr.lines().find_map(|line| {
+        line.strip_prefix("isolate: pids-limit-hits=")
+            .and_then(|n| n.parse().ok())
+    })
+}
+
+#[test]
+fn pids_limit_receipt_matches_launcher_output() {
+    // isolate.c emits this record after reading the owned cgroup's pids.events.
+    assert_eq!(
+        pids_limit_hits("unix-client: pid=123 executed=1\nisolate: pids-limit-hits=7\n"),
+        Some(7)
+    );
+    for receipt in [
+        "",
+        "unix-client: pid=123 executed=1\n",
+        "isolate:pids-limit-hits=7\n",
+        "isolate: pids-limit-hits=invalid\n",
+        "isolate: pids-limit-hits=0\n",
+    ] {
+        assert!(
+            !pids_limit_hits(receipt).is_some_and(|n| n > 0),
+            "missing, malformed or zero receipt must not establish a limit hit: {receipt}"
+        );
     }
 }
