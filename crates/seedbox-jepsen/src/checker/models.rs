@@ -10,35 +10,145 @@ use wgl::{SequentialModel, Verdict};
 pub const STEP_BUDGET: u64 = 50_000_000;
 
 /// Memory the search's configuration cache may use per check. The cache
-/// holds up to one configuration per step, each a bitset over the history
-/// plus a model state, so a long history with many unknown outcomes would
-/// otherwise fill a guest's memory long before [`STEP_BUDGET`] ran out.
+/// holds a bitset over the history plus a model state per configuration,
+/// so a long history with many unknown outcomes would otherwise fill a
+/// guest's memory long before [`STEP_BUDGET`] ran out.
 pub const SEARCH_MEMORY: u64 = 640 << 20;
 
+/// Search steps per cached configuration assumed when bounding memory.
+/// Register searches measured 9-12, deciding and exhausting alike; a search
+/// that caches faster than this may exceed [`SEARCH_MEMORY`].
+pub const STEPS_PER_CONFIGURATION: u64 = 4;
+
 /// The step budget for a history of `operations`: [`STEP_BUDGET`], or less
-/// when that many cached configurations would exceed [`SEARCH_MEMORY`], so
-/// the search reports budget exhaustion instead of the oracle being killed.
+/// when the configurations that many steps cache would exceed
+/// [`SEARCH_MEMORY`], so the search reports budget exhaustion instead of
+/// the oracle being killed.
 pub fn step_budget(operations: usize) -> u64 {
     let per_configuration = operations as u64 / 8 + 64;
-    (SEARCH_MEMORY / per_configuration).min(STEP_BUDGET)
+    (SEARCH_MEMORY / per_configuration * STEPS_PER_CONFIGURATION).min(STEP_BUDGET)
 }
 
 /// Check one key's register history with [`step_budget`], first recording
 /// which key is being checked and how large its history is.
+///
+/// Failed operations are dropped first. The search already excludes them,
+/// but sizes its configurations by the whole history, so a history that is
+/// mostly requests never sent (clients retrying a stopped node) would get
+/// a budget too small to decide what is left. Evidence indices refer to
+/// `operations`.
 pub fn check_register<V: Clone + Eq + std::hash::Hash>(
     key: &str,
     operations: &[wgl::Operation<RegisterOp<V>, RegisterRet<V>>],
 ) -> Verdict {
-    let pending = operations
+    let kept: Vec<usize> = (0..operations.len())
+        .filter(|&i| !matches!(operations[i].outcome, wgl::OpOutcome::Failed { .. }))
+        .collect();
+    let checked: Vec<_> = kept.iter().map(|&i| operations[i].clone()).collect();
+    let pending = checked
         .iter()
         .filter(|o| matches!(o.outcome, wgl::OpOutcome::Pending))
         .count();
-    let budget = step_budget(operations.len());
+    let budget = step_budget(checked.len());
     crate::kit::evidence(
         "checking",
-        serde_json::json!({"key": key, "ops": operations.len(), "pending": pending, "budget": budget}),
+        serde_json::json!({"key": key, "ops": checked.len(), "failed": operations.len() - checked.len(),
+                           "pending": pending, "budget": budget}),
     );
-    wgl::check_history(&RegisterOf::<V>::default(), operations, budget)
+    let original = |e: wgl::Evidence| wgl::Evidence {
+        longest_prefix: e.longest_prefix.iter().map(|&i| kept[i]).collect(),
+        blocked_on: e.blocked_on.map(|i| kept[i]),
+        steps: e.steps,
+    };
+    match wgl::check_history(&RegisterOf::<V>::default(), &checked, budget) {
+        Verdict::Linearizable => Verdict::Linearizable,
+        Verdict::NotLinearizable(e) => Verdict::NotLinearizable(original(e)),
+        // Many unknown outcomes can make refuting a history far costlier
+        // than accepting one; an overwritten read refutes it outright.
+        Verdict::BudgetExhausted(e) => match overwritten_read(&checked) {
+            Some((read, overwrite)) => {
+                crate::kit::evidence(
+                    "overwritten-read",
+                    serde_json::json!({"key": key, "read": kept[read], "overwrite": kept[overwrite]}),
+                );
+                Verdict::NotLinearizable(original(wgl::Evidence {
+                    blocked_on: Some(read),
+                    ..e
+                }))
+            }
+            None => Verdict::BudgetExhausted(original(e)),
+        },
+    }
+}
+
+/// A completed read that no linearization explains because the value it
+/// returned was certainly overwritten: every operation that may have
+/// written that value finished before a write or successful compare-and-set
+/// began, which itself finished before the read began. Returns the read and
+/// that overwrite. Cheap, and sound for any history, but it finds only
+/// violations of this shape: a value no unknown operation could restore.
+fn overwritten_read<V: Eq>(
+    operations: &[wgl::Operation<RegisterOp<V>, RegisterRet<V>>],
+) -> Option<(usize, usize)> {
+    use wgl::OpOutcome::{Completed, Failed, Pending};
+    // Operations that certainly changed the register, by invocation, and
+    // the earliest completion among those invoked at or after each.
+    let mut changes: Vec<(u64, u64, usize)> = operations
+        .iter()
+        .enumerate()
+        .filter_map(|(i, o)| match (&o.op, &o.outcome) {
+            (RegisterOp::Write(_), Completed { at, .. })
+            | (
+                RegisterOp::Cas(..),
+                Completed {
+                    at,
+                    ret: RegisterRet::Cas(true),
+                },
+            ) => Some((o.invoked_at, *at, i)),
+            _ => None,
+        })
+        .collect();
+    changes.sort_unstable();
+    let mut earliest = vec![(u64::MAX, usize::MAX); changes.len() + 1];
+    for k in (0..changes.len()).rev() {
+        earliest[k] = earliest[k + 1].min((changes[k].1, changes[k].2));
+    }
+    'reads: for (r, read) in operations.iter().enumerate() {
+        let (
+            RegisterOp::Read,
+            Completed {
+                at: end,
+                ret: RegisterRet::Value(Some(value)),
+            },
+        ) = (&read.op, &read.outcome)
+        else {
+            continue;
+        };
+        // When the last operation that may have written `value` finished.
+        let mut latest = 0;
+        for o in operations.iter().filter(|o| o.invoked_at < *end) {
+            let writes = match &o.op {
+                RegisterOp::Write(v) | RegisterOp::Cas(_, v) => v == value,
+                RegisterOp::Read => false,
+            };
+            match &o.outcome {
+                _ if !writes => {}
+                Pending => continue 'reads,
+                Failed { .. }
+                | Completed {
+                    ret: RegisterRet::Cas(false),
+                    ..
+                } => {}
+                Completed { at, .. } => latest = latest.max(*at),
+            }
+        }
+        let first_after = changes.partition_point(|c| c.0 <= latest);
+        let (finished, overwrite) = earliest[first_after];
+        if finished < read.invoked_at {
+            return Some((r, overwrite));
+        }
+    }
+    None
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -228,8 +338,9 @@ impl<Op: Clone + std::fmt::Debug, Ret: Clone + std::fmt::Debug> Timed<Op, Ret> {
         self.history.operations()
     }
 
-    /// Print every operation as an `H` line tagged with `key`: its index,
-    /// operation, outcome and times.
+    /// Print every operation the checker sees as an `H` line tagged with
+    /// `key`: its index, operation, outcome, times and the checker's stamps.
+    /// Failed operations, which constrain nothing, are left out.
     pub fn print(&self, key: &str) {
         for (i, (operation, (start, end))) in self
             .history
@@ -238,14 +349,15 @@ impl<Op: Clone + std::fmt::Debug, Ret: Clone + std::fmt::Debug> Timed<Op, Ret> {
             .zip(&self.times)
             .enumerate()
         {
-            let outcome = match &operation.outcome {
-                wgl::OpOutcome::Completed { ret, .. } => format!("{ret:?}"),
-                wgl::OpOutcome::Failed { .. } => "failed".into(),
-                wgl::OpOutcome::Pending => "pending".into(),
+            let (outcome, at) = match &operation.outcome {
+                wgl::OpOutcome::Completed { ret, at } => (format!("{ret:?}"), Some(*at)),
+                wgl::OpOutcome::Failed { .. } => continue,
+                wgl::OpOutcome::Pending => ("pending".into(), None),
             };
             crate::kit::history_line(&serde_json::json!({
                 "key": key, "i": i, "op": format!("{:?}", operation.op),
                 "outcome": outcome, "t0": start, "t1": end,
+                "s0": operation.invoked_at, "s1": at,
             }));
         }
     }
@@ -268,6 +380,74 @@ mod tests {
 
     fn verdict<M: SequentialModel>(model: &M, history: &History<M::Op, M::Ret>) -> &'static str {
         verdict_word(&check_history(model, history.operations(), 100_000))
+    }
+
+    #[test]
+    fn register_checks_skip_failed_operations_and_report_original_indices() {
+        // A stale read buried among many requests that were never sent.
+        let mut h = History::new();
+        let w = h.invoke(RegisterOp::Write(1u8));
+        h.complete(w, RegisterRet::Wrote);
+        for _ in 0..50_000 {
+            let r = h.invoke(RegisterOp::Read);
+            h.fail(r);
+        }
+        let w = h.invoke(RegisterOp::Write(2));
+        h.complete(w, RegisterRet::Wrote);
+        for _ in 0..50_000 {
+            let r = h.invoke(RegisterOp::Cas(2, 3));
+            h.fail(r);
+        }
+        let stale = h.invoke(RegisterOp::Read);
+        h.complete(stale, RegisterRet::Value(Some(1)));
+        let operations = h.operations();
+        assert!(step_budget(operations.len()) < 3 * operations.len() as u64);
+        match check_register("k", operations) {
+            Verdict::NotLinearizable(e) => {
+                assert_eq!(e.blocked_on, Some(stale.index()));
+                assert_eq!(e.longest_prefix, vec![0, 50_001]);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Without the stale read the same padding passes.
+        let passing = &operations[..operations.len() - 1];
+        assert!(check_register("k", passing).is_linearizable());
+    }
+
+    #[test]
+    fn overwritten_reads_refute_histories_too_costly_to_search() {
+        // The register is reset to its initial value after a write, among
+        // many writes of unknown outcome, none of which writes that value.
+        let mut h = History::new();
+        let w = h.invoke(RegisterOp::Write(0u32));
+        h.complete(w, RegisterRet::Wrote);
+        let w = h.invoke(RegisterOp::Write(1));
+        h.complete(w, RegisterRet::Wrote);
+        for v in 0..40 {
+            let _ = h.invoke(RegisterOp::Cas(1 + v % 5, 1 + (v + 1) % 5));
+        }
+        let r = h.invoke(RegisterOp::Read);
+        h.complete(r, RegisterRet::Value(Some(0)));
+        assert_eq!(overwritten_read(h.operations()), Some((r.index(), 1)));
+        // An unknown write of that value could explain the read...
+        let mut explained = History::new();
+        let w = explained.invoke(RegisterOp::Write(0u32));
+        explained.complete(w, RegisterRet::Wrote);
+        let w = explained.invoke(RegisterOp::Write(1));
+        explained.complete(w, RegisterRet::Wrote);
+        let _ = explained.invoke(RegisterOp::Write(0));
+        let r = explained.invoke(RegisterOp::Read);
+        explained.complete(r, RegisterRet::Value(Some(0)));
+        assert_eq!(overwritten_read(explained.operations()), None);
+        // ...as could a read concurrent with the overwrite.
+        let mut concurrent = History::new();
+        let w = concurrent.invoke(RegisterOp::Write(0u32));
+        concurrent.complete(w, RegisterRet::Wrote);
+        let w = concurrent.invoke(RegisterOp::Write(1));
+        let r = concurrent.invoke(RegisterOp::Read);
+        concurrent.complete(w, RegisterRet::Wrote);
+        concurrent.complete(r, RegisterRet::Value(Some(0)));
+        assert_eq!(overwritten_read(concurrent.operations()), None);
     }
 
     #[test]
@@ -355,7 +535,7 @@ mod tests {
     fn long_histories_get_a_budget_that_fits_in_memory() {
         let budget = step_budget(4_000);
         assert!(budget < step_budget(100) && step_budget(100) <= STEP_BUDGET);
-        assert!(budget * (4_000 / 8 + 64) <= SEARCH_MEMORY);
+        assert!(budget / STEPS_PER_CONFIGURATION * (4_000 / 8 + 64) <= SEARCH_MEMORY);
         // A wedged server's shape: many distinct unknown writes, then a read
         // of the value before them. The search must stop on its budget.
         let mut h = History::new();

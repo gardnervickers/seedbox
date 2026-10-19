@@ -548,7 +548,10 @@ fn registers(args: Arc<Args>) -> u8 {
                 history.print(id);
                 violations.push(id.clone());
             }
-            wgl::Verdict::BudgetExhausted(_) => exhausted.push(id.clone()),
+            wgl::Verdict::BudgetExhausted(_) => {
+                history.print(id);
+                exhausted.push(id.clone());
+            }
         }
     }
     kit::evidence(

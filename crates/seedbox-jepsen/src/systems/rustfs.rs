@@ -690,7 +690,10 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
                 history.print(key);
                 violations.push(key.clone());
             }
-            wgl::Verdict::BudgetExhausted(_) => exhausted.push(key.clone()),
+            wgl::Verdict::BudgetExhausted(_) => {
+                history.print(key);
+                exhausted.push(key.clone());
+            }
         }
     }
     let unwritten = unwritten.lock().unwrap().clone();

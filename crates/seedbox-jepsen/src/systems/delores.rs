@@ -418,7 +418,10 @@ pub fn run(args: Args) -> u8 {
                 history.print(key);
                 violations.push(key.clone());
             }
-            wgl::Verdict::BudgetExhausted(_) => exhausted.push(key.clone()),
+            wgl::Verdict::BudgetExhausted(_) => {
+                history.print(key);
+                exhausted.push(key.clone());
+            }
         }
     }
     let (acknowledged, unwritten) = {
