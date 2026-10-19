@@ -15,14 +15,24 @@
 //! CLI given by `--seedbox` rather than linking the client library: the CLI
 //! prepares projects and owns the server lifecycle, and the binary under test
 //! may be a different build from this checkout.
+//!
+//! SIGINT, SIGTERM or SIGHUP launches nothing more, stops the running
+//! simulations, records what had already completed and shuts down a server
+//! that `--serve` started; a second signal exits at once. The `seedbox`
+//! processes run in their own process group, so a terminal's Ctrl-C reaches
+//! only the runner and the shutdown happens in that order.
 use crate::kit;
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -178,6 +188,31 @@ fn plan(args: &Args) -> Result<Vec<Job>, String> {
     }
 }
 
+/// Set by the first SIGINT, SIGTERM or SIGHUP.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Simulations submitted and not yet complete, to stop on an interrupt.
+static ACTIVE: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+extern "C" fn on_signal(_: libc::c_int) {
+    if INTERRUPTED.swap(true, Ordering::SeqCst) {
+        // A second signal: leave now, without the orderly shutdown.
+        unsafe { libc::_exit(130) };
+    }
+}
+
+fn install_signal_handlers() {
+    let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        // SAFETY: the handler only touches an atomic and calls _exit.
+        unsafe { libc::signal(signal, handler) };
+    }
+}
+
+fn interrupted() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+}
+
 struct Cli<'a> {
     args: &'a Args,
 }
@@ -185,6 +220,9 @@ struct Cli<'a> {
 impl Cli<'_> {
     fn command(&self) -> Command {
         let mut command = Command::new(&self.args.seedbox);
+        // Out of the terminal's process group: on Ctrl-C the runner stops
+        // the simulations and the server itself, in order.
+        command.process_group(0);
         command.env("SEEDBOX_STATE", self.args.state());
         if let Some(engine) = &self.args.engine {
             command.env("DOCKER_HOST", engine);
@@ -537,6 +575,12 @@ fn observe(cli: &Cli, submit: &[&str], dir: &Path, name: &str) -> Result<Observe
     if id.is_empty() {
         return Err(format!("no simulation id (submission exit {code})"));
     }
+    // Inserted before checking the flag, so either the interrupt watcher
+    // sees this simulation or this check sees the interrupt.
+    ACTIVE.lock().unwrap().insert(id.clone());
+    if interrupted() {
+        cli.quiet(&["stop", &id]);
+    }
     let followed = machines(&created);
     let followers = Followers::start(cli, &id, &followed, dir);
     let final_path = dir.join(format!("{name}.json"));
@@ -559,6 +603,7 @@ fn observe(cli: &Cli, submit: &[&str], dir: &Path, name: &str) -> Result<Observe
         cli.quiet(&["stop", &id]);
         resource = complete(Some("120s"));
     }
+    ACTIVE.lock().unwrap().remove(&id);
     let (mut event_problems, mut log_problems): (Vec<String>, Vec<String>) = followers
         .finish(Duration::from_secs(60))
         .into_iter()
@@ -713,6 +758,14 @@ fn execute(cli: &Cli, job: &Job, out: &Path, args: &Args) -> Value {
     let verdict = oracle_verdict(&dir);
     let exited = document["status"]["termination"]["reason"] == "oracleExited";
     let hit = exited && document["status"]["oracleExitCode"] == 1;
+    if !exited && interrupted() {
+        // Stopped by the interrupt: no result to record.
+        row["interrupted"] = true.into();
+        if !args.keep {
+            cli.quiet(&["delete", "simulation", &id]);
+        }
+        return row;
+    }
     if !exited {
         row["error"] = document["status"]["termination"].clone();
         if row["error"].is_null() {
@@ -726,7 +779,7 @@ fn execute(cli: &Cli, job: &Job, out: &Path, args: &Args) -> Value {
     }
     row["hit"] = hit.into();
     row["verdict"] = verdict.chars().take(300).collect::<String>().into();
-    if job.replay || (hit && args.replay_hits) {
+    if (job.replay || (hit && args.replay_hits)) && !interrupted() {
         let started = Instant::now();
         let replay_dir = dir.join("replay");
         let _ = fs::create_dir_all(&replay_dir);
@@ -786,9 +839,10 @@ fn execute(cli: &Cli, job: &Job, out: &Path, args: &Args) -> Value {
     row
 }
 
-fn ensure_server(cli: &Cli, args: &Args) -> Result<(), String> {
+/// Make sure a server answers; whether this call started it.
+fn ensure_server(cli: &Cli, args: &Args) -> Result<bool, String> {
     if cli.quiet(&["get", "simulations"]) {
-        return Ok(());
+        return Ok(false);
     }
     if !args.serve {
         return Err(format!(
@@ -806,7 +860,7 @@ fn ensure_server(cli: &Cli, args: &Args) -> Result<(), String> {
         .map_err(|e| format!("seedbox serve: {e}"))?;
     for _ in 0..120 {
         if cli.quiet(&["get", "simulations"]) {
-            return Ok(());
+            return Ok(true);
         }
         kit::pause(0.5);
     }
@@ -965,11 +1019,15 @@ pub fn run(mut args: Args) -> u8 {
         eprintln!("error: {}: {error}", args.out().display());
         return 2;
     }
+    install_signal_handlers();
     let cli = Cli { args: &args };
-    if let Err(error) = ensure_server(&cli, &args) {
-        eprintln!("error: {error}");
-        return 2;
-    }
+    let started = match ensure_server(&cli, &args) {
+        Ok(started) => started,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return 2;
+        }
+    };
     let queue = Arc::new(Mutex::new(jobs.into_iter().collect::<VecDeque<_>>()));
     let rows = Arc::new(Mutex::new(Vec::new()));
     let journal = Arc::new(Mutex::new(
@@ -979,12 +1037,37 @@ pub fn run(mut args: Args) -> u8 {
             .open(args.out().join("campaign.jsonl"))
             .ok(),
     ));
+    let lanes = AtomicUsize::new(args.lanes.max(1));
     std::thread::scope(|scope| {
+        let (lanes, cli) = (&lanes, &cli);
+        scope.spawn(move || {
+            let mut stopping = false;
+            while lanes.load(Ordering::SeqCst) > 0 {
+                if interrupted() && !stopping {
+                    stopping = true;
+                    let active: Vec<String> = ACTIVE.lock().unwrap().iter().cloned().collect();
+                    eprintln!(
+                        "campaign: interrupted; stopping {} running simulations (again to exit at once)",
+                        active.len()
+                    );
+                    for id in active {
+                        cli.quiet(&["stop", &id]);
+                    }
+                }
+                kit::pause(0.2);
+            }
+        });
         for _ in 0..args.lanes.max(1) {
-            let (queue, rows, journal, args, cli) =
-                (queue.clone(), rows.clone(), journal.clone(), &args, &cli);
+            let (queue, rows, journal, args) =
+                (queue.clone(), rows.clone(), journal.clone(), &args);
             scope.spawn(move || loop {
-                let Some(job) = queue.lock().unwrap().pop_front() else {
+                let job = if interrupted() {
+                    None
+                } else {
+                    queue.lock().unwrap().pop_front()
+                };
+                let Some(job) = job else {
+                    lanes.fetch_sub(1, Ordering::SeqCst);
                     return;
                 };
                 let free = free_gb(args.state()).or_else(|| free_gb(Path::new("/")));
@@ -1003,6 +1086,10 @@ pub fn run(mut args: Args) -> u8 {
                 }
                 eprintln!("campaign: start {}", job.label);
                 let row = execute(cli, &job, args.out(), args);
+                if row["interrupted"] == true {
+                    eprintln!("campaign: stopped {}", job.label);
+                    continue;
+                }
                 eprintln!("campaign: done {}", done_line(&job.label, &row));
                 if let Some(file) = journal.lock().unwrap().as_mut() {
                     use std::io::Write;
@@ -1017,6 +1104,17 @@ pub fn run(mut args: Args) -> u8 {
     let table = summary(&rows);
     let _ = fs::write(args.out().join("summary.md"), format!("{table}\n"));
     println!("{table}");
+    if started && !args.keep {
+        eprintln!("campaign: shutting down the server it started");
+        cli.quiet(&["shutdown"]);
+    } else if started {
+        eprintln!(
+            "campaign: the server keeps the simulations (--keep); stop it with `seedbox shutdown`"
+        );
+    }
+    if interrupted() {
+        return 130;
+    }
     let failed = rows.iter().any(|r| {
         !r["error"].is_null() || r["replay"]["status"].as_str().is_some_and(|s| s != "MATCH")
     });
