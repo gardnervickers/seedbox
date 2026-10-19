@@ -79,3 +79,5 @@ configure_DynamoRIO_client(translator_observe)
 use_DynamoRIO_extension(translator_observe drmgr)
 use_DynamoRIO_extension(translator_observe drreg)
 install(TARGETS translator_observe LIBRARY DESTINATION lib)
+
+add_subdirectory(replay)
