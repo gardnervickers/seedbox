@@ -1,0 +1,5 @@
+Main-Class: JitStress
+Premain-Class: JitStress
+Can-Redefine-Classes: true
+Can-Retransform-Classes: true
+
