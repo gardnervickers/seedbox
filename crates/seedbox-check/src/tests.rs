@@ -274,6 +274,11 @@ fn dynamorio_suite_is_unprivileged_native_and_requires_prepared_inputs() {
         ("SEEDBOX_DYNAMORIO_FIXTURES", temp.0.to_str().unwrap()),
         ("SEEDBOX_DYNAMORIO_DEBUG_FIXTURES", temp.0.to_str().unwrap()),
     ]);
+    h.machine = "aarch64".into();
+    assert!(requirements(Suite::Dynamorio, &h, &env, &temp.0)
+        .iter()
+        .any(|reason| reason.contains("unix-lifecycle_model")));
+    install_executable(&temp.0.join("bin/unix-lifecycle_model"), "fixture");
     for arch in ["x86_64", "aarch64"] {
         h.machine = arch.into();
         assert!(requirements(Suite::Dynamorio, &h, &env, &temp.0).is_empty());

@@ -310,6 +310,16 @@ pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -
                     ),
                 );
             }
+            if host.arm() {
+                need(
+                    fixtures.is_some_and(|root| executable(&root.join("bin/unix-lifecycle_model"))),
+                    "prepared ARM bin/unix-lifecycle_model is required".into(),
+                );
+                need(
+                    debug.is_some_and(|root| executable(&root.join("bin/unix-lifecycle_model"))),
+                    "prepared ARM Debug bin/unix-lifecycle_model is required".into(),
+                );
+            }
         }
         if suite == Suite::DynamorioIsolated {
             for name in ["bin/unix-pid1", "bin/unix-eagain", "bin/unix-supervisor"] {
