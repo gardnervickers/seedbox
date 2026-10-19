@@ -1,4 +1,4 @@
-//! Public disarmed timer controls; deliberately excludes live-client teardown.
+//! Public disarmed state controls and live-client normal-exit regressions.
 use seedbox_test::process::Guarded;
 use seedbox_test_time::HangGuard;
 use std::{fs::File, path::PathBuf, process::Command, time::Duration};
@@ -135,5 +135,82 @@ fn public_disarmed_timer_state_and_concurrent_old_value_chains() {
             concurrent,
             format!("{expected}PASS concurrent timer transactions\n")
         );
+    }
+}
+
+fn app_receipts(out: &str) {
+    let receipt = out
+        .trim()
+        .strip_prefix("app-timer receipts=")
+        .and_then(|value| value.strip_suffix(" mask=preserved"))
+        .expect("positive application handler receipts and preserved SIGUSR1 mask");
+    let counts: Vec<u32> = receipt
+        .split(',')
+        .map(|value| value.parse().unwrap())
+        .collect();
+    assert_eq!(counts.len(), 3, "{out}");
+    assert!(counts.iter().all(|&count| count > 0), "{out}");
+}
+
+fn client_receipts(err: &str, expected_pre: u32, expected_post: u32) {
+    let receipts: Vec<_> = err
+        .lines()
+        .filter_map(|line| line.strip_prefix("timer-client callbacks="))
+        .collect();
+    assert_eq!(receipts.len(), 1, "one public exit receipt: {err}");
+    let (callbacks, fields) = receipts[0]
+        .split_once(' ')
+        .expect("callback and syscall receipts");
+    let callbacks: Vec<u32> = callbacks
+        .split(',')
+        .map(|value| value.parse().unwrap())
+        .collect();
+    assert_eq!(callbacks.len(), 3, "{err}");
+    assert!(callbacks.iter().all(|&count| count >= 2), "{err}");
+    assert_eq!(
+        fields,
+        format!("pre={expected_pre} post={expected_post} ready=1 skipped=1 updates=3")
+    );
+    assert_eq!(expected_pre, expected_post + 1);
+}
+
+#[test]
+fn public_live_client_timer_normal_exit_and_application_coexistence() {
+    let (native, _) = run(
+        &root(false),
+        "unix-timer_app_timers",
+        &[],
+        false,
+        false,
+        &[],
+        None,
+    );
+    app_receipts(&native);
+    for debug in [false, true] {
+        let root = root(debug);
+        for options in [&[][..], &["-opt_speed", "-disable_traces"][..]] {
+            let (out, err) = run(
+                &root,
+                "unix-timer_exit_marker",
+                &[],
+                true,
+                debug,
+                options,
+                Some("libunix-timer-client.so"),
+            );
+            assert!(out.is_empty(), "{out}");
+            client_receipts(&err, 101, 100);
+        }
+        let (out, err) = run(
+            &root,
+            "unix-timer_app_timers",
+            &[],
+            true,
+            debug,
+            &["-opt_speed", "-disable_traces"],
+            Some("libunix-timer-client.so"),
+        );
+        app_receipts(&out);
+        client_receipts(&err, 107, 106);
     }
 }
