@@ -22,6 +22,7 @@ in pkgs.stdenv.mkDerivation {
   cmakeFlags = [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
     "-DDynamoRIO_DIR=${runtime}/cmake"
+    "-DSEEDBOX_UNIX_STATIC_LIBC_DIR=${pkgs.glibc.static}/lib"
     "-DSEEDBOX_JDK21_HOME=${pkgs.jdk21}"
     "-DSEEDBOX_JDK25_HOME=${pkgs.jdk25}"
     "-DSEEDBOX_WHITEBOX_JAVA=${whitebox}"

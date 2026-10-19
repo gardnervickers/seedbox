@@ -101,7 +101,12 @@ from [seedbox-machine/tests/dynamorio](../crates/seedbox-machine/tests/dynamorio
 with native controls, the packaged `drrun`, and a public drmgr/drreg client.
 It checks signal context/vector/mask/alternate-stack restoration, live registers
 and flags under instrumentation, and ARM load/store-exclusive application semantics.
-Client execution is asserted independently. These host tests do not validate the
+Source-derived clients also check public flush operations, finite concurrent
+memory queries, managed-runtime result models and JVM JIT floors. ARM-only codec,
+hardware-instruction and exclusive populations remain explicit architecture cases.
+Fixture `origins.json` records source paths, commits, hashes and adaptations;
+retained saved inputs alone are not replay coverage. Client execution is asserted
+independently. These host tests do not validate the
 Seedbox guest epoch or executable-FD handoff, nor require KVM, root or Docker.
 
 From the checkout root inside the development shell:

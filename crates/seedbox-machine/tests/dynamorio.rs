@@ -129,3 +129,6 @@ fn exclusive_instructions_preserve_stored_values_and_overlapping_load_base() {
     run("exclusive", true, false);
     run("exclusive", true, true);
 }
+
+#[path = "dynamorio/translator_cases.rs"]
+mod translator_cases;
