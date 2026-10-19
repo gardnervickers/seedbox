@@ -64,6 +64,11 @@ pub fn run_with_options(
     let out = logs.path().join("stdout");
     let err = logs.path().join("stderr");
     let mut command = Command::new(root.join("bin/unix-supervisor"));
+    // SysV IPC outlives a crashed process. Keep its native owner outside DR,
+    // under the existing subreaper, so failure/containment also removes it.
+    if binary == "restart_matrix" && args.first() == Some(&"semop") {
+        command.arg("--sysv-sem");
+    }
     if let Some(flags) = isolate {
         let launcher = if flags.first() == Some(&"pid1") {
             std::env::var_os("SEEDBOX_DYNAMORIO_PID1_LAUNCHER")
@@ -148,6 +153,15 @@ pub fn checked(binary: &str, args: &[&str], profile: Profile, images: usize) -> 
         "fixture must execute its invariant: {}",
         out.stdout
     );
+    if binary == "restart_matrix" && args.first() == Some(&"semop") {
+        assert!(
+            out.stderr
+                .lines()
+                .any(|s| s == "restart-owner: reaped=1 removed=1"),
+            "native SysV owner must reap and remove its resource: {}",
+            out.stderr
+        );
+    }
     if client {
         let executed = out
             .stderr

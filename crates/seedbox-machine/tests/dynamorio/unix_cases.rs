@@ -755,3 +755,37 @@ fn original_detach_signal_masks_and_altstack_survive_live_handler() {
         }
     }
 }
+
+#[test]
+fn original_restart_table_completes_all_17_selectors_and_three_signal_modes() {
+    // Original source table, not runtime registration. No selector is silently
+    // absent: a missing/refused kernel API produces a named setup failure.
+    for selector in [
+        "read",
+        "write",
+        "nanosleep",
+        "clockNanosleepAbs",
+        "futexWait",
+        "ppoll",
+        "epollPwait2",
+        "accept4",
+        "connect",
+        "recvmsg",
+        "wait4",
+        "flock",
+        "sigtimedwait",
+        "semop",
+        "ioUringEnter",
+        "futexWaitv",
+        "sigsuspendPause",
+    ] {
+        for mode in ["0", "1", "2"] {
+            triplet(
+                "restart_matrix",
+                &[selector, mode],
+                if selector == "wait4" { 2 } else { 1 },
+                &["completed payload frame nested blocked-entry"],
+            );
+        }
+    }
+}
