@@ -56,6 +56,7 @@ typedef struct {
 static storm_t st;
 static sem_t progress, queue_ack, churn_slots, churn_done;
 static _Atomic long churn_created;
+#include "storm_diagnostics.h"
 static int sig_t1, sig_t3, sig_q;
 
 /* -churn_max: live churn threads (default 8). */
@@ -82,9 +83,12 @@ static void
 storm_wake_waiters(void)
 {
     for (int w = 0; w < STORM_WAITERS; w++) {
-        if (write(wpipe[w][1], "e", 1) < 0) {
-            /* The waiter will be reported as hung. */
-        }
+        diag[D_w0_wake_attempt + w * 6] = 1;
+        ssize_t result = write(wpipe[w][1], "e", 1);
+        int error = result < 0 ? errno : 0;
+        diag[D_w0_wake_errno + w * 6] = error;
+        diag[D_w0_wake_result + w * 6] = (uint64_t)result;
+        diag[D_w0_wake_attempt + w * 6] = 2;
     }
 }
 
@@ -97,6 +101,7 @@ static void
 waiter_loop(int w)
 {
     my_waiter = w;
+    WROLE(w);
     struct sigevent sev;
     memset(&sev, 0, sizeof(sev));
     sev.sigev_notify = SIGEV_THREAD_ID;
@@ -111,13 +116,16 @@ waiter_loop(int w)
     struct itimerspec it = { { 0, period }, { 0, period } };
     REQUIRE(timer_settime(wtimer[w], 0, &it, NULL) == 0);
     wtimer_ok[w] = 1;
+    diag[D_w0_armed + w * 6] = 1;
     char b;
     for (int iter = 0;; iter++) {
+        WROLE(w);
         ssize_t n;
         if ((iter + w) % 2 == 0)
             n = read(wpipe[w][0], &b, 1);
         else {
             struct pollfd pfd = { wpipe[w][0], POLLIN, 0 };
+            WROLE(w);
             n = syscall(SYS_ppoll, &pfd, 1, NULL, NULL, 0);
             if (n == 1)
                 n = read(wpipe[w][0], &b, 1);
@@ -126,7 +134,8 @@ waiter_loop(int w)
             break;
         if (n < 0 && errno == EINTR) {
             atomic_fetch_add(&st.weintr[w], 1);
-            REQUIRE(sem_post(&progress) == 0);
+            atomic_fetch_add(&diag[D_w0_eintr + w * 6], 1);
+            REQUIRE(post_progress() == 0);
         }
         else {
             fprintf(stderr, "  storm: waiter %d: read returned %zd errno %d\n", w, n,
@@ -135,9 +144,12 @@ waiter_loop(int w)
             break;
         }
     }
+    WROLE(w);
     st.wtid[w] = 0;
     wtimer_ok[w] = 0;
     timer_delete(wtimer[w]);
+    diag[D_w0_armed + w * 6] = 0;
+    WROLE(w);
     my_waiter = -1;
 }
 
@@ -148,6 +160,7 @@ waiter_loop(int w)
 static void *
 poker_main(void *arg)
 {
+    ROLE(poker);
     rng_t r = { (uint64_t)(uintptr_t)arg };
     while (!st.round_over) {
         int w = (int)rn(&r, (uint32_t)storm_waiters);
@@ -175,7 +188,8 @@ h_t3(int sig, siginfo_t *si, void *uc)
 {
     (void)sig; (void)uc;
     atomic_fetch_add(&st.t3_acct, 1 + si->si_overrun);
-    sem_post(&progress);
+    atomic_fetch_add(&diag[D_t3_acct], 1 + si->si_overrun);
+    post_progress();
 }
 
 static void
@@ -188,8 +202,9 @@ h_q(int sig, siginfo_t *si, void *uc)
     if (atomic_exchange(&st.q_seen[v], 1))
         atomic_fetch_add(&st.q_dup, 1);
     atomic_fetch_add(&st.q_seen_n, 1);
+    atomic_fetch_add(&diag[D_acknowledged], 1);
     sem_post(&queue_ack);
-    sem_post(&progress);
+    post_progress();
 }
 
 typedef struct { _Atomic long notifications, inflight; } notify_t;
@@ -199,10 +214,15 @@ static void
 t2_notify(union sigval v)
 {
     notify_t *n = v.sival_ptr;
+    _Atomic uint64_t *nd = diagnostics[n - notification];
+    atomic_fetch_add(&nd[D_inflight], 1);
+    atomic_fetch_add(&nd[D_notifications], 1);
     atomic_fetch_add(&n->inflight, 1);
     atomic_fetch_add(&n->notifications, 1);
     for (volatile int i = 0; i < 2000; i++) ;
     atomic_fetch_sub(&n->inflight, 1);
+    atomic_fetch_sub(&nd[D_inflight], 1);
+    atomic_fetch_add(&nd[D_progress_posts], 1);
     sem_post(&progress);
 }
 
@@ -220,6 +240,8 @@ churn_child(void *arg)
     sigfillset(&all);
     REQUIRE(pthread_sigmask(SIG_SETMASK, &all, NULL) == 0);
     atomic_fetch_sub(&st.churn_live, 1);
+    atomic_fetch_sub(&diag[D_churn_live], 1);
+    atomic_fetch_add(&diag[D_churn_done], 1);
     REQUIRE(sem_post(&churn_slots) == 0);
     REQUIRE(sem_post(&churn_done) == 0);
     return NULL;
@@ -233,8 +255,10 @@ static void wait_sem(sem_t *s)
 }
 static void *churn_main(void *arg)
 {
+    ROLE(churn);
     rng_t *r = arg;
     while (st.churn_on) {
+        ROLE(churn);
         wait_sem(&churn_slots);
         if (!st.churn_on) { sem_post(&churn_slots); break; }
         pthread_attr_t a;
@@ -242,8 +266,12 @@ static void *churn_main(void *arg)
         REQUIRE(pthread_attr_init(&a) == 0);
         REQUIRE(pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED) == 0);
         atomic_fetch_add(&st.churn_live, 1);
+        atomic_fetch_add(&diag[D_churn_live], 1);
+        ROLE(churn);
         REQUIRE(pthread_create(&t, &a, churn_child, (void *)(uintptr_t)rn(r, 20000)) == 0);
         atomic_fetch_add(&churn_created, 1);
+        atomic_fetch_add(&diag[D_churn_created], 1);
+        ROLE(churn);
         REQUIRE(pthread_attr_destroy(&a) == 0);
         (void)rn(r, 300); /* Preserve the original pacing draw, without sleeping. */
     }
@@ -252,27 +280,45 @@ static void *churn_main(void *arg)
 static void *sender_main(void *unused)
 {
     (void)unused;
+    ROLE(sender);
     for (int q = 1; q <= STORM_Q; q++) {
         union sigval v = { .sival_int = q };
+        ROLE(sender);
         REQUIRE(sigqueue(getpid(), sig_q, v) == 0);
+        diag[D_sent] = q;
+        ROLE(sender);
         wait_sem(&queue_ack);
         REQUIRE(st.q_seen[q] == 1);
     }
     st.sender_done = 1;
-    REQUIRE(sem_post(&progress) == 0);
+    diag[D_sender_done] = 1;
+    ROLE(sender);
+    REQUIRE(post_progress() == 0);
     return NULL;
 }
 static void *controller_main(void *unused)
 {
     (void)unused;
+    ROLE(controller);
     for (;;) {
+        ROLE(controller);
         wait_sem(&progress);
-        int complete = st.sender_done && current_notification->notifications > 0 && st.t3_acct > 0 && churn_created > 0;
-        for (int w = 0; w < storm_waiters; w++) complete &= st.weintr[w] >= 10;
-        if (complete) break;
+        ROLE(controller);
+        atomic_fetch_add(&diag[D_controller_seq], 1);
+        unsigned bits = (st.sender_done ? 1 : 0) |
+            (current_notification->notifications > 0 ? 2 : 0) |
+            (st.t3_acct > 0 ? 4 : 0) | (churn_created > 0 ? 8 : 0);
+        for (int w = 0; w < storm_waiters; w++)
+            if (st.weintr[w] >= 10) bits |= 16U << w;
+        diag[D_predicate] = bits;
+        atomic_fetch_add(&diag[D_controller_seq], 1);
+        if (bits == ((16U << storm_waiters) - 1)) break;
     }
     st.round_over = 1;
+    diag[D_round_over] = 1;
+    ROLE(controller);
     storm_wake_waiters();
+    ROLE(controller);
     return NULL;
 }
 
@@ -290,6 +336,10 @@ drain_fd(int fd)
 static int
 storm_round(int round, rng_t *r, timer_t t2, timer_t t3, long *eintr_total)
 {
+    diag = diagnostics[round];
+    diag[D_pid] = getpid();
+    diag[D_round] = round + 1;
+    ROLE(main);
     memset((void *)&st, 0, sizeof(st));
     churn_created = 0;
     REQUIRE(sem_init(&churn_slots, 0, (unsigned)storm_churn_max) == 0);
@@ -304,6 +354,7 @@ storm_round(int round, rng_t *r, timer_t t2, timer_t t3, long *eintr_total)
     uint64_t t2_period = 500000 + rn(r, 2500) * 1000ULL;
     uint64_t dur = 40000000ULL + rn(r, 80) * 1000000ULL;
     st.churn_on = 1;
+    diag[D_churn_on] = 1;
     sigset_t all, none;
     sigfillset(&all);
     sigemptyset(&none);
@@ -337,19 +388,26 @@ storm_round(int round, rng_t *r, timer_t t2, timer_t t3, long *eintr_total)
     REQUIRE(timer_settime(t3, 0, &i3, NULL) == 0);
     uint64_t t3_armed = monotonic_ns();
     REQUIRE(timer_settime(t2, 0, &i2, NULL) == 0);
+    ROLE(main);
     waiter_loop(0);
+    ROLE(main);
     for (int w = 1; w < storm_waiters; w++)
         pthread_join(waiters[w], NULL);
     timer_settime(t2, 0, &zero, NULL);
     st.churn_on = 0;
+    diag[D_churn_on] = 0;
     st.round_over = 1;
+    ROLE(main);
     pthread_join(ctl, NULL);
     if (storm_poker)
         pthread_join(poker, NULL);
+    ROLE(main);
     pthread_join(sender, NULL);
+    ROLE(main);
     pthread_join(churn, NULL);
     /* Original synchronous cut: every thread eligible for t3 has completed
      * before main blocks it; SIGEV_THREAD callbacks inherit a blocked mask. */
+    ROLE(main);
     for (long i = 0; i < churn_created; ++i) wait_sem(&churn_done);
     REQUIRE(st.churn_live == 0);
     REQUIRE(sem_destroy(&churn_slots) == 0);
@@ -365,6 +423,7 @@ storm_round(int round, rng_t *r, timer_t t2, timer_t t3, long *eintr_total)
     siginfo_t si3;
     struct timespec wait3 = { 60, 0 };
     uint64_t t3_cut = monotonic_ns();
+    ROLE(main);
     int got3 = sigtimedwait(&s3, &si3, &wait3) == sig_t3;
     uint64_t t3_end = monotonic_ns();
     if (got3)
@@ -393,6 +452,7 @@ storm_round(int round, rng_t *r, timer_t t2, timer_t t3, long *eintr_total)
            round, storm_waiters, (long)churn_created, (long)current_notification->notifications, acct, dur);
     for (int w = 0; w < STORM_WAITERS; w++)
         *eintr_total += st.weintr[w];
+    ROLE(main);
     return fails;
 }
 
@@ -401,6 +461,7 @@ int main(int argc, char **argv)
 {
     REQUIRE(setvbuf(stdout, NULL, _IOLBF, 0) == 0);
     REQUIRE(argc == 5);
+    diag_init();
     uint64_t seed = strtoull(argv[1], NULL, 0);
     storm_waiters = atoi(argv[2]); storm_poker = atoi(argv[3]); storm_churn_max = atol(argv[4]);
     REQUIRE(storm_waiters >= 1 && storm_waiters <= STORM_WAITERS);
