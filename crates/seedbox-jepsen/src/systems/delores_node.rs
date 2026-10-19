@@ -150,6 +150,9 @@ fn report_cuts(args: &Args) {
     }
 }
 
+/// Nodes that refused a connection recently, which clients avoid.
+static REFUSED: http::Refusals = http::Refusals::new();
+
 /// One request's outcome.
 enum Answer {
     Got(u16, Value),
@@ -179,7 +182,10 @@ fn call(args: &Args, node: &str, method: &str, path: &str, body: Option<&Value>)
     let timeout = Duration::from_secs(args.timeout);
     let stream = match http::connect(node, args.port, timeout) {
         Ok(stream) => stream,
-        Err(error) => return Answer::NotSent(error.0),
+        Err(error) => {
+            REFUSED.refused(node);
+            return Answer::NotSent(error.0);
+        }
     };
     let host = format!("{node}:{}", args.port);
     let data = body.map(Value::to_string);
@@ -437,7 +443,7 @@ fn registers(args: Arc<Args>) -> u8 {
                 let mut rng = Rng::stream(seed, client as u64);
                 while start.elapsed() < Duration::from_secs(args.duration) {
                     let r = rng.below(ids.len() as u64) as usize;
-                    let node = rng.choice(&args.nodes).clone();
+                    let node = REFUSED.choose(&mut rng, &args.nodes).clone();
                     let value = rng.range(1, 6) as u32;
                     let choice = rng.weighted(&[4.0, 2.0, 4.0]);
                     let from = rng.range(0, 6) as u32;
@@ -645,7 +651,7 @@ impl Appends {
         let mut process = client;
         while start.elapsed() < Duration::from_secs(self.args.duration) {
             let mops = keys.lock().unwrap().transaction();
-            let node = rng.choice(&self.args.nodes).clone();
+            let node = REFUSED.choose(&mut rng, &self.args.nodes).clone();
             let t0 = kit::now();
             let answer = call(&self.args, &node, "POST", "/txn", Some(&txn_body(&mops)));
             count(&self.outcomes, "TXN", &answer);

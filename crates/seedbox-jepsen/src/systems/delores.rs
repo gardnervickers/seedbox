@@ -18,7 +18,10 @@ use crate::kit::{self, http, Rng};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering::Relaxed},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -55,6 +58,12 @@ pub struct Args {
     /// Seconds a request may take.
     #[arg(long, default_value_t = 10)]
     pub timeout: u64,
+    /// Once a key has this many writes and deletes of unknown outcome since
+    /// a replica last answered an operation on it definitely, clients only
+    /// read it until one does, which bounds what the linearizability search
+    /// is exponential in. 0 never caps.
+    #[arg(long, default_value_t = 8)]
+    pub pending_cap: usize,
     /// Seconds to wait after the operations before the final reads.
     #[arg(long, default_value_t = 20)]
     pub quiet: u64,
@@ -87,6 +96,9 @@ pub struct Args {
 /// The liveness property `--sequencer-cuts` evaluates.
 pub const RESUMES: &str = "delores: operations succeed again soon after each sequencer heal";
 
+/// Replicas that refused a connection recently, which clients avoid.
+static REFUSED: http::Refusals = http::Refusals::new();
+
 /// One request's outcome.
 enum Answer {
     Got(u16, Vec<u8>),
@@ -100,7 +112,10 @@ fn call(args: &Args, replica: &str, method: &str, path: &str, body: Option<&[u8]
     let timeout = Duration::from_secs(args.timeout);
     let stream = match http::connect(replica, args.port, timeout) {
         Ok(stream) => stream,
-        Err(error) => return Answer::NotSent(error.0),
+        Err(error) => {
+            REFUSED.refused(replica);
+            return Answer::NotSent(error.0);
+        }
     };
     let host = format!("{replica}:{}", args.port);
     match http::exchange(stream, method, &host, path, body.map(|b| ("text/plain", b))) {
@@ -145,6 +160,7 @@ fn operate(
     op: RegisterOp<u32>,
     history: &Mutex<KeyHistory>,
     tally: &Mutex<Tally>,
+    unknown: &AtomicUsize,
 ) -> Option<u32> {
     let id = history.lock().unwrap().invoke(op.clone());
     let path = format!("/kv/{key}");
@@ -166,6 +182,7 @@ fn operate(
             Some(value) => {
                 history.complete(id, RegisterRet::Value(Some(value)));
                 tally.lock().unwrap().oks.push(kit::now());
+                unknown.store(0, Relaxed);
                 return Some(value);
             }
             None => {
@@ -180,6 +197,7 @@ fn operate(
         (RegisterOp::Read, Answer::Got(404, _)) => {
             history.complete(id, RegisterRet::Value(Some(0)));
             tally.lock().unwrap().oks.push(kit::now());
+            unknown.store(0, Relaxed);
             return Some(0);
         }
         // A failed read has no effect.
@@ -189,11 +207,14 @@ fn operate(
             let mut t = tally.lock().unwrap();
             t.acknowledged += 1;
             t.oks.push(kit::now());
+            unknown.store(0, Relaxed);
         }
         // Never sent, or refused before it reached the log.
         (_, Answer::NotSent(_) | Answer::Got(400..=499, _)) => history.fail(id),
         // HTTP 500 and lost answers may or may not have taken effect.
-        _ => {}
+        _ => {
+            unknown.fetch_add(1, Relaxed);
+        }
     }
     None
 }
@@ -305,17 +326,28 @@ pub fn run(args: Args) -> u8 {
         json!({"workload": "register", "keys": args.keys, "rng_seed": seed}),
     );
     let start = Instant::now();
+    // Per key, unknown writes since a replica last answered definitely.
+    let unknown: Arc<Vec<AtomicUsize>> =
+        Arc::new(keys.iter().map(|_| AtomicUsize::new(0)).collect());
     let workers: Vec<_> = (0..args.clients)
         .map(|client| {
-            let (args, keys, histories, tally) =
-                (args.clone(), keys.clone(), histories.clone(), tally.clone());
+            let (args, keys, histories, tally, unknown) = (
+                args.clone(),
+                keys.clone(),
+                histories.clone(),
+                tally.clone(),
+                unknown.clone(),
+            );
             std::thread::spawn(move || {
                 let mut rng = Rng::stream(seed, client as u64);
                 let mut next = 1u32;
                 while start.elapsed() < Duration::from_secs(args.duration) {
                     let k = rng.below(keys.len() as u64) as usize;
-                    let replica = rng.choice(&args.replicas).clone();
-                    let op = match rng.weighted(&[5.0, 4.0, 1.0]) {
+                    let replica = REFUSED.choose(&mut rng, &args.replicas).clone();
+                    let choice = rng.weighted(&[5.0, 4.0, 1.0]);
+                    let capped =
+                        args.pending_cap > 0 && unknown[k].load(Relaxed) >= args.pending_cap;
+                    let op = match if capped { 0 } else { choice } {
                         0 => RegisterOp::Read,
                         1 => {
                             // Unique per client: client in the low bits.
@@ -325,7 +357,15 @@ pub fn run(args: Args) -> u8 {
                         }
                         _ => RegisterOp::Write(0),
                     };
-                    operate(&args, &keys[k], &replica, op, &histories[k], &tally);
+                    operate(
+                        &args,
+                        &keys[k],
+                        &replica,
+                        op,
+                        &histories[k],
+                        &tally,
+                        &unknown[k],
+                    );
                     std::thread::sleep(Duration::from_millis(args.think_ms));
                 }
             })
@@ -364,9 +404,15 @@ pub fn run(args: Args) -> u8 {
     for replica in &args.replicas {
         for (k, key) in keys.iter().enumerate() {
             loop {
-                if let Some(value) =
-                    operate(&args, key, replica, RegisterOp::Read, &histories[k], &tally)
-                {
+                if let Some(value) = operate(
+                    &args,
+                    key,
+                    replica,
+                    RegisterOp::Read,
+                    &histories[k],
+                    &tally,
+                    &AtomicUsize::new(0),
+                ) {
                     finals.entry(key).or_default().insert(replica, value);
                     break;
                 }

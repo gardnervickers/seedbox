@@ -3,13 +3,63 @@
 //! gateway (including streamed watches), NATS monitoring and the Docker
 //! engine API over a Unix socket. Timeouts apply to each socket operation, as
 //! Python's `http.client` does.
-use super::{Error, Result};
+use super::{Error, Result, Rng};
 use serde_json::Value;
 use std::{
+    collections::BTreeMap,
     io::{BufRead, BufReader, Read, Write},
     net::{TcpStream, ToSocketAddrs},
-    time::Duration,
+    sync::Mutex,
+    time::{Duration, Instant},
 };
+
+/// How long clients avoid a host after it refused a connection, as real
+/// clients back off: a stopped node refuses at once, so clients with no
+/// think time would otherwise spin on it, filling the history with requests
+/// never sent and taking the guest's CPU from the requests that are.
+pub const CONNECT_BACKOFF: Duration = Duration::from_millis(100);
+
+/// The hosts that recently refused a connection, so clients send to the
+/// others instead of waiting.
+#[derive(Default)]
+pub struct Refusals(Mutex<BTreeMap<String, Instant>>);
+
+impl Refusals {
+    pub const fn new() -> Self {
+        Self(Mutex::new(BTreeMap::new()))
+    }
+
+    /// Note that `host` refused a connection just now.
+    pub fn refused(&self, host: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(host.to_owned(), Instant::now());
+    }
+
+    /// A random host among those that have not refused a connection within
+    /// [`CONNECT_BACKOFF`]; if every one has, wait that long and choose
+    /// among them all.
+    pub fn choose<'a>(&self, rng: &mut Rng, hosts: &'a [String]) -> &'a String {
+        let up: Vec<&String> = {
+            let refused = self.0.lock().unwrap();
+            hosts
+                .iter()
+                .filter(|h| {
+                    refused
+                        .get(*h)
+                        .is_none_or(|t| t.elapsed() >= CONNECT_BACKOFF)
+                })
+                .collect()
+        };
+        if up.is_empty() {
+            std::thread::sleep(CONNECT_BACKOFF);
+            return rng.choice(hosts);
+        }
+        let host: &&String = rng.choice(&up);
+        host
+    }
+}
 
 /// Connect to `host:port`, trying each resolved address within `timeout`.
 pub fn connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream> {
@@ -248,6 +298,26 @@ pub fn post_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clients_avoid_a_host_that_refused_recently() {
+        let hosts: Vec<String> = ["n1", "n2", "n3"].map(String::from).to_vec();
+        let refusals = Refusals::new();
+        let mut rng = Rng::new(1);
+        refusals.refused("n2");
+        for _ in 0..50 {
+            assert_ne!(refusals.choose(&mut rng, &hosts), "n2");
+        }
+        refusals.refused("n1");
+        refusals.refused("n3");
+        // Every host refused: wait out the backoff, then choose among all.
+        let start = Instant::now();
+        refusals.choose(&mut rng, &hosts);
+        assert!(start.elapsed() >= CONNECT_BACKOFF);
+        let seen: std::collections::BTreeSet<_> =
+            (0..50).map(|_| refusals.choose(&mut rng, &hosts)).collect();
+        assert_eq!(seen.len(), 3);
+    }
 
     #[test]
     fn chunked_and_length_bodies_decode() {
