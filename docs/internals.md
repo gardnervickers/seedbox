@@ -65,7 +65,7 @@ The gitlink selects its source; [the Nix recipe](../crates/seedbox-machine/dynam
 applies packaging adjustments and builds the launcher, core, drreg and dependencies.
 The progress client still uses the matching release SDK.
 
-Follow the [README setup](../README.md#get-your-first-pass-and-match) after
+Follow the [README setup](../README.md#build) after
 cloning or switching Seedbox revisions. `inputs.self.submodules` includes gitlinks for flake consumers, but
 Nix can lock a clean parent before noticing edits confined to a submodule.
 From the checkout root, obtain a URL-encoded reference and build live DR edits:

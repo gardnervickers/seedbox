@@ -1,17 +1,9 @@
 # Seedbox
 
-Run real Linux applications, inject failures, and replay the same execution.
-Seedbox controls time, networking, and disk faults inside virtual machines so
-you can reproduce bugs instead of hoping they happen again.
+## Build
 
-> Early, experimental software. Expect bugs and changing interfaces.
-
-![Inject and heal an etcd network partition in the Seedbox TUI](docs/assets/seedbox-tui.gif)
-
-## Get your first PASS and MATCH
-
-Start with **Linux x86-64**, **Nix**, **Docker or Podman**, and access to **`/dev/kvm`**.
-The first build and image downloads take a while.
+Requires Nix and a running Docker or Podman engine on Linux x86-64 or Apple
+Silicon macOS. macOS also needs Apple's Command Line Tools.
 
 ```sh
 git clone https://github.com/gardnervickers/seedbox.git
@@ -19,62 +11,70 @@ cd seedbox
 seedbox_flake=$(bash tools/dev-flake.sh) && nix develop "$seedbox_flake"
 cargo xtask build --release
 alias seedbox="$PWD/target/release/seedbox"
-
-seedbox init ~/seedbox-quickstart
-seedbox check ~/seedbox-quickstart
-seedbox run ~/seedbox-quickstart
 ```
 
-Accept the prompt to start a local server. The example runs a three-node etcd
-cluster and checks its behavior. When it prints `PASS: <sim-id>`, repeat it:
+## Run the etcd example
+
+PV uses hardware virtualization (KVM on Linux, HVF on macOS); TCG emulates the
+CPU in software and is slower but needs no hardware virtualization access.
+Linux PV requires access to `/dev/kvm`.
 
 ```sh
-seedbox replay <sim-id>
+seedbox server start
+
+# PV
+seedbox run examples/etcd --backend pv --paused --detach
+
+# Or TCG
+seedbox run examples/etcd --backend tcg --paused --detach
 ```
 
-**`MATCH` means the execution reproduced.** Keep the server running between
-commands. For scripts, start it explicitly with `seedbox server start`;
-`seedbox server stop` shuts it down and clears the session's simulations.
+## Open the TUI
 
-No KVM? `run --backend tcg` uses a slower software CPU. Apple Silicon also
-requires Apple's Command Line Tools and Docker Desktop or Podman; Mac execution
-still needs hardware verification.
-
-Direnv and `tools/dev-flake.sh` initialize only missing submodules, including DR's
-nested dependencies, and preserve existing branches and edits. If initialization
-fails, fix the reported checkout or access problem and retry. The encoded reference
-includes local tracked DR edits; see [DynamoRIO development](docs/internals.md#editing-dynamorio).
-
-## Explore a failure
+Use the simulation ID printed by `run`:
 
 ```sh
-seedbox run ~/seedbox-quickstart --paused --detach
 seedbox tui <sim-id>
 ```
 
-Press **Space** to resume and **f** to inject or heal faults. Increase the oracle's
-`--writes` and `--duration` in `seedbox.yaml` for longer experiments.
-Use `seedbox logs <sim-id>` to read application output.
+Press **Space** to resume or pause, and **f** to inject or heal faults.
 
-Save an application-ready simulation before a bug, then start a new run from it:
+## `seedbox.yaml` format
 
-```sh
-seedbox checkpoint <sim-id> -o before-bug.seedbox
-seedbox run before-bug.seedbox
+`machines` defines the application nodes; `oracle` drives the workload and checks
+the result. The oracle's exit code determines PASS (zero) or FAIL (nonzero).
+Both use the same launch fields and require exactly one of `image` or `build`.
+
+For example, [the Redis project](examples/redis/seedbox.yaml) uses:
+
+```yaml
+name: redis-demo
+machines:
+  redis:
+    image: docker.io/library/redis:7.2
+    command: [redis-server, --appendonly, "yes", --save, ""]
+oracle:
+  build:
+    context: ./workload
+  environment:
+    REDIS_ADDRESS: redis:6379
+    SEEDBOX_PLANT_FAILURE: "0"
+network:
+  latency: 1ms
+simulator:
+  blocksPerProgressCall: 10000
 ```
 
-The checkpoint contains its state and inputs, so it works on a fresh server
-without the original simulation or cache. Capture briefly pauses the source
-and restores its previous playback state.
+Machine names are hostnames on the simulated network. Build contexts are relative
+to `seedbox.yaml`; `build.dockerfile` defaults to `Dockerfile`.
 
-## Bring your application
+Optional launch fields are `entrypoint`, `command`, `environment`, `memoryMiB`,
+`workingDirectory`, `user`, `files` and `volumes`. `files` is a list of
+`{source, target}` entries copied into the guest at preparation; `volumes` maps
+names to `{target}` entries for writable disks that survive machine crashes.
+See [the etcd project](examples/etcd/seedbox.yaml) for a three-node cluster with
+persistent data disks.
 
-Edit the generated `seedbox.yaml`: **machines** run your application; the
-**oracle** drives the test and checks the result. Oracle exit code zero means
-PASS; nonzero means FAIL. Start with the [etcd example](examples/etcd/seedbox.yaml)
-or `seedbox init my-test --template redis`.
-
-Run more seeds with `seedbox run my-test --count 100`.
-Use `seedbox help` for commands and `seedbox help run` for options.
-
-[Design](docs/design.md) · [Internals](docs/internals.md)
+`network.latency` defaults to `1ms`; `simulator.blocksPerProgressCall` defaults to
+`10000` and controls how often translated code charges simulation progress.
+Choose the backend, seed and execution limits with CLI flags.
