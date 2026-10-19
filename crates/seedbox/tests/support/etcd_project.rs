@@ -31,7 +31,6 @@ impl Backend {
 }
 
 pub const BASELINE_SEED: u64 = 123;
-pub const EXTRA_SEEDS: [u64; 2] = [124, 125];
 pub const WRITES_PER_WORKER: usize = 4;
 pub const CONCURRENCY: usize = 1;
 
