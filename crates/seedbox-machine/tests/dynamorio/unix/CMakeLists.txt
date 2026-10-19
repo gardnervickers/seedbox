@@ -99,3 +99,5 @@ target_compile_options(unix_detach_context PRIVATE -O2 -g -fno-omit-frame-pointe
 target_link_options(unix_detach_context PRIVATE -rdynamic)
 target_link_libraries(unix_detach_context pthread dl rt)
 install(TARGETS unix_detach_context RUNTIME DESTINATION bin)
+
+add_subdirectory(rip_api)

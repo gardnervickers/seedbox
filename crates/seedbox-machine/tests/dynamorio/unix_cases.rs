@@ -837,3 +837,37 @@ fn original_detach_context_register_vector_flags_and_stack_matrix() {
         }
     }
 }
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn copied_x86_relative_operands_and_raw_roundtrips_keep_original_targets() {
+    let native = checked("rip-api-control", &[], Profile::Native, 0);
+    let plain = checked("rip-api-control", &[], Profile::Plain, 0);
+    let client = runner::run_with_options(
+        "rip-api-control",
+        &[],
+        Profile::Client,
+        None,
+        &[],
+        Some(("libunix-rip-api.so", &[])),
+    );
+    assert_eq!(client.code, 0, "{}", client.stderr);
+    assert_eq!(native.stdout, plain.stdout);
+    assert_eq!(native.stdout, client.stdout);
+    assert_eq!(native.stdout, "OK public client control app\n");
+    assert!(
+        client
+            .stderr
+            .contains("unix-rip-api: cases4 decoded4 raw4 roundtrips8 errors0")
+    );
+}
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn source_alias_literal_load_keeps_5000_updates_relative_to_application_pc() {
+    triplet(
+        "aliases",
+        &["rip-literal"],
+        1,
+        &["updates 5000 slots 64 stride 16 sum 87487500 stale 0 traps 0"],
+    );
+}

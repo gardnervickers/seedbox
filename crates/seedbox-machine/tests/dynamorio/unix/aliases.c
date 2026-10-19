@@ -21,10 +21,20 @@
 #define CHECK(c) do { if(!(c)) { fprintf(stderr,"alias line %d: %s (errno %d)\n",__LINE__,#c,errno);exit(1); } } while(0)
 static size_t page;
 static int batches;
+#if defined(__x86_64__)
+static int rip_literal;
+#endif
 static volatile sig_atomic_t expected,traps;
 static volatile uintptr_t trap_pc;
 static void emit(unsigned char *w,unsigned value,int with_trap) {
 #if defined(__x86_64__)
+    if(rip_literal) {
+        /* Additional source-derived x86 data-relative axis, not the original
+         * immediate oracle and not an invented ARM RIP equivalent. */
+        CHECK(!with_trap);w[0]=0x8b;w[1]=0x05;
+        uint32_t displacement=2;memcpy(w+2,&displacement,4);w[6]=0xc3;
+        memcpy(w+8,&value,4);return;
+    }
     /* A coherent x86 publication has no cache-maintenance instruction/syscall.
      * Each update completes before this single writer's consumer executes. */
     w[0]=0xb8;memcpy(w+1,&value,4);w[5]=with_trap?0xcc:0xc3;
@@ -124,6 +134,10 @@ int main(int argc,char **argv) {
     CHECK(argc==2);const char *mode=argv[1];long size=sysconf(_SC_PAGESIZE);CHECK(size>=4096);page=(size_t)size;
     int fd=backing();unsigned char *w=mapping(fd,PROT_READ|PROT_WRITE,MAP_SHARED,0),
         *x=mapping(fd,PROT_READ|PROT_EXEC,MAP_SHARED,0);
+#if defined(__x86_64__)
+    if(!strcmp(mode,"rip-literal")){rip_literal=1;oracle(w,x,0);}
+    else
+#endif
     if(!strcmp(mode,"boundary"))oracle(w,x,0);
     else if(!strcmp(mode,"closed")) {CHECK(close(fd)==0);fd=-1;oracle(w,x,0);}
     else if(!strcmp(mode,"late")) {set(w,x,1);CHECK(munmap(w,page)==0);w=mapping(fd,PROT_READ|PROT_WRITE,MAP_SHARED,0);oracle(w,x,0);}
