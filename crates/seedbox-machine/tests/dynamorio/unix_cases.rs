@@ -654,3 +654,31 @@ fn source_executable_alias_values_survive_mapping_lifetimes_and_signal_return() 
         );
     }
 }
+
+#[test]
+fn alias_publication_during_branch_translation_preserves_post_join_values() {
+    let native = runner::run("alias_build", &[], Profile::Native, None);
+    let plain = runner::run("alias_build", &[], Profile::Plain, None);
+    let controlled = runner::run_with_options(
+        "alias_build",
+        &[],
+        Profile::Client,
+        None,
+        &[],
+        Some(("libunix-alias-build.so", &[])),
+    );
+    for out in [&native, &plain, &controlled] {
+        assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+        assert_eq!(
+            out.stdout,
+            "alias-build: publisher joined 1 calls 1000 expected 22 stale 0\n"
+        );
+    }
+    assert!(
+        controlled
+            .stderr
+            .contains("process publication acknowledged after decode")
+    );
+    // The first call can legally execute either snapshot. Its result is only
+    // diagnostic; the1000 calls after publication AND waitpid are the oracle.
+}

@@ -1,5 +1,5 @@
 # All application images use only libc/Linux interfaces. Each selector is a fresh image.
-set(unix_shared aliases cleancallsig properties queues exec_sigign close_range_all clear_sighand_child
+set(unix_shared alias_build aliases cleancallsig properties queues exec_sigign close_range_all clear_sighand_child
     failed_clone_vm pending_overflow tempmask_pending rlimit_nofile
     pending_fork_signalfd sigsys_call_addr clone_mask vfork_exit
     timer_sigwait timer_signal_loss sigtimedwait sigtimedwait_queued
@@ -62,3 +62,9 @@ add_library(unix_cleancallsig_client SHARED cleancallsig_client.c)
 set_target_properties(unix_cleancallsig_client PROPERTIES OUTPUT_NAME unix-cleancallsig)
 configure_DynamoRIO_client(unix_cleancallsig_client)
 install(TARGETS unix_cleancallsig_client LIBRARY DESTINATION lib)
+
+add_library(unix_alias_build_client SHARED alias_build_client.c)
+set_target_properties(unix_alias_build_client PROPERTIES OUTPUT_NAME unix-alias-build)
+configure_DynamoRIO_client(unix_alias_build_client)
+target_link_options(unix_alias_build_client PRIVATE -nostdlib)
+install(TARGETS unix_alias_build_client LIBRARY DESTINATION lib)
