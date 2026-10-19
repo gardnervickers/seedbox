@@ -108,3 +108,5 @@ add_subdirectory(fd_limits)
 
 add_subdirectory(timer_state)
 add_subdirectory(cache_publication)
+
+add_subdirectory(shared_signal_handoff)

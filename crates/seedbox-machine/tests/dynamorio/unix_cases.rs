@@ -882,3 +882,6 @@ fn source_rlimit_kernel_visibility_and_fork_exec() {
         ],
     );
 }
+
+#[path = "unix/shared_signal_handoff/cases.rs"]
+mod shared_signal_handoff_cases;

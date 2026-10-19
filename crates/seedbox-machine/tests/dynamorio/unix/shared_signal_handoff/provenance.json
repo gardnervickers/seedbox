@@ -1,0 +1,22 @@
+{
+  "source_candidate": "64c9b173658332a676351fba7233c061b4e6fe62",
+  "source_parent": "ef061509d3c0a01d25bbd45d6c493d782e3e82be",
+  "temporary_sources": {
+    "handoff.c": {
+      "path": "/tmp/dr-go-preemption-validation/public-regression/handoff.c",
+      "sha256": "3e89f9275f7712aa6952c50eb55b34f411ac9818fc890f2651c0437214df56f8"
+    },
+    "client.c": {
+      "path": "/tmp/dr-go-preemption-validation/public-regression/client.c",
+      "sha256": "0f9a317bdc8f3cdc98246658b4fbefc4e537bfeb227a7dc29ff58fc3b4529b56"
+    },
+    "CMakeLists.txt": {
+      "path": "/tmp/dr-go-preemption-validation/public-regression/CMakeLists.txt",
+      "sha256": "1642c37aa3bbb0f3a855fae5a4f7acdd1be22d89be4070a382d7216768dc642e"
+    }
+  },
+  "adaptation": "handoff.c and client.c byte-identical; CMake renames targets/outputs and adds install rules, retaining C11, O2, rdynamic, pthread, LOOP_SYSCALL, drmgr and nostdlib. Existing translator/observe_client.c drmgr/drreg observer reused unchanged on both ISAs.",
+  "population": "Two workers, 128 total acknowledged SIGUSR1 deliveries each requiring nested SIGUSR2; 64 rounds and completed public delayed-flush callbacks.",
+  "profiles": "native controls; matching Release/genuine Debug default client runs for basic flush and inline sched_yield observer paths",
+  "limits": "Derived public regression, not an unchanged original inventory ID. Does not deterministically force every already-unlinked interleaving. Independent frozen DR source review separate; native ARM execution pending."
+}
