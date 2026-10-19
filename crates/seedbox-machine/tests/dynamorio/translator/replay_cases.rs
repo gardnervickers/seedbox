@@ -154,3 +154,17 @@ fn a64_original_eight_ir_transform_populations() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn a64_original_selector_forward_reverse_and_aliases() {
+    let root = fixtures();
+    for suffix in ["", "_standalone"] {
+        run(
+            Command::new(root.join(format!("bin/translator_replay_selectors{suffix}"))),
+            &format!("original A64 selector consistency{suffix}"),
+            "source-selectors: PASS registers=410 restored=5 aliases=36 opcodes=4",
+        )
+        .unwrap();
+    }
+}

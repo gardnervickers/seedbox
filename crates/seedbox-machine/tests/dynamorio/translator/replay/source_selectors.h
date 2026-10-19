@@ -844,7 +844,11 @@ static inline reg_id_t source_reg(unsigned id) {
 }
 static inline unsigned source_reg_id(reg_id_t reg) {
     for (unsigned i = 0; i < SOURCE_REG_COUNT; ++i)
-        if (source_register_ids[i] == reg) return i;
+        /* Use the same resolved map in both directions. In particular, the
+         * restored source entries must not remain invisible here merely
+         * because their build-time fallback entry was -1. Aliases share the
+         * canonical source ordinal and do not add another selector. */
+        if (source_reg(i) == reg) return i;
     REPLAY_CHECK(false, "register %s has no source selector", get_register_name(reg));
     return 0;
 }

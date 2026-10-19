@@ -23,9 +23,10 @@
     "encode.c": "2cb2d95b58814607e56caca199d9ae0e80d8c6771580dd840cdc34e350075016",
     "input.h": "f28632f4ddb638b2f90cbf1a526f26f461c3c104d85318ba3557c00f9f41a9f8",
     "ir_transform.c": "57dd51de8ce7dbc9715790b34b8feb0982a50706f6e7eae1e38bdd3ab8d40828",
+    "selectors.c": "2fe5a5f91688fa4043efb05e8bbee00c80876cd5233c5b7cd4aac8eb9f42f110",
     "semantics.c": "544ce487e5ef4881e202c7ee331af3f8f82e212e4e78b27e25c9d39312db3940",
     "shared.c": "01e7143c76219a76159cfea5211962accaf2e1c75da80f55c18992443bc3b592",
-    "source_selectors.h": "734c9febb43d40bb00b7067c0f7e7a8b7a19b5855dcdd1d6851baa328b5e4fd2",
-    "../replay_cases.rs": "024e0230d1f8bef34f0f90e98574741088573675b218a8f17159cb493c85bf0a"
+    "source_selectors.h": "54dfb61312517cbab409f825584643dcedd5feb7b6dabff4e3915adfd1f48931",
+    "../replay_cases.rs": "6cd044bb46474532af09a8b9199c9b0548dd90a23e9435156c68eaa29039d87b"
   }
 }

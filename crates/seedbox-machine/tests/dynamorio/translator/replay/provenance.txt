@@ -81,8 +81,15 @@ Precise remaining oracle limits:
   Canaries/public results do not prove all internal sanitizer/leak invariants;
   set-num-opnds-leak keeps the original reset/resizing input but internal allocator
   leak detection remains an explicit gap without a public allocator oracle.
-- Frozen candidate5ce lacks LS64 and five original A64 system registers. Keep
-  their source vectors/IDs as required failures pending coherent source work.
+- Source691f4a0e restores LS64 and the five original A64 system registers.
+  Reverse selectors resolve the same semantic map as forward selectors.
+  selectors.c checks all410 ordinals, restored names/numbers405..409,36 aliases
+  and LS64 opcode IDs1223..1226 through public APIs. Both decoder and standalone
+  targets retain these controls. The original eight transforms used public
+  drdecode, which supplies host-independent encoding eligibility. Supplemental
+  standalone core uses host feature eligibility; no new feature API is required
+  for the original decoder contract. Its Debug assertions do not reproduce the
+  original saved-input custom drdecode_fuzz assertion/sanitizer policy.
   No native ARM execution is established by this port's cross-builds or model
   assertions. Native ARM release/Debug execution remains required.
 - Generated seed corpus/search campaigns are outside these 50 saved inputs.
