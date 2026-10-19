@@ -8,12 +8,16 @@ pkgs.stdenv.mkDerivation {
   pname = "seedbox-dynamorio";
   version = "11.3.0-1";
   src = pkgs.lib.cleanSource source;
-  # BUILD_EXT configures every extension, including drsyms whose bundled
-  # elfutils dependency is not used by Seedbox. We build
-  # only drreg and its drmgr/drcontainers dependencies.
+  # Export the public SDK and runtime from one configuration. drsyms needs
+  # optional elfutils sources and is not used by the packaged clients.
   postPatch = ''
     substituteInPlace ext/CMakeLists.txt \
       --replace-fail 'add_subdirectory(drsyms)' '# drsyms is not packaged'
+    # This baseline clears CMAKE_C_FLAGS before CheckTypeSize, then builds C
+    # as gnu99. Preserve the selected C dialect for those real probes too;
+    # CMAKE_REQUIRED_FLAGS would also pollute the C++17 probe.
+    substituteInPlace CMakeLists.txt \
+      --replace-fail 'foreach (var CMAKE_C_FLAGS;CMAKE_CXX_FLAGS)' 'foreach (var CMAKE_CXX_FLAGS)'
     # The AArch64 codec generator and order check run Python scripts by
     # their /usr/bin/env shebangs when CMake's PYTHON3_EXECUTABLE is unset,
     # and the Linux build sandbox has no /usr/bin/env.
@@ -21,12 +25,12 @@ pkgs.stdenv.mkDerivation {
   '';
   nativeBuildInputs = with pkgs.buildPackages; [ cmake ninja perl python3 ];
   cmakeFlags = [
-    "-DCMAKE_BUILD_TYPE=Release"
+    "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
     "-DREADELF_EXECUTABLE=${pkgs.stdenv.cc.bintools}/bin/${pkgs.stdenv.cc.targetPrefix}readelf"
     "-DCMAKE_ASM_COMPILER=${pkgs.stdenv.cc.bintools}/bin/${pkgs.stdenv.cc.targetPrefix}as"
     # Upstream compiles C as gnu99 but probes types before setting that flag.
     # GCC 16 defaults to C23, whose built-in bool would misconfigure the core.
-    "-DCMAKE_REQUIRED_FLAGS=-std=gnu99"
+    "-DCMAKE_C_FLAGS=-std=gnu99"
     # The AArch64 codec scripts use this spelling; find_package(Python3) sets
     # Python3_EXECUTABLE, so without it CMake would exec the scripts directly.
     "-DPYTHON3_EXECUTABLE=${pkgs.buildPackages.python3}/bin/python3"
@@ -36,15 +40,11 @@ pkgs.stdenv.mkDerivation {
     "-DBUILD_EXT=ON"
     "-DBUILD_DOCS=OFF"
   ];
-  ninjaFlags = [ "dynamorio" "drreg" "drrun" ];
+  # Install the generated SDK export alongside every library it references;
+  # consumers must never combine release archive headers with this source ABI.
   installPhase = ''
     runHook preInstall
-    mkdir -p "$out/bin64"
-    cp bin64/drrun "$out/bin64/"
-    mkdir -p "$out/lib64/release"
-    cp lib64/release/libdynamorio.so "$out/lib64/release/"
-    mkdir -p "$out/ext/lib64/release"
-    cp ext/lib64/release/libdrmgr.so ext/lib64/release/libdrreg.so "$out/ext/lib64/release/"
+    cmake --install .
     runHook postInstall
   '';
 }

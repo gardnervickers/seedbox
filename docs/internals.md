@@ -62,8 +62,12 @@ The [translator](../vendor/dynamorio/core/arch/aarchxx/mangle.c) and kernel retu
 [Seedbox fork](https://github.com/gardnervickers/dynamorio/tree/seedbox/release_11.3.0-1-backports),
 based on upstream `release_11.3.0-1` with the four existing Seedbox backports.
 The gitlink selects its source; [the Nix recipe](../crates/seedbox-machine/dynamorio.nix)
-applies packaging adjustments and builds the launcher, core, drreg and dependencies.
-The progress client still uses the matching release SDK.
+applies packaging adjustments and builds the launcher, core, public extensions and
+SDK together. The progress client and test clients use that exact build's generated
+headers, CMake exports and libraries. Source version metadata can remain 11.3;
+the selected gitlink, rather than a release archive label, identifies the API build.
+The recipe preserves C-only compiler flags for the baseline's type probes and uses
+RelWithDebInfo to match its public SDK exports.
 
 Follow the [README setup](../README.md#get-your-first-pass-and-match) after
 cloning or switching Seedbox revisions. `inputs.self.submodules` includes gitlinks for flake consumers, but

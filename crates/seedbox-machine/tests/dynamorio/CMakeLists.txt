@@ -11,3 +11,12 @@ use_DynamoRIO_extension(preserve drreg)
 add_executable(application application.c probes.S)
 target_compile_options(application PRIVATE -Wall -Wextra -Werror)
 target_link_options(application PRIVATE -rdynamic)
+
+install(TARGETS application preserve
+        RUNTIME DESTINATION bin LIBRARY DESTINATION lib)
+# Each independently maintained family owns its targets and install rules.
+foreach(family unix translator)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${family}/CMakeLists.txt")
+    add_subdirectory(${family})
+  endif()
+endforeach()
