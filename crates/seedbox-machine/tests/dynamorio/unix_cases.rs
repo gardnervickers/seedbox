@@ -336,11 +336,9 @@ fn real_public_attach_detach_with_live_handler_and_ordered_pipe() {
     let native = checked("lifecycle", &["native"], Profile::Native, 0);
     let attached = checked("lifecycle", &["attach"], Profile::Native, 0);
     assert_eq!(attached.stdout, native.stdout);
-    assert!(
-        attached
-            .stdout
-            .contains("12 transitions, 24 ordered operations, 12 live handlers")
-    );
+    assert!(attached
+        .stdout
+        .contains("12 transitions, 24 ordered operations, 12 live handlers"));
 }
 #[cfg(target_arch = "aarch64")]
 #[test]
@@ -627,11 +625,9 @@ fn original_indirect_calls_complete_250_async_signals_through_clean_calls() {
     assert_eq!(client.code, 0, "{}", client.stderr);
     assert_eq!(native.stdout, plain.stdout);
     assert_eq!(native.stdout, client.stdout);
-    assert!(
-        client
-            .stderr
-            .contains("unix-cleancallsig: app-clean-calls=")
-    );
+    assert!(client
+        .stderr
+        .contains("unix-cleancallsig: app-clean-calls="));
     assert!(native.stdout.contains("acknowledgements 250"));
 }
 
@@ -678,11 +674,9 @@ fn alias_publication_during_branch_translation_preserves_post_join_values() {
             "alias-build: publisher joined 1 calls 1000 expected 22 stale 0\n"
         );
     }
-    assert!(
-        controlled
-            .stderr
-            .contains("process publication acknowledged after decode")
-    );
+    assert!(controlled
+        .stderr
+        .contains("process publication acknowledged after decode"));
     // The first call can legally execute either snapshot. Its result is only
     // diagnostic; the1000 calls after publication AND waitpid are the oracle.
 }
@@ -693,11 +687,9 @@ fn check_asynchronous_alias_context(mode: &str) {
     let client = checked("alias_async", &[mode], Profile::Client, 1);
     assert_eq!(native.stdout, plain.stdout);
     assert_eq!(native.stdout, client.stdout);
-    assert!(
-        native
-            .stdout
-            .contains("signals 64 GPR vector flags PC mask sigreturn progress preserved")
-    );
+    assert!(native
+        .stdout
+        .contains("signals 64 GPR vector flags PC mask sigreturn progress preserved"));
     let receipt = match mode {
         "both" => Some("resumed=1 flushed=1 alias-pc=1"),
         "suspend" => Some("suspend-only=1 alias-pc=1"),
@@ -741,10 +733,9 @@ fn original_generated_lifecycle_state_and_fault_oracle_spans_60_attach_rounds() 
     for variant in ["native", "default", "notraces"] {
         let out = checked("lifecycle_model", &[variant], Profile::Native, 0);
         assert!(out.stdout.contains("rounds60 blocks3/worker workers"));
-        assert!(
-            out.stdout
-                .contains("operations240 process131072 full state/fault comparisons")
-        );
+        assert!(out
+            .stdout
+            .contains("operations240 process131072 full state/fault comparisons"));
         if variant != "native" {
             assert!(out.stderr.contains("probes60"));
         }
@@ -756,10 +747,9 @@ fn original_detach_signal_masks_and_altstack_survive_live_handler() {
     for variant in ["native", "attach"] {
         for location in ["ordinary", "handler"] {
             let out = checked("detach_signal", &[variant, location], Profile::Native, 0);
-            assert!(
-                out.stdout
-                    .contains("masks altstack live-handler frame sigreturn preserved")
-            );
+            assert!(out
+                .stdout
+                .contains("masks altstack live-handler frame sigreturn preserved"));
         }
     }
 }
