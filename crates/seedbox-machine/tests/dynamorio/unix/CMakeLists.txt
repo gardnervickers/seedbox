@@ -91,3 +91,11 @@ target_link_libraries(unix_detach_signal pthread dl rt)
 install(TARGETS unix_detach_signal RUNTIME DESTINATION bin)
 
 add_subdirectory(signal_models)
+
+add_executable(unix_detach_context detach_context.c detach_context.S)
+set_target_properties(unix_detach_context PROPERTIES OUTPUT_NAME unix-detach_context)
+configure_DynamoRIO_static(unix_detach_context)
+target_compile_options(unix_detach_context PRIVATE -O2 -g -fno-omit-frame-pointer)
+target_link_options(unix_detach_context PRIVATE -rdynamic)
+target_link_libraries(unix_detach_context pthread dl rt)
+install(TARGETS unix_detach_context RUNTIME DESTINATION bin)

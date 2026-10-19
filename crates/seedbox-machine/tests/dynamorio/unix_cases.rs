@@ -816,3 +816,24 @@ fn original_sigstop_concurrent_jit_compute_and_four_wait_records() {
         ],
     );
 }
+
+#[test]
+fn original_detach_context_register_vector_flags_and_stack_matrix() {
+    for case in [
+        "gprs_cache",
+        "gprs_selfmod1",
+        "gprs_selfmod2",
+        "flags_cache",
+        "flags_selfmod",
+        "sp_cache",
+        "sp_selfmod",
+    ] {
+        for mode in ["native", "attach"] {
+            let out = checked("detach_context", &[mode, case], Profile::Native, 0);
+            assert!(
+                out.stdout
+                    .contains("source register vector status stack assertions preserved")
+            );
+        }
+    }
+}
