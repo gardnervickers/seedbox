@@ -1,5 +1,5 @@
 use super::*;
-use std::{io, ops::Range};
+use std::io;
 const INITRD_LEN: u64 = b"exact-initramfs".len() as u64;
 fn limits() -> DecodeLimits {
     DecodeLimits {
@@ -486,6 +486,8 @@ fn disk_tag_length_layer_and_native_ownership_errors() {
 ))]
 #[test]
 fn live_raw_streams_borrow_capture_and_decode_directly_into_final_owned_body() {
+    use std::ops::Range;
+
     struct BorrowWitness {
         source: Range<usize>,
         large: usize,

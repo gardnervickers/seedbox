@@ -82,7 +82,7 @@ impl Native {
         arm::virtual_timer_disabled(virtual_timer)?;
         // Offsets are UAPI u32 words in kvm_regs, not Rust/host struct bytes.
         let core = (0..31)
-            .map(|n| self.get(CORE | n * 2))
+            .map(|n| self.get(CORE | (n * 2)))
             .chain([68, 64, 66, 62].into_iter().map(|n| self.get(CORE | n)))
             .collect::<Result<Vec<_>>>()?;
         let mut simd = Vec::new();
