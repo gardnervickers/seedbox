@@ -1,0 +1,96 @@
+Finite public decoder/IR regression adapters
+
+Authority: Seedbox PR317 f32472b7fe470367b7eddecde1ac53ad299f3a3e,
+DynamoRIO pin 356c1821045a4b5678d0813e132074324623df6e.
+source_mapping.tsv maps all 50 retained inputs and eight transform IDs without
+modifying the broader inventory. cases.tsv pins original bytes by SHA256; the
+existing ../saved inputs and ../vectors remain unchanged. hashes.json records
+source and adapted source digests. BSD notices in each adapted source are retained;
+DynamoRIO-LICENSE.txt accompanies installation. shared.c and replay_cases.rs are
+new Seedbox controls/wiring, not additional original-source cases.
+
+Sources:
+decode.c <- suite/fuzz/a64_decode_fuzzer.c
+encode.c <- suite/fuzz/a64_encode_fuzzer.c
+semantics.c <- suite/fuzz/a64_semantics_fuzzer.c
+input.h <- suite/fuzz/fuzz_common.h (byte readers and disassembly canaries)
+ir_transform.c <- suite/proptest/a64_ir_transform.c
+source_selectors.h <- public register enum from core/ir/opnd_api.h and public
+opcode names/IDs generated from core/ir/aarch64/codec_*.txt at the exact source.
+Only public name/ID data is retained, not implementation headers or layouts.
+Initial decode/encode/semantics/input adaptations were inspected in the earlier
+worker's unfinished tree and compared independently against the pinned originals.
+That tree is neither frozen evidence nor a source of runtime qualification.
+
+Replay contract:
+Each saved input runs in a fresh process, as both a public drdecode application
+and a public standalone application. The latter uses dr_standalone_init/exit and
+the same SDK's actual core, including genuine Debug assertions. Its name ends
+_standalone. Install executables under bin/translator_replay_*, metadata/licenses
+under share/translator/replay. CMake configures matching public SDK targets and
+retains the core library's own install RPATH; there are no test-time compilers,
+downloads, assertion hooks, private headers or upstream test-runner dependencies.
+The test driver runs all independent inputs and reports each original source ID.
+Any unsupported required selector fails explicitly. Source rejection-or-faithful-
+roundtrip rules are retained: arbitrary malformed encode requests may reject;
+unmutated/renamed valid requests must encode. SYS aliases and logical-immediate
+canonical forms retain their original specific equivalence checks, not generic
+unsupported acceptance. Original syntax/VL, operand mutation, disassembly canary,
+relocation, MOVN/MOVZ, effective-address and register-query oracles remain.
+
+The source numeric selector population matters: source_register_names preserves
+all 410 A64 enum values (including the five after FPMR). source_opcode_names preserves
+source IDs 6..1232 including holes. The embedded MAX_ADDRESSING_REG alias
+does not consume a numeric selector or change the source modulus. Runtime lookup maps scratch requests by source
+opcode name; unsupported names fail. Missing original register names are resolved
+through the public register-name API if a later SDK supplies them; otherwise they
+fail explicitly. Nearby-register mutation occurs in source ordinal space, not the
+candidate's truncated enum. These are A64-only selectors. Shared x86 controls use
+explicit GPRs, never LAST_VALID+1 (which would lose original MPX/reserved values).
+
+Transform adapter:
+All eight properties, source seed1, full vector population, 400000 finite mutants,
+40000 constructors, 8000 instruction lists, three original known-deviation
+classifications and original coverage floors remain. No new known/skip rules.
+The existing source excludes SVE/SME from this transform population; separate
+saved replay inputs still cover their original SVE selectors. Unsupported valid
+source vectors now report failure rather than becoming an extra skipped vector.
+Source constructor cases cas, ldadd and ldr_imm_preindex use exactly their original
+macro expansions via documented instr_create_* and operand constructors because
+these convenience macros are absent from the candidate. No opcode is invented.
+
+Private-layout adaptations:
+Operand kinds use documented predicates. Element size uses the public accessor.
+Register renaming is checked by an independent expected register/base/index map,
+not by invoking the same replacement API to construct the expected operand.
+For a zero-offset base-only operand, pre/post state is observed by inserting a
+normalized copy into public LDR writeback IR and comparing its exact encoding.
+Pre/post decoded 0xf8400c20/0xf8400420 controls must discriminate before the full
+population. The instr_same exception replaces the memory operand only after all
+other observable fields match. No private operand bits are read or written.
+
+Precise remaining oracle limits:
+- Inactive pre_index bits of indexed memory and inactive element-size storage
+  of non-vector registers have no documented accessor. These representation-only
+  assertions from the original private comparison are not claimed equivalent.
+  Active zero-offset pre/post encoding and public element-size assertions remain.
+- Original fuzz tooling used drdecode_fuzz with private assertion hooks and ASan/
+  UBSan. Neither is imported. Public standalone Debug preserves actual core
+  assertions without ignoring API violations. An assertion in an original
+  malformed-input case is a failed test needing assessment, not a release pass.
+  Canaries/public results do not prove all internal sanitizer/leak invariants;
+  set-num-opnds-leak keeps the original reset/resizing input but internal allocator
+  leak detection remains an explicit gap without a public allocator oracle.
+- Frozen candidate5ce lacks LS64 and five original A64 system registers. Keep
+  their source vectors/IDs as required failures pending coherent source work.
+  No native ARM execution is established by this port's cross-builds or model
+  assertions. Native ARM release/Debug execution remains required.
+- Generated seed corpus/search campaigns are outside these 50 saved inputs.
+  The saved-input port does not claim the separate source fuzz seed population,
+  ASan campaign, original hardware ISA program tests or other translator families.
+
+Integration hooks (integrator-owned): add_subdirectory(replay) in translator's
+CMakeLists; #[path = "dynamorio/translator/replay_cases.rs"] mod replay_cases in
+the existing owning Rust test. Existing parent installs saved/ and vectors/.
+SEEDBOX_DYNAMORIO_FIXTURES selects the prepared fixture package/profile. Build and
+run both matching release and Debug packages. Existing codec5079 rows unchanged.
