@@ -218,6 +218,21 @@ fn python_case(script: &str, args: &[&str]) {
 }
 
 #[test]
+fn node_jit_with_debug_runtime_and_public_observer() {
+    let root = PathBuf::from(
+        std::env::var_os("SEEDBOX_DYNAMORIO_DEBUG_FIXTURES")
+            .expect("prepared matching Debug DR fixtures"),
+    )
+    .canonicalize()
+    .expect("Debug fixture root");
+    let mut cmd = Command::new(root.join("runtimes/python/bin/python3"));
+    cmd.arg(root.join("share/translator/languages/run.py"))
+        .arg(&root)
+        .args(["js", "jit", "--debug"]);
+    checked(cmd, "Debug js/jit", "SB-runtime:Js.jit: PASS");
+}
+
+#[test]
 fn jvm_original_model_and_jit_floors() {
     for case in [
         "ic-seedbox-seed1",

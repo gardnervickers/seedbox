@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from phase import execute
 
 
-def run(root, language, case):
+def run(root, language, case, debug=False):
     assets = root / "share/translator/languages"
     commands = {
         "cs": [str(root / "runtimes/dotnet/bin/dotnet"), str(assets / "cs/csfz.dll")],
@@ -36,8 +36,12 @@ def run(root, language, case):
             work.mkdir()
             command = app
             if mode != "native":
-                command = [str(root / "runtime/bin64/drrun"), "-use_dll",
-                           str(root / "runtime/lib64/release/libdynamorio.so")]
+                command = [str(root / "runtime/bin64/drrun")]
+                if debug:
+                    command += ["-debug"]
+                profile = "debug" if debug else "release"
+                command += ["-use_dll",
+                            str(root / f"runtime/lib64/{profile}/libdynamorio.so")]
                 if mode == "client":
                     client = "libtranslator_progress.so" if platform.machine() == "aarch64" else ("libtranslator_clr_observe.so" if language == "cs" else "libtranslator_observe.so")
                     command += ["-c", str(root / "lib" / client)]
@@ -78,5 +82,7 @@ if __name__ == "__main__":
     p.add_argument("root", type=Path)
     p.add_argument("language", choices=["js", "lua", "go", "erl", "cs"])
     p.add_argument("case")
+    p.add_argument("--debug", action="store_true",
+                   help="Use matching genuine Debug fixtures and runtime.")
     a = p.parse_args()
-    run(a.root.resolve(), a.language, a.case)
+    run(a.root.resolve(), a.language, a.case, a.debug)
