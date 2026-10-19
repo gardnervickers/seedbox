@@ -75,7 +75,15 @@ static void suspend_target(void) {
     dr_redirect_execution(&mc);
     DR_ASSERT(false);
 }
+static void first_thread_execution(void *dc) {
+    /* A fork inherits the calling thread's client TLS, while a new thread's
+     * field starts empty. Re-arm only this public per-thread witness. */
+    dr_set_tls_field(dc,NULL);
+}
 static void count(void) {
+    void *dc=dr_get_current_drcontext();
+    if(dr_get_tls_field(dc)!=NULL)return;
+    dr_set_tls_field(dc,(void *)1);
     /* CLONE_VM without CLONE_THREAD shares this client allocation with a
      * distinct process. Register the public process ID exactly once per image;
      * a single shared boolean would hide that child's actual execution. */
@@ -132,5 +140,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[]) {
         dr_register_post_syscall_event(post_syscall);
     }
     dr_free_module_data(app);
+    dr_register_thread_init_event(first_thread_execution);
+    dr_register_fork_init_event(first_thread_execution);
     dr_register_bb_event(block);
 }
