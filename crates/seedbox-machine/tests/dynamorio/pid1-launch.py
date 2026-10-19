@@ -26,5 +26,5 @@ if not sudo:
     sys.exit("isolate: setup PID namespace denied; scoped sudo launcher unavailable")
 # The immutable Nix-store helper creates only the PID namespace; before exec,
 # its child drops every supplementary group and the requested normal uid/gid.
-os.execv(sudo, [sudo, "-n", launcher, *prefix, "--as-user", str(os.getuid()),
+os.execv(sudo, [sudo, "-n", "--preserve-env=DYNAMORIO_CONFIGDIR", launcher, *prefix, "--as-user", str(os.getuid()),
                str(os.getgid()), *suffix])

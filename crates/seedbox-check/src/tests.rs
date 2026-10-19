@@ -1680,6 +1680,9 @@ fn isolated_dr_requires_positive_preflights_without_root_or_kvm_probes() {
     }
     for name in [
         "bin/seedbox-dr-isolate",
+        "bin/unix-pid1",
+        "bin/unix-eagain",
+        "bin/unix-supervisor",
         "bin/application",
         "runtime/bin64/drrun",
     ] {

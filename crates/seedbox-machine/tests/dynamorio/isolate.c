@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/types.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -178,6 +179,9 @@ static int wait_owned(int signals)
 
 int main(int argc, char **argv)
 {
+    pid_t initial_parent = getppid();
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0 || getppid() != initial_parent)
+        return setup_error("controller parent-death containment");
     struct rlimit no_core = {0, 0};
     if (setrlimit(RLIMIT_CORE, &no_core)) return setup_error("disable owned core dumps");
     int preflight = argc > 1 && !strcmp(argv[1], "preflight");
@@ -215,13 +219,13 @@ int main(int argc, char **argv)
     if (!preflight && (argc <= index + 1 || strcmp(argv[index++], "--"))) goto usage;
     if (preflight && argc != index) goto usage;
     signal(SIGPIPE, SIG_IGN);
-    sigset_t blocked;
+    sigset_t blocked, original_mask;
     sigemptyset(&blocked);
     sigaddset(&blocked, SIGCHLD);
     sigaddset(&blocked, SIGTERM);
     sigaddset(&blocked, SIGINT);
     sigaddset(&blocked, SIGHUP);
-    if (sigprocmask(SIG_BLOCK, &blocked, NULL) < 0 ||
+    if (sigprocmask(SIG_BLOCK, &blocked, &original_mask) < 0 ||
         prctl(PR_SET_CHILD_SUBREAPER, 1) < 0) return setup_error("controller signals");
     int signals = signalfd(-1, &blocked, SFD_CLOEXEC);
     if (signals < 0) return setup_error("controller signalfd");
@@ -234,6 +238,8 @@ int main(int argc, char **argv)
     int gate[2];
     if (pipe2(gate, O_CLOEXEC) < 0) return setup_error("launch gate");
     pid_t controller = getpid();
+    int controller_handle = (int)syscall(SYS_pidfd_open, controller, 0);
+    if (controller_handle < 0) return setup_error("controller pidfd");
     owned = fork();
     if (owned < 0) return setup_error("fork tracee");
     if (!owned) {
@@ -248,13 +254,21 @@ int main(int argc, char **argv)
         if (privileged && (setgroups(0, NULL) < 0 || setgid(run_gid) < 0 ||
                            setuid(run_uid) < 0 || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0))
             _exit(125);
-        sigprocmask(SIG_UNBLOCK, &blocked, NULL);
+        /* Dropping credentials clears PDEATHSIG. Re-arm it, then use the
+         * inherited pidfd to close the parent-death race even when getppid()
+         * is intentionally zero inside the new PID namespace. */
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0) _exit(125);
+        struct pollfd controller_state = { .fd = controller_handle, .events = POLLIN };
+        if (poll(&controller_state, 1, 0) != 0) _exit(125);
+        close(controller_handle);
+        sigprocmask(SIG_SETMASK, &original_mask, NULL);
         if (preflight) _exit(!pid1 || getpid() == 1 ? 0 : 125);
         execvp(argv[index], &argv[index]);
         dprintf(STDERR_FILENO, "isolate: exec %s: %s\n", argv[index], strerror(errno));
         _exit(125);
     }
     close(gate[0]);
+    close(controller_handle);
     if (setpgid(owned, owned) < 0 && errno != EACCES) return setup_error("owned process group");
     if (pids) {
         char value[80];
@@ -281,7 +295,10 @@ int main(int argc, char **argv)
     if (WIFSIGNALED(status)) {
         int sig = WTERMSIG(status);
         signal(sig, SIG_DFL);
-        sigprocmask(SIG_UNBLOCK, &blocked, NULL);
+        sigset_t fatal;
+        sigemptyset(&fatal);
+        sigaddset(&fatal, sig);
+        sigprocmask(SIG_UNBLOCK, &fatal, NULL);
         raise(sig);
         return 128 + sig;
     }

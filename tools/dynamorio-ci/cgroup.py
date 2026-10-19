@@ -59,12 +59,15 @@ def launch(args):
     root.mkdir(mode=0o700)  # exclusive; never adopt an existing resource
     child = None
     reaped = False
+    gate_read = gate_write = -1
     try:
         write(root / "cgroup.subtree_control", "+pids")
         for path in [root, *(root / name for name in (
             "cgroup.procs", "cgroup.threads", "cgroup.subtree_control"
         ))]:
             os.chown(path, args.uid, args.gid)
+        if not (root / "cgroup.kill").exists():
+            raise RuntimeError("cgroup.kill is required for owned descendant cleanup")
         controller = root / "controller"
         controller.mkdir()
         gate_read, gate_write = os.pipe2(os.O_CLOEXEC)
@@ -90,9 +93,11 @@ def launch(args):
                 print(f"isolate: exec normal-user command: {error}", file=sys.stderr)
                 os._exit(125)
         os.close(gate_read)
+        gate_read = -1
         write(controller / "cgroup.procs", str(child))
         os.write(gate_write, b"1")
         os.close(gate_write)
+        gate_write = -1
         _, status = os.waitpid(child, 0)
         reaped = True
         return os.waitstatus_to_exitcode(status)
@@ -100,7 +105,15 @@ def launch(args):
         signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT, signal.SIGHUP})
         # Kill only this uniquely created domain, including any surviving test
         # leaves. The supervisor itself stays outside and can always reap.
-        write(root / "cgroup.kill", "1")
+        for descriptor in [gate_read, gate_write]:
+            if descriptor >= 0:
+                os.close(descriptor)
+        # A failure to move the still-gated child leaves it OUTSIDE the domain.
+        # It is unreaped, so its PID is reserved and safe to kill directly.
+        if child is not None and not reaped:
+            os.kill(child, signal.SIGKILL)
+        if (root / "cgroup.kill").exists():
+            write(root / "cgroup.kill", "1")
         if child is not None and not reaped:
             os.waitpid(child, 0)
         wait_empty(root)

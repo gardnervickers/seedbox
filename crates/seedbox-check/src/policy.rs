@@ -289,6 +289,12 @@ pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -
             );
         }
         if suite == Suite::DynamorioIsolated {
+            for name in ["bin/unix-pid1", "bin/unix-eagain", "bin/unix-supervisor"] {
+                need(
+                    fixtures.is_some_and(|p| executable(&p.join(name))),
+                    format!("prepared {name} is required for isolated fixtures"),
+                );
+            }
             need(
                 fixtures.is_some_and(|p| executable(&p.join("bin/seedbox-dr-isolate"))),
                 "prepared bin/seedbox-dr-isolate is required".into(),
