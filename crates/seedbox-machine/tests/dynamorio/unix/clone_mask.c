@@ -7,6 +7,7 @@
  * Natively prints "mask blocked" and "OK". */
 #define _GNU_SOURCE
 #include "support.h"
+#include <errno.h>
 #include <linux/futex.h>
 #include <sched.h>
 #include <signal.h>
@@ -63,7 +64,17 @@ int main(int argc, char **argv) {
     if (!strcmp(kind, "thread")) {
         rc = raw_clone(CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM | CLONE_SETTLS |
                        CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID, top, &ctid, (unsigned long)&tls[32], &ctid);
-        while (rc > 0 && __atomic_load_n(&ctid, __ATOMIC_ACQUIRE)) syscall(SYS_futex, &ctid, FUTEX_WAIT, ctid, NULL, NULL, 0);
+        while (rc > 0) {
+            int expected = __atomic_load_n(&ctid, __ATOMIC_ACQUIRE);
+            if (!expected) break;
+            /* Keep this nonzero observation: exit may clear ctid and wake
+             * before FUTEX_WAIT, which must then return EAGAIN, not wait on 0. */
+            if (syscall(SYS_futex, &ctid, FUTEX_WAIT, expected, NULL, NULL, 0) < 0 &&
+                errno != EAGAIN && errno != EINTR) {
+                perror("futex wait for child exit");
+                return 1;
+            }
+        }
     } else {
         rc = raw_clone(CLONE_VM | SIGCHLD | CLONE_SETTLS, top, NULL, (unsigned long)&tls[32], NULL);
         if (rc > 0) waitpid((pid_t)rc, &st, 0);
