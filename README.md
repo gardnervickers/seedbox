@@ -1,5 +1,7 @@
 # Seedbox
 
+Run real Linux applications, inject failures, and replay the same execution.
+
 ![Inject and heal an etcd network partition in the Seedbox TUI](docs/assets/seedbox-tui.gif)
 
 ## Build
