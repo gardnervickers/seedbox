@@ -23,10 +23,29 @@ worker's unfinished tree and compared independently against the pinned originals
 That tree is neither frozen evidence nor a source of runtime qualification.
 
 Replay contract:
-Each saved input runs in a fresh process, as both a public drdecode application
-and a public standalone application. The latter uses dr_standalone_init/exit and
-the same SDK's actual core, including genuine Debug assertions. Its name ends
-_standalone. Install executables under bin/translator_replay_*, metadata/licenses
+Required registered original-population runs use public drdecode: all50 saved
+inputs each in a fresh process, and all eight full transform populations. Shared
+public IR controls and selector controls remain registered in both decoder and
+standalone modes. The standalone variants of the original-population executables
+remain available as manual supplemental diagnostics, not required original-test
+runs. They use dr_standalone_init/exit and the same SDK's actual core, including
+Debug core assertions; their names end _standalone. Native host feature eligibility
+can reject extension encodings accepted by the original transform decoder.
+
+For a manual saved-input diagnostic, take each row's adapter and input path from
+share/translator/replay/cases.tsv and run bin/translator_replay_<adapter>_standalone
+with share/translator/saved/<input> as its sole argument, in a fresh process per
+row. For the complete manual transform diagnostic, run
+bin/translator_replay_ir_transform_standalone -seed 1 -n 400000 -created 40000
+-ilists 8000 followed by every sorted path under share/translator/vectors/.
+Use absolute paths under the prepared SEEDBOX_DYNAMORIO_FIXTURES root. Retain each
+exit status, stdout and stderr and report failures explicitly, including host
+feature limits; neither rejection nor unavailable features become success.
+No emitted instruction needs execution. These diagnostics do not replace the
+original custom drdecode_fuzz assertion/sanitizer/leak policy. Native ARM decoder
+runs remain required; host offline decoding and cross-builds do not execute them.
+
+Install executables under bin/translator_replay_*, metadata/licenses
 under share/translator/replay. CMake configures matching public SDK targets and
 retains the core library's own install RPATH; there are no test-time compilers,
 downloads, assertion hooks, private headers or upstream test-runner dependencies.

@@ -97,17 +97,10 @@ fn a64_fifty_saved_inputs_public_replay() {
     let mut failures = Vec::new();
     for row in include_str!("replay/cases.tsv").lines().skip(1) {
         let fields: Vec<_> = row.split('\t').collect();
-        for suffix in ["", "_standalone"] {
-            let mut command =
-                Command::new(root.join(format!("bin/translator_replay_{}{suffix}", fields[1])));
-            command.arg(root.join("share/translator/saved").join(fields[2]));
-            if let Err(error) = run(
-                command,
-                &format!("{}{suffix}", fields[0]),
-                "saved-input: PASS",
-            ) {
-                failures.push(error);
-            }
+        let mut command = Command::new(root.join(format!("bin/translator_replay_{}", fields[1])));
+        command.arg(root.join("share/translator/saved").join(fields[2]));
+        if let Err(error) = run(command, fields[0], "saved-input: PASS") {
+            failures.push(error);
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -117,42 +110,33 @@ fn a64_fifty_saved_inputs_public_replay() {
 #[test]
 fn a64_original_eight_ir_transform_populations() {
     let root = fixtures();
-    let mut failures = Vec::new();
-    for suffix in ["", "_standalone"] {
-        let mut command =
-            Command::new(root.join(format!("bin/translator_replay_ir_transform{suffix}")));
-        // Original fixed population and all original floors remain enabled.
-        command.args([
-            "-seed", "1", "-n", "400000", "-created", "40000", "-ilists", "8000",
-        ]);
-        let mut vectors: Vec<_> = fs::read_dir(root.join("share/translator/vectors"))
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect();
-        vectors.sort();
-        command.args(vectors);
-        let out = match run(
-            command,
-            &format!("DR-IR-transform{suffix}: all eight original properties"),
-            "all properties hold",
-        ) {
-            Ok(out) => out,
-            Err(error) => {
-                failures.push(error);
-                continue;
-            }
-        };
-        for property in [
-            "canon", "clone", "rawbits", "reloc", "rename", "regdeps", "ilist", "create",
-        ] {
-            assert!(
-                out.lines()
-                    .any(|line| line.split_whitespace().next() == Some(property)),
-                "missing property {property}: {out}"
-            );
-        }
+    let mut command = Command::new(root.join("bin/translator_replay_ir_transform"));
+    // The original transform used drdecode's host-independent encoding eligibility.
+    // Original fixed population and all original floors remain enabled.
+    command.args([
+        "-seed", "1", "-n", "400000", "-created", "40000", "-ilists", "8000",
+    ]);
+    let mut vectors: Vec<_> = fs::read_dir(root.join("share/translator/vectors"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    vectors.sort();
+    command.args(vectors);
+    let out = run(
+        command,
+        "DR-IR-transform: all eight original properties",
+        "all properties hold",
+    )
+    .unwrap();
+    for property in [
+        "canon", "clone", "rawbits", "reloc", "rename", "regdeps", "ilist", "create",
+    ] {
+        assert!(
+            out.lines()
+                .any(|line| line.split_whitespace().next() == Some(property)),
+            "missing property {property}: {out}"
+        );
     }
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[cfg(target_arch = "aarch64")]
