@@ -25,6 +25,12 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
   use_DynamoRIO_extension(translator_progress drmgr)
   use_DynamoRIO_extension(translator_progress drreg)
   add_executable(translator_codec codec.c)
+  # The SDK's relative-RPATH helper requires an explicit executable directory.
+  # Nix installs this executable separately from its immutable SDK, so retain
+  # the selected imported runtime's absolute directory in the installed RPATH.
+  set_target_properties(translator_codec PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    INSTALL_RPATH "$<TARGET_FILE_DIR:dynamorio>")
   configure_DynamoRIO_standalone(translator_codec)
   add_executable(translator_isa a64_proptest.c)
   configure_DynamoRIO_decoder(translator_isa)
