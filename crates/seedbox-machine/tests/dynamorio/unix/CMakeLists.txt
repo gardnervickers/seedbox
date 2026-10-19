@@ -103,3 +103,5 @@ install(TARGETS unix_detach_context RUNTIME DESTINATION bin)
 add_subdirectory(rip_api)
 
 add_subdirectory(fault_context)
+
+add_subdirectory(fd_limits)

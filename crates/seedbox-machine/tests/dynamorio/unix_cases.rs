@@ -870,3 +870,6 @@ fn source_alias_literal_load_keeps_5000_updates_relative_to_application_pc() {
 }
 #[path = "unix/fault_context_cases.rs"]
 mod fault_context_cases;
+
+#[path = "unix/fd_limits_cases.rs"]
+mod fd_limits_cases;
