@@ -8,6 +8,7 @@ use seedbox_test_time::HangGuard;
 use std::{
     ffi::OsString,
     fs,
+    io::Read,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -170,6 +171,114 @@ impl Cli {
     }
 }
 
+// Failure evidence stays small and belongs only to this test's private session.
+const DIAGNOSTIC_LIMIT: u64 = 8 * 1024 * 1024;
+
+fn diagnostic_bytes(path: &Path) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(DIAGNOSTIC_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > DIAGNOSTIC_LIMIT {
+        return Err(format!(
+            "diagnostic input exceeds 8 MiB: {}",
+            path.display()
+        ));
+    }
+    Ok(bytes)
+}
+
+fn attempt_directory(state: &Path, id: &str) -> Result<PathBuf> {
+    let mut found = None;
+    for session in fs::read_dir(state.join("sessions")).map_err(|e| e.to_string())? {
+        let attempts = session
+            .map_err(|e| e.to_string())?
+            .path()
+            .join("runs")
+            .join(id)
+            .join("attempts");
+        if !attempts.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(attempts).map_err(|e| e.to_string())? {
+            let attempt = entry.map_err(|e| e.to_string())?.path();
+            if !attempt.is_dir() {
+                continue;
+            }
+            let manifest = diagnostic_bytes(&attempt.join("manifest.json"))?;
+            seedbox_application::record::inspect_bytes(&manifest).map_err(|e| e.to_string())?;
+            if found.replace(attempt).is_some() {
+                return Err(format!("multiple retained attempts for simulation {id}"));
+            }
+        }
+    }
+    found.ok_or_else(|| format!("no retained attempt for simulation {id}"))
+}
+
+impl Cli {
+    fn capture_comparison_failure(&self, baseline: &str, repeated: &str) {
+        let capture = || -> Result<()> {
+            let left = attempt_directory(&self.state, baseline)?;
+            let right = attempt_directory(&self.state, repeated)?;
+            for (label, attempt) in [("baseline", &left), ("repeat", &right)] {
+                let copy = || -> Result<()> {
+                    let manifest = diagnostic_bytes(&attempt.join("manifest.json"))?;
+                    let record = seedbox_application::record::inspect_bytes(&manifest)
+                        .map_err(|e| e.to_string())?;
+                    fs::write(
+                        self.directory.join(format!("{label}-manifest.json")),
+                        manifest,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    let name = seedbox_application::evidence::STATE_REPORT;
+                    let bytes = diagnostic_bytes(&attempt.join("output").join(name))?;
+                    if record.logs.get(name)
+                        != Some(&seedbox_application::store::ContentDigest::of(&bytes))
+                    {
+                        return Err("stopped-state report log digest mismatch".into());
+                    }
+                    let state: seedbox_application::evidence::StateReport =
+                        serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                    state.validate().map_err(|e| e.to_string())?;
+                    fs::write(self.directory.join(format!("{label}-{name}")), bytes)
+                        .map_err(|e| e.to_string())?;
+                    Ok(())
+                };
+                if let Err(error) = copy() {
+                    eprintln!("etcd {label} diagnostic capture failed: {error}");
+                }
+            }
+            // These readers verify retained log digests and never execute guests.
+            let divergence = seedbox_application::diff::replay_divergence(&left, &right)
+                .map_err(|e| e.to_string())
+                .and_then(|report| serde_json::to_vec_pretty(&report).map_err(|e| e.to_string()));
+            let pages = seedbox_application::diff::replay_ram_pages(&left, &right)
+                .map_err(|e| e.to_string())
+                .and_then(|report| serde_json::to_vec_pretty(&report).map_err(|e| e.to_string()));
+            for (name, report) in [
+                ("compare-divergence.json", divergence),
+                ("compare-ram-pages.json", pages),
+            ] {
+                let write = report.and_then(|bytes| {
+                    if bytes.len() as u64 > DIAGNOSTIC_LIMIT {
+                        return Err("comparison diagnostic exceeds 8 MiB".into());
+                    }
+                    fs::write(self.directory.join(name), bytes).map_err(|e| e.to_string())
+                });
+                if let Err(error) = write {
+                    eprintln!("etcd {name} diagnostic capture failed: {error}");
+                }
+            }
+            Ok(())
+        };
+        if let Err(error) = capture() {
+            eprintln!("etcd comparison diagnostic capture failed: {error}");
+        }
+    }
+}
+
 // The CLI flattens catalogue pages into a bare array, not the API's
 // SimulationList page object. Each array element is a summary object.
 fn parse_resource_summaries(bytes: &[u8]) -> Result<Vec<seedbox_api::SimulationSummary>> {
@@ -254,7 +363,8 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
             "compare-repeat",
             &words(&["compare", &baseline_id, &repeated_id, "--json"]),
         )
-        .await?,
+        .await
+        .inspect_err(|_| cli.capture_comparison_failure(&baseline_id, &repeated_id))?,
     )
     .map_err(|e| e.to_string())?;
     if compared.baseline != baseline.metadata.id
@@ -265,7 +375,8 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
             "repeat comparison did not compare two independently submitted simulations".into(),
         );
     }
-    require_match(&compared)?;
+    require_match(&compared)
+        .inspect_err(|_| cli.capture_comparison_failure(&baseline_id, &repeated_id))?;
     // Reports are already retained; bound memory by releasing completed native
     // worlds rather than accumulating multiple four-machine executions.
     cli.invoke(guard, "delete-repeat", &words(&["delete", &repeated_id]))
@@ -418,6 +529,22 @@ pub fn run(backend: Backend) {
 mod tests {
     use super::*;
     use std::{collections::BTreeMap, ffi::OsStr};
+
+    #[test]
+    fn diagnostic_files_preserve_bytes_and_reject_oversized_evidence() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("evidence.json");
+        fs::write(&path, b"retained evidence").unwrap();
+        assert_eq!(diagnostic_bytes(&path).unwrap(), b"retained evidence");
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(DIAGNOSTIC_LIMIT + 1)
+            .unwrap();
+        assert!(diagnostic_bytes(&path)
+            .unwrap_err()
+            .contains("exceeds 8 MiB"));
+        assert!(diagnostic_bytes(temporary.path()).is_err());
+    }
 
     #[test]
     fn failure_resources_parse_current_cli_summary_array() {
