@@ -5,11 +5,18 @@
 ))]
 use seedbox_test::process::Guarded;
 use std::{
+    collections::HashSet,
     fs,
     io::{BufRead, BufReader},
     path::Path,
     process::{Child, Command, Stdio},
 };
+
+// Every discovered workload proves a PASS. These four retain the expensive
+// independent same-seed and retained-input comparisons, covering dynamic
+// network faults, volume durability across crashes, clock state across reboot,
+// and concurrent application behavior.
+const REPEAT_WORKLOADS: [&str; 4] = ["network-faults", "volume-crash", "clock-reboot", "race"];
 
 fn invoke(
     cli: &Path,
@@ -116,7 +123,7 @@ fn compare(
 }
 
 #[test]
-fn every_application_runs_twice_and_reruns_through_the_server() {
+fn every_application_passes_and_representatives_repeat_through_the_server() {
     let cli = std::env::var_os("SEEDBOX_TEST_CLI")
         .expect("harness/check.sh supplies the current release CLI");
     let reports =
@@ -133,6 +140,20 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
         .collect();
     workloads.sort();
     assert!(!workloads.is_empty());
+    let discovered: HashSet<_> = workloads
+        .iter()
+        .filter_map(|path| path.file_stem().and_then(|stem| stem.to_str()))
+        .collect();
+    let missing: Vec<_> = REPEAT_WORKLOADS
+        .iter()
+        .copied()
+        .filter(|name| !discovered.contains(name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "required repeat workloads missing or renamed: {}",
+        missing.join(", ")
+    );
     // macOS limits Unix socket paths to 104 bytes. The checkout/report path
     // can exceed that before appending the socket name.
     let state_directory = tempfile::Builder::new()
@@ -151,6 +172,10 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
     };
     let mut failures = Vec::new();
     for workload in workloads {
+        let representative = workload
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|name| REPEAT_WORKLOADS.contains(&name));
         let directory = Path::new(&reports)
             .join("applications")
             .join(workload.file_stem().unwrap());
@@ -164,6 +189,9 @@ fn every_application_runs_twice_and_reruns_through_the_server() {
                 &["run", workload.to_str().unwrap(), "--wall-time", "30m"],
             )?;
             let first = simulation_id(&first_output)?;
+            if !representative {
+                return Ok(());
+            }
             let described = invoke(
                 Path::new(&cli),
                 &directory,

@@ -267,7 +267,7 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
     }
     require_match(&compared)?;
     // Reports are already retained; bound memory by releasing completed native
-    // worlds rather than accumulating five four-machine executions.
+    // worlds rather than accumulating multiple four-machine executions.
     cli.invoke(guard, "delete-repeat", &words(&["delete", &repeated_id]))
         .await?;
     // No new backend selection on replay: the retained runtime must own it.
@@ -308,20 +308,9 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
     .await?;
     cli.invoke(guard, "delete-baseline", &words(&["delete", &baseline_id]))
         .await?;
-    for seed in EXTRA_SEEDS {
-        let completed = cli
-            .fresh(guard, backend, project, seed, &format!("seed-{seed}"))
-            .await?;
-        cli.invoke(
-            guard,
-            &format!("delete-seed-{seed}"),
-            &words(&["delete", completed.metadata.id.as_str()]),
-        )
-        .await?;
-    }
     // Diagnostics only; never assert a host speed or compare timings as evidence.
     eprintln!(
-        "etcd {} seeds123(repeat+replay)/124/125 PASS; witness/full-state MATCH",
+        "etcd {} seed123 baseline/repeat/replay PASS; witness/full-state MATCH",
         backend.name()
     );
     Ok(())

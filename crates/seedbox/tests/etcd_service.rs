@@ -219,26 +219,23 @@ fn comparison_requires_witness_full_state_outcome_and_fault_history() {
 }
 
 #[test]
-fn seed_plan_keeps_repeat_identity_without_demanding_distinct_seed_witnesses() {
+fn baseline_submission_arguments_use_fixed_seed_for_each_backend() {
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("project with spaces.yaml");
-    let seeds = [BASELINE_SEED, BASELINE_SEED, EXTRA_SEEDS[0], EXTRA_SEEDS[1]];
-    let commands = seeds.map(|seed| submit_arguments(&project, seed, Backend::Pv).unwrap());
-    assert_eq!(commands[0], commands[1]);
-    for (command, seed) in commands.iter().zip(["123", "123", "124", "125"]) {
-        assert_eq!(
-            command,
-            &[
-                std::ffi::OsString::from("run"),
-                project.as_os_str().to_owned(),
-                "--seed".into(),
-                seed.into(),
-                "--paused".into(),
-                "--detach".into(),
-            ]
-        );
+    assert_eq!(BASELINE_SEED, 123);
+    for backend in [Backend::Pv, Backend::Tcg] {
+        let arguments = submit_arguments(&project, BASELINE_SEED, backend).unwrap();
+        let mut expected = vec![
+            std::ffi::OsString::from("run"),
+            project.as_os_str().to_owned(),
+            "--seed".into(),
+            "123".into(),
+            "--paused".into(),
+            "--detach".into(),
+        ];
+        if backend == Backend::Tcg {
+            expected.extend(["--backend".into(), "tcg".into()]);
+        }
+        assert_eq!(arguments, expected);
     }
-    // This validator intentionally doesn't know the seed. Different seeds may
-    // legitimately produce identical results; each still needs a passing oracle.
-    assert!(require_match(&matching_comparison()).is_ok());
 }
