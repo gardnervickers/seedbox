@@ -76,7 +76,7 @@
     {
       "source_id": "DR:a64_prop_signal/itimer/dr-itimers",
       "implementation": "itimer.c;client.c;oracle.h",
-      "status": "partial-live-state-current-x86-red",
+      "status": "partial-live-state",
       "retained": [
         "Public dr_set_itimer REAL3ms/VIRTUAL4ms/PROF5ms simultaneously with app timers",
         "positive separate callback receipts for all three timer types",
@@ -85,9 +85,9 @@
       ],
       "remaining_gaps": [
         "Same elapsed-clock and static-harness gaps as default.",
-        "Matching-f063 release AND debug public-client startup SIGFPE136 reproduces even with pure model application (no live app timer operations); this RED does not prove the original static-harness timer workload failed. Source owner notified. No success classification.",
         "Explicit helper-enabled multiplexed axis remains unexecuted; it is a known original itimer-reroute diagnostic, not silently equivalent to no-helper."
-      ]
+      ],
+      "client_link_contract": "DynamoRIO_USE_LIBC=OFF through the matching public SDK CMake API: this C client calls only public DR APIs and needs no libc/CRT. All three simultaneous timers and callback assertions remain unchanged. A libc-linked timer-free stub failed before an import-free client-entry marker; the libc-free stub and original timer workload pass. This isolates the former pre-app failure to loading the unnecessary client dependency, not the timer API or an application timer oracle; no underlying loader-fault instruction/root-cause claim."
     },
     {
       "source_id": "DR:a64_prop_signal/itimer/prof-pcs",

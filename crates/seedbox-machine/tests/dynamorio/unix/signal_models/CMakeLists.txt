@@ -10,5 +10,9 @@ endforeach()
 add_library(unix_signal_models_client SHARED client.c)
 set_target_properties(unix_signal_models_client PROPERTIES OUTPUT_NAME unix-signal-models-client
     C_STANDARD 11 C_STANDARD_REQUIRED YES)
+# This C client calls only public DR APIs. Use the SDK's documented libc-free
+# client contract so compiler-added CRT/libc constructors are not privately loaded.
+# This subdirectory-local setting does not change the application link contract.
+set(DynamoRIO_USE_LIBC OFF)
 configure_DynamoRIO_client(unix_signal_models_client)
 install(TARGETS unix_signal_models_client LIBRARY DESTINATION lib)
