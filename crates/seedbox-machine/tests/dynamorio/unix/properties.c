@@ -575,7 +575,7 @@ static long ac_h1n, ac_h1alt, ac_h1disarmed, ac_ucok, ac_resumed, ac_canbad, ac_
 static int ac_in(uintptr_t p, const char *m) { return p >= (uintptr_t)m && p < (uintptr_t)m + 65536; }
 static int ac_ucgood(const ucontext_t *uc) {
     return uc->uc_stack.ss_sp == ac_mem_a && uc->uc_stack.ss_size == sizeof ac_mem_a &&
-           (unsigned)uc->uc_stack.ss_flags == AC_AUTODISARM && 
+           (unsigned)uc->uc_stack.ss_flags == AC_AUTODISARM &&
 #if defined(__aarch64__)
            uc->uc_mcontext.pc == (uintptr_t)cfz_svc_after
 #else

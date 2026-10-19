@@ -298,7 +298,7 @@ static long sp_accepted(void) {
 static void sp_settle(long accepted) {
     uint64_t end = mono_ns(CLOCK_MONOTONIC) + 30000000000ULL;
     while (sp_total < accepted && mono_ns(CLOCK_MONOTONIC) < end) sched_yield();
-    
+
 }
 static void sp_report(const char *name) {
     long acc = sp_accepted(), lost = 0, dup = 0, extra = 0;
@@ -312,7 +312,7 @@ static void sp_report(const char *name) {
 static void sp_drain_log(int want) {
     uint64_t end = mono_ns(CLOCK_MONOTONIC) + 10000000000ULL;
     while (sp_logn < want && mono_ns(CLOCK_MONOTONIC) < end) sched_yield();
-    
+
 }
 static void sp_tags(int tag, int *got, int *order, int *foreign) {
     *got = 0; *order = 1; *foreign = 0;

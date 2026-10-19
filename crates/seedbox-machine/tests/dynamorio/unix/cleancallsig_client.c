@@ -55,9 +55,7 @@ static dr_emit_flags_t
 bb_event(void *drcontext, void *tag, instrlist_t *bb, bool for_trace, bool translating)
 {
     static int64 bb_count;
-    bool app=false;
-    for(uint i=0;i<segments;i++)if((app_pc)tag>=lo[i] && (app_pc)tag<hi[i])app=true;
-    if (++bb_count % 10 == 0 || app) {
+    if (++bb_count % 10 == 0) {
         for (instr_t *inst = instrlist_first(bb); inst != NULL;
              inst = instr_get_next(inst)) {
             if (instr_is_exclusive_store(inst))
