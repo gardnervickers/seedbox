@@ -614,7 +614,10 @@ pub fn cargo_tests<C: Commands>(
             .map_err(|e| format!("native test scratch directory: {e}"))?;
         env.insert("TMPDIR".into(), scratch.0.to_string_lossy().into());
         let mut command = vec![binary.to_string_lossy().into(), "--test-threads=1".into()];
-        if target == "applications" {
+        if matches!(
+            target.as_str(),
+            "applications" | "dynamorio" | "dynamorio_isolated"
+        ) {
             command.push("--nocapture".into());
         }
         if (package == "seedbox"

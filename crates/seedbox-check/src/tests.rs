@@ -1741,3 +1741,284 @@ fn isolated_dr_requires_positive_preflights_without_root_or_kvm_probes() {
     let h = observe(&mut c, &options.suites).unwrap();
     assert_eq!(coordinate(&mut c, &h, &options).unwrap(), 0);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn process_tree_boundary_reaps_nested_new_groups() {
+    use std::io::{Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    const MODE: &str = "SEEDBOX_CHECK_TREE_MODE";
+    let mode = std::env::var(MODE).unwrap_or_default();
+    if mode == "fixture" {
+        use std::os::unix::process::CommandExt;
+        let depth: u32 = std::env::var("SEEDBOX_CHECK_TREE_DEPTH")
+            .unwrap_or_else(|_| "0".into())
+            .parse()
+            .unwrap();
+        let _child = if depth < 2 {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "tests::process_tree_boundary_reaps_nested_new_groups",
+                    "--nocapture",
+                ])
+                .env("SEEDBOX_CHECK_TREE_DEPTH", (depth + 1).to_string())
+                .process_group(0);
+            Some(seedbox_exec::spawn(&mut command).unwrap())
+        } else {
+            None
+        };
+        unsafe {
+            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+        }
+        println!("tree stdout preserved");
+        eprintln!("tree stderr preserved");
+        let mut ready = UnixStream::connect("ready.sock").unwrap();
+        ready.write_all(&std::process::id().to_ne_bytes()).unwrap();
+        let mut ack = [0];
+        ready.read_exact(&mut ack).unwrap();
+        if depth == 0 {
+            if let Ok(code) = std::env::var("SEEDBOX_CHECK_TREE_EXIT") {
+                std::process::exit(code.parse().unwrap());
+            }
+        }
+        // Explicitly refuse TERM in all three fixtures to exercise escalation.
+        unsafe {
+            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+            loop {
+                libc::pause();
+            }
+        }
+    }
+    if !mode.is_empty() {
+        let listener = UnixListener::bind("ready.sock").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let expired = Arc::new(AtomicBool::new(false));
+        let trigger = expired.clone();
+        let cancel = mode.starts_with("cancel");
+        let timeout = mode.starts_with("timeout");
+        let owner = std::process::id();
+        let observer = std::thread::spawn(move || {
+            let mut identities = Vec::new();
+            let mut streams = Vec::new();
+            for _ in 0..3 {
+                let (mut stream, _) =
+                    seedbox_test_time::HangGuard::new("fixture readiness", Duration::from_secs(30))
+                        .wait_for(|| match listener.accept() {
+                            Ok(pair) => Some(pair),
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
+                            Err(e) => panic!("accept fixture: {e}"),
+                        })
+                        .unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(30)))
+                    .unwrap();
+                let mut bytes = [0; 4];
+                stream.read_exact(&mut bytes).unwrap();
+                let pid = u32::from_ne_bytes(bytes);
+                let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+                assert!(fd >= 0);
+                identities.push(unsafe { OwnedFd::from_raw_fd(fd as i32) });
+                streams.push(stream);
+            }
+            for mut stream in streams {
+                stream.write_all(&[1]).unwrap();
+            }
+            if cancel {
+                unsafe {
+                    libc::kill(owner as i32, libc::SIGTERM);
+                }
+            } else if timeout {
+                trigger.store(true, Ordering::Release);
+            }
+            identities
+        });
+        let mut real = Real::install_signals().unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../seedbox-machine/tests/dynamorio/unix/supervisor.c");
+        let compile = Job::new(
+            "actual fixture supervisor",
+            vec![
+                "cc".into(),
+                "-Wall".into(),
+                "-Wextra".into(),
+                "-Werror".into(),
+                source.to_string_lossy().into(),
+                "-o".into(),
+                "supervisor".into(),
+            ],
+            &std::env::vars().collect(),
+            &std::env::current_dir().unwrap(),
+        );
+        assert_eq!(real.execute(&compile).unwrap().code, 0);
+
+        let mut environment: Environment = std::env::vars().collect();
+        environment.insert(MODE.into(), "fixture".into());
+        if mode == "success" || mode == "failure" {
+            environment.insert(
+                "SEEDBOX_CHECK_TREE_EXIT".into(),
+                if mode == "success" { "0" } else { "7" }.into(),
+            );
+        }
+        let mut job = Job::new(
+            "tree",
+            vec![
+                "./supervisor".into(),
+                std::env::current_exe().unwrap().to_string_lossy().into(),
+                "--exact".into(),
+                "tests::process_tree_boundary_reaps_nested_new_groups".into(),
+                "--nocapture".into(),
+            ],
+            &environment,
+            &std::env::current_dir().unwrap(),
+        );
+        if mode.ends_with("direct") {
+            job.args.remove(0);
+        }
+        job.capture = true;
+        let result = real.execute_until(&job, |start| {
+            expired.load(Ordering::Acquire) || start.elapsed() >= Duration::from_secs(30)
+        });
+        if mode == "success" || mode == "failure" {
+            let result = result.unwrap();
+            assert_eq!(result.code, if mode == "success" { 0 } else { 7 });
+            assert!(result.stdout.contains("tree stdout preserved"));
+        } else {
+            let error = result.unwrap_err();
+            eprintln!("actual checker boundary: {mode}: {error}");
+            assert!(error.to_string().contains("tree stdout preserved"));
+            assert_eq!(
+                error.kind(),
+                if cancel {
+                    std::io::ErrorKind::Interrupted
+                } else {
+                    std::io::ErrorKind::TimedOut
+                }
+            );
+        }
+        for identity in observer.join().unwrap() {
+            let mut poll = libc::pollfd {
+                fd: identity.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            assert_eq!(unsafe { libc::poll(&mut poll, 1, 30000) }, 1);
+            // POLLHUP means the referenced task was reaped, not just exited.
+            assert_ne!(poll.revents & libc::POLLHUP, 0);
+        }
+        assert_eq!(
+            unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        return;
+    }
+    for mode in [
+        "timeout",
+        "cancel",
+        "timeout-direct",
+        "cancel-direct",
+        "success",
+        "failure",
+    ] {
+        let t = fixture();
+        let mut environment: Environment = std::env::vars().collect();
+        environment.insert(MODE.into(), mode.into());
+        let mut job = Job::new(
+            "tree boundary",
+            vec![
+                std::env::current_exe().unwrap().to_string_lossy().into(),
+                "--exact".into(),
+                "tests::process_tree_boundary_reaps_nested_new_groups".into(),
+                "--nocapture".into(),
+            ],
+            &environment,
+            &t.0,
+        );
+        job.capture = true;
+        job.timeout = Some(Duration::from_secs(60));
+        let result = Real.execute(&job).unwrap();
+        assert_eq!(result.code, 0, "{}", result.stdout);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn process_phase_output_is_bounded_and_survives_timeout() {
+    let t = fixture();
+    fs::create_dir(t.0.join("bin")).unwrap();
+    let sources =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../seedbox-machine/tests/dynamorio");
+    let environment = std::env::vars().collect();
+    let mut compile = Job::new(
+        "phase supervisor",
+        vec![
+            "cc".into(),
+            "-Wall".into(),
+            "-Wextra".into(),
+            "-Werror".into(),
+            sources.join("unix/supervisor.c").to_string_lossy().into(),
+            "-o".into(),
+            t.0.join("bin/unix-supervisor").to_string_lossy().into(),
+        ],
+        &environment,
+        &t.0,
+    );
+    compile.timeout = Some(Duration::from_secs(30));
+    assert_eq!(Real.execute(&compile).unwrap().code, 0);
+    let mut job = Job::new(
+        "phase output",
+        vec![
+            "python3".into(),
+            "-B".into(),
+            sources
+                .join("translator/phase_test.py")
+                .to_string_lossy()
+                .into(),
+            t.0.to_string_lossy().into(),
+        ],
+        &environment,
+        &t.0,
+    );
+    job.timeout = Some(Duration::from_secs(60));
+    assert_eq!(Real.execute(&job).unwrap().code, 0);
+}
+
+#[test]
+fn dr_failures_stream_before_a_later_target_timeout() {
+    let t = fixture();
+    let mut c = checks(&t.0);
+    c.commands.replies.push_back(Outcome {
+        code: 0,
+        stdout: ["dynamorio", "dynamorio_isolated", "ordinary"]
+            .map(|target| artifact(&std::path::Path::new("/fixture").join(target), target, true))
+            .join("\n"),
+    });
+    cargo_tests(
+        &mut c,
+        "seedbox-machine",
+        words(&["cargo", "test"]),
+        &[],
+        None,
+        false,
+    )
+    .unwrap();
+    for job in &c.commands.jobs[1..] {
+        assert!(job.args.contains(&"--test-threads=1".into()));
+        assert_eq!(
+            job.args.contains(&"--nocapture".into()),
+            !job.name.ends_with("/ordinary")
+        );
+        assert_eq!(job.timeout, Some(Duration::from_secs(1800)));
+    }
+    assert_eq!(c.commands.jobs.len(), 4);
+}

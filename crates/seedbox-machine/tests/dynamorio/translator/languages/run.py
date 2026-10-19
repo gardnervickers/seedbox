@@ -7,9 +7,12 @@ import argparse
 import os
 from pathlib import Path
 import platform
-import signal
-import subprocess
+import sys
 import tempfile
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from phase import execute
 
 
 def run(root, language, case):
@@ -44,16 +47,7 @@ def run(root, language, case):
                    "FZ_ERL_HOT": str(assets / "erl/hot"),
                    "PATH": str(root / "runtimes/erl/bin") + ":" + str(root / "runtimes/go/bin")}
             print(language, case, mode, flush=True)
-            with (work / "stdout").open("w") as out, (work / "stderr").open("w") as err:
-                p = subprocess.Popen(command, env=env, cwd=work, stdout=out, stderr=err)
-                try:
-                    status = p.wait(timeout=600)
-                except BaseException:
-                    os.killpg(os.getpgrp(), signal.SIGKILL)
-                    p.wait()
-                    raise
-            out = (work / "stdout").read_text()
-            err = (work / "stderr").read_text()
+            status, out, err = execute(root, command, work, env)
             assert status == 0 and "FAIL" not in out and "OK " in out, (language, case, mode, status, out, err)
             if mode == "client":
                 import re

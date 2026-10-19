@@ -1,27 +1,60 @@
 //! Source-derived public translator cases. Inventory gaps are not green tests.
 use seedbox_test::process::Guarded;
 use seedbox_test_time::HangGuard;
-use std::os::unix::process::CommandExt;
 use std::{
-    fs,
-    fs::File,
+    io::{Read, Write},
     path::PathBuf,
     process::{Command, Stdio},
     time::Duration,
 };
 
-struct ProcessGroup(std::process::Child);
-impl Drop for ProcessGroup {
+struct Running {
+    child: std::process::Child,
+    reaped: bool,
+}
+impl Drop for Running {
     fn drop(&mut self) {
-        if matches!(self.0.try_wait(), Ok(None)) {
-            // The leader is still owned and unreaped; its process-group ID
-            // cannot have been recycled. Include managed-runtime descendants.
+        if !self.reaped {
+            // Keep the native subreaper alive to collect nested/new-group children.
             unsafe {
-                libc::kill(-(self.0.id() as i32), libc::SIGKILL);
+                libc::kill(self.child.id() as i32, libc::SIGTERM);
             }
+            let _ = self.child.wait();
         }
-        let _ = self.0.wait();
     }
+}
+
+fn output_reader(
+    mut pipe: impl Read + Send + 'static,
+    live: bool,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut chunk = [0; 8192];
+        let mut total = 0;
+        loop {
+            let n = pipe.read(&mut chunk).expect("read fixture output");
+            if n == 0 {
+                break;
+            }
+            // Preserve complete oracle input up to a finite bound; exceeding it
+            // fails explicitly, never accepts a truncated result as an oracle.
+            let retained = n.min((16 * 1024 * 1024usize).saturating_sub(output.len()));
+            output.extend_from_slice(&chunk[..retained]);
+            if live && total < 1024 * 1024 {
+                let shown = n.min(1024 * 1024 - total);
+                std::io::stderr()
+                    .write_all(&chunk[..shown])
+                    .expect("stream phase diagnostics");
+                if shown < n {
+                    eprintln!("phase live diagnostics truncated at 1 MiB");
+                }
+            }
+            total += n;
+        }
+        assert!(total <= 16 * 1024 * 1024, "fixture output exceeded 16 MiB");
+        output
+    })
 }
 
 fn fixtures() -> PathBuf {
@@ -30,33 +63,38 @@ fn fixtures() -> PathBuf {
         .expect("fixture root")
 }
 
-fn checked(mut command: Command, label: &str, expected: &str) -> (String, String) {
+fn checked(command: Command, label: &str, expected: &str) -> (String, String) {
     let temporary = tempfile::tempdir().unwrap();
-    let out = temporary.path().join("stdout");
-    let err = temporary.path().join("stderr");
-    command
-        .process_group(0)
+    let python = command.get_program().to_string_lossy().ends_with("python3");
+    let mut supervisor = Command::new(fixtures().join("bin/unix-supervisor"));
+    supervisor
+        .arg(command.get_program())
+        .args(command.get_args())
         .env_clear()
         .env("HOME", temporary.path())
         .env("DYNAMORIO_CONFIGDIR", temporary.path())
         .current_dir(temporary.path())
         .stdin(Stdio::null())
-        .stdout(File::create(&out).unwrap())
-        .stderr(File::create(&err).unwrap());
-    let mut child = ProcessGroup(command.guarded_spawn().expect("start prepared fixture"));
-    let seconds = if command.get_program().to_string_lossy().ends_with("python3") {
-        2400
-    } else {
-        300
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = Running {
+        child: supervisor
+            .guarded_spawn()
+            .expect("start prepared fixture supervisor"),
+        reaped: false,
     };
+    let stdout = output_reader(child.child.stdout.take().unwrap(), python);
+    let stderr = output_reader(child.child.stderr.take().unwrap(), python);
+    let seconds = if python { 2400 } else { 300 };
     let guard = HangGuard::new(
         "source-derived fixture completion",
         Duration::from_secs(seconds),
     );
-    let result = guard.wait_for(|| child.0.try_wait().transpose());
+    let result = guard.wait_for(|| child.child.try_wait().transpose());
+    child.reaped = matches!(&result, Ok(Ok(_)));
     drop(child);
-    let out = fs::read_to_string(out).unwrap();
-    let err = fs::read_to_string(err).unwrap();
+    let out = String::from_utf8(stdout.join().expect("stdout reader")).unwrap();
+    let err = String::from_utf8(stderr.join().expect("stderr reader")).unwrap();
     let status = result
         .unwrap_or_else(|e| panic!("{label}: {e}\n{out}\n{err}"))
         .unwrap();
@@ -160,7 +198,7 @@ fn a64_native_hardware_ir_words_and_populations() {
     for population in ["regress", "templates", "mutants", "random"] {
         let mut cmd = Command::new(root.join("bin/translator_isa"));
         cmd.arg(population).args(["-seed", "1", "-n", "80000"]);
-        let mut files: Vec<_> = fs::read_dir(root.join("share/translator/vectors"))
+        let mut files: Vec<_> = std::fs::read_dir(root.join("share/translator/vectors"))
             .unwrap()
             .map(|e| e.unwrap().path())
             .collect();

@@ -44,7 +44,7 @@ add_custom_command(OUTPUT "${jvm_dir}/jitstress.jar"
   DEPENDS jvm/JitStress.java jvm/manifest.txt VERBATIM)
 add_custom_target(translator_jvm ALL DEPENDS "${jvm_dir}/jitstress.jar")
 install(FILES "${jvm_dir}/jitstress.jar" jvm/run.py jvm/source_oracle.py DESTINATION share/translator/jvm)
-install(FILES codec_vectors.tsv origins.json DESTINATION share/translator)
+install(FILES phase.py codec_vectors.tsv origins.json DESTINATION share/translator)
 install(DIRECTORY vectors saved licenses DESTINATION share/translator)
 find_program(TRANSLATOR_GO go REQUIRED)
 find_program(TRANSLATOR_ERLC erlc REQUIRED)

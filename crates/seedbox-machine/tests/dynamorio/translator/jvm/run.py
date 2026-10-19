@@ -8,26 +8,18 @@ import os
 from pathlib import Path
 import platform
 import re
-import signal
-import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from phase import execute as execute_phase
 
 from source_oracle import BASE_JVM, SCENARIOS, FLOORS, XLOG, count_log
 
 
-def execute(command, directory):
+def execute(root, command, directory):
     env = {"DYNAMORIO_CONFIGDIR": str(directory), "HOME": str(directory)}
-    with (directory / "stdout").open("w") as out, (directory / "stderr").open("w") as err:
-        process = subprocess.Popen(command, cwd=directory, env=env,
-                                   stdout=out, stderr=err)
-        try:
-            status = process.wait(timeout=600)
-        except BaseException:
-            os.killpg(os.getpgrp(), signal.SIGKILL)
-            process.wait()
-            raise
-    stdout = (directory / "stdout").read_text()
-    stderr = (directory / "stderr").read_text()
+    status, stdout, stderr = execute_phase(root, command, directory, env)
     assert status == 0, (command, status, stdout, stderr)
     results = [line for line in stdout.splitlines() if line.startswith("RESULT ")]
     assert len(results) == 1, (command, stdout, stderr)
@@ -88,7 +80,7 @@ def run(root, case, seed_offset=0):
             if mode == "translated":
                 command = dr + ["--"] + command
             print(case, mode, "seed", seed, flush=True)
-            result, stdout, stderr = execute(command, directory)
+            result, stdout, stderr = execute(root, command, directory)
             results.append(result)
             if mode == "translated":
                 counts = count_log(str(directory / "jvm.log"), stdout, sc["c2_target"])

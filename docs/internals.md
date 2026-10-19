@@ -132,6 +132,14 @@ Signal storm and interval-timer models retain their source populations and pure
 clock-input oracles. Live elapsed-clock timing equivalence remains incomplete.
 [Hosted CI](../.github/workflows/dynamorio-tests.yml) runs both native architectures.
 
+Ordinary Linux checker jobs share one sequential subreaper owner. Cancellation
+first signals TERM so fixture supervisors can finish cleanup; after two seconds
+it kills direct children and newly adopted descendants across process groups.
+It requires the kernel's complete reaping receipt within ten seconds. Managed
+runtime phases use the native supervisor too, retain bounded stdout/stderr, and
+stream bounded phase diagnostics. DR libtest failures print immediately so a
+later target timeout does not discard earlier assertion failures.
+
 The separate `dynamorio-isolated` suite requires positive namespace and cgroup
 preflights before any build. `seedbox-dr-isolate pid1 -- COMMAND...` creates a fresh
 user/PID namespace and execs the application directly as PID1. On hosts restricting

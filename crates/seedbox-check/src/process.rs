@@ -37,6 +37,8 @@ pub struct Outcome {
 pub trait Commands {
     fn execute(&mut self, job: &Job) -> io::Result<Outcome>;
 }
+#[cfg(target_os = "linux")]
+static SUBREAPER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static INTERRUPTED: AtomicI32 = AtomicI32::new(0);
 extern "C" fn interrupted(signal: libc::c_int) {
     INTERRUPTED.store(signal, Ordering::Relaxed);
@@ -50,6 +52,8 @@ impl Real {
         if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
             return Err(io::Error::last_os_error());
         }
+        #[cfg(target_os = "linux")]
+        SUBREAPER.store(true, Ordering::Relaxed);
         for signal in [libc::SIGINT, libc::SIGTERM] {
             let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
             action.sa_sigaction = interrupted as *const () as usize;
@@ -65,6 +69,19 @@ impl Real {
 }
 impl Commands for Real {
     fn execute(&mut self, job: &Job) -> io::Result<Outcome> {
+        self.execute_until(job, |start| {
+            job.timeout.is_some_and(|limit| start.elapsed() >= limit)
+        })
+    }
+}
+impl Real {
+    // The deadline predicate permits event-driven timeout injection in boundary
+    // tests without racing fixture readiness against a short wall-clock delay.
+    pub fn execute_until(
+        &mut self,
+        job: &Job,
+        expired: impl Fn(Instant) -> bool,
+    ) -> io::Result<Outcome> {
         use std::os::unix::process::CommandExt;
         if INTERRUPTED.load(Ordering::Relaxed) != 0 {
             return Err(io::Error::new(
@@ -113,7 +130,7 @@ impl Commands for Real {
                     format!("interrupted by signal {signal}"),
                 ));
             }
-            if job.timeout.is_some_and(|limit| start.elapsed() >= limit) {
+            if expired(start) {
                 break Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!("{} timed out", job.name),
@@ -143,27 +160,27 @@ impl Commands for Real {
             std::thread::sleep(Duration::from_millis(10));
         };
         let status = owned.cleanup();
-        // On Linux the executable is a subreaper: collect adopted group
-        // descendants too. The leader PID was reserved until kill_group().
-        #[cfg(target_os = "linux")]
-        loop {
-            let rc = unsafe { libc::waitpid(-(owned.child.id() as i32), std::ptr::null_mut(), 0) };
-            if rc > 0 {
-                continue;
-            }
-            if rc < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            break;
-        }
+        // Never join a pipe reader after failed containment: an unkillable
+        // descendant may still hold its write end.
+        let status = status?;
         let output = reader
             .map(|r| {
                 r.join()
                     .map_err(|_| io::Error::other("stdout reader panicked"))?
             })
             .transpose()?;
-        result?;
-        let status = status?;
+        if let Err(error) = result {
+            let bytes = output.as_deref().unwrap_or_default();
+            let tail = &bytes[bytes.len().saturating_sub(64 * 1024)..];
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}\ncaptured stdout (last {} bytes):\n{}",
+                    tail.len(),
+                    String::from_utf8_lossy(tail)
+                ),
+            ));
+        }
         let stdout = match output {
             Some(bytes) => String::from_utf8(bytes).map_err(|_| {
                 io::Error::new(
@@ -185,15 +202,90 @@ struct Owned {
 }
 impl Owned {
     fn cleanup(&mut self) -> io::Result<std::process::ExitStatus> {
-        // No try_wait(): even a finished leader reserves its identity until we
-        // have signalled its private group. Drop uses the same order on unwind.
-        if !self.cleaned {
-            unsafe {
-                libc::kill(-(self.child.id() as i32), libc::SIGKILL);
-            }
-            self.cleaned = true;
+        if self.cleaned {
+            return self.child.wait();
         }
+        // The unreaped leader reserves its group identity. Give native fixture
+        // supervisors their TERM cleanup opportunity before forcing termination.
+        unsafe {
+            libc::kill(-(self.child.id() as i32), libc::SIGTERM);
+        }
+        #[cfg(target_os = "linux")]
+        if SUBREAPER.load(Ordering::Relaxed) {
+            let status = self.cleanup_tree();
+            self.cleaned = true;
+            return status;
+        }
+        unsafe {
+            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+        }
+        self.cleaned = true;
         self.child.wait()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cleanup_tree(&mut self) -> io::Result<std::process::ExitStatus> {
+        use std::os::unix::process::ExitStatusExt;
+        // Only the standalone, sequential coordinator installs SUBREAPER. It
+        // starts no unrelated children between jobs. Orphans from *any* process
+        // group become its direct children, including nested subreaper owners.
+        // Enumerate all tasks because spawn may have happened on another thread.
+        let start = Instant::now();
+        let mut primary = None;
+        let mut notified = std::collections::HashSet::new();
+        loop {
+            let force = start.elapsed() >= Duration::from_secs(2);
+            for task in std::fs::read_dir("/proc/self/task")? {
+                let path = task?.path().join("children");
+                let text = match std::fs::read_to_string(path) {
+                    Ok(text) => text,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e),
+                };
+                for pid in text.split_whitespace() {
+                    let pid: i32 = pid.parse().map_err(io::Error::other)?;
+                    // Direct children cannot recycle until this sole waiter
+                    // reaps them. No signal targets a historical numeric PID.
+                    if force || notified.insert(pid) {
+                        unsafe {
+                            libc::kill(pid, if force { libc::SIGKILL } else { libc::SIGTERM });
+                        }
+                    }
+                }
+            }
+            loop {
+                let mut status = 0;
+                let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+                if pid > 0 {
+                    notified.remove(&pid);
+                    if pid == self.child.id() as i32 {
+                        primary = Some(std::process::ExitStatus::from_raw(status));
+                    }
+                    continue;
+                }
+                if pid < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::ECHILD) {
+                        // ECHILD is the kernel's positive complete-tree reaping
+                        // receipt, not an absence probe of previously seen PIDs.
+                        return primary
+                            .ok_or_else(|| io::Error::other("job leader was not reaped"));
+                    }
+                    if error.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(error);
+                }
+                break;
+            }
+            if start.elapsed() >= Duration::from_secs(10) {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "owned process tree did not reap after SIGKILL",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 impl Drop for Owned {
