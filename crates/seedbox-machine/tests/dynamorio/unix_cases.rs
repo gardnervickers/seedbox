@@ -28,7 +28,6 @@ fn source_signal_context_and_lifecycle_properties() {
         ("signalfd", vec!["sum 1279200", "inOrder 1"], 1),
         ("pselect", vec!["eintr 500", "handled 500"], 1),
         ("sigsuspend", vec!["eintr 500", "handled 500"], 1),
-        ("cputimer", vec!["ticksAtLeast 1"], 1),
         ("timerfd", vec!["readsWithExpiry 20"], 1),
         ("pidfd", vec!["ok 20"], 21),
         ("clone3", vec!["ok 20"], 21),
@@ -799,4 +798,9 @@ fn original_generated_lifecycle_debug_options_use_actual_debug_core() {
         assert!(out.stdout.contains("rounds60 blocks3/worker workers"));
         assert!(out.stderr.contains("profile debug confirmed60"));
     }
+}
+
+#[test]
+fn source_process_cpu_timer_delivers_20_ticks_through_public_client() {
+    triplet("properties", &["cputimer"], 1, &["ticksAtLeast 1"]);
 }
