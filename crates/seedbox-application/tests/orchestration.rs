@@ -350,23 +350,30 @@ mod page_evidence_tests {
             machines: BTreeMap::from([("oracle".into(), capture)]),
         };
         f.backend.extra_logs.insert(
-            seedbox_application::evidence::STATE_REPORT.into(),
+            "machines/driver-state.json".into(),
             serde_json::to_vec(&state).unwrap(),
         );
         f.backend
             .extra_logs
-            .insert("machines/oracle.pages".into(), pages);
+            .insert("machines/machines/oracle.pages".into(), pages);
     }
 
     #[test]
     fn full_state_replay_adds_page_evidence_without_changing_verdicts_or_old_json_fields() {
         let (mut f, mut raw) = full_state_fixture();
         let first = f.run();
-        assert!(first.record.logs.contains_key("machines/oracle.pages"));
+        assert!(first
+            .record
+            .logs
+            .contains_key("machines/machines/oracle.pages"));
         assert_eq!(
-            fs::metadata(first.directory.join("output/machines/oracle.pages"))
-                .unwrap()
-                .len(),
+            fs::metadata(
+                first
+                    .directory
+                    .join("output/machines/machines/oracle.pages")
+            )
+            .unwrap()
+            .len(),
             1024 * 1024
         );
         let matched = f.replay(&first);
@@ -768,6 +775,53 @@ fn co_located_services_use_one_machine_state_digest_and_complete_placement() {
     let calls = fixture.backend.calls.load(Ordering::SeqCst);
     assert_eq!(fixture.run().record.outcome, Outcome::Error);
     assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), calls);
+}
+
+#[test]
+fn project_workers_change_capacity_without_changing_identity_and_quantum_is_retained() {
+    let mut fixture = Fixture::new();
+    fixture.simulation.simulator.quantum_ns = std::num::NonZeroU64::new(2_500_000).unwrap();
+    fixture
+        .backend
+        .performance
+        .insert("SEEDBOX_MACHINE_WORKERS".into(), "1".into());
+    let first = fixture.run();
+    fixture.simulation.simulator.machine_workers = 4.try_into().unwrap();
+    fixture
+        .backend
+        .performance
+        .insert("SEEDBOX_MACHINE_WORKERS".into(), "4".into());
+    let parallel = fixture.run();
+    assert_eq!(first.record.run_id, parallel.record.run_id);
+    assert_eq!(
+        parallel.record.performance_parameters["SEEDBOX_MACHINE_WORKERS"],
+        "4"
+    );
+    assert_eq!(
+        parallel
+            .record
+            .identity
+            .configuration
+            .simulator
+            .machine_workers
+            .get(),
+        1
+    );
+    let executor = fixture.executing(|request| {
+        assert_eq!(request.quantum_ns.get(), 2_500_000);
+        Ok(fixture.backend.report.clone())
+    });
+    let replay = fixture
+        .orchestrator
+        .replay(
+            &parallel.directory,
+            &executor,
+            &CancellationToken::default(),
+        )
+        .unwrap();
+    assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
+    fixture.simulation.simulator.quantum_ns = std::num::NonZeroU64::new(5_000_000).unwrap();
+    assert_ne!(fixture.run().record.run_id, first.record.run_id);
 }
 
 #[test]

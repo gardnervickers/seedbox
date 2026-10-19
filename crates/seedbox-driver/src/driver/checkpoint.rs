@@ -43,6 +43,14 @@ pub struct Checkpoint<S> {
 }
 
 impl<S> Checkpoint<S> {
+    /// The immutable simulated timeslice retained by this capture.
+    // TODO: Re-evaluate: external restore adapters must validate their requested
+    // timeslice before native work. The opaque checkpoint owns this immutable
+    // value, so adapters cannot establish agreement from envelope metadata alone.
+    pub fn quantum(&self) -> Duration {
+        Duration::from_nanos(self.quantum_ns)
+    }
+
     /// Captured guest-control authority and latency. None is the SDK contract;
     /// an explicit absent controller disables all guest callers.
     pub fn controller_setup(&self) -> Option<ControllerSetup> {

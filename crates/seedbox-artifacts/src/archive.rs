@@ -612,6 +612,7 @@ mod tests {
                 links: Vec::new(),
             },
             simulator: Simulator {
+                quantum_ns: std::num::NonZeroU64::new(1_000_000).unwrap(),
                 progress_budget: std::num::NonZeroU32::new(10_000).unwrap().into(),
                 schedule: Default::default(),
                 disk: Default::default(),

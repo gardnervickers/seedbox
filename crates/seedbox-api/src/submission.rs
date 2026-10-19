@@ -30,10 +30,12 @@ pub struct Submission {
     pub overrides: Vec<Override>,
 }
 
-/// Result-affecting defaults for a partial submission.
+/// Simulator semantics and host execution capacity for a partial submission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Simulator {
+    pub quantum_ns: std::num::NonZeroU64,
+    pub machine_workers: project::WorkerCount,
     #[serde(rename = "blocksPerProgressCall")]
     pub progress_budget: seedbox_spec::progress::ProgressBudget,
     /// Expose world controls to the oracle process.
@@ -42,7 +44,9 @@ pub struct Simulator {
 impl Default for Simulator {
     fn default() -> Self {
         Self {
-            progress_budget: project::SimulatorDefaults::default().progress_budget,
+            progress_budget: Default::default(),
+            quantum_ns: seedbox_spec::SimulatorOptions::default().quantum_ns,
+            machine_workers: Default::default(),
             oracle_control: true,
         }
     }
@@ -258,8 +262,10 @@ impl Submission {
             services,
             configs,
             network,
-            simulator: project::SimulatorDefaults {
+            simulator: seedbox_spec::SimulatorOptions {
                 progress_budget: self.simulator.progress_budget,
+                quantum_ns: self.simulator.quantum_ns,
+                machine_workers: self.simulator.machine_workers,
             },
             schedule: Default::default(),
             control: self
@@ -316,7 +322,9 @@ impl Submission {
             (config.wall_clock_epoch.is_some(), "wall_clock_epoch"),
         ] {
             if nondefault {
-                return Err(format!("partial simulation submissions do not support custom {setting}; submit a complete resolved Simulation definition instead"));
+                return Err(format!(
+                    "partial simulation submissions do not support custom {setting}; submit a complete resolved Simulation definition instead"
+                ));
             }
         }
         if config
@@ -438,6 +446,8 @@ impl Submission {
             },
             simulator: Simulator {
                 progress_budget: config.simulator.progress_budget,
+                quantum_ns: config.simulator.quantum_ns,
+                machine_workers: config.simulator.machine_workers,
                 oracle_control: config.control.is_some(),
             },
             overrides: spec
@@ -493,6 +503,37 @@ mod tests {
         })
     }
     #[test]
+    fn simulator_settings_survive_submission_roundtrip() {
+        let mut raw = partial();
+        raw["simulator"] = serde_json::json!({"quantumNs": 2_500_000, "machineWorkers": 4});
+        let spec: SimulationSpec = serde_json::from_value(raw).unwrap();
+        assert_eq!(spec.configuration.simulator.quantum_ns.get(), 2_500_000);
+        assert_eq!(spec.configuration.simulator.machine_workers.get(), 4);
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert_eq!(wire["simulator"]["quantumNs"], 2_500_000);
+        assert_eq!(wire["simulator"]["machineWorkers"], 4);
+        let restored: SimulationSpec = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            restored.configuration.simulator,
+            spec.configuration.simulator
+        );
+    }
+
+    #[test]
+    fn submission_rejects_zero_quantum_and_invalid_capacity() {
+        for simulator in [
+            serde_json::json!({"quantumNs": 0}),
+            serde_json::json!({"quantumNs": 1.5}),
+            serde_json::json!({"machineWorkers": 0}),
+            serde_json::json!({"machineWorkers": 65}),
+        ] {
+            let mut raw = partial();
+            raw["simulator"] = simulator;
+            assert!(serde_json::from_value::<SimulationSpec>(raw).is_err());
+        }
+    }
+
+    #[test]
     fn partial_submissions_preserve_machine_memory_until_server_architecture_is_known() {
         let mut raw = partial();
         raw["machines"]["app"]["memoryMiB"] = 2048.into();
@@ -524,6 +565,8 @@ mod tests {
             .values()
             .all(|s| s.platform.is_empty()));
         assert_eq!(spec.configuration.simulator.progress_budget.get(), 10_000);
+        assert_eq!(spec.configuration.simulator.quantum_ns.get(), 1_000_000);
+        assert_eq!(spec.configuration.simulator.machine_workers.get(), 1);
         assert_eq!(spec.configuration.network.latency_ns, 1_000_000);
         let wire = serde_json::to_value(&spec).unwrap();
         for private in [

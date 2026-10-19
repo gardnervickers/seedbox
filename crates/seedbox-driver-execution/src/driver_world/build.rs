@@ -180,6 +180,18 @@ pub(super) fn validate_policy_binding(expected: &Inventory, captured: &Inventory
     Ok(())
 }
 
+fn validate_checkpoint_quantum<S>(
+    checkpoint: &seedbox_driver::driver::Checkpoint<S>,
+    quantum_ns: u64,
+) -> Result<()> {
+    if checkpoint.quantum() != Duration::from_nanos(quantum_ns) {
+        return Err(bad(
+            "Driver checkpoint quantum differs from the simulation definition; start fresh to change quantum",
+        ));
+    }
+    Ok(())
+}
+
 fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
     let mut envelope = checkpoint::read(path)?;
     if envelope.state.world.seed != request.seed {
@@ -225,6 +237,7 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
     // Bind the codec5 controller/latency before extracting a factory runtime
     // or restoring even the first native machine. Saved queues stay in Driver.
     let retained = checkpoint::open(&envelope, driver_limits(envelope.driver.length)?)?;
+    validate_checkpoint_quantum(&retained, request.prepared.quantum_ns)?;
     super::controller::resolve(
         &request.prepared.inventory,
         &request.prepared.oracle.name,

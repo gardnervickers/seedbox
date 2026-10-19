@@ -26,6 +26,8 @@ pub struct ExecutionRequest<'a> {
     /// Explicit server-owned observation socket, outside retained experiment identity.
     pub observations: Option<&'a Path>,
     pub seed: u64,
+    /// Fixed simulated timeslice, retained in the experiment configuration.
+    pub quantum_ns: std::num::NonZeroU64,
     pub program: &'a [seedbox_engine_protocol::input_program::TimedInput],
     pub limits: &'a Limits,
     pub network: &'a Network,

@@ -1,7 +1,7 @@
 //! Synthetic retained evidence: validates addressing/format, not native RAM capture.
 use super::*;
 use sb::{
-    evidence::{RamRegion, StateCapture, StateDisposition, StateReport, STATE_REPORT},
+    evidence::{RamRegion, StateCapture, StateDisposition, StateReport},
     store::ContentDigest,
 };
 use std::collections::BTreeMap;
@@ -51,8 +51,8 @@ fn write(path: &std::path::Path, capture: StateCapture, hashes: &[u64]) {
         &mut record,
         None,
         &[
-            (STATE_REPORT, Some(&bytes)),
-            ("machines/workload.pages", Some(&pages)),
+            ("machines/driver-state.json", Some(&bytes)),
+            ("machines/machines/workload.pages", Some(&pages)),
         ],
     );
 }

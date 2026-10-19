@@ -55,6 +55,11 @@ pub(super) fn parse(
         "$.network.latency",
         false,
     )?;
+    let quantum_ns = duration(
+        &Value::String(project.simulator.quantum),
+        "$.simulator.quantum",
+        false,
+    )?;
     Ok(Simulation {
         name: project.name,
         source: source.to_owned(),
@@ -86,7 +91,12 @@ pub(super) fn parse(
         wall_clock_epoch: None,
         machine: MachineOptions::default(),
         disk: DiskOptions::default(),
-        simulator: project.simulator,
+        simulator: seedbox_spec::SimulatorOptions {
+            progress_budget: project.simulator.progress_budget,
+            quantum_ns: std::num::NonZeroU64::new(quantum_ns)
+                .ok_or_else(|| validation("$.simulator.quantum", "expected a positive duration"))?,
+            machine_workers: project.simulator.machine_workers,
+        },
     })
 }
 
@@ -140,7 +150,10 @@ fn resolve_machine(
             || key.contains(['=', '\0'])
             || value.as_ref().is_some_and(|v| v.contains('\0'))
         {
-            return invalid(&format!("{path}.environment"), "environment names must be nonempty and contain no '='; names and values must contain no NUL");
+            return invalid(
+                &format!("{path}.environment"),
+                "environment names must be nonempty and contain no '='; names and values must contain no NUL",
+            );
         }
     }
     for args in [&machine.entrypoint, &machine.command]
@@ -285,6 +298,35 @@ mod tests {
         assert_eq!(sim.services["app"].platform, "linux/arm64");
         assert_eq!(sim.network.latency_ns, 2_500_000);
         assert_eq!(sim.limits.simulated_time_ns, u64::MAX);
+        assert_eq!(sim.simulator.quantum_ns.get(), 1_000_000);
+        assert_eq!(sim.simulator.machine_workers.get(), 1);
+    }
+
+    #[test]
+    fn simulator_resolves_quantum_and_machine_capacity() {
+        let sim = parse_native(
+            "name: demo\noracle: {image: test}\nsimulator: {quantum: 2.5ms, machineWorkers: 4}\n",
+        )
+        .unwrap();
+        assert_eq!(sim.simulator.quantum_ns.get(), 2_500_000);
+        assert_eq!(sim.simulator.machine_workers.get(), 4);
+    }
+
+    #[test]
+    fn simulator_rejects_invalid_quantum_and_capacity() {
+        for quantum in ["0ns", "18446744073709551616ns", "0.1ns"] {
+            let err = parse_native(&format!(
+                "name: demo\noracle: {{image: test}}\nsimulator: {{quantum: {quantum}}}\n"
+            ))
+            .unwrap_err();
+            assert!(err.to_string().contains("$.simulator.quantum"), "{err}");
+        }
+        for workers in [0, 65] {
+            assert!(parse_native(&format!(
+                "name: demo\noracle: {{image: test}}\nsimulator: {{machineWorkers: {workers}}}\n"
+            ))
+            .is_err());
+        }
     }
 
     #[test]

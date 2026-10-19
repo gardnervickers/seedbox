@@ -117,7 +117,7 @@ impl DriverExecutor {
                 semantic_parameters: semantic,
             },
             backend,
-            1,
+            simulation.simulator.machine_workers.get() as usize,
         )?;
         executor.admit_execution(simulation.control.is_some())?;
         Ok(executor)

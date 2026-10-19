@@ -9,7 +9,8 @@ include!("support/diff_fixture.rs");
 
 #[test]
 fn ram_pages_are_read_from_the_current_capture_page_path() {
-    // Current state captures name their retained page files explicitly.
+    // The normal Driver worker writes its report beneath output/machines and
+    // page_log is relative to that directory (including its own machines/).
     let (a, b) = ram_pair();
     let dir = tempfile::tempdir().unwrap();
     for (name, raw, pfns) in [("a", &a, vec![]), ("b", &b, vec![3usize])] {
@@ -20,13 +21,22 @@ fn ram_pages_are_read_from_the_current_capture_page_path() {
         for pfn in pfns {
             bytes[pfn * 8] = 1;
         }
-        std::fs::write(path.join("output/machines/server.pages"), &bytes).unwrap();
-        record
-            .logs
-            .insert("machines/server.pages".into(), ContentDigest::of(&bytes));
+        std::fs::write(path.join("output/machines/machines/server.pages"), &bytes).unwrap();
+        record.logs.insert(
+            "machines/machines/server.pages".into(),
+            ContentDigest::of(&bytes),
+        );
         write_fixture(&path, &mut record, Some(raw), None);
     }
     let report = diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
+    assert!(report.machines[0]
+        .differences
+        .iter()
+        .any(|difference| difference.field == "/state_digest_parts/ram"));
+    assert!(!report
+        .limitations
+        .iter()
+        .any(|message| message.contains("driver-state.json not retained")));
     assert_eq!(
         report.machines[0].ram_pages.as_ref().unwrap().first_pfns,
         [3]
@@ -78,31 +88,39 @@ fn ram_page_evidence_is_optional_but_declared_bytes_are_validated() {
     let mut ra = fixture();
     let mut rb = fixture();
     // Unregistered files on disk are ignored.
-    std::fs::write(left.join("output/machines/server.pages"), b"junk").unwrap();
+    std::fs::write(left.join("output/machines/machines/server.pages"), b"junk").unwrap();
     assert!(diff(&left, &right).unwrap().machines[0].ram_pages.is_none());
     write_pages(&left, &mut ra, &[]);
     write_pages(&right, &mut rb, &[1]);
     write_fixture(&left, &mut ra, Some(&a), None);
     write_fixture(&right, &mut rb, Some(&b), None);
-    std::fs::write(right.join("output/machines/server.pages"), b"corrupt").unwrap();
+    std::fs::write(
+        right.join("output/machines/machines/server.pages"),
+        b"corrupt",
+    )
+    .unwrap();
     assert!(diff(&left, &right)
         .unwrap_err()
         .to_string()
         .contains("evidence checksum mismatch"));
     for length in [7, 8, 1024 * 1024 - 8] {
         let bytes = vec![0; length];
-        std::fs::write(right.join("output/machines/server.pages"), &bytes).unwrap();
-        rb.logs
-            .insert("machines/server.pages".into(), ContentDigest::of(&bytes));
+        std::fs::write(right.join("output/machines/machines/server.pages"), &bytes).unwrap();
+        rb.logs.insert(
+            "machines/machines/server.pages".into(),
+            ContentDigest::of(&bytes),
+        );
         write_fixture(&right, &mut rb, Some(&b), None);
         assert!(diff(&left, &right)
             .unwrap_err()
             .to_string()
             .contains("page hash length must be 1048576 bytes"));
     }
-    rb.logs.remove("machines/server.pages");
-    rb.omitted_logs
-        .insert("machines/server.pages".into(), "retention cap".into());
+    rb.logs.remove("machines/machines/server.pages");
+    rb.omitted_logs.insert(
+        "machines/machines/server.pages".into(),
+        "retention cap".into(),
+    );
     write_fixture(&right, &mut rb, Some(&b), None);
     let result = diff(&left, &right).unwrap();
     assert!(result.machines[0].ram_pages.is_none());
@@ -353,10 +371,10 @@ fn absent_and_omitted_evidence_stays_explicit_and_is_not_read() {
     record.outcome = sb::record::Outcome::Incomplete;
     record
         .omitted_logs
-        .insert(sb::evidence::STATE_REPORT.into(), "over quota".into());
+        .insert("machines/driver-state.json".into(), "over quota".into());
     write_fixture(dir.path(), &mut record, None, None);
     std::fs::write(
-        dir.path().join("output").join(sb::evidence::STATE_REPORT),
+        dir.path().join("output").join("machines/driver-state.json"),
         "not retained",
     )
     .unwrap();
