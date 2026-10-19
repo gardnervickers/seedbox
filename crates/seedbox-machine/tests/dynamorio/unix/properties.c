@@ -298,8 +298,35 @@ static int t_cputimer(void) {
 static int t_pidfd(void) {
     long ok = 0;
     for (long i = 0; i < 20 * scale; i++) {
+        int ready[2];
+        if (pipe(ready)) { perror("pidfd readiness pipe"); return 2; }
         pid_t p = fork();
-        if (!p) { pause(); _exit(0); }
+        if (!p) {
+            close(ready[0]);
+            char byte = 'R';
+            if (write(ready[1], &byte, 1) != 1) _exit(2);
+            close(ready[1]);
+            pause();
+            _exit(0);
+        }
+        close(ready[1]);
+        if (p < 0) { close(ready[0]); perror("pidfd fork"); return 2; }
+        struct pollfd child_ready = {ready[0], POLLIN, 0};
+        int waited;
+        do { waited = poll(&child_ready, 1, 30000); } while (waited < 0 && errno == EINTR);
+        char byte = 0;
+        ssize_t received = -1;
+        if (waited > 0) {
+            do { received = read(ready[0], &byte, 1); } while (received < 0 && errno == EINTR);
+        }
+        close(ready[0]);
+        if (waited <= 0 || received != 1 || byte != 'R') {
+            if (waited < 0) perror("pidfd child readiness poll");
+            else if (waited == 0) fputs("pidfd child readiness timed out\n", stderr);
+            kill(p, SIGKILL);
+            waitpid(p, 0, 0);
+            return 2;
+        }
         int fd = syscall(434, p, 0);
         if (fd < 0) { puts("UNSUPPORTED pidfd"); kill(p, SIGKILL); waitpid(p, 0, 0); return 0; }
         syscall(424, fd, SIGTERM, NULL, 0);
