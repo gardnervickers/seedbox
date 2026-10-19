@@ -38,3 +38,43 @@ seedbox tui <sim-id>
 ```
 
 Press **Space** to resume or pause, and **f** to inject or heal faults.
+
+## `seedbox.yaml` format
+
+`machines` defines the application nodes; `oracle` drives the workload and checks
+the result. The oracle's exit code determines PASS (zero) or FAIL (nonzero).
+Both use the same launch fields and require exactly one of `image` or `build`.
+
+For example, [the Redis project](examples/redis/seedbox.yaml) uses:
+
+```yaml
+name: redis-demo
+machines:
+  redis:
+    image: docker.io/library/redis:7.2
+    command: [redis-server, --appendonly, "yes", --save, ""]
+oracle:
+  build:
+    context: ./workload
+  environment:
+    REDIS_ADDRESS: redis:6379
+    SEEDBOX_PLANT_FAILURE: "0"
+network:
+  latency: 1ms
+simulator:
+  blocksPerProgressCall: 10000
+```
+
+Machine names are hostnames on the simulated network. Build contexts are relative
+to `seedbox.yaml`; `build.dockerfile` defaults to `Dockerfile`.
+
+Optional launch fields are `entrypoint`, `command`, `environment`, `memoryMiB`,
+`workingDirectory`, `user`, `files` and `volumes`. `files` is a list of
+`{source, target}` entries copied into the guest at preparation; `volumes` maps
+names to `{target}` entries for writable disks that survive machine crashes.
+See [the etcd project](examples/etcd/seedbox.yaml) for a three-node cluster with
+persistent data disks.
+
+`network.latency` defaults to `1ms`; `simulator.blocksPerProgressCall` defaults to
+`10000` and controls how often translated code charges simulation progress.
+Choose the backend, seed and execution limits with CLI flags.
