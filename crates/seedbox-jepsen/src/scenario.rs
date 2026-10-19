@@ -2195,17 +2195,46 @@ fn delores_node(command: &str, extra: &[(&str, &str)]) -> Machine {
     machine
 }
 
+/// The S3 servers under the delores-node scenarios.
+#[derive(Clone, Copy, PartialEq)]
+enum DeloresStore {
+    /// Three keel-s3dd servers.
+    Keel,
+    /// Three single-drive RustFS servers, each its own deployment: no
+    /// erasure set or replication spans them, so delores's quorums are the
+    /// only redundancy, as with keel-s3dd.
+    RustFs,
+}
+
+/// One standalone RustFS server with a single drive.
+fn rustfs_single() -> Machine {
+    Machine::image(RUSTFS_102)
+        .env("RUSTFS_VOLUMES", "/data/rustfs0")
+        .env("RUSTFS_ADDRESS", ":9000")
+        .env("RUSTFS_ACCESS_KEY", "jepsen")
+        .env("RUSTFS_SECRET_KEY", "jepsen-secret")
+        .env("RUSTFS_CONSOLE_ENABLE", "false")
+        .memory(1024)
+        .data_sized("/data", "3GiB")
+}
+
 #[allow(clippy::type_complexity)]
-fn delores_nodes() -> Vec<Scenario> {
+fn delores_nodes(store: DeloresStore) -> Vec<Scenario> {
     let machines = |node_env: &[(&str, &str)]| {
         let mut machines = Vec::new();
         for s3 in ["s3-a", "s3-b", "s3-c"] {
-            let mut server = keel_server("poll", "log");
-            server.files = vec![("../keel/run-s3dd.sh".into(), "/run-s3dd.sh".into())];
-            // Three nodes' S3 clients need more than the default 64 slots.
-            if let Some(command) = server.command.as_mut() {
-                command.extend(strings(&["--max-connections", "256"]));
-            }
+            let server = match store {
+                DeloresStore::Keel => {
+                    let mut server = keel_server("poll", "log");
+                    server.files = vec![("../keel/run-s3dd.sh".into(), "/run-s3dd.sh".into())];
+                    // Three nodes' S3 clients need more than the default 64 slots.
+                    if let Some(command) = server.command.as_mut() {
+                        command.extend(strings(&["--max-connections", "256"]));
+                    }
+                    server
+                }
+                DeloresStore::RustFs => rustfs_single(),
+            };
             machines.push((s3.to_string(), server));
         }
         machines.push((
@@ -2225,9 +2254,19 @@ fn delores_nodes() -> Vec<Scenario> {
         }
         machines
     };
-    let topology = "Three delores jepsen-nodes, each running SMR over a virtual log whose metadata\nregister is CASPaxos over three keel-s3dd servers (one acceptor and one log-drive\nreplica each; no acceptor processes, the conditional PUT is the primitive), with\nslots from the in-memory demo sequencer.";
+    let topology = match store {
+        DeloresStore::Keel => "Three delores jepsen-nodes, each running SMR over a virtual log whose metadata\nregister is CASPaxos over three keel-s3dd servers (one acceptor and one log-drive\nreplica each; no acceptor processes, the conditional PUT is the primitive), with\nslots from the in-memory demo sequencer.",
+        DeloresStore::RustFs => "Three delores jepsen-nodes, each running SMR over a virtual log whose metadata\nregister is CASPaxos over three independent single-drive RustFS 1.0.2 servers (no\nerasure set or replication between them; one acceptor and one log-drive replica\neach, the conditional PUT is the primitive), with slots from the in-memory demo\nsequencer.",
+    };
     let seqcut = "The sequencer keeps\nrunning with its state (no kill); a cut separates one node from it, all three, or\none node from it and from one or two S3 servers, for 1-4 s (under the nodes' 5 s\nsequencer timeout) or 10-30 s, with 12-20 s between cuts. Safety must hold\nthroughout; the oracle reports how long recovery took after each heal, and for the\nregisters a second property asks that some request succeeds within 10 s of each\none (list-append only reports it: a cut can seal the log for good).";
-    let run = "Run it without a profile for a baseline, or with\n`--fault-profile harness/jepsen/delores/node-below-pause-faults.yaml` or\n`node-above-pause-faults.yaml`, which never fault the sequencer.";
+    let run = match store {
+        DeloresStore::Keel => "Run it without a profile for a baseline, or with\n`--fault-profile harness/jepsen/delores/node-below-pause-faults.yaml` or\n`node-above-pause-faults.yaml`, which never fault the sequencer.",
+        DeloresStore::RustFs => "Run it without a profile for a baseline, or with a\nprofile from harness/jepsen/delores-rustfs, none of which fault the sequencer.",
+    };
+    let busy = match store {
+        DeloresStore::Keel => "`node-above-pause-s3-faults.yaml`: the busier the S3 servers, the more often a 13-20 s\npause lands while keel-s3dd is mid-tick and its watchdog aborts it.",
+        DeloresStore::RustFs => "`s3-faults.yaml`: the busier the S3 servers, the more requests a pause or power loss\nleaves in flight.",
+    };
     let specs: [(&str, String, &[(&str, &str)], &[&str]); 9] = [
         (
             "delores-node-cas",
@@ -2261,13 +2300,13 @@ fn delores_nodes() -> Vec<Scenario> {
         ),
         (
             "delores-node-cas-busy",
-            "delores-node-cas with sixteen clients and no pause between requests, plus two threads\nper S3 server writing 64 KiB objects to a separate bucket (--s3-load), for\n`node-above-pause-s3-faults.yaml`: the busier the S3 servers, the more often a 13-20 s\npause lands while keel-s3dd is mid-tick and its watchdog aborts it.".into(),
+            format!("delores-node-cas with sixteen clients and no pause between requests, plus two threads\nper S3 server writing 64 KiB objects to a separate bucket (--s3-load), for\n{busy}"),
             &[],
             &["--workload", "cas-register", "--clients", "16", "--think-ms", "0", "--s3-load", "2"],
         ),
         (
             "delores-node-append-busy",
-            "delores-node-append with sixteen clients and no pause between requests, for\n`node-above-pause-s3-faults.yaml` (see delores-node-cas-busy).".into(),
+            format!("delores-node-append with sixteen clients and no pause between requests, for\n{} (see delores-node-cas-busy).", busy.split(':').next().unwrap()),
             &[],
             &["--workload", "list-append", "--expect-unavailable", "--clients", "16", "--think-ms", "0", "--s3-load", "2"],
         ),
@@ -2284,12 +2323,24 @@ fn delores_nodes() -> Vec<Scenario> {
             &["--workload", "list-append", "--expect-unavailable", "--key-count", "4", "--max-txn-length", "8", "--clients", "12", "--think-ms", "0", "--chaos-cuts", "4"],
         ),
     ];
+    // The RustFS scenarios take the names, and the cross references, of
+    // their keel-s3dd counterparts with delores-rustfs- for delores-node-.
+    let rename = |text: &str| match store {
+        DeloresStore::Keel => text.to_string(),
+        DeloresStore::RustFs => text.replace("delores-node-", "delores-rustfs-"),
+    };
+    let generated = match store {
+        DeloresStore::Keel => "delores jepsen-node, three nodes, three keel-s3dd (poll, log)",
+        DeloresStore::RustFs => {
+            "delores jepsen-node, three nodes, three independent single-drive RustFS 1.0.2"
+        }
+    };
     specs
         .into_iter()
         .map(|(name, comment, node_env, arguments)| Scenario {
-            name: name.into(),
-            comment,
-            generated: "delores jepsen-node, three nodes, three keel-s3dd (poll, log)".into(),
+            name: rename(name),
+            comment: rename(&comment),
+            generated: generated.into(),
             machines: machines(node_env),
             // The checks' searches grow with unknown outcomes.
             oracle: Machine::program(&strings(
@@ -2319,7 +2370,8 @@ pub fn all() -> Vec<(String, String)> {
         ("rustfs", rustfs()),
         ("keel", keel()),
         ("delores", delores()),
-        ("delores", delores_nodes()),
+        ("delores", delores_nodes(DeloresStore::Keel)),
+        ("delores-rustfs", delores_nodes(DeloresStore::RustFs)),
     ] {
         for scenario in scenarios {
             out.push((

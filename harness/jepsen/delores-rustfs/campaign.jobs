@@ -1,0 +1,28 @@
+# The delores jepsen-node scenarios over three independent single-drive
+# RustFS 1.0.2 servers instead of keel-s3dd, for `cargo jepsen campaign
+# --jobs-file`. Paths are relative to this directory. The campaign
+# interleaves the lines by seed, so every scenario runs early.
+#
+# Images: RustFS is pulled by digest; build the node image and the oracle
+# first, from the delores checkout under test:
+#   harness/jepsen/delores/node-image/build.sh DELORES_CHECKOUT
+#   cargo jepsen build-oracle
+
+# CASPaxos registers.
+delores-rustfs-cas.yaml@node-faults.yaml:10000-10199
+delores-rustfs-cas.yaml@s3-faults.yaml:10000-10199
+delores-rustfs-cas.yaml@s3-crash-faults.yaml:10000-10199
+delores-rustfs-cas.yaml@node-adversarial-faults.yaml:10000-10199
+delores-rustfs-cas-nopipeline.yaml@s3-crash-faults.yaml:10000-10199
+delores-rustfs-cas-hot.yaml@node-adversarial-faults.yaml:10000-10199
+delores-rustfs-cas-busy.yaml@s3-faults.yaml:10000-10199
+delores-rustfs-cas-seqcut.yaml:10000-10199
+
+# List-append transactions over the replicated log.
+delores-rustfs-append.yaml@node-faults.yaml:10000-10199
+delores-rustfs-append.yaml@s3-faults.yaml:10000-10199
+delores-rustfs-append.yaml@s3-crash-faults.yaml:10000-10199
+delores-rustfs-append.yaml@node-adversarial-faults.yaml:10000-10199
+delores-rustfs-append-chaos.yaml@node-adversarial-faults.yaml:10000-10199
+delores-rustfs-append-busy.yaml@s3-faults.yaml:10000-10199
+delores-rustfs-append-seqcut.yaml:10000-10199

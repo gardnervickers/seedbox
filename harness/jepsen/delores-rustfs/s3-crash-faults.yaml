@@ -1,0 +1,17 @@
+# Power loss of the RustFS servers only (volumes kept), often and briefly, and
+# now and then one server cut off from every node. An acceptor record or log
+# entry a server acknowledged must survive its power failure, or CASPaxos and
+# the quorum log drive can lose a decided value. Each fault takes one server,
+# so two of three usually stay up.
+start: 15s
+end: 70s
+interval: 2s
+targets: [s3-a, s3-b, s3-c]
+faults:
+  - kind: crash
+    weight: 3
+    downtime: {min: 500ms, max: 3s}
+  - kind: partition
+    weight: 1
+    duration: {min: 1s, max: 5s}
+    from: [n1, n2, n3]

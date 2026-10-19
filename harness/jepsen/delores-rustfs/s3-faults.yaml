@@ -1,0 +1,22 @@
+# The RustFS servers alone: process pauses of 1-20 s, SIGKILL and power loss
+# (volume kept), and one server isolated from every node. The nodes are not
+# faulted. Faults come often and may overlap on different servers. Pair it
+# with the -busy scenarios. The oracle's operations run 120 s.
+start: 15s
+end: 110s
+interval: 2s
+targets: [s3-a, s3-b, s3-c]
+faults:
+  - kind: pause_process
+    weight: 4
+    duration: {min: 1s, max: 20s}
+  - kind: stop
+    weight: 1
+    downtime: {min: 1s, max: 5s}
+  - kind: crash
+    weight: 2
+    downtime: {min: 1s, max: 5s}
+  - kind: partition
+    weight: 1
+    duration: {min: 1s, max: 8s}
+    from: [n1, n2, n3]
