@@ -590,5 +590,37 @@
     "adaptation": "Positive start barrier and4096 rounds replace timed run; precise ENOMEM assertions and public boundary queries added.",
     "source_sha256": "564d168aa633417b457b0b47e00b24ab8702ba7f3fc09e717e5b10cc811c3c7b",
     "ported_sha256": "9b901c8116c767035fd9151b99fee6da056bf28dfee97507d77b854ee7195970"
+  },
+  {
+    "file": "languages/cs/Program.cs",
+    "source": "tools/jvm-fuzz/probes/cs/Program.cs",
+    "commit": "f32472b7fe470367b7eddecde1ac53ad299f3a3e",
+    "source_sha256": "0531dbe7b2066047abcbdc316a696a5ef80da04cbc712c2a567386a8a0ac97a2",
+    "ported_sha256": "e7888e66bef14cd4fff93852965982bf1777c4c69fd985674efe90b5c1ee876f",
+    "adaptation": "Resolve packaged native bridge by library name beside csfz.dll. Replace three incidental pacing sleeps with Thread.Yield per project test policy; retain every kernel/phase/mutation/batch/callback population and model assertion. This preserves the tier workload and result oracle, but is not evidence of tier-1 installation."
+  },
+  {
+    "file": "languages/cs/csfz.csproj",
+    "source": "tools/jvm-fuzz/probes/cs/csfz.csproj",
+    "commit": "f32472b7fe470367b7eddecde1ac53ad299f3a3e",
+    "source_sha256": "e05449c09c4e8e56afb678628932f268ff6f6b4e6ab73aa6415f25e9fa9f8b4b",
+    "ported_sha256": "e05449c09c4e8e56afb678628932f268ff6f6b4e6ab73aa6415f25e9fa9f8b4b",
+    "adaptation": "Unchanged"
+  },
+  {
+    "file": "languages/cs/fzclr.c",
+    "source": "tools/jvm-fuzz/probes/c/fzclr.c",
+    "commit": "f32472b7fe470367b7eddecde1ac53ad299f3a3e",
+    "source_sha256": "e2d85880554606df4c471bf4c4141fff503dee019ea5ef671f045b241179f8ba",
+    "ported_sha256": "e2d85880554606df4c471bf4c4141fff503dee019ea5ef671f045b241179f8ba",
+    "adaptation": "Unchanged"
+  },
+  {
+    "file": "languages/cs/observe_client.c",
+    "source": "crates/seedbox-machine/tests/dynamorio/translator/observe_client.c",
+    "commit": "a28dbfead45a8913e57df2c348cd49114b1ed43f",
+    "source_sha256": "9710373db1f520cb0285fbd160c4770f6c7d0ff138664f2dd6f102487bd38b7e",
+    "ported_sha256": "8eabb8e20022bec71bad72bcde7de6b24192f6d16a0f0aaa610a3b29fb6055ff",
+    "adaptation": "Existing public drmgr/drreg observer unchanged except comment and exact module filename libjvm.so -> libcoreclr.so. Require same-build packaged CLR path and positive application AND CLR execution counts on x86. ARM retains original translator_progress client."
   }
 ]

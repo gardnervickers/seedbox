@@ -73,6 +73,7 @@ add_custom_command(OUTPUT "${language_dir}/erl/beamfz.beam" "${language_dir}/erl
 add_custom_target(translator_erlang ALL DEPENDS "${language_dir}/erl/beamfz.beam" "${language_dir}/erl/hot/v1/fzhot.beam" "${language_dir}/erl/hot/v2/fzhot.beam")
 install(DIRECTORY "${language_dir}/erl" languages/js languages/lua DESTINATION share/translator/languages)
 install(FILES languages/run.py DESTINATION share/translator/languages)
+add_subdirectory(languages/cs)
 
 add_library(translator_observe SHARED observe_client.c)
 configure_DynamoRIO_client(translator_observe)

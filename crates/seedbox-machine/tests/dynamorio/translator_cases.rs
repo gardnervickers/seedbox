@@ -261,6 +261,22 @@ fn managed_runtime_source_models() {
     }
 }
 
+// Separate selectors keep the expensive reverse P/Invoke population independently selectable.
+#[test]
+fn clr_original_tier() {
+    python_case("languages/run.py", &["cs", "tier"]);
+}
+
+#[test]
+fn clr_original_gc() {
+    python_case("languages/run.py", &["cs", "gc"]);
+}
+
+#[test]
+fn clr_original_reverse_pinvoke() {
+    python_case("languages/run.py", &["cs", "reversePInvoke"]);
+}
+
 #[cfg(target_arch = "aarch64")]
 #[test]
 fn a64_exclusive_source_strict_algorithms_and_scheduled_aba() {

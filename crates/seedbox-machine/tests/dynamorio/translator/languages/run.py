@@ -18,6 +18,7 @@ from phase import execute
 def run(root, language, case):
     assets = root / "share/translator/languages"
     commands = {
+        "cs": [str(root / "runtimes/dotnet/bin/dotnet"), str(assets / "cs/csfz.dll")],
         "js": [str(root / "runtimes/node/bin/node"), "--expose-gc", str(assets / "js/jsfz.js")],
         "lua": [str(root / "runtimes/lua/bin/luajit"), str(assets / "lua/luafz.lua")],
         "go": [str(root / ("bin/translator_gofzcgo" if case == "cgoThreads" else "bin/translator_gofz"))],
@@ -38,10 +39,15 @@ def run(root, language, case):
                 command = [str(root / "runtime/bin64/drrun"), "-use_dll",
                            str(root / "runtime/lib64/release/libdynamorio.so")]
                 if mode == "client":
-                    client = "libtranslator_progress.so" if platform.machine() == "aarch64" else "libtranslator_observe.so"
+                    client = "libtranslator_progress.so" if platform.machine() == "aarch64" else ("libtranslator_clr_observe.so" if language == "cs" else "libtranslator_observe.so")
                     command += ["-c", str(root / "lib" / client)]
                     if platform.machine() == "aarch64":
                         command += ["--instructions-per-progress-call", "50000"]
+                    elif language == "cs":
+                        # Exact public module path from the same packaged SDK/runtime.
+                        modules = list((root / "runtimes/dotnet/share/dotnet/shared/Microsoft.NETCore.App").glob("*/libcoreclr.so"))
+                        assert len(modules) == 1, modules
+                        command += [str(modules[0].resolve())]
                 command += ["--"] + app
             env = {"HOME": str(work), "DYNAMORIO_CONFIGDIR": str(work),
                    "FZ_ERL_HOT": str(assets / "erl/hot"),
@@ -53,9 +59,15 @@ def run(root, language, case):
                 import re
                 pattern = r"a64_progress_like: ([1-9][0-9]*) refills" if platform.machine() == "aarch64" else r"path-cost: exit app=([1-9][0-9]*)"
                 assert re.search(pattern, err), (language, case, err)
+                if language == "cs" and platform.machine() != "aarch64":
+                    assert re.search(r"path-cost: exit app=[1-9][0-9]* vm=[1-9][0-9]*", err), err
+                    assert "file_name=libcoreclr.so" in err, err
+            if language == "cs":
+                expected = (assets / "cs" / (case + ".stdout")).read_text()
+                assert out == expected, (language, case, mode, out, expected)
             outputs.append(out)
         assert len(set(outputs)) == 1, (language, case, outputs)
-    print("SB-runtime:" + {"js": "Js", "lua": "Lua", "go": "Go", "erl": "Erl"}[language] + "." + case + ": PASS")
+    print("SB-runtime:" + {"js": "Js", "lua": "Lua", "go": "Go", "erl": "Erl", "cs": "Cs"}[language] + "." + case + ": PASS")
 
 
 if __name__ == "__main__":
@@ -64,7 +76,7 @@ if __name__ == "__main__":
         os.setpgid(0, 0)
     p = argparse.ArgumentParser()
     p.add_argument("root", type=Path)
-    p.add_argument("language", choices=["js", "lua", "go", "erl"])
+    p.add_argument("language", choices=["js", "lua", "go", "erl", "cs"])
     p.add_argument("case")
     a = p.parse_args()
     run(a.root.resolve(), a.language, a.case)

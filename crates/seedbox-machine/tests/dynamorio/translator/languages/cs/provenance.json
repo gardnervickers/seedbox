@@ -1,0 +1,48 @@
+{
+  "seedbox_source": "f32472b7fe470367b7eddecde1ac53ad299f3a3e",
+  "original_dr_source": "356c1821045a4b5678d0813e132074324623df6e",
+  "selector_source": "tools/jvm-fuzz/jvmfuzz.py: Cs.tier, Cs.gc, Cs.reversePInvoke",
+  "prepared_sdk": "10.0.401",
+  "prepared_runtime": "Microsoft.NETCore.App 10.0.12",
+  "original_sdk_image": "mcr.microsoft.com/dotnet/sdk:10.0.400@sha256:4beef5b8919dcaa2dc924233bd069257e883cc7a061e09088a97d152d6a48510",
+  "packaging": "Pinned project Nix dotnet-sdk_10; framework-dependent Release IL, original tiered compilation/PGO, workstation concurrent GC, no ReadyToRun. Offline build-time SDK framework restore with cleared package feeds; no runtime build/restore/download. Native fzclr uses declared project compiler, pthreads, -O2 -ffp-contract=off on each native architecture.",
+  "profiles": "Inherited language native/default DR/public observer comparison. x86 CLR copy of translator_observe, with libcoreclr.so filename check and exact same-runtime module path, positive app/VM execution counters required, ARM original translator_progress with instructions-per-progress-call 50000. No CLR-specific DR or application runtime flags. These are not global Seedbox opt_speed/disable_traces or ARM ldstex2cas profile qualification.",
+  "containment": "Existing phase.py 600-second per-phase bound and native supervisor unchanged. Expensive reversePInvoke can exceed 120 seconds; completion is not a speed assertion.",
+  "architecture_boundary": "Nix fixture package builds on native x86_64-linux and aarch64-linux with the matching SDK and native helper. Full ARM language cross-build is not part of this fixture contract. Native ARM CI must build and execute it; host IL compilation is not native ARM qualification.",
+  "pacing": "Three source pacing sleeps become cooperative Thread.Yield under project test policy, as in earlier retained CLR investigations. Counts and source arithmetic/reference assertions unchanged. Tier completion does not prove tier-1 installation; original delay was also not a public tier oracle.",
+  "selectors": {
+    "tier": {
+      "arguments": [
+        "tier",
+        "1",
+        "1"
+      ],
+      "population": "Seven 1000000-operation main kernels; six 3000-call small-method phases; three sequential and three concurrent 500000-operation kernels; all phase/thread equalities.",
+      "oracle_file": "tier.stdout",
+      "sha256": "1d1d9979d02e919bfabd078b1c40b6ac0a92e94ff4d5aeeb91e978097d4215ca",
+      "oracle_origin": "Ported native reference; deterministic source arithmetic and phase/thread models. No tier-installation claim."
+    },
+    "gc": {
+      "arguments": [
+        "gc",
+        "1",
+        "1"
+      ],
+      "population": "Three sequential and three concurrent 1000000-operation mutators; 4096-node graphs; pinned arrays and compacting collections; 2000 finalizers/weak references.",
+      "oracle_file": "gc.stdout",
+      "sha256": "aaada9c3f6f06f0bd78a26d19664822fb36f2aead77515cd85108feb278b951e",
+      "oracle_origin": "Retained original workload oracle /tmp/dr-clr-final-native-gc.json; historical evidence only, independently rechecked by maintained tests."
+    },
+    "reversePInvoke": {
+      "arguments": [
+        "reversePInvoke",
+        "1",
+        "1"
+      ],
+      "population": "40 batches with 1..8 native threads and 20..32 calls, inline/native model equality; three simultaneous managed starters each running four 3-thread/10-call batches and sequential controls; 10004 callbacks and 2514 leafCallbacks.",
+      "oracle_file": "reversePInvoke.stdout",
+      "sha256": "cce491fab908064c07bfc92c22a60658af183eb4256a2e8ca53e7e23171ddfaf",
+      "oracle_origin": "Retained original workload oracle /tmp/dr-clr-final-native-reversePInvoke.json; historical evidence only, no current runtime claim."
+    }
+  }
+}
