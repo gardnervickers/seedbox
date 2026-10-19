@@ -1,0 +1,7 @@
+foreach(case IN ITEMS state concurrent)
+  add_executable(unix_timer_${case} ${case}.c)
+  set_target_properties(unix_timer_${case} PROPERTIES OUTPUT_NAME unix-timer_${case})
+  target_compile_options(unix_timer_${case} PRIVATE -O2 -Wall -Wextra -Werror)
+  target_link_libraries(unix_timer_${case} PRIVATE pthread)
+  install(TARGETS unix_timer_${case} RUNTIME DESTINATION bin)
+endforeach()

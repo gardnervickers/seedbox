@@ -57,3 +57,4 @@ DR-IR-transform:rename	356c1821045a4b5678d0813e132074324623df6e	suite/proptest/a
 DR-IR-transform:regdeps	356c1821045a4b5678d0813e132074324623df6e	suite/proptest/a64_ir_transform.c	prop_names regdeps	ir_transform.c	CROSS-BUILT; NATIVE-ARM-UNEXECUTED; LS64-DEPENDENCY-UNRESOLVED
 DR-IR-transform:ilist	356c1821045a4b5678d0813e132074324623df6e	suite/proptest/a64_ir_transform.c	prop_names ilist	ir_transform.c	CROSS-BUILT; NATIVE-ARM-UNEXECUTED; LS64-DEPENDENCY-UNRESOLVED
 DR-IR-transform:create	356c1821045a4b5678d0813e132074324623df6e	suite/proptest/a64_ir_transform.c	prop_names create	ir_transform.c	CROSS-BUILT; NATIVE-ARM-UNEXECUTED; LS64-DEPENDENCY-UNRESOLVED
+DR-api:isa-feature-pc-relative	1823dc5bfcde301c04704d1154a2eb0451345c1b	suite/tests/api/drdecode_aarch64.c	test_isa_features distant B.cond; adds near/far B.cond ADR ADRP	feature_queries.c	CROSS-BUILT; NATIVE-ARM-UNEXECUTED; supplemental x86 host A64 decoder

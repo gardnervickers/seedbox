@@ -178,3 +178,18 @@ fn a64_original_selector_forward_reverse_and_aliases() {
 fn debug_a64_original_selector_forward_reverse_and_aliases() {
     a64_selector_controls(DEBUG_FIXTURES);
 }
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn a64_public_isa_feature_queries_near_and_distant_pc_relative_operands() {
+    for variable in [RELEASE_FIXTURES, DEBUG_FIXTURES] {
+        let root = fixtures(variable);
+        let out = run(
+            Command::new(root.join("bin/translator_replay_feature_queries")),
+            &format!("{variable}: six public A64 ISA-feature queries"),
+            "B.cond near BASE",
+        )
+        .unwrap();
+        assert_eq!(out, "B.cond near BASE\nADR near BASE\nADRP near BASE\nB.cond far BASE\nADR far BASE\nADRP far BASE\n");
+    }
+}

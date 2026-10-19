@@ -120,3 +120,16 @@ CMakeLists; #[path = "dynamorio/translator/replay_cases.rs"] mod replay_cases in
 the existing owning Rust test. Existing parent installs saved/ and vectors/.
 SEEDBOX_DYNAMORIO_FIXTURES selects the prepared fixture package/profile. Build and
 run both matching release and Debug packages. Existing codec5079 rows unchanged.
+
+Independent feature_queries.c target: adapts the public distant B.cond EQ test
+from Enrico Deiana's 1823dc5bfcde301c04704d1154a2eb0451345c1b,
+suite/tests/api/drdecode_aarch64.c:test_isa_features (DynamoRIO BSD license above).
+The integer-derived PC/target preserve its 16 MiB distant B.cond case without
+out-of-object pointer arithmetic. Adds near B.cond and near/far ADR/ADRP queries:
+4 KiB near, 16 MiB far B.cond/ADR, 64 GiB far ADRP. All six require feature BASE
+and exact public name BASE. No target memory is dereferenced or executed.
+The existing 50 saved cases, eight transform populations and selector arrays
+are unchanged. Native A64 release and Debug decoder fixture roots are tested
+separately. A host-built A64 decoder on x86 is supplemental evidence only.
+The production correction is composed into source4114a763 as its final commit;
+no new production API or stack-dependent old-source failure is claimed.

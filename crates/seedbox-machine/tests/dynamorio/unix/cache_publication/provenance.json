@@ -1,0 +1,25 @@
+{
+  "source_candidate": "4114a76354c90cfd028af6e8eaa7dea7e31ee28f",
+  "fix_commits": [
+    "a75477b99f4a257430417e616c2b7e295390bac1",
+    "d78fb86b1e5fb71c0de740365df5fae616b5bd96",
+    "ee9216db265528f55fb114ce1d87f24af618907f"
+  ],
+  "temporary_sources": {
+    "publication.c": {
+      "path": "/tmp/dr-a64-ic-probe/publication.c",
+      "sha256": "ae007dcb60ddb24b179194532375dc4f7c9ff48768d59b2d848979195182921d"
+    },
+    "publication.S": {
+      "path": "/tmp/dr-a64-ic-probe/publication.S",
+      "sha256": "388dd8c3445a082ba8cc1d90cb716d3d58bc51144185a90f42dadc9408559c23"
+    },
+    "client.c": {
+      "path": "/tmp/dr-a64-ic-probe/client.c",
+      "sha256": "9819762992a02ee46d400ca505a2f40499467a97f0ad7e71469c3dee4c3bc783"
+    }
+  },
+  "adaptation": "byte-identical application, assembly and public observer client",
+  "scope": "native Linux A64 only; actual DC/DSB/IC, x0/x28/x30, default/explicit no-HWCC, positive BB receipts; native ARM unexecuted locally",
+  "open_gap": "native ARM execution and old/new discrimination pending"
+}

@@ -1,0 +1,11 @@
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  add_executable(unix_cache_publication publication.c publication.S)
+  set_target_properties(unix_cache_publication PROPERTIES OUTPUT_NAME unix-cache_publication)
+  target_compile_options(unix_cache_publication PRIVATE -O2 -Wall -Wextra -Werror)
+  target_link_libraries(unix_cache_publication PRIVATE pthread)
+  add_library(unix_cache_publication_client SHARED client.c)
+  set_target_properties(unix_cache_publication_client PROPERTIES OUTPUT_NAME unix-cache-publication)
+  configure_DynamoRIO_client(unix_cache_publication_client)
+  install(TARGETS unix_cache_publication unix_cache_publication_client
+          RUNTIME DESTINATION bin LIBRARY DESTINATION lib)
+endif()

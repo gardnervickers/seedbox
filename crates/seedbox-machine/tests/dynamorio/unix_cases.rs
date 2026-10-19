@@ -872,3 +872,9 @@ mod fault_context_cases;
 
 #[path = "unix/fd_limits_cases.rs"]
 mod fd_limits_cases;
+
+#[cfg(target_arch = "aarch64")]
+#[path = "unix/cache_publication/cases.rs"]
+mod cache_publication_cases;
+#[path = "unix/timer_state/cases.rs"]
+mod timer_state_cases;
