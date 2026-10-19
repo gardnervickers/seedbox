@@ -741,3 +741,15 @@ fn original_generated_lifecycle_state_and_fault_oracle_spans_60_attach_rounds() 
         }
     }
 }
+
+#[test]
+fn original_detach_signal_masks_and_altstack_survive_live_handler() {
+    for variant in ["native", "attach"] {
+        for location in ["ordinary", "handler"] {
+            let out = checked("detach_signal", &[variant, location], Profile::Native, 0);
+            assert!(out
+                .stdout
+                .contains("masks altstack live-handler frame sigreturn preserved"));
+        }
+    }
+}
