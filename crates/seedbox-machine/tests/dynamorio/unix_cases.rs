@@ -630,3 +630,27 @@ fn original_indirect_calls_complete_250_async_signals_through_clean_calls() {
         .contains("unix-cleancallsig: app-clean-calls="));
     assert!(native.stdout.contains("acknowledgements 250"));
 }
+
+#[test]
+fn source_executable_alias_values_survive_mapping_lifetimes_and_signal_return() {
+    // Default HWCC profile only. Source noHWCC is a distinct A64 cache-publication
+    // profile; its debug-runtime dependency is explicitly retained in inventory.
+    for case in [
+        "boundary", "closed", "late", "protect", "offset", "reuse", "remap", "replace", "stable",
+        "private", "mixed", "process", "signal",
+    ] {
+        triplet(
+            "aliases",
+            &[case],
+            if case == "process" { 2 } else { 1 },
+            &[
+                "updates 5000 slots 64 stride 16 sum 87487500 stale 0",
+                if case == "signal" {
+                    "traps 5000"
+                } else {
+                    "traps 0"
+                },
+            ],
+        );
+    }
+}
