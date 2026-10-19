@@ -687,11 +687,9 @@ fn check_asynchronous_alias_context(mode: &str) {
     let client = checked("alias_async", &[mode], Profile::Client, 1);
     assert_eq!(native.stdout, plain.stdout);
     assert_eq!(native.stdout, client.stdout);
-    assert!(
-        native
-            .stdout
-            .contains("signals 64 GPR vector flags PC mask sigreturn progress preserved")
-    );
+    assert!(native
+        .stdout
+        .contains("signals 64 GPR vector flags PC mask sigreturn progress preserved"));
     let receipt = match mode {
         "both" => Some("resumed=1 flushed=1 alias-pc=1"),
         "suspend" => Some("suspend-only=1 alias-pc=1"),
