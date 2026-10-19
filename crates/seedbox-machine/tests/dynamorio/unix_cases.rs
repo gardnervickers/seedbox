@@ -674,11 +674,9 @@ fn alias_publication_during_branch_translation_preserves_post_join_values() {
             "alias-build: publisher joined 1 calls 1000 expected 22 stale 0\n"
         );
     }
-    assert!(
-        controlled
-            .stderr
-            .contains("process publication acknowledged after decode")
-    );
+    assert!(controlled
+        .stderr
+        .contains("process publication acknowledged after decode"));
     // The first call can legally execute either snapshot. Its result is only
     // diagnostic; the1000 calls after publication AND waitpid are the oracle.
 }
