@@ -680,3 +680,48 @@ fn alias_publication_during_branch_translation_preserves_post_join_values() {
     // The first call can legally execute either snapshot. Its result is only
     // diagnostic; the1000 calls after publication AND waitpid are the oracle.
 }
+
+fn check_asynchronous_alias_context(mode: &str) {
+    let native = checked("alias_async", &[mode], Profile::Native, 0);
+    let plain = checked("alias_async", &[mode], Profile::Plain, 0);
+    let client = checked("alias_async", &[mode], Profile::Client, 1);
+    assert_eq!(native.stdout, plain.stdout);
+    assert_eq!(native.stdout, client.stdout);
+    assert!(
+        native
+            .stdout
+            .contains("signals 64 GPR vector flags PC mask sigreturn progress preserved")
+    );
+    let receipt = match mode {
+        "both" => Some("resumed=1 flushed=1 alias-pc=1"),
+        "suspend" => Some("suspend-only=1 alias-pc=1"),
+        "flush" => Some("flush-only=1"),
+        _ => None,
+    };
+    if let Some(receipt) = receipt {
+        assert_eq!(
+            client
+                .stderr
+                .lines()
+                .filter(|line| line.contains(receipt))
+                .count(),
+            64
+        );
+    }
+}
+#[test]
+fn asynchronous_alias_context_survives_public_flush_and_sigreturn() {
+    check_asynchronous_alias_context("both");
+}
+#[test]
+fn asynchronous_alias_signal_control_preserves_context() {
+    check_asynchronous_alias_context("signal");
+}
+#[test]
+fn asynchronous_alias_suspend_control_preserves_context() {
+    check_asynchronous_alias_context("suspend");
+}
+#[test]
+fn asynchronous_alias_flush_control_preserves_context() {
+    check_asynchronous_alias_context("flush");
+}

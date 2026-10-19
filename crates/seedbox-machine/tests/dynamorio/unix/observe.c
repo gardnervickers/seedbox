@@ -59,19 +59,50 @@ static void post_syscall(void *dc,int nr) {
 static int executed_pids[4096];
 static app_pc suspend_pc,after_suspend;
 static volatile int *waiter_tid;
+static app_pc *alias_rx_address,*alias_loop_lo_address,*alias_loop_hi_address;
+static size_t *alias_size_address;
+static int *alias_transaction_address;
 static void suspend_target(void) {
     int target=0;size_t got=0;
     DR_ASSERT(dr_safe_read((void *)waiter_tid,sizeof target,&target,&got) && got==sizeof target && target>0);
+    app_pc flush_start=lo[0],loop_lo=NULL,loop_hi=NULL;
+    size_t flush_size=(size_t)(hi[0]-lo[0]);
+    if(alias_rx_address!=NULL) {
+        DR_ASSERT(dr_safe_read(alias_rx_address,sizeof flush_start,&flush_start,NULL));
+        DR_ASSERT(dr_safe_read(alias_size_address,sizeof flush_size,&flush_size,NULL));
+        DR_ASSERT(dr_safe_read(alias_loop_lo_address,sizeof loop_lo,&loop_lo,NULL));
+        DR_ASSERT(dr_safe_read(alias_loop_hi_address,sizeof loop_hi,&loop_hi,NULL));
+        DR_ASSERT(flush_start!=NULL && flush_size>0 && loop_lo>=flush_start && loop_hi>loop_lo && loop_hi<=flush_start+flush_size);
+    }
+    int transaction=0;ptr_uint_t target_flags=0;
+    if(alias_transaction_address)DR_ASSERT(dr_safe_read(alias_transaction_address,sizeof transaction,&transaction,NULL));
+    DR_ASSERT(transaction>=0 && transaction<=2);
     void **contexts;uint suspended=0,missed=0;bool found=false;
+    if(transaction!=2) {
     bool all=dr_suspend_all_other_threads(&contexts,&suspended,&missed);
-    for(uint i=0;i<suspended;i++)if(dr_get_thread_id(contexts[i])==(thread_id_t)target)found=true;
+    for(uint i=0;i<suspended;i++)if(dr_get_thread_id(contexts[i])==(thread_id_t)target) {
+        found=true;
+        if(alias_rx_address!=NULL) {
+            dr_mcontext_t observed={sizeof observed,DR_MC_CONTROL};
+            DR_ASSERT(dr_get_mcontext(contexts[i],&observed));
+            DR_ASSERT(observed.pc>=loop_lo && observed.pc<loop_hi);
+            target_flags=observed.xflags;
+        }
+    }
     bool resumed=dr_resume_all_other_threads(contexts,suspended);
     DR_ASSERT(all && missed==0 && found && resumed);
+    }
+    if(transaction==1) {
+        dr_fprintf(STDERR,"unix-alias-control: suspend-only=1 alias-pc=1 flags=%x\n",(uint)target_flags);
+        return;
+    }
     dr_mcontext_t mc={sizeof mc,DR_MC_ALL};
     DR_ASSERT(dr_get_mcontext(dr_get_current_drcontext(),&mc));
     mc.pc=after_suspend;
-    DR_ASSERT(dr_flush_region(lo[0],(size_t)(hi[0]-lo[0])));
-    dr_fprintf(STDERR,"unix-client: suspended=%d resumed=1 flushed=1\n",target);
+    DR_ASSERT(dr_flush_region(flush_start,flush_size));
+    if(transaction==2)dr_fprintf(STDERR,"unix-alias-control: flush-only=1\n");
+    else if(alias_rx_address)dr_fprintf(STDERR,"unix-client: suspended=%d resumed=1 flushed=1 alias-pc=1 flags=%x\n",target,(uint)target_flags);
+    else dr_fprintf(STDERR,"unix-client: suspended=%d resumed=1 flushed=1\n",target);
     dr_redirect_execution(&mc);
     DR_ASSERT(false);
 }
@@ -129,6 +160,14 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[]) {
     DR_ASSERT((suspend_pc==NULL)==(after_suspend==NULL));
     waiter_tid=(volatile int *)dr_get_proc_address(app->handle,"unix_waiter_tid");
     DR_ASSERT((suspend_pc==NULL)==(waiter_tid==NULL));
+    alias_transaction_address=(int *)dr_get_proc_address(app->handle,"unix_alias_transaction");
+    alias_rx_address=(app_pc *)dr_get_proc_address(app->handle,"unix_alias_rx");
+    alias_size_address=(size_t *)dr_get_proc_address(app->handle,"unix_alias_size");
+    alias_loop_lo_address=(app_pc *)dr_get_proc_address(app->handle,"unix_alias_loop_lo");
+    alias_loop_hi_address=(app_pc *)dr_get_proc_address(app->handle,"unix_alias_loop_hi");
+    DR_ASSERT((alias_rx_address==NULL)==(alias_size_address==NULL));
+    DR_ASSERT((alias_rx_address==NULL)==(alias_loop_lo_address==NULL));
+    DR_ASSERT((alias_rx_address==NULL)==(alias_loop_hi_address==NULL));
     timer_stage=(volatile int *)dr_get_proc_address(app->handle,"unix_timer_stage");
     timer_sample=(volatile int *)dr_get_proc_address(app->handle,"unix_timer_sample");
     if(timer_stage) {
