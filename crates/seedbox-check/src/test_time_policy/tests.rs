@@ -362,6 +362,15 @@ fn dr_syscall_subject_is_one_bounded_documented_call_not_a_pacing_exemption() {
         .len(),
         1
     );
+    assert!(dr_c_findings(
+        path,
+        &format!("{marker} syscall(__NR_nanosleep,&req,&rem);")
+    )
+    .is_empty());
+    assert_eq!(
+        dr_c_findings(path, "syscall(__NR_nanosleep,&req,&rem);").len(),
+        1
+    );
     for invalid in [
         "/* seedbox-syscall-subject: nanosleep; bound-ms=0; invariant=EINTR */",
         "/* seedbox-syscall-subject: nanosleep; bound-ms=200; invariant= */",

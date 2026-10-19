@@ -656,7 +656,10 @@ fn dr_c_findings(path: &Path, source: &str) -> Vec<Finding> {
             continue;
         }
         let name = if token == "syscall" {
-            tokens.get(index + 2).and_then(|t| t.0.strip_prefix("SYS_"))
+            tokens.get(index + 2).and_then(|t| {
+                t.0.strip_prefix("SYS_")
+                    .or_else(|| t.0.strip_prefix("__NR_"))
+            })
         } else {
             Some(token.as_str())
         };

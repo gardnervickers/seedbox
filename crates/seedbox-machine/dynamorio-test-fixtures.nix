@@ -34,6 +34,8 @@ in pkgs.stdenv.mkDerivation {
     for client in "$out"/lib/*.so; do
       patchelf --add-rpath '${runtime}/lib64/release:${runtime}/ext/lib64/release' "$client"
     done
+    substituteInPlace "$out/bin/seedbox-dr-pid1" \
+      --replace-fail '#!/usr/bin/env python3' '#!${pkgs.python313}/bin/python3'
     ln -s ${runtime} "$out/runtime"
     mkdir -p "$out/runtimes"
     ln -s ${pkgs.jdk25} "$out/runtimes/java"

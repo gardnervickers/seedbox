@@ -218,7 +218,9 @@ int main(int argc, char **argv)
     }
     if (!preflight && (argc <= index + 1 || strcmp(argv[index++], "--"))) goto usage;
     if (preflight && argc != index) goto usage;
-    signal(SIGPIPE, SIG_IGN);
+    struct sigaction original_pipe;
+    if (sigaction(SIGPIPE, NULL, &original_pipe) < 0 || signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+        return setup_error("controller pipe disposition");
     sigset_t blocked, original_mask;
     sigemptyset(&blocked);
     sigaddset(&blocked, SIGCHLD);
@@ -261,6 +263,7 @@ int main(int argc, char **argv)
         struct pollfd controller_state = { .fd = controller_handle, .events = POLLIN };
         if (poll(&controller_state, 1, 0) != 0) _exit(125);
         close(controller_handle);
+        if (sigaction(SIGPIPE, &original_pipe, NULL) < 0) _exit(125);
         sigprocmask(SIG_SETMASK, &original_mask, NULL);
         if (preflight) _exit(!pid1 || getpid() == 1 ? 0 : 125);
         execvp(argv[index], &argv[index]);
