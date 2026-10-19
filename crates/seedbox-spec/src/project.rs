@@ -139,11 +139,66 @@ impl Default for NetworkDefaults {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SimulatorDefaults {
+    /// Maximum simulated time between parallel execution barriers.
+    #[serde(default = "quantum")]
+    pub quantum: String,
+    /// Host threads executing machines; excluded from simulation identity.
+    #[serde(default)]
+    pub machine_workers: WorkerCount,
     #[serde(default, rename = "blocksPerProgressCall")]
     pub progress_budget: crate::progress::ProgressBudget,
+}
+
+fn quantum() -> String {
+    "1ms".into()
+}
+
+impl Default for SimulatorDefaults {
+    fn default() -> Self {
+        Self {
+            quantum: quantum(),
+            machine_workers: WorkerCount::default(),
+            progress_budget: Default::default(),
+        }
+    }
+}
+
+/// Number of host threads available for machine execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct WorkerCount(u32);
+
+impl WorkerCount {
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for WorkerCount {
+    fn default() -> Self {
+        Self(1)
+    }
+}
+
+impl TryFrom<u32> for WorkerCount {
+    type Error = String;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if (1..=64).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err("machineWorkers must be in 1..64".into())
+        }
+    }
+}
+
+impl From<WorkerCount> for u32 {
+    fn from(value: WorkerCount) -> Self {
+        value.get()
+    }
 }
 
 #[cfg(test)]
@@ -165,7 +220,22 @@ mod tests {
             PathBuf::from("Dockerfile")
         );
         assert_eq!(project.simulator.progress_budget.get(), 10_000);
+        assert_eq!(project.simulator.quantum, "1ms");
+        assert_eq!(project.simulator.machine_workers.get(), 1);
         assert_eq!(project.network.latency, "1ms");
+    }
+
+    #[test]
+    fn worker_capacity_has_one_checked_numeric_format() {
+        for value in [1, 4, 64] {
+            let workers: WorkerCount = serde_json::from_value(value.into()).unwrap();
+            assert_eq!(workers.get(), value);
+            assert_eq!(serde_json::to_value(workers).unwrap(), value);
+        }
+        for value in [0, 65, u32::MAX] {
+            assert!(WorkerCount::try_from(value).is_err());
+            assert!(serde_json::from_value::<WorkerCount>(value.into()).is_err());
+        }
     }
 
     #[test]

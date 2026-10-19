@@ -580,11 +580,18 @@ impl ExecutionService {
         cancellation: &CancellationToken,
         preparation_expired: Arc<AtomicBool>,
     ) -> seedbox_application::Result<Run> {
-        let options = self
+        let mut options = self
             .manager
             .describe(id)
             .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?
             .options;
+        // Canonical definitions omit host performance settings. Retain the effective
+        // worker count in execution options for later members of this seed range.
+        options.machine_workers = Some(
+            options
+                .machine_workers
+                .unwrap_or(spec.configuration.simulator.machine_workers.get()),
+        );
         let mut resolved_spec = spec.clone();
         resolved_spec
             .resolve_project_architecture(
@@ -766,6 +773,7 @@ impl ExecutionService {
         self.manager
             .update(id, |s| {
                 s.spec = resolved_spec;
+                s.options.machine_workers = options.machine_workers;
                 s.status.phase = Phase::Running;
                 s.status.stage = Some(Stage::Booting);
             })
@@ -997,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn project_execution_uses_the_canonical_mixed_memory_profile() {
+    fn project_execution_preserves_settings_through_canonical_resolution() {
         use seedbox_application::{execution::*, image::Launch};
         #[derive(Clone)]
         struct FixtureBackend(PreparedInputs);
@@ -1022,6 +1030,9 @@ mod tests {
             fn profile(&self) -> ExecutionProfile {
                 self.0.profile.clone()
             }
+            fn performance_parameters(&self) -> BTreeMap<String, String> {
+                BTreeMap::from([("SEEDBOX_MACHINE_WORKERS".into(), "1".into())])
+            }
             fn execute(
                 &self,
                 request: ExecutionRequest<'_>,
@@ -1030,6 +1041,11 @@ mod tests {
                 assert_eq!(request.prepared.memory_mb("app").unwrap(), 2048);
                 assert_eq!(request.prepared.memory_mb("oracle").unwrap(), 256);
                 assert_eq!(request.prepared.memory_mb("helper").unwrap(), 1024);
+                assert_eq!(request.quantum_ns.get(), 2_500_000);
+                assert_eq!(
+                    request.performance_parameters["SEEDBOX_MACHINE_WORKERS"],
+                    "4"
+                );
                 Ok(ExecutionReport {
                     simulated_time_ns: Some(1),
                     host_wait_ns: 0,
@@ -1071,7 +1087,7 @@ mod tests {
         let store = ContentStore::new(temporary.path().join("store"));
         let digest = store.put(b"test-only-binary").unwrap();
         let configuration = seedbox_application::config::parse_for_architecture(
-            "name: mixed\nmachines:\n  app: {image: example/app, memoryMiB: 2048}\n  helper: {image: example/helper}\noracle: {image: example/oracle, memoryMiB: 256}\n",
+            "name: mixed\nmachines:\n  app: {image: example/app, memoryMiB: 2048}\n  helper: {image: example/helper}\noracle: {image: example/oracle, memoryMiB: 256}\nsimulator: {quantum: 2.5ms, machineWorkers: 4}\n",
             Path::new("/project/seedbox.yaml"), &Default::default(),
             if cfg!(target_arch = "aarch64") { seedbox_application::guest::Architecture::Arm64 } else { seedbox_application::guest::Architecture::Amd64 },
         ).unwrap();
@@ -1134,19 +1150,34 @@ mod tests {
             start_paused: false,
         };
         let resource = manager
-            .submit(SubmitRequest {
+            .submit_seeds(seedbox_api::SeedRangeRequest {
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "mixed-memory".into(),
                 spec,
+                count: 2,
             })
             .unwrap()
             .0;
         service.execute(resource.metadata.id.clone()).unwrap();
         let finished = manager.describe(&resource.metadata.id).unwrap();
+        assert_eq!(finished.options.machine_workers, Some(4));
         assert_eq!(finished.status.oracle_exit_code, Some(0));
         assert_eq!(
             finished.status.termination,
+            Some(seedbox_api::ExecutionTermination::OracleExited)
+        );
+
+        let second_id = manager.advance_seeds().unwrap().unwrap();
+        let second = manager.describe(&second_id).unwrap();
+        assert_eq!(second.spec.seed, Some(2));
+        assert_eq!(second.options.machine_workers, Some(4));
+        service.execute(second_id.clone()).unwrap();
+        let finished_second = manager.describe(&second_id).unwrap();
+        assert_eq!(finished_second.options.machine_workers, Some(4));
+        assert_eq!(finished_second.status.oracle_exit_code, Some(0));
+        assert_eq!(
+            finished_second.status.termination,
             Some(seedbox_api::ExecutionTermination::OracleExited)
         );
     }

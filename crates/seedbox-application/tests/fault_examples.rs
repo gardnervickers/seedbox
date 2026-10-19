@@ -56,6 +56,12 @@ fn python_projects_share_client_and_use_a_dedicated_runtime_controller() {
         .unwrap()
         .contains(&"--broken".into()));
     for variant in ["fixed", "broken", "broken-no-faults"] {
+        let project: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            &std::fs::read_to_string(destination.join(variant).join("seedbox.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(project["simulator"]["quantum"].as_str(), Some("1ms"));
+        assert_eq!(project["simulator"]["machineWorkers"].as_u64(), Some(1));
         for source in ["main.py", "scenario.py", "Dockerfile"] {
             assert_eq!(
                 std::fs::read(destination.join(variant).join("workload").join(source)).unwrap(),

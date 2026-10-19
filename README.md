@@ -77,4 +77,19 @@ or `seedbox init my-test --template redis`.
 Run more seeds with `seedbox run my-test --count 100`.
 Use `seedbox help` for commands and `seedbox help run` for options.
 
+Set the timeslice and machine execution threads in `seedbox.yaml`:
+
+```yaml
+simulator:
+  quantum: 1ms
+  machineWorkers: 4
+```
+
+`quantum` defaults to `1ms` and must be a positive duration in whole nanoseconds.
+Network latency, timers and scheduled events can shorten a parallel execution window.
+Replay and checkpoints retain the quantum. `machineWorkers` accepts 1–64 and
+defaults to 1; it affects host throughput without changing simulation results.
+Workers steal queued machine runs, so machines can outnumber threads. Each round
+still waits for all its running machines to reach the barrier.
+
 [Design](docs/design.md) · [Internals](docs/internals.md)

@@ -95,6 +95,7 @@ pub fn resolve(
         network: configuration.network.clone(),
         simulator: Simulator {
             progress_budget: configuration.simulator.progress_budget,
+            quantum_ns: configuration.simulator.quantum_ns,
             schedule: configuration.schedule.clone(),
             disk: configuration.disk.clone(),
             oracle_control: configuration.control.is_some(),
@@ -781,6 +782,8 @@ mod tests {
         std::fs::create_dir(&output).unwrap();
         let cancellation = crate::execution::CancellationToken::default();
         let performance = BTreeMap::from([("SEEDBOX_MACHINE_WORKERS".into(), "4".into())]);
+        let mut simulation = simulation;
+        simulation.simulator.quantum_ns = std::num::NonZeroU64::new(2_500_000).unwrap();
         let request = crate::execution::ExecutionRequest {
             start_paused: true,
             resume_checkpoint: None,
@@ -789,6 +792,7 @@ mod tests {
             observations: None,
             seed: 42,
             program: &[],
+            quantum_ns: simulation.simulator.quantum_ns,
             limits: &simulation.limits,
             network: &simulation.network,
             schedule: &simulation.schedule,
@@ -811,6 +815,7 @@ mod tests {
         );
         assert!(worker.start_paused);
         assert_eq!(worker.machine_workers, 4);
+        assert_eq!(worker.prepared.quantum_ns, 2_500_000);
         let wire::Inventory::Pv {
             epoch_seconds,
             policy,

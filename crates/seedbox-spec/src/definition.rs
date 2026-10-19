@@ -162,6 +162,7 @@ impl Start {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Simulator {
+    pub quantum_ns: std::num::NonZeroU64,
     #[serde(rename = "blocksPerProgressCall")]
     pub progress_budget: crate::progress::ProgressBudget,
     pub schedule: crate::Schedule,
@@ -261,8 +262,10 @@ impl Definition {
                     .unwrap_or(u32::MAX),
             },
             disk: self.simulator.disk.clone(),
-            simulator: crate::project::SimulatorDefaults {
+            simulator: crate::SimulatorOptions {
                 progress_budget: self.simulator.progress_budget,
+                quantum_ns: self.simulator.quantum_ns,
+                machine_workers: Default::default(),
             },
         })
     }
@@ -301,6 +304,28 @@ mod tests {
             assets: BTreeMap::new(),
         }
     }
+    #[test]
+    fn retained_simulator_requires_quantum_and_excludes_host_capacity() {
+        let simulator = Simulator {
+            quantum_ns: std::num::NonZeroU64::new(2_500_000).unwrap(),
+            progress_budget: Default::default(),
+            schedule: Default::default(),
+            disk: Default::default(),
+            oracle_control: true,
+        };
+        let mut wire = serde_json::to_value(&simulator).unwrap();
+        assert_eq!(wire["quantumNs"], 2_500_000);
+        assert!(wire.get("machineWorkers").is_none());
+        assert_eq!(
+            serde_json::from_value::<Simulator>(wire.clone()).unwrap(),
+            simulator
+        );
+        wire["quantumNs"] = 0.into();
+        assert!(serde_json::from_value::<Simulator>(wire.clone()).is_err());
+        wire.as_object_mut().unwrap().remove("quantumNs");
+        assert!(serde_json::from_value::<Simulator>(wire).is_err());
+    }
+
     #[test]
     fn checkpoint_keeps_consumed_prefix_and_allows_pending_edits() {
         let start = checkpoint();

@@ -294,6 +294,16 @@ fn project_argument_defaults_to_the_project_directory() {
     let created = seedbox(&["init", "demo"], directory.path());
     assert!(created.status.success());
     assert_eq!(String::from_utf8_lossy(&created.stdout), "CREATED: demo\n");
+    let redis = seedbox(&["init", "redis", "--template", "redis"], directory.path());
+    assert!(redis.status.success());
+    for name in ["demo", "redis"] {
+        let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            &fs::read_to_string(directory.path().join(name).join("seedbox.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(document["simulator"]["quantum"].as_str(), Some("1ms"));
+        assert_eq!(document["simulator"]["machineWorkers"].as_u64(), Some(1));
+    }
     for args in [&["check"][..], &["check", "."], &["check", "seedbox.yaml"]] {
         let output = seedbox(args, &project);
         assert_eq!(output.status.code(), Some(2), "{args:?}");
@@ -970,57 +980,22 @@ fn capacity_help_explains_resident_slots_and_accepts_json() {
 }
 
 #[test]
-fn machine_workers_help_and_range_on_every_execution_command() {
+fn machine_workers_is_only_configurable_in_the_project() {
     let root = tempfile::tempdir().unwrap();
     for command in ["run", "replay"] {
         let help = seedbox(&[command, "--help"], root.path());
         assert!(help.status.success(), "{command}: {}", stderr(&help));
         let text = String::from_utf8_lossy(&help.stdout);
-        let performance = text
-            .split("Performance (never changes results):")
-            .nth(1)
-            .unwrap_or_else(|| panic!("{command}: {text}"));
-        assert!(
-            performance.contains("--machine-workers <N>"),
-            "{command}: {text}"
-        );
-        assert!(performance.contains("[default: 1]"), "{command}: {text}");
-        for value in ["0", "65", "-1", "many"] {
-            let flag = format!("--machine-workers={value}");
-            let output = seedbox(&[command, &flag], root.path());
-            assert_eq!(output.status.code(), Some(2), "{command} {value}");
-            assert!(output.stdout.is_empty());
-            assert!(
-                stderr(&output).contains("--machine-workers"),
-                "{}",
-                stderr(&output)
-            );
-        }
-    }
-}
+        assert!(!text.contains("--machine-workers"), "{command}: {text}");
 
-#[test]
-fn machine_workers_is_accepted_on_every_execution_command() {
-    let root = tempfile::tempdir().unwrap();
-    for command in ["run", "replay"] {
-        for value in ["1", "4", "64"] {
-            let mut args = vec![command];
-            if command == "run" {
-                args.push("missing.yaml");
-            } else {
-                args.push("k7m2p9qx");
-            }
-            args.extend(["--machine-workers", value]);
-            let output = seedbox(&args, root.path());
-            assert_eq!(output.status.code(), Some(2), "{command} {value}");
-            assert!(output.stdout.is_empty());
-            let expected = if command == "run" {
-                "error: project file missing.yaml: not found\n"
-            } else {
-                "error: no local server is running; start `seedbox server start` in another terminal\n"
-            };
-            assert_eq!(stderr(&output), expected, "{command} {value}");
-        }
+        let output = seedbox(&[command, "--machine-workers", "4"], root.path());
+        assert_eq!(output.status.code(), Some(2), "{command}");
+        assert!(output.stdout.is_empty());
+        assert!(
+            stderr(&output).contains("unexpected argument '--machine-workers'"),
+            "{command}: {}",
+            stderr(&output)
+        );
     }
 }
 
