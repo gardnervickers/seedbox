@@ -12,7 +12,7 @@
       "source_id": "DR:a64_prop_signal/storm",
       "implementation": "storm.c",
       "source_lines": "2226-2699;2830-2874",
-      "status": "partial-state-oracles",
+      "status": "live-state-and-independent-expiration-oracle",
       "retained": [
         "40 rounds, seed1, splitmix64 and original per-round timer-period/churn/poker seeds",
         "24 exact sequential queued RT payloads per round (960 per profile), no loss or duplicate",
@@ -20,7 +20,7 @@
         "SIGEV_THREAD timer callback churn and bounded detached pthread churn",
         "delivery-plus-si_overrun accounting and synchronous sigtimedwait cut",
         "original EINTR and notification floors; each active waiter positively completes ten interruptions",
-        "original expiration-count bounds preserved in storm_model.h with synthetic positive and negative inputs only"
+        "Original expiration bounds from independent CLOCK_MONOTONIC arm/cut observations, delivery-plus-overrun count, original +/-2 tolerance; pure positive/negative model also retained"
       ],
       "adaptations": [
         "positive semaphore acknowledgements replace incidental sleeps",
@@ -47,44 +47,46 @@
         "debug_pending": "original -checklevel1 and A64P_STORM_DEBUG_OPS override not yet executed"
       },
       "remaining_gaps": [
-        "Original elapsed-wall duration and exact expected expiration interval +/-2 are not asserted. Observed accounting is not an independent exact expiration oracle.",
+        "Original randomized wall-duration pacing is replaced by positive event completion; expiration bounds apply to the actual event-driven round, not a claim of identical concurrent interleaving or duration.",
         "Original three-second no-progress detector replaced by generous external positive-completion containment, not equivalent host-time assertion.",
         "Per-waiter interrupted read/ppoll is real; no private-entry-window proof. Random schedules are stress, not deterministic proof of a particular runtime fix.",
         "The paths-mode drreg/drx/clean-call instruction-instrumented storm is outside this standalone storm selector and remains with its owner.",
-        "An earlier -disable_traces run exceeded180s; final six storm profiles passed after restoring original volatile local spin work. No causal runtime fix or flake resolution claim."
+        "Storm completion remains unresolved: plain DR and -disable_traces have exceeded positive-completion containment in focused checks. Successful completed rounds do not establish all40 rounds/profile coverage or a causal runtime fix."
       ]
     },
     {
       "source_id": "DR:a64_prop_signal/itimer/default",
       "implementation": "itimer.c;timer_model.h;oracle.h;model.c",
       "source_lines": "2879-3538",
-      "status": "partial-live-state-with-retained-synthetic-time-model",
+      "status": "live-independent-clock-oracles-with-source-noise-limits",
       "retained": [
         "Unmodified gen_itcase generator, original seven seeds1..7, all35 generated operations plus7 final disarms",
         "arm/rearm/disarm/getitimer/alarm, original helper-call selection, original timer-clock scheduled spin work",
         "state checks for old interval, normalized remaining-value representation, syscall success and helper signal blocking",
         "complete original arming/value/early/late/periodic/spurious/stall/mux model retained as pure explicit-clock-input oracle",
-        "additional seven cases seeds8..14 select PROF as well: original default selects only REAL/VIRTUAL"
+        "additional seven cases seeds8..14 select PROF as well: original default selects only REAL/VIRTUAL",
+        "Actual CLOCK_MONOTONIC, process user CPU and process CPU observations around each operation and at observed signal delivery feed the retained model; remaining values are never used as their own clock reference",
+        "Original max off-CPU gap >4000us classifier, per-case suppressed/ambiguous/check counters and native/DR pairwise floor retained"
       ],
       "remaining_gaps": [
-        "Pure model is exercised with synthetic observations and negative mutations only. No real host trace is passed to its elapsed-clock assertions.",
-        "Live remaining-time accuracy, first-expiry/periodic timing, no-spurious-expiry timing and deschedule classification remain pending policy-compatible equivalent oracle or explicit narrower authorization.",
         "Helper uses condition variables instead of the original incidental50us polling sleep; original operation choice and process-level ownership retained.",
-        "Static dr_app start/stop harness lifecycle is replaced by a fresh external native/plain process; lifecycle-specific coverage is not claimed."
+        "Static dr_app start/stop harness lifecycle is replaced by a fresh external native/plain process; lifecycle-specific coverage is not claimed.",
+        "Original ambiguity windows and mux slack can suppress individual checks. Stalled cases are inconclusive for delivery timing; value checks still run. Passing the original coverage floor is not full exact accuracy coverage.",
+        "Original per-operation elapsed wall-clock abort replaced by external positive-completion containment; no generic elapsed oracle is introduced."
       ]
     },
     {
       "source_id": "DR:a64_prop_signal/itimer/dr-itimers",
       "implementation": "itimer.c;client.c;oracle.h",
-      "status": "partial-live-state",
+      "status": "live-independent-clock-oracles-public-multiplexed-timers",
       "retained": [
         "Public dr_set_itimer REAL3ms/VIRTUAL4ms/PROF5ms simultaneously with app timers",
         "positive separate callback receipts for all three timer types",
         "source default no-helper policy, explicit helper axis available through app argument0",
-        "original mux slack model 10ms + DR period + elapsed/2 in synthetic oracle only"
+        "Original mux slack 10ms + DR period + elapsed/2 evaluated against actual independent clock observations; suppressed deviations reported"
       ],
       "remaining_gaps": [
-        "Same elapsed-clock and static-harness gaps as default.",
+        "Same source noise/ambiguity limits and static-harness lifecycle gap as default.",
         "Explicit helper-enabled multiplexed axis remains unexecuted; it is a known original itimer-reroute diagnostic, not silently equivalent to no-helper."
       ],
       "client_link_contract": "DynamoRIO_USE_LIBC=OFF through the matching public SDK CMake API: this C client calls only public DR APIs and needs no libc/CRT. All three simultaneous timers and callback assertions remain unchanged. A libc-linked timer-free stub failed before an import-free client-entry marker; the libc-free stub and original timer workload pass. This isolates the former pre-app failure to loading the unnecessary client dependency, not the timer API or an application timer oracle; no underlying loader-fault instruction/root-cause claim."
@@ -92,13 +94,13 @@
     {
       "source_id": "DR:a64_prop_signal/itimer/prof-pcs",
       "implementation": "itimer.c;oracle.h;runner.rs",
-      "status": "partial-live-state-genuine-debug",
+      "status": "live-independent-clock-oracles-genuine-debug",
       "retained": [
         "Actual debug -prof_pcs runtime option, original no-helper default",
-        "original10ms virtual-timer mux model in synthetic clock-input oracle"
+        "Original10ms virtual-timer mux model evaluated with actual independent clock observations"
       ],
       "remaining_gaps": [
-        "Same elapsed-clock and static-harness gaps as default.",
+        "Same source noise/ambiguity limits and static-harness lifecycle gap as default.",
         "No private runtime PC/cache/category inspection added. This is the original application timer model under prof_pcs, not a new assertion about internal profiler attribution.",
         "Native ARM debug execution remains pending; cross-link is not execution."
       ]
@@ -112,5 +114,6 @@
   },
   "native_arm": "pending",
   "full_suite": "not run by this worker",
-  "source_support_blob": "8185a9a4b4631f89845636ddc9d3d569720aa142"
+  "source_support_blob": "8185a9a4b4631f89845636ddc9d3d569720aa142",
+  "live_clock_scope": "Narrow user-authorized retained subject-timer comparisons during existing work only. No new blocking, sleeps, timed readiness/order or generic absence-based success. Signal readiness remains positive-event based."
 }

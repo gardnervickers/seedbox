@@ -70,6 +70,6 @@ int main(void)
             rejected++;
         }
     }
-    printf("synthetic-model cases=%u negative=%u live_time_oracle=PENDING\n", checked, rejected);
+    printf("synthetic-model cases=%u negative=%u scope=synthetic\n", checked, rejected);
     return 0;
 }

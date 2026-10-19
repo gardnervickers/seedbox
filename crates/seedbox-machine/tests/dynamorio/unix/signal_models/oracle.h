@@ -36,6 +36,10 @@
 #define STALL_US 4000
 static int64_t it_mux[3];
 static long it_suppressed;
+/* Accounting only: does not alter the original model decisions/tolerances. */
+static struct {
+    long values_checked, values_ambiguous, first_required, periodic_required, observed_checked;
+} model_coverage;
 typedef struct { struct itimerval old; unsigned alarm_old; int64_t t0, t1; } model_op_t;
 typedef struct { model_op_t op[IT_MAX_OPS+1]; int nlog, wrong_thread, report; int64_t max_gap, log[IT_MAX_LOG]; } model_trace_t;
 /* Known deviation itimer-mux (2026-10-14): with a DR timer of the same type, DR
@@ -84,6 +88,7 @@ it_val_tol(int which)
 static int
 model_check(const itcase_t *c, const model_trace_t *trace, itres_t *res, int is_dr)
 {
+    memset(&model_coverage, 0, sizeof(model_coverage));
     int which = c->which, fails = 0;
     char why[256];
     why[0] = '\0';
@@ -117,6 +122,8 @@ model_check(const itcase_t *c, const model_trace_t *trace, itres_t *res, int is_
             hi = tmp;
         }
         int ambiguous = it_due_in(&arm, t0 - vtol, t1 + vtol) || t1 - t0 > vtol;
+        if (ambiguous) model_coverage.values_ambiguous++;
+        else model_coverage.values_checked++;
         if (o->op == IT_ALARM) {
             unsigned want_lo = it_alarm_secs(lo - vtol),
                      want_hi = it_alarm_secs(hi + vtol);
@@ -186,6 +193,8 @@ model_check(const itcase_t *c, const model_trace_t *trace, itres_t *res, int is_
             int64_t dhi = a->s1 + a->value + j * a->interval;
             if (dhi + late > end || (a->interval == 0 && j > 0))
                 break;
+            if (j == 0) model_coverage.first_required++;
+            else model_coverage.periodic_required++;
             nreq++;
             expected++;
             int found = 0;
@@ -221,6 +230,7 @@ model_check(const itcase_t *c, const model_trace_t *trace, itres_t *res, int is_
     }
     /* Nothing delivered when no expiry could explain it. */
     for (int m = 0; m < nlog; m++) {
+        model_coverage.observed_checked++;
         int ok = 0;
         for (int k = 0; k < narms && !ok; k++) {
             itarm_t *a = &arms[k];

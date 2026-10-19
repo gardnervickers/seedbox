@@ -1,5 +1,5 @@
 /* Original DR:a64_prop_signal.c:2617-2633 expiration accounting oracle.
- * Copyright (c) 2026 Google, Inc.; see LICENSE. Synthetic clock inputs only. */
+ * Copyright (c) 2026 Google, Inc.; see LICENSE. Explicit clock inputs from live observations or pure model cases. */
 #ifndef SIGNAL_STORM_MODEL_H
 #define SIGNAL_STORM_MODEL_H
 #include "common.h"

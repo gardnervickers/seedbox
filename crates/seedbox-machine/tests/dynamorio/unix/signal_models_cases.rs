@@ -1,5 +1,5 @@
-//! Partial source-derived state oracles, deliberately not full storm/itimer
-//! equivalence. Clock-oracle gaps and option axes are in signal_models/provenance.json.
+//! Source-derived live timer oracles. Suppressed/inconclusive coverage and
+//! remaining lifecycle/ISA limits are explicit in signal_models/provenance.json.
 #[path = "signal_models/runner.rs"]
 mod signal_runner;
 use signal_runner::{run, Profile};
@@ -8,7 +8,7 @@ use signal_runner::{run, Profile};
 fn original_signal_timer_pure_model() {
     let out = run("model", &[], Profile::Native);
     assert!(
-        out.contains("synthetic-model cases=21 negative=42 live_time_oracle=PENDING"),
+        out.contains("synthetic-model cases=21 negative=42 scope=synthetic"),
         "{out}"
     );
 }
@@ -31,7 +31,15 @@ fn original_signal_storm_state_population() {
                 out.contains("storm-state rounds=40 queued=960 delivered=960 duplicate=0 lost=0"),
                 "{out}"
             );
-            assert!(out.contains("time_oracle=PENDING"), "{out}");
+            assert!(out.contains("time_oracle=LIVE"), "{out}");
+            let oracles: Vec<_> = out
+                .lines()
+                .filter(|line| line.starts_with("storm-oracle round="))
+                .collect();
+            assert_eq!(oracles.len(), 40, "{out}");
+            for line in oracles {
+                assert!(line.ends_with("failures=0"), "{line}");
+            }
         }
     }
 }
@@ -95,31 +103,68 @@ fn check_timer_population(out: &str, seed: &str) {
     );
     assert!(out.contains("itimer-state cases=7 operations=42"), "{out}");
     assert!(out.contains("wrong_thread=0"), "{out}");
-    assert!(out.contains("time_oracle=PENDING"), "{out}");
+    assert!(out.contains("time_oracle=LIVE"), "{out}");
+}
+
+fn unstalled_cases(out: &str) -> std::collections::BTreeSet<usize> {
+    let records: Vec<_> = out
+        .lines()
+        .filter(|line| line.starts_with("timer-oracle case="))
+        .collect();
+    assert_eq!(records.len(), 7, "{out}");
+    records
+        .iter()
+        .filter_map(|line| {
+            let fields: std::collections::BTreeMap<_, _> = line
+                .split_whitespace()
+                .filter_map(|field| field.split_once('='))
+                .collect();
+            assert_eq!(fields["failures"], "0", "{line}");
+            assert!(
+                fields["stalled"] == "0" || fields["stalled"] == "1",
+                "{line}"
+            );
+            // Suppressed checks are reported, never promoted to exact accuracy.
+            eprintln!("{line}");
+            (fields["stalled"] == "0").then(|| fields["case"].parse().unwrap())
+        })
+        .collect()
 }
 
 #[test]
-fn original_signal_itimer_state_population() {
-    // Seed 1 is the unmodified original seven-case default. Seed 8 adds PROF
-    // app timers: the original default happens to select REAL and VIRTUAL only.
+fn original_signal_itimer_live_profiles() {
+    // Native observations are paired with every actual DR profile, as in the
+    // original run_itimer. Seed1 keeps all3 variants; the existing extra seed8
+    // population exercises appPROF in default and multiplexed release profiles.
     for seed in ["1", "8"] {
-        for profile in [Profile::Native, Profile::Plain(&[])] {
-            check_timer_population(&run("itimer", &[seed, "0"], profile), seed);
+        let native = run("itimer", &[seed, "0", "native"], Profile::Native);
+        check_timer_population(&native, seed);
+        let native_cases = unstalled_cases(&native);
+        let mut profiles = vec![
+            (Profile::Plain(&[]), "0", "default"),
+            (Profile::Timers, "1", "dr-itimers"),
+        ];
+        if seed == "1" {
+            profiles.push((Profile::DebugProf, "1", "prof-pcs"));
         }
+        let variants = profiles.len();
+        let mut compared = 0;
+        for (profile, helper, name) in profiles {
+            let out = run("itimer", &[seed, helper, name], profile);
+            check_timer_population(&out, seed);
+            let dr_cases = unstalled_cases(&out);
+            let paired = native_cases.intersection(&dr_cases).count();
+            eprintln!(
+                "timer-paired seed={seed} profile={name} compared={paired} inconclusive={}",
+                7 - paired
+            );
+            compared += paired;
+        }
+        // Exact original integer floor, including native/DR pairwise noise.
+        assert!(
+            compared >= 7 * variants / 4,
+            "seed={seed}: compared={compared}, required={}",
+            7 * variants / 4
+        );
     }
-}
-
-#[test]
-fn original_signal_itimer_multiplexed_state_population() {
-    for seed in ["1", "8"] {
-        check_timer_population(&run("itimer", &[seed, "1"], Profile::Timers), seed);
-    }
-}
-
-#[test]
-fn original_signal_itimer_prof_pcs_state_population() {
-    // A missing actual debug fixture is a setup failure, never a release
-    // fallback or skip. Native ARM remains a required separate CI execution.
-    let out = run("itimer", &["1", "1"], Profile::DebugProf);
-    check_timer_population(&out, "1");
 }

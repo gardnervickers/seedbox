@@ -137,8 +137,8 @@ it_alarm_secs(int64_t us)
 }
 
 
-/* Clock inputs are supplied by synthetic model tests only. No production
- * clock, DR-private state, or live-host elapsed-time assertion is used here. */
+/* Model arithmetic accepts explicit clock inputs. The live subject-timer
+ * fixture supplies independent observations; pure tests supply synthetic ones. */
 static inline int model_old_interval(const itarm_t *a, const struct itimerval *old) {
     return old->it_interval.tv_sec * 1000000 + old->it_interval.tv_usec == a->interval;
 }

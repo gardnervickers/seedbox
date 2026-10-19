@@ -30,7 +30,13 @@
  * DAMAGE.
  */
 
-#include "common.h"
+#include "storm_model.h"
+static uint64_t monotonic_ns(void)
+{
+    struct timespec t;
+    REQUIRE(clock_gettime(CLOCK_MONOTONIC, &t) == 0);
+    return (uint64_t)t.tv_sec * 1000000000ULL + t.tv_nsec;
+}
 #include <semaphore.h>
 #define STORM_Q 24
 /* Threads (the main one included) blocked in read()/ppoll() of their own empty
@@ -326,8 +332,10 @@ storm_round(int round, rng_t *r, timer_t t2, timer_t t3, long *eintr_total)
     struct itimerspec i3 = { { 0, (long)st.t3_period_ns }, { 0, (long)st.t3_period_ns } };
     struct itimerspec zero;
     memset(&zero, 0, sizeof(zero));
-    /* Original randomized periods; the wall-time expiration oracle is pending. */
+    /* Original bounds around actual kernel arming, no pacing delay. */
+    uint64_t t3_start = monotonic_ns();
     REQUIRE(timer_settime(t3, 0, &i3, NULL) == 0);
+    uint64_t t3_armed = monotonic_ns();
     REQUIRE(timer_settime(t2, 0, &i2, NULL) == 0);
     waiter_loop(0);
     for (int w = 1; w < storm_waiters; w++)
@@ -340,9 +348,8 @@ storm_round(int round, rng_t *r, timer_t t2, timer_t t3, long *eintr_total)
         pthread_join(poker, NULL);
     pthread_join(sender, NULL);
     pthread_join(churn, NULL);
-    /* Retain delivery-plus-overrun accounting at the original synchronous cut.
-     * Independent expected expiration count needs the prohibited elapsed-clock
-     * oracle and is explicitly not certified by this state-only test. */
+    /* Original synchronous cut: every thread eligible for t3 has completed
+     * before main blocks it; SIGEV_THREAD callbacks inherit a blocked mask. */
     for (long i = 0; i < churn_created; ++i) wait_sem(&churn_done);
     REQUIRE(st.churn_live == 0);
     REQUIRE(sem_destroy(&churn_slots) == 0);
@@ -357,7 +364,9 @@ storm_round(int round, rng_t *r, timer_t t2, timer_t t3, long *eintr_total)
      */
     siginfo_t si3;
     struct timespec wait3 = { 60, 0 };
+    uint64_t t3_cut = monotonic_ns();
     int got3 = sigtimedwait(&s3, &si3, &wait3) == sig_t3;
+    uint64_t t3_end = monotonic_ns();
     if (got3)
         st.t3_acct += 1 + si3.si_overrun;
     timer_settime(t3, 0, &zero, NULL);
@@ -372,9 +381,15 @@ storm_round(int round, rng_t *r, timer_t t2, timer_t t3, long *eintr_total)
     REQUIRE(got3 && si3.si_code == SI_TIMER && si3.si_overrun >= 0);
     REQUIRE(st.q_seen_n == STORM_Q && st.q_dup == 0 && st.lost == 0 && st.hang == 0);
     REQUIRE(acct > 0);
+    long expected_min = (long)((t3_cut - t3_armed) / st.t3_period_ns);
+    long expected_max = (long)((t3_end - t3_start) / st.t3_period_ns);
+    int counted = storm_accounted(t3_start, t3_armed, t3_cut, t3_end, st.t3_period_ns, acct, got3);
+    printf("storm-oracle round=%d accounted=%ld expected_min=%ld expected_max=%ld tolerance=2 failures=%d\n",
+           round, acct, expected_min, expected_max, !counted);
+    if (!counted) fails++;
     for (int q = 1; q <= STORM_Q; ++q) REQUIRE(st.q_seen[q] == 1);
     for (int w = 0; w < storm_waiters; ++w) REQUIRE(st.weintr[w] >= 10);
-    printf("round=%d queued=24 delivered=24 duplicate=0 lost=0 waiters=%d churn=%ld notifications=%ld accounted=%ld duration_draw=%" PRIu64 " time_oracle=PENDING\n",
+    printf("round=%d queued=24 delivered=24 duplicate=0 lost=0 waiters=%d churn=%ld notifications=%ld accounted=%ld duration_draw=%" PRIu64 " time_oracle=LIVE\n",
            round, storm_waiters, (long)churn_created, (long)current_notification->notifications, acct, dur);
     for (int w = 0; w < STORM_WAITERS; w++)
         *eintr_total += st.weintr[w];
@@ -400,6 +415,7 @@ int main(int argc, char **argv)
     set_handler(sig_q, h_q, SA_RESTART, 0);
     rng_t r = { seed * 0x9e3779b97f4a7c15ULL + 3 };
     long eintr = 0, notify = 0;
+    int failures = 0;
     for (int i = 0; i < 40; ++i) {
         current_notification = &notification[i];
         timer_t t2, t3;
@@ -410,11 +426,11 @@ int main(int argc, char **argv)
         memset(&sev, 0, sizeof(sev));
         sev.sigev_notify = SIGEV_SIGNAL; sev.sigev_signo = sig_t3;
         REQUIRE(timer_create(CLOCK_MONOTONIC, &sev, &t3) == 0);
-        REQUIRE(storm_round(i, &r, t2, t3, &eintr) == 0);
+        failures += storm_round(i, &r, t2, t3, &eintr);
         notify += current_notification->notifications;
         REQUIRE(timer_delete(t2) == 0 && timer_delete(t3) == 0);
     }
     REQUIRE(eintr >= 400 && notify >= 40);
-    printf("storm-state rounds=40 queued=960 delivered=960 duplicate=0 lost=0 eintr=%ld notifications=%ld time_oracle=PENDING\n", eintr, notify);
-    return 0;
+    printf("storm-state rounds=40 queued=960 delivered=960 duplicate=0 lost=0 eintr=%ld notifications=%ld time_oracle=LIVE\n", eintr, notify);
+    return failures != 0;
 }
