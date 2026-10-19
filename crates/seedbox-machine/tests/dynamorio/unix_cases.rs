@@ -4,6 +4,17 @@
 mod runner;
 use runner::{checked, triplet, Profile};
 
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn dedicated_vfork_error_releases_child_lifecycle() {
+    triplet(
+        "vfork_exit",
+        &["fail"],
+        2,
+        &["vfork EAGAIN", "child 7", "flush 100", "thread ok", "OK"],
+    );
+}
+
 #[test]
 fn source_signal_context_and_lifecycle_properties() {
     for (case, fields, images) in [
