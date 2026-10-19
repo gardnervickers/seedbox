@@ -1,5 +1,4 @@
 # All application images use only libc/Linux interfaces. Each selector is a fresh image.
-add_subdirectory(signal_models)
 set(unix_shared restart_matrix alias_async alias_build aliases cleancallsig properties queues exec_sigign close_range_all clear_sighand_child
     failed_clone_vm pending_overflow tempmask_pending rlimit_nofile
     pending_fork_signalfd sigsys_call_addr clone_mask vfork_exit
@@ -76,6 +75,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
     target_compile_options(unix_lifecycle_model PRIVATE -O2 -g -fno-omit-frame-pointer)
     target_link_options(unix_lifecycle_model PRIVATE -rdynamic)
     configure_DynamoRIO_static(unix_lifecycle_model)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_definitions(unix_lifecycle_model PRIVATE UNIX_DEBUG_CORE=1)
+    endif()
     target_link_libraries(unix_lifecycle_model pthread dl rt)
     install(TARGETS unix_lifecycle_model RUNTIME DESTINATION bin)
 endif()
@@ -87,3 +89,5 @@ target_compile_options(unix_detach_signal PRIVATE -O2 -g -fno-omit-frame-pointer
 target_link_options(unix_detach_signal PRIVATE -rdynamic)
 target_link_libraries(unix_detach_signal pthread dl rt)
 install(TARGETS unix_detach_signal RUNTIME DESTINATION bin)
+
+add_subdirectory(signal_models)

@@ -45,7 +45,8 @@
 #define PSTATE_SSBS 0x1000ULL
 #define PSTATE_DIT 0x1000000ULL
 #define PSIG (SIGRTMIN+3)
-static int g_no_faults,g_native_profile;
+static int g_no_faults,g_native_profile,g_variant;
+static volatile int debug_option_confirmed;
 /***************************************************************************
  * Controller state shared with the workers.
  */
@@ -236,7 +237,17 @@ static dr_emit_flags_t event_block(void *dc,void *tag,instrlist_t *bb,bool trace
 }
 static void client_exit(void) {dr_unregister_bb_event(event_block);dr_unregister_exit_event(client_exit);}
 DR_EXPORT void dr_client_main(client_id_t id,int argc,const char *argv[]) {
-    (void)id;(void)argc;(void)argv;module_data_t *app=dr_get_main_module();
+    (void)id;(void)argc;(void)argv;
+    if(g_variant>=3) {
+        uint64 value=UINT64_MAX;
+        const char *option=g_variant==3?"ldstex2cas":"steal_reg";
+        uint64 expected=g_variant==3?0:27;
+        if(!dr_get_integer_option(option,&value)||value!=expected) {
+            fprintf(stderr,"lifecycle debug option %s not active: value%llu expected%llu\n",option,(unsigned long long)value,(unsigned long long)expected);_exit(2);
+        }
+        dr_atomic_add32_return_sum(&debug_option_confirmed,1);
+    }
+    module_data_t *app=dr_get_main_module();
     DR_ASSERT(app!=NULL);probe_pc=(app_pc)dr_get_proc_address(app->handle,"unix_lifecycle_probe");
     dr_free_module_data(app);DR_ASSERT(probe_pc!=NULL);
     dr_register_bb_event(event_block);dr_register_exit_event(client_exit);
@@ -305,8 +316,12 @@ static void transition(int attach) {
 }
 int main(int argc,char **argv) {
     if(argc!=2)return 2;
-    int variant=!strcmp(argv[1],"native")?0:!strcmp(argv[1],"default")?1:!strcmp(argv[1],"notraces")?2:-1;
-    if(variant<0)return 2;g_native_profile=variant==0;
+    int variant=!strcmp(argv[1],"native")?0:!strcmp(argv[1],"default")?1:!strcmp(argv[1],"notraces")?2:!strcmp(argv[1],"nocas")?3:!strcmp(argv[1],"steal27")?4:-1;
+    if(variant<0)return 2;g_native_profile=variant==0;g_variant=variant;
+#ifndef UNIX_DEBUG_CORE
+    if(variant>=3){fputs("lifecycle nocas/steal27 require actual matching Debug core fixture\n",stderr);return 2;}
+#endif
+    if(variant>=3&&setenv("DYNAMORIO_OPTIONS",variant==3?"-no_ldstex2cas":"-steal_reg 27",1))return 2;
     if(variant==2&&setenv("DYNAMORIO_OPTIONS","-disable_traces",1))return 2;
     /* Original generator uses a4KiB guard/data/stack layout. Native64KiB
      * adaptation is still a separate oracle/layout requirement, never success. */
@@ -359,6 +374,10 @@ int main(int argc,char **argv) {
     if(!g_native_profile)failed|=straddled<1||emit_default<1||emit_stored<1||client_probes!=60;
     fprintf(stderr,"model: runs%ld straddled%ld handlers%ld process%ld emit%d/%d probes%d\n",runs,straddled,handler_runs,process_sent,emit_default,emit_stored,client_probes);
     if(close(pipes[0])||close(pipes[1])||fclose(g_devnull)||sem_destroy(&received)||sem_destroy(&pipe_ready)||sem_destroy(&thread_signal_done))return 2;
+    if(g_variant>=3) {
+        fprintf(stderr,"profile debug confirmed%d\n",debug_option_confirmed);
+        failed|=debug_option_confirmed!=60;
+    }
     if(failed)return 1;
     printf("OK lifecycle model %s: rounds60 blocks3/worker workers%d operations240 process131072 full state/fault comparisons\n",argv[1],g_nworkers);
     return 0;

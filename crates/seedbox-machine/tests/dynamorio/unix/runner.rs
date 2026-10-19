@@ -9,6 +9,11 @@ use std::{
 
 pub enum Profile {
     Native,
+    #[allow(
+        dead_code,
+        reason = "A64 original source debug-only lifecycle variants"
+    )]
+    DebugNative,
     Plain,
     Client,
 }
@@ -59,7 +64,16 @@ pub fn run_with_options(
     options: &[&str],
     client: Option<(&str, &[&str])>,
 ) -> Output {
-    let root = fixtures();
+    let root = if matches!(profile, Profile::DebugNative) {
+        PathBuf::from(
+            std::env::var_os("SEEDBOX_DYNAMORIO_DEBUG_FIXTURES")
+                .expect("set SEEDBOX_DYNAMORIO_DEBUG_FIXTURES to actual matching Debug fixtures"),
+        )
+        .canonicalize()
+        .expect("prepared matching Debug fixture directory")
+    } else {
+        fixtures()
+    };
     let logs = tempfile::tempdir().unwrap();
     let out = logs.path().join("stdout");
     let err = logs.path().join("stderr");
@@ -79,7 +93,7 @@ pub fn run_with_options(
         };
         command.arg(launcher).args(flags).arg("--");
     }
-    if !matches!(profile, Profile::Native) {
+    if !matches!(profile, Profile::Native | Profile::DebugNative) {
         command
             .arg(root.join("runtime/bin64/drrun"))
             .arg("-use_dll")
