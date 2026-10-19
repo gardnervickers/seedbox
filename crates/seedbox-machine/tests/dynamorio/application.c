@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <errno.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -32,6 +33,12 @@ static void handle(int number, siginfo_t *info, void *raw)
     handler_offset = (sig_atomic_t)((uintptr_t)&local - (uintptr_t)alternate);
     CHECK(sigaltstack(NULL, &stack) == 0);
     handler_stack_flags = stack.ss_flags;
+    /* PR317 f32472b7, tools/jvm-fuzz/repros/sigaltstack_onstack.c:
+     * keep its in-handler EPERM check beside the existing SS_ONSTACK oracle.
+     * This public Linux API scenario is shared by x86-64 and AArch64.
+     */
+    stack_t again = { .ss_sp = alternate, .ss_size = sizeof(alternate) };
+    CHECK(sigaltstack(&again, NULL) == -1 && errno == EPERM);
     CHECK(sigismember(&uc->uc_sigmask, SIGUSR1) == 1);
     CHECK(sigaddset(&uc->uc_sigmask, SIGUSR2) == 0);
 #ifdef __x86_64__
