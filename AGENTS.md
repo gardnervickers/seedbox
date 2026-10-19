@@ -53,7 +53,17 @@ Start with [README.md](README.md); [design](docs/design.md) and
 
 - Tests use positive signals/events for readiness, pacing and ordering, never
   incidental host sleeps. Generous containment timeouts bound positive completion.
-  Elapsed host-time assertions and ordering inferred from timed absence are forbidden.
+  Generic elapsed host-time assertions and ordering inferred from timed absence
+  are forbidden; the subject-timer exception below is limited to its stated oracles.
+- In native DynamoRIO regression fixtures, retained original timer-accuracy oracles
+  may compare independent real clocks during already-existing timer workloads:
+  remaining time, expiry/cadence, legitimacy of observed expiries, and the signal
+  storm's clock-derived expected total. Preserve the original populations, options,
+  tolerances and noise/slack rules; report inconclusive observations explicitly,
+  never as a pass. This permits subject-timer clock comparisons only, not added
+  fixed sleeps/blocking, generic duration assertions, timed readiness/ordering,
+  or success inferred from an event's timed absence. Sleep calls remain subject
+  to the separate bounded syscall rule below.
 - In native DynamoRIO C fixtures only, a bounded `nanosleep`/`clock_nanosleep` syscall
   may be the regression subject after faithful event/state alternatives are considered.
   Immediately precede each call with
