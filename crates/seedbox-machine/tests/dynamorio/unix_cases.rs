@@ -868,3 +868,5 @@ fn source_alias_literal_load_keeps_5000_updates_relative_to_application_pc() {
         &["updates 5000 slots 64 stride 16 sum 87487500 stale 0 traps 0"],
     );
 }
+#[path = "unix/fault_context_cases.rs"]
+mod fault_context_cases;

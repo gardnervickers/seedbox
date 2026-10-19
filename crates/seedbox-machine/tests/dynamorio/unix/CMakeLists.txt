@@ -101,3 +101,5 @@ target_link_libraries(unix_detach_context pthread dl rt)
 install(TARGETS unix_detach_context RUNTIME DESTINATION bin)
 
 add_subdirectory(rip_api)
+
+add_subdirectory(fault_context)
