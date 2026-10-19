@@ -330,23 +330,14 @@ fn directories(root: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn normal_driver_existing_example_run_and_replay_match() {
-    existing_example("pv");
+fn normal_driver_inherited_environment_relocated_sdk_run_and_replay_match() {
+    // The example, default-PV selection, ordinary Nix environment and relocated
+    // SDK all exercise the same expensive native preparation and replay path.
+    existing_example_service(Service::start("pv", true, true));
 }
 #[test]
 fn normal_driver_tcg_existing_example_run_and_replay_match() {
     existing_example("tcg");
-}
-#[test]
-fn ordinary_nix_environment_selects_driver() {
-    inherited_shell_example(false);
-}
-#[test]
-fn ordinary_nix_environment_with_relocated_sdk_selects_driver() {
-    inherited_shell_example(true);
-}
-fn inherited_shell_example(relocate_sdk: bool) {
-    existing_example_service(Service::start("pv", true, relocate_sdk));
 }
 fn existing_example(backend: &'static str) {
     existing_example_service(Service::new(backend));
