@@ -17,8 +17,7 @@ Install Nix and start Docker or Podman. Macs also need Apple's Command Line Tool
 
 ```sh
 nix develop
-cargo xtask build-assets
-cargo build --release
+cargo xtask build --release
 ./target/release/seedbox doctor
 ./target/release/seedbox init ~/seedbox-quickstart --template etcd
 ./target/release/seedbox run ~/seedbox-quickstart
@@ -34,6 +33,15 @@ The build embeds the Driver runtime, guest kernel, and helpers. `doctor` checks
 the local runtime inputs and host access before any application images are prepared.
 Running Seedbox does not invoke Nix or a compiler. Docker or Podman prepares
 application images.
+
+`cargo xtask build` prepares assets, then forwards its options to `cargo build`.
+Linux builds assets with Nix directly; Mac uses Docker or Podman for guest inputs
+and native Nix for host tools. Unchanged bundles reuse the existing `build/assets`
+publication. To prepare assets without compiling the CLI, use
+`cargo xtask build-assets`; ordinary Cargo commands consume those prepared assets.
+Changed bundles retain the previous generation for concurrent builds. With all
+Cargo builds stopped, `cargo xtask clean-assets` removes old generations while
+keeping the current bundle. Already-built executables contain their own assets.
 
 Runtime inputs come from the complete build. The old `--vmm`, `--kernel`,
 `--runtime-assets`, `--guest-init`, and `--mke2fs` overrides are no longer

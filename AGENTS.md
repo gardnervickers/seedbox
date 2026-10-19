@@ -24,11 +24,14 @@ Open review-ready PRs as non-drafts; reviews and merges go through the user.
   of the server and CLI. Native worker dispatch remains in the executable.
   Use `target/release/seedbox` for guest runs;
   the bundled engine uses the CLI build profile.
-- Build guest inputs with `cargo xtask build-assets`, then the complete CLI with
-  `cargo build --release`, inside
+- Build the complete CLI with `cargo xtask build --release`, or prepare guest
+  inputs separately with `cargo xtask build-assets` before `cargo build --release`, inside
   `nix develop`. Linux uses Nix directly; Mac uses a Docker-compatible Linux
   builder with a persistent Nix store. Outputs live together under `build/`;
-  `build/assets` changes atomically after a successful asset build.
+  `build/assets` changes atomically after a successful asset build only when
+  bundle contents or permissions change; incidental archive timestamps are ignored.
+  Old generations remain available to concurrent builds. With all Cargo builds
+  stopped, `cargo xtask clean-assets` removes old generations, preserving the current one.
   Cargo embeds prepared `build/assets` by default; explicit `SEEDBOX_BUILD_HELPERS`
   and `SEEDBOX_BUILD_KERNEL` override those inputs.
   Complete builds embed the architecture-matched kernel in the executable. Runtime commands never run

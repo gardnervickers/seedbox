@@ -37,6 +37,7 @@ futures-util = "0.3"
 getrandom = "0.4"
 tempfile = "3"
 tar = "0.4"
+flate2 = "1"
 serde_yaml_ng = "0.10"
 seedbox-engine-protocol = { path = "crates/seedbox-engine-protocol" }
 clap = { version = "4", features = ["derive", "env"] }
