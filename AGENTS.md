@@ -5,6 +5,10 @@ Start with [README.md](README.md); [design](docs/design.md) and
 
 ## Scope and review
 
+Seedbox is a testing utility for cooperative users and reasonably configured applications. Users provide supported images and dependencies, required permissions, and sufficient resources; when prerequisites are missing, normal setup or runtime errors are appropriate.
+
+We do not need to support every possible application. If someone intentionally tries to break Seedbox or exercises pathological behavior, failure is acceptable; return a clear error where practical, but do not add architecture, workarounds, compatibility infrastructure, or special detection solely to support such cases. Keep supported workloads executing correctly with deterministic replay, normal cleanup, and clear error reporting; this is not permission to silently corrupt normal results.
+
 - There is no backward-compatibility requirement: replace obsolete formats/APIs;
   do not add migration shims, qualification lists or provenance gates.
 - CLI and `seedbox.yaml` interface changes need Gardner's approval; internal APIs
