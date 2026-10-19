@@ -631,10 +631,13 @@ pub fn cargo_tests<C: Commands>(
             command = privileged(prefix, command, &env);
         }
         let mut job = Job::new(&format!("{package}/{target}"), command, &env, &checks.root);
-        job.timeout = if target == "applications" {
-            None
-        } else {
-            Some(Duration::from_secs(1800))
+        job.timeout = match (package, target.as_str()) {
+            (_, "applications") => None,
+            // The complete ordinary DR corpus includes managed runtimes and
+            // many native/plain/client phases. Allow a diagnostic run to reach
+            // every case; each phase keeps its own shorter completion guard.
+            ("seedbox-machine", "dynamorio") => Some(Duration::from_secs(5400)),
+            _ => Some(Duration::from_secs(1800)),
         };
         checks.run(job);
     }

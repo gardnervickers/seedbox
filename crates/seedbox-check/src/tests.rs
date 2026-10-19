@@ -1999,9 +1999,14 @@ fn dr_failures_stream_before_a_later_target_timeout() {
     let mut c = checks(&t.0);
     c.commands.replies.push_back(Outcome {
         code: 0,
-        stdout: ["dynamorio", "dynamorio_isolated", "ordinary"]
-            .map(|target| artifact(&std::path::Path::new("/fixture").join(target), target, true))
-            .join("\n"),
+        stdout: [
+            "dynamorio",
+            "dynamorio_isolated",
+            "ordinary",
+            "applications",
+        ]
+        .map(|target| artifact(&std::path::Path::new("/fixture").join(target), target, true))
+        .join("\n"),
     });
     cargo_tests(
         &mut c,
@@ -2018,7 +2023,12 @@ fn dr_failures_stream_before_a_later_target_timeout() {
             job.args.contains(&"--nocapture".into()),
             !job.name.ends_with("/ordinary")
         );
-        assert_eq!(job.timeout, Some(Duration::from_secs(1800)));
+        let expected = match job.name.as_str() {
+            "seedbox-machine/dynamorio" => Some(Duration::from_secs(5400)),
+            "seedbox-machine/applications" => None,
+            _ => Some(Duration::from_secs(1800)),
+        };
+        assert_eq!(job.timeout, expected);
     }
-    assert_eq!(c.commands.jobs.len(), 4);
+    assert_eq!(c.commands.jobs.len(), 5);
 }

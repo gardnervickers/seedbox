@@ -21,7 +21,8 @@ pub fn run(binary: &str, args: &[&str], profile: Profile<'_>) -> String {
         std::env::var_os(key)
             .unwrap_or_else(|| panic!("set {key} to prepared same-source fixtures")),
     );
-    let logs = tempfile::tempdir().unwrap();
+    let report_dir = std::env::var_os("SEEDBOX_TEST_REPORT_DIR").map(PathBuf::from);
+    let logs = log_directory(report_dir.as_deref());
     let stdout = logs.path().join("stdout");
     let stderr = logs.path().join("stderr");
     // Existing owned supervisor kills/reaps descendants on termination. The
@@ -71,7 +72,9 @@ pub fn run(binary: &str, args: &[&str], profile: Profile<'_>) -> String {
     // Capture while the application is still present, before normal supervisor
     // cleanup. Diagnostics cannot turn a timeout or failed process into success.
     if failed && binary == "storm" {
-        capture_storm(logs.path());
+        // Also emit the snapshot before scratch cleanup, including when the
+        // report directory or diagnostic file cannot be written.
+        eprintln!("{}", capture_storm(logs.path()));
     }
     if !matches!(status, Ok(Ok(_))) {
         unsafe {
@@ -99,9 +102,24 @@ pub fn run(binary: &str, args: &[&str], profile: Profile<'_>) -> String {
     out
 }
 
+fn log_directory(report_dir: Option<&std::path::Path>) -> tempfile::TempDir {
+    // The checker deletes TMPDIR after this target, but owns a separate report
+    // directory for retained evidence. Successful runs still remove their logs.
+    if let Some(dir) = report_dir {
+        match tempfile::Builder::new()
+            .prefix("signal-model-")
+            .tempdir_in(dir)
+        {
+            Ok(logs) => return logs,
+            Err(error) => eprintln!("signal model report directory {}: {error}", dir.display()),
+        }
+    }
+    tempfile::tempdir().expect("signal model scratch directory")
+}
+
 // The C schema is also the decoder's field list: no second layout to drift.
 // Two bounded reads are explicitly partial, not a cross-process seqlock claim.
-fn capture_storm(dir: &std::path::Path) {
+fn capture_storm(dir: &std::path::Path) -> String {
     use std::io::Read;
     let names: Vec<_> = include_str!("storm_diagnostics.h")
         .lines()
@@ -162,9 +180,10 @@ fn capture_storm(dir: &std::path::Path) {
             report.push_str(&format!("{} {result:?}\n{text}\n", path.display()));
         }
     }
-    if let Err(error) = std::fs::write(dir.join("storm-diagnostic.txt"), report) {
+    if let Err(error) = std::fs::write(dir.join("storm-diagnostic.txt"), &report) {
         eprintln!("storm diagnostic write failed: {error}");
     }
+    report
 }
 
 #[test]
@@ -190,4 +209,106 @@ fn storm_diagnostic_retains_interrupted_publication() {
     capture_storm(dir.path());
     let text = std::fs::read_to_string(dir.path().join("storm-diagnostic.txt")).unwrap();
     assert!(text.contains("partial file length=7"), "{text}");
+    // A failed diagnostic write still returns printable evidence and cannot
+    // replace the original process-status assertion with a filesystem panic.
+    std::fs::remove_file(dir.path().join("storm-diagnostic.txt")).unwrap();
+    std::fs::create_dir(dir.path().join("storm-diagnostic.txt")).unwrap();
+    assert!(capture_storm(dir.path()).contains("partial file length=7"));
+}
+
+#[test]
+fn storm_failure_diagnostics_survive_checker_scratch_cleanup() {
+    const CHILD: &str = "SEEDBOX_STORM_RETENTION_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        // A synthetic failing supervisor completes immediately. No storm or
+        // timeout is induced merely to exercise the failure/retention path.
+        run("storm", &[], Profile::Native);
+        panic!("synthetic failure must fail the original status assertion");
+    }
+    let test = "unix_cases::signal_models_cases::signal_runner::storm_failure_diagnostics_survive_checker_scratch_cleanup";
+    for mode in ["checker", "direct", "missing", "bad-report"] {
+        let owner = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir_in(owner.path()).unwrap();
+        let reports = owner.path().join("reports");
+        std::fs::create_dir(&reports).unwrap();
+        let bin = owner.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let supervisor = bin.join("unix-supervisor");
+        let diagnostic = match mode {
+            "missing" => "",
+            _ => "printf partial > storm-diagnostic.bin\n",
+        };
+        seedbox_test::process::install_executable(
+            &supervisor,
+            format!("#!/bin/sh\nprintf synthetic-stdout\nprintf synthetic-stderr >&2\n{diagnostic}exit 7\n").as_bytes(),
+            0o700,
+        )
+        .unwrap();
+        let stdout = owner.path().join("child-stdout");
+        let stderr = owner.path().join("child-stderr");
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", test, "--nocapture"])
+            .env(CHILD, "1")
+            .env("SEEDBOX_DYNAMORIO_FIXTURES", owner.path())
+            .env("TMPDIR", scratch.path())
+            .env_remove("SEEDBOX_TEST_REPORT_DIR")
+            .stdout(File::create(&stdout).unwrap())
+            .stderr(File::create(&stderr).unwrap());
+        if mode == "bad-report" {
+            command.env("SEEDBOX_TEST_REPORT_DIR", &supervisor); // Not a directory.
+        } else if mode != "direct" {
+            command.env("SEEDBOX_TEST_REPORT_DIR", &reports);
+        }
+        let mut child = crate::Running(command.guarded_spawn().unwrap());
+        let status = HangGuard::new("synthetic storm failure", Duration::from_secs(30))
+            .wait_for(|| child.0.try_wait().transpose())
+            .unwrap()
+            .unwrap();
+        assert!(!status.success(), "{mode}: original failure must survive");
+        let output = format!(
+            "{}{}",
+            std::fs::read_to_string(stdout).unwrap(),
+            std::fs::read_to_string(stderr).unwrap()
+        );
+        assert!(
+            output.contains("storm []: Ok(Ok(ExitStatus"),
+            "{mode}: {output}"
+        );
+        assert!(output.contains("synthetic-stdout"), "{mode}: {output}");
+        assert!(output.contains("synthetic-stderr"), "{mode}: {output}");
+        let expected = if mode == "missing" {
+            "unavailable:"
+        } else {
+            "partial file length=7"
+        };
+        assert!(output.contains(expected), "{mode}: {output}");
+        let retained = output
+            .split("retained=Some(\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let retained = PathBuf::from(retained);
+        assert!(retained.is_dir(), "{mode}: {output}");
+        if mode == "direct" || mode == "bad-report" {
+            assert!(retained.starts_with(scratch.path()), "{output}");
+        } else {
+            drop(scratch); // The checker's Temporary parent has the same lifetime.
+            assert!(retained.starts_with(&reports), "{output}");
+            assert_eq!(
+                std::fs::read_to_string(retained.join("stdout")).unwrap(),
+                "synthetic-stdout"
+            );
+            assert!(
+                std::fs::read_to_string(retained.join("storm-diagnostic.txt"))
+                    .unwrap()
+                    .contains(expected)
+            );
+        }
+        if mode == "bad-report" {
+            assert!(output.contains("signal model report directory"), "{output}");
+        }
+    }
 }
