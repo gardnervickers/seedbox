@@ -6,6 +6,7 @@ publish.workspace = true
 
 [features]
 dynamorio-tests = []
+dynamorio-isolated-tests = []
 test-support = ["dep:seedbox-test-time"]
 
 [dependencies]
@@ -26,8 +27,14 @@ libc.workspace = true
 
 [package.metadata.seedbox-check.suites]
 dynamorio = ["dynamorio-tests"]
+dynamorio-isolated = ["dynamorio-isolated-tests"]
 
 [[test]]
 name = "dynamorio"
 path = "tests/dynamorio.rs"
 required-features = ["dynamorio-tests"]
+
+[[test]]
+name = "dynamorio_isolated"
+path = "tests/dynamorio_isolated.rs"
+required-features = ["dynamorio-isolated-tests"]

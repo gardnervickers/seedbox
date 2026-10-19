@@ -544,10 +544,156 @@ pub fn check(root: &Path) -> Result<Report, String> {
         )?;
         report.findings.extend(local.findings);
     }
+    dr_c_sources(
+        root,
+        &root.join("crates/seedbox-machine/tests/dynamorio"),
+        &mut report,
+    )?;
     report
         .findings
         .sort_by(|a, b| (&a.path, a.line, &a.detail).cmp(&(&b.path, b.line, &b.detail)));
     Ok(report)
+}
+
+// The exception is limited to the native DR syscall subject, not Rust timer
+// helpers or incidental application pacing. Keep its bound/invariant adjacent
+// to one call; a marker cannot exempt another call or an entire file/function.
+fn dr_c_subject(marker: &str, syscall: &str) -> bool {
+    let Some(marker) = marker.trim().strip_prefix("seedbox-syscall-subject:") else {
+        return false;
+    };
+    let fields: Vec<_> = marker.split(';').map(str::trim).collect();
+    fields.len() == 3
+        && fields[0] == syscall
+        && fields[1]
+            .strip_prefix("bound-ms=")
+            .is_some_and(|n| n.parse::<u64>().is_ok_and(|bound| bound > 0))
+        && fields[2]
+            .strip_prefix("invariant=")
+            .is_some_and(|s| !s.trim().is_empty())
+}
+
+fn dr_c_findings(path: &Path, source: &str) -> Vec<Finding> {
+    // Lex comments and quoted literals rather than treating diagnostic strings,
+    // source provenance or commented examples as executable calls.
+    let bytes = source.as_bytes();
+    let mut tokens = Vec::<(String, usize)>::new();
+    let (mut i, mut line) = (0, 1);
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            line += 1;
+            i += 1;
+            continue;
+        }
+        if bytes[i..].starts_with(b"/*") || bytes[i..].starts_with(b"//") {
+            let block = bytes[i + 1] == b'*';
+            let start = i + 2;
+            let comment_line = line;
+            i = start;
+            while i < bytes.len()
+                && !(if block {
+                    bytes[i..].starts_with(b"*/")
+                } else {
+                    bytes[i] == b'\n'
+                })
+            {
+                if bytes[i] == b'\n' {
+                    line += 1;
+                }
+                i += 1;
+            }
+            let comment = source[start..i].trim();
+            if comment.starts_with("seedbox-syscall-subject:") {
+                tokens.push((comment.to_owned(), comment_line));
+            }
+            if block {
+                i = (i + 2).min(bytes.len());
+            }
+            continue;
+        }
+        if matches!(bytes[i], b'"' | b'\'') {
+            let quote = bytes[i];
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\n' {
+                    line += 1;
+                }
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                } else if bytes[i] == quote {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            tokens.push((source[start..i].to_owned(), line));
+        } else {
+            if !bytes[i].is_ascii_whitespace() {
+                tokens.push(((bytes[i] as char).to_string(), line));
+            }
+            i += 1;
+        }
+    }
+    let mut marker = None;
+    let mut findings = Vec::new();
+    for (index, (token, line)) in tokens.iter().enumerate() {
+        if token.starts_with("seedbox-syscall-subject:") {
+            marker = Some(token.as_str());
+            continue;
+        }
+        if matches!(token.as_str(), ";" | "{" | "}") {
+            marker = None;
+        }
+        if tokens.get(index + 1).map(|t| t.0.as_str()) != Some("(") {
+            continue;
+        }
+        let name = if token == "syscall" {
+            tokens.get(index + 2).and_then(|t| t.0.strip_prefix("SYS_"))
+        } else {
+            Some(token.as_str())
+        };
+        let Some(name @ ("sleep" | "usleep" | "nanosleep" | "clock_nanosleep")) = name else {
+            continue;
+        };
+        let subject = matches!(name, "nanosleep" | "clock_nanosleep")
+            && marker
+                .take()
+                .is_some_and(|marker| dr_c_subject(marker, name));
+        if !subject {
+            findings.push(Finding {
+                path: path.into(), line: *line,
+                detail: format!("host sleep {name} in DR fixture; use event readiness/pacing; only a documented bounded syscall subject may use nanosleep/clock_nanosleep"),
+            });
+        }
+    }
+    findings
+}
+
+fn dr_c_sources(root: &Path, directory: &Path, report: &mut Report) -> Result<(), String> {
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(directory).map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.is_dir() {
+            dr_c_sources(root, &path, report)?;
+        } else if path.extension().is_some_and(|e| e == "c" || e == "h") {
+            let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            report.findings.extend(dr_c_findings(
+                path.strip_prefix(root).unwrap_or(&path),
+                &text,
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

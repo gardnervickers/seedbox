@@ -9,6 +9,7 @@ pub type Environment = BTreeMap<String, String>;
 pub enum Suite {
     Portable,
     Dynamorio,
+    DynamorioIsolated,
     MachineTcg,
     MachinePv,
     LinuxOci,
@@ -16,9 +17,10 @@ pub enum Suite {
     LinuxPause,
     MacApps,
 }
-pub const SUITES: [Suite; 8] = [
+pub const SUITES: [Suite; 9] = [
     Suite::Portable,
     Suite::Dynamorio,
+    Suite::DynamorioIsolated,
     Suite::MachineTcg,
     Suite::MachinePv,
     Suite::LinuxOci,
@@ -31,6 +33,7 @@ impl Suite {
         match self {
             Self::Portable => "portable",
             Self::Dynamorio => "dynamorio",
+            Self::DynamorioIsolated => "dynamorio-isolated",
             Self::MachineTcg => "machine-tcg",
             Self::MachinePv => "machine-pv-x86",
             Self::LinuxOci => "linux-oci",
@@ -41,6 +44,7 @@ impl Suite {
     }
     pub fn description(self) -> &'static str {
         match self {
+        Self::DynamorioIsolated=>"Linux x86-64/ARM64, prepared DR fixtures, user/PID namespaces and owned cgroup-v2 pids delegation.",
         Self::Dynamorio=>"Linux x86-64/ARM64, explicit dynamorioTestFixtures; no KVM, root or engine.",
         Self::Portable=>"Any host: fmt, clippy, discovered portable tests and workload validation.",
         Self::MachineTcg=>"Linux x86-64, explicit machineTcgAssets/test fixtures and patched QEMU; no KVM.",
@@ -259,7 +263,7 @@ pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -
     if suite == Suite::Portable {
         return missing;
     }
-    if suite == Suite::Dynamorio {
+    if matches!(suite, Suite::Dynamorio | Suite::DynamorioIsolated) {
         need(
             linux && (x86 || host.arm()),
             "requires Linux x86-64 or ARM64".into(),
@@ -283,6 +287,24 @@ pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -
                     "set SEEDBOX_DYNAMORIO_FIXTURES to dynamorioTestFixtures containing {file}"
                 ),
             );
+        }
+        if suite == Suite::DynamorioIsolated {
+            need(
+                fixtures.is_some_and(|p| executable(&p.join("bin/seedbox-dr-isolate"))),
+                "prepared bin/seedbox-dr-isolate is required".into(),
+            );
+            need(
+                env.get("SEEDBOX_DYNAMORIO_CGROUP_ROOT")
+                    .is_some_and(|p| Path::new(p).is_dir()),
+                "set SEEDBOX_DYNAMORIO_CGROUP_ROOT to an empty owned cgroup-v2 pids delegation"
+                    .into(),
+            );
+            for mode in ["pid1", "pids"] {
+                need(
+                    host.tools.contains(&format!("dynamorio-isolate-{mode}")),
+                    format!("isolate: {mode} capability preflight did not succeed"),
+                );
+            }
         }
         return missing;
     }

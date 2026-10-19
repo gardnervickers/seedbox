@@ -12,7 +12,9 @@ add_executable(application application.c probes.S)
 target_compile_options(application PRIVATE -Wall -Wextra -Werror)
 target_link_options(application PRIVATE -rdynamic)
 
-install(TARGETS application preserve
+add_executable(seedbox-dr-isolate isolate.c)
+target_compile_options(seedbox-dr-isolate PRIVATE -Wall -Wextra -Werror)
+install(TARGETS application preserve seedbox-dr-isolate
         RUNTIME DESTINATION bin LIBRARY DESTINATION lib)
 # Each independently maintained family owns its targets and install rules.
 foreach(family unix translator)
@@ -20,3 +22,5 @@ foreach(family unix translator)
     add_subdirectory(${family})
   endif()
 endforeach()
+
+install(PROGRAMS pid1-launch.py DESTINATION bin RENAME seedbox-dr-pid1)

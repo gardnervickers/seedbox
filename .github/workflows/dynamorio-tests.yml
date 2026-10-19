@@ -53,7 +53,13 @@ jobs:
           seedbox_flake=$(bash tools/dev-flake.sh)
           fixtures=$(nix build "$seedbox_flake#dynamorioTestFixtures" --out-link "$RUNNER_TEMP/dr-fixtures" --print-out-paths)
           echo "SEEDBOX_DYNAMORIO_FIXTURES=$fixtures" >> "$GITHUB_ENV"
-      - name: Portable prerequisites then external native tests
+      - name: Portable prerequisites then ordinary and isolated native tests
         run: |
           seedbox_flake=$(bash tools/dev-flake.sh)
-          nix develop "$seedbox_flake" --command bash harness/check.sh dynamorio
+          export SEEDBOX_DYNAMORIO_PID1_LAUNCHER="$SEEDBOX_DYNAMORIO_FIXTURES/bin/seedbox-dr-pid1"
+          # Only this supervisor is privileged. It creates a unique delegation,
+          # gates/moves its own child, then executes every build/test as runner.
+          # Missing parent pids delegation is an explicit setup failure.
+          sudo --preserve-env=PATH,SEEDBOX_DYNAMORIO_FIXTURES,SEEDBOX_DYNAMORIO_PID1_LAUNCHER,CARGO_TARGET_DIR,CARGO_INCREMENTAL,CARGO_PROFILE_DEV_DEBUG,CARGO_PROFILE_TEST_DEBUG \
+            python3 tools/dynamorio-ci/cgroup.py --uid "$(id -u)" --gid "$(id -g)" -- \
+            nix develop "$seedbox_flake" --command bash harness/check.sh dynamorio dynamorio-isolated

@@ -197,9 +197,12 @@ pub fn observe<C: Commands>(checks: &mut Checks<C>, suites: &[Suite]) -> Result<
     );
     // No root capability is needed at all by the TCG-only fixture suite.
     if host.system == "Linux"
-        && suites
-            .iter()
-            .any(|s| !matches!(s, Suite::Portable | Suite::MachineTcg | Suite::Dynamorio))
+        && suites.iter().any(|s| {
+            !matches!(
+                s,
+                Suite::Portable | Suite::MachineTcg | Suite::Dynamorio | Suite::DynamorioIsolated
+            )
+        })
     {
         if unsafe { libc::geteuid() } == 0 {
             host.root_prefix = Some(vec![]);
@@ -234,6 +237,36 @@ pub fn observe<C: Commands>(checks: &mut Checks<C>, suites: &[Suite]) -> Result<
                 .ok_or("KVM probe has no result")?
                 .into(),
         );
+    }
+    if host.system == "Linux" && suites.contains(&Suite::DynamorioIsolated) {
+        if let Some(fixtures) = checks.environment.get("SEEDBOX_DYNAMORIO_FIXTURES") {
+            let launcher = Path::new(fixtures).join("bin/seedbox-dr-isolate");
+            if executable(&launcher) {
+                for mode in ["pid1", "pids"] {
+                    let selected = if mode == "pid1" {
+                        checks
+                            .environment
+                            .get("SEEDBOX_DYNAMORIO_PID1_LAUNCHER")
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| launcher.clone())
+                    } else {
+                        launcher.clone()
+                    };
+                    let mut job = checks.job(
+                        &format!("isolate-{mode}-preflight"),
+                        vec![
+                            selected.to_string_lossy().into(),
+                            "preflight".into(),
+                            mode.into(),
+                        ],
+                    );
+                    job.timeout = Some(Duration::from_secs(150));
+                    if checks.commands.execute(&job).is_ok_and(|o| o.code == 0) {
+                        host.tools.insert(format!("dynamorio-isolate-{mode}"));
+                    }
+                }
+            }
+        }
     }
     let mut sockets = socket_candidates(&checks.environment);
     if let Some(path) = checks

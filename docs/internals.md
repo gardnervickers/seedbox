@@ -118,6 +118,26 @@ Cargo discovers cases in the feature-gated target. For a focused development run
 use `cargo test -p seedbox-machine --features dynamorio-tests --test dynamorio`.
 [Hosted CI](../.github/workflows/dynamorio-tests.yml) runs both native architectures.
 
+The separate `dynamorio-isolated` suite requires positive namespace and cgroup
+preflights before any build. `seedbox-dr-isolate pid1 -- COMMAND...` creates a fresh
+user/PID namespace and execs the application directly as PID1. On hosts restricting
+unprivileged namespaces, `SEEDBOX_DYNAMORIO_PID1_LAUNCHER` may select the packaged
+`seedbox-dr-pid1` wrapper: it first probes unprivileged support, then uses a scoped
+sudo namespace controller whose child drops groups/UID/GID before exec. The suite
+and builds run as the ordinary user.
+
+For failed-clone process limits, `SEEDBOX_DYNAMORIO_CGROUP_ROOT` supplies an empty,
+owned cgroup-v2 domain with `pids` delegated. The launcher creates a unique leaf,
+gates its child until membership is installed, and records the actual
+`pids.events max` delta; a missing limit hit fails. Its controller stays outside
+the limit, terminates surviving owned descendants and removes the leaf.
+[The CI supervisor](../tools/dynamorio-ci/cgroup.py) creates a unique domain and
+unlimited controller subgroup, enables `pids` only inside that domain, and runs its
+normal-user child there. It cleans that domain on completion or interruption. A
+parent that has not already delegated `pids` is a setup failure; the helper never
+changes shared controllers, global sysctls or unrelated process membership.
+Ordinary `dynamorio` remains accessible without these isolated-fixture prerequisites.
+
 ## ARM idle rendezvous
 
 Making an interrupt pending while idle has interrupts masked can slide delivery past a later unmask.

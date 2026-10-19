@@ -344,3 +344,57 @@ fn controlled_timers_and_unrelated_sleep_named_functions_are_not_host_sleeps() {
         assert!(findings(code).is_empty(), "{code}");
     }
 }
+
+#[test]
+fn dr_syscall_subject_is_one_bounded_documented_call_not_a_pacing_exemption() {
+    let path = Path::new("crates/seedbox-machine/tests/dynamorio/unix/subject.c");
+    let marker = "/* seedbox-syscall-subject: nanosleep; bound-ms=200; invariant=observed blocked-entry EINTR and remainder */";
+    assert!(dr_c_findings(
+        path,
+        &format!("{marker}\nlong r = syscall(SYS_nanosleep, &req, &rem);")
+    )
+    .is_empty());
+    assert_eq!(
+        dr_c_findings(
+            path,
+            &format!("{marker} nanosleep(&req,&rem); nanosleep(&req,&rem);")
+        )
+        .len(),
+        1
+    );
+    for invalid in [
+        "/* seedbox-syscall-subject: nanosleep; bound-ms=0; invariant=EINTR */",
+        "/* seedbox-syscall-subject: nanosleep; bound-ms=200; invariant= */",
+        "/* seedbox-syscall-subject: clock_nanosleep; bound-ms=200; invariant=EINTR */",
+        "/* allow-sleep: readiness */",
+    ] {
+        assert_eq!(
+            dr_c_findings(path, &format!("{invalid} nanosleep(&req,&rem);")).len(),
+            1
+        );
+    }
+    assert_eq!(
+        dr_c_findings(path, &format!("{marker} usleep(10);")).len(),
+        1
+    );
+    assert_eq!(
+        dr_c_findings(
+            path,
+            "sleep(1); syscall(SYS_clock_nanosleep,clock,flags,&req,&rem);"
+        )
+        .len(),
+        2
+    );
+    assert!(dr_c_findings(path, "/* nanosleep(0,0); */ puts(\"nanosleep(0,0);\");").is_empty());
+    // A C subject marker never exempts Rust scheduling helpers.
+    assert_eq!(
+        source(
+            Path::new("tests/a.rs"),
+            &format!("{marker} fn f(){{std::thread::sleep(delay);}}"),
+            true
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+}

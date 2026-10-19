@@ -51,8 +51,16 @@ Start with [README.md](README.md); [design](docs/design.md) and
 
 ## Tests and CLI
 
-- Tests never sleep or infer order from elapsed time/timed absence. Use positive
-  signals and generous wait timeouts; no test-time annotations or exemptions.
+- Tests use positive signals/events for readiness, pacing and ordering, never
+  incidental host sleeps. Generous containment timeouts bound positive completion.
+  Elapsed host-time assertions and ordering inferred from timed absence are forbidden.
+- In native DynamoRIO C fixtures only, a bounded `nanosleep`/`clock_nanosleep` syscall
+  may be the regression subject after faithful event/state alternatives are considered.
+  Immediately precede each call with
+  `/* seedbox-syscall-subject: nanosleep; bound-ms=N; invariant=... */`
+  (or `clock_nanosleep`). Review must verify the actual bound and syscall-specific
+  invariant; a marker permits one call, never incidental pacing or a whole function.
+  The checker still rejects Rust timer helpers and all unmarked DR fixture sleeps.
 - Unit tests stay beside components; public-boundary tests stay in their owning
   crate's `tests/`. Give each scenario one owner; share backend-neutral scenarios.
 - Run portable checks in `nix develop`; engine changes also need relevant native

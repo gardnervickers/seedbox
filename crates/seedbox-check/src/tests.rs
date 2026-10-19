@@ -322,6 +322,14 @@ fn test_workspace_suite_targets_preserve_portable_linux_mac_and_pause_selection(
             }],
         ),
         (
+            vec!["dynamorio-isolated"],
+            vec![SuiteTests {
+                package: "seedbox-machine".into(),
+                features: strings(&["dynamorio-isolated-tests"]),
+                targets: strings(&["dynamorio_isolated"]),
+            }],
+        ),
+        (
             vec!["linux"],
             vec![
                 SuiteTests {
@@ -1661,4 +1669,46 @@ fn scan_only_stage_reports_success_findings_and_parse_failure() {
     assert!(test_time_policy_stage(&t.0)
         .unwrap_err()
         .contains("fixture.rs"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn isolated_dr_requires_positive_preflights_without_root_or_kvm_probes() {
+    let temp = fixture();
+    for name in ["bin", "lib", "runtime/bin64", "cgroup"] {
+        fs::create_dir_all(temp.0.join(name)).unwrap();
+    }
+    for name in [
+        "bin/seedbox-dr-isolate",
+        "bin/application",
+        "runtime/bin64/drrun",
+    ] {
+        install_executable(&temp.0.join(name), "fixture");
+    }
+    fs::write(temp.0.join("lib/libpreserve.so"), "fixture").unwrap();
+    let mut c = checks(&temp.0);
+    c.environment = env(&[
+        ("SEEDBOX_DYNAMORIO_FIXTURES", temp.0.to_str().unwrap()),
+        (
+            "SEEDBOX_DYNAMORIO_CGROUP_ROOT",
+            temp.0.join("cgroup").to_str().unwrap(),
+        ),
+    ]);
+    c.commands.replies.push_back(Outcome {
+        code: 2,
+        ..Outcome::default()
+    });
+    c.commands.replies.push_back(Outcome::default());
+    let options = options(strings(&["dynamorio-isolated", "--list"])).unwrap();
+    let h = observe(&mut c, &options.suites).unwrap();
+    assert_eq!(coordinate(&mut c, &h, &options).unwrap(), 2);
+    assert_eq!(c.commands.jobs.len(), 2);
+    assert!(c.commands.jobs.iter().all(|j| j.args[1] == "preflight"));
+    assert!(
+        requirements(Suite::DynamorioIsolated, &h, &c.environment, &temp.0)
+            .iter()
+            .any(|s| s.contains("pid1 capability preflight"))
+    );
+    let h = observe(&mut c, &options.suites).unwrap();
+    assert_eq!(coordinate(&mut c, &h, &options).unwrap(), 0);
 }
