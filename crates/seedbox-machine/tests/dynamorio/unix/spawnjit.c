@@ -119,7 +119,6 @@ int main(int argc, char **argv) {
         shared_code = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         for (uint32_t slot = 0; slot < 256; slot += 4) {
             unix_emit(&shared_code[slot], slot);
-        atomic_store(&writer_ready, 1);
         }
         __builtin___clear_cache((char *)shared_code, (char *)shared_code + 4096);
         for (int k = 0; k < copies; k++) pthread_create(&ts[k], NULL, executor, (void *)(uintptr_t)k);
