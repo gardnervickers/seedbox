@@ -1,5 +1,5 @@
 # All application images use only libc/Linux interfaces. Each selector is a fresh image.
-set(unix_shared restart_matrix alias_async alias_build aliases cleancallsig properties queues exec_sigign close_range_all clear_sighand_child
+set(unix_shared sigstop_concurrent restart_matrix alias_async alias_build aliases cleancallsig properties queues exec_sigign close_range_all clear_sighand_child
     failed_clone_vm pending_overflow tempmask_pending rlimit_nofile
     pending_fork_signalfd sigsys_call_addr clone_mask vfork_exit
     timer_sigwait timer_signal_loss sigtimedwait sigtimedwait_queued

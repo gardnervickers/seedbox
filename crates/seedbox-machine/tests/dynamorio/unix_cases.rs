@@ -804,3 +804,15 @@ fn original_generated_lifecycle_debug_options_use_actual_debug_core() {
 fn source_process_cpu_timer_delivers_20_ticks_through_public_client() {
     triplet("properties", &["cputimer"], 1, &["ticksAtLeast 1"]);
 }
+
+#[test]
+fn original_sigstop_concurrent_jit_compute_and_four_wait_records() {
+    triplet(
+        "sigstop_concurrent",
+        &[],
+        2,
+        &[
+            "workers8 stopped200 continued200 usr1=50/50 JITstale0 computeBad0 timed4 EINTR0 wrong0 early=PENDING",
+        ],
+    );
+}
