@@ -830,10 +830,9 @@ fn original_detach_context_register_vector_flags_and_stack_matrix() {
     ] {
         for mode in ["native", "attach"] {
             let out = checked("detach_context", &[mode, case], Profile::Native, 0);
-            assert!(
-                out.stdout
-                    .contains("source register vector status stack assertions preserved")
-            );
+            assert!(out
+                .stdout
+                .contains("source register vector status stack assertions preserved"));
         }
     }
 }
@@ -855,11 +854,9 @@ fn copied_x86_relative_operands_and_raw_roundtrips_keep_original_targets() {
     assert_eq!(native.stdout, plain.stdout);
     assert_eq!(native.stdout, client.stdout);
     assert_eq!(native.stdout, "OK public client control app\n");
-    assert!(
-        client
-            .stderr
-            .contains("unix-rip-api: cases4 decoded4 raw4 roundtrips8 errors0")
-    );
+    assert!(client
+        .stderr
+        .contains("unix-rip-api: cases4 decoded4 raw4 roundtrips8 errors0"));
 }
 #[cfg(target_arch = "x86_64")]
 #[test]
