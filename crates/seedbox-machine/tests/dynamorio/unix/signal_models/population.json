@@ -1,0 +1,724 @@
+{
+  "source": "356c1821045a4b5678d0813e132074324623df6e:suite/tests/api/a64_prop_signal.c:gen_itcase",
+  "default_seed": 1,
+  "cases_per_invocation": 7,
+  "default_cases": [
+    {
+      "seed": 1,
+      "which": 0,
+      "operations": [
+        {
+          "index": 0,
+          "kind": 2,
+          "other_thread": 0,
+          "alarm_sec": 1,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 97556
+        },
+        {
+          "index": 1,
+          "kind": 0,
+          "other_thread": 1,
+          "alarm_sec": 0,
+          "value_us": 92586,
+          "interval_us": 0,
+          "wait_us": 84091
+        },
+        {
+          "index": 2,
+          "kind": 2,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 72936
+        },
+        {
+          "index": 3,
+          "kind": 0,
+          "other_thread": 1,
+          "alarm_sec": 0,
+          "value_us": 57685,
+          "interval_us": 20320,
+          "wait_us": 40134
+        },
+        {
+          "index": 4,
+          "kind": 0,
+          "other_thread": 1,
+          "alarm_sec": 0,
+          "value_us": 79342,
+          "interval_us": 0,
+          "wait_us": 62021
+        },
+        {
+          "index": 5,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 52398,
+          "interval_us": 0,
+          "wait_us": 65162
+        },
+        {
+          "index": 6,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 84258,
+          "interval_us": 0,
+          "wait_us": 33039
+        }
+      ]
+    },
+    {
+      "seed": 2,
+      "which": 1,
+      "operations": [
+        {
+          "index": 0,
+          "kind": 1,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 97556
+        },
+        {
+          "index": 1,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 92586,
+          "interval_us": 0,
+          "wait_us": 96013
+        },
+        {
+          "index": 2,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 27281
+        },
+        {
+          "index": 3,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 56044,
+          "interval_us": 0,
+          "wait_us": 96630
+        },
+        {
+          "index": 4,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 40134
+        },
+        {
+          "index": 5,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 79342,
+          "interval_us": 0,
+          "wait_us": 100522
+        }
+      ]
+    },
+    {
+      "seed": 3,
+      "which": 1,
+      "operations": [
+        {
+          "index": 0,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 22470,
+          "interval_us": 0,
+          "wait_us": 14864
+        },
+        {
+          "index": 1,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 68011,
+          "interval_us": 0,
+          "wait_us": 72936
+        },
+        {
+          "index": 2,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 57685,
+          "interval_us": 20320,
+          "wait_us": 2413
+        },
+        {
+          "index": 3,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 99646,
+          "interval_us": 0,
+          "wait_us": 78278
+        },
+        {
+          "index": 4,
+          "kind": 1,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 62021
+        }
+      ]
+    },
+    {
+      "seed": 4,
+      "which": 1,
+      "operations": [
+        {
+          "index": 0,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 92586,
+          "interval_us": 0,
+          "wait_us": 96013
+        },
+        {
+          "index": 1,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 27281
+        },
+        {
+          "index": 2,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 56044,
+          "interval_us": 0,
+          "wait_us": 96630
+        },
+        {
+          "index": 3,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 40134
+        }
+      ]
+    },
+    {
+      "seed": 5,
+      "which": 1,
+      "operations": [
+        {
+          "index": 0,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 80864,
+          "interval_us": 17091,
+          "wait_us": 97011
+        },
+        {
+          "index": 1,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 85158,
+          "interval_us": 0,
+          "wait_us": 18685
+        },
+        {
+          "index": 2,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 7413,
+          "interval_us": 18949,
+          "wait_us": 81646
+        },
+        {
+          "index": 3,
+          "kind": 1,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 78278
+        },
+        {
+          "index": 4,
+          "kind": 1,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 62021
+        },
+        {
+          "index": 5,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 52398,
+          "interval_us": 0,
+          "wait_us": 78576
+        }
+      ]
+    },
+    {
+      "seed": 6,
+      "which": 1,
+      "operations": [
+        {
+          "index": 0,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 4013,
+          "interval_us": 0,
+          "wait_us": 97011
+        },
+        {
+          "index": 1,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 85158,
+          "interval_us": 0,
+          "wait_us": 18685
+        },
+        {
+          "index": 2,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 7413,
+          "interval_us": 18949,
+          "wait_us": 81646
+        }
+      ]
+    },
+    {
+      "seed": 7,
+      "which": 1,
+      "operations": [
+        {
+          "index": 0,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 84091
+        },
+        {
+          "index": 1,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 90936,
+          "interval_us": 0,
+          "wait_us": 3044
+        },
+        {
+          "index": 2,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 66320,
+          "interval_us": 38134,
+          "wait_us": 100949
+        },
+        {
+          "index": 3,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 49278,
+          "interval_us": 25021,
+          "wait_us": 72254
+        }
+      ]
+    }
+  ],
+  "additional_prof_seed_cases": [
+    {
+      "seed": 8,
+      "which": 1,
+      "operations": [
+        {
+          "index": 0,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 68011,
+          "interval_us": 0,
+          "wait_us": 72936
+        },
+        {
+          "index": 1,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 57685,
+          "interval_us": 20320,
+          "wait_us": 2413
+        },
+        {
+          "index": 2,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 99646,
+          "interval_us": 0,
+          "wait_us": 78278
+        },
+        {
+          "index": 3,
+          "kind": 1,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 62021
+        },
+        {
+          "index": 4,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 52398,
+          "interval_us": 0,
+          "wait_us": 78576
+        },
+        {
+          "index": 5,
+          "kind": 1,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 61063
+        },
+        {
+          "index": 6,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 63155,
+          "interval_us": 0,
+          "wait_us": 33039
+        }
+      ]
+    },
+    {
+      "seed": 9,
+      "which": 1,
+      "operations": [
+        {
+          "index": 0,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 27281
+        },
+        {
+          "index": 1,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 56044,
+          "interval_us": 0,
+          "wait_us": 96630
+        },
+        {
+          "index": 2,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 40134
+        },
+        {
+          "index": 3,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 79342,
+          "interval_us": 0,
+          "wait_us": 100522
+        },
+        {
+          "index": 4,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 49822,
+          "interval_us": 0,
+          "wait_us": 63087
+        },
+        {
+          "index": 5,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 98063,
+          "interval_us": 0,
+          "wait_us": 37258
+        }
+      ]
+    },
+    {
+      "seed": 10,
+      "which": 2,
+      "operations": [
+        {
+          "index": 0,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 90936,
+          "interval_us": 0,
+          "wait_us": 3044
+        },
+        {
+          "index": 1,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 66320,
+          "interval_us": 38134,
+          "wait_us": 100949
+        },
+        {
+          "index": 2,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 49278,
+          "interval_us": 25021,
+          "wait_us": 72254
+        },
+        {
+          "index": 3,
+          "kind": 1,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 93398
+        }
+      ]
+    },
+    {
+      "seed": 11,
+      "which": 0,
+      "operations": [
+        {
+          "index": 0,
+          "kind": 2,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 72936
+        },
+        {
+          "index": 1,
+          "kind": 0,
+          "other_thread": 1,
+          "alarm_sec": 0,
+          "value_us": 57685,
+          "interval_us": 20320,
+          "wait_us": 40134
+        },
+        {
+          "index": 2,
+          "kind": 0,
+          "other_thread": 1,
+          "alarm_sec": 0,
+          "value_us": 79342,
+          "interval_us": 0,
+          "wait_us": 62021
+        },
+        {
+          "index": 3,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 52398,
+          "interval_us": 0,
+          "wait_us": 65162
+        }
+      ]
+    },
+    {
+      "seed": 12,
+      "which": 2,
+      "operations": [
+        {
+          "index": 0,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 56044,
+          "interval_us": 0,
+          "wait_us": 96630
+        },
+        {
+          "index": 1,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 40134
+        },
+        {
+          "index": 2,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 79342,
+          "interval_us": 0,
+          "wait_us": 100522
+        },
+        {
+          "index": 3,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 49822,
+          "interval_us": 0,
+          "wait_us": 63087
+        }
+      ]
+    },
+    {
+      "seed": 13,
+      "which": 0,
+      "operations": [
+        {
+          "index": 0,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 56044,
+          "interval_us": 0,
+          "wait_us": 57320
+        },
+        {
+          "index": 1,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 26949,
+          "interval_us": 0,
+          "wait_us": 78278
+        },
+        {
+          "index": 2,
+          "kind": 1,
+          "other_thread": 1,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 72254
+        },
+        {
+          "index": 3,
+          "kind": 1,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 0,
+          "interval_us": 0,
+          "wait_us": 63087
+        }
+      ]
+    },
+    {
+      "seed": 14,
+      "which": 1,
+      "operations": [
+        {
+          "index": 0,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 19630,
+          "interval_us": 35413,
+          "wait_us": 40134
+        },
+        {
+          "index": 1,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 79342,
+          "interval_us": 0,
+          "wait_us": 100522
+        },
+        {
+          "index": 2,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 49822,
+          "interval_us": 0,
+          "wait_us": 63087
+        },
+        {
+          "index": 3,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 98063,
+          "interval_us": 0,
+          "wait_us": 37258
+        },
+        {
+          "index": 4,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 68039,
+          "interval_us": 33551,
+          "wait_us": 52904
+        },
+        {
+          "index": 5,
+          "kind": 0,
+          "other_thread": 0,
+          "alarm_sec": 0,
+          "value_us": 97025,
+          "interval_us": 0,
+          "wait_us": 6962
+        }
+      ]
+    }
+  ],
+  "final_operation": "IT_SET(value=0,interval=0),wait=50000us REAL or 100000us CPU; generated operations plus final disarms total42 per invocation"
+}

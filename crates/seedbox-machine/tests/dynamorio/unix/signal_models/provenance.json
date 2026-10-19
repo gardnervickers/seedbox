@@ -1,0 +1,116 @@
+{
+  "schema": 1,
+  "seedbox_source": "f32472b7fe470367b7eddecde1ac53ad299f3a3e",
+  "dynamorio_source": "356c1821045a4b5678d0813e132074324623df6e",
+  "source_path": "suite/tests/api/a64_prop_signal.c",
+  "source_blob": "ac84ce12abc16c9972fd9aaccbf9e309dd06de1a",
+  "license": "LICENSE",
+  "source_support": "suite/tests/api/a64_dr_prop_gen.h:PRNG (splitmix64); suite/tests/api/a64_prop_support.c:variants",
+  "inventory_semantics": "Four semantic selectors in the original 659-selector plus 5079-decoder-row inventory. Not a claim of independent test count or completed migration.",
+  "records": [
+    {
+      "source_id": "DR:a64_prop_signal/storm",
+      "implementation": "storm.c",
+      "source_lines": "2226-2699;2830-2874",
+      "status": "partial-state-oracles",
+      "retained": [
+        "40 rounds, seed1, splitmix64 and original per-round timer-period/churn/poker seeds",
+        "24 exact sequential queued RT payloads per round (960 per profile), no loss or duplicate",
+        "four distinct FD waiters alternating read and raw ppoll, per-TID POSIX timers; randomized tgkill poker",
+        "SIGEV_THREAD timer callback churn and bounded detached pthread churn",
+        "delivery-plus-si_overrun accounting and synchronous sigtimedwait cut",
+        "original EINTR and notification floors; each active waiter positively completes ten interruptions",
+        "original expiration-count bounds preserved in storm_model.h with synthetic positive and negative inputs only"
+      ],
+      "adaptations": [
+        "positive semaphore acknowledgements replace incidental sleeps",
+        "controller requires all payloads, each waiter, churn, process-timer and thread-timer progress instead of randomized wall-duration",
+        "signal counters are lock-free C atomics; no private DR state",
+        "block test signals before a churn thread publishes completion; wait for all completion receipts before next round",
+        "each round's SIGEV_THREAD callback retains distinct process-lifetime storage so delayed callback cannot mutate next round"
+      ],
+      "options": {
+        "native_and_release": [
+          "default",
+          "-disable_traces"
+        ],
+        "application": [
+          "seed",
+          "waiters1..4",
+          "poker0|1",
+          "churn_max>=1"
+        ],
+        "checked_axes": [
+          "seed1/waiters4/poker1/churn8",
+          "seed1/waiters1/poker0/churn1"
+        ],
+        "debug_pending": "original -checklevel1 and A64P_STORM_DEBUG_OPS override not yet executed"
+      },
+      "remaining_gaps": [
+        "Original elapsed-wall duration and exact expected expiration interval +/-2 are not asserted. Observed accounting is not an independent exact expiration oracle.",
+        "Original three-second no-progress detector replaced by generous external positive-completion containment, not equivalent host-time assertion.",
+        "Per-waiter interrupted read/ppoll is real; no private-entry-window proof. Random schedules are stress, not deterministic proof of a particular runtime fix.",
+        "The paths-mode drreg/drx/clean-call instruction-instrumented storm is outside this standalone storm selector and remains with its owner.",
+        "An earlier -disable_traces run exceeded180s; final six storm profiles passed after restoring original volatile local spin work. No causal runtime fix or flake resolution claim."
+      ]
+    },
+    {
+      "source_id": "DR:a64_prop_signal/itimer/default",
+      "implementation": "itimer.c;timer_model.h;oracle.h;model.c",
+      "source_lines": "2879-3538",
+      "status": "partial-live-state-with-retained-synthetic-time-model",
+      "retained": [
+        "Unmodified gen_itcase generator, original seven seeds1..7, all35 generated operations plus7 final disarms",
+        "arm/rearm/disarm/getitimer/alarm, original helper-call selection, original timer-clock scheduled spin work",
+        "state checks for old interval, normalized remaining-value representation, syscall success and helper signal blocking",
+        "complete original arming/value/early/late/periodic/spurious/stall/mux model retained as pure explicit-clock-input oracle",
+        "additional seven cases seeds8..14 select PROF as well: original default selects only REAL/VIRTUAL"
+      ],
+      "remaining_gaps": [
+        "Pure model is exercised with synthetic observations and negative mutations only. No real host trace is passed to its elapsed-clock assertions.",
+        "Live remaining-time accuracy, first-expiry/periodic timing, no-spurious-expiry timing and deschedule classification remain pending policy-compatible equivalent oracle or explicit narrower authorization.",
+        "Helper uses condition variables instead of the original incidental50us polling sleep; original operation choice and process-level ownership retained.",
+        "Static dr_app start/stop harness lifecycle is replaced by a fresh external native/plain process; lifecycle-specific coverage is not claimed."
+      ]
+    },
+    {
+      "source_id": "DR:a64_prop_signal/itimer/dr-itimers",
+      "implementation": "itimer.c;client.c;oracle.h",
+      "status": "partial-live-state-current-x86-red",
+      "retained": [
+        "Public dr_set_itimer REAL3ms/VIRTUAL4ms/PROF5ms simultaneously with app timers",
+        "positive separate callback receipts for all three timer types",
+        "source default no-helper policy, explicit helper axis available through app argument0",
+        "original mux slack model 10ms + DR period + elapsed/2 in synthetic oracle only"
+      ],
+      "remaining_gaps": [
+        "Same elapsed-clock and static-harness gaps as default.",
+        "Matching-f063 release AND debug public-client startup SIGFPE136 reproduces even with pure model application (no live app timer operations); this RED does not prove the original static-harness timer workload failed. Source owner notified. No success classification.",
+        "Explicit helper-enabled multiplexed axis remains unexecuted; it is a known original itimer-reroute diagnostic, not silently equivalent to no-helper."
+      ]
+    },
+    {
+      "source_id": "DR:a64_prop_signal/itimer/prof-pcs",
+      "implementation": "itimer.c;oracle.h;runner.rs",
+      "status": "partial-live-state-genuine-debug",
+      "retained": [
+        "Actual debug -prof_pcs runtime option, original no-helper default",
+        "original10ms virtual-timer mux model in synthetic clock-input oracle"
+      ],
+      "remaining_gaps": [
+        "Same elapsed-clock and static-harness gaps as default.",
+        "No private runtime PC/cache/category inspection added. This is the original application timer model under prof_pcs, not a new assertion about internal profiler attribution.",
+        "Native ARM debug execution remains pending; cross-link is not execution."
+      ]
+    }
+  ],
+  "shared_isa_scope": "These source storm/timer policies use Linux application state and public APIs with no A64 instruction/context assumptions, so identical source is compiled for x86_64 and AArch64. No fabricated x86 replacement for original A64 instruction/context cases.",
+  "resource_contract": {
+    "release": "SEEDBOX_DYNAMORIO_FIXTURES with bin/unix-supervisor, installed bin/unix-signal-models-*, lib/libunix-signal-models-client.so and runtime/{bin64/drrun,lib64/release/libdynamorio.so}",
+    "debug": "SEEDBOX_DYNAMORIO_DEBUG_FIXTURES with matching debug-built applications/client, supervisor, runtime/bin64/drrun and runtime/lib64/debug/libdynamorio.so. Missing is setup failure, never skip/release fallback.",
+    "runtime_preparation": "Same-source public SDK/binary; build at package preparation only. No checker-time builds/downloads."
+  },
+  "native_arm": "pending",
+  "full_suite": "not run by this worker",
+  "source_support_blob": "8185a9a4b4631f89845636ddc9d3d569720aa142"
+}
