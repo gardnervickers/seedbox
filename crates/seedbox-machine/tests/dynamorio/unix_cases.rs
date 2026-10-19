@@ -733,10 +733,9 @@ fn original_generated_lifecycle_state_and_fault_oracle_spans_60_attach_rounds() 
     for variant in ["native", "default", "notraces"] {
         let out = checked("lifecycle_model", &[variant], Profile::Native, 0);
         assert!(out.stdout.contains("rounds60 blocks3/worker workers"));
-        assert!(
-            out.stdout
-                .contains("operations240 process131072 full state/fault comparisons")
-        );
+        assert!(out
+            .stdout
+            .contains("operations240 process131072 full state/fault comparisons"));
         if variant != "native" {
             assert!(out.stderr.contains("probes60"));
         }
