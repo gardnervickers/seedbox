@@ -1,5 +1,9 @@
 # Seedbox
 
+Run real Linux applications, inject failures, and replay the same execution.
+
+![Inject and heal an etcd network partition in the Seedbox TUI](docs/assets/seedbox-tui.gif)
+
 ## Build
 
 Requires Nix and a running Docker or Podman engine on Linux x86-64 or Apple
