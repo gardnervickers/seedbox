@@ -38,15 +38,18 @@ pub struct Args {
     /// The seedbox CLI to run.
     #[arg(long, default_value = "seedbox")]
     pub seedbox: PathBuf,
-    /// Server state directory (SEEDBOX_STATE for every command).
+    /// Server state directory (SEEDBOX_STATE for every command); guided
+    /// campaigns keep their findings under it.
+    /// [default: ~/seedbox-campaigns/NAME/state, NAME being the jobs file's directory]
     #[arg(long)]
-    pub state: PathBuf,
+    pub state: Option<PathBuf>,
     /// Docker-compatible engine socket URL (DOCKER_HOST for every command).
     #[arg(long)]
     pub engine: Option<String>,
     /// Directory for per-run evidence, bundles and the summary.
+    /// [default: ~/seedbox-campaigns/NAME/out]
     #[arg(long)]
-    pub out: PathBuf,
+    pub out: Option<PathBuf>,
     /// Simulations at once (a replay counts as one).
     #[arg(long, default_value_t = 2)]
     pub lanes: usize,
@@ -182,7 +185,7 @@ struct Cli<'a> {
 impl Cli<'_> {
     fn command(&self) -> Command {
         let mut command = Command::new(&self.args.seedbox);
-        command.env("SEEDBOX_STATE", &self.args.state);
+        command.env("SEEDBOX_STATE", self.args.state());
         if let Some(engine) = &self.args.engine {
             command.env("DOCKER_HOST", engine);
         }
@@ -790,10 +793,10 @@ fn ensure_server(cli: &Cli, args: &Args) -> Result<(), String> {
     if !args.serve {
         return Err(format!(
             "no seedbox server answers for state {}; start `seedbox serve` or pass --serve",
-            args.state.display()
+            args.state().display()
         ));
     }
-    let log = fs::File::create(args.out.join("serve.log")).map_err(|e| e.to_string())?;
+    let log = fs::File::create(args.out().join("serve.log")).map_err(|e| e.to_string())?;
     cli.command()
         .args(["serve", "--capacity", &args.lanes.max(1).to_string()])
         .stdin(Stdio::null())
@@ -906,7 +909,51 @@ pub fn summary(rows: &[Value]) -> String {
     lines.join("\n")
 }
 
-pub fn run(args: Args) -> u8 {
+impl Args {
+    fn state(&self) -> &Path {
+        self.state.as_deref().expect("resolved by run")
+    }
+
+    fn out(&self) -> &Path {
+        self.out.as_deref().expect("resolved by run")
+    }
+
+    /// Fill in `--state` and `--out` under `~/seedbox-campaigns/NAME`, NAME
+    /// being the directory of the jobs file (or of the first job's
+    /// scenario), so state and findings outlive temporary directories.
+    fn resolve_directories(&mut self, home: Option<&Path>) -> Result<(), String> {
+        if self.state.is_some() && self.out.is_some() {
+            return Ok(());
+        }
+        let home = home.ok_or("HOME is not set; pass --state and --out")?;
+        let anchor = self.jobs_file.clone().or_else(|| {
+            self.jobs
+                .first()
+                .map(|job| PathBuf::from(job.split(['@', ':']).next().unwrap_or(job)))
+        });
+        let name = anchor
+            .as_deref()
+            .and_then(|path| fs::canonicalize(path).ok())
+            .and_then(|path| Some(path.parent()?.file_name()?.to_owned()))
+            .unwrap_or_else(|| "campaign".into());
+        let root = home.join("seedbox-campaigns").join(name);
+        self.state.get_or_insert_with(|| root.join("state"));
+        self.out.get_or_insert_with(|| root.join("out"));
+        Ok(())
+    }
+}
+
+pub fn run(mut args: Args) -> u8 {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Err(error) = args.resolve_directories(home.as_deref()) {
+        eprintln!("error: {error}");
+        return 2;
+    }
+    eprintln!(
+        "campaign: state {}, evidence {}",
+        args.state().display(),
+        args.out().display()
+    );
     let jobs = match plan(&args) {
         Ok(jobs) => jobs,
         Err(error) => {
@@ -914,8 +961,8 @@ pub fn run(args: Args) -> u8 {
             return 2;
         }
     };
-    if let Err(error) = fs::create_dir_all(args.out.join("runs")) {
-        eprintln!("error: {}: {error}", args.out.display());
+    if let Err(error) = fs::create_dir_all(args.out().join("runs")) {
+        eprintln!("error: {}: {error}", args.out().display());
         return 2;
     }
     let cli = Cli { args: &args };
@@ -929,7 +976,7 @@ pub fn run(args: Args) -> u8 {
         fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(args.out.join("campaign.jsonl"))
+            .open(args.out().join("campaign.jsonl"))
             .ok(),
     ));
     std::thread::scope(|scope| {
@@ -940,7 +987,7 @@ pub fn run(args: Args) -> u8 {
                 let Some(job) = queue.lock().unwrap().pop_front() else {
                     return;
                 };
-                let free = free_gb(&args.state).or_else(|| free_gb(Path::new("/")));
+                let free = free_gb(args.state()).or_else(|| free_gb(Path::new("/")));
                 if free.is_some_and(|free| free < args.min_free_gb) {
                     eprintln!(
                         "campaign: {} GB free, below --min-free-gb {}; not launching {}",
@@ -955,15 +1002,8 @@ pub fn run(args: Args) -> u8 {
                     continue;
                 }
                 eprintln!("campaign: start {}", job.label);
-                let row = execute(cli, &job, &args.out, args);
-                eprintln!(
-                    "campaign: done {} id {} oracle {} replay {} {}",
-                    job.label,
-                    row["id"].as_str().unwrap_or("-"),
-                    row["oracle_exit"],
-                    row["replay"]["status"].as_str().unwrap_or("-"),
-                    row["verdict"].as_str().unwrap_or("")
-                );
+                let row = execute(cli, &job, args.out(), args);
+                eprintln!("campaign: done {}", done_line(&job.label, &row));
                 if let Some(file) = journal.lock().unwrap().as_mut() {
                     use std::io::Write;
                     let _ = writeln!(file, "{row}");
@@ -975,12 +1015,30 @@ pub fn run(args: Args) -> u8 {
     let mut rows = rows.lock().unwrap().clone();
     rows.sort_by(|a, b| a["label"].as_str().cmp(&b["label"].as_str()));
     let table = summary(&rows);
-    let _ = fs::write(args.out.join("summary.md"), format!("{table}\n"));
+    let _ = fs::write(args.out().join("summary.md"), format!("{table}\n"));
     println!("{table}");
     let failed = rows.iter().any(|r| {
         !r["error"].is_null() || r["replay"]["status"].as_str().is_some_and(|s| s != "MATCH")
     });
     u8::from(failed)
+}
+
+/// A finished run for the progress log: label, simulation, the oracle's
+/// verdict line (or its exit status when it printed none) and the replay.
+fn done_line(label: &str, row: &Value) -> String {
+    let verdict = row["verdict"]
+        .as_str()
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("no verdict (oracle exit {})", row["oracle_exit"]));
+    let replay = row["replay"]["status"]
+        .as_str()
+        .map(|status| format!("; replay {status}"))
+        .unwrap_or_default();
+    format!(
+        "{label} ({}): {verdict}{replay}",
+        row["id"].as_str().unwrap_or("not submitted")
+    )
 }
 
 #[cfg(test)]
@@ -995,6 +1053,44 @@ mod tests {
         }
         <Cli as clap::Parser>::parse_from(std::iter::once("campaign").chain(argv.iter().copied()))
             .args
+    }
+
+    #[test]
+    fn directories_default_under_home_by_the_jobs_file_directory() {
+        let dir = scratch("defaults").join("delores-rustfs");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("campaign.jobs"), "").unwrap();
+        let jobs_file = dir.join("campaign.jobs");
+        let mut args = parse(&["--jobs-file", jobs_file.to_str().unwrap()]);
+        args.resolve_directories(Some(Path::new("/home/u")))
+            .unwrap();
+        assert_eq!(
+            args.state(),
+            Path::new("/home/u/seedbox-campaigns/delores-rustfs/state")
+        );
+        assert_eq!(
+            args.out(),
+            Path::new("/home/u/seedbox-campaigns/delores-rustfs/out")
+        );
+        let mut args = parse(&["--state", "/s", "--out", "/o", "x.yaml:1"]);
+        args.resolve_directories(None).unwrap();
+        assert_eq!(
+            (args.state(), args.out()),
+            (Path::new("/s"), Path::new("/o"))
+        );
+        assert!(parse(&["x.yaml:1"]).resolve_directories(None).is_err());
+    }
+
+    #[test]
+    fn done_lines_lead_with_the_verdict() {
+        let row = json!({"id": "zh2h6vz8", "oracle_exit": 0, "replay": {"status": "MATCH"},
+                         "verdict": "VERDICT ok: 5 of 5 registers linearizable"});
+        assert_eq!(
+            done_line("cas-s1", &row),
+            "cas-s1 (zh2h6vz8): VERDICT ok: 5 of 5 registers linearizable; replay MATCH"
+        );
+        let row = json!({"id": "a", "oracle_exit": 3});
+        assert_eq!(done_line("x", &row), "x (a): no verdict (oracle exit 3)");
     }
 
     #[test]
