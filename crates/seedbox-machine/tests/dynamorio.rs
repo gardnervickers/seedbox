@@ -132,3 +132,6 @@ fn exclusive_instructions_preserve_stored_values_and_overlapping_load_base() {
 
 #[path = "dynamorio/translator_cases.rs"]
 mod translator_cases;
+
+#[path = "dynamorio/unix_cases.rs"]
+mod unix_cases;

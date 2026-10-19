@@ -2,7 +2,7 @@
 //! provenance live beside the application sources in unix/inventory.tsv.
 #[path = "unix/runner.rs"]
 mod runner;
-use runner::{Profile, checked, triplet};
+use runner::{checked, triplet, Profile};
 
 #[test]
 fn source_signal_context_and_lifecycle_properties() {
@@ -336,11 +336,9 @@ fn real_public_attach_detach_with_live_handler_and_ordered_pipe() {
     let native = checked("lifecycle", &["native"], Profile::Native, 0);
     let attached = checked("lifecycle", &["attach"], Profile::Native, 0);
     assert_eq!(attached.stdout, native.stdout);
-    assert!(
-        attached
-            .stdout
-            .contains("12 transitions, 24 ordered operations, 12 live handlers")
-    );
+    assert!(attached
+        .stdout
+        .contains("12 transitions, 24 ordered operations, 12 live handlers"));
 }
 #[cfg(target_arch = "aarch64")]
 #[test]
@@ -627,10 +625,8 @@ fn original_indirect_calls_complete_250_async_signals_through_clean_calls() {
     assert_eq!(client.code, 0, "{}", client.stderr);
     assert_eq!(native.stdout, plain.stdout);
     assert_eq!(native.stdout, client.stdout);
-    assert!(
-        client
-            .stderr
-            .contains("unix-cleancallsig: app-clean-calls=")
-    );
+    assert!(client
+        .stderr
+        .contains("unix-cleancallsig: app-clean-calls="));
     assert!(native.stdout.contains("acknowledgements 250"));
 }

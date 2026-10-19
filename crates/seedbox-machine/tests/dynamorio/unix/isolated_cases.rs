@@ -2,7 +2,7 @@
 //! dynamorio-isolated suite must preflight capabilities; none is a skip.
 #[path = "runner.rs"]
 mod runner;
-use runner::{Profile, run};
+use runner::{run, Profile};
 fn image_executed(stderr: &str) {
     assert!(
         stderr

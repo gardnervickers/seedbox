@@ -3,7 +3,8 @@
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-// The Unix owner's frozen isolated_cases module is wired here at integration.
+#[path = "dynamorio/unix/isolated_cases.rs"]
+mod isolated_cases;
 
 use seedbox_test::process::Guarded;
 use std::{path::PathBuf, process::Command};
