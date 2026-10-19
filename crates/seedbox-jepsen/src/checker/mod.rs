@@ -33,7 +33,7 @@ pub fn linearizable_summary(
     if undecided > 0 {
         rest.push(format!("{undecided} undecided: search budget exhausted"));
     }
-    let mut text = format!("{ok} of {total} {noun} linearizable");
+    let mut text = format!("{ok} of {total} {} linearizable", counted(noun, total));
     if !rest.is_empty() {
         text.push_str(&format!(" ({})", rest.join(", ")));
     }
@@ -43,10 +43,24 @@ pub fn linearizable_summary(
 /// Whether the final reads agree: "all 5 registers agree across nodes", or
 /// "2 of 5 registers divergent across nodes".
 pub fn agreement_summary(noun: &str, total: usize, divergent: usize, across: &str) -> String {
-    if divergent == 0 {
-        format!("all {total} {noun} agree across {across}")
+    if divergent > 0 {
+        format!(
+            "{divergent} of {total} {} divergent across {across}",
+            counted(noun, total)
+        )
+    } else if total == 1 {
+        format!("the {} agrees across {across}", counted(noun, 1))
     } else {
-        format!("{divergent} of {total} {noun} divergent across {across}")
+        format!("all {total} {noun} agree across {across}")
+    }
+}
+
+/// A plural noun ("registers", "keys") in the number `count` takes.
+fn counted(noun: &str, count: usize) -> &str {
+    if count == 1 {
+        noun.strip_suffix('s').unwrap_or(noun)
+    } else {
+        noun
     }
 }
 
@@ -80,6 +94,14 @@ mod tests {
         assert_eq!(
             agreement_summary("keys", 5, 2, "replicas"),
             "2 of 5 keys divergent across replicas"
+        );
+        assert_eq!(
+            linearizable_summary("registers", 1, 0, 1),
+            "0 of 1 register linearizable (1 undecided: search budget exhausted)"
+        );
+        assert_eq!(
+            agreement_summary("registers", 1, 0, "nodes"),
+            "the register agrees across nodes"
         );
         assert_eq!(
             unwritten_summary(0),

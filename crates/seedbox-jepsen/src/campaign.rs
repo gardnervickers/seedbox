@@ -26,6 +26,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
+    io::IsTerminal,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -186,6 +187,39 @@ fn plan(args: &Args) -> Result<Vec<Job>, String> {
             return Ok(jobs);
         }
     }
+}
+
+/// Colour the progress lines: stderr is a terminal and NO_COLOR is unset.
+static COLOUR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn colour() -> bool {
+    *COLOUR
+        .get_or_init(|| std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none())
+}
+
+/// Wrap `text` in an SGR `code` when `on`.
+fn paint(on: bool, code: &str, text: &str) -> String {
+    if on {
+        format!("\x1b[{code}m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+const BOLD: &str = "1";
+const DIM: &str = "2";
+const RED: &str = "1;31";
+const GREEN: &str = "32";
+const YELLOW: &str = "33";
+
+/// Print one progress line, `campaign: WORD detail`, with WORD in `code`.
+fn progress(code: &str, word: &str, detail: &str) {
+    let on = colour();
+    eprintln!(
+        "{} {} {detail}",
+        paint(on, DIM, "campaign:"),
+        paint(on, code, word)
+    );
 }
 
 /// Set by the first SIGINT, SIGTERM or SIGHUP.
@@ -1003,10 +1037,14 @@ pub fn run(mut args: Args) -> u8 {
         eprintln!("error: {error}");
         return 2;
     }
-    eprintln!(
-        "campaign: state {}, evidence {}",
-        args.state().display(),
-        args.out().display()
+    progress(
+        DIM,
+        "state",
+        &format!(
+            "{}, evidence {}",
+            args.state().display(),
+            args.out().display()
+        ),
     );
     let jobs = match plan(&args) {
         Ok(jobs) => jobs,
@@ -1046,9 +1084,13 @@ pub fn run(mut args: Args) -> u8 {
                 if interrupted() && !stopping {
                     stopping = true;
                     let active: Vec<String> = ACTIVE.lock().unwrap().iter().cloned().collect();
-                    eprintln!(
-                        "campaign: interrupted; stopping {} running simulations (again to exit at once)",
-                        active.len()
+                    progress(
+                        YELLOW,
+                        "interrupted;",
+                        &format!(
+                            "stopping {} running simulations (again to exit at once)",
+                            active.len()
+                        ),
                     );
                     for id in active {
                         cli.quiet(&["stop", &id]);
@@ -1072,11 +1114,15 @@ pub fn run(mut args: Args) -> u8 {
                 };
                 let free = free_gb(args.state()).or_else(|| free_gb(Path::new("/")));
                 if free.is_some_and(|free| free < args.min_free_gb) {
-                    eprintln!(
-                        "campaign: {} GB free, below --min-free-gb {}; not launching {}",
-                        free.unwrap_or(0),
-                        args.min_free_gb,
-                        job.label
+                    progress(
+                        YELLOW,
+                        "low disk:",
+                        &format!(
+                            "{} GB free, below --min-free-gb {}; not launching {}",
+                            free.unwrap_or(0),
+                            args.min_free_gb,
+                            job.label
+                        ),
                     );
                     rows.lock().unwrap().push(
                         json!({"label": job.label, "scenario": job.scenario, "seed": job.seed,
@@ -1084,13 +1130,13 @@ pub fn run(mut args: Args) -> u8 {
                     );
                     continue;
                 }
-                eprintln!("campaign: start {}", job.label);
+                progress(DIM, "start", &job.label);
                 let row = execute(cli, &job, args.out(), args);
                 if row["interrupted"] == true {
-                    eprintln!("campaign: stopped {}", job.label);
+                    progress(YELLOW, "stopped", &job.label);
                     continue;
                 }
-                eprintln!("campaign: done {}", done_line(&job.label, &row));
+                progress(BOLD, "done", &done_line(&job.label, &row, colour()));
                 if let Some(file) = journal.lock().unwrap().as_mut() {
                     use std::io::Write;
                     let _ = writeln!(file, "{row}");
@@ -1105,11 +1151,13 @@ pub fn run(mut args: Args) -> u8 {
     let _ = fs::write(args.out().join("summary.md"), format!("{table}\n"));
     println!("{table}");
     if started && !args.keep {
-        eprintln!("campaign: shutting down the server it started");
+        progress(DIM, "shutting down", "the server it started");
         cli.quiet(&["shutdown"]);
     } else if started {
-        eprintln!(
-            "campaign: the server keeps the simulations (--keep); stop it with `seedbox shutdown`"
+        progress(
+            DIM,
+            "keeping",
+            "the server for the kept simulations (--keep); stop it with `seedbox shutdown`",
         );
     }
     if interrupted() {
@@ -1123,18 +1171,35 @@ pub fn run(mut args: Args) -> u8 {
 
 /// A finished run for the progress log: label, simulation, the oracle's
 /// verdict line (or its exit status when it printed none) and the replay.
-fn done_line(label: &str, row: &Value) -> String {
-    let verdict = row["verdict"]
-        .as_str()
-        .filter(|v| !v.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("no verdict (oracle exit {})", row["oracle_exit"]));
+/// With `on`, the label is bold, the verdict word green, red or yellow
+/// (ok, violation, inconclusive) and the replay green only for a MATCH.
+fn done_line(label: &str, row: &Value, on: bool) -> String {
+    let verdict = match row["verdict"].as_str().filter(|v| !v.is_empty()) {
+        Some(verdict) => {
+            let (head, rest) = verdict.split_once(':').unwrap_or((verdict, ""));
+            let code = match head {
+                "VERDICT ok" => GREEN,
+                "VERDICT violation" => RED,
+                _ => YELLOW,
+            };
+            format!("{}{rest}", paint(on, code, &format!("{head}:")))
+        }
+        None => paint(
+            on,
+            RED,
+            &format!("no verdict (oracle exit {})", row["oracle_exit"]),
+        ),
+    };
     let replay = row["replay"]["status"]
         .as_str()
-        .map(|status| format!("; replay {status}"))
+        .map(|status| {
+            let code = if status == "MATCH" { GREEN } else { RED };
+            format!("; replay {}", paint(on, code, status))
+        })
         .unwrap_or_default();
     format!(
-        "{label} ({}): {verdict}{replay}",
+        "{} ({}): {verdict}{replay}",
+        paint(on, BOLD, label),
         row["id"].as_str().unwrap_or("not submitted")
     )
 }
@@ -1184,11 +1249,19 @@ mod tests {
         let row = json!({"id": "zh2h6vz8", "oracle_exit": 0, "replay": {"status": "MATCH"},
                          "verdict": "VERDICT ok: 5 of 5 registers linearizable"});
         assert_eq!(
-            done_line("cas-s1", &row),
+            done_line("cas-s1", &row, false),
             "cas-s1 (zh2h6vz8): VERDICT ok: 5 of 5 registers linearizable; replay MATCH"
         );
+        assert_eq!(
+            done_line("cas-s1", &row, true),
+            "\x1b[1mcas-s1\x1b[0m (zh2h6vz8): \x1b[32mVERDICT ok:\x1b[0m 5 of 5 registers \
+             linearizable; replay \x1b[32mMATCH\x1b[0m"
+        );
         let row = json!({"id": "a", "oracle_exit": 3});
-        assert_eq!(done_line("x", &row), "x (a): no verdict (oracle exit 3)");
+        assert_eq!(
+            done_line("x", &row, false),
+            "x (a): no verdict (oracle exit 3)"
+        );
     }
 
     #[test]
