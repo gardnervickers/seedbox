@@ -934,10 +934,8 @@ fn conclude(
                "stale_serializable": b.stale_serializable}),
     );
     let mut summary = format!(
-        "{} keys, {ops} ops ({pending} pending): {} not linearizable, {} undecided; {} revision conflicts, {} stale, {} phantom serializable reads, {} unparseable values",
-        b.keys.len(),
-        violations.len(),
-        exhausted.len(),
+        "{ops} ops ({pending} pending): {}; {} revision conflicts, {} stale, {} phantom serializable reads, {} unparseable values",
+        crate::checker::linearizable_summary("keys", b.keys.len(), violations.len(), exhausted.len()),
         b.conflicts.len(),
         b.stale.len(),
         b.phantom.len(),

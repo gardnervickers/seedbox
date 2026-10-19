@@ -556,12 +556,15 @@ fn registers(args: Arc<Args>) -> u8 {
         json!({"registers": counts, "finals": finals, "divergent": divergent, "down": down}),
     );
     let summary = format!(
-        "{} of {} registers not linearizable, {} undecided; {} acknowledged writes and compare-and-sets; {} registers divergent across nodes{}",
-        violations.len(),
-        ids.len(),
-        exhausted.len(),
+        "{}; {} acknowledged writes and compare-and-sets; {}{}",
+        crate::checker::linearizable_summary(
+            "registers",
+            ids.len(),
+            violations.len(),
+            exhausted.len()
+        ),
         acknowledged,
-        divergent.len(),
+        crate::checker::agreement_summary("registers", ids.len(), divergent.len(), "nodes"),
         never_answered(&down)
     );
     // An undecided register is a failed test, not an unevaluated property.

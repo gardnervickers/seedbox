@@ -431,19 +431,20 @@ pub fn run(args: Args) -> u8 {
                "unwritten": unwritten.iter().take(10).collect::<Vec<_>>()}),
     );
     let summary = format!(
-        "{} of {} keys not linearizable, {} undecided; {} acknowledged writes; {} keys divergent across replicas; {} reads of bytes no client wrote{}",
-        violations.len(),
-        keys.len(),
-        exhausted.len(),
+        "{}; {} acknowledged writes; {}; {}{}",
+        crate::checker::linearizable_summary("keys", keys.len(), violations.len(), exhausted.len()),
         acknowledged,
-        divergent.len(),
-        unwritten.len(),
+        crate::checker::agreement_summary("keys", keys.len(), divergent.len(), "replicas"),
+        crate::checker::unwritten_summary(unwritten.len()),
         if down.is_empty() {
             String::new()
         } else {
             format!(
                 "; {} never answered again after the faults ended",
-                down.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                down.iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         }
     );

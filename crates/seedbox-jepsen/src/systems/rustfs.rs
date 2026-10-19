@@ -699,11 +699,9 @@ fn register(s3: Arc<S3>, args: &Args, bucket: &str) -> u8 {
         json!({"keys": counts, "unwritten": unwritten.iter().take(10).collect::<Vec<_>>()}),
     );
     let summary = format!(
-        "{} of {} keys not linearizable, {} undecided; {} reads of bytes no client wrote{}{}",
-        violations.len(),
-        keys.len(),
-        exhausted.len(),
-        unwritten.len(),
+        "{}; {}{}{}",
+        crate::checker::linearizable_summary("keys", keys.len(), violations.len(), exhausted.len()),
+        crate::checker::unwritten_summary(unwritten.len()),
         refusal_windows(&refusals.lock().unwrap()),
         unrecovered(&down)
     );
