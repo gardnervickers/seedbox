@@ -723,3 +723,22 @@ fn asynchronous_alias_suspend_control_preserves_context() {
 fn asynchronous_alias_flush_control_preserves_context() {
     check_asynchronous_alias_context("flush");
 }
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn original_generated_lifecycle_state_and_fault_oracle_spans_60_attach_rounds() {
+    // Full original generator/state oracle; each worker admits3 blocks using
+    // two identical native executions before any DR attach. Debug-only nocas /
+    // steal27 remain explicitly pending a matching ARM debug SDK.
+    for variant in ["native", "default", "notraces"] {
+        let out = checked("lifecycle_model", &[variant], Profile::Native, 0);
+        assert!(out.stdout.contains("rounds60 blocks3/worker workers"));
+        assert!(
+            out.stdout
+                .contains("operations240 process131072 full state/fault comparisons")
+        );
+        if variant != "native" {
+            assert!(out.stderr.contains("probes60"));
+        }
+    }
+}

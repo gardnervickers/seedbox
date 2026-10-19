@@ -68,3 +68,13 @@ set_target_properties(unix_alias_build_client PROPERTIES OUTPUT_NAME unix-alias-
 configure_DynamoRIO_client(unix_alias_build_client)
 target_link_options(unix_alias_build_client PRIVATE -nostdlib)
 install(TARGETS unix_alias_build_client LIBRARY DESTINATION lib)
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    add_executable(unix_lifecycle_model lifecycle_model.c state_model.c)
+    set_target_properties(unix_lifecycle_model PROPERTIES OUTPUT_NAME unix-lifecycle_model)
+    target_compile_options(unix_lifecycle_model PRIVATE -O2 -g -fno-omit-frame-pointer)
+    target_link_options(unix_lifecycle_model PRIVATE -rdynamic)
+    configure_DynamoRIO_static(unix_lifecycle_model)
+    target_link_libraries(unix_lifecycle_model pthread dl rt)
+    install(TARGETS unix_lifecycle_model RUNTIME DESTINATION bin)
+endif()
