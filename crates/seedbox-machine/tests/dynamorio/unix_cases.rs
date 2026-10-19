@@ -2,6 +2,8 @@
 //! provenance live beside the application sources in unix/inventory.tsv.
 #[path = "unix/runner.rs"]
 mod runner;
+#[path = "unix/signal_models_cases.rs"]
+mod signal_models_cases;
 use runner::{checked, triplet, Profile};
 
 #[test]

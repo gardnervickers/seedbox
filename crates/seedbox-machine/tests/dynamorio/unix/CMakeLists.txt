@@ -1,4 +1,5 @@
 # All application images use only libc/Linux interfaces. Each selector is a fresh image.
+add_subdirectory(signal_models)
 set(unix_shared alias_async alias_build aliases cleancallsig properties queues exec_sigign close_range_all clear_sighand_child
     failed_clone_vm pending_overflow tempmask_pending rlimit_nofile
     pending_fork_signalfd sigsys_call_addr clone_mask vfork_exit

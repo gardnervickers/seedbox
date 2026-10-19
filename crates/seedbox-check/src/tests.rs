@@ -246,13 +246,34 @@ fn dynamorio_suite_is_unprivileged_native_and_requires_prepared_inputs() {
     h.kvm = None;
     h.tools.clear();
     h.root_prefix = None;
-    let env = env(&[("SEEDBOX_DYNAMORIO_FIXTURES", temp.0.to_str().unwrap())]);
+    let release_only = env(&[("SEEDBOX_DYNAMORIO_FIXTURES", temp.0.to_str().unwrap())]);
     fs::create_dir_all(temp.0.join("bin")).unwrap();
     fs::create_dir_all(temp.0.join("runtime/bin64")).unwrap();
     fs::create_dir_all(temp.0.join("lib")).unwrap();
     install_executable(&temp.0.join("runtime/bin64/drrun"), "fixture");
     install_executable(&temp.0.join("bin/application"), "fixture");
     fs::write(temp.0.join("lib/libpreserve.so"), "fixture").unwrap();
+    assert!(requirements(Suite::Dynamorio, &h, &release_only, &temp.0)
+        .iter()
+        .any(|reason| reason.contains("SEEDBOX_DYNAMORIO_DEBUG_FIXTURES")));
+    fs::create_dir_all(temp.0.join("runtime/lib64/debug")).unwrap();
+    fs::write(
+        temp.0.join("runtime/lib64/debug/libdynamorio.so"),
+        "fixture",
+    )
+    .unwrap();
+    install_executable(&temp.0.join("bin/unix-supervisor"), "fixture");
+    install_executable(&temp.0.join("bin/unix-signal-models-itimer"), "fixture");
+    assert!(
+        requirements(Suite::Dynamorio, &h, &release_only, &temp.0)
+            .iter()
+            .any(|reason| reason.contains("SEEDBOX_DYNAMORIO_DEBUG_FIXTURES")),
+        "release input never implicitly supplies debug fixtures"
+    );
+    let env = env(&[
+        ("SEEDBOX_DYNAMORIO_FIXTURES", temp.0.to_str().unwrap()),
+        ("SEEDBOX_DYNAMORIO_DEBUG_FIXTURES", temp.0.to_str().unwrap()),
+    ]);
     for arch in ["x86_64", "aarch64"] {
         h.machine = arch.into();
         assert!(requirements(Suite::Dynamorio, &h, &env, &temp.0).is_empty());

@@ -1,11 +1,11 @@
-{ pkgs }:
+{ pkgs, debug ? false }:
 let
   source = ../../vendor/dynamorio;
 in
 assert pkgs.lib.assertMsg (builtins.pathExists (source + "/CMakeLists.txt"))
   "DynamoRIO submodule missing; run git submodule update --init --recursive vendor/dynamorio from the Seedbox checkout.";
 pkgs.stdenv.mkDerivation {
-  pname = "seedbox-dynamorio";
+  pname = "seedbox-dynamorio${pkgs.lib.optionalString debug "-debug"}";
   version = "11.3.0-1";
   src = pkgs.lib.cleanSource source;
   # Export the public SDK and runtime from one configuration. drsyms needs
@@ -25,7 +25,7 @@ pkgs.stdenv.mkDerivation {
   '';
   nativeBuildInputs = with pkgs.buildPackages; [ cmake ninja perl python3 ];
   cmakeFlags = [
-    "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
+    "-DCMAKE_BUILD_TYPE=${if debug then "Debug" else "RelWithDebInfo"}"
     "-DREADELF_EXECUTABLE=${pkgs.stdenv.cc.bintools}/bin/${pkgs.stdenv.cc.targetPrefix}readelf"
     "-DCMAKE_ASM_COMPILER=${pkgs.stdenv.cc.bintools}/bin/${pkgs.stdenv.cc.targetPrefix}as"
     # Upstream compiles C as gnu99 but probes types before setting that flag.

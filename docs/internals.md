@@ -114,6 +114,7 @@ From the checkout root inside the development shell:
 ```sh
 seedbox_flake=$(bash tools/dev-flake.sh)
 export SEEDBOX_DYNAMORIO_FIXTURES=$(nix build "$seedbox_flake#dynamorioTestFixtures" --no-link --print-out-paths)
+export SEEDBOX_DYNAMORIO_DEBUG_FIXTURES=$(nix build "$seedbox_flake#dynamorioDebugTestFixtures" --no-link --print-out-paths)
 bash harness/check.sh dynamorio
 ```
 
@@ -121,6 +122,10 @@ The checker requires prepared fixtures before building and runs portable checks
 first; portable's `--all-features --no-run` compiles the integration entrypoint.
 Cargo discovers cases in the feature-gated target. For a focused development run,
 use `cargo test -p seedbox-machine --features dynamorio-tests --test dynamorio`.
+The separate debug fixture package builds its public SDK, runtime and clients
+from the same source with `Debug`; `prof_pcs` cases require that explicit input.
+Signal storm and interval-timer models retain their source populations and pure
+clock-input oracles. Live elapsed-clock timing equivalence remains incomplete.
 [Hosted CI](../.github/workflows/dynamorio-tests.yml) runs both native architectures.
 
 The separate `dynamorio-isolated` suite requires positive namespace and cgroup

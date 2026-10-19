@@ -1,6 +1,7 @@
-{ pkgs }:
+{ pkgs, debug ? false }:
 let
-  runtime = import ./dynamorio.nix { inherit pkgs; };
+  runtime = import ./dynamorio.nix { inherit pkgs debug; };
+  configuration = if debug then "debug" else "release";
   # Exact WhiteBox sources from PR317's JDK21 runtime fixture, fetched during
   # the Nix build. Runtime tests never retrieve or compile dependencies.
   whitebox = pkgs.fetchurl {
@@ -12,7 +13,7 @@ let
     sha256 = "f807936a68041072ca4a8b217e279890e50cbbcca2874488ed11dea70e2952e7";
   };
 in pkgs.stdenv.mkDerivation {
-  pname = "seedbox-dynamorio-test-fixtures";
+  pname = "seedbox-dynamorio-test-fixtures${pkgs.lib.optionalString debug "-debug"}";
   version = "0.1.0";
   src = ./tests/dynamorio;
   nativeBuildInputs = with pkgs; [
@@ -20,7 +21,7 @@ in pkgs.stdenv.mkDerivation {
     beam28Packages.erlang luajit dotnet-sdk_10
   ];
   cmakeFlags = [
-    "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
+    "-DCMAKE_BUILD_TYPE=${if debug then "Debug" else "RelWithDebInfo"}"
     "-DDynamoRIO_DIR=${runtime}/cmake"
     "-DSEEDBOX_UNIX_STATIC_LIBC_DIR=${pkgs.glibc.static}/lib"
     "-DSEEDBOX_JDK21_HOME=${pkgs.jdk21}"
@@ -32,7 +33,7 @@ in pkgs.stdenv.mkDerivation {
     # Clients use only this build's public core/extensions, including after
     # the build tree is removed. Applications retain their normal libc RPATH.
     for client in "$out"/lib/*.so; do
-      patchelf --add-rpath '${runtime}/lib64/release:${runtime}/ext/lib64/release' "$client"
+      patchelf --add-rpath '${runtime}/lib64/${configuration}:${runtime}/ext/lib64/${configuration}' "$client"
     done
     substituteInPlace "$out/bin/seedbox-dr-pid1" \
       --replace-fail '#!/usr/bin/env python3' '#!${pkgs.python313}/bin/python3'

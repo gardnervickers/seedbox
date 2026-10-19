@@ -2,7 +2,7 @@
 //! equivalence. Clock-oracle gaps and option axes are in signal_models/provenance.json.
 #[path = "signal_models/runner.rs"]
 mod signal_runner;
-use signal_runner::{Profile, run};
+use signal_runner::{run, Profile};
 
 #[test]
 fn original_signal_timer_pure_model() {
