@@ -1,0 +1,9 @@
+{
+  "origin": "Seedbox-authored public regression for the R20 signal-disposition finding",
+  "source_base": "30bfb244fcf82ed9ac026863d75f68a70004d22d",
+  "application": "signal_disposition.c",
+  "client": "signal_disposition_client.c",
+  "contract": "DR_SIGNAL_SUPPRESS and application SIG_IGN preserve a raw read's result and payload; client/handler acknowledgement precedes payload production",
+  "population": "256 request/signal/receipt/payload rounds per process",
+  "coverage_limit": "Public coordination proves signal disposition and raw completion, but does not deterministically force the private fcache-enter window"
+}

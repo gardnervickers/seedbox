@@ -896,3 +896,46 @@ fn source_rlimit_kernel_visibility_and_fork_exec() {
 
 #[path = "unix/shared_signal_handoff/cases.rs"]
 mod shared_signal_handoff_cases;
+
+#[test]
+fn signal_suppression_and_ignored_delivery_preserve_raw_reads() {
+    let native = checked("signal_disposition", &["native"], Profile::Native, 0);
+    assert_eq!(
+        native.stdout,
+        "reads 256 payloads 256 receipts 256 rawEintr 0\nOK\n"
+    );
+    for (mode, receipt) in [
+        (
+            "suppress",
+            "disposition-client: suppressed=256 ignored=0 defaulted=0 bypassed=0",
+        ),
+        (
+            "ignore",
+            "disposition-client: suppressed=0 ignored=256 defaulted=0 bypassed=0",
+        ),
+        (
+            "default",
+            "disposition-client: suppressed=0 ignored=0 defaulted=256 bypassed=0",
+        ),
+        (
+            "bypass",
+            "disposition-client: suppressed=0 ignored=0 defaulted=0 bypassed=256",
+        ),
+    ] {
+        let out = runner::run_with_options(
+            "signal_disposition",
+            &[mode],
+            Profile::Client,
+            None,
+            &[],
+            Some(("libunix-signal-disposition.so", &[])),
+        );
+        assert_eq!(out.code, 0, "{mode}: {}", out.stderr);
+        assert_eq!(out.stdout, native.stdout, "{mode}: {}", out.stderr);
+        assert!(
+            out.stderr.lines().any(|line| line == receipt),
+            "{}",
+            out.stderr
+        );
+    }
+}
