@@ -225,16 +225,6 @@ fn source_exec_descriptors_raw_clone_and_failure_rollback() {
             ],
         );
     }
-    triplet(
-        "rlimit_nofile",
-        &[],
-        2,
-        &[
-            "exec'd limit 2048",
-            "limits kernel-visible set/get/prlimit fork/exec preserved",
-            "OK",
-        ],
-    );
     for mode in ["thread", "vm"] {
         triplet(
             "clone_mask",
@@ -878,3 +868,17 @@ mod fd_limits_cases;
 mod cache_publication_cases;
 #[path = "unix/timer_state/cases.rs"]
 mod timer_state_cases;
+
+#[test]
+fn source_rlimit_kernel_visibility_and_fork_exec() {
+    triplet(
+        "rlimit_nofile",
+        &[],
+        2,
+        &[
+            "exec'd limit 2048",
+            "limits kernel-visible set/get/prlimit fork/exec preserved",
+            "OK",
+        ],
+    );
+}
