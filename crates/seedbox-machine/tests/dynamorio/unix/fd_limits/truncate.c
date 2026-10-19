@@ -4,7 +4,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -15,10 +14,10 @@ main(void)
 {
     /* The Rust owner supplies a fresh working directory and removes it even
      * if the supervised application fails or must be terminated. */
-    char name[] = "truncate-XXXXXX";
-    int retained = mkstemp(name);
+    const char *name = "retained";
+    int retained = open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
     if (retained < 0) {
-        perror("mkstemp");
+        perror("create retained file");
         return 2;
     }
     int result = 2, opened = -1;
@@ -52,7 +51,8 @@ main(void)
 cleanup:
     if (opened >= 0)
         close(opened);
-    if (unlink(name) || close(retained)) {
+    /* Rust also inspects the bytes after exit, including a fatal runtime error. */
+    if (close(retained)) {
         perror("cleanup retained file");
         return 2;
     }

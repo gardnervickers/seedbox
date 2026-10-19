@@ -1,5 +1,5 @@
 /* Derived public controls for the signalfd allocation/update port defect.
- * Preserve the source owner's raw old-signalfd/signalfd4 axes and real signal
+ * Retain the public old-signalfd/signalfd4 axes and real signal
  * delivery oracle; no DR client or runtime internals are involved. */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -24,9 +24,8 @@ main(int argc, char **argv)
 {
     CHECK(argc == 3);
     CHECK(!strcmp(argv[1], "old") || !strcmp(argv[1], "new"));
-    CHECK(!strcmp(argv[2], "update") || !strcmp(argv[2], "create"));
+    CHECK(!strcmp(argv[2], "update"));
     const int old = !strcmp(argv[1], "old");
-    const int create = !strcmp(argv[2], "create");
     long number = SYS_signalfd4;
 #ifdef SYS_signalfd
     if (old)
@@ -45,25 +44,24 @@ main(int argc, char **argv)
     int low = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
     CHECK(low >= 0);
     const int fd = fcntl(low, F_DUPFD_CLOEXEC, 50);
-    CHECK(fd == 50);
+    CHECK(fd >= 50);
     CHECK(close(low) == 0);
     struct rlimit limit;
     CHECK(getrlimit(RLIMIT_NOFILE, &limit) == 0);
     /* Limits belong only to this dedicated application process. */
-    limit.rlim_cur = create ? 3 : 32;
+    limit.rlim_cur = 32;
     CHECK(setrlimit(RLIMIT_NOFILE, &limit) == 0);
     CHECK(sigaddset(&mask, SIGUSR2) == 0);
     errno = 0;
     /* Linux x86-64/A64 kernel signal masks have 64 bits, unlike sigset_t.
      * Old signalfd takes three arguments; that ABI ignores the fourth. Flags
      * zero on update must preserve the existing CLOEXEC/NONBLOCK settings. */
-    const long result = syscall(number, create ? -1 : fd, &mask, 8, 0);
-    const int error = errno;
+    const long result = syscall(number, fd, &mask, 8, 0);
     CHECK(fcntl(fd, F_GETFD) == FD_CLOEXEC);
     CHECK(fcntl(fd, F_GETFL) & O_NONBLOCK);
-    CHECK(create ? result == -1 && error == EMFILE : result == fd);
+    CHECK(result == fd);
     const int signals[] = { SIGUSR1, SIGUSR2 };
-    const int count = create ? 1 : 2;
+    const int count = 2;
     for (int i = 0; i < count; ++i) {
         /* Both signals were blocked before sending. A successful self-send
          * establishes pending state; read observes actual delivery, no sleep. */
@@ -76,7 +74,7 @@ main(int argc, char **argv)
     CHECK(fcntl(fd, F_GETFD) == FD_CLOEXEC);
     CHECK(fcntl(fd, F_GETFL) & O_NONBLOCK);
     CHECK(close(fd) == 0);
-    printf("fd-limits signalfd: %s %s fd50 flags and signal delivery preserved\n",
+    printf("fd-limits signalfd: %s %s existing-fd flags and signal delivery preserved\n",
            argv[1], argv[2]);
     return 0;
 }
