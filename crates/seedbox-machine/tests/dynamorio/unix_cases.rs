@@ -230,9 +230,8 @@ fn source_exec_descriptors_raw_clone_and_failure_rollback() {
         &[],
         2,
         &[
-            "limit 16 16",
-            "opened 13 until EMFILE",
-            "exec'd limit 16 16",
+            "exec'd limit 2048",
+            "limits kernel-visible set/get/prlimit fork/exec preserved",
             "OK",
         ],
     );
