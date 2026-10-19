@@ -132,7 +132,7 @@ fn write_fixture_logs(
     logs: &[(&str, Option<&[u8]>)],
 ) {
     use sb::store::ContentDigest;
-    std::fs::create_dir_all(path.join("output/machines")).unwrap();
+    std::fs::create_dir_all(path.join("output/machines/machines")).unwrap();
     // Synthetic fixture descriptions are encoded into the CURRENT retained
     // formats here. No production legacy world-report decoder participates.
     let state = raw.and_then(|raw| {
@@ -162,10 +162,13 @@ fn write_fixture_logs(
         }
         (!machines.is_empty()).then(|| serde_json::to_vec(&sb::evidence::StateReport { version: 1, machines }).unwrap())
     });
-    let logs = std::iter::once((sb::evidence::STATE_REPORT, state.as_deref())).chain(logs.iter().copied());
+    let report_log = format!("{}/{}", sb::evidence::MACHINE_OUTPUT_DIR, sb::evidence::STATE_REPORT);
+    let logs = std::iter::once((report_log.as_str(), state.as_deref())).chain(logs.iter().copied());
     for (name, bytes) in logs {
         if let Some(bytes) = bytes {
-            std::fs::write(path.join("output").join(name), bytes).unwrap();
+            let destination = path.join("output").join(name);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::write(destination, bytes).unwrap();
             record.logs.insert(name.into(), ContentDigest::of(bytes));
         }
     }
@@ -194,6 +197,7 @@ fn write_pages(path: &std::path::Path, record: &mut sb::record::RunRecord, pfns:
     for pfn in pfns {
         bytes[pfn * 8..pfn * 8 + 8].copy_from_slice(&0x0123456789abcdefu64.to_le_bytes());
     }
-    std::fs::write(path.join("output/machines/server.pages"), &bytes).unwrap();
-    record.logs.insert("machines/server.pages".into(), sb::store::ContentDigest::of(&bytes));
+    std::fs::create_dir_all(path.join("output/machines/machines")).unwrap();
+    std::fs::write(path.join("output/machines/machines/server.pages"), &bytes).unwrap();
+    record.logs.insert("machines/machines/server.pages".into(), sb::store::ContentDigest::of(&bytes));
 }

@@ -217,6 +217,22 @@ fn attempt_directory(state: &Path, id: &str) -> Result<PathBuf> {
     found.ok_or_else(|| format!("no retained attempt for simulation {id}"))
 }
 
+fn copy_state_report(
+    attempt: &Path,
+    destination: &Path,
+    logs: &std::collections::BTreeMap<String, seedbox_application::store::ContentDigest>,
+) -> Result<()> {
+    let name = format!("machines/{}", seedbox_application::evidence::STATE_REPORT);
+    let bytes = diagnostic_bytes(&attempt.join("output").join(&name))?;
+    if logs.get(&name) != Some(&seedbox_application::store::ContentDigest::of(&bytes)) {
+        return Err("stopped-state report log digest mismatch".into());
+    }
+    let state: seedbox_application::evidence::StateReport =
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    state.validate().map_err(|e| e.to_string())?;
+    fs::write(destination, bytes).map_err(|e| e.to_string())
+}
+
 impl Cli {
     fn capture_comparison_failure(&self, baseline: &str, repeated: &str) {
         let capture = || -> Result<()> {
@@ -232,18 +248,14 @@ impl Cli {
                         manifest,
                     )
                     .map_err(|e| e.to_string())?;
-                    let name = seedbox_application::evidence::STATE_REPORT;
-                    let bytes = diagnostic_bytes(&attempt.join("output").join(name))?;
-                    if record.logs.get(name)
-                        != Some(&seedbox_application::store::ContentDigest::of(&bytes))
-                    {
-                        return Err("stopped-state report log digest mismatch".into());
-                    }
-                    let state: seedbox_application::evidence::StateReport =
-                        serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-                    state.validate().map_err(|e| e.to_string())?;
-                    fs::write(self.directory.join(format!("{label}-{name}")), bytes)
-                        .map_err(|e| e.to_string())?;
+                    copy_state_report(
+                        attempt,
+                        &self.directory.join(format!(
+                            "{label}-{}",
+                            seedbox_application::evidence::STATE_REPORT
+                        )),
+                        &record.logs,
+                    )?;
                     Ok(())
                 };
                 if let Err(error) = copy() {
@@ -251,6 +263,9 @@ impl Cli {
                 }
             }
             // These readers verify retained log digests and never execute guests.
+            let state = seedbox_application::diff::diff(&left, &right)
+                .map_err(|e| e.to_string())
+                .and_then(|report| serde_json::to_vec_pretty(&report).map_err(|e| e.to_string()));
             let divergence = seedbox_application::diff::replay_divergence(&left, &right)
                 .map_err(|e| e.to_string())
                 .and_then(|report| serde_json::to_vec_pretty(&report).map_err(|e| e.to_string()));
@@ -258,6 +273,7 @@ impl Cli {
                 .map_err(|e| e.to_string())
                 .and_then(|report| serde_json::to_vec_pretty(&report).map_err(|e| e.to_string()));
             for (name, report) in [
+                ("compare-state.json", state),
                 ("compare-divergence.json", divergence),
                 ("compare-ram-pages.json", pages),
             ] {
@@ -529,6 +545,50 @@ pub fn run(backend: Backend) {
 mod tests {
     use super::*;
     use std::{collections::BTreeMap, ffi::OsStr};
+
+    #[test]
+    fn comparison_capture_copies_state_from_retained_machine_output() {
+        use seedbox_application::{evidence::*, store::ContentDigest};
+        let temporary = tempfile::tempdir().unwrap();
+        let attempt = temporary.path().join("attempt");
+        let output = attempt.join("output/machines");
+        fs::create_dir_all(&output).unwrap();
+        let layout = [0u64.to_le_bytes(), 4096u64.to_le_bytes()].concat();
+        let report = StateReport {
+            version: 1,
+            machines: BTreeMap::from([(
+                "oracle".into(),
+                StateCapture {
+                    boot: 1,
+                    disposition: StateDisposition::Live,
+                    digest: ContentDigest::of(b"stopped-state"),
+                    parts: BTreeMap::from([
+                        ("ram".into(), ContentDigest::of(b"ram")),
+                        ("ram_regions".into(), ContentDigest::of(&layout)),
+                    ]),
+                    regions: vec![RamRegion {
+                        base: 0,
+                        length: 4096,
+                    }],
+                    page_log: "machines/state-0.pages".into(),
+                },
+            )]),
+        };
+        let bytes = serde_json::to_vec(&report).unwrap();
+        fs::write(output.join(STATE_REPORT), &bytes).unwrap();
+        // Page hashes and VM RAM/disks are unnecessary for metadata capture.
+        let logs = BTreeMap::from([(
+            format!("machines/{STATE_REPORT}"),
+            ContentDigest::of(&bytes),
+        )]);
+        let destination = temporary.path().join("baseline-driver-state.json");
+        copy_state_report(&attempt, &destination, &logs).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), bytes);
+        assert_eq!(
+            serde_json::from_slice::<StateReport>(&fs::read(destination).unwrap()).unwrap(),
+            report
+        );
+    }
 
     #[test]
     fn diagnostic_files_preserve_bytes_and_reject_oversized_evidence() {

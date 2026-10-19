@@ -350,23 +350,30 @@ mod page_evidence_tests {
             machines: BTreeMap::from([("oracle".into(), capture)]),
         };
         f.backend.extra_logs.insert(
-            seedbox_application::evidence::STATE_REPORT.into(),
+            "machines/driver-state.json".into(),
             serde_json::to_vec(&state).unwrap(),
         );
         f.backend
             .extra_logs
-            .insert("machines/oracle.pages".into(), pages);
+            .insert("machines/machines/oracle.pages".into(), pages);
     }
 
     #[test]
     fn full_state_replay_adds_page_evidence_without_changing_verdicts_or_old_json_fields() {
         let (mut f, mut raw) = full_state_fixture();
         let first = f.run();
-        assert!(first.record.logs.contains_key("machines/oracle.pages"));
+        assert!(first
+            .record
+            .logs
+            .contains_key("machines/machines/oracle.pages"));
         assert_eq!(
-            fs::metadata(first.directory.join("output/machines/oracle.pages"))
-                .unwrap()
-                .len(),
+            fs::metadata(
+                first
+                    .directory
+                    .join("output/machines/machines/oracle.pages")
+            )
+            .unwrap()
+            .len(),
             1024 * 1024
         );
         let matched = f.replay(&first);
