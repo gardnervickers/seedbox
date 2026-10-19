@@ -35,6 +35,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          # Validate the published PR head, preserving the frozen source inputs.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           submodules: recursive
       - uses: cachix/install-nix-action@v31
         with:
@@ -55,7 +57,15 @@ jobs:
           echo "SEEDBOX_DYNAMORIO_FIXTURES=$fixtures" >> "$GITHUB_ENV"
           debug_fixtures=$(nix build "$seedbox_flake#dynamorioDebugTestFixtures" --out-link "$RUNNER_TEMP/dr-debug-fixtures" --print-out-paths)
           echo "SEEDBOX_DYNAMORIO_DEBUG_FIXTURES=$debug_fixtures" >> "$GITHUB_ENV"
-      - name: Portable prerequisites then ordinary and isolated native tests
+      - name: Portable prerequisites and ordinary native tests
+        run: |
+          seedbox_flake=$(bash tools/dev-flake.sh)
+          uname -m
+          git rev-parse HEAD
+          git -C vendor/dynamorio rev-parse HEAD
+          nix develop "$seedbox_flake" --command bash harness/check.sh portable dynamorio
+      - name: Separate isolated native fixture validation
+        if: ${{ !cancelled() }}
         run: |
           seedbox_flake=$(bash tools/dev-flake.sh)
           export SEEDBOX_DYNAMORIO_PID1_LAUNCHER="$SEEDBOX_DYNAMORIO_FIXTURES/bin/seedbox-dr-pid1"
@@ -64,4 +74,4 @@ jobs:
           # Missing parent pids delegation is an explicit setup failure.
           sudo --preserve-env=PATH,SEEDBOX_DYNAMORIO_FIXTURES,SEEDBOX_DYNAMORIO_DEBUG_FIXTURES,SEEDBOX_DYNAMORIO_PID1_LAUNCHER,CARGO_TARGET_DIR,CARGO_INCREMENTAL,CARGO_PROFILE_DEV_DEBUG,CARGO_PROFILE_TEST_DEBUG \
             python3 tools/dynamorio-ci/cgroup.py --uid "$(id -u)" --gid "$(id -g)" -- \
-            nix develop "$seedbox_flake" --command bash harness/check.sh dynamorio dynamorio-isolated
+            nix develop "$seedbox_flake" --command bash harness/check.sh dynamorio-isolated
