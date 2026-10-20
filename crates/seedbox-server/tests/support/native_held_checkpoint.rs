@@ -79,7 +79,7 @@ pub async fn native_held_checkpoint(backend: CpuBackend) {
 
         request.spec.program.push(seedbox_spec::definition::Override {
             id: KEY.into(), at_ns: at, timeout_ns: 1_000_000_000,
-            action: serde_json::to_value(seedbox_control::Action::Throttle {
+            action: serde_json::to_value(seedbox_engine_protocol::control::Action::Throttle {
                 handle: "held-scale".into(), machine: "oracle".into(), factor_permille: 2000,
             }).unwrap(),
         });
@@ -144,7 +144,6 @@ pub async fn native_held_checkpoint(backend: CpuBackend) {
 
         session.client.stop(&source).await.unwrap();
         session.complete(&source, true, 1, 123).await;
-        session.client.delete_checkpoint(&source, "held").await.unwrap();
         session.client.delete(&source).await.unwrap();
         assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
 

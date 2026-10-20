@@ -1,5 +1,7 @@
 //! Retained run records, identities and manifest persistence.
 use crate::{config::Simulation, execution::*, store::ContentDigest, Error, Result};
+use seedbox_api::SimulationId;
+pub use seedbox_api::{ComparisonStatus, SimulationComparison};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -32,24 +34,6 @@ pub enum Outcome {
     Error,
     Timeout,
     Incomplete,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ReplayStatus {
-    Match,
-    Mismatch,
-    NotComparable,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReplayComparison {
-    pub status: ReplayStatus,
-    pub outcome_matches: bool,
-    pub witness_matches: Option<bool>,
-    pub full_state_matches: Option<bool>,
-    pub fault_history_matches: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,7 +115,11 @@ pub fn write_record(directory: &Path, record: &RunRecord) -> Result<()> {
 }
 
 /// Compare retained result evidence; callers separately establish input compatibility.
-pub fn compare(baseline: &RunRecord, fresh: &RunRecord) -> ReplayComparison {
+pub fn compare(
+    baseline: (&SimulationId, &RunRecord),
+    simulation: (&SimulationId, &RunRecord),
+) -> SimulationComparison {
+    let ((baseline_id, baseline), (simulation_id, fresh)) = (baseline, simulation);
     let outcome_matches = baseline.outcome == fresh.outcome;
     let evidence = |record: &RunRecord| {
         record.report.as_ref().is_some_and(|r| {
@@ -168,18 +156,20 @@ pub fn compare(baseline: &RunRecord, fresh: &RunRecord) -> ReplayComparison {
             _ => (None, None, false, false),
         };
     let status = if !comparable {
-        ReplayStatus::NotComparable
+        ComparisonStatus::NotComparable
     } else if outcome_matches
         && result_matches
         && witness_matches == Some(true)
         && full_state_matches != Some(false)
         && fault_history_matches
     {
-        ReplayStatus::Match
+        ComparisonStatus::Match
     } else {
-        ReplayStatus::Mismatch
+        ComparisonStatus::Mismatch
     };
-    ReplayComparison {
+    SimulationComparison {
+        baseline: baseline_id.clone(),
+        simulation: simulation_id.clone(),
         status,
         outcome_matches,
         witness_matches,

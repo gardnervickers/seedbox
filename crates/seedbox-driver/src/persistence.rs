@@ -10,7 +10,7 @@ use std::{
 /// A SHA-256 content-addressed encoded snapshot, independent of backend or host paths.
 /// Verify identity against the original encoded bytes, not a semantic decode
 /// followed by re-encoding: accepted encodings need not be canonical.
-// TODO: Re-evaluate: the outer execution envelope chooses the backend; Driver
+// The outer execution envelope chooses the backend; Driver
 // only needs immutable content identity and length, not a backend registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SnapshotReference {
@@ -34,7 +34,7 @@ impl SnapshotReference {
 
 /// Explicit offline decode budgets. These bound logical allocations and input,
 /// not process RSS, allocator overhead, or native restore resource requirements.
-// TODO: Re-evaluate: import must bound counts before allocation without imposing
+// Import bounds counts before allocation without imposing
 // backend resource minima or an artificial RAM cap on future definitions.
 #[derive(Clone, Copy, Debug)]
 pub struct DecodeLimits {

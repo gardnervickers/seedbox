@@ -6,7 +6,6 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-seedbox-control.workspace = true
 seedbox-engine-protocol.workspace = true
 seedbox-spec.workspace = true
 serde.workspace = true

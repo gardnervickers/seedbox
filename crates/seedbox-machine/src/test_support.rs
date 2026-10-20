@@ -1,7 +1,7 @@
 //! Opt-in reusable Machine specification bodies and caller-owned test dependencies.
 //! No backend or Driver dependency is required to compile these helpers.
-// TODO: Re-evaluate: backend-local tests instantiate one common contract suite.
-// A cfg(test)-only module cannot be consumed by tests in another crate.
+// Feature-gated rather than cfg(test): backend crates' tests instantiate this
+// common contract suite, and cfg(test) items are invisible to other crates.
 pub use crate::machine::{ExitReason, Machine, RunContext, StopReason, Timestamp};
 mod rng;
 pub use crate::clock::{FixedClock, SimulationClock};

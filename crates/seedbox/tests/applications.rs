@@ -14,8 +14,9 @@ use std::{
 
 mod support {
     pub mod failure_capture;
+    pub mod json_diff;
 }
-use support::failure_capture;
+use support::{failure_capture, json_diff};
 
 // Every discovered workload proves a PASS. These four retain the expensive
 // independent same-seed and retained-input comparisons, covering dynamic
@@ -188,8 +189,34 @@ fn compare(
                 }
             }
         }
+        log_definition_differences(&failure, name);
     }
     result
+}
+
+/// Show in the CI log where the two resolved definitions (prepared inputs
+/// included) differ, so a run tells MISMATCH and NOT_COMPARABLE causes apart.
+/// Reads the bounded definition observations captured in `failure`.
+fn log_definition_differences(failure: &Path, name: &str) {
+    let spec = |side: &str| {
+        failure_capture::read(&failure.join(format!("{name}-{side}-definition.stdout")))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .map(|resource| resource["spec"].clone())
+    };
+    let (Some(baseline), Some(repeated)) = (spec("baseline"), spec("repeated")) else {
+        eprintln!("{name}: definition diff unavailable");
+        return;
+    };
+    let mut differences = Vec::new();
+    json_diff::json_differences("spec", &baseline, &repeated, &mut differences);
+    eprintln!(
+        "{name}: baseline/repeated definitions differ at {} paths",
+        differences.len()
+    );
+    for difference in differences.iter().take(60) {
+        eprintln!("  {difference}");
+    }
 }
 
 #[test]

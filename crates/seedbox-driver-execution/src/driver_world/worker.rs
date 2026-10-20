@@ -492,7 +492,7 @@ where
         let intervention = Intervention {
             request_id: request_id.clone(),
             position: reply.position,
-            plan: seedbox_control::Plan {
+            plan: seedbox_engine_protocol::control::Plan {
                 id: record.fault.get(),
                 at_ns: at,
                 deadline_ns: at
@@ -679,7 +679,7 @@ where
                 ([record], []) => self.state.world.input_program.admissions.push(
                     seedbox_engine_protocol::input_program::InputAdmission {
                         key: input.key.clone(),
-                        plan: seedbox_control::Plan {
+                        plan: seedbox_engine_protocol::control::Plan {
                             id: record.fault.get(),
                             at_ns: input.at_ns,
                             deadline_ns: input
@@ -855,8 +855,7 @@ where
                     .unwrap_or_default(),
                 code,
             }),
-            // The event chain is only one evidence component. The concrete
-            // native worker supplies validated execution/disk/network evidence;
+            // The concrete native worker supplies validated execution/disk/network evidence;
             // encoded snapshots and observation samples are not substitutes.
             witness,
             full_state,

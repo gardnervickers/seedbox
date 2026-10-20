@@ -1,5 +1,5 @@
 use super::*;
-use seedbox_control::{Action, Plan};
+use crate::control::{Action, Plan};
 fn input(key: &str, at_ns: u64) -> TimedInput {
     TimedInput {
         key: key.into(),
@@ -176,8 +176,6 @@ fn observer_history_is_not_serializable_but_current_outcome_continues() {
     };
     source.session.next_driver_sequence = 91;
     source.session.observation_records = 72;
-    source.session.witness = [3; 32];
-    source.session.witness_records = 91;
     source.session.applied_faults.push(AppliedFault {
         requested_at_ns: 1,
         applied_at_ns: 2,

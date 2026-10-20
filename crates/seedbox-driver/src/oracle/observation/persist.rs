@@ -1,4 +1,5 @@
-//! Version 1 field/tag order. Do not renumber tags or reorder fields.
+//! Field and tag order is the checkpoint encoding; changing it needs a
+//! checkpoint `VERSION` bump.
 use super::*;
 wire_enum!(ApplicationCondition; units {0=>Starting,1=>Running,2=>Stopped,3=>Paused,4=>Exited,5=>Unavailable} tuples {} records {});
 wire_struct!(ApplicationView {

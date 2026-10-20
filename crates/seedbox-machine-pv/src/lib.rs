@@ -6,8 +6,8 @@ pub mod machine;
 /// CLI or application initialization. This entry parses no arguments or environment.
 /// EOF succeeds; protocol/worker failures are returned for the executable to print
 /// and map to its exit status. Unsupported hosts return an error without serving.
-// TODO: Re-evaluate: the library owns native execution and its protocol; the
-// executable owns launch recognition, diagnostics, exit status and native signing.
+// The library owns native execution and its protocol; the executable owns
+// launch recognition, diagnostics, exit status and native signing.
 pub fn serve_worker() -> Result<(), String> {
     #[cfg(seedbox_pv)]
     {

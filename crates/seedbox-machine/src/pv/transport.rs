@@ -1,6 +1,4 @@
 //! Private byte transport; write boundaries are not application messages.
-// TODO: Re-evaluate: separate backends consume this canonical helper.
-// Crate-private access cannot cross packages; representation remains private.
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,7 +14,7 @@ pub enum GuestWrite {
     Console(LifecycleWrite),
     Lifecycle(LifecycleWrite),
     /// One whole Ethernet frame, stamped at its guest transmit point.
-    // TODO: Re-evaluate: frames share this stream so ties with console and
+    // Frames share this stream so ties with console and
     // lifecycle writes keep their actual guest order without correlation state.
     Frame(LifecycleWrite),
 }
@@ -53,8 +51,8 @@ mod tests;
 impl LifecycleOutput {
     /// Whether all pending device output has transferred to its stopped run
     /// response. This observation never consumes, merges or reorders writes.
-    // TODO: Re-evaluate: a separate backend must validate its capture boundary
-    // without mutating drain or exposing this buffer's private representation.
+    // Lets a backend check its capture boundary without draining the buffer
+    // or exposing its representation.
     pub fn is_empty(&self) -> bool {
         let Self(writes) = self;
         writes.is_empty()

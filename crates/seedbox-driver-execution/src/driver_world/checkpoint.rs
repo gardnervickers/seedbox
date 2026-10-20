@@ -21,8 +21,8 @@ fn integrity(message: impl Into<String>) -> Error {
 
 /// Hold exact already-drained service state alongside the Driver. Prepared
 /// interventions must commit first; an admitted pre-effect hold is Driver state.
-// TODO: Re-evaluate: these two service gates are not backend snapshot state;
-// publishing a capture there would sever the durable prepare/commit handshake.
+// These two service gates are not backend snapshot state; publishing a capture
+// there would sever the durable prepare/commit handshake.
 pub(super) struct Capture<'a> {
     pub inventory: &'a Inventory,
     pub state: &'a mut State,

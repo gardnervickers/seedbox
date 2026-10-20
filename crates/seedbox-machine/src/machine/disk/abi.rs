@@ -12,7 +12,7 @@
 //! Guest memory is only accessed through raw copies to and from local
 //! buffers, so overlapping guest iovecs never form aliasing Rust references.
 
-// TODO: Re-evaluate: QEMU must call the one shared request and overlay
+// QEMU calls the one shared request and overlay
 // policy without duplicating it in C; a handle, iovec streams and SBXSTOR1
 // bytes are the narrowest boundary that keeps execution sector-bounded.
 

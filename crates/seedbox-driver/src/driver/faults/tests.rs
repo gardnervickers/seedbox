@@ -5,7 +5,7 @@ use serde_json::json;
 fn all_public_faults_translate_without_an_admission_or_alias_policy() {
     let at = Target::Name("node".into());
     let deadline = Duration::from_nanos(19);
-    let connection = seedbox_control::Connection {
+    let connection = seedbox_engine_protocol::control::Connection {
         from: "node".into(),
         to: "peer".into(),
         src_addr: "10.0.0.1".parse().unwrap(),
@@ -97,7 +97,7 @@ fn all_public_faults_translate_without_an_admission_or_alias_policy() {
                     bandwidth_bps: Some(900),
                     queue_bound_ns: Some(1000),
                 },
-                network_faults: seedbox_control::NetworkFaults {
+                network_faults: seedbox_engine_protocol::control::NetworkFaults {
                     duplicate_ppm: 60,
                     ..Default::default()
                 },

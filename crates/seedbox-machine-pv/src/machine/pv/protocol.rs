@@ -69,8 +69,8 @@ pub(super) enum Request {
     ExportDisk(PathBuf),
 }
 /// The one block device of a boot, owned by the worker until the boot ends.
-// TODO: Re-evaluate: files keep multi-megabyte disks out of JSON frames; the
-// client keeps the base and policy, so the worker only needs these inputs.
+// Files keep multi-megabyte disks out of JSON frames; the client keeps the
+// base and boot-end policy, so the worker only needs these inputs.
 #[derive(Serialize, Deserialize)]
 pub(super) struct BootDisk {
     /// Capacity in 512-byte sectors; a base file is exactly this long.
@@ -114,8 +114,8 @@ pub(super) enum Stop {
 }
 
 /// Accept only a stopped worker that acknowledged this exact resource layout.
-// TODO: Re-evaluate: a unit Ready response let old workers silently use 128 MiB;
-// structural request/ack fields detect incompatible workers without provenance gates.
+// Echoed resource, layout, policy and witness fields detect an incompatible
+// worker structurally, without provenance gates.
 // Also compiled into the worker, where only the client performs this check.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn ready(

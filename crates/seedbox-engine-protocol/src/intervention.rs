@@ -1,8 +1,8 @@
 //! Retained semantic inputs for interactive faults. Host arrival times and
 //! delivery sequences deliberately do not participate in this history.
 
+use crate::control::Plan;
 use crate::host_control::BoundaryPosition;
-use seedbox_control::Plan;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -26,37 +26,6 @@ pub struct Intervention {
 pub struct History {
     pub version: u32,
     pub entries: Vec<Intervention>,
-}
-
-/// Replay progress at a checkpoint taken after all inputs at this boundary
-/// have committed. The world checkpoint must bind the same position.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ReplayCheckpoint {
-    pub history: History,
-    pub consumed: usize,
-    pub position: BoundaryPosition,
-}
-
-impl ReplayCheckpoint {
-    pub fn validate(&self) -> Result<(), String> {
-        self.history.validate()?;
-        if self.consumed > self.history.entries.len() {
-            return Err("checkpoint replay cursor exceeds retained history".into());
-        }
-        for (index, entry) in self.history.entries.iter().enumerate() {
-            let consumed = index < self.consumed;
-            if consumed != (entry.position.boundary_index <= self.position.boundary_index)
-                || (consumed && entry.position.completed_rounds > self.position.completed_rounds)
-                || (!consumed && entry.position.completed_rounds < self.position.completed_rounds)
-                || (entry.position.boundary_index == self.position.boundary_index
-                    && entry.position != self.position)
-            {
-                return Err("checkpoint replay cursor disagrees with its boundary".into());
-            }
-        }
-        Ok(())
-    }
 }
 
 impl Default for History {

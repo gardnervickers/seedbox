@@ -12,26 +12,22 @@ seedbox-spec.workspace = true
 seedbox-engine-protocol.workspace = true
 seedbox-driver-execution.workspace = true
 serde.workspace = true
-seedbox-control.workspace = true
-seedbox-engine-core.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true
-sha2.workspace = true
-shell-words = "1"
 tempfile.workspace = true
 tar.workspace = true
 walkdir = "2"
-flate2.workspace = true
 bollard.workspace = true
 futures-util.workspace = true
 tokio-util = { version = "0.7", features = ["io"] }
 globset = "0.4"
 tokio.workspace = true
-libc.workspace = true
 ocirender = "0.2.2"
 
 
 [dev-dependencies]
+flate2.workspace = true
+libc.workspace = true
 seedbox-test.workspace = true
 seedbox-test-time.workspace = true
 seedbox-machine = { workspace = true, features = ["test-support"] }

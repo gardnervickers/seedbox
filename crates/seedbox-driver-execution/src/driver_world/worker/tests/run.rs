@@ -30,7 +30,7 @@ fn loop_processes_real_control_prepare_commit_retry_and_resumes_exactly_once() {
             Command::PrepareFault {
                 request_id: "live".into(),
                 timeout_ns: 5_000_000_000,
-                action: seedbox_control::Action::ClockDrift {
+                action: seedbox_engine_protocol::control::Action::ClockDrift {
                     handle: "caller".into(),
                     machine: "n1".into(),
                     rate_ppb: None,
@@ -186,7 +186,7 @@ fn loop_advances_idle_world_to_service_owned_future_input_without_queuing_a_copy
                 key: "only-in-service-suffix".into(),
                 at_ns: 20,
                 timeout_ns: 5_000_000_000,
-                action: seedbox_control::Action::ClockDrift {
+                action: seedbox_engine_protocol::control::Action::ClockDrift {
                     handle: "idle-drift".into(),
                     machine: "n1".into(),
                     rate_ppb: Some(100),

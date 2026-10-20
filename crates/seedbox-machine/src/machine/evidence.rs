@@ -28,8 +28,8 @@ pub fn combined_digest(parts: &[(String, String)]) -> String {
 
 /// One actual guest RAM extent, ordered by guest physical address.
 /// Holes are not RAM and contribute neither bytes nor page hashes.
-// TODO: Re-evaluate: sparse RAM needs address metadata at the common evidence
-// boundary; a flat page vector cannot identify pages across MMIO holes.
+// Sparse RAM needs address metadata at the common evidence boundary; a flat
+// page vector cannot identify pages across MMIO holes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RamRegion {
     pub base: u64,
@@ -41,7 +41,7 @@ crate::record!(RamRegion {
 });
 
 /// The lifetime represented by a stopped-state capture.
-// TODO: Re-evaluate: teardown destroys native RAM; callers must distinguish a
+// Teardown destroys native RAM; callers must distinguish a
 // retained ended boot from a current live boot without inventing successor RAM.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EvidenceDisposition {
@@ -95,15 +95,15 @@ impl crate::snapshot::Record for EvidenceDisposition {
 ///
 /// `page_hashes` concatenates, per region in order, the first eight SHA-256
 /// bytes of each 4096-byte RAM chunk. A final partial chunk is not padded.
-/// Each eight-byte record is the legacy little-endian u64 representation.
+/// Readers interpret each eight-byte record as a little-endian u64.
 /// The region list maps these records to guest physical page addresses.
 ///
 /// Evidence is not a snapshot digest and cannot be compared across backends.
 /// Ended evidence is captured before teardown and disk loss, and retained in
 /// snapshots together with its pages. Earlier ended boots are published through
 /// boot-end outputs, not returned again by this getter after a later boot.
-// TODO: Re-evaluate: backend-specific CPU/device projections coexist, while
-// physical RAM, page addressing and lifetime identity need one service boundary.
+// CPU/device projections stay backend-specific; physical RAM, page addressing
+// and lifetime identity share this one service boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StateEvidence {
     pub boot: u64,

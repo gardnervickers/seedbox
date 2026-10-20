@@ -778,6 +778,10 @@ fn test_machine_suites_do_not_force_serial_execution() {
         "cargo test -p seedbox-machine-tcg --locked --test simulation_control -- --ignored tcg",
         "cargo test -p seedbox-server --locked --features tcg-tests --test native_tcg_service --",
         "cargo test -p seedbox-server --locked --features tcg-tests --test native_controller_service --",
+        "cargo test -p seedbox-server --locked --features tcg-tests --test native_held_checkpoint --",
+        "cargo test -p seedbox-server --locked --features tcg-tests --test native_disk_tcg_service --",
+        "cargo test -p seedbox-server --locked --features tcg-tests --test native_fault_clock_tcg_service --",
+        "cargo test -p seedbox-server --locked --features tcg-tests --test native_fault_network_tcg_service --",
         "cargo test -p seedbox-machine-pv --locked --lib -- --ignored",
         "cargo test -p seedbox-machine-pv --locked --test native_machine -- --ignored",
         "cargo test -p seedbox-driver --locked --test native_driver -- --ignored pv",
@@ -790,6 +794,13 @@ fn test_machine_suites_do_not_force_serial_execution() {
         "cargo test -p seedbox-machine-pv --locked --test simulation_control -- --ignored pv",
         "cargo test -p seedbox-server --locked --features kvm-tests --test native_pv_service --",
         "cargo test -p seedbox-server --locked --features kvm-tests --test native_controller_service --",
+        "cargo test -p seedbox-server --locked --features kvm-tests --test native_held_checkpoint --",
+        "cargo test -p seedbox-server --locked --features kvm-tests --test native_disk_pv_service --",
+        "cargo test -p seedbox-server --locked --features kvm-tests --test native_fault_clock_pv_service --",
+        "cargo test -p seedbox-server --locked --features kvm-tests --test native_fault_network_pv_service --",
+        "cargo test -p seedbox-server --locked --features kvm-tests --test native_fault_disk_pv_service --",
+        "cargo test -p seedbox-server --locked --features kvm-tests --test native_fault_lifecycle_pv_service --",
+        "cargo test -p seedbox-server --locked --features kvm-tests,worker-failure-tests --test native_faults_pv_service --",
     ]
     .map(|line| {
         line.split_whitespace()
@@ -805,7 +816,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
             .map(|job| job.args.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        22
+        33
     );
     assert_eq!(
         runs.iter().map(|job| job.name.as_str()).collect::<Vec<_>>(),
@@ -820,6 +831,10 @@ fn test_machine_suites_do_not_force_serial_execution() {
             "machine-tcg/seedbox-machine-tcg/--test/simulation_control",
             "machine-tcg/seedbox-server/--test/native_tcg_service",
             "machine-tcg/seedbox-server/--test/native_controller_service",
+            "machine-tcg/seedbox-server/--test/native_held_checkpoint",
+            "machine-tcg/seedbox-server/--test/native_disk_tcg_service",
+            "machine-tcg/seedbox-server/--test/native_fault_clock_tcg_service",
+            "machine-tcg/seedbox-server/--test/native_fault_network_tcg_service",
             "machine-pv-x86/seedbox-machine-pv/--lib/",
             "machine-pv-x86/seedbox-machine-pv/--test/native_machine",
             "machine-pv-x86/seedbox-driver/--test/native_driver",
@@ -831,7 +846,14 @@ fn test_machine_suites_do_not_force_serial_execution() {
             "machine-pv-x86/seedbox-machine-pv/--test/prepared_application",
             "machine-pv-x86/seedbox-machine-pv/--test/simulation_control",
             "machine-pv-x86/seedbox-server/--test/native_pv_service",
-            "machine-pv-x86/seedbox-server/--test/native_controller_service"
+            "machine-pv-x86/seedbox-server/--test/native_controller_service",
+            "machine-pv-x86/seedbox-server/--test/native_held_checkpoint",
+            "machine-pv-x86/seedbox-server/--test/native_disk_pv_service",
+            "machine-pv-x86/seedbox-server/--test/native_fault_clock_pv_service",
+            "machine-pv-x86/seedbox-server/--test/native_fault_network_pv_service",
+            "machine-pv-x86/seedbox-server/--test/native_fault_disk_pv_service",
+            "machine-pv-x86/seedbox-server/--test/native_fault_lifecycle_pv_service",
+            "machine-pv-x86/seedbox-server/--test/native_faults_pv_service"
         ]
     );
     for job in runs {
@@ -840,18 +862,11 @@ fn test_machine_suites_do_not_force_serial_execution() {
 }
 #[test]
 fn test_machine_suites_schedule_feature_gated_public_service_targets_unfiltered() {
-    for (suite, feature, targets) in [
-        (
-            "machine-tcg",
-            "tcg-tests",
-            &["native_tcg_service", "native_controller_service"][..],
-        ),
-        (
-            "machine-pv-x86",
-            "kvm-tests",
-            &["native_pv_service", "native_controller_service"][..],
-        ),
+    for (suite, kind) in [
+        ("machine-tcg", Suite::MachineTcg),
+        ("machine-pv-x86", Suite::MachinePv),
     ] {
+        let targets = service_targets(kind);
         let runs = machine_suite_runs(
             &suites(&[suite]),
             &Environment::new(),
@@ -862,7 +877,7 @@ fn test_machine_suites_schedule_feature_gated_public_service_targets_unfiltered(
             .filter(|job| job.args.iter().any(|a| a == "seedbox-server"))
             .collect();
         assert_eq!(service.len(), targets.len(), "{suite}");
-        for (job, target) in service.iter().zip(targets) {
+        for (job, (target, features)) in service.iter().zip(targets) {
             assert_eq!(
                 job.args,
                 strings(&[
@@ -872,7 +887,7 @@ fn test_machine_suites_schedule_feature_gated_public_service_targets_unfiltered(
                     "seedbox-server",
                     "--locked",
                     "--features",
-                    feature,
+                    features,
                     "--test",
                     target,
                     "--",
@@ -885,6 +900,27 @@ fn test_machine_suites_schedule_feature_gated_public_service_targets_unfiltered(
             assert_eq!(job.name, format!("{suite}/seedbox-server/--test/{target}"));
         }
     }
+}
+#[test]
+fn test_machine_suites_schedule_every_native_server_target() {
+    // A feature-gated server target outside every suite would compile and
+    // never run; each native_* target must belong to a machine suite.
+    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../seedbox-server/tests");
+    let mut present = std::collections::BTreeSet::new();
+    for entry in fs::read_dir(tests).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        if let Some(target) = name
+            .strip_prefix("native_")
+            .and_then(|n| n.strip_suffix(".rs"))
+        {
+            present.insert(format!("native_{target}"));
+        }
+    }
+    let scheduled: std::collections::BTreeSet<_> = [Suite::MachineTcg, Suite::MachinePv]
+        .into_iter()
+        .flat_map(|suite| service_targets(suite).iter().map(|(t, _)| t.to_string()))
+        .collect();
+    assert_eq!(scheduled, present);
 }
 #[test]
 fn test_service_release_build_uses_the_target_the_service_tests_read() {
@@ -980,6 +1016,22 @@ fn portable_failure_blocks_all_native_work_but_not_outer_prerequisites() {
             .collect::<Vec<_>>(),
         ["fmt", "clippy", "shell-discovery"]
     );
+    // Clippy type-checks every feature-gated target; there is no second
+    // all-features test build.
+    assert_eq!(
+        c.commands.jobs[1].args,
+        strings(&[
+            "cargo",
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--all-features",
+            "--locked",
+            "--",
+            "-D",
+            "warnings"
+        ])
+    );
 }
 #[test]
 fn empty_native_selection_and_empty_artifacts_are_errors() {
@@ -1034,37 +1086,14 @@ fn portable_order_is_single_owned() {
     let jobs = &c.commands.jobs;
     assert_eq!(
         jobs.iter().map(|j| j.name.as_str()).collect::<Vec<_>>(),
-        [
-            "shell-discovery",
-            "workspace-feature-build",
-            "workspace-tests"
-        ]
+        ["shell-discovery", "workspace-tests"]
     );
-    assert!(jobs
-        .iter()
-        .filter(|j| j.name.starts_with("workspace"))
-        .all(|j| j.environment.contains_key("CARGO_TARGET_DIR")));
+    assert!(jobs[1].environment.contains_key("CARGO_TARGET_DIR"));
     assert_eq!(
         jobs[1].args,
-        strings(&[
-            "cargo",
-            "test",
-            "--workspace",
-            "--locked",
-            "--all-features",
-            "--no-run"
-        ])
-    );
-    assert_eq!(
-        jobs[2].args,
         strings(&["cargo", "test", "--workspace", "--locked"])
     );
-    let labels = [
-        "shell-syntax",
-        "test-time-policy",
-        "workspace-feature-build",
-        "workspace-tests",
-    ];
+    let labels = ["shell-syntax", "test-time-policy", "workspace-tests"];
     assert_eq!(c.timings.len(), labels.len());
     for (row, label) in c.timings.iter().zip(labels) {
         assert!(row.starts_with(&format!("timing: portable/{label}: ")));

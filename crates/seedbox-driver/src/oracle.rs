@@ -38,7 +38,7 @@ pub(crate) enum Target {
     Key(String),
 }
 
-pub(crate) use seedbox_control::{Connection, NetworkFaults};
+pub(crate) use seedbox_engine_protocol::control::{Connection, NetworkFaults};
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]

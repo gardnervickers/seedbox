@@ -4,8 +4,8 @@
 //! StopReason::Exited boundaries cannot replace this seam. Scheduling reads its
 //! boot, pause gate and execution setting; no fault history, complete Inspect or
 //! network projection lives here.
-// TODO: Re-evaluate: one committed record per machine replaces Entry and
-// control mirrors of boot, pause and execution. Accepted run progress
+// Boot, pause and execution live only in this one committed record per
+// machine, not in mirrors in Entry or control. Accepted run progress
 // (StopReason, positions) stays in Entry: it changes within a round, while
 // this record changes only at committed boundaries and confirmed effects.
 use super::service::{CommandKind, CommandOwner, Facts, Process, Vm};
@@ -222,7 +222,7 @@ impl State {
         self.condition_since = at;
     }
     fn application(&mut self, condition: ApplicationCondition, code: Option<u8>, at: u64) {
-        // Confirmed process effects update legacy changed_at even if an external
+        // Confirmed process effects update changed_at even if an external
         // idempotent command leaves the visible condition unchanged.
         self.application = ApplicationView {
             condition,

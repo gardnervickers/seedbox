@@ -8,7 +8,6 @@ mod capacity;
 #[cfg(unix)]
 pub mod catalogue;
 #[cfg(unix)]
-mod checkpoint_cleanup;
 #[cfg(unix)]
 mod controls;
 #[cfg(unix)]

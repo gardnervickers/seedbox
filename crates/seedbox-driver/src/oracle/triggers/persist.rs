@@ -1,4 +1,5 @@
-//! Version 1 field/tag order. Do not renumber tags or reorder fields.
+//! Field and tag order is the checkpoint encoding; changing it needs a
+//! checkpoint `VERSION` bump.
 use super::*;
 wire_enum!(Status; units {0=>Armed,1=>Cancelled,2=>Matched,3=>Expired,4=>Rejected,5=>Fired,6=>CutOff} tuples {} records {});
 wire_enum!(TriggerAction; units {} tuples {0=>Stop(v0)} records {1=>Partition{left,right}});

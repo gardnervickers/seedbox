@@ -1,8 +1,6 @@
 //! Canonical Ethernet frame bounds shared by the frame contract, the Driver
 //! and NIC models. The PV worker binary includes this file by path.
 
-// TODO: Re-evaluate: separate backends consume this canonical helper.
-// Crate-private access cannot cross packages; representation remains private.
 /// Smallest frame on the network: an Ethernet header with no payload.
 pub const MIN_FRAME_BYTES: usize = 14;
 /// Largest frame on the network: a 1500-byte MTU payload plus its 14-byte

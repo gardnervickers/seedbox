@@ -207,8 +207,8 @@ static inline int sbx_env_collisions(struct sbx_guest_environment *e,struct sbx_
         if (j-i>1 && (!keys[i].kind || j-i>2 || keys[i].kind!=1 || keys[i+1].kind!=2)) {result=sbx_env_bad(EINVAL);goto done;}
         i=j;
     }
-    /* TODO: Re-evaluate deep-path prefix comparisons if profiling warrants
-     * a linear prefix walk; path/count bounds must not become new quotas. */
+    /* Each ancestor prefix is looked up separately; a linear prefix walk
+     * could replace this, but path/count bounds must not become new quotas. */
     for(size_t i=paths;i<n;i++) {
         char copy[SBX_ENV_PATH];size_t length=strlen(keys[i].path);memcpy(copy,keys[i].path,length+1);
         for(size_t p=1;p<length;p++) if(copy[p]=='/') {

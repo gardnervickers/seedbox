@@ -3,16 +3,15 @@
 pub use crate::comparison::*;
 use crate::{
     evidence::{
-        page_hash_log, RamRegion, StateDigestParts, StateDisposition, StateReport,
-        MACHINE_OUTPUT_DIR, STATE_REPORT,
+        RamRegion, StateDigestParts, StateDisposition, StateReport, MACHINE_OUTPUT_DIR,
+        STATE_REPORT,
     },
-    limits::{exceeds, read_bounded},
+    limits::read_bounded,
     record::{self as orchestration, RunRecord},
     retained,
     store::ContentDigest,
     Error, Result,
 };
-use seedbox_engine_protocol::trace::{InvalidTraceRecord, TraceRecord};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -61,22 +60,13 @@ pub struct MachineDiff {
     pub ram_pages: Option<PageHashDiff>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct Record {
-    pub time_ns: Option<u64>,
-    pub kind: String,
-    pub value: Value,
-}
-
+/// The first machine, by name, whose stopped terminal state differs. A terminal
+/// observation cannot locate the actual first exit.
 #[derive(Clone, Debug, Serialize)]
 pub struct FirstRecord {
     pub machine: String,
-    /// "trace" or "terminal"; a terminal observation cannot locate the actual first exit.
-    pub source: String,
-    /// One-based record number, for a trace only.
-    pub record: Option<u64>,
-    pub a: Option<Record>,
-    pub b: Option<Record>,
+    pub a: Option<Value>,
+    pub b: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -84,8 +74,6 @@ pub struct DiffReport {
     pub status: Status,
     pub world_witness: Witness,
     pub machines: Vec<MachineDiff>,
-    /// Earliest witness-log divergence across machines.
-    pub divergence: Option<Divergence>,
     pub first_record: Option<FirstRecord>,
     pub identity_differences: Vec<Difference>,
     pub result_differences: Vec<Difference>,
@@ -135,7 +123,6 @@ fn bad(path: &Path, error: impl std::fmt::Display) -> Error {
 
 /// The engine report is metadata, not an arbitrarily large trace.
 const REPORT_LIMIT: u64 = 256 * 1024 * 1024;
-const TRACE_LINE_LIMIT: u64 = 64 * 1024;
 
 fn log(directory: &Path, record: &RunRecord, name: &str) -> Result<Option<File>> {
     crate::retained::log(directory, record, name, "diff")
@@ -150,7 +137,6 @@ fn load(directory: &Path) -> Result<Evidence> {
         orchestration::inspect(directory).map_err(|e| bad(&directory.join("manifest.json"), e))?;
     let world = record.report.as_ref().and_then(|r| r.witness.clone());
     // Machine identity is retained even when full-state capture was not requested.
-    // Trace/witness-log discovery must not depend on a stopped-state report.
     let mut machines: BTreeMap<_, _> = record
         .identity
         .inputs
@@ -273,30 +259,11 @@ fn compare_values(a: &impl Serialize, b: &impl Serialize) -> Result<Vec<Differen
     );
     Ok(out)
 }
-fn terminal(machine: &Machine) -> Option<Record> {
+fn terminal(machine: &Machine) -> Option<Value> {
     if machine.end.is_empty() {
         return None;
     }
-    Some(Record {
-        // A stopped capture does not claim a per-machine terminal timestamp.
-        time_ns: None,
-        kind: "terminal".into(),
-        value: serde_json::to_value(&machine.end).ok()?,
-    })
-}
-fn time(record: &FirstRecord) -> u64 {
-    record
-        .a
-        .iter()
-        .chain(record.b.iter())
-        .filter_map(|r| r.time_ns)
-        .min()
-        .unwrap_or(u64::MAX)
-}
-fn earliest(records: Vec<FirstRecord>) -> Option<FirstRecord> {
-    records
-        .into_iter()
-        .min_by(|a, b| (time(a), &a.machine).cmp(&(time(b), &b.machine)))
+    serde_json::to_value(&machine.end).ok()
 }
 
 /// Compare run directories without requiring their original content store. Only
@@ -309,57 +276,6 @@ pub fn diff(a: &Path, b: &Path) -> Result<DiffReport> {
     result.limitations.extend(pages.limitations);
     for machine in &mut result.machines {
         machine.ram_pages = pages.machines.get(&machine.machine).cloned();
-    }
-    let logs = divergence(a, &left, b, &right)?;
-    result.limitations.extend(logs.limitations);
-    result
-        .evidence_differences
-        .extend(logs.evidence_differences);
-    if logs.divergence.is_some() {
-        result.divergence = logs.divergence;
-        result.status = Status::Different;
-    }
-    let mut traces = Vec::new();
-    for machine in &result.machines {
-        let name = format!("machines/{}.trace", machine.machine);
-        let x = log(a, &left.record, &name)?;
-        let y = log(b, &right.record, &name)?;
-        match (x, y) {
-            (Some(x), Some(y)) => {
-                if let Some(record) = trace_diff(&machine.machine, x, y)
-                    .map_err(|e| bad(a, format!("{name} compared with {}: {e}", b.display())))?
-                {
-                    traces.push(record);
-                }
-            }
-            (None, None) => result.limitations.push(format!(
-                "{}: no retained trace on either side",
-                machine.machine
-            )),
-            _ => {
-                result.evidence_differences.push(Difference {
-                    field: format!("/logs/{}", name.replace('~', "~0").replace('/', "~1")),
-                    a: left
-                        .record
-                        .logs
-                        .get(&name)
-                        .map(|d| Value::String(d.hex().into())),
-                    b: right
-                        .record
-                        .logs
-                        .get(&name)
-                        .map(|d| Value::String(d.hex().into())),
-                });
-                result.limitations.push(format!(
-                    "{}: trace missing on one side; no trace alignment available",
-                    machine.machine
-                ));
-            }
-        }
-    }
-    if let Some(first) = earliest(traces) {
-        result.first_record = Some(first);
-        result.status = Status::Different;
     }
     if !result.evidence_differences.is_empty() {
         result.status = Status::Different;
@@ -399,11 +315,9 @@ fn compare(a: &Evidence, b: &Evidence) -> Result<DiffReport> {
         }
         let tx = x.and_then(terminal);
         let ty = y.and_then(terminal);
-        if tx.as_ref().map(|r| &r.value) != ty.as_ref().map(|r| &r.value) {
+        if tx != ty {
             terminals.push(FirstRecord {
                 machine: name.clone(),
-                source: "terminal".into(),
-                record: None,
                 a: tx,
                 b: ty,
             });
@@ -456,151 +370,12 @@ fn compare(a: &Evidence, b: &Evidence) -> Result<DiffReport> {
         },
         world_witness,
         machines,
-        divergence: None,
-        first_record: earliest(terminals),
+        // Names are visited in order, so the first is the earliest by machine.
+        first_record: terminals.into_iter().next(),
         identity_differences,
         result_differences,
         evidence_differences,
         limitations,
-    })
-}
-
-/// Manifest-relative witness log, beside the VMM's per-machine traces.
-pub(crate) fn witness_log(machine: &str) -> String {
-    format!(
-        "{}/{machine}.witness-log",
-        crate::evidence::MACHINE_OUTPUT_DIR
-    )
-}
-
-/// Engine witness-log entry: little-endian u64 time_ns, records, witness prefix.
-const SAMPLE_BYTES: usize = 24;
-
-fn next_sample(reader: &mut impl Read) -> std::io::Result<Option<WitnessSample>> {
-    let mut buffer = [0; SAMPLE_BYTES];
-    let entry = &mut buffer[..];
-    let mut filled = 0;
-    while filled < entry.len() {
-        match reader.read(&mut entry[filled..])? {
-            0 if filled == 0 => return Ok(None),
-            0 => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "witness log length is not a multiple of {} bytes",
-                        entry.len()
-                    ),
-                ))
-            }
-            n => filled += n,
-        }
-    }
-    let field = |i: usize| u64::from_le_bytes(entry[i * 8..i * 8 + 8].try_into().unwrap());
-    Ok(Some(WitnessSample {
-        time_ns: field(0),
-        records: field(1),
-        witness: format!("{:016x}", field(2)),
-    }))
-}
-
-/// Compare two witness logs in lockstep. Logs are fully read so a corrupt
-/// tail is reported even after the first difference.
-fn compare_logs(machine: &str, a: impl Read, b: impl Read) -> Result<Option<Divergence>> {
-    let mut a = BufReader::new(a);
-    let mut b = BufReader::new(b);
-    let mut last = None;
-    let mut first = None;
-    let mut sample = 0;
-    loop {
-        let x = next_sample(&mut a)?;
-        let y = next_sample(&mut b)?;
-        if x.is_none() && y.is_none() {
-            return Ok(first);
-        }
-        sample += 1;
-        if first.is_some() {
-            continue;
-        }
-        if x == y {
-            last = x;
-        } else {
-            first = Some(Divergence {
-                machine: machine.into(),
-                sample,
-                last_match: last.take(),
-                a: x,
-                b: y,
-            });
-        }
-    }
-}
-
-fn start(d: &Divergence) -> (u64, u64) {
-    let end = d.a.iter().chain(d.b.iter()).map(|s| s.time_ns).min();
-    (
-        d.last_match.as_ref().map_or(0, |s| s.time_ns),
-        end.unwrap_or(u64::MAX),
-    )
-}
-
-struct Logs {
-    divergence: Option<Divergence>,
-    evidence_differences: Vec<Difference>,
-    limitations: Vec<String>,
-}
-
-fn divergence(a: &Path, left: &Evidence, b: &Path, right: &Evidence) -> Result<Logs> {
-    let mut found = Vec::new();
-    let mut evidence_differences = Vec::new();
-    let mut limitations = Vec::new();
-    let names: BTreeSet<_> = left.machines.keys().chain(right.machines.keys()).collect();
-    for machine in names {
-        let name = witness_log(machine);
-        match (log(a, &left.record, &name)?, log(b, &right.record, &name)?) {
-            (Some(x), Some(y)) => {
-                if let Some(d) = compare_logs(machine, x, y)
-                    .map_err(|e| bad(a, format!("{name} compared with {}: {e}", b.display())))?
-                {
-                    found.push(d);
-                }
-            }
-            (None, None) => {
-                limitations.push(format!("{machine}: no retained witness log on either side"))
-            }
-            _ => {
-                let digest = |e: &Evidence| {
-                    e.record
-                        .logs
-                        .get(&name)
-                        .map(|d| Value::String(d.hex().into()))
-                };
-                evidence_differences.push(Difference {
-                    field: format!("/logs/{}", name.replace('~', "~0").replace('/', "~1")),
-                    a: digest(left),
-                    b: digest(right),
-                });
-                limitations.push(format!(
-                    "{machine}: witness log missing on one side; no divergence interval available"
-                ));
-            }
-        }
-    }
-    let divergence = found
-        .into_iter()
-        .min_by(|x, y| (start(x), &x.machine).cmp(&(start(y), &y.machine)));
-    Ok(Logs {
-        divergence,
-        evidence_differences,
-        limitations,
-    })
-}
-
-/// Witness-log divergence between a run and its replay; diagnostic only.
-pub fn replay_divergence(a: &Path, b: &Path) -> Result<DivergenceReport> {
-    let logs = divergence(a, &load(a)?, b, &load(b)?)?;
-    Ok(DivergenceReport {
-        divergence: logs.divergence,
-        limitations: logs.limitations,
     })
 }
 
@@ -625,67 +400,39 @@ fn ram_only(a: &Machine, b: &Machine) -> bool {
 struct PageFile {
     file: File,
     regions: Vec<RamRegion>,
-    physical_metadata: bool,
 }
-fn page_file(
-    directory: &Path,
-    evidence: &Evidence,
-    machine_name: &str,
-    machine: &Machine,
-    name: &str,
-) -> Result<Option<PageFile>> {
+/// Page evidence is read only beside a validated stopped-state capture, which
+/// always records its page file and physical RAM regions.
+fn page_file(directory: &Path, evidence: &Evidence, machine: &Machine) -> Result<Option<PageFile>> {
+    let (Some(name), Some(regions)) = (&machine.page_log, &machine.regions) else {
+        return Err(bad(directory, "physical RAM-region metadata is missing"));
+    };
     let Some(file) = log(directory, &evidence.record, name)? else {
         return Ok(None);
     };
-    let (regions, expected, physical_metadata) = if let Some(regions) = &machine.regions {
-        let (digest, bytes) =
-            crate::evidence::region_layout(regions).map_err(|error| bad(directory, error))?;
-        if machine
-            .end
-            .state_digest_parts
-            .as_ref()
-            .and_then(|parts| parts.get("ram_regions"))
-            != Some(digest.hex())
-        {
-            return Err(bad(
-                directory,
-                "RAM-region metadata disagrees with state parts",
-            ));
-        }
-        (regions.clone(), bytes, true)
-    } else {
-        if machine
-            .end
-            .state_digest_parts
-            .as_ref()
-            .and_then(|parts| parts.get("ram_regions"))
-            .is_some()
-        {
-            return Err(bad(directory, "physical RAM-region metadata is missing"));
-        }
-        let memory_mb = evidence.record.identity.inputs.memory_mb(machine_name)?;
-        if memory_mb == 0 {
-            return Err(bad(directory, "page hashes require recorded memory_mb"));
-        }
-        let regions = vec![RamRegion {
-            base: 0,
-            length: u64::from(memory_mb) << 20,
-        }];
-        (regions, u64::from(memory_mb) * 2048, false)
-    };
+    let (digest, expected) =
+        crate::evidence::region_layout(regions).map_err(|error| bad(directory, error))?;
+    if machine
+        .end
+        .state_digest_parts
+        .as_ref()
+        .and_then(|parts| parts.get("ram_regions"))
+        != Some(digest.hex())
+    {
+        return Err(bad(
+            directory,
+            "RAM-region metadata disagrees with state parts",
+        ));
+    }
     if file.metadata().map_err(|e| bad(directory, e))?.len() != expected {
         return Err(bad(
             &directory.join("output").join(name),
-            format!(
-                "page hash length must be {expected} bytes for recorded {}RAM",
-                if physical_metadata { "mapped " } else { "" }
-            ),
+            format!("page hash length must be {expected} bytes for recorded mapped RAM"),
         ));
     }
     Ok(Some(PageFile {
         file,
-        regions,
-        physical_metadata,
+        regions: regions.clone(),
     }))
 }
 
@@ -698,21 +445,15 @@ fn ram_pages(a: &Path, left: &Evidence, b: &Path, right: &Evidence) -> Result<Ra
         if !ram_only(x, y) {
             continue;
         }
-        let name = x.page_log.clone().unwrap_or_else(|| page_hash_log(machine));
-        let other_name = y.page_log.clone().unwrap_or_else(|| page_hash_log(machine));
-        let x = page_file(a, left, machine, x, &name)?;
-        let y = page_file(b, right, machine, y, &other_name)?;
+        let name = x.page_log.clone().unwrap_or_default();
+        let x = page_file(a, left, x)?;
+        let y = page_file(b, right, y)?;
         if let (Some(x), Some(y)) = (x, y) {
             if x.regions != y.regions {
                 return Err(bad(a, "compared page-hash physical RAM layouts differ"));
             }
-            let pages = compare_pages(
-                x.file,
-                y.file,
-                &x.regions,
-                x.physical_metadata || y.physical_metadata,
-            )
-            .map_err(|e| bad(a, format!("{name} compared with {}: {e}", b.display())))?;
+            let pages = compare_pages(x.file, y.file, &x.regions)
+                .map_err(|e| bad(a, format!("{name} compared with {}: {e}", b.display())))?;
             report.machines.insert(machine.clone(), pages);
         } else {
             report.limitations.push(format!(
@@ -723,12 +464,7 @@ fn ram_pages(a: &Path, left: &Evidence, b: &Path, right: &Evidence) -> Result<Ra
     Ok(report)
 }
 
-fn compare_pages(
-    a: impl Read,
-    b: impl Read,
-    regions: &[RamRegion],
-    physical_metadata: bool,
-) -> Result<PageHashDiff> {
+fn compare_pages(a: impl Read, b: impl Read, regions: &[RamRegion]) -> Result<PageHashDiff> {
     let mut a = BufReader::new(a);
     let mut b = BufReader::new(b);
     let mut result = PageHashDiff {
@@ -755,9 +491,7 @@ fn compare_pages(
             result.differing_pfns += 1;
             if result.first_pfns.len() < 8 {
                 result.first_pfns.push(gpa / 4096);
-                if physical_metadata {
-                    result.first_gpas.push(gpa);
-                }
+                result.first_gpas.push(gpa);
             }
         }
     }
@@ -769,163 +503,9 @@ fn compare_pages(
     Ok(result)
 }
 
-fn next_trace(reader: &mut impl BufRead) -> Result<Option<Record>> {
-    let mut line = String::new();
-    if reader.take(TRACE_LINE_LIMIT + 1).read_line(&mut line)? == 0 {
-        return Ok(None);
-    }
-    if line.len() as u64 > TRACE_LINE_LIMIT {
-        return Err(Error::Integrity(exceeds("trace record", TRACE_LINE_LIMIT)));
-    }
-    let TraceRecord {
-        kind,
-        time_ns,
-        extra,
-        rip,
-    } = line
-        .parse()
-        .map_err(|e: InvalidTraceRecord| Error::Integrity(e.to_string()))?;
-    let kind = char::from(kind).to_string();
-    Ok(Some(Record {
-        time_ns: Some(time_ns),
-        value: serde_json::json!({"kind":kind, "time_ns":time_ns, "extra":extra, "rip":rip}),
-        kind,
-    }))
-}
-fn trace_diff(machine: &str, a: impl Read, b: impl Read) -> Result<Option<FirstRecord>> {
-    let mut a = BufReader::new(a);
-    let mut b = BufReader::new(b);
-    let mut index = 0;
-    let mut first = None;
-    loop {
-        let x = next_trace(&mut a)?;
-        let y = next_trace(&mut b)?;
-        if x.is_none() && y.is_none() {
-            break;
-        }
-        index += 1;
-        if first.is_none() && x.as_ref().map(|r| &r.value) != y.as_ref().map(|r| &r.value) {
-            first = Some(FirstRecord {
-                machine: machine.into(),
-                source: "trace".into(),
-                record: Some(index),
-                a: x,
-                b: y,
-            });
-        }
-    }
-    Ok(first)
-}
-
 #[cfg(test)]
-#[allow(dead_code)]
 mod tests {
     use super::*;
-    use crate as sb;
-    include!("../tests/support/diff_fixture.rs");
-    #[test]
-    fn traces_report_first_changed_or_missing_record_and_validate_remainder() {
-        let a = b"I 1 2 3\nH 5 6 7\n";
-        let b = b"I 1 2 3\nP 9 6 7\n";
-        let first = trace_diff("m", &a[..], &b[..]).unwrap().unwrap();
-        assert_eq!(first.record, Some(2));
-        assert_eq!(first.a.unwrap().kind, "H");
-        assert_eq!(first.b.unwrap().time_ns, Some(9));
-        let first = trace_diff("m", &a[..], &b[..8]).unwrap().unwrap();
-        assert_eq!(first.record, Some(2));
-        assert!(first.b.is_none());
-        assert!(trace_diff("m", &a[..], &b"P 1 2 3\nbad\n"[..]).is_err());
-        assert!(trace_diff("m", &a[..], &a[..]).unwrap().is_none());
-    }
-
-    fn sample(time_ns: u64, records: u64, witness: u64) -> WitnessSample {
-        WitnessSample {
-            time_ns,
-            records,
-            witness: format!("{witness:016x}"),
-        }
-    }
-
-    #[test]
-    fn witness_logs_report_first_differing_sample_and_validate_remainder() {
-        let a = witness_log_bytes(&[[0, 1, 7], [1_000_050, 9, 8], [2_000_000, 20, 9]]);
-        let b = witness_log_bytes(&[[0, 1, 7], [1_000_050, 9, 8], [2_000_000, 20, 10]]);
-        assert!(compare_logs("m", &a[..], &a[..]).unwrap().is_none());
-        let d = compare_logs("m", &a[..], &b[..]).unwrap().unwrap();
-        assert_eq!(d.sample, 3);
-        assert_eq!(d.last_match, Some(sample(1_000_050, 9, 8)));
-        assert_eq!(d.a, Some(sample(2_000_000, 20, 9)));
-        assert_eq!(d.b.unwrap().witness, "000000000000000a");
-        // A log that ends early differs at its end; a first sample can differ.
-        let d = compare_logs("m", &a[..], &b[..48]).unwrap().unwrap();
-        assert_eq!((d.sample, d.b), (3, None));
-        let d = compare_logs("m", &b[24..], &a[..]).unwrap().unwrap();
-        assert_eq!((d.sample, d.last_match), (1, None));
-        // A torn entry is an error even after the first difference.
-        assert!(compare_logs("m", &a[..], &b[..71]).is_err());
-        assert!(compare_logs("m", &b[..], &a[..71]).is_err());
-    }
-
-    #[test]
-    fn earliest_divergence_is_chosen_by_interval_then_machine() {
-        let make = |machine: &str, last: Option<u64>, end: u64| Divergence {
-            machine: machine.into(),
-            sample: 2,
-            last_match: last.map(|t| sample(t, 1, 0)),
-            a: Some(sample(end, 2, 1)),
-            b: Some(sample(end + 5, 2, 2)),
-        };
-        let pick = |all: Vec<Divergence>| {
-            all.into_iter()
-                .min_by(|x, y| (start(x), &x.machine).cmp(&(start(y), &y.machine)))
-                .unwrap()
-                .machine
-        };
-        assert_eq!(
-            pick(vec![make("a", Some(20), 30), make("z", Some(10), 40)]),
-            "z"
-        );
-        assert_eq!(
-            pick(vec![make("z", Some(10), 40), make("a", None, 50)]),
-            "a"
-        );
-        assert_eq!(
-            pick(vec![make("z", Some(10), 30), make("a", Some(10), 40)]),
-            "z"
-        );
-        assert_eq!(
-            pick(vec![make("z", Some(10), 30), make("a", Some(10), 30)]),
-            "a"
-        );
-    }
-
-    #[test]
-    fn earliest_trace_is_chosen_by_time_then_machine_not_report_order() {
-        let make = |machine: &str, time| FirstRecord {
-            machine: machine.into(),
-            source: "trace".into(),
-            record: Some(2),
-            a: Some(Record {
-                time_ns: Some(time),
-                kind: "I".into(),
-                value: Value::Null,
-            }),
-            b: None,
-        };
-        assert_eq!(
-            earliest(vec![make("a", 20), make("z", 10)])
-                .unwrap()
-                .machine,
-            "z"
-        );
-        assert_eq!(
-            earliest(vec![make("z", 10), make("a", 10)])
-                .unwrap()
-                .machine,
-            "a"
-        );
-    }
-
     #[test]
     fn structural_identity_differences_include_images_and_escape_keys() {
         let a = serde_json::json!({"images":{"service":{"manifest":"one", "layers":["a"]}}, "semantic_parameters":{"x/y~z":"old"}});
@@ -944,14 +524,5 @@ mod tests {
                 "/semantic_parameters/x~1y~0z"
             ]
         );
-    }
-
-    #[test]
-    fn trace_line_limit_is_checked() {
-        let bytes = vec![b'I'; 65537];
-        assert!(trace_diff("m", &bytes[..], &b""[..])
-            .unwrap_err()
-            .to_string()
-            .contains("64 KiB"));
     }
 }

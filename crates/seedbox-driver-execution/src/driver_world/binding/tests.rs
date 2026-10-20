@@ -1,7 +1,8 @@
 //! Structural package ownership tests only. These headers contain no runnable
 //! guest or host program, and no machine/factory/worker is constructed.
 use super::*;
-use crate::runtime_assets::{Backend, Runtime};
+use crate::runtime_assets::Runtime;
+use seedbox_spec::backend::CpuBackend;
 use seedbox_spec::definition::Architecture;
 use std::io::Write;
 
@@ -57,7 +58,7 @@ fn package(kernel: &[u8]) -> Vec<u8> {
 fn inputs(runtime: &Runtime) -> Inputs {
     runtime
         .select(
-            Backend::Pv,
+            CpuBackend::Pv,
             if cfg!(target_arch = "aarch64") {
                 Architecture::Aarch64
             } else {

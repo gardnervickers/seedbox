@@ -7,8 +7,8 @@ use seedbox_api::{
 };
 use std::collections::BTreeSet;
 
-fn observed_connection_fixture() -> seedbox_control::Connection {
-    seedbox_control::Connection {
+fn observed_connection_fixture() -> seedbox_engine_protocol::control::Connection {
+    seedbox_engine_protocol::control::Connection {
         from: "client".into(),
         to: "target".into(),
         src_addr: "10.0.0.2".parse().unwrap(),

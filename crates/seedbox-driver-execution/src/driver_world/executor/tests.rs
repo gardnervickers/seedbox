@@ -128,7 +128,7 @@ fn controller_scope_follows_driver_host_for_pv_and_tcg() {
         let error = pv.preflight(None).unwrap_err().to_string();
         assert!(
             error.contains("requires Linux x86-64 (KVM) or macOS aarch64 (HVF)")
-                && error.contains("legacy service path"),
+                && error.contains("TCG backend"),
             "{error}"
         );
         assert!(pv.admit_execution(false).is_err());

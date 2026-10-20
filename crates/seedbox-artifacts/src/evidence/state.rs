@@ -29,7 +29,7 @@ pub enum StateDisposition {
 /// `(base, length)` u64 pairs; both that part and `ram` enter the combined digest.
 /// Page files contain one eight-byte hash per mapped 4096-byte chunk,
 /// concatenated by region; a region's final partial chunk is not padded.
-// TODO: Re-evaluate: retained readers cannot depend on native Machine types;
+// Retained readers cannot depend on native Machine types;
 // this data-only boundary preserves physical addressing and boot disposition.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

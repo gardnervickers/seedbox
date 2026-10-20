@@ -8,8 +8,7 @@
 //! + disk\0 + presence:u8 [+ CURRENT surviving disk64];
 //! ...; end\0 + count:u64LE
 //! ```
-//! This new-engine framing is unambiguous and does not claim byte equality
-//! with legacy streaming SHA.
+//! Tags and length prefixes make this framing unambiguous.
 use super::*;
 use crate::store::ContentDigest;
 use seedbox_machine::machine::ExecutionEvidence;

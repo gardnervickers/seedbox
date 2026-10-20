@@ -51,7 +51,6 @@ struct Entry {
     request: SubmitRequest,
     resource: Simulation,
     controls: BTreeMap<String, ControlReceipt>,
-    deleted_checkpoints: BTreeSet<String>,
     deleting: bool,
 }
 
@@ -216,7 +215,6 @@ impl Catalogue {
                 .map(|receipt| (receipt.request.request_id.clone(), receipt.clone()))
                 .collect(),
             imported_checkpoints: Some(snapshot.checkpoints.clone()),
-            deleted_checkpoints: BTreeSet::new(),
             deleting: false,
             range: None,
         };
@@ -319,7 +317,6 @@ impl Catalogue {
             imported_checkpoints: None,
             resource: resource.clone(),
             controls: BTreeMap::new(),
-            deleted_checkpoints: BTreeSet::new(),
             deleting: false,
             range,
         };
@@ -363,18 +360,8 @@ impl Catalogue {
                 Ok(None)
             }
             InputSource::Project => {
-                let config = &spec.configuration;
-                if config.check.exit_code != 0 {
-                    return Err(Error::Invalid(
-                        "oracle success is always exit code zero".into(),
-                    ));
-                }
-
-                if config.schedule.stop_tolerance_ns != 0 {
-                    return Err(Error::Invalid(
-                        "new simulations use default stop tolerance settings".into(),
-                    ));
-                }
+                seedbox_application::config::validate_project(&spec.configuration)
+                    .map_err(|error| Error::Invalid(error.to_string()))?;
                 Ok(None)
             }
             InputSource::Checkpoint {
@@ -518,7 +505,6 @@ impl Catalogue {
             imported_checkpoints: original.imported_checkpoints.clone(),
             resource: resource.clone(),
             controls: original.controls.clone(),
-            deleted_checkpoints: original.deleted_checkpoints.clone(),
             deleting: original.deleting,
             range: original.range.clone(),
         };
@@ -546,45 +532,9 @@ impl Catalogue {
         Ok(entry
             .controls
             .values()
-            .filter(|receipt| {
-                receipt.request.command == seedbox_api::ControlCommand::Checkpoint
-                    && !entry
-                        .deleted_checkpoints
-                        .contains(&receipt.request.request_id)
-            })
+            .filter(|receipt| receipt.request.command == seedbox_api::ControlCommand::Checkpoint)
             .cloned()
             .collect())
-    }
-
-    /// Tombstone under the same lock as branch admission, retaining the original
-    /// control receipt for idempotent request retries and audit.
-    pub fn delete_checkpoint(&mut self, id: &SimulationId, name: &str) -> Result<()> {
-        validate_request_id(name)?;
-        let entry = self
-            .entries
-            .get(id)
-            .ok_or_else(|| Error::NotFound(id.clone()))?;
-        if entry.resource.status.phase != Phase::Completed {
-            return Err(Error::Invalid(
-                "checkpoint deletion requires a completed simulation".into(),
-            ));
-        }
-        if entry.deleted_checkpoints.contains(name) {
-            return Ok(());
-        }
-        self.captured_checkpoint(id, name)?;
-        if self.entries.values().any(|candidate| {
-            candidate.resource.metadata.parent.as_ref() == Some(id)
-                && candidate.resource.metadata.checkpoint.as_deref() == Some(name)
-        }) {
-            return Err(Error::Invalid(format!(
-                "checkpoint {name} is referenced by a branch"
-            )));
-        }
-        let mut entry = entry.clone();
-        entry.deleted_checkpoints.insert(name.to_owned());
-        self.entries.insert(id.clone(), entry);
-        Ok(())
     }
 
     pub fn captured_checkpoint(
@@ -593,16 +543,6 @@ impl Catalogue {
         request_id: &str,
     ) -> Result<seedbox_engine_protocol::host_control::CheckpointStatus> {
         use seedbox_engine_protocol::host_control::CheckpointState;
-        let entry = self
-            .entries
-            .get(id)
-            .ok_or_else(|| Error::NotFound(id.clone()))?;
-        if entry.deleted_checkpoints.contains(request_id) {
-            return Err(Error::Invalid(format!(
-                "checkpoint {request_id} was deleted"
-            )));
-        }
-
         let receipt = self.control_receipt(id, request_id)?;
         match receipt.map(|receipt| (&receipt.request.command, &receipt.state)) {
             Some((

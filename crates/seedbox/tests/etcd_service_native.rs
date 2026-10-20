@@ -7,6 +7,7 @@ mod etcd_native;
 mod support {
     pub mod etcd_project;
     pub mod failure_capture;
+    pub mod json_diff;
 }
 use etcd_project::Backend;
 use support::etcd_project;

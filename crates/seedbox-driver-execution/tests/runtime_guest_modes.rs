@@ -1,11 +1,12 @@
 //! Portable composition regression: host modes on guest ELF input files do not
 //! determine the executable modes of the resulting guest initramfs entries.
 //! All binaries here are structural fixtures; none is executed.
-use seedbox_driver_execution::runtime_assets::{Backend, Runtime};
+use seedbox_driver_execution::runtime_assets::Runtime;
 use seedbox_machine::{
     application::{boot_archive_configured, GuestBootstrap, GuestEnvironment, Kernel, NamedVolume},
     definition::{FilesystemArchive, Launch, PreparedApplication},
 };
+use seedbox_spec::backend::CpuBackend;
 use seedbox_spec::definition::Architecture;
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt};
 
@@ -167,8 +168,8 @@ fn read_only_guest_elf_inputs_select_and_become_executable_in_each_guest_archive
     let scratch = tempfile::tempdir().unwrap();
     let runtime = Runtime::from_bytes(&package(&layout()), scratch.path()).unwrap();
     for (backend, arch) in [
-        (Backend::Pv, native()),
-        (Backend::Tcg, Architecture::X86_64),
+        (CpuBackend::Pv, native()),
+        (CpuBackend::Tcg, Architecture::X86_64),
     ] {
         let inputs = runtime.select(backend, arch).unwrap();
         for name in ["init", "mke2fs"] {
@@ -219,7 +220,7 @@ fn read_only_guest_files_still_require_the_requested_elf_architecture() {
             .1 = elf(183);
         let runtime = Runtime::from_bytes(&package(&members), scratch.path()).unwrap();
         assert!(runtime
-            .select(Backend::Tcg, Architecture::X86_64)
+            .select(CpuBackend::Tcg, Architecture::X86_64)
             .unwrap_err()
             .to_string()
             .contains("wrong architecture"));
@@ -237,7 +238,7 @@ fn host_qemu_launcher_and_binary_still_require_execute_permission() {
             .2 = 0o644;
         let runtime = Runtime::from_bytes(&package(&members), scratch.path()).unwrap();
         assert!(runtime
-            .select(Backend::Tcg, Architecture::X86_64)
+            .select(CpuBackend::Tcg, Architecture::X86_64)
             .unwrap_err()
             .to_string()
             .contains("not executable"));

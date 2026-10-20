@@ -30,7 +30,7 @@ pub(super) fn open(request: &wire::Request) -> Result<Worker<Native>> {
     if request.machine_workers == 0 {
         return Err(bad("Driver worker count must be positive"));
     }
-    super::policy::decode_optional(request.prepared.inventory.backend_policy()).map_err(bad)?;
+    super::policy::check_optional(request.prepared.inventory.backend_policy()).map_err(bad)?;
     super::controller::resolve(
         &request.prepared.inventory,
         &request.prepared.oracle.name,
@@ -170,8 +170,8 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     Ok(worker)
 }
 pub(super) fn validate_policy_binding(expected: &Inventory, captured: &Inventory) -> Result<()> {
-    super::policy::decode_optional(expected.backend_policy()).map_err(bad)?;
-    super::policy::decode_optional(captured.backend_policy()).map_err(bad)?;
+    super::policy::check_optional(expected.backend_policy()).map_err(bad)?;
+    super::policy::check_optional(captured.backend_policy()).map_err(bad)?;
     if std::mem::discriminant(expected) != std::mem::discriminant(captured)
         || expected.backend_policy() != captured.backend_policy()
     {
@@ -360,20 +360,21 @@ fn materialize_factory(
     output: &Path,
     binding: Option<&wire::RuntimeBinding>,
 ) -> Result<Assets> {
-    super::policy::decode_optional(inventory.backend_policy()).map_err(bad)?;
-    use crate::runtime_assets::{Backend, Runtime};
+    super::policy::check_optional(inventory.backend_policy()).map_err(bad)?;
+    use crate::runtime_assets::Runtime;
+    use seedbox_spec::backend::CpuBackend;
     use seedbox_spec::definition::Architecture;
     let (archive, backend, architecture) = match inventory {
         Inventory::Pv { runtime, .. } => (
             runtime,
-            Backend::Pv,
+            CpuBackend::Pv,
             if cfg!(target_arch = "aarch64") {
                 Architecture::Aarch64
             } else {
                 Architecture::X86_64
             },
         ),
-        Inventory::Tcg { runtime, .. } => (runtime, Backend::Tcg, Architecture::X86_64),
+        Inventory::Tcg { runtime, .. } => (runtime, CpuBackend::Tcg, Architecture::X86_64),
     };
     checkpoint::verified(archive)?;
     let (guest_assets, qemu, inputs) = if let Some(binding) = binding {
@@ -420,7 +421,13 @@ fn materialize_factory(
             if let Some(formatter) = formatter {
                 remap(formatter, &guest_assets.join("mke2fs"))?;
             }
-            let path = output.join("factory-worker");
+            // Worker-owned copy, written before `Factory::load` spawns anything
+            // (see above). It lives in the attempt's native scratch, which the
+            // parent removes after the monitor exits, so the engine never
+            // becomes part of the attempt's retained output logs.
+            let scratch = output.join(super::NATIVE_SCRATCH);
+            fs::create_dir_all(&scratch)?;
+            let path = scratch.join("factory-worker");
             copy(executable, &path)?;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
             remap(executable, &path)?;

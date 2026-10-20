@@ -1,20 +1,19 @@
 //! Canonical pure policy types with Driver-owned streams and stopped routing.
 use super::*;
 use crate::driver::{Position, Timestamp};
-pub use seedbox_control::{Connection, NetworkFaults};
 use seedbox_engine_core::connections::{is_reset_frame, reset_frame};
 pub use seedbox_engine_core::{
     links::{Policy as NetworkPolicy, QueueCounts},
     network_counters::PairCounts as NetworkPairCounts,
     network_faults::Counts as NetworkFaultCounts,
 };
+pub use seedbox_engine_protocol::control::{Connection, NetworkFaults};
 use std::collections::BTreeSet;
 
 /// Collision-free identity of one directed counter pair within this Driver.
 /// IDs are insertion identities retained by checkpoints, independent of names
 /// and their punctuation. Ordering is sender ID then receiver ID. Resolve names
 /// only for presentation; concatenated names are not pair identities.
-// TODO: Re-evaluate: transport adapters own display spelling, not counter keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NetworkPair {
     pub from: MachineId,
@@ -24,8 +23,8 @@ pub struct NetworkPair {
 /// One directed named baseline override; endpoints identify prepared definitions.
 /// The entire policy replaces the global policy for this ordered pair (including
 /// an explicit absence of bandwidth), rather than inheriting individual fields.
-// TODO: Re-evaluate: shared links need named setup independent of machine
-// construction order, including definitions that are spawned later.
+// Named so shared links can be set up independent of machine construction
+// order, including definitions that are spawned later.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkPolicy {
     pub from: String,
@@ -35,8 +34,8 @@ pub struct LinkPolicy {
 /// Complete initial network policy, retaining the original causal latency floor.
 /// Existing NetworkConfig and Driver constructors continue using no bandwidth,
 /// no baselines and no frame observations. This value executes no work.
-// TODO: Re-evaluate: per-pair/global queue policy cannot live in an individual
-// machine definition or alter the existing Copy NetworkConfig boundary.
+// Per-pair and global queue policy spans machines, so it cannot live in an
+// individual machine definition; it stays outside the Copy NetworkConfig.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetworkSetup {
     pub(super) config: NetworkConfig,
@@ -62,8 +61,6 @@ impl NetworkSetup {
     /// Validate all policies against config's latency floor, unique directed
     /// named pairs and nonempty distinct endpoints. Definition membership and
     /// interface attachment are checked by the Driver before factory work.
-    // TODO: Re-evaluate: setup validates policy once without backend admission
-    // or hidden defaults; the Driver still owns prepared-name membership.
     pub fn new(
         config: NetworkConfig,
         bandwidth_bps: Option<u64>,
@@ -96,8 +93,6 @@ impl NetworkSetup {
     /// Overflow increments omitted, never changes routing or authoritative counts.
     /// This is host observer configuration, never continuing checkpoint state.
     /// Restore starts with frame retention disabled and no pre-checkpoint history.
-    // TODO: Re-evaluate: packet observation must be bounded and separate from
-    // dense committed EventKind sequencing and deterministic witness content.
     pub fn with_frame_capacity(mut self, capacity: usize) -> Self {
         self.frame_capacity = capacity;
         self
@@ -143,7 +138,6 @@ impl NetworkSetup {
 /// Counts returned by a selection heal, sampled when the heal is admitted.
 /// `matched` includes matching frames masked by a partition; `dropped` counts
 /// only frames for which this selection won the loss decision.
-// TODO: Re-evaluate: admission-time snapshots must not drift while a heal waits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct SelectionCounts {
     pub matched: u64,
@@ -153,8 +147,8 @@ pub struct SelectionCounts {
 /// Shape counts are sampled when removal applies; selection counts at admission.
 /// Disabled shape features are absent, enabled features may have zero counts.
 /// Selection counts are exclusive of queue/fault counts.
-// TODO: Re-evaluate: service receipts need counts without parsing free-form
-// details or adding another event that shifts existing dense event sequences.
+// Typed so service receipts read counts without parsing free-form details or
+// adding an event that would shift dense event sequences.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct NetworkSettlement {
     #[serde(rename = "queue_counts", skip_serializing_if = "Option::is_none")]
@@ -170,7 +164,6 @@ pub struct NetworkSettlement {
 /// Committed network observation, never an EventKind or witness contribution.
 /// Scheduled proves enqueueing, not delivery. A later ReceiverDropped can refer
 /// to that same frame; selection, ordinary loss and burst loss share LossDropped.
-// TODO: Re-evaluate: packet facts and confirmed receive counters are independent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameFate {
     Scheduled,
@@ -183,7 +176,6 @@ pub enum FrameFate {
 /// the actual offered bytes (including a reset substitution), not a payload copy.
 /// Position is the route commit, or the delivery-time position for ReceiverDropped.
 /// Duplicate copies have their own scheduled fact and due time.
-// TODO: Re-evaluate: bounded facts intentionally do not retain packet bodies.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrameFact {
     pub position: Position,
@@ -199,7 +191,7 @@ pub struct FrameFact {
 /// Omitted saturates at u64::MAX. Initially disabled observation returns an
 /// empty drain with zero omissions. Clearing/shrinking preserves omissions for
 /// the next drain; draining resets only facts and their omission count.
-// TODO: Re-evaluate: omission is transport loss, never simulation packet loss.
+// `omitted` counts discarded observation facts, never simulated packet loss.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FrameFacts {
     pub facts: Vec<FrameFact>,

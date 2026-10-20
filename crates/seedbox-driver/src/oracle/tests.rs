@@ -238,7 +238,7 @@ fn network_operations_parse_and_validate_before_policy_admission() {
         invalid(json!({"op":"shape"})).code,
         ErrorCode::InvalidRequest
     );
-    // Disk has no operation in the legacy guest schema; do not invent one.
+    // The guest schema has no disk operation; do not invent one.
     assert_eq!(
         invalid(json!({"op":"disk"})).code,
         ErrorCode::InvalidRequest

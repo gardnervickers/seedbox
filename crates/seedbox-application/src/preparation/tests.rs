@@ -58,7 +58,7 @@ impl FixturePreparer {
 
 fn fixture(root: &Path) -> (FixturePreparer, config::Simulation, ContentStore) {
     use seedbox_driver_execution::driver_world::DriverExecutor;
-    let (_, runtime, _) = sdk(root, seedbox_driver_execution::runtime_assets::Backend::Pv);
+    let (_, runtime, _) = sdk(root, seedbox_spec::backend::CpuBackend::Pv);
     let kernel = root.join("kernel");
     fs::copy(runtime.guest_assets.join("kernel"), &kernel).unwrap();
     let engine = std::env::current_exe().unwrap();

@@ -31,8 +31,6 @@ impl ExecutionProfile {
 pub struct SemanticParameters {
     /// Seeded survival of the latest unflushed 512-byte sectors on crash.
     pub torn_writes: bool,
-    /// Runtime checkpoint and the branch seed after it.
-    pub checkpoint: Option<Checkpoint>,
     /// Driver executable descriptor. Non-executing test backends may omit it.
     pub engine: Option<EngineDescriptor>,
 }
@@ -48,7 +46,6 @@ impl SemanticParameters {
     pub fn new() -> Self {
         Self {
             torn_writes: false,
-            checkpoint: None,
             engine: None,
         }
     }
@@ -63,25 +60,13 @@ impl SemanticParameters {
     pub fn differences(&self, other: &Self) -> Vec<&'static str> {
         let Self {
             torn_writes,
-            checkpoint,
             engine: _,
         } = self;
-        [
-            (torn_writes != &other.torn_writes, "torn_writes"),
-            (checkpoint != &other.checkpoint, "checkpoint"),
-        ]
-        .into_iter()
-        .filter_map(|(differs, name)| differs.then_some(name))
-        .collect()
+        [(torn_writes != &other.torn_writes, "torn_writes")]
+            .into_iter()
+            .filter_map(|(differs, name)| differs.then_some(name))
+            .collect()
     }
-}
-
-/// A runtime checkpoint: the world forks at `at_ns` with a new branch seed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Checkpoint {
-    pub at_ns: u64,
-    pub branch_seed: u64,
 }
 
 /// The retained executable's launch contract plus descriptive build metadata.
@@ -125,8 +110,6 @@ pub struct PreparedImage {
 #[serde(deny_unknown_fields)]
 pub struct PreparedInputs {
     /// Guest CLOCK_REALTIME at the launch barrier, sampled once during preparation.
-    /// Historical prepared inputs omit this and retain their original boot bytes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_clock_epoch: Option<u32>,
     pub images: BTreeMap<String, PreparedImage>,
     /// Every service maps to one machine; services may share a machine.

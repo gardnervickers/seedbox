@@ -10,8 +10,6 @@
 //! A zero sector is ordinary data, never a hole that exposes older layers.
 //! Failed operations change nothing.
 
-// TODO: Re-evaluate: separate backends consume this canonical helper.
-// Crate-private access cannot cross packages; representation remains private.
 use std::{collections::BTreeMap, sync::Arc};
 
 // Explicit canonical paths also support the standalone QEMU Rust FFI build.
@@ -50,10 +48,9 @@ enum Base {
     Image(Arc<[u8]>),
 }
 
-// TODO: Re-evaluate: one backend-neutral store keeps durability semantics in a
-// single place for future block devices; the frozen Machine contract alone
-// cannot share them. Private, synchronous and local: it fixes no device
-// latency, boot-end policy, wire format or public definition.
+// One backend-neutral store keeps durability semantics in a single place for
+// the PV and TCG block devices. It fixes no device latency, boot-end policy,
+// wire format or public definition.
 #[derive(Clone)]
 pub struct Store {
     base: Base,
@@ -161,9 +158,8 @@ impl Store {
     /// this helper draws no randomness: the caller owns the dedicated policy
     /// stream, including the zero-draw default. Reads of actual sector bytes
     /// also permit stopped disk evidence without hashing a snapshot encoding.
-    // TODO: Re-evaluate: both backend boot-end policies need the same ordered
-    // selection while store representation stays private; cloning and reading
-    // alone cannot observe an unflushed overwrite equal to durable bytes.
+    // Boot-end loss needs this ordered selection: cloning and reading alone
+    // cannot observe an unflushed overwrite equal to durable bytes.
     pub fn crashed_keeping(&self, mut survives: impl FnMut(u64, &[u8]) -> bool) -> (Self, u64) {
         let mut next = self.clone();
         next.unflushed.clear();

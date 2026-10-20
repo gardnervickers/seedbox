@@ -95,8 +95,8 @@ pub struct Snapshot {
     // The immutable body owns the exact resource/boot/native state; the
     // separately owned disk base closes the capture independently of temp files.
     #[cfg_attr(not(test), allow(dead_code))]
-    // TODO: Re-evaluate: capture bytes are immutable; sharing the owned Vec
-    // avoids full-RAM copies when a caller retains multiple restore branches.
+    // Capture bytes are immutable; sharing the owned Vec avoids full-RAM copies
+    // when a caller retains multiple restore branches.
     bytes: std::sync::Arc<Vec<u8>>,
     /// The immutable base, shared rather than copied into `bytes`.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -104,8 +104,8 @@ pub struct Snapshot {
     aux: retained::Aux,
 }
 /// The machine's disk: its immutable base and, between boots, its store.
-// TODO: Re-evaluate: exactly one owner at a time (worker during a boot, this
-// machine between boots) keeps boot-end loss a single client decision.
+// Exactly one owner at a time (the worker during a boot, this machine between
+// boots) keeps boot-end loss a single client decision.
 struct Disk {
     base: DiskImage,
     /// A store over the base with empty overlays; clones share its base.
@@ -177,7 +177,7 @@ const TEST_COMMAND_LINE: &str = "console=ttyS0 earlycon=uart8250,io,0x3f8 rdinit
 
 impl Snapshot {
     /// Validate the retained optional named policy before native restore.
-    // TODO: Re-evaluate: external factory authority must not come from imported
+    // Policy authority comes from the caller's factory, never from imported
     // snapshot data; this check exposes no RAM or private native representation.
     pub fn validate_policy(
         &self,
@@ -806,8 +806,6 @@ impl PVMachine {
     /// clocks, RNG streams or simulation queues. The default temporary directory's
     /// effective absolute path must be UTF-8 for the worker JSON transport;
     /// invalid encoding is rejected before scratch creation or worker startup.
-    // TODO: Re-evaluate: real driver restoration needs this opaque backend capture.
-    // Keeping it test-private cannot support production reconstruction.
     pub fn from_snapshot(executable: &Path, snapshot: &Snapshot) -> Result<Self, String> {
         Self::from_snapshot_with_scratch(executable, snapshot, None)
     }
@@ -824,9 +822,6 @@ impl PVMachine {
     /// An encoding error is returned before creating scratch or a worker.
     /// Native restore capability
     /// and execution semantics are those of [`Self::from_snapshot`].
-    // TODO: Re-evaluate: a service session must own cleanup after process death.
-    // Explicit host authority cannot be recovered from snapshot bytes or a
-    // process-global temporary-directory setting.
     pub fn from_snapshot_in(
         executable: &Path,
         snapshot: &Snapshot,
@@ -921,8 +916,8 @@ fn scratch_directory(root: Option<&Path>) -> Result<TempDir, String> {
 
 /// Scratch belongs to this restoration, never to the source capture. Unwind or
 /// a failed worker boot drops it; a successful Ready permits explicit removal.
-// TODO: Re-evaluate: Boot Ready owns all restored bytes; future transports must
-// preserve this early release point rather than retaining scratch until Drop.
+// Once Boot is Ready the worker owns all restored bytes, so scratch is released
+// then rather than retained until Drop.
 fn restore_image(directory: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, String> {
     let mut image = tempfile::NamedTempFile::new_in(directory)
         .map_err(|e| format!("PV restore image create in {}: {e}", directory.display()))?;
@@ -1122,8 +1117,8 @@ mod progress_tests;
 /// Explicit fixture-only construction and stopped evidence for retained scenarios.
 /// These helpers are absent unless `test-support` is enabled; they never export
 /// native handles, boot manifests or mutable machine state.
-// TODO: Re-evaluate: Driver scenarios need backend-local construction/assertions.
-// A reverse dev-dependency or general private-state inspection would be broader.
+// Driver scenarios need backend-local construction and assertions; a reverse
+// dev-dependency or general private-state inspection would be broader.
 #[cfg(feature = "test-support")]
 pub mod test_support;
 

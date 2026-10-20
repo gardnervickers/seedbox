@@ -476,7 +476,7 @@ pub fn check_client(transcript: &Transcript) {
     assert!(routed(1, 0) * 1514 >= 262_144 && routed(0, 1) * 1514 >= 262_144);
 }
 
-// TODO: Re-evaluate: PV and TCG must exercise the same network assertions.
+// PV and TCG exercise the same network assertions.
 // Only construction and restore vary; these test-only callbacks keep those
 // differences out of the scenario bodies, as `disk_scenario::Backend` does.
 /// Construction and restore for the shared direct-`Machine` scenarios.

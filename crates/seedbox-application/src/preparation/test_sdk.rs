@@ -3,7 +3,7 @@ use std::{fs, path::Path};
 
 pub(super) fn sdk(
     root: &Path,
-    backend: seedbox_driver_execution::runtime_assets::Backend,
+    backend: seedbox_spec::backend::CpuBackend,
 ) -> (
     seedbox_driver_execution::runtime_assets::Runtime,
     seedbox_driver_execution::runtime_assets::Inputs,
@@ -136,7 +136,7 @@ pub(super) fn sdk(
     let selected = runtime
         .select(
             backend,
-            if backend == runtime_assets::Backend::Pv && cfg!(target_arch = "aarch64") {
+            if backend == seedbox_spec::backend::CpuBackend::Pv && cfg!(target_arch = "aarch64") {
                 seedbox_spec::definition::Architecture::Aarch64
             } else {
                 seedbox_spec::definition::Architecture::X86_64

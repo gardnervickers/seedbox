@@ -12,9 +12,12 @@ mod admission_value_tests;
 
 /// Result of draining only work due at the current simulation time.
 /// Admission/dispatch is not completion of a command awaiting future guest ACKs.
-// TODO: Re-evaluate: service receipts need to distinguish an admitted held effect
-// and oracle completion without using pacing's Waiting or positive-budget steps.
-// Preserve the existing public by-value API and Copy canonical fault action.
+// Service receipts distinguish an admitted held effect from oracle completion
+// without pacing's Waiting or positive-budget steps.
+// TODO: `clippy::large_enum_variant` is suppressed here and on PreparedOutcome
+// only to keep FaultRecord by value, but there is no backward-compatibility
+// requirement on this API. Measure the variant size and either box the record
+// (updating the service worker's matches) or document why by-value is needed.
 #[expect(
     clippy::large_enum_variant,
     reason = "network records retain the existing public by-value outcome API"
@@ -33,10 +36,9 @@ pub enum DueOutcome {
 }
 
 /// A non-mutating admission projection, not a queued request or allocated ID.
-// TODO: Re-evaluate: the legacy journal must know the exact admitted record before
-// committing. A closed plain value separates outer preflight errors from policy
-// rejection without introducing tokens, serde identity or a second scheduler.
-// No opaque indirection or handle registry belongs in an exact proposal value.
+// The caller's journal records the exact admitted record before commit. A
+// closed plain value separates outer preflight errors from policy rejection
+// without tokens, serde identity, a handle registry or a second scheduler.
 #[expect(
     clippy::large_enum_variant,
     reason = "network records retain the existing public by-value proposal API"
@@ -52,9 +54,9 @@ pub enum PreparedOutcome {
 /// carries no authorization or source identity. Commit reprojects the full
 /// outcome against current state; callers exclusively retain it across their
 /// journal transaction and must not journal rejected outcomes.
-// TODO: Re-evaluate: an exclusive prepare/journal/commit scope needs an inspectable
-// value, not an opaque token registry. Reprojection detects stale IDs/state before
-// effects; position alone is not sufficient. External journaling stays caller-owned.
+// An exclusive prepare/journal/commit scope needs an inspectable value, not an
+// opaque token registry. Reprojection detects stale IDs/state before effects;
+// position alone is not sufficient.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedInput {
     handle: Option<FaultHandle>,
@@ -66,8 +68,6 @@ pub struct PreparedInput {
 }
 impl PreparedInput {
     /// The explicitly requested host name, or None for ordinary pN allocation.
-    // TODO: Re-evaluate: aliases are part of exact admission, not a mapping
-    // installed after journal commit or machine effects.
     pub fn handle(&self) -> Option<&FaultHandle> {
         self.handle.as_ref()
     }
@@ -115,9 +115,9 @@ where
     /// settlements succeeded. Execution/control failures after dispatch begins
     /// poison exactly like step: staged machine output is cleared and confirmed
     /// facts remain drainable. Preflight refusals do not poison or publish.
-    // TODO: Re-evaluate: pacing setters change anchors, arms and step targets.
-    // An owned zero-time dispatch phase preserves legacy service admission without
-    // changing ordinary step or creating a service-side scheduler.
+    // Pacing setters change anchors, arms and step targets, so service admission
+    // uses this zero-time dispatch phase instead, without changing ordinary step
+    // or creating a service-side scheduler.
     pub fn apply_due_now(&mut self) -> Result<DueOutcome, Error<M::Error>> {
         self.check_admission_boundary()?;
         let result = self.driver.drain_due_now(Instant::now());
@@ -135,9 +135,9 @@ where
     /// Dropping a proposal after a journal failure leaves the Driver unchanged.
     /// Readiness, authored cursor, user-handle and checkpoint gates belong to the
     /// exclusive service worker, not this Driver operation.
-    // TODO: Re-evaluate: the legacy journal requires state validation and an exact
-    // ID before durable write. A shared admission helper on cloned Control avoids
-    // speculative real mutation or whole-Driver cloning.
+    // The caller's journal needs state validation and an exact ID before its
+    // durable write. Admitting on cloned Control avoids speculative real
+    // mutation or whole-Driver cloning.
     pub fn prepare_input(
         &self,
         key: InputKey,
@@ -148,8 +148,6 @@ where
     /// Project admission with a nonempty explicit host name. Pending duplicate
     /// text is allowed; an active namespace collision is rejected. Names do not
     /// consume guest pN numbers and participate in exact commit comparison.
-    // TODO: Re-evaluate: shared cloned admission is necessary for guest heals,
-    // aliases and pending races; a service-only after-commit map cannot do it.
     pub fn prepare_input_with_handle(
         &self,
         key: InputKey,
@@ -239,7 +237,7 @@ where
     /// source has already changed. All post-mutation failures poison like step
     /// and must never be retried. External journal failure is handled by not
     /// calling this method; journal rollback/publication is entirely the caller's concern.
-    // TODO: Re-evaluate: retaining a fault ID only in a host proposal is unsafe
+    // Retaining a fault ID only in a host proposal is unsafe
     // when control state moves. Exact non-mutating reprojection precedes admission;
     // the post-admission guard detects implementation bugs, not stale proposals.
     pub fn commit_input(

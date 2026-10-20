@@ -67,8 +67,8 @@ fn bad(message: impl Into<String>) -> Error {
 /// prepared Driver world, then its typed manifest. No image engine, builder or
 /// guest is invoked. The manifest replaces source host paths with logical
 /// content references and joins PreparedInputs' ordinary materialization set.
-// TODO: Re-evaluate: preparation and execution are separate lifetimes; retaining
-// only the current boot loses stateless future-factory authority on branch/spawn.
+// Preparation and execution are separate lifetimes; retaining only the current
+// boot would lose the factory inputs later branches and spawns need.
 pub fn retain_prepared(
     inputs: &mut PreparedInputs,
     prepared: &Prepared,
@@ -79,8 +79,14 @@ pub fn retain_prepared(
     let mut objects = BTreeSet::new();
     visit(&mut prepared, |artifact| {
         artifact.validate().map_err(bad)?;
-        let mut source = super::checkpoint::verified(artifact)?;
-        let digest = store.put_reader(&mut source)?;
+        // `put_file` hashes the source (once per unchanged file in this
+        // process) and only reads, never rewrites or syncs, an object the
+        // store already holds; the result is the digest of the stored bytes.
+        let path = Path::new(&artifact.artifact);
+        if fs::metadata(path)?.len() != artifact.length {
+            return Err(bad("Driver artifact encoded length differs"));
+        }
+        let digest = store.put_file(path)?;
         if digest.hex() != artifact.sha256 {
             return Err(bad("Driver input changed while retaining its content"));
         }
@@ -164,8 +170,8 @@ impl Closure {
 /// This reads only bounded retained metadata and verifies closure membership and
 /// length. It never searches startup/default assets, builds inputs or executes
 /// a worker. The caller materializes precisely this content in its owned session.
-// TODO: Re-evaluate: the CLI must acquire runtime ownership before launch, but
-// must not duplicate private manifest parsing or infer authority from provenance.
+// The CLI acquires the runtime before launch through this, without duplicating
+// private manifest parsing or inferring authority from provenance.
 pub fn runtime_digest(inputs: &PreparedInputs, store: &ContentStore) -> Result<ContentDigest> {
     validate_contract(&inputs.profile)?;
     let closure = Closure::from_inputs(inputs)?
@@ -319,7 +325,7 @@ pub(crate) fn request(
         let policy = match &mut prepared.inventory {
             wire::Inventory::Pv { policy, .. } | wire::Inventory::Tcg { policy, .. } => policy,
         };
-        let resolved = seedbox_machine::definition::BackendPolicy {
+        let resolved = wire::BackendPolicy {
             seed: request.seed,
             timer_jitter_ns: request.schedule.timer_jitter_ns,
             stop_tolerance_ns: request.schedule.stop_tolerance_ns,
@@ -331,7 +337,7 @@ pub(crate) fn request(
             controller,
         };
         resolved.validate().map_err(bad)?;
-        *policy = Some(super::policy::encode(&resolved).map_err(bad)?);
+        *policy = Some(resolved);
     }
     let epoch = request
         .prepared

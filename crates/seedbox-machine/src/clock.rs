@@ -26,9 +26,8 @@ pub trait Clock {
 /// The rate scales everything the machine experiences as time, including its
 /// counters, timers and the CPU work it completes per simulation nanosecond
 /// (one crystal for the whole machine). Execution pricing is not compensated.
-// TODO: Re-evaluate: drift needs a validated, backend-neutral value shared by
-// host actions, events and the Driver's mapping; a raw integer would let each
-// owner reinterpret units and bounds.
+// A validated newtype shared by host actions, events and the Driver's mapping;
+// a raw integer would let each owner reinterpret units and bounds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ClockRate(i32);
 

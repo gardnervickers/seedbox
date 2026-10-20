@@ -741,8 +741,8 @@ fn physical_peer_exit_preflight_precedes_policy_and_preserves_crash_reboot_path(
     ));
     o.facts.vm = Vm::Down;
     s.applied(fault(&p), 11, 11).unwrap();
-    // New Machine may retain its ProgramExit after logical Crash. Excluding
-    // Down from physical preflight preserves legacy fresh-unrun Down behavior.
+    // A crashed Machine may retain its ProgramExit; Down skips physical
+    // preflight, so a Down process fault still admits and settles Unavailable.
     let unavailable = call(
         &mut s,
         &mut o,

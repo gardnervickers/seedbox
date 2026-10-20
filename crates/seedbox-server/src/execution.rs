@@ -189,32 +189,6 @@ impl ExecutionService {
         Ok(())
     }
 
-    /// Block new branches before removing the completed simulation's capture.
-    /// Repeated deletion retries cleanup using the retained attempt reference.
-    pub fn delete_checkpoint(&self, id: &SimulationId, name: &str) -> Result<(), Error> {
-        let _evidence = self
-            .evidence
-            .lock()
-            .map_err(|_| catalogue::Error::StorageFailed)?;
-        self.manager.delete_checkpoint(id, name)?;
-        if self.manager.read(|catalogue| catalogue.is_imported(id))? {
-            return Ok(());
-        }
-        let inputs: RetainedInputs = serde_json::from_reader(fs::File::open(
-            self.root.join("inputs").join(format!("{id}.json")),
-        )?)
-        .map_err(std::io::Error::other)?;
-        let attempt = inputs
-            .attempt
-            .ok_or_else(|| std::io::Error::other("checkpoint source has no execution attempt"))?;
-        crate::checkpoint_cleanup::remove(&attempt, name).map_err(|e| {
-            Error::Storage(std::io::Error::new(
-                e.kind(),
-                format!("checkpoint {name} cleanup: {e}"),
-            ))
-        })
-    }
-
     /// Snapshot the atomically published semantic journal using owned paths.
     /// Reading never acquires the writer lock or mutates the source simulation.
     pub fn timeline(&self, id: &SimulationId) -> Result<seedbox_api::FaultTimeline, Error> {
@@ -366,30 +340,16 @@ impl ExecutionService {
                 fault_history_matches: false,
             });
         };
-        let comparison = seedbox_artifacts::record::compare(&first.record, &second.record);
-        use seedbox_api::ComparisonStatus;
-        let compatible = bundles::semantic_definition(first.definition)?
-            == bundles::semantic_definition(second.definition)?;
-        let status = if !compatible {
-            ComparisonStatus::NotComparable
-        } else {
-            match comparison.status {
-                seedbox_artifacts::record::ReplayStatus::Match => ComparisonStatus::Match,
-                seedbox_artifacts::record::ReplayStatus::Mismatch => ComparisonStatus::Mismatch,
-                seedbox_artifacts::record::ReplayStatus::NotComparable => {
-                    ComparisonStatus::NotComparable
-                }
-            }
-        };
-        Ok(seedbox_api::SimulationComparison {
-            baseline: baseline.clone(),
-            simulation: simulation.clone(),
-            status,
-            outcome_matches: comparison.outcome_matches,
-            witness_matches: comparison.witness_matches,
-            full_state_matches: comparison.full_state_matches,
-            fault_history_matches: comparison.fault_history_matches,
-        })
+        let mut comparison = seedbox_artifacts::record::compare(
+            (baseline, &first.record),
+            (simulation, &second.record),
+        );
+        if bundles::semantic_definition(first.definition)?
+            != bundles::semantic_definition(second.definition)?
+        {
+            comparison.status = seedbox_api::ComparisonStatus::NotComparable;
+        }
+        Ok(comparison)
     }
 
     /// The owner waits for every active task during graceful shutdown. Dropping

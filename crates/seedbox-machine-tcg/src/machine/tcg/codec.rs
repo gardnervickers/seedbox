@@ -98,7 +98,7 @@ fn validate_scalars(s: &Snapshot) -> Result<()> {
     }
     // Source run drains input, output and prepared replies before capture;
     // construction is the only pending-boot boundary. Never resume a run Err.
-    // TODO: REVISIT if accepted input delivery moves beyond the end of run.
+    // This relies on accepted input being delivered by the end of each run.
     if !s.input.is_empty()
         || !s.writes.is_empty()
         || s.pending_boots > 1
@@ -245,8 +245,8 @@ impl Snapshot {
     /// Trusted bridge validation may allocate fallible identity scratch without
     /// decode quotas, never a second migration image. Test-only raw Program boots
     /// are not part of this persisted format.
-    // TODO: Re-evaluate: concrete snapshots own backend closure. A generic
-    // serializer would expose private manifest, bridge and migration state.
+    // Each concrete snapshot owns its encoding; a generic serializer would
+    // expose private manifest, bridge and migration state.
     pub fn write_to(&self, output: &mut impl Write) -> Result<()> {
         validate_scalars(self)?;
         let (kernel, initrd, firmware, command, _) = boot(&self.manifest.boot)?;
@@ -284,8 +284,8 @@ impl Snapshot {
     /// supplies compatible patched QEMU and external execution context to restore;
     /// later native restore can fail. Quotas are not RSS/native admission or CPU
     /// isolation. Readers/allocators retain ordinary blocking/failure behavior.
-    // TODO: Re-evaluate: owner-local closed parsing is necessary for budgeted
-    // import; neither private QMP JSON nor native migration is a safe Rust schema.
+    // Budgeted import needs closed parsing here; neither private QMP JSON nor
+    // native migration is a safe Rust schema.
     pub fn read_from(input: &mut impl Read, limits: &DecodeLimits) -> Result<Self> {
         if limits.encoded_bytes < HEADER {
             return Err(CodecError::Limit("encoded bytes"));

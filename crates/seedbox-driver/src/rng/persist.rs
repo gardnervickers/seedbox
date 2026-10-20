@@ -1,4 +1,5 @@
-//! Version 1 RNG state fields; no stream algorithm/domain changes.
+//! RNG state fields are the checkpoint encoding; changing them or the stream
+//! algorithm/domains needs a checkpoint `VERSION` bump.
 use super::seeded::Domain;
 use super::*;
 use crate::persistence::{CodecError, Decoder, Encoder, Result, Wire};

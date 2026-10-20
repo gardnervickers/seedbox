@@ -23,7 +23,7 @@ fn fixture(
 ) {
     use seedbox_application::execution::ExecutionBackend;
     use seedbox_driver_execution::driver_world::DriverExecutor;
-    let (_, runtime, _) = sdk(root, seedbox_driver_execution::runtime_assets::Backend::Pv);
+    let (_, runtime, _) = sdk(root, seedbox_spec::backend::CpuBackend::Pv);
     let kernel = root.join("kernel");
     fs::copy(runtime.guest_assets.join("kernel"), &kernel).unwrap();
     let engine = std::env::current_exe().unwrap();
@@ -64,20 +64,19 @@ fn fixture(
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn ordinary_oci_output_retains_a_complete_driver_factory_without_source_paths() {
-    cold_driver_factory(seedbox_driver_execution::runtime_assets::Backend::Pv);
+    cold_driver_factory(seedbox_spec::backend::CpuBackend::Pv);
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn ordinary_tcg_oci_output_needs_no_pv_progress_and_retains_firmware() {
-    cold_driver_factory(seedbox_driver_execution::runtime_assets::Backend::Tcg);
+    cold_driver_factory(seedbox_spec::backend::CpuBackend::Tcg);
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn cold_driver_factory(backend: seedbox_driver_execution::runtime_assets::Backend) {
+fn cold_driver_factory(backend: seedbox_spec::backend::CpuBackend) {
     use seedbox_application::execution::ExecutionBackend;
     use seedbox_driver_execution::driver_world::{self, DriverExecutor};
-    use seedbox_driver_execution::runtime_assets;
     use seedbox_engine_protocol::driver_world as wire;
     struct Transport;
     impl ImageTransport for Transport {
@@ -130,10 +129,7 @@ fn cold_driver_factory(backend: seedbox_driver_execution::runtime_assets::Backen
     }
     let root = tempfile::tempdir().unwrap();
     let (mut preparer, mut simulation, store, _fixture_runtime) = fixture(root.path());
-    let cpu_backend = match backend {
-        runtime_assets::Backend::Pv => seedbox_spec::backend::CpuBackend::Pv,
-        runtime_assets::Backend::Tcg => seedbox_spec::backend::CpuBackend::Tcg,
-    };
+    let cpu_backend = backend;
     simulation
         .services
         .insert("side".into(), simulation.services["oracle"].clone());
@@ -169,7 +165,7 @@ fn cold_driver_factory(backend: seedbox_driver_execution::runtime_assets::Backen
     let mut inputs = preparer
         .prepare_driver_with_transport(&simulation, &store, &context, &Transport, &selected)
         .unwrap();
-    if backend == runtime_assets::Backend::Tcg {
+    if backend == seedbox_spec::backend::CpuBackend::Tcg {
         assert!(
             !preparer.progress.exists(),
             "TCG package deliberately lacks progress.tar"
@@ -276,7 +272,7 @@ fn cold_driver_factory(backend: seedbox_driver_execution::runtime_assets::Backen
             kernel,
             ..
         } => {
-            assert_eq!(backend, runtime_assets::Backend::Pv);
+            assert_eq!(backend, seedbox_spec::backend::CpuBackend::Pv);
             (boot_archives, environments, kernel)
         }
         wire::Inventory::Tcg {
@@ -287,7 +283,7 @@ fn cold_driver_factory(backend: seedbox_driver_execution::runtime_assets::Backen
             executable,
             ..
         } => {
-            assert_eq!(backend, runtime_assets::Backend::Tcg);
+            assert_eq!(backend, seedbox_spec::backend::CpuBackend::Tcg);
             assert_eq!(
                 firmware.sha256,
                 ContentDigest::of(&fs::read(selected.guest_assets.join("firmware")).unwrap()).hex()

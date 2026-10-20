@@ -10,6 +10,7 @@ dynamorio-isolated-tests = []
 test-support = ["dep:seedbox-test-time"]
 
 [dependencies]
+seedbox-engine-protocol.workspace = true
 seedbox-test-time = { workspace = true, optional = true }
 libc.workspace = true
 serde.workspace = true

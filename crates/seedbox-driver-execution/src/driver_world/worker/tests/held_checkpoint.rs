@@ -157,13 +157,13 @@ fn restore(envelope: &wire::Checkpoint, workers: usize, output: &Path) -> Worker
     )
     .unwrap()
 }
-fn crash() -> seedbox_control::Action {
-    seedbox_control::Action::Crash {
+fn crash() -> seedbox_engine_protocol::control::Action {
+    seedbox_engine_protocol::control::Action::Crash {
         machine: "n1".into(),
     }
 }
-fn partition() -> seedbox_control::Action {
-    seedbox_control::Action::Partition {
+fn partition() -> seedbox_engine_protocol::control::Action {
+    seedbox_engine_protocol::control::Action::Partition {
         handle: "partition".into(),
         left: vec!["oracle".into()],
         right: vec!["n1".into()],

@@ -209,7 +209,6 @@ pub async fn controller_checkpoint(backend: CpuBackend) {
         assert!(!assets.is_empty());
         session.client.stop(&source).await.unwrap();
         session.complete(&source, true, 1, SEED).await;
-        session.client.delete_checkpoint(&source, "saved").await.unwrap();
         session.client.delete(&source).await.unwrap();
         assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
         session.workers.store(4, Ordering::SeqCst);

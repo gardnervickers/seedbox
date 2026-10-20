@@ -1,4 +1,5 @@
-//! Version 1 field/tag order. Do not renumber tags or reorder fields.
+//! Field and tag order is the checkpoint encoding; changing it needs a
+//! checkpoint `VERSION` bump.
 use super::*;
 impl crate::persistence::Wire for InputKey {
     fn put<W: std::io::Write>(

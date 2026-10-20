@@ -111,15 +111,8 @@ fn write_fixture(
     path: &std::path::Path,
     record: &mut sb::record::RunRecord,
     raw: Option<&serde_json::Value>,
-    trace: Option<&[u8]>,
 ) {
-    write_fixture_logs(path, record, raw, &[("machines/workload.trace", trace)]);
-}
-
-/// Encode engine witness-log entries (time_ns, records, witness prefix).
-#[allow(dead_code)]
-fn witness_log_bytes(entries: &[[u64; 3]]) -> Vec<u8> {
-    entries.iter().flatten().flat_map(|v| v.to_le_bytes()).collect()
+    write_fixture_logs(path, record, raw, &[]);
 }
 
 fn write_fixture_logs(
@@ -131,7 +124,7 @@ fn write_fixture_logs(
     use sb::store::ContentDigest;
     std::fs::create_dir_all(path.join("output/machines/machines")).unwrap();
     // Synthetic fixture descriptions are encoded into the CURRENT retained
-    // formats here. No production legacy world-report decoder participates.
+    // formats here.
     let state = raw.and_then(|raw| {
         use std::collections::BTreeMap;
         if let Some(report) = record.report.as_mut() {

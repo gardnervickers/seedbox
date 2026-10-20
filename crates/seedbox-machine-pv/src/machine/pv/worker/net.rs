@@ -28,9 +28,8 @@
 //! transmitted stay available for [`Net::take_transmitted`]. The whole device,
 //! including backlog and untaken TX, belongs to machine snapshots.
 //
-// TODO: Re-evaluate: the 256-frame backlog follows legacy engine-core
-// `virtio_network.rs`. Dropping into a short buffer, unlike legacy truncation,
-// matches the TCG device and cannot stall the ring; Linux posts 1526 bytes.
+// Dropping a frame that does not fit a short RX buffer, rather than truncating
+// it, matches the TCG device and cannot stall the ring; Linux posts 1526 bytes.
 use super::virtio::*;
 use super::Result;
 use seedbox_machine::pv::ethernet::{

@@ -49,7 +49,7 @@ pub(crate) struct Record {
     pub(crate) matched_at: Option<u64>,
     pub(crate) effect_at: Option<u64>,
     pub(crate) fault_id: Option<u32>,
-    // TODO: Re-evaluate: guest inspection needs the actual opaque partition
+    // Guest inspection needs the actual opaque partition
     // handle after admission; fault IDs use a separate allocator. Retaining it
     // here avoids preallocation at arm time or client-side handle reconstruction.
     /// Actual partition handle allocated when this trigger fires; absent for stops.

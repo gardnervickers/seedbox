@@ -105,25 +105,29 @@ fn native() -> Architecture {
 #[test]
 fn default_pv_and_requested_x86_tcg_select_distinct_guest_directories() {
     let scratch = tempfile::tempdir().unwrap();
-    assert_eq!(Backend::default(), Backend::Pv);
+    assert_eq!(CpuBackend::default(), CpuBackend::Pv);
     let bytes = package(&files());
     let runtime = Runtime::from_bytes(&bytes, scratch.path()).unwrap();
-    let pv = runtime.select(Backend::Pv, native()).unwrap();
+    let pv = runtime.select(CpuBackend::Pv, native()).unwrap();
     assert!(pv
         .guest_assets
         .ends_with(format!("pv/{}", std::env::consts::ARCH)));
     assert!(pv.qemu.is_none());
     assert!(pv.guest_assets.join("progress.tar").is_file());
-    let tcg = runtime.select(Backend::Tcg, Architecture::X86_64).unwrap();
+    let tcg = runtime
+        .select(CpuBackend::Tcg, Architecture::X86_64)
+        .unwrap();
     assert!(tcg.guest_assets.ends_with("tcg/x86_64"));
     assert!(tcg.qemu.unwrap().is_file());
-    assert!(runtime.select(Backend::Tcg, Architecture::Aarch64).is_err());
+    assert!(runtime
+        .select(CpuBackend::Tcg, Architecture::Aarch64)
+        .is_err());
     let foreign = if native() == Architecture::X86_64 {
         Architecture::Aarch64
     } else {
         Architecture::X86_64
     };
-    assert!(runtime.select(Backend::Pv, foreign).is_err());
+    assert!(runtime.select(CpuBackend::Pv, foreign).is_err());
 }
 #[test]
 fn archive_and_entire_closure_survive_source_run_deletion_and_round_trip() {
@@ -136,7 +140,9 @@ fn archive_and_entire_closure_survive_source_run_deletion_and_round_trip() {
     fs::write(&path, &bytes).unwrap();
     let original = Runtime::from_archive(&path, scratch.path()).unwrap();
     let digest = original.retain(&store).unwrap();
-    let inputs = original.select(Backend::Tcg, Architecture::X86_64).unwrap();
+    let inputs = original
+        .select(CpuBackend::Tcg, Architecture::X86_64)
+        .unwrap();
     let root = original.directory.path().to_owned();
     drop(original);
     drop(source);
@@ -145,7 +151,9 @@ fn archive_and_entire_closure_survive_source_run_deletion_and_round_trip() {
     drop(inputs);
     assert!(!root.exists());
     let restored = Runtime::from_store(&store, &digest, scratch.path()).unwrap();
-    let inputs = restored.select(Backend::Tcg, Architecture::X86_64).unwrap();
+    let inputs = restored
+        .select(CpuBackend::Tcg, Architecture::X86_64)
+        .unwrap();
     for (name, bytes, mode) in files() {
         let path = restored.directory.path().join("assets").join(name);
         assert_eq!(fs::read(&path).unwrap(), bytes);
@@ -190,7 +198,9 @@ fn missing_formatter_wrong_guest_isa_or_missing_closure_never_falls_back() {
         }
         let runtime = Runtime::from_bytes(&package(&files), scratch.path()).unwrap();
         assert!(
-            runtime.select(Backend::Tcg, Architecture::X86_64).is_err(),
+            runtime
+                .select(CpuBackend::Tcg, Architecture::X86_64)
+                .is_err(),
             "{bad}"
         );
     }
@@ -274,7 +284,7 @@ fn explicit_session_root_owns_every_extracted_file_and_failure_cleans_up() {
     let runtime = Runtime::from_bytes(&bytes, scratch.path()).unwrap();
     assert!(runtime.archive().starts_with(scratch.path()));
     assert!(runtime
-        .select(Backend::Tcg, Architecture::X86_64)
+        .select(CpuBackend::Tcg, Architecture::X86_64)
         .unwrap()
         .qemu
         .unwrap()
@@ -317,7 +327,9 @@ fn concurrent_loads_own_independent_paths_and_do_not_publish_partial_inputs() {
             .map(|_| {
                 scope.spawn(|| {
                     let runtime = Runtime::from_bytes(&bytes, scratch.path()).unwrap();
-                    let inputs = runtime.select(Backend::Tcg, Architecture::X86_64).unwrap();
+                    let inputs = runtime
+                        .select(CpuBackend::Tcg, Architecture::X86_64)
+                        .unwrap();
                     (runtime, inputs)
                 })
             })

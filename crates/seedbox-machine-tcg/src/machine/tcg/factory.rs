@@ -31,10 +31,6 @@ impl Factory {
     /// derives from the same epoch. Use one epoch for all machines of a run,
     /// including spawned machines; it is part of each machine's boot inputs
     /// and snapshots, not a Driver setting.
-    // TODO: Re-evaluate: the epoch is concrete boot configuration owned with
-    // the factory's other guest inputs and retained in each machine's boot
-    // image and snapshots; neither the Driver's time mapping nor ambient state
-    // can supply it to arbitrary machines.
     pub fn new(qemu: &Path, guest_assets: &Path, epoch_seconds: u32) -> Result<Self, Error> {
         use seedbox_machine::machine::assets;
         assets::executable(qemu)?;
@@ -73,12 +69,12 @@ impl Factory {
         })
     }
     /// Select explicit run-wide backend semantics for subsequently created
-    /// machines. `None` remains the ordinary constructor's legacy behavior;
+    /// machines. Without it, machines carry no named policy (`None`);
     /// even `Some(default)` selects named policy with controller sockets off.
     /// Validation happens before any machine construction. Restore never calls
     /// this builder on an existing machine or reseeds its saved streams.
-    // TODO: Re-evaluate: one retained policy closes initial and future factory
-    // creation without adding mandatory fields to generic MachineDefinition.
+    // Policy lives on the factory so every creation path applies it without a
+    // MachineDefinition field.
     pub fn with_policy(mut self, policy: BackendPolicy) -> Result<Self, Error> {
         policy.validate().map_err(|error| Error(error.into()))?;
         self.policy = Some(policy);
@@ -100,8 +96,6 @@ impl Factory {
     /// Without this builder, standalone temporary-file behavior is unchanged.
     /// The root is host authority, not a guest input or snapshot field; restore
     /// must supply new authority with [`TcgMachine::from_snapshot_in`].
-    // TODO: Re-evaluate: service sessions own cleanup authority while factories
-    // only borrow its directory lifetime through an explicitly owned path.
     pub fn with_scratch_root(mut self, root: &Path) -> Self {
         self.scratch_root = Some(root.to_owned());
         self
@@ -110,8 +104,8 @@ impl Factory {
     /// Named volumes require definition.disk and the optional static x86-64
     /// mke2fs guest asset loaded by new. Missing prerequisites fail before guest
     /// execution. This adds no PV instrumentation/progress budget to TCG.
-    // TODO: Re-evaluate: service-owned environments close boot inputs without
-    // adding mandatory MachineDefinition fields or a generic inspection API.
+    // The guest environment is a per-call factory input, not a MachineDefinition
+    // field or a generic inspection API.
     pub fn create_configured(
         &mut self,
         definition: &MachineDefinition,
@@ -124,8 +118,8 @@ impl Factory {
     /// files. It adds no PV instrumentation. Named-volume prerequisites are
     /// checked, but native RAM constraints are not: callers may size these
     /// actual bytes before selecting guest RAM.
-    // TODO: Re-evaluate: preparation and creation must share byte assembly;
-    // archive estimates omit retained configuration and bootstrap overhead.
+    // Preparation sizes the exact bytes creation uses; an estimate would omit
+    // retained configuration and bootstrap overhead.
     pub fn boot_archive_configured(
         &self,
         definition: &MachineDefinition,
@@ -160,8 +154,8 @@ impl Factory {
     /// and board epoch come from this factory. Workload filesystem/launch fields
     /// are not repackaged. Native resource checks and scratch placement retain
     /// ordinary creation semantics. This entry executes no guest instructions.
-    // TODO: Re-evaluate: complete retained boot input cannot be reconstructed
-    // from a stale paired filesystem after a caller replaces its boot archive.
+    // A replaced boot archive cannot be reconstructed from the definition's
+    // paired filesystem, so these bytes are used verbatim.
     pub fn create_boot_archive(
         &mut self,
         definition: &MachineDefinition,

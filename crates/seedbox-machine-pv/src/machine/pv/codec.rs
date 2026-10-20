@@ -91,7 +91,7 @@ fn validate(c: &Capture, disk: Option<&DiskImage>) -> Result<()> {
     }
     // Successful run transfers accepted input, ordered writes and prepared
     // replies; constructors are the sole pending-boot capture boundary.
-    // TODO: Re-evaluate if input delivery ever moves beyond the end of run.
+    // This relies on accepted input being delivered by the end of each run.
     if !c.input.is_empty()
         || !c.writes.is_empty()
         || c.pending_boots > 1
@@ -256,8 +256,8 @@ impl Snapshot {
     /// bodies are written in bounded chunks without staging another RAM image.
     /// Ordinary I/O failure leaves caller-owned partial output; retrying from
     /// this unchanged capture is supported. No file/CAS transaction is implied.
-    // TODO: Re-evaluate: concrete snapshots own backend closure; a generic
-    // machine serializer would expose private native and bridge representation.
+    // Each concrete snapshot owns its encoding; a generic machine serializer
+    // would expose private native and bridge representation.
     pub fn write_to(&self, output: &mut impl Write) -> Result<()> {
         let parts = Parts::new(self)?;
         let mut sink = std::io::sink();
@@ -280,8 +280,8 @@ impl Snapshot {
     /// native register semantics, host inventories or rings versus guest RAM;
     /// later native restore remains fallible. Integrity is not authenticity.
     /// Arbitrary readers/allocators retain their normal blocking/failure behavior.
-    // TODO: Re-evaluate: untrusted collection parsing must be closed and budgeted
-    // at the concrete owner; private worker JSON is reconstructed only afterward.
+    // Untrusted collections are parsed closed and budgeted here; private worker
+    // JSON is reconstructed only afterward.
     pub fn read_from(input: &mut impl Read, limits: &DecodeLimits) -> Result<Self> {
         if limits.encoded_bytes < HEADER_BYTES {
             return Err(CodecError::Limit("encoded bytes"));

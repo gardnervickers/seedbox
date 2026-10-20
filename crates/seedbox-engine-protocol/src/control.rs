@@ -1,5 +1,5 @@
 //! Language-neutral fault actions, plans and limits. No transport or scheduler.
-pub const PROCESS_EFFECT_TIMEOUT_NS: u64 = 5_000_000_000;
+pub use seedbox_spec::definition::PROCESS_EFFECT_TIMEOUT_NS;
 /// Largest wall-clock skew, fixed or seeded, in either direction: one year.
 pub const MAX_CLOCK_OFFSET_NS: u64 = 365 * 86_400 * 1_000_000_000;
 /// Probabilities are in parts per million: this is certainty.

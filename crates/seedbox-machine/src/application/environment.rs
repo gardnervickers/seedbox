@@ -9,8 +9,8 @@ use std::{
 /// Names are single components; targets are normalized absolute Linux paths.
 /// Creation inherits target directory metadata, never its contents. This does
 /// not denote a host mount or sharing between machines.
-// TODO: Re-evaluate: the service retains explicit name/target pairs; embedding
-// these in MachineDefinition would unnecessarily couple Driver definition codecs.
+// Kept out of MachineDefinition so Driver definition codecs stay independent
+// of service setup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NamedVolume {
     pub name: String,
@@ -20,7 +20,7 @@ pub struct NamedVolume {
 /// descriptors within this limit; it does not virtualize getrlimit.
 /// Default is max_map_count=262144 and nofile=1048576.
 /// Linux admission remains fallible in the guest.
-// TODO: Re-evaluate: concrete bootstrap settings preserve container behavior
+// Concrete bootstrap settings preserve container behavior
 // without adding execution settings or environment-dependent machine identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GuestLimits {
@@ -48,8 +48,6 @@ impl Default for GuestLimits {
 /// than 4,096 bytes. Config bytes borrow one loader-owned record through setup;
 /// text/array/index accounting is derived from the actual record/schema bounds,
 /// not an additional aggregate payload quota or RSS/native-resource guarantee.
-// TODO: Re-evaluate: service-owned per-name setup must affect boot bytes without
-// requiring new MachineDefinition fields or exposing machine snapshot internals.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuestEnvironment {
     pub hostname: String,
@@ -65,8 +63,6 @@ impl GuestEnvironment {
     /// the container-parity limits. Validation occurs when packaged, including
     /// changes made to public fields after construction. This is not the absent
     /// environment used by ordinary Factory::create.
-    // TODO: Re-evaluate: callers need one small owned setup value, not a builder
-    // registry or ambient guest defaults that silently change machine boot bytes.
     pub fn new(
         hostname: impl Into<String>,
         hosts: impl Into<String>,
@@ -212,7 +208,7 @@ fn validate(env: &GuestEnvironment, runtime: bool) -> Result<(), DefinitionError
         }
     }
     // Image anonymous VOLUME paths may equal or lie below a named target;
-    // legacy setup mkdirs them after mounting named directories. Index config
+    // guest setup creates them after mounting named directories. Index config
     // ancestors instead of a pairwise scan of attacker-controlled collections.
     let configs: BTreeSet<_> = env.configs.keys().map(String::as_str).collect();
     for (path, data) in &env.configs {

@@ -103,6 +103,42 @@ fn unknown_input_sources_return_not_found_without_creating_resources() {
 }
 
 #[test]
+fn project_submissions_are_held_to_what_a_project_can_express() {
+    let mut catalogue = Catalogue::in_memory();
+    let mut relative = request();
+    relative
+        .spec
+        .configuration
+        .services
+        .get_mut("oracle")
+        .unwrap()
+        .source = seedbox_spec::ImageSource::Build {
+        context: "context".into(),
+        dockerfile: "context/Dockerfile".into(),
+    };
+    let mut tolerance = request();
+    tolerance.spec.configuration.schedule.stop_tolerance_ns = 1;
+    let mut nul = request();
+    nul.spec
+        .configuration
+        .services
+        .get_mut("oracle")
+        .unwrap()
+        .command = Some(vec!["run\0".into()]);
+    for (invalid, path) in [
+        (relative, "$.services.oracle.source"),
+        (tolerance, "$.schedule"),
+        (nul, "$.services.oracle"),
+    ] {
+        assert!(
+            matches!(catalogue.submit(invalid), Err(Error::Invalid(message)) if message.contains(path)),
+            "{path}"
+        );
+    }
+    assert_eq!(catalogue.list().count(), 0);
+}
+
+#[test]
 fn accepted_submission_and_request_identity_are_idempotent() {
     let mut catalogue = Catalogue::in_memory();
     let mut invalid = request();
@@ -298,7 +334,6 @@ fn captured_checkpoint_registry_is_independent_of_descendant_ownership() {
             },
         )
         .unwrap();
-    assert!(catalogue.delete_checkpoint(&id, "saved").is_err());
     let mut spare = catalogue
         .control_receipt(&id, "saved")
         .unwrap()
@@ -343,12 +378,7 @@ fn captured_checkpoint_registry_is_independent_of_descendant_ownership() {
     source.status.phase = Phase::Completed;
     source.status.termination = Some(seedbox_api::ExecutionTermination::Stopped);
     catalogue.update(source).unwrap();
-    catalogue.delete_checkpoint(&id, "saved").unwrap();
-    catalogue.delete_checkpoint(&id, "spare").unwrap();
-    catalogue.delete_checkpoint(&id, "spare").unwrap();
-    assert!(catalogue.captured_checkpoint(&id, "spare").is_err());
-    let checkpoints = catalogue.checkpoints(&id).unwrap();
-    assert!(checkpoints.is_empty());
+    assert_eq!(catalogue.checkpoints(&id).unwrap().len(), 2);
     assert_eq!(catalogue.begin_delete(&id).unwrap(), vec![id.clone()]);
     let marked = catalogue.get(&id).unwrap().metadata.clone();
     assert!(marked.deletion_requested_at_unix_ms.is_some());
@@ -517,10 +547,10 @@ fn resolved_definitions_allow_independent_edits_and_outlive_their_source() {
 fn malformed_timeline_actions_reject_but_state_dependent_heals_are_admitted() {
     let mut catalogue = Catalogue::in_memory();
     for action in [
-        seedbox_control::Action::Stop {
+        seedbox_engine_protocol::control::Action::Stop {
             machine: "unknown".into(),
         },
-        seedbox_control::Action::Throttle {
+        seedbox_engine_protocol::control::Action::Throttle {
             machine: "oracle".into(),
             handle: "slow".into(),
             factor_permille: 0,
