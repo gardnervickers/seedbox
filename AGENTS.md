@@ -74,7 +74,13 @@ We do not need to support every possible application. If someone intentionally t
   `/* seedbox-syscall-subject: nanosleep; bound-ms=N; invariant=... */`
   (or `clock_nanosleep`). Review must verify the actual bound and syscall-specific
   invariant; a marker permits one call, never incidental pacing or a whole function.
-  The checker still rejects Rust timer helpers and all unmarked DR fixture sleeps.
+  The checker rejects Rust timer helpers and known sleep spellings in downstream
+  DR Rust, C/header, assembly, Python, Go, JavaScript, Java and C# fixtures, including
+  C function-address assignments, named sleep syscalls with casts and zero-fd
+  select delays. It ignores comments, literals and ordinary C prototypes.
+  This source lint does not resolve arbitrary wrappers, imports, generated code,
+  numeric assembly syscall IDs or every language/API; review enforces the same
+  readiness rule throughout the suite. A move into another language is no exemption.
 - Unit tests stay beside components; public-boundary tests stay in their owning
   crate's `tests/`. Give each scenario one owner; share backend-neutral scenarios.
 - Run portable checks in `nix develop`; engine changes also need relevant native
