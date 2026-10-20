@@ -862,11 +862,8 @@ impl Control {
         &self,
         notice: crate::oracle::service::Notice,
     ) -> Result<(Timestamp, super::EventKind), String> {
-        use super::{EventKind, SettlementStatus as Public, TriggerResult};
-        use crate::oracle::{
-            service::{Notice, SettlementStatus},
-            triggers::Status,
-        };
+        use super::{EventKind, TriggerResult};
+        use crate::oracle::{service::Notice, triggers::Status};
         Ok(match notice {
             Notice::Admitted(a) => (
                 Timestamp::from_nanos(a.admitted_at),
@@ -890,12 +887,7 @@ impl Control {
                         &s.handle,
                         s.requested_at,
                     )?,
-                    status: match s.status {
-                        SettlementStatus::Applied => Public::Applied,
-                        SettlementStatus::Unavailable => Public::Unavailable,
-                        SettlementStatus::Rejected => Public::Rejected,
-                        SettlementStatus::Failed => Public::Failed,
-                    },
+                    status: s.status,
                     outcome_at: s.outcome_at.map(Timestamp::from_nanos),
                     detail: s.detail,
                     network: s.network,

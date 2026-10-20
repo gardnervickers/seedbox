@@ -212,13 +212,7 @@ impl Effect {
 /// Terminal observations are handed to the timeline/history owner once. No
 /// duplicate unbounded history is kept here. Outcome time is not applied time:
 /// only Applied proves a mutation; Unavailable and Failed never do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SettlementStatus {
-    Applied,
-    Unavailable,
-    Rejected,
-    Failed,
-}
+pub(crate) use crate::driver::SettlementStatus;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FaultAction {
     Effect(Effect),
