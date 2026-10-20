@@ -10,5 +10,4 @@ pub mod input_program;
 pub mod intervention;
 pub mod network_counters;
 pub mod observation;
-pub mod output_layout;
 pub mod policy_config;

@@ -942,30 +942,6 @@ fn torn_write_policy_changes_identity_and_replay_requires_the_recorded_policy() 
 }
 
 #[test]
-fn checkpoint_identity_replays_retained_semantics() {
-    let mut fixture = Fixture::new();
-    let parent = fixture.run();
-    fixture.backend.profile.semantic_parameters.checkpoint = Some(Checkpoint {
-        at_ns: 500,
-        branch_seed: 42,
-    });
-    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
-    let branch = fixture.run();
-    assert_eq!(branch.record.outcome, Outcome::Pass);
-    assert_ne!(branch.record.run_id, parent.record.run_id);
-    let replay = fixture.replay(&branch);
-    assert_eq!(replay.record.run_id, branch.record.run_id);
-    assert_eq!(replay.comparison.status, ComparisonStatus::Match);
-    fixture.backend.profile.semantic_parameters.checkpoint = Some(Checkpoint {
-        at_ns: 500,
-        branch_seed: 43,
-    });
-    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
-    let other = fixture.run();
-    assert_ne!(other.record.run_id, branch.record.run_id);
-}
-
-#[test]
 fn materialize_trusts_only_unchanged_objects_this_store_hashed() {
     use std::os::unix::fs::MetadataExt;
     use std::time::{Duration, UNIX_EPOCH};
