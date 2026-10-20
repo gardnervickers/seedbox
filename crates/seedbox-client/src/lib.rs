@@ -227,15 +227,8 @@ impl Client {
         id: &SimulationId,
         name: &str,
     ) -> Result<seedbox_api::ControlReceipt, Error> {
-        let mut url = reqwest::Url::parse("http://seedbox.local/v1/simulations/")
-            .map_err(|e| Error::Stream(e.to_string()))?;
-        url.path_segments_mut()
-            .map_err(|_| Error::Stream("invalid checkpoint URL".into()))?
-            .pop_if_empty()
-            .push(&id.to_string())
-            .push("checkpoints")
-            .push(name);
-        self.document(self.http.get(url)).await
+        let path = simulation_path(id, &["checkpoints", name])?;
+        self.document(self.request(Method::GET, &path)).await
     }
 
     pub async fn delete(&self, id: &SimulationId) -> Result<serde_json::Value, Error> {
@@ -248,15 +241,8 @@ impl Client {
         id: &SimulationId,
         name: &str,
     ) -> Result<serde_json::Value, Error> {
-        let mut url = reqwest::Url::parse("http://seedbox.local/v1/simulations/")
-            .map_err(|e| Error::Stream(e.to_string()))?;
-        url.path_segments_mut()
-            .map_err(|_| Error::Stream("invalid checkpoint URL".into()))?
-            .pop_if_empty()
-            .push(id.as_str())
-            .push("checkpoints")
-            .push(name);
-        self.document(self.http.delete(url)).await
+        let path = simulation_path(id, &["checkpoints", name])?;
+        self.document(self.request(Method::DELETE, &path)).await
     }
 
     pub async fn stop(&self, id: &SimulationId) -> Result<Simulation, Error> {
@@ -293,12 +279,13 @@ impl Client {
         .await
     }
 
-    /// Submit a schema-generated control without decoding its action locally.
-    pub async fn request_control_json(
+    /// Submit a control. Callers that present schema-generated actions without
+    /// decoding them locally use `serde_json::Value` for both documents.
+    pub async fn request_control<T: DeserializeOwned>(
         &self,
         id: &SimulationId,
-        request: &serde_json::Value,
-    ) -> Result<serde_json::Value, Error> {
+        request: &impl serde::Serialize,
+    ) -> Result<T, Error> {
         self.document(
             self.request(Method::POST, &format!("/v1/simulations/{id}/controls"))
                 .json(request),
@@ -306,49 +293,13 @@ impl Client {
         .await
     }
 
-    /// Read a schema-generated control receipt without decoding its action locally.
-    pub async fn control_receipt_json(
+    pub async fn control_receipt<T: DeserializeOwned>(
         &self,
         id: &SimulationId,
         request_id: &str,
-    ) -> Result<serde_json::Value, Error> {
-        let mut url = reqwest::Url::parse("http://seedbox.local/v1/simulations/")
-            .map_err(|e| Error::Stream(e.to_string()))?;
-        url.path_segments_mut()
-            .map_err(|_| Error::Stream("invalid API base URL".into()))?
-            .pop_if_empty()
-            .push(&id.to_string())
-            .push("controls")
-            .push(request_id);
-        self.document(self.request(Method::GET, url.path())).await
-    }
-
-    pub async fn request_control(
-        &self,
-        id: &SimulationId,
-        request: &seedbox_api::ControlRequest,
-    ) -> Result<seedbox_api::ControlReceipt, Error> {
-        self.document(
-            self.request(Method::POST, &format!("/v1/simulations/{id}/controls"))
-                .json(request),
-        )
-        .await
-    }
-
-    pub async fn control_receipt(
-        &self,
-        id: &SimulationId,
-        request_id: &str,
-    ) -> Result<seedbox_api::ControlReceipt, Error> {
-        let mut url = reqwest::Url::parse("http://seedbox.local/v1/simulations/")
-            .map_err(|e| Error::Stream(e.to_string()))?;
-        url.path_segments_mut()
-            .map_err(|_| Error::Stream("invalid API base URL".into()))?
-            .pop_if_empty()
-            .push(&id.to_string())
-            .push("controls")
-            .push(request_id);
-        self.document(self.request(Method::GET, url.path())).await
+    ) -> Result<T, Error> {
+        let path = simulation_path(id, &["controls", request_id])?;
+        self.document(self.request(Method::GET, &path)).await
     }
 
     pub async fn playback(
@@ -415,17 +366,9 @@ impl Client {
         machine: &str,
         follow: bool,
     ) -> Result<LogStream, Error> {
-        // URL-encode the machine as one path segment, never as API syntax.
-        let mut url = reqwest::Url::parse("http://seedbox.local/v1/simulations/")
-            .map_err(|e| Error::Stream(e.to_string()))?;
-        url.path_segments_mut()
-            .map_err(|_| Error::Stream("invalid API base URL".into()))?
-            .pop_if_empty()
-            .push(&id.to_string())
-            .push("logs")
-            .push(machine);
+        let path = simulation_path(id, &["logs", machine])?;
         Ok(sse::logs(
-            self.event_response(&format!("{}{}", url.path(), follow_query(follow)))
+            self.event_response(&format!("{path}{}", follow_query(follow)))
                 .await?,
         ))
     }
@@ -509,6 +452,18 @@ impl Client {
     }
 }
 
+/// Percent-encode each segment as one path component, never as API syntax.
+fn simulation_path(id: &SimulationId, segments: &[&str]) -> Result<String, Error> {
+    let mut url = reqwest::Url::parse("http://seedbox.local/v1/simulations/")
+        .map_err(|e| Error::Stream(e.to_string()))?;
+    url.path_segments_mut()
+        .map_err(|_| Error::Stream("invalid API base URL".into()))?
+        .pop_if_empty()
+        .push(id.as_str())
+        .extend(segments);
+    Ok(url.path().to_owned())
+}
+
 fn follow_query(follow: bool) -> &'static str {
     if follow {
         ""
@@ -522,15 +477,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn submission_serialization_errors_are_reported_before_connecting() {
-        let mut spec: seedbox_api::SimulationSpec = serde_json::from_value(serde_json::json!({
-            "machines": {}, "oracle": {"image":"example/oracle"}
-        }))
-        .unwrap();
-        spec.configuration.machine.memory_mb = 512;
+    fn serialization_errors_are_reported_before_connecting() {
+        struct Unserializable;
+        impl serde::Serialize for Unserializable {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("fixture cannot be serialized"))
+            }
+        }
         let client = Client::connect_to(Path::new("/nonexistent-seedbox-test.sock")).unwrap();
-        let error = client.json_request("/v1/simulations", &spec).unwrap_err();
+        let error = client
+            .json_request("/v1/simulations", &Unserializable)
+            .unwrap_err();
         assert!(matches!(error, Error::Request(_)));
-        assert_eq!(error.to_string(), "server request: partial simulation submissions do not support custom machine (memory_mb, page_timer or deferred_tx); submit a complete resolved Simulation definition instead");
+        assert_eq!(
+            error.to_string(),
+            "server request: fixture cannot be serialized"
+        );
+    }
+
+    #[test]
+    fn path_segments_are_encoded_as_single_components() {
+        let id: SimulationId = "k7m2p9qx".parse().unwrap();
+        assert_eq!(
+            simulation_path(&id, &["logs", "a/b c?"]).unwrap(),
+            "/v1/simulations/k7m2p9qx/logs/a%2Fb%20c%3F"
+        );
     }
 }

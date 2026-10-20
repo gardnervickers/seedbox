@@ -1099,8 +1099,8 @@ impl NativeSession {
         name: &str,
         command: seedbox_api::ControlCommand,
     ) -> seedbox_api::ControlReceipt {
-        use seedbox_api::{ControlRequest, ControlState};
-        bounded(self.client.request_control(
+        use seedbox_api::{ControlReceipt, ControlRequest, ControlState};
+        bounded(self.client.request_control::<ControlReceipt>(
             id,
             &ControlRequest {
                 request_id: name.into(),
@@ -1122,7 +1122,7 @@ impl NativeSession {
             // A paused world need not publish an event or a catalogue revision.
             // The receipt itself is the positive completion signal.
             let receipt = runtime
-                .block_on(client.control_receipt(&id, &name))
+                .block_on(client.control_receipt::<ControlReceipt>(&id, &name))
                 .unwrap();
             if receipt.state == ControlState::Accepted {
                 let status = manager.describe(&id).unwrap().status;

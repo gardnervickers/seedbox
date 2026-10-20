@@ -746,7 +746,7 @@ pub(super) fn playback(
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
         if let Some(request_id) = request_id {
-            let receipt = client
+            let receipt: seedbox_api::ControlReceipt = client
                 .control_receipt(id, request_id)
                 .await
                 .map_err(client_error)?;
@@ -786,7 +786,7 @@ pub(super) fn mutate_control(
             request_id,
             command,
         };
-        let mut receipt = client
+        let mut receipt: seedbox_api::ControlReceipt = client
             .request_control(&mutation.id, &request)
             .await
             .map_err(client_error)?;
