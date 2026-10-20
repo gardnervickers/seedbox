@@ -2040,7 +2040,6 @@ dependencies = [
 name = "seedbox-engine-core"
 version = "0.1.0"
 dependencies = [
- "hex",
  "seedbox-control",
  "seedbox-engine-protocol",
  "serde",
