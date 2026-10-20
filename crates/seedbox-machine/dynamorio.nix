@@ -18,11 +18,6 @@ pkgs.stdenv.mkDerivation {
   postPatch = ''
     substituteInPlace ext/CMakeLists.txt \
       --replace-fail 'add_subdirectory(drsyms)' '# drsyms is not packaged'
-    # This baseline clears CMAKE_C_FLAGS before CheckTypeSize, then builds C
-    # as gnu99. Preserve the selected C dialect for those real probes too;
-    # CMAKE_REQUIRED_FLAGS would also pollute the C++17 probe.
-    substituteInPlace CMakeLists.txt \
-      --replace-fail 'foreach (var CMAKE_C_FLAGS;CMAKE_CXX_FLAGS)' 'foreach (var CMAKE_CXX_FLAGS)'
     # The AArch64 codec generator and order check run Python scripts by
     # their /usr/bin/env shebangs when CMake's PYTHON3_EXECUTABLE is unset,
     # and the Linux build sandbox has no /usr/bin/env.
