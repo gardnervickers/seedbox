@@ -891,9 +891,10 @@ mod tests {
                 .find_map(|word| word.strip_prefix("bytes="))
                 .unwrap();
             assert_eq!(encoded.len(), 8192);
-            let page = encoded
-                .as_bytes()
-                .chunks_exact(2)
+            let (pairs, remainder) = encoded.as_bytes().as_chunks::<2>();
+            assert!(remainder.is_empty());
+            let page = pairs
+                .iter()
                 .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
                 .collect::<Vec<_>>();
             assert_eq!(page, vec![fill; 4096]);
@@ -967,8 +968,8 @@ esac
             let bytes = fs::read(failure.join(name)).unwrap();
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
         }
-        assert_captured_pages(&failure, "baseline", [b'b', b'a']);
-        assert_captured_pages(&failure, "repeat", [b'r', b'e']);
+        assert_captured_pages(&failure, "baseline", *b"ba");
+        assert_captured_pages(&failure, "repeat", *b"re");
         assert!(fs::read_to_string(failure.join("replay-oracle-log.stdout"))
             .unwrap()
             .contains("RESULT pass"));
