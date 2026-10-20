@@ -421,7 +421,13 @@ fn materialize_factory(
             if let Some(formatter) = formatter {
                 remap(formatter, &guest_assets.join("mke2fs"))?;
             }
-            let path = output.join("factory-worker");
+            // Worker-owned copy, written before `Factory::load` spawns anything
+            // (see above). It lives in the attempt's native scratch, which the
+            // parent removes after the monitor exits, so the engine never
+            // becomes part of the attempt's retained output logs.
+            let scratch = output.join(super::NATIVE_SCRATCH);
+            fs::create_dir_all(&scratch)?;
+            let path = scratch.join("factory-worker");
             copy(executable, &path)?;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
             remap(executable, &path)?;
