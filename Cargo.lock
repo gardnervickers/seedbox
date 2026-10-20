@@ -1998,6 +1998,7 @@ dependencies = [
  "rayon",
  "seedbox-control",
  "seedbox-engine-core",
+ "seedbox-engine-protocol",
  "seedbox-machine",
  "seedbox-machine-pv",
  "seedbox-machine-tcg",

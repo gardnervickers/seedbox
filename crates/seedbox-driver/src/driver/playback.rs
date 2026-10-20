@@ -3,23 +3,11 @@
 mod persist;
 
 use super::{Error, FaultRecord, Position};
-use std::{
-    num::NonZeroU32,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 /// Simulated seconds per host second. A positive rational rate avoids rounding
 /// the requested speed; pacing changes host waiting only, never execution bounds.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum PlaybackRate {
-    Paused,
-    Limited {
-        numerator: NonZeroU32,
-        denominator: NonZeroU32,
-    },
-    #[default]
-    Unlimited,
-}
+pub use seedbox_engine_protocol::host_control::PlaybackRate;
 
 /// Control state observed at a stopped simulation boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]

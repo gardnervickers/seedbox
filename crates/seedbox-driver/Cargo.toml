@@ -8,6 +8,7 @@ publish.workspace = true
 # TODO: Re-evaluate: canonical pure connection/link policy stays shared with
 # standalone engines; no legacy scheduler or RNG implementation is adopted.
 seedbox-engine-core.workspace = true
+seedbox-engine-protocol.workspace = true
 seedbox-control.workspace = true
 seedbox-machine.workspace = true
 seedbox-machine-tcg.workspace = true

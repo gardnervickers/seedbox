@@ -210,7 +210,7 @@ where
             position: self.state.world.position,
             terminal: self.terminal,
             application_ready: self.state.world.readiness.latched,
-            rate: rate_to_wire(playback.rate),
+            rate: playback.rate,
             achieved_rate,
             stepping: !self.terminal && playback.stepping,
             before_next_fault: playback.before_next_fault,
@@ -261,12 +261,12 @@ where
                 }
                 return Ok(Dispatch::Reply(reply));
             }
-            Command::SetRate { rate } => self
-                .driver
-                .with_barrier(|barrier| barrier.set_rate(rate_from_wire(*rate))),
+            Command::SetRate { rate } => {
+                self.driver.with_barrier(|barrier| barrier.set_rate(*rate))
+            }
             Command::PauseBeforeNextFault { rate } => self
                 .driver
-                .with_barrier(|barrier| barrier.pause_before_next_fault(rate_from_wire(*rate))),
+                .with_barrier(|barrier| barrier.pause_before_next_fault(*rate)),
             Command::Step => self.driver.with_barrier(|barrier| barrier.step_quantum()),
             Command::Checkpoint { request_id } => {
                 let playback = self.playback()?;
@@ -884,32 +884,6 @@ pub(super) fn position(position: driver::Position) -> host::BoundaryPosition {
         boundary_index: position.boundary_index,
         completed_rounds: position.completed_quanta,
         simulated_time_ns: position.at.as_nanos(),
-    }
-}
-pub(super) fn rate_from_wire(rate: host::PlaybackRate) -> driver::PlaybackRate {
-    match rate {
-        host::PlaybackRate::Paused => driver::PlaybackRate::Paused,
-        host::PlaybackRate::Unlimited => driver::PlaybackRate::Unlimited,
-        host::PlaybackRate::Limited {
-            numerator,
-            denominator,
-        } => driver::PlaybackRate::Limited {
-            numerator,
-            denominator,
-        },
-    }
-}
-fn rate_to_wire(rate: driver::PlaybackRate) -> host::PlaybackRate {
-    match rate {
-        driver::PlaybackRate::Paused => host::PlaybackRate::Paused,
-        driver::PlaybackRate::Unlimited => host::PlaybackRate::Unlimited,
-        driver::PlaybackRate::Limited {
-            numerator,
-            denominator,
-        } => host::PlaybackRate::Limited {
-            numerator,
-            denominator,
-        },
     }
 }
 fn valid_request_id(id: &str) -> bool {
