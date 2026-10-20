@@ -3,14 +3,14 @@
 use super::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "test-support"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "test-support"))]
 const PRIVATE_ORACLE_PAGE_GPAS: [u64; 2] = [0x0459_1000, 0x0459_2000];
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "test-support"))]
 const PRIVATE_ORACLE_CAPTURE_LIMIT: usize = 32;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "test-support"))]
 static PRIVATE_ORACLE_CAPTURE_COUNT: AtomicUsize = AtomicUsize::new(0);
 // Compile the pure ARM projection on the host for golden/model tests as well.
 // Native ARM adapters are still target-gated and never executed by these tests.
@@ -59,9 +59,9 @@ impl<B: Backend> Machine<B> {
         )?);
         parts.push(part("timer_policy", &self.state.policy)?);
         let layout = self.ram.layout()?;
-        // Private PR329 diagnostic: copy only the two stopped oracle pages that
-        // differed in the retained CI evidence. Never modify guest RAM.
-        #[cfg(target_arch = "x86_64")]
+        // Private PR329 test diagnostic: copy only the two stopped oracle pages
+        // that differed in retained CI evidence. Default builds compile this out.
+        #[cfg(all(target_arch = "x86_64", feature = "test-support"))]
         let private_pages = self
             .state
             .policy
@@ -124,7 +124,7 @@ impl<B: Backend> Machine<B> {
         parts.push(("ram".into(), hex(&ram.finalize())));
         parts.push(("ram_regions".into(), hex(&region_hash.finalize())));
         parts.push(("ram_pages".into(), hex(&pages.finalize())));
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "test-support"))]
         if let Some((seed, boot, private_pages)) = private_pages {
             // Boot-end evidence may precede the final service state. Retain up
             // to 32 stopped captures (64 raw pages, 256 KiB) per worker; the

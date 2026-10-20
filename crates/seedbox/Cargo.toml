@@ -39,7 +39,7 @@ linux-pause = ["retained-run-tests"]
 
 [features]
 application-tests = []
-etcd-prep-tests = []
+etcd-prep-tests = ["seedbox-machine-pv/test-support"]
 retained-run-tests = []
 
 [[test]]
