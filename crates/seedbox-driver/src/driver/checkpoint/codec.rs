@@ -14,8 +14,8 @@ impl<S> Checkpoint<S> {
     /// On Err this capture is consumed: completed replacements and remaining
     /// snapshots drop before return. The independent source Driver is unchanged.
     /// Artifact publication/cleanup from callbacks remains the caller's duty.
-    // TODO: Re-evaluate: ownership transfer avoids cloning giant future archives
-    // while permitting backend codecs outside the Driver without exposing state.
+    // Consuming avoids cloning large snapshot archives while letting backend
+    // codecs live outside the Driver without exposing its state.
     pub fn try_map_snapshots<T, E>(
         self,
         mut map: impl FnMut(S) -> std::result::Result<T, E>,
@@ -118,7 +118,7 @@ impl Checkpoint<SnapshotReference> {
     /// Prefer a buffered writer for file/socket destinations: individual fields
     /// can cause small writes. Flushing (and durable/transactional publication)
     /// is the caller's responsibility; this method does not flush the writer.
-    // TODO: Re-evaluate: Driver alone owns private continuation fields and future
+    // Only the Driver can encode its private continuation fields and future
     // definitions. Raw framed bodies avoid JSON byte arrays and extra blob copies.
     pub fn write_to(&self, writer: &mut impl Write) -> Result<()> {
         self.validate_decoded()?;
@@ -141,8 +141,8 @@ impl Checkpoint<SnapshotReference> {
     /// appropriate), rather than exposing the next frame to the EOF check.
     /// Verify any artifact digest against original encoded bytes: decoding and
     /// re-encoding preserve semantics, not necessarily canonical input bytes.
-    // TODO: Re-evaluate: typed capture validation is insufficient for imported
-    // bytes. A closed bounded codec validates before any restore callbacks.
+    // Typed capture validation is insufficient for imported bytes, so this
+    // closed bounded codec validates before any restore callbacks.
     pub fn read_from(reader: &mut impl Read, limits: DecodeLimits) -> Result<Self> {
         require(
             limits.encoded_bytes >= 20,

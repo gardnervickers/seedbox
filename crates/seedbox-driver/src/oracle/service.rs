@@ -40,13 +40,12 @@ pub(crate) struct Facts {
     pub ready: bool,
 }
 /// Authoritative stopped-state view, not an output-derived mirror. Inspection
-/// must supply the complete legacy projection, or explicitly return Unsupported.
+/// must supply the complete projection, or explicitly return Unsupported.
 /// Lifecycle/process policy follows confirmed control admissions/completions;
 /// physical exit is tracked separately. Natural application exit keeps the
 /// machine Up and makes its process eligible for Start, without a commanded Stop. Physical exit preflight nevertheless rejects Pause/Resume and all
-/// process controls before policy validation, matching the legacy API wrapper.
-/// Logical Down excludes this preflight: new Machine may retain an Exited
-/// reason after Crash, while legacy Crash installed a fresh unrun machine.
+/// process controls before policy validation. Logical Down excludes this
+/// preflight because a crashed Machine may still retain an Exited reason.
 /// Down process faults therefore still admit and settle Unavailable regardless
 /// of physical state. Crash/Reboot validate retained lifecycle independently;
 /// a confirmed physical crash (`ExitReason::Crashed`) makes that lifecycle Down.

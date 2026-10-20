@@ -34,9 +34,9 @@ pub use checkpoint::{Checkpoint, CheckpointMapError};
 mod control;
 mod controller;
 mod due;
-// TODO: Re-evaluate: the service needs a pure compilation seam in the executing
-// owner; keeping it in application or engine-core would duplicate Driver policy.
-// This exports no scheduler, lifecycle or admission-state setters.
+// Public faults compile here, in the executing owner; compiling them in
+// application or engine-core would duplicate Driver policy. This exports no
+// scheduler, lifecycle or admission-state setters.
 pub mod faults;
 pub use controller::ControllerSetup;
 mod event;
@@ -359,10 +359,10 @@ where
     /// Spawns join at their FIFO effect turn and run from the next round. IDs and
     /// RNG streams follow spawn admission order. Construction failure publishes a
     /// Failed settlement and poisons the driver; confirmed events remain drainable.
-    /// The driver retains the factory and spawnable definitions.
-    /// TODO: Re-evaluate: declared spawnables keep future machines as complete inputs.
-    /// A factory alone cannot enumerate names for pre-execution uniqueness checks.
-    /// Retaining definitions supports one-shot admission without template or override APIs.
+    /// The driver retains the factory and spawnable definitions, so future
+    /// machines are complete inputs: a factory alone cannot enumerate names for
+    /// pre-execution uniqueness checks, and retained definitions support
+    /// one-shot admission without template or override APIs.
     /// The factory must return newly configured machines without executing them. This order
     /// breaks scheduling ties and assigns
     /// independent machine RNG streams by drawing one little-endian u64 seed
@@ -372,7 +372,7 @@ where
     /// nothing from the simulation RNG or the machine's stream, and survive
     /// reboot. Only run calls borrow the clock and the machine's continuing RNG.
     /// Machine-only snapshots capture none of these RNG cursors.
-    // TODO: Re-evaluate: seeded clock faults need values that neither shift
+    // Seeded clock faults need values that neither shift
     // later machine seeds nor consume guest entropy or another target's draws;
     // the shared simulation stream and the machine's own stream cannot isolate
     // them, so each target gets a domain-separated stream from its seed.
@@ -419,9 +419,8 @@ where
     /// While an attached machine can execute, rounds end no later than its
     /// earliest execution time plus latency, so no frame arrives before the
     /// round that sent it commits. Blocked or paused machines impose no limit.
-    // TODO: Re-evaluate: positive latency bounds each round from the earliest
-    // attached producer, as legacy lookahead did, without early delivery; blocked
-    // machines impose no bound, so idle simulations still jump to their next event.
+    // Blocked machines impose no bound, so idle simulations still jump to their
+    // next event.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         start: Timestamp,
@@ -588,9 +587,9 @@ where
     /// Zero disables retention. Clearing or shrinking counts discarded facts as
     /// omissions in the next drain. Never changes policy, machine work, event
     /// sequencing or deterministic evidence.
-    // TODO: Re-evaluate: an observer belongs to the host, including after restore.
-    // Constructor-only capacity cannot rebind a captured Driver to an absent or
-    // new observer without changing simulation authority; keep this telemetry-only.
+    // The observer belongs to the host, including after restore: a
+    // constructor-only capacity could not rebind a captured Driver to an absent
+    // or new observer, so this stays a telemetry-only setter.
     pub fn set_frame_capacity(&mut self, capacity: usize) {
         self.observations.frames.set_capacity(capacity);
     }
@@ -647,8 +646,8 @@ where
     /// the machine definitions, the seed and host inputs (barrier operations
     /// and the `upto` bounds passed to `step`). Worker count and playback rate
     /// never change it.
-    // TODO: Re-evaluate: one handoff prevents service input/status continuation
-    // from depending on optional Event retention or a second publication path.
+    // One handoff keeps service input/status continuation independent of
+    // optional retention or a second publication path.
     pub fn drain_observations(&mut self) -> FlushResults {
         FlushResults {
             position: self.position(),
@@ -911,7 +910,7 @@ where
     /// the current deadline from its own authoritative editable input suffix.
     /// A `Blocked` result may have advanced time and still needs another call
     /// until `upto` is reached. Existing `step` quiescence semantics are unchanged.
-    // TODO: Re-evaluate: an external timeline must not be copied into Driver
+    // The external timeline stays outside the Driver; it is not copied in
     // merely to keep idle time moving toward an editable service-owned input.
     pub fn step_toward_external(
         &mut self,
@@ -1855,8 +1854,8 @@ where
     /// after a failed step: a machine execution error promises no resumable
     /// stopped state. `None` is unavailable evidence, not a full-state success.
     /// This does not execute work, drain output, or change clocks or RNG state.
-    // TODO: Re-evaluate: evidence transports need a mutable stopped backend;
-    // a specific operation preserves the barrier's no-execution boundary.
+    // Evidence transports need a mutable stopped backend; a dedicated
+    // operation keeps the barrier's no-execution boundary.
     pub fn state_evidence(
         &mut self,
         id: MachineId,
@@ -1876,7 +1875,7 @@ where
 
     /// The machine's last stop projected into simulation time. Unlike a
     /// `Machine::run` result, a `Blocked` deadline may equal `reached`.
-    // TODO: Re-evaluate: the projection rounds machine times up to whole
+    // The projection rounds machine times up to whole
     // simulation nanoseconds so nothing fires early; keeping the strict
     // inequality would need delaying the timer, so the Driver relaxes it here
     // instead of in the machine contract.
@@ -2083,8 +2082,6 @@ where
     /// Admission rejects a text already Active/Healing/Lost. An apply-time
     /// collision settles Failed without effects or poison, removing only the
     /// losing Pending record; an allocated loser never gets its pN back.
-    // TODO: Re-evaluate: cross-origin heal/inspect and FIFO collision timing
-    // require the alias in the Driver owner, not a service-local mapping.
     pub fn schedule_with_handle(
         &mut self,
         at: Timestamp,

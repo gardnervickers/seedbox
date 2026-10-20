@@ -22,9 +22,9 @@ where
     /// draw occurs. An externally supplied RNG has no cursor evidence and fails.
     /// This is one component of a run witness, not CPU or RAM evidence; callers
     /// must combine it with actual stopped native execution evidence.
-    // TODO: Re-evaluate: authoritative policy is not the event transcript or a
-    // serialized whole-Driver checkpoint. The narrow stopped writer permits
-    // streaming into a digest without cloning native images or exposing fields.
+    // Authoritative policy is neither the event transcript nor a serialized
+    // whole-Driver checkpoint. This narrow stopped writer streams into a digest
+    // without cloning native images or exposing fields.
     pub fn write_policy_evidence(
         &self,
         output: &mut impl Write,
