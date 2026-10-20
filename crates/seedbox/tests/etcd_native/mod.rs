@@ -92,7 +92,8 @@ impl Cli {
         if let Err(error) = &result {
             let directory = self.directory.join("failure");
             failure_capture::note(&directory, error);
-            let capture = || -> Result<()> {
+            let diagnostics = failure_capture::budget();
+            let capture = async {
                 let bytes = failure_capture::read(&self.directory.join("replay.stdout"))?;
                 fs::write(directory.join("replay.stdout"), &bytes).map_err(|e| e.to_string())?;
                 let stderr = failure_capture::read(&self.directory.join("replay.stderr"))?;
@@ -107,7 +108,13 @@ impl Cli {
                             .into(),
                     );
                 }
-                self.capture_comparison_failure(baseline, comparison.simulation.as_str());
+                self.capture_comparison_failure(
+                    guard,
+                    &diagnostics,
+                    baseline,
+                    comparison.simulation.as_str(),
+                )
+                .await;
                 // Use the same CLI environment as the scenario, with bounded pipe readers.
                 let mut command = self.command().into_std();
                 command.args([
@@ -117,9 +124,15 @@ impl Cli {
                     "--tail",
                     "100",
                 ]);
-                failure_capture::command(&mut command, &directory, "replay-oracle-log")
+                failure_capture::command_async(
+                    command,
+                    &directory,
+                    "replay-oracle-log",
+                    &bounded_diagnostics(guard, &diagnostics)?,
+                )
+                .await
             };
-            if let Err(error) = capture() {
+            if let Err(error) = capture.await {
                 failure_capture::note(&directory, &error);
             }
         }
@@ -281,7 +294,39 @@ fn copy_state_report(
 }
 
 impl Cli {
-    fn capture_comparison_failure(&self, baseline: &str, repeated: &str) {
+    async fn capture_comparison_failure(
+        &self,
+        scenario: &HangGuard,
+        diagnostics: &HangGuard,
+        baseline: &str,
+        repeated: &str,
+    ) {
+        let directory = self.directory.join("failure");
+        let result = async {
+            let guard = bounded_diagnostics(scenario, diagnostics)?;
+            // Offline diffing can read large retained files. Run it in an owned
+            // test subprocess so cancellation stops the actual work as well.
+            let mut command =
+                std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+            command
+                .args([
+                    "--exact",
+                    "etcd_native::capture_comparison_worker",
+                    "--nocapture",
+                ])
+                .env("SEEDBOX_CAPTURE_DIRECTORY", &self.directory)
+                .env("SEEDBOX_CAPTURE_STATE", &self.state)
+                .env("SEEDBOX_CAPTURE_BASELINE", baseline)
+                .env("SEEDBOX_CAPTURE_REPEATED", repeated);
+            failure_capture::command_async(command, &directory, "comparison-capture", &guard).await
+        }
+        .await;
+        if let Err(error) = result {
+            failure_capture::note(&directory, &error);
+        }
+    }
+
+    fn capture_comparison_files(&self, baseline: &str, repeated: &str) {
         let directory = self.directory.join("failure");
         failure_capture::note(&directory, &format!("comparison {baseline} / {repeated}"));
         let capture = || -> Result<()> {
@@ -428,16 +473,25 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
         .await?;
     let baseline_id = baseline.metadata.id.to_string();
     let repeated_id = repeated.metadata.id.to_string();
-    let compared: SimulationComparison = serde_json::from_slice(
-        &cli.invoke(
+    let comparison = cli
+        .invoke(
             guard,
             "compare-repeat",
             &words(&["compare", &baseline_id, &repeated_id, "--json"]),
         )
-        .await
-        .inspect_err(|_| cli.capture_comparison_failure(&baseline_id, &repeated_id))?,
-    )
-    .map_err(|e| e.to_string())?;
+        .await;
+    if let Err(error) = &comparison {
+        failure_capture::note(&cli.directory.join("failure"), error);
+        cli.capture_comparison_failure(
+            guard,
+            &failure_capture::budget(),
+            &baseline_id,
+            &repeated_id,
+        )
+        .await;
+    }
+    let compared: SimulationComparison =
+        serde_json::from_slice(&comparison?).map_err(|e| e.to_string())?;
     if compared.baseline != baseline.metadata.id
         || compared.simulation != repeated.metadata.id
         || baseline.metadata.id == repeated.metadata.id
@@ -446,8 +500,17 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
             "repeat comparison did not compare two independently submitted simulations".into(),
         );
     }
-    require_match(&compared)
-        .inspect_err(|_| cli.capture_comparison_failure(&baseline_id, &repeated_id))?;
+    if let Err(error) = require_match(&compared) {
+        failure_capture::note(&cli.directory.join("failure"), &error);
+        cli.capture_comparison_failure(
+            guard,
+            &failure_capture::budget(),
+            &baseline_id,
+            &repeated_id,
+        )
+        .await;
+        return Err(error);
+    }
     // Reports are already retained; bound memory by releasing completed native
     // worlds rather than accumulating multiple four-machine executions.
     cli.invoke(guard, "delete-repeat", &words(&["delete", &repeated_id]))
@@ -906,4 +969,143 @@ esac
             "preserve the caller's engine connection"
         );
     }
+}
+
+// The owned subprocess receives explicit paths and IDs. Normal discovery
+// exercises the missing-session diagnostic against a private empty fixture.
+#[test]
+fn capture_comparison_worker() {
+    let Some(directory) = std::env::var_os("SEEDBOX_CAPTURE_DIRECTORY") else {
+        let temporary = tempfile::tempdir().unwrap();
+        let cli = Cli {
+            executable: PathBuf::new(),
+            directory: temporary.path().to_owned(),
+            state: temporary.path().join("absent"),
+        };
+        cli.capture_comparison_files("kmm5wkwf", "23456789");
+        let summary = fs::read_to_string(temporary.path().join("failure/summary.txt")).unwrap();
+        assert!(
+            summary.contains("comparison kmm5wkwf / 23456789"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("comparison diagnostic capture failed"),
+            "{summary}"
+        );
+        return;
+    };
+    let cli = Cli {
+        executable: PathBuf::new(),
+        directory: directory.into(),
+        state: std::env::var_os("SEEDBOX_CAPTURE_STATE")
+            .expect("capture state")
+            .into(),
+    };
+    cli.capture_comparison_files(
+        &std::env::var("SEEDBOX_CAPTURE_BASELINE").expect("capture baseline"),
+        &std::env::var("SEEDBOX_CAPTURE_REPEATED").expect("capture repeat"),
+    );
+}
+
+fn bounded_diagnostics(scenario: &HangGuard, diagnostics: &HangGuard) -> Result<HangGuard> {
+    let remaining = scenario
+        .remaining()
+        .map_err(|e| e.to_string())?
+        .min(diagnostics.remaining().map_err(|e| e.to_string())?);
+    Ok(HangGuard::new("etcd failure diagnostics", remaining))
+}
+
+#[tokio::test]
+async fn replay_wedged_logs_returns_original_cli_failure() {
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("cli");
+    seedbox_test::process::install_executable(&executable, br#"#!/bin/sh
+case "$1" in
+replay) printf '%s\n' '{"baseline":"kmm5wkwf","simulation":"23456789","status":"MISMATCH","outcomeMatches":true,"witnessMatches":false,"fullStateMatches":false,"faultHistoryMatches":true}'; exit 1;;
+logs) exec python3 -c 'import os,signal; print(os.getpid(), flush=True); signal.pause()';;
+*) exit 9;;
+esac
+"#, 0o755).unwrap();
+    let cli = Cli {
+        executable,
+        directory: temporary.path().to_owned(),
+        state: temporary.path().join("state"),
+    };
+    let guard = HangGuard::new("wedged replay diagnostic fixture", Duration::from_secs(60));
+    let error = cli.replay(&guard, "kmm5wkwf").await.unwrap_err();
+    assert!(error.starts_with("CLI replay: exit status: 1;"), "{error}");
+    let directory = temporary.path().join("failure");
+    let summary = fs::read_to_string(directory.join("summary.txt")).unwrap();
+    assert!(summary.contains(&error), "{summary}");
+    assert!(
+        summary.contains("replay-oracle-log: diagnostic timeout"),
+        "{summary}"
+    );
+    let pid: i32 = fs::read_to_string(directory.join("replay-oracle-log.stdout"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut status = 0;
+    assert_eq!(
+        unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
+}
+
+#[tokio::test]
+async fn comparison_capture_cancels_a_wedged_retained_reader() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let temporary = tempfile::tempdir().unwrap();
+    let attempt = temporary
+        .path()
+        .join("state/sessions/fixture/runs/kmm5wkwf/attempts/fixture");
+    fs::create_dir_all(&attempt).unwrap();
+    let manifest = attempt.join("manifest.json");
+    let name = std::ffi::CString::new(manifest.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let cli = Cli {
+        executable: PathBuf::new(),
+        directory: temporary.path().to_owned(),
+        state: temporary.path().join("state"),
+    };
+    // The writer opens only after the actual offline worker opens its reader.
+    // Holding it without sending bytes keeps that read pending until cancelled.
+    let writer = tokio::task::spawn_blocking(move || {
+        HangGuard::new(
+            "retained manifest reader readiness",
+            Duration::from_secs(60),
+        )
+        .wait_for(|| {
+            match fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&manifest)
+            {
+                Ok(file) => Some(file),
+                Err(error) if error.raw_os_error() == Some(libc::ENXIO) => None,
+                Err(error) => panic!("manifest readiness: {error}"),
+            }
+        })
+        .unwrap()
+    });
+    let scenario = HangGuard::new("wedged offline diagnostic fixture", Duration::from_secs(60));
+    let diagnostics = failure_capture::budget();
+    let capture = cli.capture_comparison_failure(&scenario, &diagnostics, "kmm5wkwf", "23456789");
+    tokio::pin!(capture);
+    let held_writer = tokio::select! {
+        _ = &mut capture => panic!("comparison returned before its retained reader was ready"),
+        writer = writer => writer.unwrap(),
+    };
+    capture.await;
+    let summary = fs::read_to_string(temporary.path().join("failure/summary.txt")).unwrap();
+    assert!(
+        summary.contains("comparison-capture: diagnostic timeout"),
+        "{summary}"
+    );
+    drop(held_writer);
 }

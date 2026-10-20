@@ -72,6 +72,7 @@ fn first_run(cli: &Path, directory: &Path, state: &Path, args: &[&str]) -> Resul
     if let Err(error) = &result {
         let failure = directory.join("failure");
         failure_capture::note(&failure, error);
+        let guard = failure_capture::budget();
         let capture = || -> Result<(), String> {
             let bytes = failure_capture::read(&directory.join("first.log"))?;
             fs::write(failure.join("first.log"), &bytes).map_err(|e| e.to_string())?;
@@ -111,7 +112,7 @@ fn first_run(cli: &Path, directory: &Path, state: &Path, args: &[&str]) -> Resul
                     .args(args)
                     .env_remove("SEEDBOX_VMM")
                     .env("SEEDBOX_STATE", state);
-                if let Err(error) = failure_capture::command(&mut command, &failure, label) {
+                if let Err(error) = failure_capture::command(command, &failure, label, &guard) {
                     failure_capture::note(&failure, &format!("{label}: {error}"));
                 }
             }
@@ -158,7 +159,10 @@ fn compare(
         &["compare", baseline, repeated, "--json"],
     )
     .and_then(|output| require_full_state_match(&output));
-    if result.is_err() {
+    if let Err(error) = &result {
+        let failure = directory.join("failure");
+        failure_capture::note(&failure, error);
+        let guard = failure_capture::budget();
         for (side, id) in [("baseline", baseline), ("repeated", repeated)] {
             for (kind, args) in [
                 (
@@ -169,14 +173,18 @@ fn compare(
                 ("timeline", vec!["show", "--view", "timeline", id, "--json"]),
                 ("logs", vec!["logs", id, "--tail", "100"]),
             ] {
-                if let Err(error) = invoke(
-                    cli,
-                    directory,
-                    state,
+                let mut command = Command::new(cli);
+                command
+                    .args(&args)
+                    .env_remove("SEEDBOX_VMM")
+                    .env("SEEDBOX_STATE", state);
+                if let Err(error) = failure_capture::command(
+                    command,
+                    &failure,
                     &format!("{name}-{side}-{kind}"),
-                    &args,
+                    &guard,
                 ) {
-                    eprintln!("comparison diagnostic: {error}");
+                    failure_capture::note(&failure, &format!("comparison diagnostic: {error}"));
                 }
             }
         }
@@ -467,7 +475,13 @@ fn failure_capture_bounds_a_long_guest_line_and_drains_both_pipes() {
         "-c",
         "head -c 8388627 /dev/zero; printf 'assertion marker\\n' >&2",
     ]);
-    let error = failure_capture::command(&mut command, temporary.path(), "oracle-log").unwrap_err();
+    let error = failure_capture::command(
+        command,
+        temporary.path(),
+        "oracle-log",
+        &failure_capture::budget(),
+    )
+    .unwrap_err();
     assert!(error.contains("omitted 19 bytes"), "{error}");
     assert_eq!(
         fs::metadata(temporary.path().join("oracle-log.stdout"))
@@ -479,4 +493,94 @@ fn failure_capture_bounds_a_long_guest_line_and_drains_both_pipes() {
         fs::read_to_string(temporary.path().join("oracle-log.stderr")).unwrap(),
         "assertion marker\n"
     );
+}
+
+#[test]
+fn first_run_wedged_diagnostic_preserves_original_failure_and_reaps_observer() {
+    let temporary = tempfile::tempdir().unwrap();
+    let cli = temporary.path().join("cli");
+    seedbox_test::process::install_executable(
+        &cli,
+        br#"#!/bin/sh
+case "$1" in
+run) printf 'FAIL: kmm5wkwf\n'; exit 1;;
+*) exec python3 -c 'import os,signal; print(os.getpid(), flush=True); signal.pause()';;
+esac
+"#,
+        0o755,
+    )
+    .unwrap();
+    let error = first_run(&cli, temporary.path(), temporary.path(), &["run"]).unwrap_err();
+    assert!(error.starts_with("first: exit status: 1;"), "{error}");
+    let failure = temporary.path().join("failure");
+    let summary = fs::read_to_string(failure.join("summary.txt")).unwrap();
+    assert!(summary.contains(&error), "{summary}");
+    assert!(
+        summary.contains("oracle-logs: diagnostic timeout"),
+        "{summary}"
+    );
+    // Readiness was emitted by the actual wedged process before it was killed.
+    let pid: i32 = fs::read_to_string(failure.join("oracle-logs.stdout"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut status = 0;
+    assert_eq!(
+        unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
+    // The batch deadline prevents one fresh timeout for every remaining command.
+    assert!(!failure.join("application-logs.stdout").exists());
+}
+
+#[test]
+fn comparison_failure_keeps_original_error_and_captures_both_sides() {
+    let temporary = tempfile::tempdir().unwrap();
+    let cli = temporary.path().join("cli");
+    seedbox_test::process::install_executable(
+        &cli,
+        br#"#!/bin/sh
+case "$1" in
+compare) printf 'comparison mismatch\n'; exit 1;;
+*) printf '%s\n' "$*" >> "$SEEDBOX_STATE/observations"
+   printf 'diagnostic assertion marker\n'; exit 7;;
+esac
+"#,
+        0o755,
+    )
+    .unwrap();
+    let error = compare(
+        &cli,
+        temporary.path(),
+        temporary.path(),
+        "compare",
+        "kmm5wkwf",
+        "23456789",
+    )
+    .unwrap_err();
+    assert!(error.starts_with("compare: exit status: 1;"), "{error}");
+    assert_eq!(
+        fs::read_to_string(temporary.path().join("observations"))
+            .unwrap()
+            .lines()
+            .count(),
+        8
+    );
+    let failure = temporary.path().join("failure");
+    assert!(fs::read_to_string(failure.join("summary.txt"))
+        .unwrap()
+        .contains(&error));
+    for side in ["baseline", "repeated"] {
+        for kind in ["definition", "world", "timeline", "logs"] {
+            assert_eq!(
+                fs::read_to_string(failure.join(format!("compare-{side}-{kind}.stdout"))).unwrap(),
+                "diagnostic assertion marker\n"
+            );
+        }
+    }
 }
