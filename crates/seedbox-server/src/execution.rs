@@ -41,6 +41,14 @@ struct RetainedInputs {
     attempt: Option<PathBuf>,
 }
 
+/// What one input source contributes to an execution before its definition is canonicalized.
+struct SourceInputs {
+    inputs: PreparedInputs,
+    interventions: Option<ContentDigest>,
+    checkpoint: Option<PathBuf>,
+    executor: Box<dyn ExecutionBackend>,
+}
+
 pub struct Backends {
     pub preparation: Box<dyn PreparationBackend>,
     pub execution: Box<dyn ExecutionBackend>,
@@ -601,124 +609,13 @@ impl ExecutionService {
         })?;
         let directory = self.root.join("runs").join(id.as_str());
         fs::create_dir(&directory)?;
-        let (inputs, interventions, checkpoint, executor) = match &spec.inputs {
-            InputSource::Resolved { definition } => {
-                let inputs = seedbox_application::definition::prepared(definition, &self.store)?;
-                let executor = self.backends.retained(&inputs, &self.store)?;
-                let checkpoint = seedbox_application::definition::materialize_start(
-                    definition,
-                    &self.store,
-                    &directory,
-                )?;
-                (inputs, None, checkpoint, executor)
-            }
-            InputSource::Project => {
-                let backends = self.backends.project(
-                    &spec.configuration,
-                    options.backend.unwrap_or_default(),
-                    &self.store,
-                    &budget.cancellation,
-                )?;
-                backends.preparation.validate_runtime_inputs()?;
-                backends.execution.preflight(None)?;
-                let observer = self.manager.clone();
-                let simulation = id.clone();
-                let context = PreparationContext::new(
-                    directory.join("preparation"),
-                    budget.cancellation.clone(),
-                )?
-                .with_progress(move |machine, stage| {
-                    use seedbox_application::preparation::PreparationStage as Source;
-                    let stage = match stage {
-                        Source::Image => seedbox_api::PreparationStage::Image,
-                        Source::Guest => seedbox_api::PreparationStage::Guest,
-                        Source::Ready => seedbox_api::PreparationStage::Ready,
-                    };
-                    observer.publish_engine_event(
-                        &simulation,
-                        0,
-                        seedbox_api::EventKind::PreparationProgress {
-                            machine: machine.to_owned(),
-                            stage,
-                        },
-                    );
-                });
-                let inputs = backends.preparation.prepare_cancellable(
-                    &spec.configuration,
-                    &self.store,
-                    &context,
-                )?;
-                (inputs, None, None, backends.execution)
-            }
-            InputSource::Retained { simulation }
-            | InputSource::Prepared { simulation }
-            | InputSource::Checkpoint { simulation, .. } => {
-                let path = self.root.join("inputs").join(format!("{simulation}.json"));
-                let file = fs::File::open(&path).map_err(|e| {
-                    seedbox_application::Error::Setup(format!(
-                        "retained inputs {}: {e}",
-                        path.display()
-                    ))
-                })?;
-                let retained: RetainedInputs = serde_json::from_reader(file)?;
-                let (interventions, checkpoint) =
-                    if let InputSource::Checkpoint { checkpoint, .. } = &spec.inputs {
-                        let _captured = self
-                            .manager
-                            .captured_checkpoint(simulation, checkpoint)
-                            .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?;
-                        let attempt = retained.attempt.as_ref().ok_or_else(|| {
-                            seedbox_application::Error::Setup(
-                                "checkpoint source has no execution attempt".into(),
-                            )
-                        })?;
-                        let path = attempt
-                            .join("output")
-                            .join(seedbox_application::execution::MACHINE_OUTPUT_DIR)
-                            .join(format!("checkpoint-{checkpoint}.json"));
-                        if !path.is_file() {
-                            return Err(seedbox_application::Error::Setup(format!(
-                                "checkpoint {}: not found",
-                                path.display()
-                            )));
-                        }
-                        let history = seedbox_artifacts::interventions::read(
-                            &attempt.join(format!("checkpoint-{checkpoint}-interventions.json")),
-                        )?;
-                        let digest = self.store.put_unsynced(
-                            &history
-                                .encode()
-                                .map_err(seedbox_application::Error::Integrity)?,
-                        )?;
-                        (Some(digest), Some(path))
-                    } else if matches!(spec.inputs, InputSource::Prepared { .. }) {
-                        (None, None)
-                    } else {
-                        (
-                            self.retained_history(&retained)?,
-                            retained.checkpoint.clone(),
-                        )
-                    };
-                let inputs = retained.prepared;
-                let executor = self.backends.retained(&inputs, &self.store)?;
-                (inputs, interventions, checkpoint, executor)
-            }
-        };
-        let overrides = spec.program.clone();
-        let seed = spec.seed.ok_or_else(|| {
-            seedbox_application::Error::Integrity("unresolved submission seed".into())
-        })?;
-        let mut definition = if let InputSource::Resolved { definition } = &spec.inputs {
-            let mut d = definition.as_ref().clone();
-            d.seed = seed;
-            d.overrides = overrides;
-            d
-        } else {
-            seedbox_application::definition::resolve(&spec.configuration, &inputs, seed, overrides)?
-        };
-        // The first run and every resubmission use the same resolved private representation.
-        // Source paths, image transport manifests and human metadata never enter experiment identity.
-        let inputs = seedbox_application::definition::prepared(&definition, &self.store)?;
+        let SourceInputs {
+            inputs,
+            interventions,
+            checkpoint,
+            executor,
+        } = self.source_inputs(id, spec, &options, &budget.cancellation, &directory)?;
+        let (mut definition, inputs) = self.canonical_definition(spec, &inputs)?;
         // Resolving per-machine RAM chooses the oracle's RAM as the legacy
         // default. Bind execution to that canonical profile as well.
         let executor = if executor.profile() == inputs.profile {
@@ -726,17 +623,7 @@ impl ExecutionService {
         } else {
             self.backends.retained(&inputs, &self.store)?
         };
-        definition.runtime.execution =
-            seedbox_application::definition::execution_settings_with_inputs(&inputs)?;
-        for (name, machine) in &mut definition.machines {
-            machine.boot_archive =
-                seedbox_spec::definition::Asset(format!("sha256:{}", inputs.guests[name].hex()));
-        }
-        let oracle_name = definition.oracle_name().to_owned();
-        definition.oracle.boot_archive = seedbox_spec::definition::Asset(format!(
-            "sha256:{}",
-            inputs.guests[&oracle_name].hex()
-        ));
+        bind_prepared_inputs(&mut definition, &inputs)?;
         let resolved_spec = seedbox_api::SimulationSpec::resolved(definition)
             .map_err(seedbox_application::Error::Setup)?;
         let configuration = resolved_spec.configuration.clone();
@@ -778,36 +665,221 @@ impl ExecutionService {
                 },
                 inputs,
                 executor.as_ref(),
-                |progress| {
-                    let report = match progress {
-                        RunProgress::Starting { directory } => {
-                            retained.attempt = Some(directory.to_owned());
-                            save_inputs(&self.root.join("inputs"), id, &retained, true)?;
-                            return self
-                                .manager
-                                .attach_worker(id, directory)
-                                .map_err(|e| seedbox_application::Error::Execution(e.to_string()));
-                        }
-                        RunProgress::Finalizing { report } => report,
-                    };
-                    let exit = report
-                        .and_then(|r| r.workload_exit.as_ref())
-                        .filter(|e| e.service == spec.configuration.check.service)
-                        .map(|e| e.code);
-                    self.manager
-                        .update(id, |s| {
-                            s.status.phase = Phase::Finalizing;
-                            s.status.stage = Some(Stage::Finalizing);
-                            merge_report_observation(
-                                &mut s.status,
-                                exit,
-                                report.and_then(|r| r.simulated_time_ns),
-                            );
-                        })
-                        .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
-                    Ok(())
-                },
+                |progress| self.observe_run_progress(id, spec, &mut retained, progress),
             )
+    }
+
+    /// Prepared inputs, intervention history, start checkpoint and executor for
+    /// the submission's input source. `cancellation` is the preparation budget's token.
+    fn source_inputs(
+        &self,
+        id: &SimulationId,
+        spec: &seedbox_api::SimulationSpec,
+        options: &seedbox_api::ExecutionOptions,
+        cancellation: &CancellationToken,
+        directory: &Path,
+    ) -> seedbox_application::Result<SourceInputs> {
+        match &spec.inputs {
+            InputSource::Resolved { definition } => {
+                let inputs = seedbox_application::definition::prepared(definition, &self.store)?;
+                let executor = self.backends.retained(&inputs, &self.store)?;
+                let checkpoint = seedbox_application::definition::materialize_start(
+                    definition,
+                    &self.store,
+                    directory,
+                )?;
+                Ok(SourceInputs {
+                    inputs,
+                    interventions: None,
+                    checkpoint,
+                    executor,
+                })
+            }
+            InputSource::Project => {
+                self.prepare_project(id, spec, options, cancellation, directory)
+            }
+            InputSource::Retained { simulation }
+            | InputSource::Prepared { simulation }
+            | InputSource::Checkpoint { simulation, .. } => self.retained_source(spec, simulation),
+        }
+    }
+
+    /// Prepare a project submission's images and guests, publishing per-machine progress.
+    fn prepare_project(
+        &self,
+        id: &SimulationId,
+        spec: &seedbox_api::SimulationSpec,
+        options: &seedbox_api::ExecutionOptions,
+        cancellation: &CancellationToken,
+        directory: &Path,
+    ) -> seedbox_application::Result<SourceInputs> {
+        let backends = self.backends.project(
+            &spec.configuration,
+            options.backend.unwrap_or_default(),
+            &self.store,
+            cancellation,
+        )?;
+        backends.preparation.validate_runtime_inputs()?;
+        backends.execution.preflight(None)?;
+        let observer = self.manager.clone();
+        let simulation = id.clone();
+        let context = PreparationContext::new(directory.join("preparation"), cancellation.clone())?
+            .with_progress(move |machine, stage| {
+                use seedbox_application::preparation::PreparationStage as Source;
+                let stage = match stage {
+                    Source::Image => seedbox_api::PreparationStage::Image,
+                    Source::Guest => seedbox_api::PreparationStage::Guest,
+                    Source::Ready => seedbox_api::PreparationStage::Ready,
+                };
+                observer.publish_engine_event(
+                    &simulation,
+                    0,
+                    seedbox_api::EventKind::PreparationProgress {
+                        machine: machine.to_owned(),
+                        stage,
+                    },
+                );
+            });
+        let inputs =
+            backends
+                .preparation
+                .prepare_cancellable(&spec.configuration, &self.store, &context)?;
+        Ok(SourceInputs {
+            inputs,
+            interventions: None,
+            checkpoint: None,
+            executor: backends.execution,
+        })
+    }
+
+    /// Reuse another simulation's retained inputs, with the history and
+    /// checkpoint its source kind selects.
+    fn retained_source(
+        &self,
+        spec: &seedbox_api::SimulationSpec,
+        simulation: &SimulationId,
+    ) -> seedbox_application::Result<SourceInputs> {
+        let path = self.root.join("inputs").join(format!("{simulation}.json"));
+        let file = fs::File::open(&path).map_err(|e| {
+            seedbox_application::Error::Setup(format!("retained inputs {}: {e}", path.display()))
+        })?;
+        let retained: RetainedInputs = serde_json::from_reader(file)?;
+        let (interventions, checkpoint) =
+            if let InputSource::Checkpoint { checkpoint, .. } = &spec.inputs {
+                self.checkpoint_start(simulation, checkpoint, &retained)?
+            } else if matches!(spec.inputs, InputSource::Prepared { .. }) {
+                (None, None)
+            } else {
+                (
+                    self.retained_history(&retained)?,
+                    retained.checkpoint.clone(),
+                )
+            };
+        let inputs = retained.prepared;
+        let executor = self.backends.retained(&inputs, &self.store)?;
+        Ok(SourceInputs {
+            inputs,
+            interventions,
+            checkpoint,
+            executor,
+        })
+    }
+
+    /// The intervention history and machine checkpoint captured at a source checkpoint.
+    fn checkpoint_start(
+        &self,
+        simulation: &SimulationId,
+        checkpoint: &str,
+        retained: &RetainedInputs,
+    ) -> seedbox_application::Result<(Option<ContentDigest>, Option<PathBuf>)> {
+        let _captured = self
+            .manager
+            .captured_checkpoint(simulation, checkpoint)
+            .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?;
+        let attempt = retained.attempt.as_ref().ok_or_else(|| {
+            seedbox_application::Error::Setup("checkpoint source has no execution attempt".into())
+        })?;
+        let path = attempt
+            .join("output")
+            .join(seedbox_application::execution::MACHINE_OUTPUT_DIR)
+            .join(format!("checkpoint-{checkpoint}.json"));
+        if !path.is_file() {
+            return Err(seedbox_application::Error::Setup(format!(
+                "checkpoint {}: not found",
+                path.display()
+            )));
+        }
+        let history = seedbox_artifacts::interventions::read(
+            &attempt.join(format!("checkpoint-{checkpoint}-interventions.json")),
+        )?;
+        let digest = self.store.put_unsynced(
+            &history
+                .encode()
+                .map_err(seedbox_application::Error::Integrity)?,
+        )?;
+        Ok((Some(digest), Some(path)))
+    }
+
+    /// Resolve the submission's canonical definition and the prepared inputs it names.
+    fn canonical_definition(
+        &self,
+        spec: &seedbox_api::SimulationSpec,
+        inputs: &PreparedInputs,
+    ) -> seedbox_application::Result<(seedbox_spec::definition::Definition, PreparedInputs)> {
+        let overrides = spec.program.clone();
+        let seed = spec.seed.ok_or_else(|| {
+            seedbox_application::Error::Integrity("unresolved submission seed".into())
+        })?;
+        let definition = if let InputSource::Resolved { definition } = &spec.inputs {
+            let mut d = definition.as_ref().clone();
+            d.seed = seed;
+            d.overrides = overrides;
+            d
+        } else {
+            seedbox_application::definition::resolve(&spec.configuration, inputs, seed, overrides)?
+        };
+        // The first run and every resubmission use the same resolved private representation.
+        // Source paths, image transport manifests and human metadata never enter experiment identity.
+        let inputs = seedbox_application::definition::prepared(&definition, &self.store)?;
+        Ok((definition, inputs))
+    }
+
+    /// Persist the attempt before its worker starts, and publish the final
+    /// report's observations before fallible finalization.
+    fn observe_run_progress(
+        &self,
+        id: &SimulationId,
+        spec: &seedbox_api::SimulationSpec,
+        retained: &mut RetainedInputs,
+        progress: RunProgress<'_>,
+    ) -> seedbox_application::Result<()> {
+        let report = match progress {
+            RunProgress::Starting { directory } => {
+                retained.attempt = Some(directory.to_owned());
+                save_inputs(&self.root.join("inputs"), id, retained, true)?;
+                return self
+                    .manager
+                    .attach_worker(id, directory)
+                    .map_err(|e| seedbox_application::Error::Execution(e.to_string()));
+            }
+            RunProgress::Finalizing { report } => report,
+        };
+        let exit = report
+            .and_then(|r| r.workload_exit.as_ref())
+            .filter(|e| e.service == spec.configuration.check.service)
+            .map(|e| e.code);
+        self.manager
+            .update(id, |s| {
+                s.status.phase = Phase::Finalizing;
+                s.status.stage = Some(Stage::Finalizing);
+                merge_report_observation(
+                    &mut s.status,
+                    exit,
+                    report.and_then(|r| r.simulated_time_ns),
+                );
+            })
+            .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
+        Ok(())
     }
 }
 
@@ -838,6 +910,23 @@ impl ExecutionService {
                 .map(Some)
         }
     }
+}
+
+/// Name the prepared execution settings and guest archives in the definition.
+fn bind_prepared_inputs(
+    definition: &mut seedbox_spec::definition::Definition,
+    inputs: &PreparedInputs,
+) -> seedbox_application::Result<()> {
+    definition.runtime.execution =
+        seedbox_application::definition::execution_settings_with_inputs(inputs)?;
+    for (name, machine) in &mut definition.machines {
+        machine.boot_archive =
+            seedbox_spec::definition::Asset(format!("sha256:{}", inputs.guests[name].hex()));
+    }
+    let oracle_name = definition.oracle_name().to_owned();
+    definition.oracle.boot_archive =
+        seedbox_spec::definition::Asset(format!("sha256:{}", inputs.guests[&oracle_name].hex()));
+    Ok(())
 }
 
 fn save_inputs(
