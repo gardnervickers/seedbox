@@ -121,7 +121,7 @@ fn tcg_controller_requests_are_admitted_only_on_driver_hosts() {
         crate::driver_world::policy::admit(&tcg).unwrap();
         crate::driver_world::policy::admit_restore(&tcg).unwrap();
         assert!(
-            !error.contains("incomplete") && !error.contains("legacy service path"),
+            !error.contains("incomplete") && !error.contains("requires Linux x86-64"),
             "{error}"
         );
     } else {

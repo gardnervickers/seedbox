@@ -44,7 +44,7 @@ fn tcg_codec_three_policy_and_name_refuse_before_native_reconstruction() {
         artifact: missing.to_str().unwrap().into(),
     };
     let mut inventory = wire::Inventory::Tcg {
-        policy: Some(crate::driver_world::policy::encode(&policy).unwrap()),
+        policy: Some(policy.clone()),
         executable: artifact.clone(),
         kernel: artifact.clone(),
         init: artifact.clone(),

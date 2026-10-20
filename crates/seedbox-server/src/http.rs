@@ -3,7 +3,6 @@
 
 mod checkpoint_bundle;
 mod checkpoint_export;
-mod export_accept;
 
 use crate::{catalogue::Error as CatalogueError, manager::Manager};
 use axum::{
@@ -97,10 +96,6 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/simulations/{id}/checkpoints/{request_id}/definition",
             get(checkpoint_definition),
-        )
-        .route(
-            "/v1/simulations/{id}/checkpoints/{request_id}",
-            get(checkpoint).delete(delete_checkpoint),
         )
         .route("/v1/simulations/{id}/controls", post(request_control))
         .route(
@@ -597,46 +592,6 @@ async fn delete_simulation(
     .map_err(|_| HttpError::internal("simulation deletion task failed"))?
 }
 
-async fn delete_checkpoint(
-    State(state): State<ApiState>,
-    path: Result<Path<(SimulationId, String)>, PathRejection>,
-) -> Result<Json<serde_json::Value>, HttpError> {
-    let Path((id, name)) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
-    let execution = state
-        .execution
-        .ok_or_else(|| HttpError::internal("execution evidence is unavailable"))?;
-    tokio::task::spawn_blocking(move || {
-        execution
-            .delete_checkpoint(&id, &name)
-            .map_err(HttpError::from)?;
-        Ok(Json(
-            serde_json::json!({"simulation": id, "checkpoint": name, "deleted": true}),
-        ))
-    })
-    .await
-    .map_err(|_| HttpError::internal("checkpoint deletion task failed"))?
-}
-
-async fn checkpoint(
-    state: State<ApiState>,
-    path: Result<Path<(SimulationId, String)>, PathRejection>,
-) -> Result<Json<seedbox_api::ControlReceipt>, HttpError> {
-    let Path((id, name)) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
-    let items = checkpoints(state, Ok(Path(id))).await?;
-    items
-        .0
-        .into_iter()
-        .find(|item| item.request.request_id == name)
-        .map(Json)
-        .ok_or_else(|| {
-            HttpError::new(
-                StatusCode::NOT_FOUND,
-                ErrorCode::NotFound,
-                "checkpoint not found",
-            )
-        })
-}
-
 async fn control_receipt(
     State(state): State<ApiState>,
     path: Result<Path<(SimulationId, String)>, PathRejection>,
@@ -989,37 +944,19 @@ impl IntoResponse for HttpError {
 async fn checkpoint_definition(
     State(state): State<ApiState>,
     path: Result<Path<(SimulationId, String)>, PathRejection>,
-    headers: axum::http::HeaderMap,
 ) -> Result<Response, HttpError> {
     let Path((id, name)) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
     let execution = state
         .execution
         .ok_or_else(|| HttpError::invalid("execution evidence is unavailable"))?;
-    let representation = export_accept::negotiate(&headers).ok_or_else(|| {
-        HttpError::new(
-            StatusCode::NOT_ACCEPTABLE,
-            ErrorCode::InvalidRequest,
-            "checkpoint export requires application/json or text/event-stream",
-        )
-    })?;
-    if representation == export_accept::Representation::Stream {
-        return Ok(checkpoint_export::response(
-            state.shutdown,
-            move |progress| {
-                execution
-                    .checkpoint_definition_observed(&id, &name, &mut |n| progress.advance(n))
-                    .map_err(HttpError::from)
-            },
-        ));
-    }
-    tokio::task::spawn_blocking(move || {
-        execution
-            .checkpoint_definition(&id, &name)
-            .map(|simulation| Json(simulation).into_response())
-            .map_err(HttpError::from)
-    })
-    .await
-    .map_err(|_| HttpError::internal("checkpoint export task failed"))?
+    Ok(checkpoint_export::response(
+        state.shutdown,
+        move |progress| {
+            execution
+                .checkpoint_definition_observed(&id, &name, &mut |n| progress.advance(n))
+                .map_err(HttpError::from)
+        },
+    ))
 }
 
 #[cfg(test)]

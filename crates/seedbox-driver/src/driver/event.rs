@@ -3,8 +3,8 @@
 //! See [`Driver::drain_observations`](super::Driver::drain_observations) for the ordering,
 //! failure and retention contract shared by every event.
 //!
-//! TODO: Re-evaluate: committed outputs and control settlements need a drainable stream.
-//! Polling current state cannot reconstruct their order or a prefix preceding failure.
+//! Committed outputs and control settlements form a drainable stream because
+//! polling current state cannot reconstruct their order or a prefix preceding failure.
 //! Events report owned facts; they do not claim transport delivery or a complete world view.
 
 use super::{FaultHandle, InputKey, InputRejection, MachineId, MachineResponse, Position};
@@ -81,14 +81,12 @@ pub enum EventKind {
         detail: String,
         /// Typed network heal counts, also returned in the guest reply; None
         /// for unrelated settlements. This field adds no event or sequence.
-        // TODO: Re-evaluate: result facts cannot be encoded in human detail
-        // strings or extra packet events without changing existing evidence.
         network: Option<super::NetworkSettlement>,
     },
     /// A guest call armed an output trigger at `at`. Bytes observed at or
     /// after `deadline` never match. `source` is the watched machine whose
     /// output is matched, for every trigger kind.
-    // TODO: Re-evaluate: a partition has no single machine target, and a boot
+    // A partition has no single machine target, and a boot
     // would be wrong at arm time because the effect binds when it fires; the
     // admitted fault's FaultTarget::Links names the actual members.
     TriggerArmed {
@@ -108,9 +106,8 @@ pub enum EventKind {
         fault: Option<FaultId>,
     },
     /// A simulation-control reply was admitted into the inbox of the calling
-    /// machine's current boot at its timeline time `at`. This equals the legacy
-    /// `delivered_at_ns`, but it proves neither transport completion nor that
-    /// the program read the reply. Replies discarded because the machine exited
+    /// machine's current boot at its timeline time `at`. It proves neither
+    /// transport completion nor that the program read the reply. Replies discarded because the machine exited
     /// or because the call belongs to an earlier boot publish nothing. A machine
     /// can still silently discard a reply to a session it retired within the
     /// same boot; that discard is not visible to the driver.
@@ -168,9 +165,9 @@ pub struct FaultId(pub(crate) u32);
 impl FaultId {
     /// The assigned numeric identity, for retained plans and observation wires.
     /// This neither allocates an identity nor permits callers to construct one.
-    // TODO: Re-evaluate: service plans and observations already carry u32 IDs;
-    // a read-only projection avoids parsing Debug without adding serde or an
-    // externally constructible identity namespace.
+    // Service plans and observations carry u32 IDs; a read-only projection
+    // avoids parsing Debug without adding serde or an externally constructible
+    // identity namespace.
     pub const fn get(self) -> u32 {
         self.0
     }
@@ -193,9 +190,6 @@ pub struct FaultRecord {
     pub requested_at: Timestamp,
 }
 
-// TODO: Re-evaluate: a partition persists across every member's boots and acts
-// on links, not one machine, so a single machine and bound boot cannot describe
-// it truthfully; one scoped target keeps admission and settlement records exact.
 /// The scope a fault acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -212,15 +206,15 @@ pub enum FaultTarget {
         right: Vec<MachineId>,
     },
     /// Only from × to directions, never their implicit reverse; no boot binding.
-    // TODO: Re-evaluate: the service catalogue must distinguish shape direction
+    // Separate from Links so the service catalogue can tell shape direction
     // from bidirectional partitions without reconstructing the execution spec.
     DirectedLinks {
         from: Vec<MachineId>,
         to: Vec<MachineId>,
     },
     /// One direction of an observed TCP incarnation, independent of VM boots.
-    // TODO: Re-evaluate: a connection selector cannot be represented by only
-    // machine links; tuple reuse must not retarget an older incarnation.
+    // Machine links cannot represent a connection selector, and tuple reuse
+    // must not retarget an older incarnation.
     Connection { connection: super::Connection },
 }
 
@@ -266,14 +260,13 @@ pub enum FaultAction {
     /// still arrive.
     Partition,
     /// Directed policy and optional impairments, with data validated at admission.
-    // TODO: Re-evaluate: observations need the actual policy, not a service-side
-    // reconstruction or a second mutable fault catalogue.
+    // Carries the actual policy so observations need no service-side
+    // reconstruction or second mutable fault catalogue.
     Shape {
         policy: super::NetworkPolicy,
         network_faults: super::NetworkFaults,
     },
     /// Select the exact connection carried by FaultTarget::Connection.
-    // TODO: Re-evaluate: the selection target belongs in the scoped fault record.
     DropConnection,
     /// Restore the configuration replaced by an earlier fault's handle: nominal
     /// execution cost, nominal clock rate (keeping accrued offset), the inverse

@@ -28,7 +28,7 @@ pub fn validate_input_program(
 /// This does not contact a worker or touch a simulation's RNG, state or IDs.
 pub fn fault_action_targets(
     configuration: &crate::config::Simulation,
-    action: &seedbox_control::Action,
+    action: &seedbox_engine_protocol::control::Action,
 ) -> Result<ActionTargets> {
     let names: Vec<_> = configuration.services.keys().cloned().collect();
     seedbox_driver_execution::driver_world::action_targets(
@@ -42,7 +42,7 @@ pub fn fault_action_targets(
 #[cfg(test)]
 mod program_tests {
     use super::*;
-    use seedbox_control::Action;
+    use seedbox_engine_protocol::control::Action;
     use seedbox_engine_protocol::input_program::TimedInput;
     #[test]
     fn program_validates_targets_handles_order_keys_and_deadlines_without_ids() {

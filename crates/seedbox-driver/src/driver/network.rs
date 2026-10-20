@@ -24,7 +24,7 @@ const MAX_DELAY_NS: u64 = 3_600_000_000_000;
 /// Parts per million in a certain loss.
 const MAX_LOSS_PPM: u32 = 1_000_000;
 
-// TODO: Re-evaluate: the shared network spans machines, so neither a machine
+// The shared network spans machines, so neither a machine
 // definition nor a factory can express it; one validated constructor input keeps
 // the minimum delay that bounds causal rounds fixed for the Driver's lifetime.
 /// Delay and loss applied to every frame between attached machines.

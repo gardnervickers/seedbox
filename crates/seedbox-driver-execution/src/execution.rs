@@ -1,5 +1,5 @@
 //! Explicit execution request and backend interface for retained Driver execution.
-pub use seedbox_artifacts::evidence::{page_hash_log, MACHINE_OUTPUT_DIR};
+pub use seedbox_artifacts::evidence::MACHINE_OUTPUT_DIR;
 pub use seedbox_artifacts::execution::*;
 use seedbox_artifacts::{
     config::{Check, Limits, Network, Schedule},

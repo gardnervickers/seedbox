@@ -8,7 +8,7 @@ use crate::{
     store::{ContentDigest, ContentStore},
     Error, Result,
 };
-use seedbox_spec::definition::Architecture;
+use seedbox_spec::{backend::CpuBackend, definition::Architecture};
 use std::{
     fs,
     io::Read,
@@ -22,16 +22,6 @@ mod archive;
 const COMPRESSED_LIMIT: u64 = 1 << 30;
 const UNPACKED_LIMIT: u64 = 4 << 30;
 const MEMBER_LIMIT: usize = 16_384;
-
-/// Factory selection, independent of worker transport or execution policy.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Backend {
-    /// Native PV remains the default backend.
-    #[default]
-    Pv,
-    /// Software emulation of x86-64 Linux, on either supported host ISA.
-    Tcg,
-}
 
 /// A privately extracted, immutable runtime package. Clones share its lifetime.
 #[derive(Clone, Debug)]
@@ -159,28 +149,30 @@ impl Runtime {
     /// Guest files are read as bytes; their host execute bits are irrelevant.
     /// Guest ELF ISA and real host executable modes are checked here; concrete
     /// factories validate complete formats and give guest boot files their modes.
-    // TODO: Re-evaluate: merge this small selection enum with the service's
-    // backend type if that type becomes transport-independent and public.
-    pub fn select(&self, backend: Backend, architecture: Architecture) -> Result<Inputs> {
+    pub fn select(&self, backend: CpuBackend, architecture: Architecture) -> Result<Inputs> {
         let arch = match architecture {
             Architecture::X86_64 => "x86_64",
             Architecture::Aarch64 => "aarch64",
         };
-        if (backend == Backend::Tcg && architecture != Architecture::X86_64)
-            || (backend == Backend::Pv && arch != std::env::consts::ARCH)
+        if (backend == CpuBackend::Tcg && architecture != Architecture::X86_64)
+            || (backend == CpuBackend::Pv && arch != std::env::consts::ARCH)
         {
             return Err(Error::Setup(format!("{backend:?} does not support {arch} guests on {}; PV requires the native ISA and TCG requires x86_64", host_system())));
         }
         let root = self.directory.path().join("assets");
         let guest = root
-            .join(if backend == Backend::Pv { "pv" } else { "tcg" })
+            .join(if backend == CpuBackend::Pv {
+                "pv"
+            } else {
+                "tcg"
+            })
             .join(arch);
         for name in [
             "kernel",
             "init",
             "command-line",
             "mke2fs",
-            if backend == Backend::Pv {
+            if backend == CpuBackend::Pv {
                 "progress.tar"
             } else {
                 "firmware"
@@ -196,7 +188,7 @@ impl Runtime {
         for name in ["init", "mke2fs"] {
             guest_elf(&guest.join(name), expected_machine)?;
         }
-        let qemu = if backend == Backend::Tcg {
+        let qemu = if backend == CpuBackend::Tcg {
             let host = root.join("host").join(host_system());
             let launcher = host.join("bin/qemu-system-x86_64");
             executable(&launcher)?;

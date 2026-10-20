@@ -96,7 +96,7 @@ fn codec3_policy_binding_refuses_before_native_restore_and_driver_hosts_restore_
     let (name, snapshot) = cold(Some(policy.clone()));
     let mut encoded = vec![];
     snapshot.write_to(&mut encoded).unwrap();
-    let inventory = inventory(Some(crate::driver_world::policy::encode(&policy).unwrap()));
+    let inventory = inventory(Some(policy.clone()));
     let limits = seedbox_machine::snapshot::DecodeLimits {
         encoded_bytes: 16 << 20,
         allocation_bytes: 64 << 20,

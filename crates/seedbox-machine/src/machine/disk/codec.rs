@@ -11,9 +11,7 @@
 //! wrong magic or capacity, truncation, trailing bytes, duplicate, unordered
 //! or out-of-range sectors are errors that leave the store unchanged.
 
-// TODO: Re-evaluate: separate backends consume this canonical helper.
-// Crate-private access cannot cross packages; representation remains private.
-// TODO: Re-evaluate: overlays must cross process boundaries (QEMU migration,
+// Overlays cross process boundaries (QEMU migration,
 // boot inputs, exports, PV captures) while each owner keeps the immutable
 // base; a private versioned encoding with exact validation is the narrowest.
 
@@ -52,9 +50,8 @@ pub fn encoded_limit(capacity: u64) -> u128 {
 /// Both layers may contain the same sector. Zero-filled sectors are data, not
 /// holes; empty layers do not imply an empty or zero-filled base. The base is
 /// never present in this encoding and stays with its owner.
-// TODO: Re-evaluate: both backend offline decoders need structural validation
-// without temporary overlay maps. A borrowed scan shares restore's rules while
-// leaving base ownership and capacity/byte-geometry validation with the caller.
+// Offline decoders in both backends validate structure without building
+// temporary overlay maps; this borrowed scan shares restore's rules.
 pub fn validate_overlays(bytes: &[u8], capacity: u64) -> Result<(), CodecError> {
     walk(bytes, capacity, |_, _, _| {})
 }

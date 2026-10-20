@@ -173,22 +173,34 @@ pub const CPU_LOOP_FIXTURE: &str = "SEEDBOX_CPU_LOOP_FIXTURE";
 /// The normal runtime package the public-service tests submit through, from
 /// `cargo xtask build-assets`.
 pub const SERVICE_RUNTIME: &str = "build/assets/driver-runtime.tar.gz";
-/// The feature and `seedbox-server` integration targets of a machine suite's
-/// public-service acceptance. These tests are feature-gated, not ignored.
-/// The controller target runs the prepared fixture's oracle socket calls on
-/// either backend.
+/// The `seedbox-server` integration targets of a machine suite's public-service
+/// acceptance, each with the Cargo features it is built with. These tests are
+/// feature-gated, not ignored. The controller and held-checkpoint targets run
+/// on either backend. `native_faults_pv_service` also opts into
+/// `worker-failure-tests` for its injected worker-failure case.
 /// Other suites have none.
-pub fn service_targets(suite: Suite) -> (&'static str, &'static [&'static str]) {
+pub fn service_targets(suite: Suite) -> &'static [(&'static str, &'static str)] {
     match suite {
-        Suite::MachineTcg => (
-            "tcg-tests",
-            &["native_tcg_service", "native_controller_service"],
-        ),
-        Suite::MachinePv => (
-            "kvm-tests",
-            &["native_pv_service", "native_controller_service"],
-        ),
-        _ => ("", &[]),
+        Suite::MachineTcg => &[
+            ("native_tcg_service", "tcg-tests"),
+            ("native_controller_service", "tcg-tests"),
+            ("native_held_checkpoint", "tcg-tests"),
+            ("native_disk_tcg_service", "tcg-tests"),
+            ("native_fault_clock_tcg_service", "tcg-tests"),
+            ("native_fault_network_tcg_service", "tcg-tests"),
+        ],
+        Suite::MachinePv => &[
+            ("native_pv_service", "kvm-tests"),
+            ("native_controller_service", "kvm-tests"),
+            ("native_held_checkpoint", "kvm-tests"),
+            ("native_disk_pv_service", "kvm-tests"),
+            ("native_fault_clock_pv_service", "kvm-tests"),
+            ("native_fault_network_pv_service", "kvm-tests"),
+            ("native_fault_disk_pv_service", "kvm-tests"),
+            ("native_fault_lifecycle_pv_service", "kvm-tests"),
+            ("native_faults_pv_service", "kvm-tests,worker-failure-tests"),
+        ],
+        _ => &[],
     }
 }
 pub fn machine_inputs(suite: Suite) -> Vec<String> {

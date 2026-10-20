@@ -22,9 +22,11 @@ const DRIVER_HOSTS: [(&str, &str, Architecture, &str); 2] = [
     ),
 ];
 
-// TODO: Re-evaluate: PV needs a native hypervisor leaf (Linux KVM on x86-64,
-// macOS HVF on aarch64); TCG emulates an x86-64 guest with the packaged QEMU on
-// either host. Linux aarch64 PV stays out until its snapshot path is proven.
+// PV needs a native hypervisor leaf (Linux KVM on x86-64, macOS HVF on
+// aarch64); TCG emulates an x86-64 guest with the packaged QEMU on either host.
+// TODO: Linux aarch64 has no Driver host because its PV KVM backend cannot
+// restore live captures ("PV KVM architectural restore is not implemented" in
+// seedbox-machine-pv); implement and test that restore, then admit the host.
 impl Host {
     /// The host this binary runs on.
     pub const fn current() -> Self {

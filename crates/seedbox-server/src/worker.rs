@@ -245,7 +245,7 @@ impl Worker {
             let reply = execute(Command::PrepareFault {
                 request_id: request.request_id.clone(),
                 action: action.clone(),
-                timeout_ns: seedbox_control::PROCESS_EFFECT_TIMEOUT_NS,
+                timeout_ns: seedbox_engine_protocol::control::PROCESS_EFFECT_TIMEOUT_NS,
             })?;
             if reply.error.is_some() {
                 *fault = None;
@@ -261,7 +261,7 @@ impl Worker {
                 || record
                     .plan
                     .at_ns
-                    .checked_add(seedbox_control::PROCESS_EFFECT_TIMEOUT_NS)
+                    .checked_add(seedbox_engine_protocol::control::PROCESS_EFFECT_TIMEOUT_NS)
                     != Some(record.plan.deadline_ns)
             {
                 return Err(Error::Fatal(
@@ -410,10 +410,10 @@ mod tests {
             intervention: Some(Intervention {
                 request_id: "cut".into(),
                 position,
-                plan: seedbox_control::Plan {
+                plan: seedbox_engine_protocol::control::Plan {
                     id: 1,
                     at_ns: 100,
-                    deadline_ns: 100 + seedbox_control::PROCESS_EFFECT_TIMEOUT_NS,
+                    deadline_ns: 100 + seedbox_engine_protocol::control::PROCESS_EFFECT_TIMEOUT_NS,
                     action: seedbox_api::FaultAction::Heal {
                         handle: "cut".into(),
                     },
@@ -504,7 +504,7 @@ mod tests {
         Command::PrepareFault {
             request_id: "cut".into(),
             action,
-            timeout_ns: seedbox_control::PROCESS_EFFECT_TIMEOUT_NS,
+            timeout_ns: seedbox_engine_protocol::control::PROCESS_EFFECT_TIMEOUT_NS,
         }
     }
     fn commit() -> Command {

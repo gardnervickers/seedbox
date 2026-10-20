@@ -78,7 +78,7 @@ pub struct Prepared {
 /// the parent. The parent retains its Inputs guard until this worker and all
 /// native descendants have stopped. This is never checkpoint data; a retained
 /// archive with different content must be acquired independently.
-// TODO: Re-evaluate: process boundaries cannot transfer an Arc; explicit paths
+// Process boundaries cannot transfer an Arc; explicit paths
 // borrow the parent session lifetime rather than re-extracting the same package.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -90,7 +90,6 @@ pub struct RuntimeBinding {
 impl RuntimeBinding {
     /// Require the same content identity and length as retained factory authority.
     /// Paths may differ between sessions; a different archive is never substituted.
-    // TODO: Re-evaluate: compare retained bytes, not descriptive build/host stamps.
     pub fn validate_archive(&self, archive: &Artifact) -> Result<(), String> {
         if self.archive.sha256 != archive.sha256 || self.archive.length != archive.length {
             return Err("shared runtime differs from the retained factory archive; acquire that retained archive rather than the startup/default runtime".into());

@@ -17,9 +17,9 @@ mod controller_tests;
 /// Captures can be borrowed repeatedly after the source Driver is destroyed;
 /// machine snapshots need not implement Clone or a serialization trait.
 /// This type is not a persistence/export format.
-// TODO: Re-evaluate: machine captures cannot retain private scheduler state.
-// An opaque aggregate supplies production continuation without exposing fields
-// or expanding the Machine contract with Driver or persistence requirements.
+// Machine captures cannot retain private scheduler state. This opaque
+// aggregate supplies continuation without exposing fields or expanding the
+// Machine contract with Driver or persistence requirements.
 pub struct Checkpoint<S> {
     now: Timestamp,
     rng: SeededRng,
@@ -44,9 +44,8 @@ pub struct Checkpoint<S> {
 
 impl<S> Checkpoint<S> {
     /// The immutable simulated timeslice retained by this capture.
-    // TODO: Re-evaluate: external restore adapters must validate their requested
-    // timeslice before native work. The opaque checkpoint owns this immutable
-    // value, so adapters cannot establish agreement from envelope metadata alone.
+    // Restore adapters validate their requested timeslice against this before
+    // native work; envelope metadata alone cannot establish agreement.
     pub fn quantum(&self) -> Duration {
         Duration::from_nanos(self.quantum_ns)
     }
@@ -61,9 +60,8 @@ impl<S> Checkpoint<S> {
     /// Anonymous machines added through the low-level SDK have no name. This
     /// borrows only the retained control ledger: it never touches native
     /// snapshots or requires them to implement Clone or a serialization trait.
-    // TODO: Re-evaluate: external restore adapters need to validate their name
-    // bindings before native callbacks; the service envelope is not authority
-    // for the independently captured Driver ledger.
+    // Restore adapters validate their name bindings against this before native
+    // callbacks; the service envelope is not authority for the captured ledger.
     pub fn machine_names(&self) -> impl ExactSizeIterator<Item = (MachineId, Option<&str>)> {
         self.control.machine_names()
     }
@@ -172,9 +170,14 @@ where
     /// [`Self::new`]; the simulation RNG is owned concretely so its exact byte
     /// cursor can be captured. The same seed and subsequent inputs produce the
     /// same results as new supplied with the same SeededRng algorithm.
-    // TODO: Re-evaluate: an arbitrary RngStream has no capture contract. Owning
-    // the existing seeded stream enables exact continuation without changing
-    // RngStream, guessing its algorithm, or recording/replaying random requests.
+    // An arbitrary RngStream has no capture contract; owning the seeded stream
+    // enables exact continuation without changing RngStream, guessing its
+    // algorithm, or recording/replaying random requests.
+    // TODO: Only `new_seeded_with_network` is used outside examples and test
+    // fixtures, while a Driver built by `new` with an arbitrary RngStream can
+    // neither checkpoint nor write policy evidence. Decide whether `new`'s
+    // RngStream generality is still needed; if not, fold the three constructors
+    // into one seeded constructor.
     #[allow(clippy::too_many_arguments)]
     pub fn new_seeded(
         start: Timestamp,
@@ -205,8 +208,6 @@ where
     /// Construct with validated baseline/queue policies and opt-in bounded
     /// frame observation. Other construction and RNG semantics match new_seeded;
     /// invalid prepared endpoint membership fails before context/factory work.
-    // TODO: Re-evaluate: full network setup belongs to the Driver, not factories
-    // or a changed default on the existing NetworkConfig constructor.
     #[allow(clippy::too_many_arguments)]
     pub fn new_seeded_with_network(
         start: Timestamp,
@@ -247,9 +248,9 @@ where
     /// returned; partial captures are dropped and the valid source remains at
     /// the same simulation state, as required by [`Machine::snapshot`]. Capture
     /// does not flush, drain or republish observations and is not persistence.
-    // TODO: Re-evaluate: only the Driver owns the exact private continuation
-    // state. Capturing it here avoids rounded reconstruction from observations
-    // or a second scheduler above Machine.
+    // Only the Driver owns the exact private continuation state; capturing it
+    // here avoids rounded reconstruction from observations or a second
+    // scheduler above Machine.
     pub fn checkpoint(&mut self) -> Result<Checkpoint<M::Snapshot>, Error<M::Error>> {
         match self.checkpoint_map(Ok::<_, std::convert::Infallible>) {
             Ok(checkpoint) => Ok(checkpoint),
@@ -282,8 +283,8 @@ where
     /// same boundary. This does not permit resuming a failed [`Machine::run`].
     /// External I/O side effects, rollback and manifest publication belong entirely
     /// to the caller: this operation neither publishes nor removes their artifacts.
-    // TODO: Re-evaluate: mapping after checkpoint retains every native RAM image.
-    // Mapping inside the capture loop enables caller-owned streaming codecs
+    // Mapping inside the capture loop lets caller-owned codecs stream each
+    // snapshot instead of retaining every native RAM image until capture ends,
     // without expanding Machine or imposing a resource admission ceiling.
     pub fn checkpoint_map<S, E>(
         &mut self,
@@ -369,9 +370,9 @@ where
     /// obligations are not serialized or validated by this typed capture.
     /// Observation history is not restored. Service input-program cursors must be retained
     /// separately by the host; this operation alone is not checkpoint export.
-    // TODO: Re-evaluate: opaque backend restore callbacks supply native resources
-    // without adding a common Machine constructor. New ownership makes partial
-    // restoration failure cleanable without mutating a live Driver in place.
+    // Opaque backend restore callbacks supply native resources without a
+    // common Machine constructor. Building a new Driver makes partial restore
+    // failure cleanable without mutating a live Driver in place.
     pub fn from_checkpoint(
         checkpoint: &Checkpoint<M::Snapshot>,
         workers: usize,

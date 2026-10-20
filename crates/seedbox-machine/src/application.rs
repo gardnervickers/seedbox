@@ -1,7 +1,5 @@
 //! Shared archive preparation. Linux paths remain archive bytes; guest files
 //! are never extracted on the host. Backend derivation does not mutate inputs.
-// TODO: Re-evaluate: separate backends consume this canonical helper.
-// Crate-private access cannot cross packages; representation remains private.
 use crate::definition::{DefinitionError, FilesystemArchive, Launch, PreparedApplication};
 mod environment;
 pub use environment::{GuestEnvironment, GuestLimits, NamedVolume};
@@ -576,8 +574,6 @@ impl Newc {
 /// the host. An empty init, invalid archive/launch recipe, or unrepresentable
 /// newc metadata returns a DefinitionError without publishing a partial archive.
 /// No guest instructions, host builders, clock reads or RNG draws occur.
-// TODO: Re-evaluate: separate factories need the same archive preparation.
-// Keeping it crate-private would force copies or a reverse dependency.
 pub fn boot_archive(
     application: &PreparedApplication,
     bootstrap: &GuestBootstrap,
@@ -588,8 +584,6 @@ pub fn boot_archive(
 /// The original prepared application remains independent and reusable. The
 /// prefix is passed to the guest launch recipe, not executed on the host;
 /// boot_derived validates and packages these supplied values when called.
-// TODO: Re-evaluate: both derivation and packaging cross the factory boundary.
-// One owned result keeps the existing archive and prefix paired without mutation.
 pub struct DerivedApplication {
     pub application: PreparedApplication,
     pub execution_prefix: Vec<String>,
@@ -597,8 +591,6 @@ pub struct DerivedApplication {
 /// Package the owned derived workload and its prefix with the explicit bootstrap.
 /// Has boot_archive ownership, validation and error behavior, adding the stored
 /// prefix to the guest launch recipe. No input is mutated or host program run.
-// TODO: Re-evaluate: PV factories derive a runtime before common packaging.
-// An implementation-private function cannot serve that separate crate.
 pub fn boot_derived(
     application: &DerivedApplication,
     bootstrap: &GuestBootstrap,
@@ -616,7 +608,7 @@ pub fn boot_derived(
 /// init's ELF architecture. No formatter is included or required without them.
 /// This owns boot_archive's no-execution/source-immutability contract, validates
 /// the closed environment recipe, and never extracts Linux paths on the host.
-// TODO: Re-evaluate: setup is service-owned boot input, not an obligatory field
+// Setup is service-owned boot input, not an obligatory field
 // on every MachineDefinition or a generic machine inspection/serialization API.
 pub fn boot_archive_configured(
     application: &PreparedApplication,
@@ -631,8 +623,8 @@ pub fn boot_archive_configured(
 /// to the environment's visible nofile limit and is mounted read-only at boot;
 /// other prefixes do not imply this reserve or runtime mount. Formatter rules
 /// and no-host-execution guarantees are those of boot_archive_configured.
-// TODO: Re-evaluate: the concrete derived prefix is already the guest launch
-// contract; duplicating backend/Driver configuration would hide its boot bytes.
+// The derived prefix itself selects the runtime reserve; separate backend or
+// Driver configuration would hide what changes the boot bytes.
 pub fn boot_derived_configured(
     application: &DerivedApplication,
     bootstrap: &GuestBootstrap,

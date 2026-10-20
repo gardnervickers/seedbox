@@ -33,10 +33,6 @@ impl Factory {
     /// the epoch plus the machine counter (its time base). Use one epoch for
     /// all machines of a run, including spawned machines; it is part of each
     /// machine's boot inputs and snapshots, not a Driver setting.
-    // TODO: Re-evaluate: the epoch is concrete boot configuration owned with
-    // the factory's other guest inputs and retained in each machine's boot
-    // image and snapshots; neither the Driver's time mapping nor ambient state
-    // can supply it to arbitrary machines.
     pub fn new(worker: &Path, guest_assets: &Path, epoch_seconds: u32) -> io::Result<Self> {
         use seedbox_machine::machine::assets;
         assets::executable(worker)?;
@@ -82,11 +78,11 @@ impl Factory {
         })
     }
     /// Select exact named backend semantics for subsequently created machines.
-    /// Ordinary constructors retain legacy None; an explicit default selects
+    /// Without it, machines carry no named policy; an explicit default selects
     /// named policy with controller sockets disabled. Validation occurs before
     /// construction. This never configures or reseeds a restored machine.
-    // TODO: Re-evaluate: one retained factory policy must close ordinary,
-    // configured and verbatim boot paths without new definition fields.
+    // Policy lives on the factory so ordinary, configured and verbatim creation
+    // all apply it without a definition field.
     pub fn with_policy(mut self, policy: BackendPolicy) -> io::Result<Self> {
         policy.validate().map_err(io::Error::other)?;
         self.policy = Some(policy);
@@ -102,8 +98,8 @@ impl Factory {
     /// created machines. Default is 32. The explicit nonzero value is encoded
     /// in each derived launch prefix and retained by its closed boot snapshot;
     /// this performs no guest work and changes no already-created machine.
-    // TODO: Re-evaluate: the service owns one resolved PV budget in its factory
-    // inventory; a required definition field would churn unrelated Driver codecs.
+    // The service resolves one PV budget into its factory inventory; a
+    // definition field would churn unrelated Driver codecs.
     pub fn with_progress_budget(
         mut self,
         budget: impl Into<seedbox_spec::progress::ProgressBudget>,
@@ -121,8 +117,6 @@ impl Factory {
     /// Without this builder, standalone temporary-file behavior is unchanged.
     /// The root is host authority, not a guest input or snapshot field; restore
     /// must supply new authority with [`PVMachine::from_snapshot_in`].
-    // TODO: Re-evaluate: service sessions own cleanup authority while factories
-    // only borrow its directory lifetime through an explicitly owned path.
     pub fn with_scratch_root(mut self, root: &Path) -> Self {
         self.scratch_root = Some(root.to_owned());
         self
@@ -131,8 +125,7 @@ impl Factory {
     /// Named volumes require definition.disk and the optional static mke2fs
     /// guest asset loaded by new; missing prerequisites fail before guest work.
     /// Ordinary create remains unconfigured, including generic control behavior.
-    // TODO: Re-evaluate: the service's per-name environment map is separate
-    // factory authority, not mandatory application/Driver definition metadata.
+    // The guest environment is a per-call factory input, not definition metadata.
     pub fn create_configured(
         &mut self,
         definition: &MachineDefinition,
@@ -145,8 +138,8 @@ impl Factory {
     /// consumes no clock/RNG, starts no process and creates no private files.
     /// Named-volume prerequisites are checked; native RAM constraints are not.
     /// The returned bytes can therefore be sized before choosing guest RAM.
-    // TODO: Re-evaluate: preparation and creation need one byte-producing recipe;
-    // estimates cannot account for retained configuration and instrumentation.
+    // Preparation sizes the exact bytes creation uses; an estimate could not
+    // account for retained configuration and instrumentation.
     pub fn boot_archive_configured(
         &self,
         definition: &MachineDefinition,
@@ -198,8 +191,8 @@ impl Factory {
     /// definition; kernel and command line come from this factory. Workload
     /// filesystem/launch fields are not repackaged by this entry. Native RAM
     /// checks and scratch placement have the same semantics as ordinary creation.
-    // TODO: Re-evaluate: retained complete-boot assets are authoritative inputs,
-    // not application tar archives to overlay or instrument a second time.
+    // Retained complete boot archives are authoritative inputs, not application
+    // archives to overlay or instrument a second time.
     pub fn create_boot_archive(
         &mut self,
         definition: &MachineDefinition,

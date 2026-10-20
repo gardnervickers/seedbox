@@ -99,8 +99,10 @@ pub struct Override {
     #[serde(default = "default_timeout_ns")]
     pub timeout_ns: u64,
 }
+/// Default deadline for a process effect to take hold in the guest.
+pub const PROCESS_EFFECT_TIMEOUT_NS: u64 = 5_000_000_000;
 pub const fn default_timeout_ns() -> u64 {
-    seedbox_control::PROCESS_EFFECT_TIMEOUT_NS
+    PROCESS_EFFECT_TIMEOUT_NS
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]

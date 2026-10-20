@@ -1,4 +1,4 @@
-//! Shared legacy named-volume setup for one prepared machine.
+//! Named-volume setup for one prepared machine.
 //! This chooses initial capacity and guest mount metadata; it allocates no disk
 //! and performs no filesystem, formatter, worker or hypervisor operations.
 use seedbox_engine_protocol::driver_world::NamedVolume;
@@ -12,7 +12,7 @@ pub struct VolumeSetup {
 }
 
 /// Pass the named mounts of every service placed on this machine, in retained
-/// order. Multiple mounts share the legacy single 1 GiB disk; they do not add
+/// order. Multiple mounts share one 1 GiB disk; they do not add
 /// capacities. Anonymous OCI volumes are ordinary guest directories and must
 /// not be passed as named mounts or cause a persistent disk to be allocated.
 pub fn volume_setup<'a>(mounts: impl IntoIterator<Item = &'a VolumeMount>) -> VolumeSetup {

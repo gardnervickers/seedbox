@@ -78,8 +78,9 @@ impl FaultHandle {
     /// semantic length/alphabet bound; import allocation uses DecodeLimits.
     /// Named host faults share the active namespace with guest pN handles, but
     /// do not advance that allocator. Admission and apply-time checks are distinct.
-    // TODO: Re-evaluate: guest heals and inspect must see host aliases inside
-    // the Driver owner; an after-commit service-only map cannot preserve races.
+    // Host aliases live in the Driver so guest heals, inspect and FIFO
+    // collisions see them with exact admission races; a service-side map
+    // installed after commit could not.
     pub fn named(text: impl Into<String>) -> Result<Self, String> {
         let text = text.into();
         if text.is_empty() {
@@ -109,9 +110,9 @@ pub enum Target {
 
 /// A typed fault scheduled by the host.
 ///
-/// TODO: Re-evaluate: actions express admission policy, not raw machine work.
-/// Machine requests cannot represent Driver-owned pause/rate changes or target binding.
-/// Keeping this boundary makes host and guest controls share IDs and settlement rules.
+/// Actions express admission policy, not raw machine work: machine requests
+/// cannot represent Driver-owned pause/rate changes or target binding, and
+/// this boundary lets host and guest controls share IDs and settlement rules.
 ///
 /// Every action is admitted by the control policy at its scheduled time, with
 /// the same availability preflight and state validation as an ordinary guest
@@ -135,7 +136,7 @@ pub enum Action {
     /// exit with [`ExitReason::Crashed`](crate::machine::ExitReason::Crashed)
     /// crashed it. Pending process commands of that boot settle Unavailable.
     Crash(Target),
-    // TODO: Re-evaluate: the boot's confirmed state, not the cause or origin
+    // The boot's confirmed state, not the cause or origin
     // of its crash, owns reboot eligibility. A confirmed self-crash is already
     // down; demanding a synthetic Crash would keep two contradictory views.
     /// Start a fresh boot of a crashed machine, clearing its driver pause and
@@ -180,10 +181,9 @@ pub enum Action {
     /// admitted is rejected. The new identity is reserved at admission and the
     /// machine is built at its FIFO effect turn.
     Spawn { name: String },
-    // TODO: Re-evaluate: host clock faults must share the guest control
-    // policy, handles and events (`Transition::ClockRate`,
-    // `FaultAction::{Drift, StepRealtime}`); a raw Driver setter would bypass
-    // admission, keys and settlement. Steps carry no deadline: the default applies.
+    // Host clock faults share the guest control policy, handles and events
+    // (`Transition::ClockRate`, `FaultAction::{Drift, StepRealtime}`); a raw
+    // Driver setter would bypass admission, keys and settlement.
     /// Set the rate of the machine's time base from the effect's barrier and
     /// allocate a [`FaultHandle`]. The time-base mapping keeps the machine time
     /// already reached, so the offset accrued so far is kept. At most one drift
@@ -198,8 +198,8 @@ pub enum Action {
     /// admission. The bound must be positive and satisfy guest-control limits.
     /// Preparation projects on cloned policy/RNG state; only commit consumes
     /// the admitted draw. Fixed drift and rejected state checks draw nothing.
-    // TODO: Re-evaluate: host bounds must enter the same admission transaction
-    // as guest bounds, not be resolved by a service-side RNG or alias policy.
+    // Host bounds enter the same admission transaction as guest bounds rather
+    // than being resolved by a service-side RNG or alias policy.
     DriftBounded { target: Target, max_rate_ppb: u64 },
     /// Step the guest's `CLOCK_REALTIME` by `nanoseconds`, performed by the
     /// guest as a [`Request::StepRealtime`](crate::pv::Request::StepRealtime)
@@ -220,10 +220,10 @@ pub enum Action {
     /// as a guest clock-skew call. A positive bound is at most 365 days; the
     /// resolved value may be zero. Handle and settlement semantics match
     /// `StepRealtime`, including the ordinary guest acknowledgment deadline.
-    // TODO: Re-evaluate: retain the requested bound until Driver admission so
-    // proposal retries cannot consume or change the eventual committed draw.
+    // The requested bound is retained until Driver admission so proposal
+    // retries cannot consume or change the eventual committed draw.
     StepRealtimeBounded { target: Target, max_offset_ns: u64 },
-    // TODO: Re-evaluate: a partition is admitted like any fault (keys, handles,
+    // A partition is admitted like any fault (keys, handles,
     // settlement) but acts on links between attached machines and outlives
     // their boots, so it names member sets rather than one boot-bound target.
     /// Cut both directions of every link between a `left` and a `right` member
@@ -243,8 +243,8 @@ pub enum Action {
     /// Install a directed from × to policy layer, validated against the global
     /// latency floor. The highest fault ID containing a pair wins. Healing
     /// removes only this layer/burst state and leaves queued frames untouched.
-    // TODO: Re-evaluate: a directed policy is not a bidirectional partition;
-    // callers supply canonical validated policy data without scheduler policy.
+    // Separate from Partition because it is directed; callers supply canonical
+    // validated policy data, not scheduler policy.
     Shape {
         from: Vec<Target>,
         to: Vec<Target>,
@@ -254,8 +254,8 @@ pub enum Action {
     /// Select one observed open TCP incarnation/direction. Argument errors
     /// precede handle allocation; unavailable/stale/capacity state rejection
     /// consumes an allocated pN, and apply rechecks the session before effects.
-    // TODO: Re-evaluate: an incarnation selector belongs to network state, not
-    // machine lifecycle or a guessed transport connection in the service worker.
+    // An incarnation selector belongs to network state, not machine lifecycle
+    // or a guessed transport connection in the service worker.
     DropConnection { connection: super::Connection },
 }
 

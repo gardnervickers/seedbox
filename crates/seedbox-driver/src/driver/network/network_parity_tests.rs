@@ -902,7 +902,7 @@ fn real_network_fault_records_project_losslessly_to_canonical_control_actions() 
                     network_faults,
                 },
                 FaultTarget::DirectedLinks { from, to },
-            ) => seedbox_control::Action::Shape {
+            ) => seedbox_engine_protocol::control::Action::Shape {
                 handle,
                 from: from.iter().map(|i| format!("fixture-{}", i.0)).collect(),
                 to: to.iter().map(|i| format!("fixture-{}", i.0)).collect(),
@@ -914,12 +914,12 @@ fn real_network_fault_records_project_losslessly_to_canonical_control_actions() 
                 network_faults: *network_faults,
             },
             (FaultAction::DropConnection, FaultTarget::Connection { connection }) => {
-                seedbox_control::Action::DropConnection {
+                seedbox_engine_protocol::control::Action::DropConnection {
                     handle,
                     connection: connection.clone(),
                 }
             }
-            (FaultAction::Heal, _) => seedbox_control::Action::Heal { handle },
+            (FaultAction::Heal, _) => seedbox_engine_protocol::control::Action::Heal { handle },
             _ => panic!("not a network fixture record"),
         }
     };
@@ -939,7 +939,7 @@ fn real_network_fault_records_project_losslessly_to_canonical_control_actions() 
     let record = settled(&d.drain_events(), "shape").0;
     assert_eq!(
         project(&record),
-        seedbox_control::Action::Shape {
+        seedbox_engine_protocol::control::Action::Shape {
             handle: "net".into(),
             from: vec!["fixture-1".into()],
             to: vec!["fixture-2".into()],
@@ -961,7 +961,7 @@ fn real_network_fault_records_project_losslessly_to_canonical_control_actions() 
     );
     assert_eq!(
         project(&settled(&d.drain_events(), "drop").0),
-        seedbox_control::Action::DropConnection {
+        seedbox_engine_protocol::control::Action::DropConnection {
             handle: "tcp".into(),
             connection: c
         }
@@ -974,7 +974,7 @@ fn real_network_fault_records_project_losslessly_to_canonical_control_actions() 
     );
     assert_eq!(
         project(&settled(&d.drain_events(), "heal").0),
-        seedbox_control::Action::Heal {
+        seedbox_engine_protocol::control::Action::Heal {
             handle: "net".into()
         }
     );

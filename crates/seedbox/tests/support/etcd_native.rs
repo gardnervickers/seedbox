@@ -234,11 +234,19 @@ fn copy_state_report(
 }
 
 impl Cli {
-    fn capture_comparison_failure(&self, baseline: &str, repeated: &str) {
+    /// `other` is the "repeat" or "replay" side; its CLI output and
+    /// definition were captured as `{output}.stdout` and `{other}-result.stdout`.
+    fn capture_comparison_failure(
+        &self,
+        baseline: &str,
+        repeated: &str,
+        other: &str,
+        output: &str,
+    ) {
         let capture = || -> Result<()> {
             let left = attempt_directory(&self.state, baseline)?;
             let right = attempt_directory(&self.state, repeated)?;
-            for (label, attempt) in [("baseline", &left), ("repeat", &right)] {
+            for (label, attempt) in [("baseline", &left), (other, &right)] {
                 let copy = || -> Result<()> {
                     let manifest = diagnostic_bytes(&attempt.join("manifest.json"))?;
                     let record = seedbox_application::record::inspect_bytes(&manifest)
@@ -266,15 +274,11 @@ impl Cli {
             let state = seedbox_application::diff::diff(&left, &right)
                 .map_err(|e| e.to_string())
                 .and_then(|report| serde_json::to_vec_pretty(&report).map_err(|e| e.to_string()));
-            let divergence = seedbox_application::diff::replay_divergence(&left, &right)
-                .map_err(|e| e.to_string())
-                .and_then(|report| serde_json::to_vec_pretty(&report).map_err(|e| e.to_string()));
             let pages = seedbox_application::diff::replay_ram_pages(&left, &right)
                 .map_err(|e| e.to_string())
                 .and_then(|report| serde_json::to_vec_pretty(&report).map_err(|e| e.to_string()));
             for (name, report) in [
                 ("compare-state.json", state),
-                ("compare-divergence.json", divergence),
                 ("compare-ram-pages.json", pages),
             ] {
                 let write = report.and_then(|bytes| {
@@ -292,8 +296,55 @@ impl Cli {
         if let Err(error) = capture() {
             eprintln!("etcd comparison diagnostic capture failed: {error}");
         }
+        self.log_comparison_summary(other, output);
+    }
+
+    /// CI keeps only the job log readily visible, so summarize the retained
+    /// comparison evidence there: the verdict, where the two resolved
+    /// definitions differ (prepared inputs included), and the state diff head.
+    fn log_comparison_summary(&self, other: &str, output: &str) {
+        let read = |name: &str| fs::read(self.directory.join(name)).ok();
+        for stream in ["stdout", "stderr"] {
+            match read(&format!("{output}.{stream}")) {
+                Some(bytes) => eprintln!(
+                    "etcd {output} {stream}: {}",
+                    String::from_utf8_lossy(&bytes[..bytes.len().min(SUMMARY_BYTES)])
+                ),
+                None => eprintln!("etcd {output} {stream} unavailable"),
+            }
+        }
+        let spec = |name: &str| {
+            read(name)
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .map(|resource| resource["spec"].clone())
+        };
+        match (
+            spec("baseline-result.stdout"),
+            spec(&format!("{other}-result.stdout")),
+        ) {
+            (Some(baseline), Some(repeat)) => {
+                let mut differences = Vec::new();
+                crate::json_diff::json_differences("spec", &baseline, &repeat, &mut differences);
+                eprintln!(
+                    "etcd baseline/{other} definitions differ at {} paths",
+                    differences.len()
+                );
+                for difference in differences.iter().take(SUMMARY_LINES) {
+                    eprintln!("  {difference}");
+                }
+            }
+            _ => eprintln!("etcd baseline/{other} definition diff unavailable"),
+        }
+        if let Some(bytes) = read("compare-state.json") {
+            for line in String::from_utf8_lossy(&bytes).lines().take(SUMMARY_LINES) {
+                eprintln!("etcd compare-state: {line}");
+            }
+        }
     }
 }
+
+const SUMMARY_BYTES: usize = 4096;
+const SUMMARY_LINES: usize = 60;
 
 // The CLI flattens catalogue pages into a bare array, not the API's
 // SimulationList page object. Each array element is a summary object.
@@ -380,7 +431,9 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
             &words(&["compare", &baseline_id, &repeated_id, "--json"]),
         )
         .await
-        .inspect_err(|_| cli.capture_comparison_failure(&baseline_id, &repeated_id))?,
+        .inspect_err(|_| {
+            cli.capture_comparison_failure(&baseline_id, &repeated_id, "repeat", "compare-repeat")
+        })?,
     )
     .map_err(|e| e.to_string())?;
     if compared.baseline != baseline.metadata.id
@@ -391,29 +444,49 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
             "repeat comparison did not compare two independently submitted simulations".into(),
         );
     }
-    require_match(&compared)
-        .inspect_err(|_| cli.capture_comparison_failure(&baseline_id, &repeated_id))?;
+    require_match(&compared).inspect_err(|_| {
+        cli.capture_comparison_failure(&baseline_id, &repeated_id, "repeat", "compare-repeat")
+    })?;
     // Reports are already retained; bound memory by releasing completed native
     // worlds rather than accumulating multiple four-machine executions.
     cli.invoke(guard, "delete-repeat", &words(&["delete", &repeated_id]))
         .await?;
     // No new backend selection on replay: the retained runtime must own it.
-    let replay: SimulationComparison = serde_json::from_slice(
-        &cli.invoke(
+    let replayed_output = cli
+        .invoke(
             guard,
             "replay",
             &words(&["replay", &baseline_id, "--json", "--wall-time", "20m"]),
         )
-        .await?,
-    )
-    .map_err(|e| e.to_string())?;
+        .await;
+    let replay: SimulationComparison = match replayed_output {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
+        // A completed mismatching replay still prints its comparison; capture
+        // both sides before returning the CLI failure.
+        Err(error) => {
+            if let Ok(compared) = serde_json::from_slice::<SimulationComparison>(
+                &fs::read(cli.directory.join("replay.stdout")).unwrap_or_default(),
+            ) {
+                let id = compared.simulation.to_string();
+                if let Err(capture) = cli.describe(guard, "replay-result", &id).await {
+                    eprintln!("etcd replay definition capture failed: {capture}");
+                }
+                cli.capture_comparison_failure(&baseline_id, &id, "replay", "replay");
+            } else {
+                cli.log_comparison_summary("replay", "replay");
+            }
+            return Err(error);
+        }
+    };
     if replay.baseline != baseline.metadata.id
         || replay.simulation == baseline.metadata.id
         || replay.simulation == repeated.metadata.id
     {
         return Err("replay did not create/compare a fresh simulation from the original".into());
     }
-    require_match(&replay)?;
+    require_match(&replay).inspect_err(|_| {
+        cli.capture_comparison_failure(&baseline_id, replay.simulation.as_str(), "replay", "replay")
+    })?;
     let replayed = cli
         .describe(guard, "replay-result", replay.simulation.as_str())
         .await?;

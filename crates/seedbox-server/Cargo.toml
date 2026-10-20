@@ -12,7 +12,6 @@ tcg-tests = []
 worker-failure-tests = ["seedbox-driver-execution/test-support"]
 
 [dependencies]
-seedbox-control.workspace = true
 seedbox-artifacts.workspace = true
 seedbox-application.workspace = true
 seedbox-driver-execution.workspace = true

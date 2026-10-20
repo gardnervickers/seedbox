@@ -12,7 +12,6 @@ pub mod rng;
 pub mod test_support;
 
 /// Concrete-backend snapshot quotas and closed wire primitives.
-// TODO: Re-evaluate: backend and shared bridge codecs must share one budget.
 pub mod snapshot;
 
 #[cfg(unix)]

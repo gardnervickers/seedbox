@@ -226,11 +226,6 @@ pub async fn disk_checkpoint_continuation(backend: CpuBackend) {
             ));
             session.client.stop(&source).await.unwrap();
             session.complete(&source, true, 1, SEED).await;
-            session
-                .client
-                .delete_checkpoint(&source, "saved")
-                .await
-                .unwrap();
             session.client.delete(&source).await.unwrap();
 
             session.workers.store(4, Ordering::SeqCst);

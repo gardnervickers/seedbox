@@ -33,8 +33,8 @@ impl Memory {
         })
     }
     /// Allocate sparse address-indexed backing under an already checked RAM layout.
-    // TODO: Re-evaluate: native slots/loaders must share this authority rather
-    // than reinterpret the backing length as configured guest capacity.
+    // Native slots and loaders take capacity from this layout; the backing
+    // length includes holes and is not the configured guest capacity.
     pub(super) fn ram(layout: super::boot::RamLayout) -> Result<Self> {
         let mut memory = Self::new(layout.span)?;
         memory.layout = Some(layout);

@@ -76,8 +76,8 @@ pub fn assert_no_pending_boots(machine: &TcgMachine) {
     assert_eq!(machine.pending_boots, 0);
 }
 /// The captured execution position used to construct the original continuation.
-// TODO: Re-evaluate: this scenario value configures Driver and caller clocks.
-// A boolean assertion cannot supply that existing restore input.
+// Scenarios feed this value to Driver and caller clocks on restore, so it is
+// returned rather than asserted.
 pub fn snapshot_reached(snapshot: &Snapshot) -> Timestamp {
     snapshot.reached
 }

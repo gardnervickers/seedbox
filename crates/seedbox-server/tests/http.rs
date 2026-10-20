@@ -76,7 +76,7 @@ async fn unix_client_submits_describes_and_retries_without_duplicate_work() {
     );
     assert_eq!(
         shape.schema["properties"]["loss_ppm"]["maximum"],
-        seedbox_control::MAX_PPM
+        seedbox_engine_protocol::control::MAX_PPM
     );
     assert_eq!(shape.schema["properties"]["loss_ppm"]["x-unit"], "ppm");
     assert_eq!(stop.category, seedbox_api::FaultCategory::Application);

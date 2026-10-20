@@ -64,7 +64,7 @@ pub enum Kind {
         /// The admitted plan's action, so observers can tell which links or
         /// machines it affects. Absent from workers that predate it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        plan: Option<Box<seedbox_control::Action>>,
+        plan: Option<Box<crate::control::Action>>,
     },
     OverrideRejected {
         input_key: String,

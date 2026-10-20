@@ -31,8 +31,8 @@ impl<M, R> DerefMut for Environment<M, R> {
 impl<M: Machine<Context = ()>, R: RngStream> Environment<M, R> {
     /// Attach caller-owned dependencies to an already configured, stopped machine.
     /// Construction performs no execution and saves no dependency in its snapshot.
-    // TODO: Re-evaluate: backend-local constructors wrap the same generic harness.
-    // Concrete backend impl blocks cannot be methods of a foreign crate type.
+    // Backend-local constructors wrap this generic harness: backend crates
+    // cannot add inherent methods to this foreign type.
     pub fn configured(machine: M, rng: R, clock: Arc<dyn Clock + Send + Sync>) -> Self {
         Self {
             machine,
@@ -201,9 +201,8 @@ where
 
 /// Shared queued-boot entropy regression; callers supply a native machine that
 /// has not drawn entropy, its private restore and its private boot-seed reader.
-// TODO: Re-evaluate: both backends promise the same caller-entropy contract, so
-// one body owns the assertions. Restore and the boot seed are private to each
-// backend, so closures pass them in; no public accessor exists only for tests.
+// Restore and the boot seed are private to each backend, so closures pass
+// them in; no public accessor exists only for tests.
 pub fn check_queued_boot_entropy<M, F, S>(mut machine: M, restore: F, seed: S)
 where
     M: Machine<Context = ()>,
@@ -292,9 +291,8 @@ where
 
 /// Shared deferred-startup regression; callers supply a machine whose backend
 /// process path, `missing`, does not exist.
-// TODO: Re-evaluate: deferred startup failure is one Machine contract on both
-// backends; only construction differs. The `Display` bound is all the body
-// needs to match its error to the path the caller says is missing.
+// The `Display` bound is all the body needs to match its error to the path
+// the caller says is missing.
 pub fn check_deferred_startup_failure<M>(mut machine: M, missing: &str)
 where
     M: Machine<Context = ()>,

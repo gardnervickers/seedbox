@@ -3,8 +3,6 @@
 //! These are logical quotas, not allocator/RSS isolation or native-restore
 //! admission. Native register contents and device state versus RAM still require
 //! native restore validation. Integrity of a snapshot is not authenticity.
-// TODO: Re-evaluate: concrete backends need the same wire and budget accounting
-// across crate boundaries; no serializer trait or machine inspection is exposed.
 use std::io::{self, Read, Write};
 
 /// Caller-selected limits for one owned backend snapshot decode. All limits
@@ -12,8 +10,6 @@ use std::io::{self, Read, Write};
 /// storage, explicit scratch and ownership copies, excluding allocator overhead,
 /// stack and resources allocated by a later native restore. Item limits separately
 /// bound collection overhead. The fixed schema has bounded nesting.
-// TODO: Re-evaluate: backend imports share explicit logical quotas, not a
-// process sandbox or a native resource-admission policy.
 #[derive(Clone, Copy, Debug)]
 pub struct DecodeLimits {
     /// Whole object including the fixed version/architecture header.
@@ -67,8 +63,8 @@ pub type Result<T> = std::result::Result<T, CodecError>;
 /// A finite field-ordered body reader. `header_bytes` counts the already-read
 /// fixed header toward the whole encoded limit. It never reads outside the
 /// declared body except for the single-byte EOF check in `finish`.
-// TODO: Re-evaluate: shared bridge records must consume the backend's remaining
-// wire and logical quotas, rather than start a new independent budget.
+// Shared bridge records consume the backend's remaining wire and logical
+// quotas rather than starting a new independent budget.
 pub struct Reader<'a, R> {
     input: &'a mut R,
     remaining: u64,
@@ -242,8 +238,6 @@ pub fn reserve<T>(v: &mut Vec<T>, n: usize) -> Result<()> {
 /// Streaming field writer. All raw writes are at most 64 KiB. A sink writer
 /// supplies exact encoded sizing without staging a body. Failure leaves an
 /// ordinary caller-owned partial output and does not roll it back.
-// TODO: Re-evaluate: the bridge and both backends share field encoding, not
-// arbitrary serde serialization or a registry of caller-defined records.
 pub struct Writer<'a, W> {
     output: &'a mut W,
     count: u64,

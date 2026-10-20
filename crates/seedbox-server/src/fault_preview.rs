@@ -1,7 +1,7 @@
 //! Observation-only explanations. Never use the worker's PrepareFault path here.
 use crate::catalogue::Error;
 use seedbox_api::{FaultPreview, FaultPreviewLink, WorldState};
-use seedbox_control::Action;
+use seedbox_engine_protocol::control::Action;
 
 pub(crate) fn preview(
     world: &WorldState,

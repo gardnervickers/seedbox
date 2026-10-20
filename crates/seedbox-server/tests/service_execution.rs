@@ -113,7 +113,7 @@ impl ExecutionBackend for FixtureExecutor {
                         completed_rounds: 1,
                         simulated_time_ns: 10,
                     },
-                    plan: seedbox_control::Plan {
+                    plan: seedbox_engine_protocol::control::Plan {
                         id: 1,
                         at_ns: 10,
                         deadline_ns: 510,
@@ -344,11 +344,8 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
     );
     // The digest-only comparator would call this MISMATCH, not missing evidence.
     // The real service must establish input compatibility before reporting it.
-    let evidence = seedbox_artifacts::record::compare(old, new);
-    assert_eq!(
-        evidence.status,
-        seedbox_artifacts::record::ReplayStatus::Mismatch
-    );
+    let evidence = seedbox_artifacts::record::compare((old_id, old), (new_id, new));
+    assert_eq!(evidence.status, ComparisonStatus::Mismatch);
     assert_eq!(evidence.witness_matches, Some(false));
     assert_eq!(
         service.compare(old_id, old_id).unwrap().status,
@@ -418,13 +415,6 @@ async fn public_dispatch_retains_oracle_and_missing_witness_errors_without_compa
             assert!(host.client.checkpoints(id).await.unwrap().is_empty());
             assert_eq!(host.client.describe(id).await.unwrap(), before);
             assert_eq!(host.calls.load(Ordering::SeqCst), 1);
-            assert!(matches!(
-                host.client.checkpoint(id, "uncaptured").await,
-                Err(Error::Rejected {
-                    code: ErrorCode::NotFound,
-                    ..
-                })
-            ));
             assert!(matches!(
                 host.client.checkpoint_definition(id, "uncaptured").await,
                 Err(Error::Rejected {

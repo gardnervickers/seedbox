@@ -40,8 +40,6 @@ pub(crate) const NATIVE_SCRATCH: &str = "native-scratch";
 /// calls. Full-state requests require real backend evidence; missing evidence
 /// becomes an error report, never fabricated state. The report does not treat
 /// event publication hashes as execution witnesses.
-// TODO: Re-evaluate: a retained executable owns native processes and Driver;
-// moving this execution into the catalogue would change resource authority.
 pub fn run_request(
     request: &seedbox_engine_protocol::driver_world::Request,
 ) -> crate::Result<crate::execution::ExecutionReport> {

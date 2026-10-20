@@ -115,7 +115,7 @@ fn region_digest_and_mapped_byte_count_are_checked_before_comparison() {
         .contains("RAM-region digest mismatch"));
 }
 #[test]
-fn ended_identity_round_trips_and_legacy_page_report_wire_is_unchanged() {
+fn ended_identity_round_trips() {
     let original = capture(b"RAM", b"combined");
     assert_eq!(original.page_bytes().unwrap(), 32);
     let decoded: StateCapture =
@@ -123,10 +123,6 @@ fn ended_identity_round_trips_and_legacy_page_report_wire_is_unchanged() {
     assert_eq!(decoded, original);
     assert_eq!(decoded.boot, 3);
     assert_eq!(decoded.disposition, StateDisposition::Crashed);
-    let old = serde_json::json!({"differing_pfns":2,"first_pfns":[3,9]});
-    let decoded: sb::comparison::PageHashDiff = serde_json::from_value(old.clone()).unwrap();
-    assert!(decoded.first_gpas.is_empty());
-    assert_eq!(serde_json::to_value(decoded).unwrap(), old);
 }
 #[test]
 fn invalid_regions_fail_without_inventing_hole_or_partial_page_bytes() {

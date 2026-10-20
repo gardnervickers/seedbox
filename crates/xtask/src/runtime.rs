@@ -91,8 +91,10 @@ pub(super) fn guest(root: &Path, output: &Path, arch: &str) -> Result<()> {
 /// The generated launcher preserves inherited fd0/fd1 as bidirectional QMP/GDB
 /// sockets: it neither reads nor writes either transport before exec. Its root
 /// calculation captures stdout privately; diagnostics use only stderr.
-// TODO: Re-evaluate: if upstream enables runtime-loadable QEMU modules, extend
-// the explicit closure discovery here before enabling that build configuration.
+// TODO: closure discovery follows only the QEMU binary's linked libraries, so
+// runtime-loadable QEMU modules (dlopen'd from its module directory) would be
+// silently missing from the relocated closure. Before enabling modules in the
+// tcgQemu build, extend discovery to copy them and their dependencies.
 pub(super) fn host(root: &Path, output: &Path) -> Result<()> {
     let input = nix_output(root, "tcgQemu")?;
     let system = format!(

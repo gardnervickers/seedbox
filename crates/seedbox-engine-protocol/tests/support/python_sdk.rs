@@ -28,7 +28,7 @@ impl Sdk {
         let mut child = seedbox_test::process::spawn(
             Command::new("python3")
                 .args(["-B", "-u"])
-                .arg(root.join("crates/seedbox-control/tests/support/python_sdk.py"))
+                .arg(root.join("crates/seedbox-engine-protocol/tests/support/python_sdk.py"))
                 .env_clear()
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .env("PYTHONPATH", root.join("python"))

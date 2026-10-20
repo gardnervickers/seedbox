@@ -16,9 +16,7 @@
 //! into the last writable byte. A write reads all of its data before writing
 //! the status, so aliasing buffers observe the same order on every transport.
 
-// TODO: Re-evaluate: separate backends consume this canonical helper.
-// Crate-private access cannot cross packages; representation remains private.
-// TODO: Re-evaluate: request semantics are the one device policy PV's ring
+// Request semantics are the one device policy PV's ring
 // and the QEMU adapter must share; their transports differ. Streams in, data
 // and status out, so no caller can bypass store durability or validation.
 

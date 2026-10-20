@@ -1861,7 +1861,6 @@ dependencies = [
 name = "seedbox-api"
 version = "0.1.0"
 dependencies = [
- "seedbox-control",
  "seedbox-engine-protocol",
  "seedbox-spec",
  "serde",
@@ -1881,9 +1880,7 @@ dependencies = [
  "libc",
  "ocirender",
  "seedbox-artifacts",
- "seedbox-control",
  "seedbox-driver-execution",
- "seedbox-engine-core",
  "seedbox-engine-protocol",
  "seedbox-machine",
  "seedbox-spec",
@@ -1892,8 +1889,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
- "sha2",
- "shell-words",
  "tar",
  "tempfile",
  "tokio",
@@ -1979,24 +1974,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "seedbox-control"
-version = "0.1.0"
-dependencies = [
- "libc",
- "seedbox-test",
- "seedbox-test-time",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "seedbox-driver"
 version = "0.1.0"
 dependencies = [
  "hex",
  "rayon",
- "seedbox-control",
  "seedbox-engine-core",
  "seedbox-engine-protocol",
  "seedbox-machine",
@@ -2019,7 +2001,6 @@ dependencies = [
  "hex",
  "libc",
  "seedbox-artifacts",
- "seedbox-control",
  "seedbox-driver",
  "seedbox-engine-protocol",
  "seedbox-exec",
@@ -2041,7 +2022,6 @@ dependencies = [
 name = "seedbox-engine-core"
 version = "0.1.0"
 dependencies = [
- "seedbox-control",
  "seedbox-engine-protocol",
  "serde",
  "serde_json",
@@ -2053,11 +2033,12 @@ name = "seedbox-engine-protocol"
 version = "0.1.0"
 dependencies = [
  "libc",
- "seedbox-control",
  "seedbox-spec",
  "seedbox-test",
+ "seedbox-test-time",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2070,6 +2051,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "libc",
+ "seedbox-engine-protocol",
  "seedbox-test",
  "seedbox-test-time",
  "serde",
@@ -2130,7 +2112,6 @@ dependencies = [
  "seedbox-application",
  "seedbox-artifacts",
  "seedbox-client",
- "seedbox-control",
  "seedbox-driver",
  "seedbox-driver-execution",
  "seedbox-engine-protocol",
@@ -2151,7 +2132,6 @@ dependencies = [
 name = "seedbox-spec"
 version = "0.1.0"
 dependencies = [
- "seedbox-control",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -2291,12 +2271,6 @@ dependencies = [
  "cpufeatures",
  "digest",
 ]
-
-[[package]]
-name = "shell-words"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shlex"

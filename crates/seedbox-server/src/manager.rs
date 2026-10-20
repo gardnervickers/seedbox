@@ -407,14 +407,6 @@ impl Manager {
         Ok(())
     }
 
-    pub(crate) fn delete_checkpoint(&self, id: &SimulationId, name: &str) -> Result<(), Error> {
-        self.0
-            .lock()
-            .map_err(|_| Error::StorageFailed)?
-            .catalogue
-            .delete_checkpoint(id, name)
-    }
-
     pub(crate) fn captured_checkpoint(
         &self,
         id: &SimulationId,

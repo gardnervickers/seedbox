@@ -15,8 +15,8 @@ use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
 /// Retained process adapter sharing the ordinary worker ownership, cancellation,
 /// observation and journal boundaries. Construction performs no guest work.
-// TODO: Re-evaluate: the execution process owns Driver and its nested native
-// workers; putting Driver into the catalogue process breaks owner-death cleanup.
+// The execution process owns Driver and its nested native workers; running
+// Driver in the catalogue process would break owner-death cleanup.
 pub struct DriverExecutor {
     profile: ExecutionProfile,
     backend: CpuBackend,
@@ -66,7 +66,7 @@ impl DriverExecutor {
     }
     /// Select the normal fresh Driver profile for this host before OCI
     /// preparation, with the host's guest ISA ([`super::platform::Host`]). Runtime
-    /// bytes remain explicit; legacy retained profiles are never rewritten.
+    /// bytes remain explicit; existing retained profiles are never rewritten.
     pub fn for_preparation(
         simulation: &crate::config::Simulation,
         witness_mode: crate::execution::WitnessMode,
@@ -114,8 +114,8 @@ impl DriverExecutor {
     /// environment discovered by this library. These are transient host inputs,
     /// never retained simulation metadata. Without this builder the environment
     /// is empty and no session is borrowed.
-    // TODO: Re-evaluate: a monitor crosses a process boundary; implicit ambient
-    // inheritance and output-ancestor searches lose explicit cleanup authority.
+    // The monitor crosses a process boundary; ambient inheritance or searching
+    // output ancestors would lose explicit cleanup authority.
     pub fn with_launch_context(
         mut self,
         environment: Vec<(OsString, OsString)>,
@@ -130,8 +130,8 @@ impl DriverExecutor {
     /// substitutes a startup/default archive for a different retained archive.
     /// This executor keeps the complete Inputs guard through worker shutdown.
     /// Callers may share cloned Inputs acquired in their owned session.
-    // TODO: Re-evaluate: direct standalone executors may instead own extraction
-    // inside their single worker; service callers already holding Inputs reuse it.
+    // Without it, a standalone executor's single worker extracts the runtime
+    // itself; service callers already holding Inputs reuse them.
     pub fn with_runtime(mut self, inputs: crate::runtime_assets::Inputs) -> Result<Self> {
         if inputs.qemu.is_some() != (self.backend == CpuBackend::Tcg) {
             return Err(Error::Setup("Driver runtime Inputs select a different backend; select this executor backend from the retained archive".into()));
@@ -174,8 +174,6 @@ impl ExecutionBackend for DriverExecutor {
     }
     fn preflight(&self, _: Option<&std::path::Path>) -> Result<()> {
         // Fail before opening a native admission device or preparing workers.
-        // TODO: Re-evaluate: remove only after real PV policy/evidence wiring
-        // and acceptance, not by restoring an unconfigured None policy path.
         self.admit_execution(false)
     }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {

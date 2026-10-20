@@ -3,8 +3,8 @@ use crate::rng::RngStream;
 use sha2::{Digest, Sha256};
 /// Machine-domain fixture stream with the original seed/block/cursor byte format.
 /// It owns no fault or network domains and is not a production RNG policy.
-// TODO: Re-evaluate: shared specifications need their historical input bytes.
-// A Driver dependency would reverse the graph; equivalence is checked in Driver.
+// Reproduces the Driver's machine-domain bytes without a Driver dependency,
+// which would reverse the graph; Driver tests check the equivalence.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SeededRng {

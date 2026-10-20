@@ -13,9 +13,9 @@
 //! A reader checks the declared count against the end mark, validates each
 //! length before reading, and allocates only as bytes actually arrive.
 //
-// TODO: Re-evaluate: the trailer keeps one ordered write stream, with bytes
-// outside the 8 MiB JSON cap, without a new crate or a side file per run.
-// Counts are u64, so they impose no run limit narrower than memory.
+// A trailer keeps one ordered write stream outside the 8 MiB JSON cap without
+// a side file per run. Counts are u64, so they impose no run limit narrower
+// than memory.
 // The client and the worker each use one direction of each trailer.
 #![allow(dead_code)]
 use seedbox_machine::pv::{

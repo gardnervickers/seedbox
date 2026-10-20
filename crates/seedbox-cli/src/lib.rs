@@ -84,7 +84,7 @@ enum Command {
         from: Option<seedbox_api::SimulationId>,
         #[command(flatten)]
         backend: BackendArgs,
-        /// Simulation seed [default: project seed, otherwise allocated by the server].
+        /// Simulation seed [default: a simulation document's seed, otherwise allocated by the server].
         #[arg(long)]
         seed: Option<u64>,
         /// Run this many consecutive seeds using one frozen preparation [default: 1].
@@ -487,6 +487,7 @@ impl RuntimeInputs {
         cpu_backend: seedbox_spec::backend::CpuBackend,
         cancellation: &CancellationToken,
         scratch: &Path,
+        runtimes: &backends::RuntimeCache,
     ) -> Result<(Preparer, Executor)> {
         let engine = defaults::engine()?;
         if !self.use_driver() {
@@ -502,21 +503,13 @@ impl RuntimeInputs {
             witness,
             cpu_backend,
         )?;
-        let runtime_backend = match cpu_backend {
-            seedbox_spec::backend::CpuBackend::Pv => {
-                seedbox_driver_execution::runtime_assets::Backend::Pv
-            }
-            seedbox_spec::backend::CpuBackend::Tcg => {
-                seedbox_driver_execution::runtime_assets::Backend::Tcg
-            }
-        };
         let architecture = seedbox_driver_execution::driver_world::platform::Host::current()
             .guest(cpu_backend)
             .ok_or_else(|| {
                 Error::Setup("the Driver runtime requires Linux x86-64 or macOS aarch64".into())
             })?;
-        let runtime = backends::driver_runtime(None, scratch)?;
-        let selected = runtime.select(runtime_backend, architecture)?;
+        let runtime = backends::session_driver_runtime(runtimes, scratch)?;
+        let selected = runtime.select(cpu_backend, architecture)?;
         let inputs = OciPreparer {
             docker: backends::container_engine()?,
             kernel: selected.guest_assets.join("kernel"),
@@ -541,8 +534,6 @@ impl RuntimeInputs {
 /// The executable must dispatch its private engine worker before calling this.
 /// Clap retains process termination for help, version and argument errors; other
 /// commands return their existing exit status, with broken pipes treated as success.
-// TODO: Re-evaluate: keep this ambient process boundary separate from explicit
-// application/server inputs if another frontend entry is introduced.
 pub fn main() -> ExitCode {
     let mut arguments: Vec<_> = std::env::args_os().collect();
     let explicit_command = has_explicit_command(&arguments);

@@ -54,7 +54,7 @@ pub enum Request {
     /// Start a fresh boot, discarding old-boot work and pending shutdown, with
     /// the machine's crash disk semantics. A boot forcibly ended by this
     /// teardown is retired as [`crate::machine::EvidenceDisposition::Crashed`],
-    /// not graceful shutdown: it applies the legacy crash disk-loss semantics.
+    /// not graceful shutdown, so crash disk loss applies.
     /// An already-ended boot is not reclassified or reported a second time.
     /// This is not snapshot restoration.
     /// Existing snapshots and committed external effects remain unchanged.
@@ -91,7 +91,7 @@ pub enum Request {
         /// Operation on the application's process group.
         command: ApplicationCommand,
     },
-    // TODO: Re-evaluate: a realtime step is guest kernel state (offset, timer
+    // A realtime step is guest kernel state (offset, timer
     // re-evaluation, cancel-on-set); changing the injected time base would move
     // monotonic too, so the guest must perform it. It reuses the guest-command
     // ID space and acknowledgment rather than adding another completion path.
@@ -115,7 +115,7 @@ pub enum Request {
         /// Signed realtime step in nanoseconds.
         nanoseconds: NonZeroI64,
     },
-    // TODO: Re-evaluate: frames reuse the timed inbox so arrival shares the
+    // Frames reuse the timed inbox so arrival shares the
     // admission order of lifecycle requests and adopts the machine's time base;
     // a separate delivery path would need its own ordering and snapshot rules.
     /// Offer one Ethernet frame to the machine's NIC. The input's `at` is the
@@ -183,7 +183,7 @@ pub enum Response {
     /// crash disk loss; it does not turn an earlier natural exit into a second
     /// retirement. Without a disk, lost sectors is zero and the surviving
     /// digest is None.
-    // TODO: Re-evaluate: reboot output carriers name the prospective boot;
+    // Reboot output carriers name the prospective boot;
     // retired state needs its own validated committed ordinal. A typed output
     // preserves identity without rewriting every other response's stamping.
     BootEnded {

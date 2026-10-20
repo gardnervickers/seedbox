@@ -1,9 +1,9 @@
 //! A machine's optional Ethernet interface on the simulation's network.
 //!
-// TODO: Re-evaluate: addressing is explicit in the definition because routing
-// and guest bootstrap need it before execution, and index-derived addresses
-// would change with spawn or host-addition order. One optional interface on
-// one isolated L2 segment is the minimal surface; multiple NICs need a new design.
+//! Addressing is explicit in the definition because routing and guest
+//! bootstrap need it before execution, and index-derived addresses would
+//! change with spawn or host-addition order. One optional interface on one
+//! isolated L2 segment is the minimal surface; multiple NICs need a new design.
 use super::DefinitionError;
 use std::{fmt, net::Ipv4Addr};
 

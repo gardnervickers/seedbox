@@ -55,7 +55,8 @@ impl Store {
             counter = next;
             let bytes = draw.finalize();
             let draw = u64::from_le_bytes(bytes[..8].try_into().expect("eight digest bytes"));
-            // Match legacy floating-point threshold, including rounding near 0.5.
+            // An f64 fraction compared with 0.5; its rounding near 0.5 is part
+            // of the defined stream, so do not replace it with a bit test.
             (draw as f64 / (u64::MAX as f64 + 1.0)) < 0.5
         });
         if overflow {
