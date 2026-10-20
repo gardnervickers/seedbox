@@ -1007,6 +1007,7 @@ mod tests {
     #[test]
     fn project_execution_preserves_settings_through_canonical_resolution() {
         use seedbox_application::{execution::*, image::Launch};
+        use seedbox_driver_execution::driver_world::{platform, DriverExecutor};
         #[derive(Clone)]
         struct FixtureBackend(PreparedInputs);
         impl PreparationBackend for FixtureBackend {
@@ -1086,6 +1087,8 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let store = ContentStore::new(temporary.path().join("store"));
         let digest = store.put(b"test-only-binary").unwrap();
+        let architecture =
+            platform::Host::current().project_architecture(seedbox_spec::backend::CpuBackend::Pv);
         let configuration = seedbox_application::config::parse_for_architecture(
             "name: mixed\nmachines:\n  app: {image: example/app, memoryMiB: 2048}\n  helper: {image: example/helper}\noracle: {image: example/oracle, memoryMiB: 256}\nsimulator: {quantum: 2.5ms, machineWorkers: 4}\n",
             Path::new("/project/seedbox.yaml"), &Default::default(),
@@ -1129,9 +1132,20 @@ mod tests {
             profile: ExecutionProfile {
                 backend: "test".into(),
                 witness_mode: WitnessMode::Exits,
-                semantic_parameters: SemanticParameters::new(),
+                semantic_parameters: SemanticParameters {
+                    engine: Some(DriverExecutor::descriptor(platform::architecture_name(
+                        architecture,
+                    ))),
+                    ..SemanticParameters::new()
+                },
             },
-            auxiliary: BTreeMap::new(),
+            // Only the fake ExecutionBackend consumes these bytes. Retain the
+            // descriptor's closure so canonical resolution preserves its ISA;
+            // descriptor-free profiles default to x86-64 even on ARM servers.
+            auxiliary: BTreeMap::from([
+                ("driver-world/executable".into(), digest.clone()),
+                ("driver-world/manifest".into(), digest.clone()),
+            ]),
             provenance: BTreeMap::new(),
         };
         let manager = Arc::new(Manager::new(catalogue::Catalogue::in_memory()));
@@ -1161,6 +1175,10 @@ mod tests {
             .0;
         service.execute(resource.metadata.id.clone()).unwrap();
         let finished = manager.describe(&resource.metadata.id).unwrap();
+        let InputSource::Resolved { definition } = &finished.spec.inputs else {
+            panic!("project execution must retain its canonical definition");
+        };
+        assert_eq!(definition.architecture, architecture);
         assert_eq!(finished.options.machine_workers, Some(4));
         assert_eq!(finished.status.oracle_exit_code, Some(0));
         assert_eq!(
