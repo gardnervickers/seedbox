@@ -329,9 +329,9 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
     let temp = tempfile::tempdir().unwrap();
     let manager = Arc::new(seedbox_server::manager::Manager::new(Catalogue::in_memory()));
     let mut request = support::resolved_request("timeline-source");
-    request.spec.program = vec![seedbox_api::ProgramInput {
+    request.spec.program = vec![seedbox_spec::definition::Override {
         timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
-        key: "authored-1".into(),
+        id: "authored-1".into(),
         at_ns: 100_000_000,
         action: serde_json::json!({"action":"pause","machine":"oracle"}),
     }];
@@ -452,7 +452,7 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
             .spec
             .program
             .iter()
-            .map(|input| input.key.as_str())
+            .map(|input| input.id.as_str())
             .collect::<Vec<_>>(),
         vec!["z-first", "a-second", "authored-1"]
     );
@@ -516,9 +516,9 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
     assert!(generated.get("inputs").is_none() && generated.get("configuration").is_none());
     assert_eq!(
         derived.spec.program,
-        vec![seedbox_api::ProgramInput {
+        vec![seedbox_spec::definition::Override {
             timeout_ns: 0,
-            key: "z-first".into(),
+            id: "z-first".into(),
             at_ns: 100,
             action: serde_json::json!({"action":"stop","machine":"oracle"}),
         }]

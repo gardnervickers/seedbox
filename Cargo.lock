@@ -2150,6 +2150,7 @@ dependencies = [
 name = "seedbox-spec"
 version = "0.1.0"
 dependencies = [
+ "seedbox-control",
  "serde",
  "serde_json",
  "serde_yaml_ng",

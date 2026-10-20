@@ -1268,7 +1268,6 @@ mod tests {
                 request_id: "world-logs".into(),
                 spec: SimulationSpec {
                     program: Vec::new(),
-                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,
@@ -1327,7 +1326,6 @@ mod tests {
                 request_id: "oversized-events".into(),
                 spec: SimulationSpec {
                     program: Vec::new(),
-                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,
@@ -1472,7 +1470,6 @@ mod tests {
                     request_id: "oracle-observation".into(),
                     spec: SimulationSpec {
                         program: Vec::new(),
-                        start_paused: false,
                         seed: Some(1),
                         inputs: InputSource::Project,
                         configuration,
@@ -1553,7 +1550,6 @@ mod tests {
                 request_id: "readiness".into(),
                 spec: SimulationSpec {
                     program: Vec::new(),
-                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,

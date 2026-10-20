@@ -704,16 +704,7 @@ impl ExecutionService {
                 (inputs, interventions, checkpoint, executor)
             }
         };
-        let overrides: Vec<_> = spec
-            .program
-            .iter()
-            .map(|p| seedbox_spec::definition::Override {
-                id: p.key.clone(),
-                at_ns: p.at_ns,
-                action: p.action.clone(),
-                timeout_ns: p.timeout_ns,
-            })
-            .collect();
+        let overrides = spec.program.clone();
         let seed = spec.seed.ok_or_else(|| {
             seedbox_application::Error::Integrity("unresolved submission seed".into())
         })?;
@@ -953,7 +944,6 @@ mod tests {
             request_id: name.into(),
             spec: SimulationSpec {
                 program: Vec::new(),
-                start_paused: false,
                 seed: Some(1),
                 inputs: InputSource::Project,
                 configuration: configuration.clone(),
@@ -1134,7 +1124,6 @@ mod tests {
             inputs: InputSource::Project,
             seed: Some(1),
             program: vec![],
-            start_paused: false,
         };
         let resource = manager
             .submit_seeds(seedbox_api::SeedRangeRequest {
@@ -1185,7 +1174,6 @@ mod tests {
                 request_id: "late-report".into(),
                 spec: SimulationSpec {
                     program: Vec::new(),
-                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,
@@ -1250,7 +1238,6 @@ mod tests {
                 request_id: "delete-control-io".into(),
                 spec: SimulationSpec {
                     program: Vec::new(),
-                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,
@@ -1346,7 +1333,6 @@ mod tests {
                 request_id: "delete-control-io".into(),
                 spec: SimulationSpec {
                     program: Vec::new(),
-                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,
@@ -1449,7 +1435,6 @@ mod tests {
                 request_id: "timeout".into(),
                 spec: SimulationSpec {
                     program: Vec::new(),
-                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,

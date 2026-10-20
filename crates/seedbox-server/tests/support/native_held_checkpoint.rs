@@ -4,7 +4,7 @@ mod authority;
 use super::*;
 use seedbox_api::{
     CheckpointState, ControlCommand, ControlState, EventDelivery, EventKind, FaultStatus,
-    PlaybackRate, ProgramInput,
+    PlaybackRate,
 };
 const KEY: &str = "held-throttle";
 
@@ -77,8 +77,8 @@ pub async fn native_held_checkpoint(backend: DriverBackend) {
         assert!(at > ready && at < finish);
         eprintln!("held calibration backend={} ready_ns={ready} final_ns={finish} planned_fault_ns={at}", label(backend));
 
-        request.spec.program.push(ProgramInput {
-            key: KEY.into(), at_ns: at, timeout_ns: 1_000_000_000,
+        request.spec.program.push(seedbox_spec::definition::Override {
+            id: KEY.into(), at_ns: at, timeout_ns: 1_000_000_000,
             action: serde_json::to_value(seedbox_control::Action::Throttle {
                 handle: "held-scale".into(), machine: "oracle".into(), factor_permille: 2000,
             }).unwrap(),

@@ -3493,7 +3493,21 @@ pub(crate) mod tests {
     }
     pub(crate) fn timeline_resource(created: u64) -> seedbox_api::Simulation {
         let spec = serde_json::from_value(serde_json::json!({
-            "seed":42,"oracle":{"image":"example/oracle:latest"}
+            "seed": 42,
+            "inputs": {"kind": "project"},
+            "configuration": {
+                "name": "", "source": "", "configs": {}, "seed": 42,
+                "services": {"oracle": {
+                    "source": {"kind": "registry", "reference": "example/oracle:latest"},
+                    "platform": "", "entrypoint": null, "command": null, "environment": {},
+                    "working_dir": null, "user": null, "configs": [], "network": "default"
+                }},
+                "network": {"name": "default", "latency_ns": 1_000_000, "jitter_ns": 0},
+                "schedule": {"timer_jitter_ns": 0, "stop_tolerance_ns": 0},
+                "control": {"service": "oracle"},
+                "limits": {"simulated_time_ns": u64::MAX, "wall_time_ns": u64::MAX},
+                "check": {"service": "oracle", "exit_code": 0}
+            }
         }))
         .unwrap();
         let mut resource = seedbox_api::Simulation::queued(

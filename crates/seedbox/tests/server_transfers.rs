@@ -333,7 +333,6 @@ fn request() -> SubmitRequest {
         request_id: "submit-123".into(),
         spec: SimulationSpec {
             program: Vec::new(),
-            start_paused: false,
             seed: Some(123),
             inputs: InputSource::Project,
             configuration: seedbox_application::config::parse(

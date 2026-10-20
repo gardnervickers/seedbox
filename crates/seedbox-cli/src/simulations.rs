@@ -67,7 +67,6 @@ fn load_spec(
         };
         SimulationSpec {
             program: Vec::new(),
-            start_paused: false,
             seed: None,
             inputs: InputSource::Project,
             configuration: seedbox_application::config::parse_for_architecture(
@@ -857,17 +856,25 @@ mod tests {
     #[test]
     fn backend_selection_defaults_projects_but_preserves_retained_tcg() {
         use seedbox_spec::{backend::CpuBackend, definition as d};
-        let spec: SimulationSpec =
-            serde_json::from_value(serde_json::json!({"oracle":{"image":"example/oracle"}}))
-                .unwrap();
+        let spec = SimulationSpec {
+            program: Vec::new(),
+            seed: None,
+            inputs: InputSource::Project,
+            configuration: seedbox_application::config::parse(
+                "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+                std::path::Path::new("/project/seedbox.yaml"),
+                &Default::default(),
+            )
+            .unwrap(),
+        };
         assert_eq!(select_backend(&spec, None).unwrap(), CpuBackend::Pv);
         assert_eq!(
             select_backend(&spec, Some(CpuBackend::Tcg)).unwrap(),
             CpuBackend::Tcg
         );
-        assert!(serde_json::to_value(&spec).unwrap()["simulator"]
-            .get("backend")
-            .is_none());
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert!(wire.get("backend").is_none());
+        assert!(wire["configuration"]["simulator"].get("backend").is_none());
         // DTO-only fixture: no execution, guest or fabricated native report.
         let asset = d::Asset(format!("sha256:{}", "0".repeat(64)));
         let definition = d::Definition {

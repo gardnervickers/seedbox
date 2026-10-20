@@ -391,16 +391,7 @@ impl Catalogue {
                     definition.start = seedbox_spec::definition::Start::Fresh;
                 }
                 definition.seed = spec.seed.expect("resolved above");
-                definition.overrides = spec
-                    .program
-                    .iter()
-                    .map(|input| seedbox_spec::definition::Override {
-                        id: input.key.clone(),
-                        at_ns: input.at_ns,
-                        action: input.action.clone(),
-                        timeout_ns: input.timeout_ns,
-                    })
-                    .collect();
+                definition.overrides = spec.program.clone();
                 definition
                     .start
                     .validate_overrides(&definition.overrides)
@@ -818,11 +809,11 @@ pub(crate) fn resolve_program(
         .iter()
         .map(|input| {
             Ok(seedbox_engine_protocol::input_program::TimedInput {
-                key: input.key.clone(),
+                key: input.id.clone(),
                 at_ns: input.at_ns,
                 timeout_ns: input.timeout_ns,
                 action: serde_json::from_value(input.action.clone())
-                    .map_err(|error| Error::Invalid(format!("program {}: {error}", input.key)))?,
+                    .map_err(|error| Error::Invalid(format!("program {}: {error}", input.id)))?,
             })
         })
         .collect::<Result<Vec<_>>>()?;

@@ -13,11 +13,6 @@ mod http;
 mod id;
 mod playback;
 mod resource;
-mod submission;
-pub use submission::{
-    Link as SubmissionLink, Network as SubmissionNetwork, Simulator as SubmissionSimulator,
-    Submission,
-};
 mod status;
 pub use playback::{
     BoundaryPosition, PlaybackObservation, PlaybackRate, PlaybackStatus, RateMeasurement,
@@ -36,7 +31,7 @@ pub use events::{
 pub use http::{ApiError, ErrorCode, ServerInfo, SimulationList, SimulationSummary};
 pub use id::{InvalidSimulationId, SimulationId};
 pub use resource::{
-    ApiVersion, ExecutionOptions, InputSource, Metadata, ProgramInput, ResourceKind, Simulation,
+    ApiVersion, ExecutionOptions, InputSource, Metadata, ResourceKind, Simulation,
     SimulationDocument, SimulationSpec, SimulationStatus, SubmitRequest,
 };
 pub use status::{ExecutionTermination, Phase, Stage, StageTiming, TestVerdict};

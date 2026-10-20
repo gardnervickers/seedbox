@@ -163,7 +163,6 @@ mod tests {
                     request_id: name.into(),
                     spec: SimulationSpec {
                         program: Vec::new(),
-                        start_paused: false,
                         seed: Some(1),
                         inputs: InputSource::Project,
                         configuration,

@@ -210,7 +210,6 @@ mod tests {
             count: 3,
             spec: SimulationSpec {
                 program: Vec::new(),
-                start_paused: false,
                 seed: Some(123),
                 inputs: InputSource::Project,
                 configuration: seedbox_application::config::parse(

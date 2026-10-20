@@ -1090,7 +1090,7 @@ mod tests {
         assert_eq!(request.metadata.labels["application"], "demo");
         assert!(request.options.start_paused);
         assert_eq!(request.options.wall_time_ns, Some(9999));
-        assert_eq!(request.spec.program[0].key, "external");
+        assert_eq!(request.spec.program[0].id, "external");
         assert!(matches!(
             request.spec.inputs,
             seedbox_api::InputSource::Resolved { .. }

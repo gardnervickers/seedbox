@@ -481,12 +481,15 @@ fn resolved_definitions_allow_independent_edits_and_outlive_their_source() {
         .metadata
         .annotations
         .insert("derived-from".into(), original.metadata.id.to_string());
-    edited.spec.program.push(seedbox_api::ProgramInput {
-        timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
-        key: "authored-1".into(),
-        at_ns: 1_000_000_000,
-        action: serde_json::json!({"action":"stop","machine":"oracle"}),
-    });
+    edited
+        .spec
+        .program
+        .push(seedbox_spec::definition::Override {
+            timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+            id: "authored-1".into(),
+            at_ns: 1_000_000_000,
+            action: serde_json::json!({"action":"stop","machine":"oracle"}),
+        });
     let InputSource::Resolved { definition } = &mut edited.spec.inputs else {
         panic!("expected resolved fixture")
     };
@@ -524,12 +527,15 @@ fn malformed_timeline_actions_reject_but_state_dependent_heals_are_admitted() {
         },
     ] {
         let mut invalid = request();
-        invalid.spec.program.push(seedbox_api::ProgramInput {
-            timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
-            key: "authored-1".into(),
-            at_ns: 1,
-            action: serde_json::to_value(action).unwrap(),
-        });
+        invalid
+            .spec
+            .program
+            .push(seedbox_spec::definition::Override {
+                timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+                id: "authored-1".into(),
+                at_ns: 1,
+                action: serde_json::to_value(action).unwrap(),
+            });
         assert!(matches!(catalogue.submit(invalid), Err(Error::Invalid(_))));
         assert_eq!(catalogue.list().count(), 0);
     }
@@ -539,12 +545,15 @@ fn malformed_timeline_actions_reject_but_state_dependent_heals_are_admitted() {
 fn state_dependent_heal_can_be_submitted_for_deterministic_runtime_rejection() {
     let mut catalogue = Catalogue::in_memory();
     let mut submission = request();
-    submission.spec.program.push(seedbox_api::ProgramInput {
-        timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
-        key: "heal-removed-prior-action".into(),
-        at_ns: 1,
-        action: serde_json::json!({"action":"heal","handle":"deleted-owner"}),
-    });
+    submission
+        .spec
+        .program
+        .push(seedbox_spec::definition::Override {
+            timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+            id: "heal-removed-prior-action".into(),
+            at_ns: 1,
+            action: serde_json::json!({"action":"heal","handle":"deleted-owner"}),
+        });
     let (accepted, _) = catalogue.submit(submission).unwrap();
-    assert_eq!(accepted.spec.program[0].key, "heal-removed-prior-action");
+    assert_eq!(accepted.spec.program[0].id, "heal-removed-prior-action");
 }
