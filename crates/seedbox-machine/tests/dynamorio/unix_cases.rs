@@ -598,8 +598,8 @@ fn original_aarch64_generated_signal_abi_and_public_spill_paths() {
                 assert_eq!(out.code, 0, "model {mode}/{kind}: {}", out.stderr);
                 assert_eq!(
                     out.stdout, native.stdout,
-                    "model {mode}/{kind}: {}",
-                    out.stderr
+                    "model {mode}/{kind}: native stderr:\n{}\ntranslated stderr:\n{}",
+                    native.stderr, out.stderr
                 );
                 if path_args.is_some() {
                     assert!(out.stderr.contains("unix-paths: instructions="));
