@@ -719,6 +719,8 @@ mod tests {
     use super::*;
     use std::{collections::BTreeMap, ffi::OsStr};
 
+    const CAPTURED_PAGE_GPAS: [u64; 4] = [0x0440_c000, 0x0459_1000, 0x0459_2000, 0x0459_8000];
+
     fn retained_attempt(state: &Path, id: &str, content: &[u8]) {
         use seedbox_application::{evidence::*, execution::*, record::*, store::ContentDigest};
         let attempt = state
@@ -728,14 +730,26 @@ mod tests {
         let output = attempt.join("output/machines");
         fs::create_dir_all(&output).unwrap();
         let digest = ContentDigest::of(content);
-        let layout = [0x0459_1000u64.to_le_bytes(), (2 * 4096u64).to_le_bytes()].concat();
-        let first_page = [content[0]; 4096];
-        let second_page = [content[1]; 4096];
-        let ram = [first_page.as_slice(), second_page.as_slice()].concat();
-        let page_digests = [
-            ContentDigest::of(&first_page),
-            ContentDigest::of(&second_page),
+        let layout = [
+            0x0440_c000u64.to_le_bytes().as_slice(),
+            4096u64.to_le_bytes().as_slice(),
+            0x0459_1000u64.to_le_bytes().as_slice(),
+            (2 * 4096u64).to_le_bytes().as_slice(),
+            0x0459_8000u64.to_le_bytes().as_slice(),
+            4096u64.to_le_bytes().as_slice(),
+        ]
+        .concat();
+        let raw_pages = [
+            [content[0]; 4096],
+            [content[1]; 4096],
+            [content[2]; 4096],
+            [content[3]; 4096],
         ];
+        let ram = raw_pages
+            .iter()
+            .flat_map(|page| page.iter().copied())
+            .collect::<Vec<_>>();
+        let page_digests = raw_pages.each_ref().map(|page| ContentDigest::of(page));
         let state_report = StateReport {
             version: 1,
             machines: BTreeMap::from([(
@@ -748,10 +762,20 @@ mod tests {
                         ("ram".into(), ContentDigest::of(&ram)),
                         ("ram_regions".into(), ContentDigest::of(&layout)),
                     ]),
-                    regions: vec![RamRegion {
-                        base: 0x0459_1000,
-                        length: 2 * 4096,
-                    }],
+                    regions: vec![
+                        RamRegion {
+                            base: 0x0440_c000,
+                            length: 4096,
+                        },
+                        RamRegion {
+                            base: 0x0459_1000,
+                            length: 2 * 4096,
+                        },
+                        RamRegion {
+                            base: 0x0459_8000,
+                            length: 4096,
+                        },
+                    ],
                     page_log: "oracle.pages".into(),
                 },
             )]),
@@ -774,12 +798,11 @@ mod tests {
         .concat();
         fs::write(output.join("oracle.witness-log"), &samples).unwrap();
         fs::write(output.join("oracle.pages"), &pages).unwrap();
-        let worker_stderr = [
-            (0x0459_1000u64, &first_page, &page_digests[0]),
-            (0x0459_2000u64, &second_page, &page_digests[1]),
-        ]
-        .into_iter()
-        .map(|(gpa, page, digest)| {
+        let worker_stderr = CAPTURED_PAGE_GPAS
+            .into_iter()
+            .zip(raw_pages.iter())
+            .zip(page_digests.iter())
+            .map(|((gpa, page), digest)| {
             format!(
                 "SEEDBOX_PRIVATE_PV_ORACLE_PAGE pid=7 sequence=0 seed=123 boot=1 time_ns=100 gpa={gpa:#010x} sha256={} bytes={}\n",
                 digest.hex(),
@@ -858,12 +881,12 @@ mod tests {
         write_record(&attempt, &record).unwrap();
     }
 
-    fn assert_captured_pages(directory: &Path, label: &str, fills: [u8; 2]) {
+    fn assert_captured_pages(directory: &Path, label: &str, fills: [u8; 4]) {
         use seedbox_application::{record::inspect_bytes, store::ContentDigest};
         let manifest = fs::read(directory.join(format!("{label}-manifest.json"))).unwrap();
         let record = inspect_bytes(&manifest).unwrap();
         let vector = fs::read(directory.join(format!("{label}-oracle-pages.out"))).unwrap();
-        assert_eq!(vector.len(), 16);
+        assert_eq!(vector.len(), 32);
         assert_eq!(
             record.logs.get("machines/oracle.pages"),
             Some(&ContentDigest::of(&vector))
@@ -873,10 +896,10 @@ mod tests {
             .lines()
             .filter(|line| line.starts_with("SEEDBOX_PRIVATE_PV_ORACLE_PAGE "))
             .collect::<Vec<_>>();
-        assert_eq!(markers.len(), 2);
+        assert_eq!(markers.len(), 4);
         for (index, (line, gpa, fill)) in markers
             .into_iter()
-            .zip([0x0459_1000u64, 0x0459_2000])
+            .zip(CAPTURED_PAGE_GPAS)
             .zip(fills)
             .map(|((line, gpa), fill)| (line, gpa, fill))
             .enumerate()
@@ -968,8 +991,8 @@ esac
             let bytes = fs::read(failure.join(name)).unwrap();
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
         }
-        assert_captured_pages(&failure, "baseline", *b"ba");
-        assert_captured_pages(&failure, "repeat", *b"re");
+        assert_captured_pages(&failure, "baseline", *b"base");
+        assert_captured_pages(&failure, "repeat", *b"repl");
         assert!(fs::read_to_string(failure.join("replay-oracle-log.stdout"))
             .unwrap()
             .contains("RESULT pass"));
@@ -980,7 +1003,7 @@ esac
         let pages: serde_json::Value =
             serde_json::from_slice(&fs::read(failure.join("compare-ram-pages.json")).unwrap())
                 .unwrap();
-        assert_eq!(pages["machines"]["oracle"]["differing_pfns"], 2);
+        assert_eq!(pages["machines"]["oracle"]["differing_pfns"], 4);
         let summary = fs::read_to_string(failure.join("summary.txt")).unwrap();
         assert!(summary.contains(&error));
         assert!(!summary.contains("capture failed"), "{summary}");
