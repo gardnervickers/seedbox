@@ -16,7 +16,6 @@ seedbox-machine.workspace = true
 seedbox-machine-pv.workspace = true
 seedbox-machine-tcg.workspace = true
 seedbox-control.workspace = true
-seedbox-engine-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
