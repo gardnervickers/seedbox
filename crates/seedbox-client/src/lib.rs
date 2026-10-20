@@ -222,15 +222,6 @@ impl Client {
             .await
     }
 
-    pub async fn checkpoint(
-        &self,
-        id: &SimulationId,
-        name: &str,
-    ) -> Result<seedbox_api::ControlReceipt, Error> {
-        let path = simulation_path(id, &["checkpoints", name])?;
-        self.document(self.request(Method::GET, &path)).await
-    }
-
     pub async fn delete(&self, id: &SimulationId) -> Result<serde_json::Value, Error> {
         self.document(self.request(Method::DELETE, &format!("/v1/simulations/{id}")))
             .await

@@ -288,7 +288,7 @@ async fn checkpoint_roundtrip() {
             .unwrap(),
         captured
     );
-    assert_eq!(client.checkpoint(id, "saved").await.unwrap(), captured);
+    assert!(client.checkpoints(id).await.unwrap().contains(&captured));
     client.stop(id).await.unwrap();
     assert_eq!(
         completed(&client, id).await.status.termination,

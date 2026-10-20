@@ -419,13 +419,6 @@ async fn public_dispatch_retains_oracle_and_missing_witness_errors_without_compa
             assert_eq!(host.client.describe(id).await.unwrap(), before);
             assert_eq!(host.calls.load(Ordering::SeqCst), 1);
             assert!(matches!(
-                host.client.checkpoint(id, "uncaptured").await,
-                Err(Error::Rejected {
-                    code: ErrorCode::NotFound,
-                    ..
-                })
-            ));
-            assert!(matches!(
                 host.client.checkpoint_definition(id, "uncaptured").await,
                 Err(Error::Rejected {
                     code: ErrorCode::InvalidRequest,
