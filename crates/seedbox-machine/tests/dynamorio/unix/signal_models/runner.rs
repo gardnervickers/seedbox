@@ -11,6 +11,13 @@ pub enum Profile<'a> {
     DebugProf,
 }
 pub fn run(binary: &str, args: &[&str], profile: Profile<'_>) -> String {
+    let selected = match &profile {
+        Profile::Native => "native/direct-release".to_owned(),
+        Profile::Plain(options) => format!("plain-release options={options:?}"),
+        Profile::Timers => "client-release timers".to_owned(),
+        Profile::DebugProf => "plain-debug options=[-prof_pcs]".to_owned(),
+    };
+    let context = format!("{binary} {args:?} profile={selected}");
     let debug = matches!(profile, Profile::DebugProf);
     let key = if debug {
         "SEEDBOX_DYNAMORIO_DEBUG_FIXTURES"
@@ -74,7 +81,7 @@ pub fn run(binary: &str, args: &[&str], profile: Profile<'_>) -> String {
     if failed && binary == "storm" {
         // Also emit the snapshot before scratch cleanup, including when the
         // report directory or diagnostic file cannot be written.
-        eprintln!("{}", capture_storm(logs.path()));
+        eprintln!("{context}: {}", capture_storm(logs.path()));
     }
     if !matches!(status, Ok(Ok(_))) {
         unsafe {
@@ -89,7 +96,7 @@ pub fn run(binary: &str, args: &[&str], profile: Profile<'_>) -> String {
         status
             .as_ref()
             .is_ok_and(|s| s.as_ref().is_ok_and(|s| s.success())),
-        "{binary} {args:?}: {status:?} retained={retained:?}\n{out}\n{err}"
+        "{context}: {status:?} retained={retained:?}\n{out}\n{err}"
     );
     if matches!(profile, Profile::Timers) {
         let receipt = err
@@ -125,7 +132,9 @@ fn capture_storm(dir: &std::path::Path) -> String {
         .lines()
         .filter_map(|line| line.trim().strip_prefix("D(")?.split_once(')').map(|v| v.0))
         .collect();
-    let mut report = String::from("storm diagnostic: partial native-endian snapshots; roles=TID:source-line; no atomic whole-record guarantee\n");
+    let mut report = String::from(
+        "storm diagnostic: partial native-endian snapshots; roles=TID:source-line; no atomic whole-record guarantee\n",
+    );
     let mut pid = None;
     for sample in 0..2 {
         let bytes = match std::fs::read(dir.join("storm-diagnostic.bin")) {
@@ -169,6 +178,7 @@ fn capture_storm(dir: &std::path::Path) -> String {
                 for task in tasks.take(128).flatten() {
                     paths.push(task.path().join("status"));
                     paths.push(task.path().join("wchan"));
+                    paths.push(task.path().join("syscall"));
                 }
             }
             Err(error) => report.push_str(&format!("tasks unavailable: {error}\n")),
@@ -197,14 +207,24 @@ fn storm_diagnostic_retains_interrupted_publication() {
     words[2] = (123_u64 << 32) | 456;
     words[7] = 3;
     words[8] = 254;
-    let bytes: Vec<_> = words.into_iter().flat_map(u64::to_ne_bytes).collect();
-    std::fs::write(dir.path().join("storm-diagnostic.bin"), bytes).unwrap();
+    let mut bytes: Vec<_> = words.into_iter().flat_map(u64::to_ne_bytes).collect();
+    std::fs::write(dir.path().join("storm-diagnostic.bin"), &bytes).unwrap();
     capture_storm(dir.path());
     let text = std::fs::read_to_string(dir.path().join("storm-diagnostic.txt")).unwrap();
     assert!(text.contains("main_role=123:456"), "{text}");
     assert!(text.contains("controller_seq=3 predicate=254"), "{text}");
     assert!(text.contains("sample=1"), "{text}");
     assert!(text.contains("tasks unavailable:"), "{text}");
+    // Exercise the existing bounded proc reader against this test process only.
+    // Access restrictions remain printable diagnostics, never a test prerequisite.
+    let pid = std::process::id();
+    bytes[8..16].copy_from_slice(&u64::from(pid).to_ne_bytes());
+    std::fs::write(dir.path().join("storm-diagnostic.bin"), &bytes).unwrap();
+    let live = capture_storm(dir.path());
+    assert!(
+        live.contains(&format!("/proc/{pid}/task/{pid}/syscall ")),
+        "{live}"
+    );
     std::fs::write(dir.path().join("storm-diagnostic.bin"), [0; 7]).unwrap();
     capture_storm(dir.path());
     let text = std::fs::read_to_string(dir.path().join("storm-diagnostic.txt")).unwrap();
@@ -272,7 +292,7 @@ fn storm_failure_diagnostics_survive_checker_scratch_cleanup() {
             std::fs::read_to_string(stderr).unwrap()
         );
         assert!(
-            output.contains("storm []: Ok(Ok(ExitStatus"),
+            output.contains("storm [] profile=native/direct-release: Ok(Ok(ExitStatus"),
             "{mode}: {output}"
         );
         assert!(output.contains("synthetic-stdout"), "{mode}: {output}");

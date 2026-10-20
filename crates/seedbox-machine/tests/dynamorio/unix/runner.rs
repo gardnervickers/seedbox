@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+#[derive(Clone, Copy)]
 pub enum Profile {
     Native,
     #[allow(
@@ -16,6 +17,17 @@ pub enum Profile {
     DebugNative,
     Plain,
     Client,
+}
+impl Profile {
+    fn label(self) -> &'static str {
+        match self {
+            // Direct launch may enter the statically linked DR itself.
+            Self::Native => "native/direct-release",
+            Self::DebugNative => "native/static-debug",
+            Self::Plain => "plain-release",
+            Self::Client => "client-release",
+        }
+    }
 }
 struct Running {
     child: Child,
@@ -46,6 +58,7 @@ pub struct Output {
     pub stdout: String,
     pub stderr: String,
     pub code: i32,
+    pub profile: &'static str,
 }
 /// `isolate` runs outside drrun; its child is the actual application/runtime
 /// image. In particular no resident init is interposed before PID1 execution.
@@ -64,6 +77,7 @@ pub fn run_with_options(
     options: &[&str],
     client: Option<(&str, &[&str])>,
 ) -> Output {
+    let context = format!("{binary} {args:?} profile={}", profile.label());
     let root = if matches!(profile, Profile::DebugNative) {
         PathBuf::from(
             std::env::var_os("SEEDBOX_DYNAMORIO_DEBUG_FIXTURES")
@@ -123,7 +137,7 @@ pub fn run_with_options(
     let mut running = Running {
         child: command
             .guarded_spawn()
-            .expect("start owned Unix fixture supervisor"),
+            .unwrap_or_else(|e| panic!("{context}: start owned Unix fixture supervisor: {e}")),
         reaped: false,
     };
     let guard = HangGuard::new(
@@ -138,9 +152,10 @@ pub fn run_with_options(
     let stdout = std::fs::read_to_string(out).unwrap();
     let stderr = std::fs::read_to_string(err).unwrap();
     let status = status
-        .unwrap_or_else(|e| panic!("{binary} {args:?}: {e}\n{stdout}\n{stderr}"))
-        .expect("wait for Unix fixture");
+        .unwrap_or_else(|e| panic!("{context}: {e}\n{stdout}\n{stderr}"))
+        .unwrap_or_else(|e| panic!("{context}: wait for Unix fixture: {e}"));
     Output {
+        profile: profile.label(),
         stdout,
         stderr,
         code: status
@@ -157,14 +172,15 @@ pub fn checked(binary: &str, args: &[&str], profile: Profile, images: usize) -> 
     let out = run(binary, args, profile, None);
     assert_eq!(
         out.code, 0,
-        "{binary} {args:?}\n{}\n{}",
-        out.stdout, out.stderr
+        "{binary} {args:?} profile={}\n{}\n{}",
+        out.profile, out.stdout, out.stderr
     );
     assert!(
         !out.stdout.lines().any(|line| line
             .split_whitespace()
             .any(|word| matches!(word, "UNSUPPORTED" | "FAIL" | "BAD"))),
-        "fixture must execute its invariant: {}",
+        "{binary} {args:?} profile={}: fixture must execute its invariant: {}",
+        out.profile,
         out.stdout
     );
     if binary == "restart_matrix" && args.first() == Some(&"semop") {
@@ -184,7 +200,8 @@ pub fn checked(binary: &str, args: &[&str], profile: Profile, images: usize) -> 
             .count();
         assert!(
             executed >= images,
-            "{binary} {args:?}: per-image/fork application execution: expected >= {images}, got {executed}\n{}",
+            "{binary} {args:?} profile={}: per-image/fork application execution: expected >= {images}, got {executed}\n{}",
+            out.profile,
             out.stderr
         );
     }
@@ -207,8 +224,79 @@ pub fn triplet(binary: &str, args: &[&str], images: usize, required: &[&str]) {
         let translated = checked(binary, args, profile, images);
         assert_eq!(
             translated.stdout, native.stdout,
-            "{binary} {args:?}\n{}",
-            translated.stderr
+            "{binary} {args:?} profile={} compared with profile={}\n{}",
+            translated.profile, native.profile, translated.stderr
         );
+    }
+}
+
+#[test]
+fn failure_identifies_selected_profile() {
+    const CHILD: &str = "SEEDBOX_UNIX_PROFILE_TEST_CHILD";
+    let profiles = [
+        Profile::Native,
+        Profile::DebugNative,
+        Profile::Plain,
+        Profile::Client,
+    ];
+    if let Ok(index) = std::env::var(CHILD) {
+        checked(
+            "synthetic",
+            &["selector"],
+            profiles[index.parse::<usize>().unwrap()],
+            0,
+        );
+        panic!("synthetic failure must retain the status assertion");
+    }
+    let test = concat!(module_path!(), "::failure_identifies_selected_profile")
+        .split_once("::")
+        .unwrap()
+        .1;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("bin")).unwrap();
+    seedbox_test::process::install_executable(
+        &root.path().join("bin/unix-supervisor"),
+        b"#!/bin/sh\nprintf synthetic-output\nprintf synthetic-error >&2\nexit 7\n",
+        0o700,
+    )
+    .unwrap();
+    for (index, profile) in profiles.iter().enumerate() {
+        let stdout = root.path().join("stdout");
+        let stderr = root.path().join("stderr");
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", test, "--nocapture"])
+            .env(CHILD, index.to_string())
+            .env("SEEDBOX_DYNAMORIO_FIXTURES", root.path())
+            .env("SEEDBOX_DYNAMORIO_DEBUG_FIXTURES", root.path())
+            .stdout(File::create(&stdout).unwrap())
+            .stderr(File::create(&stderr).unwrap());
+        let mut child = Running {
+            child: command.guarded_spawn().unwrap(),
+            reaped: false,
+        };
+        let status = HangGuard::new("synthetic profile failure", Duration::from_secs(30))
+            .wait_for(|| child.child.try_wait().transpose())
+            .unwrap()
+            .unwrap();
+        child.reaped = true;
+        let output = format!(
+            "{}{}",
+            std::fs::read_to_string(stdout).unwrap(),
+            std::fs::read_to_string(stderr).unwrap()
+        );
+        assert!(!status.success(), "{output}");
+        assert!(
+            output.contains(&format!(
+                "synthetic [\"selector\"] profile={}",
+                profile.label()
+            )),
+            "{output}"
+        );
+        assert!(
+            output.contains("synthetic-output") && output.contains("synthetic-error"),
+            "{output}"
+        );
+        assert!(output.contains("left: 7"), "{output}");
     }
 }

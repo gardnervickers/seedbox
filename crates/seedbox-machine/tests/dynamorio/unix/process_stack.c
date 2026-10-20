@@ -194,6 +194,21 @@ static struct fl fc_w[2];
 static uint32_t *fc_phasefn;
 static int fc_reaped[FC_PHASES][2], fc_ok[FC_PHASES][2];
 static long fc_exec_bad;
+/* First claimant among failing executors owns the record. Only the controller
+ * reads it, after all executor joins; no publication spin or hot-path lock. */
+static int fc_bad_claimed;
+static struct { uint32_t value; int writer, slot; long executor, tid; } fc_first_bad;
+static void fc_record_bad(uint32_t value, int writer, int slot, long executor) {
+    int expected = 0;
+    if (__atomic_compare_exchange_n(&fc_bad_claimed, &expected, 1, 0,
+                                    __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        fc_first_bad.value = value;
+        fc_first_bad.writer = writer;
+        fc_first_bad.slot = slot;
+        fc_first_bad.executor = executor;
+        fc_first_bad.tid = syscall(SYS_gettid);
+    }
+}
 static int fc_code(int c, int p, int i) { return 1 + (c * 97 + p * 13 + i * 3) % 200; }
 static uint32_t fc_phasetag(int p) { return 0x5a000000u | (uint32_t)p << 16 | (uint32_t)(seed & 0xffff); }
 static uint64_t fc_record(int c, int p, int i, uint32_t t, int ok) { return (uint64_t)c | (uint64_t)p << 4 | (uint64_t)i << 8 | (uint64_t)ok << 31 | (uint64_t)t << 32; }
@@ -264,7 +279,10 @@ static void *fc_executor(void *arg) {
     long bad = 0;
     while (!load(&fc_exec_stop)) {
         int w = xnext(&rs) & 1, slot = xnext(&rs) % 64;
-        bad += !fl_check(&fc_w[w], slot, fl_call(&fc_w[w], slot));
+        uint32_t value = fl_call(&fc_w[w], slot);
+        int invalid = !fl_check(&fc_w[w], slot, value);
+        bad += invalid;
+        if (invalid) fc_record_bad(value, w, slot, k);
     }
     __atomic_add_fetch(&fc_exec_bad, bad, __ATOMIC_RELAXED);
     if (k & 1) pthread_exit(NULL);
@@ -325,6 +343,10 @@ static int t_forkcallers(void) {
                fc_reaped[p][1], fc_ok[p][1], fc_k, recCount[p]);
     OUT("recordBad", "%ld", recBad);
     OUT("childJitBad", "%ld", recChildBad);
+    if (fc_bad_claimed)
+        fprintf(stderr, "forkcallers first executor mismatch: value=0x%08x writer=%d slot=%d phase=%ld executor=%ld tid=%ld\n",
+                fc_first_bad.value, fc_first_bad.writer, fc_first_bad.slot,
+                fc_first_bad.executor / 3, fc_first_bad.executor, fc_first_bad.tid);
     OUT("executorBad", "%ld", fc_exec_bad);
     OUT("writerBad", "%ld", fc_w[0].bad + fc_w[1].bad);
     if (diag) fprintf(stderr, "writer flushes %ld %ld\n", fc_w[0].count, fc_w[1].count);
