@@ -112,7 +112,8 @@ impl PreparationBackend for Preparer {
         store: &ContentStore,
         context: &PreparationContext,
     ) -> Result<PreparedInputs> {
-        self.validate_runtime_inputs()?;
+        // prepare_driver_with_transport validates these runtime inputs before
+        // any OCI work.
         let transport = seedbox_application::container_images::ContainerTransport {
             docker: self.inputs.docker.clone(),
             cancellation: context.cancellation.clone(),

@@ -74,19 +74,32 @@ pub(crate) fn filesystem(rootfs: &crate::oci::RootFilesystem) -> Result<Vec<u8>>
     };
     Ok(bytes)
 }
+/// Whether two paths hold the same bytes. The CLI normally passes the runtime's
+/// own files, so one inode needs no byte comparison.
+fn same_bytes(left: &std::path::Path, right: &std::path::Path) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let (a, b) = (fs::metadata(left)?, fs::metadata(right)?);
+    if a.dev() == b.dev() && a.ino() == b.ino() {
+        return Ok(true);
+    }
+    Ok(fs::read(left)? == fs::read(right)?)
+}
 /// Validate the explicit SDK bootstrap package without opening a hypervisor,
 /// starting a worker or contacting OCI.
 pub fn validate_oci_runtime(preparer: &OciPreparer, runtime: &Inputs) -> Result<()> {
     seedbox_driver_execution::driver_world::retained::validate_contract(&preparer.profile)?;
     for (path, name) in [(&preparer.kernel, "kernel"), (&preparer.init, "init")] {
-        if fs::read(path)? != fs::read(runtime.guest_assets.join(name))? {
+        if !same_bytes(path, &runtime.guest_assets.join(name))? {
             return Err(Error::Integrity(
                 "Driver OCI bootstrap differs from its selected runtime".into(),
             ));
         }
     }
     if runtime.qemu.is_none()
-        && fs::read(&preparer.progress)? != fs::read(runtime.guest_assets.join("progress.tar"))?
+        && !same_bytes(
+            &preparer.progress,
+            &runtime.guest_assets.join("progress.tar"),
+        )?
     {
         return Err(Error::Integrity(
             "Driver PV progress differs from its selected runtime".into(),
