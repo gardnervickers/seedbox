@@ -11,7 +11,7 @@ mod timeline;
 mod timeline_view;
 mod view;
 
-pub use view::latency;
+pub use view::{latency, short_time};
 
 use seedbox_api::SimulationId;
 use seedbox_client::Client;
