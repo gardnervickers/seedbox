@@ -213,7 +213,7 @@ impl Fixture {
 struct Replayed {
     directory: std::path::PathBuf,
     record: RunRecord,
-    comparison: ReplayComparison,
+    comparison: SimulationComparison,
 }
 
 fn replay_retained(
@@ -237,7 +237,11 @@ fn replay_retained(
             executor,
         )?;
     Ok(Replayed {
-        comparison: compare(&baseline, &fresh.record),
+        // Server identities are irrelevant to retained evidence comparison.
+        comparison: compare(
+            (&"k7m2p9qx".parse().unwrap(), &baseline),
+            (&"k7m2p9qy".parse().unwrap(), &fresh.record),
+        ),
         directory: fresh.directory,
         record: fresh.record,
     })
@@ -257,7 +261,7 @@ fn run_retains_inputs_result_logs_and_replay_does_not_prepare_again() {
         let fresh = fixture.replay(&first);
         assert_eq!(fresh.record.run_id, first.record.run_id);
         assert_ne!(fresh.directory, first.directory);
-        assert_eq!(fresh.comparison.status, ReplayStatus::Match);
+        assert_eq!(fresh.comparison.status, ComparisonStatus::Match);
         assert_eq!(fixture.preparer.calls.load(Ordering::SeqCst), 1);
         assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 2);
     }
@@ -270,12 +274,15 @@ fn reproduced_application_failure_is_separate_from_replay_mismatch() {
     let failed = fixture.run();
     let reproduced = fixture.replay(&failed);
     assert_eq!(reproduced.record.outcome, Outcome::Fail);
-    assert_eq!(reproduced.comparison.status, ReplayStatus::Match);
+    assert_eq!(reproduced.comparison.status, ComparisonStatus::Match);
     // Two different failing exit codes must not be treated as equal outcomes.
     fixture.backend.report.workload_exit.as_mut().unwrap().code = 4;
     let different_failure = fixture.replay(&failed);
     assert_eq!(different_failure.record.outcome, Outcome::Fail);
-    assert_eq!(different_failure.comparison.status, ReplayStatus::Mismatch);
+    assert_eq!(
+        different_failure.comparison.status,
+        ComparisonStatus::Mismatch
+    );
 }
 
 #[test]
@@ -284,7 +291,7 @@ fn witness_fault_history_and_full_state_comparisons_are_distinct() {
     let first = fixture.run();
     fixture.backend.report.witness = Some(ContentDigest::of(b"diverged"));
     let replay = fixture.replay(&first).comparison;
-    assert_eq!(replay.status, ReplayStatus::Mismatch);
+    assert_eq!(replay.status, ComparisonStatus::Mismatch);
     assert_eq!(replay.witness_matches, Some(false));
     assert_eq!(replay.full_state_matches, None);
     fixture.backend.report.witness = first.record.report.as_ref().unwrap().witness.clone();
@@ -295,11 +302,11 @@ fn witness_fault_history_and_full_state_comparisons_are_distinct() {
     let with_state = fixture.run();
     let matched = fixture.replay(&with_state).comparison;
     assert_eq!(matched.full_state_matches, Some(true));
-    assert_eq!(matched.status, ReplayStatus::Match);
+    assert_eq!(matched.status, ComparisonStatus::Match);
     fixture.backend.report.full_state = None;
     assert_eq!(
         fixture.replay(&with_state).comparison.status,
-        ReplayStatus::Mismatch
+        ComparisonStatus::Mismatch
     );
     fixture.backend.report.faults.push(FaultEvent {
         requested_at_ns: 1,
@@ -311,7 +318,7 @@ fn witness_fault_history_and_full_state_comparisons_are_distinct() {
     let replay = fixture.replay(&first).comparison;
     assert_eq!(replay.witness_matches, Some(true));
     assert!(!replay.fault_history_matches);
-    assert_eq!(replay.status, ReplayStatus::Mismatch);
+    assert_eq!(replay.status, ComparisonStatus::Mismatch);
 }
 
 #[test]
@@ -345,9 +352,9 @@ fn limits_cancellation_and_missing_completion_cannot_pass() {
         assert_eq!(
             fixture.replay(&run).comparison.status,
             if expected == Outcome::Timeout {
-                ReplayStatus::Match
+                ComparisonStatus::Match
             } else {
-                ReplayStatus::NotComparable
+                ComparisonStatus::NotComparable
             }
         );
     }
@@ -619,19 +626,19 @@ fn wall_limit_is_infrastructure_but_simulated_limit_can_reproduce() {
     fixture.backend.report.reason = StopReason::WallTimeLimit;
     let replay = fixture.replay(&baseline);
     assert_eq!(replay.record.outcome, Outcome::Incomplete);
-    assert_eq!(replay.comparison.status, ReplayStatus::NotComparable);
+    assert_eq!(replay.comparison.status, ComparisonStatus::NotComparable);
     fixture.backend.report.reason = StopReason::SimulatedTimeLimit;
     fixture.backend.report.workload_exit = None;
     let timed_out = fixture.run();
     assert_eq!(timed_out.record.outcome, Outcome::Timeout);
     assert_eq!(
         fixture.replay(&timed_out).comparison.status,
-        ReplayStatus::Match
+        ComparisonStatus::Match
     );
     fixture.backend.report.witness = None;
     assert_eq!(
         fixture.replay(&timed_out).comparison.status,
-        ReplayStatus::NotComparable
+        ComparisonStatus::NotComparable
     );
 }
 
@@ -660,7 +667,10 @@ fn co_located_services_use_one_machine_state_digest_and_complete_placement() {
     )]));
     let run = fixture.run();
     assert_eq!(run.record.outcome, Outcome::Pass);
-    assert_eq!(fixture.replay(&run).comparison.status, ReplayStatus::Match);
+    assert_eq!(
+        fixture.replay(&run).comparison.status,
+        ComparisonStatus::Match
+    );
     fixture.preparer.inputs.placement.remove("redis");
     let calls = fixture.backend.calls.load(Ordering::SeqCst);
     assert_eq!(fixture.run().record.outcome, Outcome::Error);
@@ -702,7 +712,7 @@ fn project_workers_change_capacity_without_changing_identity_and_quantum_is_reta
         Ok(fixture.backend.report.clone())
     });
     let replay = replay_retained(&fixture.orchestrator, &parallel.directory, &executor).unwrap();
-    assert_eq!(replay.comparison.status, ReplayStatus::Match);
+    assert_eq!(replay.comparison.status, ComparisonStatus::Match);
     fixture.simulation.simulator.quantum_ns = std::num::NonZeroU64::new(5_000_000).unwrap();
     assert_ne!(fixture.run().record.run_id, first.record.run_id);
 }
@@ -721,11 +731,11 @@ fn performance_changes_are_recorded_without_changing_identity_or_bypassing_compa
         replay.record.performance_parameters,
         first.record.performance_parameters
     );
-    assert_eq!(replay.comparison.status, ReplayStatus::Match);
+    assert_eq!(replay.comparison.status, ComparisonStatus::Match);
     fixture.backend.report.witness = Some(ContentDigest::of(b"bad performance optimization"));
     assert_eq!(
         fixture.replay(&first).comparison.status,
-        ReplayStatus::Mismatch
+        ComparisonStatus::Mismatch
     );
 }
 
@@ -743,7 +753,7 @@ fn fault_comparison_uses_acknowledged_effect_time_and_rejects_invalid_acknowledg
     fixture.backend.report.faults[0].applied_at_ns = 21;
     assert_eq!(
         fixture.replay(&run).comparison.status,
-        ReplayStatus::Mismatch
+        ComparisonStatus::Mismatch
     );
     fixture.backend.report.faults[0].applied_at_ns = 9;
     assert_eq!(fixture.run().record.outcome, Outcome::Error);
@@ -849,7 +859,10 @@ fn machine_lifecycle_effects_pass_and_replay_with_their_service() {
     }
     let run = fixture.run();
     assert_eq!(run.record.outcome, Outcome::Pass);
-    assert_eq!(fixture.replay(&run).comparison.status, ReplayStatus::Match);
+    assert_eq!(
+        fixture.replay(&run).comparison.status,
+        ComparisonStatus::Match
+    );
     fixture.backend.report.faults[0].service.clear();
     assert_eq!(fixture.run().record.outcome, Outcome::Error);
 }
@@ -915,11 +928,17 @@ fn torn_write_policy_changes_identity_and_replay_requires_the_recorded_policy() 
     fixture.preparer.inputs.profile = fixture.backend.profile.clone();
     let on = fixture.run();
     assert_ne!(on.record.run_id, off.record.run_id);
-    assert_eq!(fixture.replay(&on).comparison.status, ReplayStatus::Match);
+    assert_eq!(
+        fixture.replay(&on).comparison.status,
+        ComparisonStatus::Match
+    );
     assert_eq!(fixture.replay(&off).record.outcome, Outcome::Error);
     fixture.backend.profile.semantic_parameters.torn_writes = false;
     assert_eq!(fixture.replay(&on).record.outcome, Outcome::Error);
-    assert_eq!(fixture.replay(&off).comparison.status, ReplayStatus::Match);
+    assert_eq!(
+        fixture.replay(&off).comparison.status,
+        ComparisonStatus::Match
+    );
 }
 
 #[test]
@@ -936,7 +955,7 @@ fn checkpoint_identity_replays_retained_semantics() {
     assert_ne!(branch.record.run_id, parent.record.run_id);
     let replay = fixture.replay(&branch);
     assert_eq!(replay.record.run_id, branch.record.run_id);
-    assert_eq!(replay.comparison.status, ReplayStatus::Match);
+    assert_eq!(replay.comparison.status, ComparisonStatus::Match);
     fixture.backend.profile.semantic_parameters.checkpoint = Some(Checkpoint {
         at_ns: 500,
         branch_seed: 43,
@@ -1179,7 +1198,7 @@ fn interactive_history_is_sealed_as_portable_overrides_and_replays_without_journ
     fs::remove_file(first.directory.join("interventions.json")).unwrap();
     let replay = replay_retained(&fixture.orchestrator, &first.directory, &backend).unwrap();
     assert_eq!(replay.record.run_id, first.record.run_id);
-    assert_eq!(replay.comparison.status, ReplayStatus::Match);
+    assert_eq!(replay.comparison.status, ComparisonStatus::Match);
     assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 2);
     let empty = Orchestrator::new(
         ContentStore::new(fixture.directory.path().join("empty-store")),

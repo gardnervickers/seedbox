@@ -344,11 +344,8 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
     );
     // The digest-only comparator would call this MISMATCH, not missing evidence.
     // The real service must establish input compatibility before reporting it.
-    let evidence = seedbox_artifacts::record::compare(old, new);
-    assert_eq!(
-        evidence.status,
-        seedbox_artifacts::record::ReplayStatus::Mismatch
-    );
+    let evidence = seedbox_artifacts::record::compare((old_id, old), (new_id, new));
+    assert_eq!(evidence.status, ComparisonStatus::Mismatch);
     assert_eq!(evidence.witness_matches, Some(false));
     assert_eq!(
         service.compare(old_id, old_id).unwrap().status,

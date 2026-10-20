@@ -340,30 +340,16 @@ impl ExecutionService {
                 fault_history_matches: false,
             });
         };
-        let comparison = seedbox_artifacts::record::compare(&first.record, &second.record);
-        use seedbox_api::ComparisonStatus;
-        let compatible = bundles::semantic_definition(first.definition)?
-            == bundles::semantic_definition(second.definition)?;
-        let status = if !compatible {
-            ComparisonStatus::NotComparable
-        } else {
-            match comparison.status {
-                seedbox_artifacts::record::ReplayStatus::Match => ComparisonStatus::Match,
-                seedbox_artifacts::record::ReplayStatus::Mismatch => ComparisonStatus::Mismatch,
-                seedbox_artifacts::record::ReplayStatus::NotComparable => {
-                    ComparisonStatus::NotComparable
-                }
-            }
-        };
-        Ok(seedbox_api::SimulationComparison {
-            baseline: baseline.clone(),
-            simulation: simulation.clone(),
-            status,
-            outcome_matches: comparison.outcome_matches,
-            witness_matches: comparison.witness_matches,
-            full_state_matches: comparison.full_state_matches,
-            fault_history_matches: comparison.fault_history_matches,
-        })
+        let mut comparison = seedbox_artifacts::record::compare(
+            (baseline, &first.record),
+            (simulation, &second.record),
+        );
+        if bundles::semantic_definition(first.definition)?
+            != bundles::semantic_definition(second.definition)?
+        {
+            comparison.status = seedbox_api::ComparisonStatus::NotComparable;
+        }
+        Ok(comparison)
     }
 
     /// The owner waits for every active task during graceful shutdown. Dropping
