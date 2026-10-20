@@ -180,6 +180,75 @@ pub fn driver_runtime(
         scratch,
     )
 }
+/// The default Driver runtime for one server session, extracted at most once
+/// per archive content. A changed asset archive is extracted afresh.
+pub fn session_driver_runtime(
+    cache: &RuntimeCache,
+    scratch: &Path,
+) -> Result<seedbox_driver_execution::runtime_assets::Runtime> {
+    let embedded = std::env::var_os("SEEDBOX_ASSET_DIR")
+        .is_none()
+        .then_some(seedbox_driver_execution::runtime_assets::EMBEDDED)
+        .flatten();
+    let directory = asset_directory();
+    let load = || resolve_driver_runtime(None, embedded, &directory, scratch);
+    let digest = match embedded {
+        Some(bytes) => {
+            static EMBEDDED_DIGEST: std::sync::OnceLock<seedbox_application::store::ContentDigest> =
+                std::sync::OnceLock::new();
+            EMBEDDED_DIGEST
+                .get_or_init(|| seedbox_application::store::ContentDigest::of(bytes))
+                .clone()
+        }
+        // An unreadable package reports its usual setup error from extraction.
+        None => match seedbox_driver_execution::admission::file_digest(
+            &directory.join("driver-runtime.tar.gz"),
+        ) {
+            Ok(digest) => digest,
+            Err(_) => return load(),
+        },
+    };
+    cache.get_or_extract(&digest, load)
+}
+
+/// Session-scoped extracted Driver runtime, keyed by its archive's content
+/// digest. Extraction stays a fresh private directory, never rewritten, so
+/// executables in it are never open for writing; sharing only skips repeats.
+/// The most recent package stays alive until the session ends or another
+/// package replaces it; executors keep their own clones alive.
+#[derive(Default)]
+pub struct RuntimeCache {
+    current: std::sync::Mutex<
+        Option<(
+            seedbox_application::store::ContentDigest,
+            seedbox_driver_execution::runtime_assets::Runtime,
+        )>,
+    >,
+}
+impl RuntimeCache {
+    /// The runtime whose archive has `digest`, extracting it with `load` when
+    /// absent. A loaded package is cached under the digest of the archive it
+    /// actually extracted, so a source that changed meanwhile is not misfiled.
+    pub fn get_or_extract(
+        &self,
+        digest: &seedbox_application::store::ContentDigest,
+        load: impl FnOnce() -> Result<seedbox_driver_execution::runtime_assets::Runtime>,
+    ) -> Result<seedbox_driver_execution::runtime_assets::Runtime> {
+        let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((cached, runtime)) = current.as_ref() {
+            if cached == digest {
+                return Ok(runtime.clone());
+            }
+        }
+        let runtime = load()?;
+        let actual = seedbox_driver_execution::admission::file_digest(&runtime.archive());
+        *current = match actual {
+            Ok(actual) if actual == *digest => Some((actual, runtime.clone())),
+            _ => None,
+        };
+        Ok(runtime)
+    }
+}
 fn resolve_driver_runtime(
     explicit: Option<std::path::PathBuf>,
     embedded: Option<&[u8]>,

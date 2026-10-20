@@ -487,6 +487,7 @@ impl RuntimeInputs {
         cpu_backend: seedbox_spec::backend::CpuBackend,
         cancellation: &CancellationToken,
         scratch: &Path,
+        runtimes: &backends::RuntimeCache,
     ) -> Result<(Preparer, Executor)> {
         let engine = defaults::engine()?;
         if !self.use_driver() {
@@ -507,7 +508,7 @@ impl RuntimeInputs {
             .ok_or_else(|| {
                 Error::Setup("the Driver runtime requires Linux x86-64 or macOS aarch64".into())
             })?;
-        let runtime = backends::driver_runtime(None, scratch)?;
+        let runtime = backends::session_driver_runtime(runtimes, scratch)?;
         let selected = runtime.select(cpu_backend, architecture)?;
         let inputs = OciPreparer {
             docker: backends::container_engine()?,

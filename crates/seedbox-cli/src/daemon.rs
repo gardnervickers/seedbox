@@ -30,6 +30,7 @@ struct NativeBackends {
     environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     session_lease: PathBuf,
     session_root: PathBuf,
+    runtimes: super::backends::RuntimeCache,
 }
 
 impl BackendProvider for NativeBackends {
@@ -46,6 +47,7 @@ impl BackendProvider for NativeBackends {
             backend,
             cancellation,
             &self.session_root,
+            &self.runtimes,
         )?;
         let execution = Executor(Box::new(
             (*execution.0)
@@ -74,17 +76,17 @@ impl BackendProvider for NativeBackends {
         let backend = driver_backend
             .ok_or_else(|| Error::Setup("Driver contract has no validated CPU backend".into()))?;
         let digest = seedbox_driver_execution::driver_world::runtime_digest(inputs, store)?;
-        let mut archive = tempfile::NamedTempFile::new_in(&self.session_root).map_err(|error| {
-            Error::Setup(format!(
-                "retained Driver runtime scratch {}: {error}",
-                self.session_root.display()
-            ))
+        let runtime = self.runtimes.get_or_extract(&digest, || {
+            let mut archive =
+                tempfile::NamedTempFile::new_in(&self.session_root).map_err(|error| {
+                    Error::Setup(format!(
+                        "retained Driver runtime scratch {}: {error}",
+                        self.session_root.display()
+                    ))
+                })?;
+            store.copy_to(&digest, archive.as_file_mut())?;
+            super::backends::driver_runtime(Some(archive.path().to_path_buf()), &self.session_root)
         })?;
-        store.copy_to(&digest, archive.as_file_mut())?;
-        let runtime = super::backends::driver_runtime(
-            Some(archive.path().to_path_buf()),
-            &self.session_root,
-        )?;
         let architecture = match descriptor.guest_arch.as_str() {
             "x86_64" => seedbox_spec::definition::Architecture::X86_64,
             "aarch64" => seedbox_spec::definition::Architecture::Aarch64,
@@ -303,6 +305,7 @@ fn serve_inner(
                 environment: std::env::vars_os().collect(),
                 session_lease: scratch.lease_path(),
                 session_root: scratch.path().to_path_buf(),
+                runtimes: Default::default(),
             }),
         )
         .map_err(setup)?,

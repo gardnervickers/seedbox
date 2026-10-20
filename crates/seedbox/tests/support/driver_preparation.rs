@@ -249,10 +249,10 @@ impl Service {
         let mut barriers = Vec::new();
         for directory in &dirs {
             let name = directory.file_name().unwrap().to_string_lossy();
+            // The server keeps its extracted Driver runtime for the session;
+            // shutdown removes it with the session directory.
             assert!(
-                !name.starts_with("native-scratch")
-                    && !name.starts_with("seedbox-pv-")
-                    && !name.starts_with("driver-runtime-"),
+                !name.starts_with("native-scratch") && !name.starts_with("seedbox-pv-"),
                 "native inputs survive public completion: {directory:?}"
             );
             let lease = directory.join(EXECUTION_LEASE_FILE);
@@ -260,7 +260,7 @@ impl Service {
                 barriers.push(reclaim_barrier(&lease, Duration::ZERO).unwrap());
             }
         }
-        eprintln!("normal CLI pre-close W2: native/runtime absent with execution lease barriers held; live server still owns the session lease");
+        eprintln!("normal CLI pre-close W2: native scratch absent with execution lease barriers held; live server still owns the session lease and runtime");
         barriers
     }
     fn close(mut self) {

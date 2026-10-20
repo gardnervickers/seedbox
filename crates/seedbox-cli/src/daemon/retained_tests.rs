@@ -11,7 +11,7 @@ use seedbox_test::process::Guarded;
 use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
 
 #[test]
-fn retained_driver_acquires_only_recorded_runtime_and_owns_it_until_executor_drop() {
+fn retained_driver_acquires_only_recorded_runtime_once_per_session() {
     // tar's fork can briefly inherit another test's CLOEXEC flock before exec.
     // Session probes deliberately use a zero-wait ownership check.
     let _scope = super::session_test_scope();
@@ -144,6 +144,7 @@ fn retained_driver_acquires_only_recorded_runtime_and_owns_it_until_executor_dro
         environment: vec![],
         session_lease: session.join("owner.lease"),
         session_root: session.clone(),
+        runtimes: Default::default(),
     };
     let executor = provider.retained(&inputs, &store).unwrap();
     assert!(
@@ -166,7 +167,13 @@ fn retained_driver_acquires_only_recorded_runtime_and_owns_it_until_executor_dro
     assert_eq!(owned.len(), 1);
     assert!(owned[0].join("runtime.tar.gz").exists());
     drop(executor);
-    assert!(directories().is_empty());
+    let again = provider.retained(&inputs, &store).unwrap();
+    assert_eq!(
+        directories(),
+        owned,
+        "one server session extracts a retained runtime archive once"
+    );
+    drop(again);
 
     let corrupt = root.path().join("corrupt-runtime.tar.gz");
     fs::write(&corrupt, b"not a runtime archive").unwrap();
@@ -181,8 +188,14 @@ fn retained_driver_acquires_only_recorded_runtime_and_owns_it_until_executor_dro
         provider.retained(&bad_inputs, &store).is_err(),
         "a corrupt retained archive must not fall back to embedded/default startup assets"
     );
+    assert_eq!(
+        directories(),
+        owned,
+        "failed acquisition must reclaim partial owned runtime inputs"
+    );
+    drop(provider);
     assert!(
         directories().is_empty(),
-        "failed acquisition must reclaim partial owned runtime inputs"
+        "the session's runtime cache owns no inputs past its provider"
     );
 }
