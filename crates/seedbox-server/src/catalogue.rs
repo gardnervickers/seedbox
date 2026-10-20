@@ -264,141 +264,10 @@ impl Catalogue {
                 break id;
             }
         };
-        let mut spec = request.spec.clone();
-        resolve_program(&spec)?;
-        // Explicit submission seed wins over the project's seed, then randomness.
-        spec.seed = Some(match spec.seed.or(spec.configuration.seed) {
-            Some(seed) => seed,
-            None => {
-                let mut bytes = [0; 8];
-                random(&mut bytes)?;
-                u64::from_le_bytes(bytes)
-            }
-        });
-        spec = serde_json::from_value(
-            serde_json::to_value(&spec).map_err(|e| Error::Invalid(e.to_string()))?,
-        )
-        .map_err(|e| Error::Invalid(e.to_string()))?;
-        if let Some(range) = &range {
-            spec.seed
-                .and_then(|seed| seed.checked_add(u64::from(range.count - 1)))
-                .ok_or_else(|| Error::Invalid("seed range overflows u64".into()))?;
-        }
-        let reference = match &spec.inputs {
-            InputSource::Project | InputSource::Resolved { .. } => None,
-            InputSource::Retained { simulation }
-            | InputSource::Prepared { simulation }
-            | InputSource::Checkpoint { simulation, .. } => Some(simulation),
-        };
-        let referenced_backend = if let Some(source) = reference {
-            let entry = self
-                .entries
-                .get(source)
-                .ok_or_else(|| Error::NotFound(source.clone()))?;
-            if entry.deleting {
-                return Err(Error::Invalid("source simulation is being deleted".into()));
-            }
-            entry.resource.options.backend
-        } else {
-            None
-        };
-        let parent = match &spec.inputs {
-            InputSource::Resolved { definition } => {
-                definition
-                    .start
-                    .validate_overrides(&definition.overrides)
-                    .map_err(Error::Invalid)?;
-                if definition.machines.contains_key(definition.oracle_name()) {
-                    return Err(Error::Invalid(
-                        "oracle must have its own dedicated declaration".into(),
-                    ));
-                }
-                None
-            }
-            InputSource::Project => {
-                let config = &spec.configuration;
-                if config.check.exit_code != 0 {
-                    return Err(Error::Invalid(
-                        "oracle success is always exit code zero".into(),
-                    ));
-                }
-
-                if config.schedule.stop_tolerance_ns != 0 {
-                    return Err(Error::Invalid(
-                        "new simulations use default stop tolerance settings".into(),
-                    ));
-                }
-                None
-            }
-            InputSource::Checkpoint {
-                simulation,
-                checkpoint,
-            } => {
-                validate_request_id(checkpoint)?;
-                let original = self.get(simulation)?;
-                if original.spec.configuration != spec.configuration
-                    || original.spec.seed != spec.seed
-                    || original.spec.program != spec.program
-                {
-                    return Err(Error::Invalid(
-                        "checkpoint requires its source configuration and seed".into(),
-                    ));
-                }
-                self.captured_checkpoint(simulation, checkpoint)?;
-                None
-            }
-            InputSource::Retained { simulation } | InputSource::Prepared { simulation } => {
-                let original = self.get(simulation)?;
-                if original.status.phase != Phase::Completed {
-                    return Err(Error::Invalid(
-                        "rerun requires a completed simulation".into(),
-                    ));
-                }
-                if matches!(spec.inputs, InputSource::Retained { .. })
-                    && original.spec.seed != spec.seed
-                {
-                    return Err(Error::Invalid(
-                        "retained execution requires its source seed; use prepared inputs to vary the seed".into(),
-                    ));
-                }
-                if original.spec.configuration != spec.configuration
-                    || (matches!(spec.inputs, InputSource::Retained { .. })
-                        && original.spec.program != spec.program)
-                {
-                    return Err(Error::Invalid(
-                        "retained input configuration differs from its source".into(),
-                    ));
-                }
-                None
-            }
-        };
-        // Imported resources own portable definitions, not executable attempt
-        // paths. Existing reference validation above still applies.
-        if let Some(source) = reference {
-            let entry = &self.entries[source];
-            if let Some(checkpoints) = &entry.imported_checkpoints {
-                let mut definition = match &spec.inputs {
-                    InputSource::Checkpoint { checkpoint, .. } => checkpoints
-                        .get(checkpoint)
-                        .ok_or_else(|| Error::Invalid("imported checkpoint unavailable".into()))?
-                        .clone(),
-                    _ => match &entry.resource.spec.inputs {
-                        InputSource::Resolved { definition } => definition.as_ref().clone(),
-                        _ => return Err(Error::Invalid("imported definition unavailable".into())),
-                    },
-                };
-                if matches!(spec.inputs, InputSource::Prepared { .. }) {
-                    definition.start = seedbox_spec::definition::Start::Fresh;
-                }
-                definition.seed = spec.seed.expect("resolved above");
-                definition.overrides = spec.program.clone();
-                definition
-                    .start
-                    .validate_overrides(&definition.overrides)
-                    .map_err(Error::Invalid)?;
-                spec = seedbox_api::SimulationSpec::resolved(definition).map_err(Error::Invalid)?;
-            }
-        }
+        let mut spec = seeded_spec(&request.spec, range.as_ref())?;
+        let referenced_backend = self.referenced_backend(&spec)?;
+        let parent = self.validate_source(&spec)?;
+        self.adopt_imported_definition(&mut spec)?;
         let recorded_backend = match &spec.inputs {
             InputSource::Resolved { definition } => definition
                 .runtime
@@ -458,6 +327,131 @@ impl Catalogue {
             .insert(entry.request.request_id.clone(), id.clone());
         self.entries.insert(id, entry);
         Ok((resource, true))
+    }
+
+    /// The backend recorded by the submission's source simulation, if it has one.
+    fn referenced_backend(
+        &self,
+        spec: &seedbox_api::SimulationSpec,
+    ) -> Result<Option<seedbox_spec::backend::CpuBackend>> {
+        let Some(source) = source_reference(spec) else {
+            return Ok(None);
+        };
+        let entry = self
+            .entries
+            .get(source)
+            .ok_or_else(|| Error::NotFound(source.clone()))?;
+        if entry.deleting {
+            return Err(Error::Invalid("source simulation is being deleted".into()));
+        }
+        Ok(entry.resource.options.backend)
+    }
+
+    /// Check the submission against its input source; returns the resource's parent.
+    fn validate_source(&self, spec: &seedbox_api::SimulationSpec) -> Result<Option<SimulationId>> {
+        match &spec.inputs {
+            InputSource::Resolved { definition } => {
+                definition
+                    .start
+                    .validate_overrides(&definition.overrides)
+                    .map_err(Error::Invalid)?;
+                if definition.machines.contains_key(definition.oracle_name()) {
+                    return Err(Error::Invalid(
+                        "oracle must have its own dedicated declaration".into(),
+                    ));
+                }
+                Ok(None)
+            }
+            InputSource::Project => {
+                let config = &spec.configuration;
+                if config.check.exit_code != 0 {
+                    return Err(Error::Invalid(
+                        "oracle success is always exit code zero".into(),
+                    ));
+                }
+
+                if config.schedule.stop_tolerance_ns != 0 {
+                    return Err(Error::Invalid(
+                        "new simulations use default stop tolerance settings".into(),
+                    ));
+                }
+                Ok(None)
+            }
+            InputSource::Checkpoint {
+                simulation,
+                checkpoint,
+            } => {
+                validate_request_id(checkpoint)?;
+                let original = self.get(simulation)?;
+                if original.spec.configuration != spec.configuration
+                    || original.spec.seed != spec.seed
+                    || original.spec.program != spec.program
+                {
+                    return Err(Error::Invalid(
+                        "checkpoint requires its source configuration and seed".into(),
+                    ));
+                }
+                self.captured_checkpoint(simulation, checkpoint)?;
+                Ok(None)
+            }
+            InputSource::Retained { simulation } | InputSource::Prepared { simulation } => {
+                let original = self.get(simulation)?;
+                if original.status.phase != Phase::Completed {
+                    return Err(Error::Invalid(
+                        "rerun requires a completed simulation".into(),
+                    ));
+                }
+                if matches!(spec.inputs, InputSource::Retained { .. })
+                    && original.spec.seed != spec.seed
+                {
+                    return Err(Error::Invalid(
+                        "retained execution requires its source seed; use prepared inputs to vary the seed".into(),
+                    ));
+                }
+                if original.spec.configuration != spec.configuration
+                    || (matches!(spec.inputs, InputSource::Retained { .. })
+                        && original.spec.program != spec.program)
+                {
+                    return Err(Error::Invalid(
+                        "retained input configuration differs from its source".into(),
+                    ));
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// Imported resources own portable definitions, not executable attempt
+    /// paths. Existing reference validation still applies before this.
+    fn adopt_imported_definition(&self, spec: &mut seedbox_api::SimulationSpec) -> Result<()> {
+        let Some(source) = source_reference(spec) else {
+            return Ok(());
+        };
+        let entry = &self.entries[source];
+        let Some(checkpoints) = &entry.imported_checkpoints else {
+            return Ok(());
+        };
+        let mut definition = match &spec.inputs {
+            InputSource::Checkpoint { checkpoint, .. } => checkpoints
+                .get(checkpoint)
+                .ok_or_else(|| Error::Invalid("imported checkpoint unavailable".into()))?
+                .clone(),
+            _ => match &entry.resource.spec.inputs {
+                InputSource::Resolved { definition } => definition.as_ref().clone(),
+                _ => return Err(Error::Invalid("imported definition unavailable".into())),
+            },
+        };
+        if matches!(spec.inputs, InputSource::Prepared { .. }) {
+            definition.start = seedbox_spec::definition::Start::Fresh;
+        }
+        definition.seed = spec.seed.expect("resolved above");
+        definition.overrides = spec.program.clone();
+        definition
+            .start
+            .validate_overrides(&definition.overrides)
+            .map_err(Error::Invalid)?;
+        *spec = seedbox_api::SimulationSpec::resolved(definition).map_err(Error::Invalid)?;
+        Ok(())
     }
 
     /// Compare-and-swap prevents a late worker callback from overwriting newer
@@ -749,6 +743,44 @@ impl Catalogue {
         self.pending.remove(id);
         self.entries.insert(id.clone(), entry);
         Ok(control)
+    }
+}
+
+/// Resolve the submission's seed and project it through the public schema.
+fn seeded_spec(
+    spec: &seedbox_api::SimulationSpec,
+    range: Option<&seeds::Range>,
+) -> Result<seedbox_api::SimulationSpec> {
+    let mut spec = spec.clone();
+    resolve_program(&spec)?;
+    // Explicit submission seed wins over the project's seed, then randomness.
+    spec.seed = Some(match spec.seed.or(spec.configuration.seed) {
+        Some(seed) => seed,
+        None => {
+            let mut bytes = [0; 8];
+            random(&mut bytes)?;
+            u64::from_le_bytes(bytes)
+        }
+    });
+    spec = serde_json::from_value(
+        serde_json::to_value(&spec).map_err(|e| Error::Invalid(e.to_string()))?,
+    )
+    .map_err(|e| Error::Invalid(e.to_string()))?;
+    if let Some(range) = range {
+        spec.seed
+            .and_then(|seed| seed.checked_add(u64::from(range.count - 1)))
+            .ok_or_else(|| Error::Invalid("seed range overflows u64".into()))?;
+    }
+    Ok(spec)
+}
+
+/// The existing simulation whose inputs a submission reuses.
+fn source_reference(spec: &seedbox_api::SimulationSpec) -> Option<&SimulationId> {
+    match &spec.inputs {
+        InputSource::Project | InputSource::Resolved { .. } => None,
+        InputSource::Retained { simulation }
+        | InputSource::Prepared { simulation }
+        | InputSource::Checkpoint { simulation, .. } => Some(simulation),
     }
 }
 
