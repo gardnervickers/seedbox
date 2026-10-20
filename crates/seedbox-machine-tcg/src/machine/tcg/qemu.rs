@@ -46,10 +46,8 @@ const RECEIVE_BATCH: usize = 64;
 /// Frames per `seedbox-net-drain` chunk, at most.
 const DRAIN_BATCH: usize = 256;
 
-/// Lowercase hexadecimal, the private QMP frame encoding.
-pub(super) fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
+/// Lowercase hexadecimal is the private QMP frame encoding.
+pub(super) use seedbox_machine::machine::hex;
 
 pub(super) fn unhex(text: &str) -> Option<Vec<u8>> {
     let digit = |c: u8| match c {

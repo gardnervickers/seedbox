@@ -1,5 +1,31 @@
 //! Stopped physical-state evidence, independent of snapshot encodings.
 
+/// Lowercase hexadecimal, as digests, witnesses and evidence parts record it.
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Whether `value` is a lowercase hexadecimal SHA-256 digest.
+pub fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// SHA-256 over ordered `name NUL value` parts: both backends' combined
+/// [`StateEvidence::digest`].
+pub fn combined_digest(parts: &[(String, String)]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for (name, value) in parts {
+        h.update(name.as_bytes());
+        h.update([0]);
+        h.update(value.as_bytes());
+    }
+    hex(&h.finalize())
+}
+
 /// One actual guest RAM extent, ordered by guest physical address.
 /// Holes are not RAM and contribute neither bytes nor page hashes.
 // TODO: Re-evaluate: sparse RAM needs address metadata at the common evidence
@@ -100,18 +126,12 @@ impl StateEvidence {
     /// Validate common shape. The backend additionally validates its exact part
     /// set and computes the digests from stopped state, never serialised state.
     pub fn validate(&self) -> Result<(), &'static str> {
-        fn sha256(value: &str) -> bool {
-            value.len() == 64
-                && value
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        }
-        if !sha256(&self.digest) {
+        if !is_sha256_hex(&self.digest) {
             return Err("state evidence: invalid combined SHA-256");
         }
         let mut names = std::collections::BTreeSet::new();
         for (name, digest) in &self.parts {
-            if name.is_empty() || !names.insert(name.as_str()) || !sha256(digest) {
+            if name.is_empty() || !names.insert(name.as_str()) || !is_sha256_hex(digest) {
                 return Err("state evidence: invalid or repeated part");
             }
         }

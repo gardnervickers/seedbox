@@ -191,7 +191,7 @@ impl Aux {
                 || r.disk
                     .iter()
                     .chain(&r.retired)
-                    .any(|s| !super::evidence::valid_hash(s))
+                    .any(|s| !seedbox_machine::machine::is_sha256_hex(s))
             {
                 return Err("PV pending end shape".into());
             }

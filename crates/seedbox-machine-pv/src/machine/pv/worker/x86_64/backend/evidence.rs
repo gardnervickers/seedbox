@@ -1,7 +1,8 @@
 //! Read actual KVM banks without settling I/O, entering the guest or capturing
 //! a migration image. Explicit fields omit ABI padding and reserved bytes.
 use super::*;
-use crate::machine::pv::worker::evidence::{hex, part};
+use crate::machine::pv::worker::evidence::part;
+use seedbox_machine::machine::hex;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 fn segment(s: &kvm_segment) -> [u64; 12] {

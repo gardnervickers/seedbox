@@ -196,7 +196,7 @@ pub(super) fn validate(s: &Snapshot) -> Result<(), CodecError> {
             || r.disk
                 .iter()
                 .chain(&r.retired)
-                .any(|v| !evidence::valid_hash(v))
+                .any(|v| !seedbox_machine::machine::is_sha256_hex(v))
         {
             return Err(invalid("pending boot-end shape"));
         }

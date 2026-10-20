@@ -28,7 +28,9 @@ pub mod assets;
 pub mod disk;
 
 mod evidence;
-pub use evidence::{EvidenceDisposition, RamRegion, StateEvidence};
+pub use evidence::{
+    combined_digest, hex, is_sha256_hex, EvidenceDisposition, RamRegion, StateEvidence,
+};
 pub mod execution_evidence;
 pub use execution_evidence::ExecutionEvidence;
 

@@ -133,26 +133,11 @@ impl Factory {
         definition: &MachineDefinition,
         environment: &GuestEnvironment,
     ) -> Result<Vec<u8>, Error> {
-        self.check_environment(definition, Some(environment))?;
+        environment
+            .check_attachments(definition.disk.is_some(), self.formatter.is_some())
+            .map_err(|e| Error(e.into()))?;
         self.assemble_selected(&definition.application, &self.bootstrap, Some(environment))
             .map_err(|error| Error(error.to_string()))
-    }
-    fn check_environment(
-        &self,
-        definition: &MachineDefinition,
-        environment: Option<&GuestEnvironment>,
-    ) -> Result<(), Error> {
-        if environment.is_some_and(|e| !e.named_volumes.is_empty()) {
-            if definition.disk.is_none() {
-                return Err(Error(
-                    "named guest volumes require a machine disk at /dev/vda".into(),
-                ));
-            }
-            if self.formatter.is_none() {
-                return Err(Error("named guest volumes require guest asset mke2fs; package the static guest formatter".into()));
-            }
-        }
-        Ok(())
     }
     fn assemble_selected(
         &self,
@@ -202,7 +187,11 @@ impl Factory {
         definition: &MachineDefinition,
         environment: Option<&GuestEnvironment>,
     ) -> Result<TcgMachine, Error> {
-        self.check_environment(definition, environment)?;
+        if let Some(environment) = environment {
+            environment
+                .check_attachments(definition.disk.is_some(), self.formatter.is_some())
+                .map_err(|e| Error(e.into()))?;
+        }
         let mut machine = if environment.is_none() {
             match self.scratch_root.as_deref() {
                 Some(root) => TcgMachine::new_with_scratch(

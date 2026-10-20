@@ -155,27 +155,10 @@ impl Factory {
         definition: &MachineDefinition,
         environment: &GuestEnvironment,
     ) -> io::Result<Vec<u8>> {
-        self.check_environment(definition, Some(environment))?;
+        environment
+            .check_attachments(definition.disk.is_some(), self.formatter.is_some())
+            .map_err(io::Error::other)?;
         self.assemble_selected(definition, Some(environment))
-    }
-    fn check_environment(
-        &self,
-        definition: &MachineDefinition,
-        environment: Option<&GuestEnvironment>,
-    ) -> io::Result<()> {
-        if environment.is_some_and(|e| !e.named_volumes.is_empty()) {
-            if definition.disk.is_none() {
-                return Err(io::Error::other(
-                    "named guest volumes require a machine disk at /dev/vda",
-                ));
-            }
-            if self.formatter.is_none() {
-                return Err(io::Error::other(
-                    "named guest volumes require guest asset mke2fs; package the static guest formatter",
-                ));
-            }
-        }
-        Ok(())
     }
     fn assemble_selected(
         &self,
@@ -202,7 +185,11 @@ impl Factory {
         definition: &MachineDefinition,
         environment: Option<&GuestEnvironment>,
     ) -> io::Result<PVMachine> {
-        self.check_environment(definition, environment)?;
+        if let Some(environment) = environment {
+            environment
+                .check_attachments(definition.disk.is_some(), self.formatter.is_some())
+                .map_err(io::Error::other)?;
+        }
         boot::RamLayout::native(definition.resources.memory_bytes).map_err(io::Error::other)?;
         let initrd = self.assemble_selected(definition, environment)?;
         self.construct_archive(definition, initrd)

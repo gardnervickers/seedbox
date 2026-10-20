@@ -1,6 +1,7 @@
 //! Actual stopped native/device/PV-page/physical RAM projection. No snapshot
 //! file, migration digest, CPU entry, clock adoption or durability mutation.
 use super::*;
+use seedbox_machine::machine::hex;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 // Compile the pure ARM projection on the host for golden/model tests as well.
@@ -8,9 +9,6 @@ use sha2::{Digest, Sha256};
 #[cfg(any(target_arch = "aarch64", test))]
 #[path = "aarch64/backend/evidence.rs"]
 pub(super) mod arm;
-pub(super) fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|v| format!("{v:02x}")).collect()
-}
 pub(super) fn part(name: &str, value: &impl Serialize) -> Result<(String, String)> {
     let b = serde_json::to_vec(value).map_err(|e| format!("PV evidence {name}: {e}"))?;
     Ok((name.into(), hex(&Sha256::digest(b))))
