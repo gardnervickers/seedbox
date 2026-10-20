@@ -103,6 +103,42 @@ fn unknown_input_sources_return_not_found_without_creating_resources() {
 }
 
 #[test]
+fn project_submissions_are_held_to_what_a_project_can_express() {
+    let mut catalogue = Catalogue::in_memory();
+    let mut relative = request();
+    relative
+        .spec
+        .configuration
+        .services
+        .get_mut("oracle")
+        .unwrap()
+        .source = seedbox_spec::ImageSource::Build {
+        context: "context".into(),
+        dockerfile: "context/Dockerfile".into(),
+    };
+    let mut tolerance = request();
+    tolerance.spec.configuration.schedule.stop_tolerance_ns = 1;
+    let mut nul = request();
+    nul.spec
+        .configuration
+        .services
+        .get_mut("oracle")
+        .unwrap()
+        .command = Some(vec!["run\0".into()]);
+    for (invalid, path) in [
+        (relative, "$.services.oracle.source"),
+        (tolerance, "$.schedule"),
+        (nul, "$.services.oracle"),
+    ] {
+        assert!(
+            matches!(catalogue.submit(invalid), Err(Error::Invalid(message)) if message.contains(path)),
+            "{path}"
+        );
+    }
+    assert_eq!(catalogue.list().count(), 0);
+}
+
+#[test]
 fn accepted_submission_and_request_identity_are_idempotent() {
     let mut catalogue = Catalogue::in_memory();
     let mut invalid = request();

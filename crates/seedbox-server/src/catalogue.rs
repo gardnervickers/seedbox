@@ -363,18 +363,8 @@ impl Catalogue {
                 Ok(None)
             }
             InputSource::Project => {
-                let config = &spec.configuration;
-                if config.check.exit_code != 0 {
-                    return Err(Error::Invalid(
-                        "oracle success is always exit code zero".into(),
-                    ));
-                }
-
-                if config.schedule.stop_tolerance_ns != 0 {
-                    return Err(Error::Invalid(
-                        "new simulations use default stop tolerance settings".into(),
-                    ));
-                }
+                seedbox_application::config::validate_project(&spec.configuration)
+                    .map_err(|error| Error::Invalid(error.to_string()))?;
                 Ok(None)
             }
             InputSource::Checkpoint {

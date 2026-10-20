@@ -1,5 +1,5 @@
 //! Resolve native project inputs without contacting an image engine.
-use super::*;
+use super::{project_form::overlaps, *};
 use seedbox_spec::project::{Machine, Project};
 
 pub(super) fn parse(
@@ -60,7 +60,7 @@ pub(super) fn parse(
         "$.simulator.quantum",
         false,
     )?;
-    Ok(Simulation {
+    let simulation = Simulation {
         name: project.name,
         source: source.to_owned(),
         services,
@@ -97,7 +97,9 @@ pub(super) fn parse(
                 .ok_or_else(|| validation("$.simulator.quantum", "expected a positive duration"))?,
             machine_workers: project.simulator.machine_workers,
         },
-    })
+    };
+    validate_project(&simulation)?;
+    Ok(simulation)
 }
 
 fn resolve_machine(
@@ -212,10 +214,6 @@ fn resolve_machine(
         volumes,
         network: "default".into(),
     })
-}
-
-fn overlaps(a: &str, b: &str) -> bool {
-    a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
 }
 
 fn collect_files(

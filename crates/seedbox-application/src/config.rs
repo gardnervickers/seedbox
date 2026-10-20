@@ -1,6 +1,7 @@
 //! Native seedbox.yaml parsing without builds, registry access, or execution.
 
 mod native_project;
+mod project_form;
 
 use crate::{invalid, Error, Result};
 use serde_yaml_ng::Value;
@@ -9,6 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub use project_form::validate_project;
 pub use seedbox_artifacts::config::*;
 
 /// Load explicit native project inputs; no process environment is read.
