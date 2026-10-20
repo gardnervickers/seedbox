@@ -111,12 +111,33 @@ pub async fn command_async(
     capture_child(child, directory, label, deadline).await
 }
 
+// A cancelled capture drops its future before it can await the child. Keep the
+// child owned by a cleanup task so a killed observer cannot remain a zombie.
+struct Observer(Option<tokio::process::Child>);
+
+impl Drop for Observer {
+    fn drop(&mut self) {
+        let Some(mut child) = self.0.take() else {
+            return;
+        };
+        let _ = child.start_kill();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = child.wait().await;
+            });
+        }
+        // Without a running executor, kill_on_drop remains the fallback.
+    }
+}
+
 async fn capture_child(
-    mut child: tokio::process::Child,
+    child: tokio::process::Child,
     directory: &Path,
     label: &str,
     deadline: tokio::time::Instant,
 ) -> Result<(), String> {
+    let mut observer = Observer(Some(child));
+    let child = observer.0.as_mut().ok_or("missing observation child")?;
     let stdout = child.stdout.take().ok_or("missing observation stdout")?;
     let stderr = child.stderr.take().ok_or("missing observation stderr")?;
     let out_path = directory.join(format!("{label}.stdout"));
@@ -138,9 +159,11 @@ async fn capture_child(
                 .kill()
                 .await
                 .map_err(|e| format!("{label}: diagnostic timeout; cleanup: {e}"))?;
+            observer.0.take();
             return Err(format!("{label}: diagnostic timeout"));
         }
     };
+    observer.0.take();
     let mut errors = Vec::new();
     for result in [out, err] {
         if let Err(error) = result {
