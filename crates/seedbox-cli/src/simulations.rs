@@ -202,7 +202,7 @@ pub(super) fn run_checkpoint(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn explore(
+pub(super) fn run_count(
     server: &ServerArgs,
     project: &ProjectArg,
     seed: Option<u64>,
@@ -413,7 +413,7 @@ pub(super) fn replay(
     )
 }
 
-pub(super) fn rerun(
+pub(super) fn run_from(
     server: &ServerArgs,
     id: &SimulationId,
     paused: bool,
@@ -593,7 +593,7 @@ pub(super) fn delete(server: &ServerArgs, id: &SimulationId) -> Result<u8> {
     Ok(0)
 }
 
-pub(super) fn get(server: &ServerArgs, id: &SimulationId, json: bool) -> Result<u8> {
+pub(super) fn show_status(server: &ServerArgs, id: &SimulationId, json: bool) -> Result<u8> {
     let client = daemon::connect(server)?;
     let resource = runtime()?
         .block_on(client.describe(id))
@@ -705,7 +705,7 @@ fn age(seconds: u128) -> String {
     }
 }
 
-pub(super) fn describe(server: &ServerArgs, id: &SimulationId, json: bool) -> Result<u8> {
+pub(super) fn show_definition(server: &ServerArgs, id: &SimulationId, json: bool) -> Result<u8> {
     let client = daemon::connect(server)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
