@@ -34,10 +34,14 @@ fn exited_target_can_crash_and_reboot_while_separate_oracle_remains_alive() {
         })
         .unwrap();
     driver.step(at(2)).unwrap();
-    assert!(driver.drain_events().iter().any(|event| matches!(
-        &event.kind,
-        EventKind::InputRejected { key: found, .. } if *found == key("early")
-    )));
+    assert!(driver
+        .drain_observations()
+        .events
+        .iter()
+        .any(|event| matches!(
+            &event.kind,
+            EventKind::InputRejected { key: found, .. } if *found == key("early")
+        )));
     crash_then_reboot(&mut driver, id, 2);
     assert_eq!(
         driver.step(at(2)).unwrap(),
@@ -90,7 +94,7 @@ fn self_crashed_target_reboots_directly_but_self_shutdown_needs_a_crash() {
         driver.step(at(100)).unwrap(),
         StepOutcome::Blocked { at: at(2) }
     );
-    driver.drain_events();
+    driver.drain_observations();
     driver
         .with_barrier(|barrier| {
             assert_eq!(
@@ -118,7 +122,7 @@ fn self_crashed_target_reboots_directly_but_self_shutdown_needs_a_crash() {
         })
         .unwrap();
     driver.step(at(2)).unwrap();
-    let events = driver.drain_events();
+    let events = driver.drain_observations().events;
     let rejected = |name: &str| {
         events.iter().any(|event| {
             matches!(&event.kind,
@@ -226,7 +230,7 @@ fn future_lifecycle_inputs_survive_exit_with_the_same_identity() {
 fn same_time_crash_then_reboot_inputs_apply_the_crash_and_reject_the_reboot() {
     let mut driver = controlled_targets(2, &[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
-    driver.drain_events();
+    driver.drain_observations();
     driver
         .with_barrier(|barrier| {
             barrier.schedule(at(0), key("crash"), Action::Crash(Target::Machine(id)))?;
@@ -239,7 +243,7 @@ fn same_time_crash_then_reboot_inputs_apply_the_crash_and_reject_the_reboot() {
     );
     // Generated effects join the FIFO tail, so the Reboot input is admitted
     // while the target is still up, before the Crash effect applies.
-    let events = driver.drain_events();
+    let events = driver.drain_observations().events;
     let facts: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -515,7 +519,7 @@ fn repeated_boot_lifecycle_results_are_worker_independent() {
             ["crash", "reboot", "crash", "reboot", "crash"]
         );
         assert_eq!(observations[1].3, ["crash", "reboot", "crash"]);
-        let observed = (outcomes, observations, driver.drain_events());
+        let observed = (outcomes, observations, driver.drain_observations().events);
         if let Some(reference) = &reference {
             assert_eq!(&observed, reference);
         } else {

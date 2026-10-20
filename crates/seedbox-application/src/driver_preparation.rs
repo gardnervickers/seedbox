@@ -1,16 +1,10 @@
 //! OCI ingestion and preparation bridge to explicit Driver boot inputs.
-use crate::{
-    config::Simulation,
-    execution::PreparedInputs,
-    preparation::{OciPreparer, PreparationContext},
-    store::ContentStore,
-    Error, Result,
-};
+use crate::{preparation::OciPreparer, Error, Result};
 use seedbox_driver_execution::{driver_world::preparation::OciBootFactory, runtime_assets::Inputs};
 use std::{fs, path::Path};
-// ContainerTransport's archive is ready for the legacy boot assembler: every
-// entry (and hard-link target) already carries its rootfs/ transport prefix.
-// The SDK takes an application-root tar and supplies its own rootfs/ prefix.
+// ContainerTransport's archive carries a rootfs/ transport prefix on every
+// entry (and hard-link target). The SDK takes an application-root tar and
+// supplies its own rootfs/ prefix.
 // Rewrite metadata only; never extract guest paths onto the host.
 fn logical_archive(path: &Path) -> Result<Vec<u8>> {
     fn relative(path: &Path) -> Result<&Path> {
@@ -115,22 +109,6 @@ pub fn validate_oci_runtime(preparer: &OciPreparer, runtime: &Inputs) -> Result<
         std::num::NonZeroU32::new(1).unwrap().into(),
     )?;
     Ok(())
-}
-
-pub fn retain_oci_prepared(
-    inputs: &mut PreparedInputs,
-    simulation: &Simulation,
-    runtime: &Inputs,
-    store: &ContentStore,
-    context: &PreparationContext,
-) -> Result<()> {
-    seedbox_driver_execution::driver_world::preparation::retain_oci_prepared(
-        inputs,
-        simulation,
-        runtime,
-        store,
-        &|| context.check(),
-    )
 }
 
 #[cfg(test)]

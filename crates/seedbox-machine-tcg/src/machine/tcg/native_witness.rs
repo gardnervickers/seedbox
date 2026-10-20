@@ -44,7 +44,7 @@ struct Cached {
     witness: String,
 }
 fn bytes(s: &str) -> Result<[u8; 32], Error> {
-    if !evidence::valid_hash(s) {
+    if !seedbox_machine::machine::is_sha256_hex(s) {
         return Err(Error("TCG native witness: invalid chain SHA256".into()));
     }
     let mut out = [0; 32];
@@ -173,7 +173,7 @@ impl TcgMachine {
             &self.guest,
             self.shutdown_requested,
         ))?;
-        Ok(policy::hex(&chain::observe(&h, &pending)))
+        Ok(seedbox_machine::machine::hex(&chain::observe(&h, &pending)))
     }
     pub(super) fn cache_native(
         &mut self,
@@ -242,7 +242,7 @@ impl TcgMachine {
             ),
             None => (chain::initial(), false),
         };
-        process.start_native_witness(&policy::hex(&origin), boot, forced)?;
+        process.start_native_witness(&seedbox_machine::machine::hex(&origin), boot, forced)?;
         self.native_witness.predecessor = None;
         Ok(())
     }

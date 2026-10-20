@@ -15,9 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 #[tokio::test]
 async fn unix_client_submits_describes_and_retries_without_duplicate_work() {
     let temp = tempfile::tempdir().unwrap();
-    let catalogue = Arc::new(seedbox_server::manager::Manager::new(
-        Catalogue::open(&temp.path().join("catalogue")).unwrap(),
-    ));
+    let catalogue = Arc::new(seedbox_server::manager::Manager::new(Catalogue::in_memory()));
     let (work, mut pending) = mpsc::channel(4);
     let socket = temp.path().join("api.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -228,9 +226,7 @@ async fn status_refreshes_elapsed_time_and_preserves_failed_preparation_timing()
     use seedbox_api::{ExecutionTermination, Phase, Stage, TestVerdict};
     use seedbox_server::manager::Manager;
     let temp = tempfile::tempdir().unwrap();
-    let manager = Arc::new(Manager::new(
-        Catalogue::open(&temp.path().join("catalogue")).unwrap(),
-    ));
+    let manager = Arc::new(Manager::new(Catalogue::in_memory()));
     let (work, mut pending) = mpsc::channel(4);
     let socket = temp.path().join("api.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -333,9 +329,9 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
     let temp = tempfile::tempdir().unwrap();
     let manager = Arc::new(seedbox_server::manager::Manager::new(Catalogue::in_memory()));
     let mut request = support::resolved_request("timeline-source");
-    request.spec.program = vec![seedbox_api::ProgramInput {
+    request.spec.program = vec![seedbox_spec::definition::Override {
         timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
-        key: "authored-1".into(),
+        id: "authored-1".into(),
         at_ns: 100_000_000,
         action: serde_json::json!({"action":"pause","machine":"oracle"}),
     }];
@@ -456,7 +452,7 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
             .spec
             .program
             .iter()
-            .map(|input| input.key.as_str())
+            .map(|input| input.id.as_str())
             .collect::<Vec<_>>(),
         vec!["z-first", "a-second", "authored-1"]
     );
@@ -520,9 +516,9 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
     assert!(generated.get("inputs").is_none() && generated.get("configuration").is_none());
     assert_eq!(
         derived.spec.program,
-        vec![seedbox_api::ProgramInput {
+        vec![seedbox_spec::definition::Override {
             timeout_ns: 0,
-            key: "z-first".into(),
+            id: "z-first".into(),
             at_ns: 100,
             action: serde_json::json!({"action":"stop","machine":"oracle"}),
         }]
@@ -544,9 +540,7 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
 #[tokio::test]
 async fn native_acceptance_submissions_round_trip_over_unix_http() {
     let temp = tempfile::tempdir().unwrap();
-    let manager = Arc::new(seedbox_server::manager::Manager::new(
-        Catalogue::open(&temp.path().join("catalogue")).unwrap(),
-    ));
+    let manager = Arc::new(seedbox_server::manager::Manager::new(Catalogue::in_memory()));
     let (work, mut pending) = mpsc::channel(4);
     let socket = temp.path().join("api.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();

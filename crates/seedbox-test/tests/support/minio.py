@@ -214,7 +214,7 @@ try:
         elif action == 'check_console':
             observation['value'] = verify.check_console(request['text'], request['mode'])
         elif action == 'verify':
-            observation['value'] = verify.verify(Path(request['root']), request['mode'], replay=request['replay'])
+            observation['value'] = verify.verify(Path(request['root']), request['mode'])
         elif action in ('stage', 'generate'):
             stage_inputs.PINS = request['pins']
             if action == 'stage':

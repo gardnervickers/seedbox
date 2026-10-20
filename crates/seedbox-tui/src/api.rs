@@ -541,7 +541,8 @@ async fn control(
     };
     let shown = serde_json::to_string_pretty(&request).unwrap_or_default();
     let result = async {
-        let mut receipt = client.request_control(&id, &request).await?;
+        let mut receipt: seedbox_api::ControlReceipt =
+            client.request_control(&id, &request).await?;
         let deadline = tokio::time::Instant::now() + RECEIPT_WAIT;
         while receipt.state == ControlState::Accepted && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -676,7 +677,7 @@ async fn fault(
     let mut rejected = false;
     let result = async {
         let mut receipt = client
-            .request_control_json(&id, &request)
+            .request_control::<serde_json::Value>(&id, &request)
             .await
             .map_err(|error| {
                 rejected = matches!(
@@ -693,7 +694,7 @@ async fn fault(
         let deadline = tokio::time::Instant::now() + RECEIPT_WAIT;
         while receipt["state"]["type"] == "accepted" && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            receipt = client.control_receipt_json(&id, &request_id).await?;
+            receipt = client.control_receipt(&id, &request_id).await?;
         }
         Ok::<_, seedbox_client::Error>(receipt)
     }
@@ -1089,7 +1090,7 @@ mod tests {
         assert_eq!(request.metadata.labels["application"], "demo");
         assert!(request.options.start_paused);
         assert_eq!(request.options.wall_time_ns, Some(9999));
-        assert_eq!(request.spec.program[0].key, "external");
+        assert_eq!(request.spec.program[0].id, "external");
         assert!(matches!(
             request.spec.inputs,
             seedbox_api::InputSource::Resolved { .. }

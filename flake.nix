@@ -106,37 +106,10 @@
             testFixtures = import ./crates/seedbox-machine/pv-test-fixtures.nix { inherit pkgs guest; };
           };
         in {
-          seedboxCheck = import ./nix/seedbox-check.nix { inherit pkgs; };
-          minioPythonFixture = minioPythonFixture pkgs;
-          networkTools = pkgs.iproute2;
-          tcgQemu = import ./nix/tcg.nix { inherit pkgs; };
-          tcgLinux = import ./nix/tcg-linux.nix { inherit pkgs; };
+          tcgQemu = machineTcg.qemu;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           dynamorioTestFixtures = import ./crates/seedbox-machine/dynamorio-test-fixtures.nix { inherit pkgs; };
           dynamorioDebugTestFixtures = import ./crates/seedbox-machine/dynamorio-test-fixtures.nix { inherit pkgs; debug = true; };
-          # Compile only: ARM native cfg with the project-managed target stdlib.
-          # This does not change the host dev shell or build/run guest inputs.
-          machinePvAarch64Check = pkgs.pkgsCross.aarch64-multiplatform.rustPlatform.buildRustPackage {
-            pname = "seedbox-machine-pv-aarch64-check";
-            version = "0.1.0";
-            src = pkgs.lib.cleanSourceWith {
-              src = ./.;
-              filter = path: type: path != toString ./vendor && pkgs.lib.cleanSourceFilter path type;
-            };
-            cargoLock.lockFile = ./Cargo.lock;
-            doCheck = false;
-            buildPhase = ''
-              runHook preBuild
-              cargo check -p seedbox-machine-pv --all-features --target aarch64-unknown-linux-gnu
-              runHook postBuild
-            '';
-            installPhase = ''
-              mkdir -p "$out"
-              printf '%s\n' 'aarch64-linux cargo check only; no native execution' > "$out/check-kind"
-            '';
-          };
-          # Name outputs explicitly so selecting helpers never imports the kernel recipe.
-          tcgKernel = import ./nix/tcg-kernel.nix { inherit pkgs; };
           machineTcgAssets = machineTcg.assets;
           machineTcgTestFixtures = machineTcg.testFixtures;
           # These executables run INSIDE the configured Linux guest. TCG always
@@ -147,9 +120,6 @@
           }).filesystemTools.bin;
         } // pkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.isAarch64 || pkgs.stdenv.hostPlatform.isx86_64) {
           # seedbox-machine's own native PV guest inputs, for this host's architecture.
-          machinePvKernel = machinePv.kernel;
-          machinePvProgress = machinePv.progress;
-          machinePvGuest = machinePv.guest;
           machinePvAssets = machinePv.assets;
           machinePvTestFixtures = machinePv.testFixtures;
         }

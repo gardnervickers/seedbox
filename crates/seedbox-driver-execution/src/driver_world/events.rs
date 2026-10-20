@@ -41,34 +41,17 @@ impl Publisher {
             sequence: 0,
         })
     }
-    /// Fan out one already-bookkept handoff; never accept unconsumed causal facts.
+    /// Fan out one handoff after the worker applied its required bookkeeping.
     pub(super) fn batch(
         &mut self,
         state: &mut State,
         names: &BTreeMap<MachineId, String>,
         batch: driver::FlushResults,
     ) -> Result<()> {
-        if !batch.changes.is_empty() {
-            return Err(invalid(
-                "observation publication received unconsumed required changes",
-            ));
-        }
-        let mut omitted = batch.omitted_events;
         for event in batch.events {
-            let next = state.world.publication.session.next_driver_sequence;
-            if event.sequence > next {
-                // Resizing without draining can retain events after a gap, not
-                // just a dense prefix. Account for each interior omission once.
-                let gap = event.sequence - next;
-                omitted = omitted
-                    .checked_sub(gap)
-                    .ok_or_else(|| invalid("Driver event sequence gap exceeds omitted count"))?;
-                self.event_gap(state, gap, event.sequence)?;
-            }
             self.publish(state, names, event)?;
         }
         state.world.position = super::worker::position(batch.position);
-        self.event_gap(state, omitted, batch.next_event_sequence)?;
         self.frames(state, names, batch.frames)
     }
     fn emit(
@@ -174,31 +157,6 @@ impl Publisher {
         }
         Ok(())
     }
-    pub(super) fn event_gap(&mut self, state: &mut State, omitted: u64, next: u64) -> Result<()> {
-        if omitted != 0 && self.socket.is_some() {
-            self.sequence = self
-                .sequence
-                .checked_add(omitted)
-                .ok_or_else(|| invalid("Driver event observation sequence exhausted"))?;
-            state.world.publication.session.observation_records = state
-                .world
-                .publication
-                .session
-                .observation_records
-                .checked_add(omitted)
-                .ok_or_else(|| invalid("Driver event observation count exhausted"))?;
-            self.emit(
-                state,
-                "",
-                0,
-                state.world.position.simulated_time_ns,
-                Kind::Frames { frames: vec![] },
-            )?;
-        }
-        state.world.publication.session.next_driver_sequence = next;
-        Ok(())
-    }
-
     pub(super) fn close(&mut self, state: &mut State) -> Result<()> {
         self.emit(
             state,

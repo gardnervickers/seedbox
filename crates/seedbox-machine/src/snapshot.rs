@@ -289,4 +289,6 @@ impl<'a, W: Write> Writer<'a, W> {
     }
 }
 
-pub(crate) mod record;
+mod record;
+pub(crate) use record::charge_index;
+pub use record::Record;

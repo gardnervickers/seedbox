@@ -1,25 +1,10 @@
 //! Actual stopped worker evidence plus client-owned pending work and disk.
 use super::*;
-use seedbox_machine::machine::{EvidenceDisposition, RamRegion, StateEvidence};
+use seedbox_machine::machine::{
+    combined_digest, hex, EvidenceDisposition, RamRegion, StateEvidence,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-pub(super) fn hex(b: &[u8]) -> String {
-    b.iter().map(|v| format!("{v:02x}")).collect()
-}
-pub(super) fn valid_hash(s: &str) -> bool {
-    s.len() == 64
-        && s.bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-fn combined(parts: &[(String, String)]) -> String {
-    let mut h = Sha256::new();
-    for (n, v) in parts {
-        h.update(n.as_bytes());
-        h.update([0]);
-        h.update(v.as_bytes());
-    }
-    hex(&h.finalize())
-}
 fn regions(memory: u64) -> Result<Vec<(u64, u64)>, String> {
     let layout = boot::RamLayout::native(memory)?;
     let mut list: Vec<_> = layout
@@ -69,7 +54,7 @@ pub(super) fn validate(e: &StateEvidence, memory: u64) -> Result<(), String> {
     if e.regions.iter().map(|r| (r.base, r.length)).ne(expected) {
         return Err("PV evidence mapped RAM differs from actual layout".into());
     }
-    if combined(&e.parts) != e.digest {
+    if combined_digest(&e.parts) != e.digest {
         return Err("PV evidence combined digest".into());
     }
     let mut layout = Sha256::new();
@@ -106,60 +91,19 @@ pub(super) fn validate(e: &StateEvidence, memory: u64) -> Result<(), String> {
     Ok(())
 }
 pub(super) fn disk_digest(store: &Store, torn: bool) -> Result<String, String> {
-    let mut volatile = Sha256::new();
-    let mut count = 0u64;
-    let (stable, _) = store.crashed_keeping(|sector, bytes| {
-        volatile.update(sector.to_le_bytes());
-        volatile.update(bytes);
-        count += 1;
-        false
-    });
-    let mut h = Sha256::new();
-    h.update(b"seedbox-disk-state-v1");
-    h.update(store.capacity().to_le_bytes());
-    h.update([u8::from(torn)]);
-    let mut sector = [0; 512];
-    for n in 0..stable.capacity() {
-        stable
-            .read(n, &mut sector)
-            .map_err(|e| format!("PV disk evidence: {e:?}"))?;
-        h.update(sector);
-    }
-    h.update(count.to_le_bytes());
-    h.update(volatile.finalize());
-    Ok(hex(&h.finalize()))
+    store
+        .state_digest(torn)
+        .map_err(|e| format!("PV disk evidence: {e:?}"))
 }
 pub(super) fn lose(
     store: &Store,
     p: Option<&policy::Named>,
     boot: u64,
 ) -> Result<(Store, u64), String> {
-    let Some(p) = p.filter(|p| p.settings.torn_writes) else {
-        return Ok(store.crashed_keeping(|_, _| false));
-    };
-    let mut h = Sha256::new();
-    h.update(b"seedbox-v1");
-    h.update(p.settings.seed.to_le_bytes());
-    h.update(format!("disk-loss/{}/{boot}", p.name).as_bytes());
-    let key = h.finalize();
-    let mut counter = 0u64;
-    let mut overflow = false;
-    let result = store.crashed_keeping(|_, _| {
-        let Some(next) = counter.checked_add(1) else {
-            overflow = true;
-            return false;
-        };
-        let mut h = Sha256::new();
-        h.update(key);
-        h.update(counter.to_le_bytes());
-        counter = next;
-        let n = u64::from_le_bytes(h.finalize()[..8].try_into().expect("eight digest bytes"));
-        (n as f64 / (u64::MAX as f64 + 1.0)) < 0.5
-    });
-    if overflow {
-        return Err("PV disk-loss RNG exhausted".into());
-    }
-    Ok(result)
+    let torn = p
+        .filter(|p| p.settings.torn_writes)
+        .map(|p| (p.settings.seed, p.name.as_str()));
+    store.crash(torn, boot).map_err(|e| format!("PV {e}"))
 }
 pub(super) fn policy_digest(
     policy: &policy::Named,
@@ -176,7 +120,7 @@ pub(super) fn policy_digest(
         settings,
         speed_permille,
     } = policy;
-    let policy::Settings {
+    let seedbox_machine::definition::BackendPolicy {
         seed,
         timer_jitter_ns,
         stop_tolerance_ns,
@@ -310,7 +254,7 @@ impl PVMachine {
         let e = StateEvidence {
             boot,
             disposition,
-            digest: combined(&parts),
+            digest: combined_digest(&parts),
             parts,
             regions: expected
                 .into_iter()

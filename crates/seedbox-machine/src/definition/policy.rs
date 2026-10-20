@@ -30,6 +30,17 @@ pub struct BackendPolicy {
     pub controller: Option<String>,
 }
 
+crate::record!(BackendPolicy {
+    seed: u64,
+    timer_jitter_ns: u64,
+    stop_tolerance_ns: u64,
+    torn_writes: bool,
+    full_state: bool,
+    seeded_pv_speed: bool,
+    boot_end_evidence: bool,
+    controller: Option<String>,
+});
+
 impl BackendPolicy {
     /// Reject unsupported ranges before constructing a native machine.
     pub fn validate(&self) -> Result<(), &'static str> {

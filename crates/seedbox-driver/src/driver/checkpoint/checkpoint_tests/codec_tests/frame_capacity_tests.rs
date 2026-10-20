@@ -43,7 +43,7 @@ fn pending_network_authority_bytes_exclude_frame_capacity_facts_and_omission_cur
             } else {
                 expected = Some(bytes.clone());
             }
-            let retained = source.drain_frames();
+            let retained = source.drain_observations().frames;
             let kept = capacity.min(3);
             assert_eq!(retained.facts.len(), kept);
             assert_eq!(
@@ -56,7 +56,7 @@ fn pending_network_authority_bytes_exclude_frame_capacity_facts_and_omission_cur
             let finished = states(&source);
             for restored_workers in [1, 4] {
                 let mut branch = restore(&checkpoint, restored_workers);
-                assert_eq!(branch.drain_frames(), FrameFacts::default());
+                assert_eq!(branch.drain_observations().frames, FrameFacts::default());
                 assert_eq!(artifact(branch.checkpoint().unwrap()).0, bytes);
                 advance(&mut branch, 80);
                 assert_eq!(states(&branch), finished);
@@ -86,7 +86,7 @@ fn unused_frame_capacity_larger_than_capture_roundtrips_with_tight_limits() {
         let expected_states = states(&driver);
         for workers in [1, 4] {
             let mut restored = restore(&checkpoint, workers);
-            assert_eq!(restored.drain_frames(), FrameFacts::default());
+            assert_eq!(restored.drain_observations().frames, FrameFacts::default());
             assert_eq!(advance(&mut restored, 60), expected);
             assert_eq!(states(&restored), expected_states);
         }
@@ -115,7 +115,7 @@ fn buffered_frames_shrunk_cleared_or_with_unused_capacity_roundtrip() {
         advance(&mut driver, 50);
         driver.set_frame_capacity(capacity);
         let checkpoint = tight_roundtrip(&mut driver);
-        let retained = driver.drain_frames();
+        let retained = driver.drain_observations().frames;
         let kept = capacity.min(3);
         assert_eq!(retained.facts.len(), kept);
         assert_eq!(retained.omitted, (3 - kept) as u64);
@@ -124,7 +124,7 @@ fn buffered_frames_shrunk_cleared_or_with_unused_capacity_roundtrip() {
         let expected_states = states(&driver);
         for workers in [1, 4] {
             let mut restored = restore(&checkpoint, workers);
-            assert_eq!(restored.drain_frames(), FrameFacts::default());
+            assert_eq!(restored.drain_observations().frames, FrameFacts::default());
             assert_eq!(advance(&mut restored, 80), expected);
             assert_eq!(states(&restored), expected_states);
         }

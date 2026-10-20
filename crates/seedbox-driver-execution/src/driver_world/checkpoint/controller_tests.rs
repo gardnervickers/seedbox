@@ -60,7 +60,7 @@ fn codec5_service_envelope_preserves_controller_and_disabled_authority() {
         )
         .unwrap();
         source.step(Timestamp::from_nanos(20)).unwrap();
-        let expected = session_events(source.drain_events());
+        let expected = session_events(source.drain_observations().events);
         drop(source);
         let envelope = read(&manifest).unwrap();
         assert_eq!(
@@ -91,9 +91,9 @@ fn codec5_service_envelope_preserves_controller_and_disabled_authority() {
         for workers in [1, 4] {
             let mut branch = restored(&checkpoint, workers);
             authority.validate_saved(branch.controller_setup()).unwrap();
-            assert!(branch.drain_events().is_empty());
+            assert!(branch.drain_observations().events.is_empty());
             branch.step(Timestamp::from_nanos(20)).unwrap();
-            assert_eq!(session_events(branch.drain_events()), expected);
+            assert_eq!(session_events(branch.drain_observations().events), expected);
         }
     }
 }

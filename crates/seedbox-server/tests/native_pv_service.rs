@@ -4,19 +4,19 @@
 
 #[path = "support/native_service.rs"]
 pub mod native_service;
-use native_service::{native_session, DriverBackend};
+use native_service::{native_session, CpuBackend};
 
 #[tokio::test]
 async fn retained_driver_pv_guest_completes_and_cancellation_reaps_owned_inputs() {
-    native_service::native_completion_and_cancellation(DriverBackend::Pv).await;
+    native_service::native_completion_and_cancellation(CpuBackend::Pv).await;
 }
 #[tokio::test]
 async fn fresh_native_pv_same_submission_witnesses_match() {
-    native_session(DriverBackend::Pv, &[200_000, 200_000], false, Some(true)).await;
+    native_session(CpuBackend::Pv, &[200_000, 200_000], false, Some(true)).await;
 }
 #[tokio::test]
 async fn fresh_native_pv_different_input_witnesses_do_not_match() {
-    native_session(DriverBackend::Pv, &[200_000, 400_000], false, Some(false)).await;
+    native_session(CpuBackend::Pv, &[200_000, 400_000], false, Some(false)).await;
 }
 
 #[tokio::test]
@@ -38,7 +38,7 @@ async fn native_pv_public_checkpoint_export_import_matches_uninterrupted() {
 }
 #[tokio::test]
 async fn native_pv_checkpoint_with_pending_sleep_and_network_continues() {
-    native_service::checkpoint_in_flight_continuation(DriverBackend::Pv).await;
+    native_service::checkpoint_in_flight_continuation(CpuBackend::Pv).await;
 }
 #[tokio::test]
 async fn native_pv_network_frames_are_observation_only() {
@@ -47,5 +47,5 @@ async fn native_pv_network_frames_are_observation_only() {
 
 #[tokio::test]
 async fn native_pv_forced_panic_awaits_owned_cleanup_before_rethrow() {
-    native_service::native_forced_failure(DriverBackend::Pv, false).await;
+    native_service::native_forced_failure(CpuBackend::Pv, false).await;
 }

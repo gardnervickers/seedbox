@@ -1,5 +1,4 @@
 //! Backend implementation over the common machine contract.
-pub use seedbox_machine::machine::*;
 #[cfg(unix)]
 pub mod tcg;
 

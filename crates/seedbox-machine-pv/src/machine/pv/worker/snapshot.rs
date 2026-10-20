@@ -1,6 +1,7 @@
 //! Pure closed records and structural checks for the worker-owned image.
 use super::*;
-use crate::machine::pv::codec::{json_len, json_write, record::Record};
+use crate::machine::pv::codec::{json_len, json_write};
+use seedbox_machine::snapshot::Record;
 use seedbox_machine::snapshot::{CodecError, Reader, Writer};
 
 pub(in crate::machine::pv) struct Header(Capture);

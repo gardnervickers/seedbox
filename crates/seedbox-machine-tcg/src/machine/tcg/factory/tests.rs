@@ -47,7 +47,7 @@ fn loaded_assets_are_owned_and_workload_is_reusable() {
     }
     // A disk is owned by the machine's manifest, sharing its image.
     let mut with_disk = definition.clone();
-    let image = crate::definition::DiskImage::from_bytes(vec![7; 1024]).unwrap();
+    let image = seedbox_machine::definition::DiskImage::from_bytes(vec![7; 1024]).unwrap();
     with_disk.disk = Some(image.clone());
     let attached = factory.create(&with_disk).unwrap();
     assert_eq!(attached.manifest.disk, Some(image));
@@ -56,8 +56,8 @@ fn loaded_assets_are_owned_and_workload_is_reusable() {
     // address; the networkless command line above is unchanged.
     let mut networked = definition.clone();
     networked.network = Some(
-        crate::definition::NetworkInterface::new(
-            crate::definition::MacAddress::new([2, 0, 0, 0, 0, 1]).unwrap(),
+        seedbox_machine::definition::NetworkInterface::new(
+            seedbox_machine::definition::MacAddress::new([2, 0, 0, 0, 0, 1]).unwrap(),
             std::net::Ipv4Addr::new(10, 0, 0, 1),
             24,
         )
@@ -148,8 +148,8 @@ fn the_network_address_counts_toward_the_kernel_command_line_limit() {
     let mut definition = definition::definition(0);
     assert!(factory.create(&definition).is_ok());
     definition.network = Some(
-        crate::definition::NetworkInterface::new(
-            crate::definition::MacAddress::new([2, 0, 0, 0, 0, 1]).unwrap(),
+        seedbox_machine::definition::NetworkInterface::new(
+            seedbox_machine::definition::MacAddress::new([2, 0, 0, 0, 0, 1]).unwrap(),
             std::net::Ipv4Addr::new(10, 0, 0, 1),
             24,
         )

@@ -2,7 +2,6 @@
 use seedbox_control::{NetworkFaults, MAX_LINK_DELAY_NS, MAX_PPM};
 use sha2::{Digest, Sha256};
 
-pub type Pair = (usize, usize);
 /// Global link latency when the network config names none: one millisecond.
 pub use seedbox_engine_protocol::policy_config::DEFAULT_LATENCY_NS;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -55,10 +54,6 @@ pub struct QueueCounts {
     pub matched: u64,
     pub queue_dropped: u64,
     pub delayed_max_ns: u64,
-}
-pub fn pair_hash(h: &mut Sha256, (a, b): Pair) {
-    h.update((a as u64).to_le_bytes());
-    h.update((b as u64).to_le_bytes());
 }
 pub fn string_hash(h: &mut Sha256, s: &str) {
     h.update((s.len() as u64).to_le_bytes());

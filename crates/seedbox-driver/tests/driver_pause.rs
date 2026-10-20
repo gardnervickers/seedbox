@@ -214,7 +214,7 @@ fn settled(events: &[seedbox_driver::driver::Event]) -> Vec<(FaultAction, Settle
 fn pause_and_resume_follow_policy_state_and_rejected_inputs_never_consume_the_arm() {
     let mut driver = controlled_targets(2, &[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
-    driver.drain_events();
+    driver.drain_observations();
     let target = || Target::Machine(id);
     driver
         .with_barrier(|barrier| {
@@ -230,7 +230,7 @@ fn pause_and_resume_follow_policy_state_and_rejected_inputs_never_consume_the_ar
         driver.step(at(0)).unwrap(),
         StepOutcome::Blocked { at: at(0) }
     );
-    let events = driver.drain_events();
+    let events = driver.drain_observations().events;
     assert_eq!(rejected(&events), ["resume-1", "resume-2"]);
     // The repeated pause is admitted but stale at its FIFO turn.
     assert_eq!(
@@ -256,7 +256,7 @@ fn pause_and_resume_follow_policy_state_and_rejected_inputs_never_consume_the_ar
         driver_fixture::held(&held),
         Some((at(0), FaultAction::Resume, id))
     );
-    assert_eq!(rejected(&driver.drain_events()), ["pause-3"]);
+    assert_eq!(rejected(&driver.drain_observations().events), ["pause-3"]);
     assert_eq!(driver.step(at(100)).unwrap(), held);
     driver
         .with_barrier(|barrier| {
@@ -286,7 +286,7 @@ fn pause_and_resume_follow_policy_state_and_rejected_inputs_never_consume_the_ar
         driver_fixture::held(&driver.step(at(100)).unwrap()),
         Some((at(0), FaultAction::Crash, id))
     );
-    assert_eq!(rejected(&driver.drain_events()), ["resume-4"]);
+    assert_eq!(rejected(&driver.drain_observations().events), ["resume-4"]);
     driver
         .with_barrier(|barrier| {
             assert!(!barrier.machine(id)?.crashed);
@@ -309,7 +309,7 @@ fn pause_and_resume_follow_policy_state_and_rejected_inputs_never_consume_the_ar
         StepOutcome::Blocked { at: at(0) }
     );
     assert_eq!(
-        rejected(&driver.drain_events()),
+        rejected(&driver.drain_observations().events),
         ["pause-down", "resume-down"]
     );
     driver

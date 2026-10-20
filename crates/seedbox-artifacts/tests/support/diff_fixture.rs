@@ -47,7 +47,6 @@ fn fixture() -> sb::record::RunRecord {
         identity,
         attempt: "fixture".into(),
         performance_parameters: BTreeMap::new(),
-        allow_engine_change: false,
         log_policy: LogPolicy::default(),
         omitted_logs: BTreeMap::new(),
         outcome: Outcome::Pass,
@@ -66,8 +65,6 @@ fn fixture() -> sb::record::RunRecord {
         }),
         error: None,
         logs: BTreeMap::new(),
-        replay_of: None,
-        replay: None,
     }
 }
 

@@ -14,7 +14,7 @@
 //! 1=Blocked(optional deadline), 2=Shutdown, 3=Crashed. Unknown tags, reserved
 //! bits and trailing bytes reject. No host paths or executable identity occur.
 use super::{Boot, ExitReason, Manifest, Snapshot, State, Timestamp, COMMAND_LINE_SIZE};
-use crate::definition::{DiskImage, MacAddress};
+use seedbox_machine::definition::{DiskImage, MacAddress};
 use seedbox_machine::snapshot::{reserve, CodecError, DecodeLimits, Reader, Result, Writer};
 use std::io::{Read, Write};
 
@@ -135,8 +135,8 @@ fn validate_command(command: &str) -> Result<()> {
     Ok(())
 }
 fn validate_boot(kernel: &[u8], initrd: &[u8], firmware: &[u8], memory: u32) -> Result<()> {
-    super::super::assets::bzimage(kernel).map_err(|_| invalid("x86-64 bzImage"))?;
-    super::super::assets::bios(firmware).map_err(|_| invalid("x86 BIOS"))?;
+    seedbox_machine::machine::assets::bzimage(kernel).map_err(|_| invalid("x86-64 bzImage"))?;
+    seedbox_machine::machine::assets::bios(firmware).map_err(|_| invalid("x86 BIOS"))?;
     if initrd.len() as u64 > u64::from(memory) * 1024 * 1024 {
         return Err(invalid("initramfs exceeds guest RAM"));
     }
@@ -145,7 +145,7 @@ fn validate_boot(kernel: &[u8], initrd: &[u8], firmware: &[u8], memory: u32) -> 
 fn validate_disk(bytes: Option<&[u8]>, disk: Option<&DiskImage>) -> Result<()> {
     if let Some(bytes) = bytes {
         let disk = disk.ok_or(invalid("TCG snapshot disk does not match its manifest"))?;
-        crate::machine::disk::codec::validate_overlays(bytes, disk.sectors())
+        seedbox_machine::machine::disk::codec::validate_overlays(bytes, disk.sectors())
             .map_err(|_| invalid("disk overlays"))?;
     }
     Ok(())
@@ -333,8 +333,11 @@ impl Snapshot {
         if r.u64()? != 0 || r.u64()? != 0 {
             return Err(invalid("capture boundary ownership"));
         }
-        let guest =
-            crate::pv::bridge::GuestBridge::read_snapshot(&mut r, reached.as_nanos(), true)?;
+        let guest = seedbox_machine::pv::bridge::GuestBridge::read_snapshot(
+            &mut r,
+            reached.as_nanos(),
+            true,
+        )?;
         let aux = super::retained::read(&mut r)?;
         let tag = r.u8()?;
         let capacity = match tag {
@@ -372,7 +375,8 @@ impl Snapshot {
         }
         if client
             && (no < 32
-                || no as u128 > crate::machine::disk::codec::encoded_limit(capacity.unwrap() / 512))
+                || no as u128
+                    > seedbox_machine::machine::disk::codec::encoded_limit(capacity.unwrap() / 512))
         {
             return Err(invalid("overlay length exceeds disk geometry"));
         }
@@ -415,7 +419,8 @@ impl Snapshot {
         };
         validate_scalars(&snapshot)?;
         let kernel = body(&mut r, nk)?;
-        super::super::assets::bzimage(&kernel).map_err(|_| invalid("x86-64 bzImage"))?;
+        seedbox_machine::machine::assets::bzimage(&kernel)
+            .map_err(|_| invalid("x86-64 bzImage"))?;
         let initramfs = body(&mut r, ni)?;
         let firmware = body(&mut r, nf)?;
         validate_boot(&kernel, &initramfs, &firmware, memory_mib)?;

@@ -9,8 +9,8 @@ fn chunks_and_restored_snapshots_continue_identical_bytes() {
     pieces.fill_bytes(&mut got[..3]);
     pieces.fill_bytes(&mut []);
     pieces.fill_bytes(&mut got[3..37]);
-    let serialized = serde_json::to_vec(&pieces).unwrap();
-    let mut restored: SeededRng = serde_json::from_slice(&serialized).unwrap();
+    let (domain, seed, block, bytes, position) = pieces.parts();
+    let mut restored = SeededRng::from_parts(domain, seed, block, bytes, position).unwrap();
     let mut clone = pieces.clone();
     pieces.fill_bytes(&mut got[37..]);
     assert_eq!(want, got);
@@ -63,9 +63,17 @@ fn common_spec_stream_preserves_machine_domain_bytes_and_split_cursors() {
                 production.fill_bytes(&mut want);
                 fixture.fill_bytes(&mut got);
                 assert_eq!(got, want, "seed={seed}, fill={length}");
+                let (domain, seed, block, bytes, position) = production.parts();
+                assert_eq!(domain, Domain::Machine);
                 assert_eq!(
-                    serde_json::to_vec(&fixture).unwrap(),
-                    serde_json::to_vec(&production).unwrap()
+                    serde_json::to_value(&fixture).unwrap(),
+                    serde_json::json!({
+                        "domain": "Machine",
+                        "seed": seed,
+                        "block": block,
+                        "bytes": bytes,
+                        "position": position,
+                    })
                 );
             }
         }

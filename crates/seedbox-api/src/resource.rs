@@ -14,8 +14,8 @@ pub enum ResourceKind {
 }
 
 /// The resubmission view deliberately ignores server-owned fields. Unlike
-/// deserializing a resource, it accepts old or extended status representations
-/// while still validating the API version, resource kind and entire spec.
+/// deserializing a resource, it accepts any status representation while still
+/// validating the API version, resource kind and entire spec.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SimulationDocument {
@@ -73,57 +73,33 @@ pub enum InputSource {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProgramInput {
-    pub key: String,
-    pub at_ns: u64,
-    /// Opaque on reads so newer server actions do not break older clients.
-    pub action: serde_json::Value,
-    #[serde(default = "seedbox_engine_protocol::input_program::default_timeout_ns")]
-    pub timeout_ns: u64,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SimulationSpec {
-    /// Internal compatibility field; execution options are submitted separately.
-    pub start_paused: bool,
     pub seed: Option<u64>,
     pub inputs: InputSource,
     pub configuration: seedbox_spec::Simulation,
-    pub program: Vec<ProgramInput>,
+    pub program: Vec<seedbox_spec::definition::Override>,
 }
+/// Wire form for every input source except a resolved definition, which is
+/// serialized as the definition itself.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LegacySpec {
+struct ConfiguredSpec {
     seed: Option<u64>,
     inputs: InputSource,
     configuration: seedbox_spec::Simulation,
     #[serde(default)]
-    program: Vec<ProgramInput>,
+    program: Vec<seedbox_spec::definition::Override>,
 }
 impl Serialize for SimulationSpec {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if let InputSource::Resolved { definition } = &self.inputs {
             let mut definition = definition.as_ref().clone();
             definition.seed = self.seed.unwrap_or(definition.seed);
-            definition.overrides = self
-                .program
-                .iter()
-                .map(|p| seedbox_spec::definition::Override {
-                    id: p.key.clone(),
-                    at_ns: p.at_ns,
-                    action: p.action.clone(),
-                    timeout_ns: p.timeout_ns,
-                })
-                .collect();
+            definition.overrides = self.program.clone();
             definition.serialize(serializer)
-        } else if matches!(self.inputs, InputSource::Project) {
-            crate::Submission::from_spec(self)
-                .map_err(serde::ser::Error::custom)?
-                .serialize(serializer)
         } else {
-            LegacySpec {
+            ConfiguredSpec {
                 seed: self.seed,
                 inputs: self.inputs.clone(),
                 configuration: self.configuration.clone(),
@@ -139,52 +115,61 @@ impl<'de> Deserialize<'de> for SimulationSpec {
         if value.get("runtime").is_some() {
             let definition: seedbox_spec::definition::Definition =
                 serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-            Self::resolved(definition).map_err(serde::de::Error::custom)
-        } else {
-            if value.get("configuration").is_none() {
-                let partial: crate::Submission =
-                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-                return partial.into_spec().map_err(serde::de::Error::custom);
-            }
-            let project: LegacySpec =
-                serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-            let configuration = match &project.inputs {
-                InputSource::Resolved { definition } => definition
-                    .configuration(&project.configuration.name)
-                    .map_err(serde::de::Error::custom)?,
-                _ => project.configuration,
-            };
-            Ok(Self {
-                start_paused: false,
-                seed: project.seed,
-                inputs: project.inputs,
-                configuration,
-                program: project.program,
-            })
+            return Self::resolved(definition).map_err(serde::de::Error::custom);
         }
+        let spec: ConfiguredSpec =
+            serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        if matches!(spec.inputs, InputSource::Resolved { .. }) {
+            return Err(serde::de::Error::custom(
+                "resolved inputs are represented by their definition",
+            ));
+        }
+        Ok(Self {
+            seed: spec.seed,
+            inputs: spec.inputs,
+            configuration: spec.configuration,
+            program: spec.program,
+        })
     }
 }
 impl SimulationSpec {
     pub fn resolved(definition: seedbox_spec::definition::Definition) -> Result<Self, String> {
         let configuration = definition.configuration("")?;
         Ok(Self {
-            start_paused: false,
             seed: Some(definition.seed),
             configuration,
-            program: definition
-                .overrides
-                .iter()
-                .map(|p| ProgramInput {
-                    key: p.id.clone(),
-                    at_ns: p.at_ns,
-                    action: p.action.clone(),
-                    timeout_ns: p.timeout_ns,
-                })
-                .collect(),
+            program: definition.overrides.clone(),
             inputs: InputSource::Resolved {
                 definition: Box::new(definition),
             },
         })
+    }
+
+    /// Resolve omitted architecture against the execution server before preparation.
+    pub fn resolve_project_architecture(
+        &mut self,
+        architecture: seedbox_spec::definition::Architecture,
+    ) -> Result<(), String> {
+        use seedbox_spec::definition::Architecture;
+        let (expected, maximum) = match architecture {
+            Architecture::X86_64 => ("linux/amd64", 65536),
+            Architecture::Aarch64 => ("linux/arm64", 3072),
+        };
+        for (name, service) in &mut self.configuration.services {
+            if !service.platform.is_empty() && service.platform != expected {
+                return Err(format!(
+                    "machine {name}: architecture {} does not match execution server {expected}",
+                    service.platform
+                ));
+            }
+            if let Some(memory) = service.memory_mb {
+                if !(64..=maximum).contains(&memory) {
+                    return Err(format!("machine {name}: memoryMiB must be 64..{maximum}"));
+                }
+            }
+            service.platform = expected.into();
+        }
+        Ok(())
     }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,8 +237,8 @@ pub struct SimulationStatus {
     pub stop_requested: bool,
 }
 
-// Keep the derived verdict at the wire boundary, never in mutable status. The
-// same view accepts older resources without it and ignores supplied verdicts.
+// Keep the derived verdict at the wire boundary, never in mutable status.
+// Supplied verdicts are ignored on input.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StatusDocument {
@@ -266,15 +251,7 @@ struct StatusDocument {
     oracle_exit_code: Option<u8>,
     termination: Option<ExecutionTermination>,
     stop_requested: bool,
-    #[serde(default, deserialize_with = "ignore_verdict")]
-    verdict: Option<TestVerdict>,
-}
-
-fn ignore_verdict<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<TestVerdict>, D::Error> {
-    serde::de::IgnoredAny::deserialize(deserializer)?;
-    Ok(None)
+    verdict: TestVerdict,
 }
 
 impl Serialize for SimulationStatus {
@@ -288,7 +265,7 @@ impl Serialize for SimulationStatus {
             oracle_exit_code: self.oracle_exit_code,
             termination: self.termination.clone(),
             stop_requested: self.stop_requested,
-            verdict: Some(self.verdict()),
+            verdict: self.verdict(),
         }
         .serialize(serializer)
     }
@@ -361,6 +338,64 @@ impl Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seedbox_spec::definition::{Architecture, Override};
+
+    fn project() -> SimulationSpec {
+        let service = |reference: &str| seedbox_spec::Service {
+            memory_mb: None,
+            source: seedbox_spec::ImageSource::Registry {
+                reference: reference.into(),
+            },
+            platform: String::new(),
+            entrypoint: None,
+            command: None,
+            environment: BTreeMap::new(),
+            working_dir: None,
+            user: None,
+            configs: Vec::new(),
+            volumes: Vec::new(),
+            network: "default".into(),
+        };
+        SimulationSpec {
+            seed: Some(123),
+            inputs: InputSource::Project,
+            program: Vec::new(),
+            configuration: seedbox_spec::Simulation {
+                name: "test".into(),
+                source: Default::default(),
+                services: BTreeMap::from([
+                    ("app".into(), service("example/app:latest")),
+                    ("oracle".into(), service("example/oracle:latest")),
+                ]),
+                configs: BTreeMap::new(),
+                network: seedbox_spec::Network {
+                    name: "default".into(),
+                    latency_ns: 1_000_000,
+                    jitter_ns: 0,
+                    bandwidth_bps: None,
+                    queue_bound_ns: None,
+                    links: Vec::new(),
+                },
+                simulator: Default::default(),
+                schedule: Default::default(),
+                control: Some(seedbox_spec::Control {
+                    service: "oracle".into(),
+                }),
+                limits: seedbox_spec::Limits {
+                    simulated_time_ns: u64::MAX,
+                    wall_time_ns: u64::MAX,
+                },
+                check: seedbox_spec::Check {
+                    service: "oracle".into(),
+                    exit_code: 0,
+                },
+                seed: None,
+                wall_clock_epoch: None,
+                machine: Default::default(),
+                disk: Default::default(),
+            },
+        }
+    }
 
     #[test]
     fn cpu_backend_round_trips_only_as_a_request_option() {
@@ -373,7 +408,7 @@ mod tests {
         assert_eq!(serde_json::to_value(&options).unwrap()["backend"], "tcg");
         assert_eq!(ExecutionOptions::default().backend, None);
         for field in ["backend", "simulator"] {
-            let mut spec = serde_json::json!({"oracle":{"image":"example/oracle"}});
+            let mut spec = serde_json::to_value(project()).unwrap();
             spec[field] = if field == "backend" {
                 serde_json::json!("tcg")
             } else {
@@ -384,14 +419,72 @@ mod tests {
     }
 
     #[test]
-    fn resubmission_ignores_server_fields_but_rejects_unknown_spec_fields() {
-        let spec = serde_json::json!({"seed":123,"oracle":{"image":"example/oracle:latest"}});
-        let expected: SimulationSpec = serde_json::from_value(spec.clone()).unwrap();
-        assert!(!expected.start_paused);
-        assert!(serde_json::to_value(&expected)
+    fn project_inputs_round_trip_with_configuration_and_program() {
+        let mut spec = project();
+        spec.program.push(Override {
+            id: "stop".into(),
+            at_ns: 42,
+            action: serde_json::json!({"action":"stop","machine":"oracle"}),
+            timeout_ns: 50,
+        });
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert_eq!(wire["inputs"]["kind"], "project");
+        assert_eq!(wire["program"][0]["id"], "stop");
+        assert_eq!(wire["program"][0]["timeoutNs"], 50);
+        assert_eq!(
+            serde_json::from_value::<SimulationSpec>(wire.clone()).unwrap(),
+            spec
+        );
+        let mut defaulted = wire;
+        defaulted["program"][0]
+            .as_object_mut()
             .unwrap()
-            .get("startPaused")
-            .is_none());
+            .remove("timeoutNs");
+        assert_eq!(
+            serde_json::from_value::<SimulationSpec>(defaulted)
+                .unwrap()
+                .program[0]
+                .timeout_ns,
+            seedbox_control::PROCESS_EFFECT_TIMEOUT_NS
+        );
+    }
+
+    #[test]
+    fn project_architecture_resolves_against_the_server_and_bounds_memory() {
+        let mut spec = project();
+        spec.resolve_project_architecture(Architecture::Aarch64)
+            .unwrap();
+        assert!(spec
+            .configuration
+            .services
+            .values()
+            .all(|s| s.platform == "linux/arm64"));
+        assert!(spec
+            .resolve_project_architecture(Architecture::X86_64)
+            .unwrap_err()
+            .contains("does not match"));
+        let mut large = project();
+        large
+            .configuration
+            .services
+            .get_mut("app")
+            .unwrap()
+            .memory_mb = Some(4096);
+        assert!(large
+            .clone()
+            .resolve_project_architecture(Architecture::Aarch64)
+            .unwrap_err()
+            .contains("memoryMiB"));
+        large
+            .resolve_project_architecture(Architecture::X86_64)
+            .unwrap();
+    }
+
+    #[test]
+    fn resubmission_ignores_server_fields_but_rejects_unknown_spec_fields() {
+        let expected = project();
+        let spec = serde_json::to_value(&expected).unwrap();
+        assert!(spec.get("startPaused").is_none());
         let mut paused = spec.clone();
         paused["startPaused"] = true.into();
         assert!(serde_json::from_value::<SimulationSpec>(paused).is_err());
@@ -439,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn input_verdict_cannot_override_oracle_and_old_documents_remain_readable() {
+    fn input_verdict_cannot_override_oracle() {
         let status = SimulationStatus {
             phase: Phase::Completed,
             oracle_exit_code: Some(5),
@@ -448,13 +541,9 @@ mod tests {
         let mut document = serde_json::to_value(&status).unwrap();
         document["verdict"] = serde_json::json!("passed");
         let decoded: SimulationStatus = serde_json::from_value(document.clone()).unwrap();
+        assert_eq!(decoded, status);
         assert_eq!(decoded.verdict(), TestVerdict::Failed);
         assert_eq!(serde_json::to_value(decoded).unwrap()["verdict"], "failed");
-        document.as_object_mut().unwrap().remove("verdict");
-        assert_eq!(
-            serde_json::from_value::<SimulationStatus>(document.clone()).unwrap(),
-            status
-        );
         document["unknown"] = serde_json::json!(true);
         assert!(serde_json::from_value::<SimulationStatus>(document).is_err());
     }

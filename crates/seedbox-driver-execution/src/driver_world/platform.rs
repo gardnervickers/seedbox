@@ -1,7 +1,7 @@
 //! Which Driver backends a host runs, and with which guest ISA. Fresh
 //! preparation, the CLI and native admission all derive the guest from here,
 //! so no caller hardcodes x86-64. Pure: no device probe or environment lookup.
-use super::DriverBackend;
+use seedbox_spec::backend::CpuBackend;
 use seedbox_spec::definition::Architecture;
 
 /// An operating system and CPU pair, as in `std::env::consts`.
@@ -35,24 +35,20 @@ impl Host {
     }
     /// The guest ISA `backend` executes on this host, or `None` when the host
     /// has no Driver implementation for it.
-    pub fn guest(self, backend: DriverBackend) -> Option<Architecture> {
+    pub fn guest(self, backend: CpuBackend) -> Option<Architecture> {
         let pv = DRIVER_HOSTS
             .iter()
             .find(|(os, arch, ..)| (*os, *arch) == (self.os, self.arch))
             .map(|(_, _, guest, _)| *guest);
         match backend {
-            DriverBackend::Pv => pv,
-            DriverBackend::Tcg => pv.map(|_| Architecture::X86_64),
+            CpuBackend::Pv => pv,
+            CpuBackend::Tcg => pv.map(|_| Architecture::X86_64),
         }
     }
     /// The simulation-wide guest ISA a server on this host resolves for an
     /// omitted project architecture. Driver hosts follow the selected backend
     /// (TCG is always x86-64); other hosts keep their native ISA.
-    pub fn project_architecture(self, backend: seedbox_spec::backend::CpuBackend) -> Architecture {
-        let backend = match backend {
-            seedbox_spec::backend::CpuBackend::Pv => DriverBackend::Pv,
-            seedbox_spec::backend::CpuBackend::Tcg => DriverBackend::Tcg,
-        };
+    pub fn project_architecture(self, backend: CpuBackend) -> Architecture {
         self.guest(backend).unwrap_or(if self.arch == "aarch64" {
             Architecture::Aarch64
         } else {
@@ -61,13 +57,13 @@ impl Host {
     }
     /// Whether this host runs normal Driver executions at all.
     pub fn runs_driver(self) -> bool {
-        self.guest(DriverBackend::Pv).is_some()
+        self.guest(CpuBackend::Pv).is_some()
     }
 }
 
 /// The hosts that run `backend`, for user-facing refusals, e.g.
 /// "Linux x86-64 or macOS on Apple Silicon".
-pub fn hosts_for(backend: DriverBackend) -> String {
+pub fn hosts_for(backend: CpuBackend) -> String {
     DRIVER_HOSTS
         .iter()
         .filter(|&&(os, arch, ..)| Host { os, arch }.guest(backend).is_some())
@@ -97,26 +93,14 @@ mod tests {
     };
     #[test]
     fn linux_x86_keeps_x86_pv_and_tcg() {
-        assert_eq!(
-            LINUX_X86.guest(DriverBackend::Pv),
-            Some(Architecture::X86_64)
-        );
-        assert_eq!(
-            LINUX_X86.guest(DriverBackend::Tcg),
-            Some(Architecture::X86_64)
-        );
+        assert_eq!(LINUX_X86.guest(CpuBackend::Pv), Some(Architecture::X86_64));
+        assert_eq!(LINUX_X86.guest(CpuBackend::Tcg), Some(Architecture::X86_64));
         assert!(LINUX_X86.runs_driver());
     }
     #[test]
     fn apple_silicon_runs_native_arm_pv_and_emulated_x86_tcg() {
-        assert_eq!(
-            MAC_ARM.guest(DriverBackend::Pv),
-            Some(Architecture::Aarch64)
-        );
-        assert_eq!(
-            MAC_ARM.guest(DriverBackend::Tcg),
-            Some(Architecture::X86_64)
-        );
+        assert_eq!(MAC_ARM.guest(CpuBackend::Pv), Some(Architecture::Aarch64));
+        assert_eq!(MAC_ARM.guest(CpuBackend::Tcg), Some(Architecture::X86_64));
         assert!(MAC_ARM.runs_driver());
     }
     #[test]
@@ -135,14 +119,13 @@ mod tests {
                 arch: "x86_64",
             },
         ] {
-            assert_eq!(host.guest(DriverBackend::Pv), None, "{host:?}");
-            assert_eq!(host.guest(DriverBackend::Tcg), None, "{host:?}");
+            assert_eq!(host.guest(CpuBackend::Pv), None, "{host:?}");
+            assert_eq!(host.guest(CpuBackend::Tcg), None, "{host:?}");
             assert!(!host.runs_driver(), "{host:?}");
         }
     }
     #[test]
     fn project_architecture_follows_backend_on_driver_hosts_and_isa_elsewhere() {
-        use seedbox_spec::backend::CpuBackend;
         let linux_arm = Host {
             os: "linux",
             arch: "aarch64",
@@ -158,7 +141,7 @@ mod tests {
     }
     #[test]
     fn host_names_come_from_the_same_mapping() {
-        for backend in [DriverBackend::Pv, DriverBackend::Tcg] {
+        for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
             assert_eq!(hosts_for(backend), "Linux x86-64 or macOS on Apple Silicon");
         }
     }

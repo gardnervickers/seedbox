@@ -471,7 +471,7 @@ fn planted_negatives() {
     }
 }
 #[test]
-fn retained_outcome_exit_memory_faults_and_replay_negatives() {
+fn retained_outcome_exit_memory_and_fault_negatives() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     fs::create_dir_all(root.join("output/machines")).unwrap();
@@ -482,8 +482,7 @@ fn retained_outcome_exit_memory_faults_and_replay_negatives() {
     .unwrap();
     let base = json!({"outcome":"FAIL","error":null,"omitted_logs":{},
         "report":{"reason":"COMPLETED","witness":"synthetic-witness","workload_exit":{"service":"client","code":1}},
-        "identity":{"inputs":{"profile":{"semantic_parameters":{"memory_mb":"2048"}},"placement":{"client":"client","minio":"minio"}}},
-        "replay_of":"original","replay":{"status":"MATCH","outcome_matches":true,"witness_matches":true,"fault_history_matches":true,"full_state_matches":null}});
+        "identity":{"inputs":{"profile":{"semantic_parameters":{"memory_mb":"2048"}},"placement":{"client":"client","minio":"minio"}}}});
     let world = json!({"machines":[{"name":"minio"},{"name":"client"}],"faults":[]});
     fs::write(
         root.join("manifest.json"),
@@ -491,7 +490,7 @@ fn retained_outcome_exit_memory_faults_and_replay_negatives() {
     )
     .unwrap();
     fs::write(root.join("output/vmm.json"), world.to_string()).unwrap();
-    let verify = || call(json!({"action":"verify","root":root,"mode":"broken","replay":true}));
+    let verify = || call(json!({"action":"verify","root":root,"mode":"broken"}));
     ok(&verify());
     for (pointer, value) in [
         ("/outcome", json!("ERROR")),
@@ -503,11 +502,6 @@ fn retained_outcome_exit_memory_faults_and_replay_negatives() {
         ),
         ("/identity/inputs/placement/client", json!("minio")),
         ("/omitted_logs", json!({"client.console":"cap"})),
-        ("/replay", Value::Null),
-        ("/replay/status", json!("MISMATCH")),
-        ("/replay/witness_matches", json!(false)),
-        ("/replay/outcome_matches", json!(false)),
-        ("/replay/fault_history_matches", json!(false)),
     ] {
         let mut record = base.clone();
         *record.pointer_mut(pointer).unwrap() = value;

@@ -8,10 +8,7 @@
 //! The probes assert Linux semantics: exec of a file still open for writing
 //! fails with ETXTBSY. Other Unix hosts permit it, so the file is Linux-only.
 #![cfg(target_os = "linux")]
-use seedbox_artifacts::{
-    exec_files,
-    store::{ContentDigest, ContentStore},
-};
+use seedbox_artifacts::store::{ContentDigest, ContentStore};
 use std::{
     fs,
     io::{self, Read, Write},
@@ -148,16 +145,13 @@ fn plain_spawn(command: &mut Command) -> io::Result<Child> {
 }
 
 fn scoped_spawn(command: &mut Command) -> io::Result<Child> {
-    exec_files::spawn(command)
+    seedbox_exec::spawn(command)
 }
 
 type Materialize = fn(&ContentStore, &ContentDigest, &Path) -> seedbox_artifacts::Result<PathBuf>;
 const PLAIN: Materialize = |store, digest, directory| store.materialize(digest, directory);
 const EXECUTABLE: Materialize =
     |store, digest, directory| store.materialize_executable(digest, directory);
-const LINKED: Materialize = |store, digest, directory| {
-    store.materialize_linked_executable(digest, &directory.join("shared"), &directory.join("run"))
-};
 
 fn publish(store: &PausedStore, directory: &Path, materialize: Materialize) -> JoinHandle<PathBuf> {
     let (store, digest, directory) = (
@@ -203,7 +197,7 @@ fn unscoped_materialize_leaves_fork_copy_that_makes_published_engine_etxtbsy() {
 fn run(engine: &Path) {
     // Through the same guard every production spawn uses.
     let mut command = Command::new(engine);
-    assert!(exec_files::spawn(&mut command)
+    assert!(seedbox_exec::spawn(&mut command)
         .unwrap()
         .wait()
         .unwrap()
@@ -213,24 +207,22 @@ fn run(engine: &Path) {
 #[test]
 fn executable_materialize_excludes_every_fork_until_its_descriptors_close() {
     let _serial = serial();
-    for (name, materialize) in [("direct", EXECUTABLE), ("shared copy", LINKED)] {
-        let paused = PausedStore::new();
-        let directory = tempfile::tempdir().unwrap();
-        let writer = publish(&paused, directory.path(), materialize);
-        let mut source = paused.source_is_blocked_with_destination_open();
-        assert!(
-            exec_files::try_spawning().is_none(),
-            "{name}: a fork could now copy the open destination"
-        );
-        // Another execution's monitor spawn queues behind the write.
-        let mut monitor = Parked::start(scoped_spawn, -1);
-        source.write_all(&paused.bytes).unwrap();
-        drop(source);
-        let engine = writer.join().unwrap();
-        monitor.wait_until_forked(); // forked only after every writer closed
-        run(&engine);
-        monitor.release_and_reap();
-    }
+    let paused = PausedStore::new();
+    let directory = tempfile::tempdir().unwrap();
+    let writer = publish(&paused, directory.path(), EXECUTABLE);
+    let mut source = paused.source_is_blocked_with_destination_open();
+    assert!(
+        seedbox_exec::try_spawning().is_none(),
+        "a fork could now copy the open destination"
+    );
+    // Another execution's monitor spawn queues behind the write.
+    let mut monitor = Parked::start(scoped_spawn, -1);
+    source.write_all(&paused.bytes).unwrap();
+    drop(source);
+    let engine = writer.join().unwrap();
+    monitor.wait_until_forked(); // forked only after every writer closed
+    run(&engine);
+    monitor.release_and_reap();
 }
 
 #[test]
@@ -239,7 +231,7 @@ fn a_spawn_between_fork_and_exec_excludes_executable_writes() {
     let mut monitor = Parked::start(scoped_spawn, -1);
     monitor.wait_until_forked();
     assert!(
-        exec_files::try_writing().is_none(),
+        seedbox_exec::try_writing().is_none(),
         "an executable could be opened for write while a fork is pre-exec"
     );
     let paused = PausedStore::new();
@@ -250,5 +242,5 @@ fn a_spawn_between_fork_and_exec_excludes_executable_writes() {
     source.write_all(&paused.bytes).unwrap();
     drop(source);
     run(&writer.join().unwrap());
-    assert!(exec_files::try_writing().is_some());
+    assert!(seedbox_exec::try_writing().is_some());
 }

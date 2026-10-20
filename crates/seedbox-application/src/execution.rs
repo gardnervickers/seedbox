@@ -18,7 +18,7 @@ pub trait PreparationBackend: Send + Sync {
         Ok(())
     }
     fn prepare(&self, simulation: &Simulation, store: &ContentStore) -> Result<PreparedInputs>;
-    /// Exploration preparation owns diagnostics independently of scratch inputs.
+    /// Preparation with server-owned diagnostics, scratch and cancellation.
     /// Backends must explicitly support cancellation; the default fails before work.
     fn prepare_cancellable(
         &self,
@@ -27,7 +27,7 @@ pub trait PreparationBackend: Send + Sync {
         _context: &crate::preparation::PreparationContext,
     ) -> Result<PreparedInputs> {
         Err(crate::Error::Setup(
-            "preparation backend does not support exploration cancellation".into(),
+            "preparation backend does not support cancellation".into(),
         ))
     }
 }

@@ -5,7 +5,7 @@
 //! queue at `RING` and notifies it once. QMP drives bounded execution, reads
 //! RAM, exports the overlays and migrates; the Rust store decodes the results.
 use super::raw_program_data::{Asm, Cond, Reg, GED_RESET, GED_SLEEP, PROGRAM};
-use crate::machine::disk::{Store, SECTOR};
+use seedbox_machine::machine::disk::{Store, SECTOR};
 use seedbox_test::process::Guarded;
 use seedbox_test_time::HangGuard;
 use serde_json::{json, Value};
@@ -569,15 +569,13 @@ mod machine {
     use super::*;
     use crate::{
         clock::SimulationClock,
-        definition::DiskImage,
-        execution::ExecutionConfig,
-        machine::{
-            tcg::{Boot, Manifest, Snapshot, TcgMachine},
-            ExitReason, Machine, RunContext, StopReason, Timestamp,
-        },
-        pv::{Inbox, Input, Outbox, Request},
+        machine::tcg::{Boot, Manifest, Snapshot, TcgMachine},
         rng::SeededRng,
     };
+    use seedbox_machine::definition::DiskImage;
+    use seedbox_machine::execution::ExecutionConfig;
+    use seedbox_machine::machine::{ExitReason, Machine, RunContext, StopReason, Timestamp};
+    use seedbox_machine::pv::{Inbox, Input, Outbox, Request};
     use std::collections::VecDeque;
 
     fn start(ring: Vec<u8>) -> TcgMachine {

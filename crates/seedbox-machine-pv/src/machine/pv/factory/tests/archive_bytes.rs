@@ -15,8 +15,11 @@ fn pure_configured_assembly_is_exact_creation_input_including_the_pv_budget() {
         .with_progress_budget(std::num::NonZeroU32::new(budget).unwrap());
         let mut definition = definition::definition(0);
         let original = definition.clone();
-        let mut environment =
-            crate::application::GuestEnvironment::new("node", "127.0.0.1 localhost\n", true);
+        let mut environment = seedbox_machine::application::GuestEnvironment::new(
+            "node",
+            "127.0.0.1 localhost\n",
+            true,
+        );
         environment
             .configs
             .insert("/etc/large.bin".into(), vec![0xa5; 65_537]);

@@ -1,4 +1,4 @@
-//! Run lifecycle and replay comparison, independent of how machines execute.
+//! Run lifecycle, independent of how machines execute.
 
 use crate::{config::Simulation, execution::*, store::ContentStore, Error, Result};
 use std::{
@@ -8,13 +8,6 @@ use std::{
 };
 
 pub use seedbox_artifacts::record::*;
-
-#[derive(Clone, Debug, Default)]
-pub struct ReplayOptions {
-    pub cancellation: CancellationToken,
-    /// Semantic settings must still match. A new engine gives a new identity.
-    pub allow_engine_change: bool,
-}
 
 #[derive(Clone, Debug, Default)]
 pub struct RunOptions {
@@ -45,8 +38,6 @@ pub struct Orchestrator {
     pub(crate) store: ContentStore,
     pub(crate) runs: PathBuf,
     pub(crate) log_policy: LogPolicy,
-    /// Where exploration attempts share one read-only copy of each input.
-    pub(crate) shared_inputs: Option<PathBuf>,
 }
 
 impl Orchestrator {
@@ -77,7 +68,6 @@ impl Orchestrator {
             store,
             runs: runs.into(),
             log_policy: LogPolicy::default(),
-            shared_inputs: None,
         }
     }
 
@@ -181,78 +171,7 @@ impl Orchestrator {
             configuration,
             inputs,
         };
-        self.execute(identity, executor, &options, None, false, progress)
-    }
-
-    /// Fresh execution with the original seed and retained artifacts. There is
-    /// intentionally no preparation backend argument: replay cannot rebuild.
-    pub fn replay(
-        &self,
-        directory: &Path,
-        executor: &dyn ExecutionBackend,
-        cancellation: &CancellationToken,
-    ) -> Result<Run> {
-        self.replay_with_options(
-            directory,
-            executor,
-            ReplayOptions {
-                cancellation: cancellation.clone(),
-                ..Default::default()
-            },
-        )
-    }
-
-    pub fn replay_with_options(
-        &self,
-        directory: &Path,
-        executor: &dyn ExecutionBackend,
-        options: ReplayOptions,
-    ) -> Result<Run> {
-        let baseline = inspect(directory)?;
-        let requested = executor.profile();
-        let mut identity = baseline.identity.clone();
-        if options.allow_engine_change {
-            // A new executable can use different argv without changing the
-            // simulation's retained memory, timebase, faults or other settings.
-            identity.inputs.profile.semantic_parameters.engine =
-                requested.semantic_parameters.engine;
-        }
-        let mut run = self.execute(
-            identity,
-            executor,
-            &RunOptions {
-                cancellation: options.cancellation.clone(),
-                ..Default::default()
-            },
-            Some(&baseline),
-            options.allow_engine_change,
-            |_| Ok(()),
-        )?;
-        if let Some(comparison) = &mut run.record.replay {
-            if comparison.status == ReplayStatus::Mismatch {
-                // Optional evidence must never replace the execution verdict.
-                comparison.divergence = Some(
-                    crate::diff::replay_divergence(directory, &run.directory).unwrap_or_else(
-                        |error| crate::diff::DivergenceReport {
-                            divergence: None,
-                            limitations: vec![error.to_string()],
-                        },
-                    ),
-                );
-                if comparison.full_state_matches == Some(false) {
-                    comparison.ram_pages = Some(
-                        crate::diff::replay_ram_pages(directory, &run.directory).unwrap_or_else(
-                            |error| crate::diff::RamPageReport {
-                                machines: BTreeMap::new(),
-                                limitations: vec![error.to_string()],
-                            },
-                        ),
-                    );
-                }
-                write_record(&run.directory, &run.record)?;
-            }
-        }
-        Ok(run)
+        self.execute(identity, executor, &options, progress)
     }
 
     fn execute(
@@ -260,8 +179,6 @@ impl Orchestrator {
         identity: RunIdentity,
         executor: &dyn ExecutionBackend,
         options: &RunOptions,
-        baseline: Option<&RunRecord>,
-        allow_engine_change: bool,
         mut progress: impl FnMut(RunProgress<'_>) -> Result<()>,
     ) -> Result<Run> {
         let cancellation = &options.cancellation;
@@ -280,15 +197,12 @@ impl Orchestrator {
                 .into_owned(),
             identity,
             performance_parameters: performance_parameters(executor, options.machine_workers),
-            allow_engine_change,
             log_policy: self.log_policy.clone(),
             omitted_logs: BTreeMap::new(),
             outcome: Outcome::Incomplete,
             report: None,
             error: None,
             logs: BTreeMap::new(),
-            replay_of: baseline.map(|r| r.attempt.clone()),
-            replay: None,
         };
         // A killed process leaves a durable INCOMPLETE record, never a PASS.
         write_record(&directory, &record)?;
@@ -334,15 +248,10 @@ impl Orchestrator {
                         .inputs
                         .executable()
                         .is_ok_and(|engine| digest == engine);
-                    let path = match (&self.shared_inputs, executable) {
-                        (Some(shared), true) => self
-                            .store
-                            .materialize_linked_executable(digest, shared, &inputs)?,
-                        (Some(shared), false) => {
-                            self.store.materialize_linked(digest, shared, &inputs)?
-                        }
-                        (None, true) => self.store.materialize_executable(digest, &inputs)?,
-                        (None, false) => self.store.materialize(digest, &inputs)?,
+                    let path = if executable {
+                        self.store.materialize_executable(digest, &inputs)?
+                    } else {
+                        self.store.materialize(digest, &inputs)?
                     };
                     artifacts.insert(digest.clone(), path);
                 }
@@ -454,9 +363,6 @@ impl Orchestrator {
                     .store
                     .put_unsynced(&serde_json::to_vec(&record.identity)?)?;
             }
-        }
-        if let Some(baseline) = baseline {
-            record.replay = Some(compare(baseline, &record));
         }
         write_record(&directory, &record)?;
         Ok(Run { directory, record })

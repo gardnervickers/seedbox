@@ -1,6 +1,6 @@
 //! Public host event stream published by [`Driver`](super::Driver).
 //!
-//! See [`Driver::drain_events`](super::Driver::drain_events) for the ordering,
+//! See [`Driver::drain_observations`](super::Driver::drain_observations) for the ordering,
 //! failure and retention contract shared by every event.
 //!
 //! TODO: Re-evaluate: committed outputs and control settlements need a drainable stream.

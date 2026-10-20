@@ -2,20 +2,8 @@
 //! Platform adapters supply committed events and actual transmitted bytes.
 pub mod connections;
 pub mod links;
-pub mod log_index;
 pub mod network_counters;
-pub use seedbox_engine_protocol::output_layout;
-pub mod rng;
-pub use seedbox_engine_protocol::trace;
 
 pub mod network_faults;
 
 pub mod checkpoint;
-pub use seedbox_engine_protocol::policy_config;
-
-use sha2::{Digest, Sha256};
-
-/// Lowercase hex SHA-256 of `bytes`, as digests and witnesses record it.
-pub fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
-    hex::encode(Sha256::digest(bytes))
-}

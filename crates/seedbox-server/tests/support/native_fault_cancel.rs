@@ -5,7 +5,7 @@ pub async fn pv_fault_cancel() {
     let processes = Arc::new(Mutex::new(None));
     let captured = processes.clone();
     native_case(move |owner| Box::pin(async move {
-        let session = owner.session(DriverBackend::Pv);
+        let session = owner.session(CpuBackend::Pv);
         let (id, fault) = active_throttle(session).await;
         *captured.lock().unwrap() = Some(native_process_probe::OwnedProcesses::capture(session.session.path()));
         eprintln!("requesting ordinary public cancellation after guest START and applied fault: id={id} fault={fault}");

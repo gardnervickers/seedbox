@@ -72,7 +72,7 @@ async fn applied(session: &NativeSession, id: &seedbox_api::SimulationId) -> Vec
     applied
 }
 
-async fn unfaulted(session: &mut NativeSession, backend: DriverBackend) -> Transfer {
+async fn unfaulted(session: &mut NativeSession, backend: CpuBackend) -> Transfer {
     let request = network_submission(backend, session.root.path(), &session.store, SEED);
     let id = session.submit(request, 1).await;
     session.worker(&id).await;
@@ -100,7 +100,7 @@ async fn unfaulted(session: &mut NativeSession, backend: DriverBackend) -> Trans
 /// faulted client's TCP completion time and the world after the source run.
 async fn faulted_and_replayed(
     session: &mut NativeSession,
-    backend: DriverBackend,
+    backend: CpuBackend,
     inputs: &[(&str, u64, serde_json::Value)],
     actions: &[&str],
 ) -> (u64, seedbox_api::WorldState, String) {
@@ -183,7 +183,7 @@ fn link<'a>(
 /// Cut client|server both ways mid-transfer for one simulated second, then
 /// heal: the stream stalls, frames are dropped by the partition, and TCP
 /// recovers to the same complete echo after the heal.
-pub async fn network_partition_heal_replay(backend: DriverBackend) {
+pub async fn network_partition_heal_replay(backend: CpuBackend) {
     native_case(move |owner| {
         Box::pin(async move {
             let session = owner.session(backend);
@@ -224,7 +224,7 @@ pub async fn network_partition_heal_replay(backend: DriverBackend) {
 /// Shape client->server mid-transfer (added latency, loss, duplicates and
 /// reordering), then heal: the transfer slows and loses frames, and TCP still
 /// delivers the exact echo.
-pub async fn network_shape_heal_replay(backend: DriverBackend) {
+pub async fn network_shape_heal_replay(backend: CpuBackend) {
     native_case(move |owner| {
         Box::pin(async move {
             let session = owner.session(backend);
@@ -388,7 +388,7 @@ async fn inject(
 /// heal once the client reports its connection aborted. The client then
 /// reconnects, and the oracle observes a newer incarnation of the same
 /// direction.
-pub async fn network_drop_connection_replay(backend: DriverBackend) {
+pub async fn network_drop_connection_replay(backend: CpuBackend) {
     use seedbox_api::{ControlCommand, FaultAction, PlaybackRate};
     native_case(move |owner| {
         Box::pin(async move {

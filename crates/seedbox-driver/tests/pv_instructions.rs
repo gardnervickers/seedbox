@@ -146,7 +146,8 @@ fn instruction_run(
             .unwrap();
         outputs.extend(
             driver
-                .drain_events()
+                .drain_observations()
+                .events
                 .into_iter()
                 .filter_map(|event| match event.kind {
                     EventKind::Output(output) => Some(output),

@@ -47,12 +47,11 @@ fn throttle() -> Action {
 /// Honest internal fingerprint: no capture/validation is claimed for poisoned or
 /// intermediate synthetic states. Encode every deterministic Driver field plus
 /// failed and native mock state; compare Playback itself too (including anchor).
-fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback, Vec<Committed>) {
+fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
     let Driver {
         execution,
         playback,
         observations,
-        committed,
         workers: _,
         factory: _,
     } = d;
@@ -81,8 +80,6 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback, Vec<Committed>) {
         staged_events,
         published,
         next_sequence,
-        capacity: _,
-        omitted: _,
         frames: _,
     } = observations;
     let SimulationRng::Seeded(rng) = rng else {
@@ -132,7 +129,7 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback, Vec<Committed>) {
         .put(&mut e)
         .unwrap();
     }
-    (e.output, playback.clone(), committed.clone())
+    (e.output, playback.clone())
 }
 fn bytes(d: &mut Driver<Mock>) -> (Vec<u8>, Store) {
     artifact(d.checkpoint().unwrap())
@@ -504,14 +501,7 @@ fn stale_position_id_and_boot_state_are_detected_before_any_real_mutation() {
     // Read-only preview uses the actual committed lifecycle, not position alone.
     d.execution.machines[1]
         .lifecycle
-        .admission(
-            0,
-            3,
-            3,
-            crate::oracle::observation::Admission::Applied(
-                crate::oracle::observation::Transition::Crash,
-            ),
-        )
+        .admission(0, 3, 3, crate::oracle::observation::Transition::Crash)
         .unwrap();
     d.execution.machines[1]
         .lifecycle
@@ -519,9 +509,7 @@ fn stale_position_id_and_boot_state_are_detected_before_any_real_mutation() {
             0,
             3,
             3,
-            crate::oracle::observation::Admission::Applied(
-                crate::oracle::observation::Transition::Reboot { new_boot: 1 },
-            ),
+            crate::oracle::observation::Transition::Reboot { new_boot: 1 },
         )
         .unwrap();
     let before = internal(&d);
@@ -860,7 +848,11 @@ fn immediate_unavailable_admission_has_exact_record_even_without_pending_effect(
         }
     );
     assert!(matches!(commit(&mut d, &p), DueOutcome::Applied { .. }));
-    assert!(d.drain_events().iter().any(|e| matches!(&e.kind,
+    assert!(d
+        .drain_observations()
+        .events
+        .iter()
+        .any(|e| matches!(&e.kind,
         EventKind::FaultSettled { record: actual, status: SettlementStatus::Unavailable, .. }
         if actual == record(&p))));
 }

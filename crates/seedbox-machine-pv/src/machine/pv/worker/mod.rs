@@ -24,9 +24,9 @@ use super::{
     boot,
     protocol::{self, BootDisk, Request, Response, Stop},
 };
-use crate::machine::disk::Store;
 use arch::{Architecture, Backend, Devices, Exit, Native};
 use memory::Memory;
+use seedbox_machine::machine::disk::Store;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
@@ -78,7 +78,7 @@ struct State {
     console: console::Console,
     /// The boot's NIC, including its backlog and untaken transmissions.
     net: Option<net::Net>,
-    writes: Vec<crate::pv::transport::GuestWrite>,
+    writes: Vec<seedbox_machine::pv::transport::GuestWrite>,
     #[serde(default)]
     policy: Option<super::policy::Runtime>,
 }
@@ -206,7 +206,7 @@ impl<B: Backend> Machine<B> {
                 .output
                 .drain()
                 .into_iter()
-                .map(crate::pv::transport::GuestWrite::Lifecycle),
+                .map(seedbox_machine::pv::transport::GuestWrite::Lifecycle),
         );
     }
     /// Move NIC transmissions, already stamped, into the ordered write stream.
@@ -215,10 +215,12 @@ impl<B: Backend> Machine<B> {
             self.state
                 .writes
                 .extend(net.take_transmitted().into_iter().map(|frame| {
-                    crate::pv::transport::GuestWrite::Frame(crate::pv::transport::LifecycleWrite {
-                        time: frame.time,
-                        bytes: frame.bytes,
-                    })
+                    seedbox_machine::pv::transport::GuestWrite::Frame(
+                        seedbox_machine::pv::transport::LifecycleWrite {
+                            time: frame.time,
+                            bytes: frame.bytes,
+                        },
+                    )
                 }));
         }
     }
@@ -243,8 +245,8 @@ impl<B: Backend> Machine<B> {
         self.output.push(byte);
         self.state
             .writes
-            .push(crate::pv::transport::GuestWrite::Console(
-                crate::pv::transport::LifecycleWrite {
+            .push(seedbox_machine::pv::transport::GuestWrite::Console(
+                seedbox_machine::pv::transport::LifecycleWrite {
                     time: self.state.now,
                     bytes: vec![byte],
                 },
@@ -612,7 +614,8 @@ fn read_snapshot(path: &Path, inputs: &BootInputs) -> Result<Saved> {
     match &inputs.disk {
         None if tail != 0 => return Err("PV snapshot trailing bytes".into()),
         Some(base)
-            if u128::from(tail) > crate::machine::disk::codec::encoded_limit(base.capacity()) =>
+            if u128::from(tail)
+                > seedbox_machine::machine::disk::codec::encoded_limit(base.capacity()) =>
         {
             return Err("PV snapshot disk exceeds capacity".into())
         }
@@ -633,7 +636,7 @@ fn read_snapshot(path: &Path, inputs: &BootInputs) -> Result<Saved> {
         return Err("PV snapshot truncated disk".into());
     }
     if let Some(base) = &inputs.disk {
-        crate::machine::disk::codec::validate_overlays(&overlays, base.capacity())
+        seedbox_machine::machine::disk::codec::validate_overlays(&overlays, base.capacity())
             .map_err(|e| format!("PV snapshot disk: {e:?}"))?;
     }
     Ok(Saved {
@@ -841,20 +844,20 @@ pub(crate) fn serve() -> Result<()> {
 }
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::machine::pv::codec::record::Record for State {
-    const MIN: u64 = <[u8; 32] as crate::machine::pv::codec::record::Record>::MIN
-        + <u64 as crate::machine::pv::codec::record::Record>::MIN
+impl seedbox_machine::snapshot::Record for State {
+    const MIN: u64 = <[u8; 32] as seedbox_machine::snapshot::Record>::MIN
+        + <u64 as seedbox_machine::snapshot::Record>::MIN
         + 40
-        + <Option<u64> as crate::machine::pv::codec::record::Record>::MIN
-        + <bool as crate::machine::pv::codec::record::Record>::MIN
-        + <bool as crate::machine::pv::codec::record::Record>::MIN
-        + <bool as crate::machine::pv::codec::record::Record>::MIN
-        + <bool as crate::machine::pv::codec::record::Record>::MIN
-        + <Devices as crate::machine::pv::codec::record::Record>::MIN
-        + <console::Console as crate::machine::pv::codec::record::Record>::MIN
-        + <Option<net::Net> as crate::machine::pv::codec::record::Record>::MIN
-        + <Vec<crate::pv::transport::GuestWrite> as crate::machine::pv::codec::record::Record>::MIN
-        + <Option<super::policy::Runtime> as crate::machine::pv::codec::record::Record>::MIN;
+        + <Option<u64> as seedbox_machine::snapshot::Record>::MIN
+        + <bool as seedbox_machine::snapshot::Record>::MIN
+        + <bool as seedbox_machine::snapshot::Record>::MIN
+        + <bool as seedbox_machine::snapshot::Record>::MIN
+        + <bool as seedbox_machine::snapshot::Record>::MIN
+        + <Devices as seedbox_machine::snapshot::Record>::MIN
+        + <console::Console as seedbox_machine::snapshot::Record>::MIN
+        + <Option<net::Net> as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<seedbox_machine::pv::transport::GuestWrite> as seedbox_machine::snapshot::Record>::MIN
+        + <Option<super::policy::Runtime> as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -895,33 +898,33 @@ impl crate::machine::pv::codec::record::Record for State {
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
         Ok(Self {
-            witness: crate::machine::pv::codec::record::Record::decode(r)?,
-            witness_boot: crate::machine::pv::codec::record::Record::decode(r)?,
-            witness_origin: crate::machine::pv::codec::record::Record::decode(r)?,
-            now: crate::machine::pv::codec::record::Record::decode(r)?,
-            deadline: crate::machine::pv::codec::record::Record::decode(r)?,
-            timer: crate::machine::pv::codec::record::Record::decode(r)?,
-            ready: crate::machine::pv::codec::record::Record::decode(r)?,
-            shutdown: crate::machine::pv::codec::record::Record::decode(r)?,
-            idle: crate::machine::pv::codec::record::Record::decode(r)?,
-            devices: crate::machine::pv::codec::record::Record::decode(r)?,
-            console: crate::machine::pv::codec::record::Record::decode(r)?,
-            net: crate::machine::pv::codec::record::Record::decode(r)?,
-            writes: crate::machine::pv::codec::record::Record::decode(r)?,
-            policy: crate::machine::pv::codec::record::Record::decode(r)?,
+            witness: seedbox_machine::snapshot::Record::decode(r)?,
+            witness_boot: seedbox_machine::snapshot::Record::decode(r)?,
+            witness_origin: seedbox_machine::snapshot::Record::decode(r)?,
+            now: seedbox_machine::snapshot::Record::decode(r)?,
+            deadline: seedbox_machine::snapshot::Record::decode(r)?,
+            timer: seedbox_machine::snapshot::Record::decode(r)?,
+            ready: seedbox_machine::snapshot::Record::decode(r)?,
+            shutdown: seedbox_machine::snapshot::Record::decode(r)?,
+            idle: seedbox_machine::snapshot::Record::decode(r)?,
+            devices: seedbox_machine::snapshot::Record::decode(r)?,
+            console: seedbox_machine::snapshot::Record::decode(r)?,
+            net: seedbox_machine::snapshot::Record::decode(r)?,
+            writes: seedbox_machine::snapshot::Record::decode(r)?,
+            policy: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::machine::pv::codec::record::Record for Capture {
-    const MIN: u64 = <u64 as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <u64 as crate::machine::pv::codec::record::Record>::MIN
-        + <Vec<(u64, u64)> as crate::machine::pv::codec::record::Record>::MIN
-        + <State as crate::machine::pv::codec::record::Record>::MIN
-        + <Architecture as crate::machine::pv::codec::record::Record>::MIN
-        + <Option<block::Transport> as crate::machine::pv::codec::record::Record>::MIN;
+impl seedbox_machine::snapshot::Record for Capture {
+    const MIN: u64 = <u64 as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <u64 as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<(u64, u64)> as seedbox_machine::snapshot::Record>::MIN
+        + <State as seedbox_machine::snapshot::Record>::MIN
+        + <Architecture as seedbox_machine::snapshot::Record>::MIN
+        + <Option<block::Transport> as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -948,13 +951,13 @@ impl crate::machine::pv::codec::record::Record for Capture {
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
         Ok(Self {
-            memory_bytes: crate::machine::pv::codec::record::Record::decode(r)?,
-            layout_version: crate::machine::pv::codec::record::Record::decode(r)?,
-            page_bytes: crate::machine::pv::codec::record::Record::decode(r)?,
-            segments: crate::machine::pv::codec::record::Record::decode(r)?,
-            state: crate::machine::pv::codec::record::Record::decode(r)?,
-            architecture: crate::machine::pv::codec::record::Record::decode(r)?,
-            block: crate::machine::pv::codec::record::Record::decode(r)?,
+            memory_bytes: seedbox_machine::snapshot::Record::decode(r)?,
+            layout_version: seedbox_machine::snapshot::Record::decode(r)?,
+            page_bytes: seedbox_machine::snapshot::Record::decode(r)?,
+            segments: seedbox_machine::snapshot::Record::decode(r)?,
+            state: seedbox_machine::snapshot::Record::decode(r)?,
+            architecture: seedbox_machine::snapshot::Record::decode(r)?,
+            block: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }

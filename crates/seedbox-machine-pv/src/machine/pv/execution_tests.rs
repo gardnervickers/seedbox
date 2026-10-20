@@ -3,9 +3,9 @@
 use super::*;
 use crate::{
     clock::{Clock, SimulationClock},
-    execution::ExecutionConfig,
     rng::SeededRng,
 };
+use seedbox_machine::execution::ExecutionConfig;
 use std::collections::VecDeque;
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
@@ -110,11 +110,11 @@ fn run(
     rng: &mut SeededRng,
     factor: u32,
     upto: u64,
-    requests: impl IntoIterator<Item = crate::pv::Request>,
+    requests: impl IntoIterator<Item = seedbox_machine::pv::Request>,
 ) -> StopReason {
     let mut inbox: VecDeque<_> = requests
         .into_iter()
-        .map(|payload| crate::pv::Input {
+        .map(|payload| seedbox_machine::pv::Input {
             at: at(clock.now()),
             payload,
         })
@@ -127,8 +127,8 @@ fn run(
                 clock,
                 rng,
                 execution: ExecutionConfig::new(factor).unwrap(),
-                inbox: crate::pv::Inbox::new(&mut inbox, at(clock.now())),
-                outbox: crate::pv::Outbox::new(&mut outputs, at(clock.now()), at(upto)),
+                inbox: seedbox_machine::pv::Inbox::new(&mut inbox, at(clock.now())),
+                outbox: seedbox_machine::pv::Outbox::new(&mut outputs, at(clock.now()), at(upto)),
             },
             at(upto),
         )
@@ -239,7 +239,7 @@ fn native_execution_price_exact_subpercent_split_bounds_and_reboot() {
             &mut rng,
             factor,
             total,
-            [crate::pv::Request::Reboot],
+            [seedbox_machine::pv::Request::Reboot],
         );
         // Console bytes already observed remain external history across reboot.
         assert_eq!(machine.console, [1, 2]);

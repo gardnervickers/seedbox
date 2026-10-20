@@ -90,7 +90,7 @@ where
         let outcome = driver
             .step(Timestamp::from_nanos((now + 10_000_000).min(LIMIT_NS)))
             .map_err(|error| format!("run guest at {now} ns: {error:?}"))?;
-        for event in driver.drain_events() {
+        for event in driver.drain_observations().events {
             if let EventKind::Output(output) = event.kind {
                 match output.payload {
                     Response::ApplicationOutput { stream, bytes, .. } => {

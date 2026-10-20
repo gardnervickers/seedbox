@@ -17,6 +17,9 @@ cargo xtask build --release
 alias seedbox="$PWD/target/release/seedbox"
 ```
 
+Inside `nix develop`, `bash harness/check.sh` runs the portable checks; `--help`
+lists the native suites.
+
 ## Run the etcd example
 
 PV uses hardware virtualization (KVM on Linux, HVF on macOS); TCG emulates the

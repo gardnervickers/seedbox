@@ -14,7 +14,7 @@ pub mod runtime_assets;
 mod worker_process;
 use seedbox_artifacts::limits;
 use seedbox_artifacts::Context;
-pub use seedbox_artifacts::{config, engine, exec_files, store, Error, Result};
+pub use seedbox_artifacts::{config, engine, store, Error, Result};
 
 #[cfg(test)]
 fn fixture_simulation(oracle: &str) -> seedbox_spec::Simulation {

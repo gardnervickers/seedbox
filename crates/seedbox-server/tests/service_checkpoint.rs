@@ -264,11 +264,12 @@ async fn checkpoint_roundtrip() {
         request_id: "saved".into(),
         command: ControlCommand::Checkpoint,
     };
-    let accepted = client.request_control(id, &request).await.unwrap();
+    let accepted: seedbox_api::ControlReceipt = client.request_control(id, &request).await.unwrap();
     assert_eq!(accepted.state, ControlState::Accepted);
     let mut changes = client.events_with(id, true).await.unwrap();
     let captured = loop {
-        let receipt = client.control_receipt(id, "saved").await.unwrap();
+        let receipt: seedbox_api::ControlReceipt =
+            client.control_receipt(id, "saved").await.unwrap();
         if receipt.state != ControlState::Accepted {
             break receipt;
         }
@@ -281,7 +282,10 @@ async fn checkpoint_roundtrip() {
         checkpoint: Some(checkpoint), error: None, ..
     } if checkpoint.state == CheckpointState::Captured && checkpoint.position.completed_rounds == 7));
     assert_eq!(
-        client.request_control(id, &request).await.unwrap(),
+        client
+            .request_control::<seedbox_api::ControlReceipt>(id, &request)
+            .await
+            .unwrap(),
         captured
     );
     assert_eq!(client.checkpoint(id, "saved").await.unwrap(), captured);

@@ -22,7 +22,6 @@ tempfile.workspace = true
 tar.workspace = true
 walkdir = "2"
 flate2.workspace = true
-xattr = "1"
 bollard.workspace = true
 futures-util.workspace = true
 tokio-util = { version = "0.7", features = ["io"] }

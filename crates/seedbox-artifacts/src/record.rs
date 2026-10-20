@@ -50,11 +50,6 @@ pub struct ReplayComparison {
     pub witness_matches: Option<bool>,
     pub full_state_matches: Option<bool>,
     pub fault_history_matches: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ram_pages: Option<crate::comparison::RamPageReport>,
-    /// Where the witness logs first disagree; diagnostic only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub divergence: Option<crate::comparison::DivergenceReport>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,15 +75,12 @@ pub struct RunRecord {
     pub attempt: String,
     pub identity: RunIdentity,
     pub performance_parameters: BTreeMap<String, String>,
-    pub allow_engine_change: bool,
     pub log_policy: LogPolicy,
     pub omitted_logs: BTreeMap<String, String>,
     pub outcome: Outcome,
     pub report: Option<ExecutionReport>,
     pub error: Option<String>,
     pub logs: BTreeMap<String, ContentDigest>,
-    pub replay_of: Option<String>,
-    pub replay: Option<ReplayComparison>,
 }
 
 /// A checksum protects all recorded results as well as the input identity.
@@ -193,7 +185,5 @@ pub fn compare(baseline: &RunRecord, fresh: &RunRecord) -> ReplayComparison {
         witness_matches,
         full_state_matches,
         fault_history_matches,
-        ram_pages: None,
-        divergence: None,
     }
 }

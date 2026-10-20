@@ -1,8 +1,8 @@
-use super::{Machine, StopReason, Timestamp};
 use crate::{
     clock::Clock,
     rng::{RngStream, SeededRng},
 };
+use seedbox_machine::machine::{Machine, StopReason, Timestamp};
 use seedbox_machine::test_support::test_environment as shared;
 pub(super) use shared::{
     check_deferred_startup_failure, check_lifecycle_fifo, check_queued_boot_entropy, run_requests,
@@ -30,7 +30,7 @@ impl<M: Machine, R> Machine for Environment<M, R> {
     type Snapshot = M::Snapshot;
     fn run(
         &mut self,
-        context: &mut crate::machine::RunContext<'_, Self::Context>,
+        context: &mut seedbox_machine::machine::RunContext<'_, Self::Context>,
         upto: Timestamp,
     ) -> Result<StopReason, Self::Error> {
         Machine::run(&mut self.0, context, upto)
@@ -84,7 +84,10 @@ impl<M: Machine<Context = ()>, R: RngStream> Environment<M, R> {
     pub(super) fn run(&mut self, worker: &mut (), upto: Timestamp) -> Result<StopReason, M::Error> {
         self.0.run(worker, upto)
     }
-    pub(super) fn request(&mut self, payload: crate::pv::Request) -> Result<StopReason, M::Error> {
+    pub(super) fn request(
+        &mut self,
+        payload: seedbox_machine::pv::Request,
+    ) -> Result<StopReason, M::Error> {
         self.0.request(payload)
     }
 }

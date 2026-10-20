@@ -63,7 +63,8 @@ fn explicit_disabled_and_noncontroller_calls_poison_without_admission() {
         );
         assert!(matches!(d.step(at(20)), Err(Error::Failed)));
         assert!(!d
-            .drain_events()
+            .drain_observations()
+            .events
             .iter()
             .any(|event| matches!(event.kind, EventKind::FaultAdmitted(_))));
     }

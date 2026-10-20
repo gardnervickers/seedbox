@@ -66,7 +66,7 @@ impl PVMachine {
         let result = ExecutionEvidence {
             boot,
             disposition,
-            witness: evidence::hex(&witness),
+            witness: seedbox_machine::machine::hex(&witness),
             disk,
         };
         result.validate().map_err(str::to_owned)?;

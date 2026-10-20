@@ -112,7 +112,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         let outputs = driver
-            .drain_events()
+            .drain_observations()
+            .events
             .into_iter()
             .filter_map(|event| match event.kind {
                 EventKind::Output(output) => Some(output),

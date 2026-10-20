@@ -225,10 +225,10 @@ impl Decoder {
 mod tests;
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::snapshot::record::Record for Correlation {
-    const MIN: u64 = <NonZeroU32 as crate::snapshot::record::Record>::MIN
-        + <NonZeroU32 as crate::snapshot::record::Record>::MIN
-        + <NonZeroU32 as crate::snapshot::record::Record>::MIN;
+impl crate::snapshot::Record for Correlation {
+    const MIN: u64 = <NonZeroU32 as crate::snapshot::Record>::MIN
+        + <NonZeroU32 as crate::snapshot::Record>::MIN
+        + <NonZeroU32 as crate::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut crate::snapshot::Writer<'_, W>,
@@ -247,22 +247,22 @@ impl crate::snapshot::record::Record for Correlation {
         r: &mut crate::snapshot::Reader<'_, R>,
     ) -> crate::snapshot::Result<Self> {
         Ok(Self {
-            relay: crate::snapshot::record::Record::decode(r)?,
-            session: crate::snapshot::record::Record::decode(r)?,
-            request: crate::snapshot::record::Record::decode(r)?,
+            relay: crate::snapshot::Record::decode(r)?,
+            session: crate::snapshot::Record::decode(r)?,
+            request: crate::snapshot::Record::decode(r)?,
         })
     }
 }
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::snapshot::record::Record for Decoder {
-    const MIN: u64 = <u32 as crate::snapshot::record::Record>::MIN
-        + <u32 as crate::snapshot::record::Record>::MIN
-        + <u32 as crate::snapshot::record::Record>::MIN
-        + <bool as crate::snapshot::record::Record>::MIN
-        + <Option<u64> as crate::snapshot::record::Record>::MIN
-        + <Option<Correlation> as crate::snapshot::record::Record>::MIN
-        + <bool as crate::snapshot::record::Record>::MIN;
+impl crate::snapshot::Record for Decoder {
+    const MIN: u64 = <u32 as crate::snapshot::Record>::MIN
+        + <u32 as crate::snapshot::Record>::MIN
+        + <u32 as crate::snapshot::Record>::MIN
+        + <bool as crate::snapshot::Record>::MIN
+        + <Option<u64> as crate::snapshot::Record>::MIN
+        + <Option<Correlation> as crate::snapshot::Record>::MIN
+        + <bool as crate::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut crate::snapshot::Writer<'_, W>,
@@ -289,13 +289,13 @@ impl crate::snapshot::record::Record for Decoder {
         r: &mut crate::snapshot::Reader<'_, R>,
     ) -> crate::snapshot::Result<Self> {
         Ok(Self {
-            relay: crate::snapshot::record::Record::decode(r)?,
-            session: crate::snapshot::record::Record::decode(r)?,
-            public: crate::snapshot::record::Record::decode(r)?,
-            failed: crate::snapshot::record::Record::decode(r)?,
-            last_time: crate::snapshot::record::Record::decode(r)?,
-            pending: crate::snapshot::record::Record::decode(r)?,
-            reply_prepared: crate::snapshot::record::Record::decode(r)?,
+            relay: crate::snapshot::Record::decode(r)?,
+            session: crate::snapshot::Record::decode(r)?,
+            public: crate::snapshot::Record::decode(r)?,
+            failed: crate::snapshot::Record::decode(r)?,
+            last_time: crate::snapshot::Record::decode(r)?,
+            pending: crate::snapshot::Record::decode(r)?,
+            reply_prepared: crate::snapshot::Record::decode(r)?,
         })
     }
 }

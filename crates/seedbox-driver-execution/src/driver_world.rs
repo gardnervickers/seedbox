@@ -14,7 +14,7 @@ mod events;
 mod executor;
 mod inventory;
 mod results;
-pub use executor::{DriverBackend, DriverExecutor};
+pub use executor::DriverExecutor;
 pub use seedbox_driver::driver::faults::{action_targets, ActionTargets};
 mod controller;
 mod native;

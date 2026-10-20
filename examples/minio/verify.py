@@ -87,7 +87,7 @@ def check_console(console, mode):
                 "acknowledgement invariant not demonstrated")
     return result
 
-def verify(run, mode, replay=False):
+def verify(run, mode):
     run = Path(run)
     record = json.loads((run / 'manifest.json').read_text())['record']
     expected = 'FAIL' if mode == 'broken' else 'PASS'
@@ -104,19 +104,12 @@ def verify(run, mode, replay=False):
     require({m['name'] for m in world['machines']} == {'client', 'minio'}, "wrong world machines")
     require(not world['faults'] and not world.get('fault_error') and not world.get('rejected_fault_effects'),
             "unexpected fault/control error")
-    comparison = record.get('replay')
-    if replay or comparison is not None:
-        require(record.get('replay_of') and comparison and comparison['status'] == 'MATCH' and
-                comparison['outcome_matches'] and comparison['witness_matches'] is True and
-                comparison['fault_history_matches'] and comparison.get('full_state_matches') is not False,
-                "retained replay did not MATCH")
     result = check_console((run / 'output/machines/client.console').read_text(), mode)
-    return dict(run=str(run), outcome=expected, replay=comparison, result=result, witness=report['witness'])
+    return dict(run=str(run), outcome=expected, result=result, witness=report['witness'])
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('run', type=Path)
     parser.add_argument('--mode', required=True, choices=('qualification', 'broken', 'fixed'))
-    parser.add_argument('--replay', action='store_true')
     args = parser.parse_args()
-    print(json.dumps(verify(args.run, args.mode, args.replay), indent=2))
+    print(json.dumps(verify(args.run, args.mode), indent=2))

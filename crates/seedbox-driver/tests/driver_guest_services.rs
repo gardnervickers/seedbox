@@ -64,7 +64,7 @@ where
             .unwrap()
     }
     fn drain(&mut self) {
-        let drained = self.driver.drain_events();
+        let drained = self.driver.drain_observations().events;
         self.all.extend(drained.iter().cloned());
         let responses = drained
             .into_iter()
@@ -995,7 +995,7 @@ where
         .with_barrier(|b| Ok(b.machines().map(|(id, _)| id).collect::<Vec<_>>()))
         .unwrap();
     assert_eq!(initial.len(), 1);
-    let mut events = driver.drain_events();
+    let mut events = driver.drain_observations().events;
     let mut outcomes = Vec::new();
     let guard = HangGuard::new(
         "native spawn response transport must return",
@@ -1005,7 +1005,7 @@ where
     for _ in 0..20000 {
         guard.remaining().expect("native spawn infrastructure hang");
         let outcome = driver.step(at(now.as_nanos() + QUANTUM)).unwrap();
-        events.extend(driver.drain_events());
+        events.extend(driver.drain_observations().events);
         outcomes.push(outcome.clone());
         match outcome {
             StepOutcome::BarrierReached { at } => now = at,

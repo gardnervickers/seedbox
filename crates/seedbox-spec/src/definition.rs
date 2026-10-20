@@ -100,7 +100,7 @@ pub struct Override {
     pub timeout_ns: u64,
 }
 pub const fn default_timeout_ns() -> u64 {
-    5_000_000_000
+    seedbox_control::PROCESS_EFFECT_TIMEOUT_NS
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]

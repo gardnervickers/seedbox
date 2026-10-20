@@ -982,24 +982,6 @@ fn portable_failure_blocks_all_native_work_but_not_outer_prerequisites() {
     );
 }
 #[test]
-fn portable_stage_keeps_outer_fmt_and_clippy_out() {
-    let t = fixture();
-    let mut c = checks(&t.0);
-    let o = options(strings(&["--portable-stage"])).unwrap();
-    assert_eq!(coordinate(&mut c, &host(), &o).unwrap(), 0);
-    assert!(c
-        .commands
-        .jobs
-        .iter()
-        .all(|job| job.name != "fmt" && !job.name.contains("clippy")));
-    assert!(c
-        .commands
-        .jobs
-        .iter()
-        .any(|job| job.name == "workspace-feature-build"));
-}
-
-#[test]
 fn empty_native_selection_and_empty_artifacts_are_errors() {
     let t = fixture();
     let mut c = checks(&t.0);
@@ -1420,16 +1402,6 @@ fn compatibility_wrappers_only_exec_the_supplied_tool_and_preserve_arguments() {
     assert!(result
         .stdout
         .contains(&format!("cwd:{}\n", checkout.display())));
-    for args in [vec![], vec!["portable"]] {
-        let result = Real
-            .execute(&wrapper_job(&t.0, "acceptance.sh", &args, &e))
-            .unwrap();
-        assert_eq!(result.code, 0);
-        assert!(result
-            .stdout
-            .starts_with("arg:--portable-stage\narg:portable\n"));
-        assert!(result.stdout.contains("incremental:0\n"));
-    }
 }
 #[test]
 fn missing_provisioned_tool_is_actionable_and_has_no_build_fallback() {
@@ -1438,35 +1410,14 @@ fn missing_provisioned_tool_is_actionable_and_has_no_build_fallback() {
         env(&[("PATH", "/no-tools")]),
         env(&[("PATH", "/no-tools"), ("SEEDBOX_CHECK", "/missing/checker")]),
     ] {
-        for (wrapper, args) in [
-            ("check.sh", vec!["--list"]),
-            ("acceptance.sh", vec!["portable"]),
-        ] {
-            let result = Real
-                .execute(&wrapper_job(&t.0, wrapper, &args, &environment))
-                .unwrap();
-            assert_eq!(result.code, 2);
-            assert!(result.stdout.contains("nix develop"));
-            assert!(result.stdout.contains("never builds or downloads"));
-        }
-    }
-}
-#[test]
-fn acceptance_compatibility_rejects_nonportable_and_extra_arguments() {
-    let t = fixture();
-    let e = env(&[("PATH", "/no-tools")]);
-    for args in [vec!["linux"], vec!["portable", "extra"], vec!["--list"]] {
         let result = Real
-            .execute(&wrapper_job(&t.0, "acceptance.sh", &args, &e))
+            .execute(&wrapper_job(&t.0, "check.sh", &["--list"], &environment))
             .unwrap();
         assert_eq!(result.code, 2);
-        assert!(result
-            .stdout
-            .starts_with("Usage: harness/acceptance.sh portable;"));
-        assert!(!result.stdout.contains("Rust coordinator unavailable"));
+        assert!(result.stdout.contains("nix develop"));
+        assert!(result.stdout.contains("never builds or downloads"));
     }
 }
-
 #[test]
 fn malformed_unix_arguments_are_rejected_without_lossy_suite_acceptance() {
     use std::os::unix::ffi::OsStringExt;
@@ -1664,13 +1615,7 @@ fn scan_only_policy_mode_is_explicit_and_cannot_select_other_work() {
             .test_time_policy
     );
     assert!(!options(vec![]).unwrap().test_time_policy);
-    for other in [
-        "portable",
-        "linux-apps",
-        "--list",
-        "--portable-stage",
-        "--probe-linux",
-    ] {
+    for other in ["portable", "linux-apps", "--list", "--probe-linux"] {
         assert_eq!(
             options(strings(&["--test-time-policy", other])).unwrap_err(),
             "--test-time-policy must be used without suites or other modes"
@@ -2054,7 +1999,6 @@ fn skip_portable_selects_native_suites_explicitly() {
     for args in [
         vec!["--skip-portable"],
         vec!["--skip-portable", "portable", "dynamorio"],
-        vec!["--skip-portable", "--portable-stage", "dynamorio"],
         vec!["--skip-portable", "--test-time-policy"],
     ] {
         assert!(options(strings(&args)).is_err());

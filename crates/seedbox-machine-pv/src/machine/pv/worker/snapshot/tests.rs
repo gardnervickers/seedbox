@@ -67,8 +67,8 @@ mod checks {
                 7 => {
                     h.0.state
                         .writes
-                        .push(crate::pv::transport::GuestWrite::Console(
-                            crate::pv::transport::LifecycleWrite {
+                        .push(seedbox_machine::pv::transport::GuestWrite::Console(
+                            seedbox_machine::pv::transport::LifecycleWrite {
                                 time: 7,
                                 bytes: vec![1],
                             },
@@ -172,7 +172,7 @@ fn closed_native_records_budget_reject_huge_nested_counts_and_identity_duplicate
     // rather than relying on BTree collection normalization by serde.
     #[cfg(target_arch = "aarch64")]
     {
-        use crate::machine::pv::codec::record::Record;
+        use seedbox_machine::snapshot::Record;
         let mut bytes = vec![];
         let mut w = Writer::new(&mut bytes);
         w.u64(2).unwrap();

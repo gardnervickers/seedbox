@@ -10,22 +10,16 @@ use crate::{
     worker_process::{incomplete, WorkerLaunch},
     Error, Result,
 };
+use seedbox_spec::backend::CpuBackend;
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
-/// Native implementation selected by the retained factory inventory, not by
-/// an ambient environment variable or an executor-side backend override.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DriverBackend {
-    Pv,
-    Tcg,
-}
 /// Retained process adapter sharing the ordinary worker ownership, cancellation,
 /// observation and journal boundaries. Construction performs no guest work.
 // TODO: Re-evaluate: the execution process owns Driver and its nested native
 // workers; putting Driver into the catalogue process breaks owner-death cleanup.
 pub struct DriverExecutor {
     profile: ExecutionProfile,
-    backend: DriverBackend,
+    backend: CpuBackend,
     workers: usize,
     runtime: Option<super::binding::Binding>,
     environment: Vec<(OsString, OsString)>,
@@ -49,7 +43,7 @@ impl DriverExecutor {
 
     /// Use an explicit retained profile and server-owned worker count. Factory
     /// inventory must name the same backend; no fallback or profile rewriting.
-    pub fn new(profile: ExecutionProfile, backend: DriverBackend, workers: usize) -> Result<Self> {
+    pub fn new(profile: ExecutionProfile, backend: CpuBackend, workers: usize) -> Result<Self> {
         let recorded = super::retained::validate_contract(&profile)?;
         if recorded != backend {
             return Err(Error::Integrity(
@@ -76,7 +70,7 @@ impl DriverExecutor {
     pub fn for_preparation(
         simulation: &crate::config::Simulation,
         witness_mode: crate::execution::WitnessMode,
-        cpu_backend: seedbox_spec::backend::CpuBackend,
+        backend: CpuBackend,
     ) -> Result<Self> {
         if simulation
             .control
@@ -88,10 +82,6 @@ impl DriverExecutor {
                 message: "controller must also be the check service".into(),
             });
         }
-        let backend = match cpu_backend {
-            seedbox_spec::backend::CpuBackend::Pv => DriverBackend::Pv,
-            seedbox_spec::backend::CpuBackend::Tcg => DriverBackend::Tcg,
-        };
         let memory_mb = simulation.machine.memory_mb;
         if !(64..=65536).contains(&memory_mb) {
             return Err(Error::Execution(
@@ -108,11 +98,7 @@ impl DriverExecutor {
         semantic.engine = Some(Self::descriptor(guest));
         let executor = Self::new(
             ExecutionProfile {
-                backend: match backend {
-                    DriverBackend::Pv => "driver-pv",
-                    DriverBackend::Tcg => "driver-tcg",
-                }
-                .into(),
+                backend: backend.recorded_name().into(),
                 witness_mode,
                 semantic_parameters: semantic,
             },
@@ -147,7 +133,7 @@ impl DriverExecutor {
     // TODO: Re-evaluate: direct standalone executors may instead own extraction
     // inside their single worker; service callers already holding Inputs reuse it.
     pub fn with_runtime(mut self, inputs: crate::runtime_assets::Inputs) -> Result<Self> {
-        if inputs.qemu.is_some() != (self.backend == DriverBackend::Tcg) {
+        if inputs.qemu.is_some() != (self.backend == CpuBackend::Tcg) {
             return Err(Error::Setup("Driver runtime Inputs select a different backend; select this executor backend from the retained archive".into()));
         }
         self.runtime = Some(super::binding::Binding::new(inputs)?);

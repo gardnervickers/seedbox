@@ -4,8 +4,12 @@ use seedbox_api::{Simulation, SimulationSpec};
 
 fn resource(tag: &str) -> serde_json::Value {
     use seedbox_spec::definition as d;
-    let project: SimulationSpec =
-        serde_json::from_value(serde_json::json!({"oracle":{"image":"fixture/oracle"}})).unwrap();
+    let project = seedbox_application::config::parse(
+        "name: fixture\nmachines: {}\noracle:\n  image: fixture/oracle\n",
+        std::path::Path::new("/project/seedbox.yaml"),
+        &Default::default(),
+    )
+    .unwrap();
     let asset = d::Asset(format!("sha256:{}", "0".repeat(64)));
     let definition = d::Definition {
         architecture: d::Architecture::X86_64,
@@ -31,10 +35,10 @@ fn resource(tag: &str) -> serde_json::Value {
             volumes: Default::default(),
             anonymous_volumes: vec![],
         },
-        network: project.configuration.network,
+        network: project.network,
         simulator: d::Simulator {
             quantum_ns: std::num::NonZeroU64::new(1_000_000).unwrap(),
-            progress_budget: project.configuration.simulator.progress_budget,
+            progress_budget: project.simulator.progress_budget,
             schedule: Default::default(),
             disk: Default::default(),
             oracle_control: true,

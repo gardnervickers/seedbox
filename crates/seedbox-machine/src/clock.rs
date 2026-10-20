@@ -5,7 +5,10 @@
 //! time (see the driver contract). Without a rate change the mapping is
 //! the identity.
 
-use std::fmt;
+use std::{
+    fmt,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 pub trait Clock {
     /// Returns the current time in nanoseconds of the observing machine's time
@@ -65,8 +68,35 @@ impl fmt::Display for InvalidClockRate {
 }
 impl std::error::Error for InvalidClockRate {}
 
+/// Shared simulation time controlled by the driver.
+pub struct SimulationClock(AtomicU64);
+
+impl SimulationClock {
+    pub fn new(nanos: u64) -> Self {
+        Self(AtomicU64::new(nanos))
+    }
+
+    /// Set the time after the driver has established the scheduling position.
+    pub fn set(&self, nanos: u64) {
+        self.0.store(nanos, Ordering::Relaxed);
+    }
+}
+
+impl Clock for SimulationClock {
+    fn now(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// One machine's view of a fixed barrier, already mapped to its time base.
+#[derive(Clone, Copy, Debug)]
+pub struct FixedClock(pub u64);
+
+impl Clock for FixedClock {
+    fn now(&self) -> u64 {
+        self.0
+    }
+}
+
 #[cfg(test)]
 mod tests;
-
-#[cfg(any(test, feature = "test-support"))]
-pub use crate::test_support::SimulationClock;

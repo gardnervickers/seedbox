@@ -1,11 +1,8 @@
 use super::{boot, PVMachine};
-use crate::{
-    application::{
-        boot_derived, boot_derived_configured, with_runtime, GuestBootstrap, GuestEnvironment,
-        Kernel,
-    },
-    definition::{BackendPolicy, FilesystemArchive, MachineDefinition},
+use seedbox_machine::application::{
+    boot_derived, boot_derived_configured, with_runtime, GuestBootstrap, GuestEnvironment, Kernel,
 };
+use seedbox_machine::definition::{BackendPolicy, FilesystemArchive, MachineDefinition};
 use std::{
     collections::BTreeSet,
     io,
@@ -41,7 +38,7 @@ impl Factory {
     // image and snapshots; neither the Driver's time mapping nor ambient state
     // can supply it to arbitrary machines.
     pub fn new(worker: &Path, guest_assets: &Path, epoch_seconds: u32) -> io::Result<Self> {
-        use super::super::assets;
+        use seedbox_machine::machine::assets;
         assets::executable(worker)?;
         let kernel = assets::read(guest_assets, "kernel")?;
         guest::kernel(&kernel)?;
@@ -155,27 +152,10 @@ impl Factory {
         definition: &MachineDefinition,
         environment: &GuestEnvironment,
     ) -> io::Result<Vec<u8>> {
-        self.check_environment(definition, Some(environment))?;
+        environment
+            .check_attachments(definition.disk.is_some(), self.formatter.is_some())
+            .map_err(io::Error::other)?;
         self.assemble_selected(definition, Some(environment))
-    }
-    fn check_environment(
-        &self,
-        definition: &MachineDefinition,
-        environment: Option<&GuestEnvironment>,
-    ) -> io::Result<()> {
-        if environment.is_some_and(|e| !e.named_volumes.is_empty()) {
-            if definition.disk.is_none() {
-                return Err(io::Error::other(
-                    "named guest volumes require a machine disk at /dev/vda",
-                ));
-            }
-            if self.formatter.is_none() {
-                return Err(io::Error::other(
-                    "named guest volumes require guest asset mke2fs; package the static guest formatter",
-                ));
-            }
-        }
-        Ok(())
     }
     fn assemble_selected(
         &self,
@@ -202,7 +182,11 @@ impl Factory {
         definition: &MachineDefinition,
         environment: Option<&GuestEnvironment>,
     ) -> io::Result<PVMachine> {
-        self.check_environment(definition, environment)?;
+        if let Some(environment) = environment {
+            environment
+                .check_attachments(definition.disk.is_some(), self.formatter.is_some())
+                .map_err(io::Error::other)?;
+        }
         boot::RamLayout::native(definition.resources.memory_bytes).map_err(io::Error::other)?;
         let initrd = self.assemble_selected(definition, environment)?;
         self.construct_archive(definition, initrd)
@@ -272,7 +256,7 @@ mod guest {
     /// ARM exclusives become compare-and-swap with software reservations.
     pub(super) const TRANSLATOR_OPTIONS: &[&str] = &["-ldstex2cas"];
     pub(super) fn kernel(bytes: &[u8]) -> std::io::Result<()> {
-        super::super::super::assets::kernel(bytes)
+        super::seedbox_machine::machine::assets::kernel(bytes)
     }
 }
 #[cfg(target_arch = "x86_64")]
@@ -347,7 +331,7 @@ fn validate_runtime(bytes: &[u8]) -> io::Result<()> {
                 if !path.ends_with(".txt") && !path.ends_with(".LIB") {
                     let mut content = vec![];
                     std::io::Read::read_to_end(&mut entry, &mut content)?;
-                    super::super::assets::elf(&content, guest::ELF_MACHINE, false)?;
+                    seedbox_machine::machine::assets::elf(&content, guest::ELF_MACHINE, false)?;
                 }
             }
         }

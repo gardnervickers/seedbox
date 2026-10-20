@@ -332,7 +332,7 @@ where
         let outcome = driver
             .step(Timestamp::from_nanos(LIMIT))
             .unwrap_or_else(|error| panic!("driver step: {error:?}\n{}", run.report()));
-        for event in driver.drain_events() {
+        for event in driver.drain_observations().events {
             if let EventKind::Output(output) = &event.kind {
                 let index = run.ids.iter().position(|id| *id == output.machine).unwrap();
                 let text = match &output.payload {

@@ -1,8 +1,7 @@
-//! Network, control and checkpoint configuration shared by fault validation,
+//! Network configuration shared by fault validation,
 //! the canonical link policies and retained evidence.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 pub const DEFAULT_LATENCY_NS: u64 = 1_000_000;
 
@@ -54,36 +53,6 @@ pub struct LinkConfig {
     pub bandwidth_bps: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_bound_ns: Option<u64>,
-}
-
-/// The runtime controller: its machine, its reply latency and the service
-/// placement that resolves service targets.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ControlConfig {
-    pub machine: String,
-    pub latency_ns: u64,
-    pub placement: BTreeMap<String, String>,
-}
-
-/// The guest transport that carries runtime control.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ControlChannel {
-    #[serde(rename = "virtio-console-v1")]
-    VirtioConsoleV1,
-}
-
-/// A runtime checkpoint and the branch run from it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CheckpointConfig {
-    pub at_ns: u64,
-    pub branch_seed: u64,
-    /// When present, the engine checks it against its own inputs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_identity: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch_identity: Option<String>,
 }
 
 #[cfg(test)]

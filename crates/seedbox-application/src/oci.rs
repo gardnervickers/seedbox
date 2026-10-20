@@ -17,8 +17,8 @@ use std::{
 pub enum RootFilesystem {
     /// An application-root directory, without a transport prefix.
     Directory(PathBuf),
-    /// Transport tar with rootfs/ on entries and hard-link targets. The legacy
-    /// boot assembler consumes it directly; SDK builders need the logical root.
+    /// Transport tar with rootfs/ on entries and hard-link targets. SDK
+    /// builders need the logical root, so the prefix is stripped before use.
     Archive(PathBuf),
 }
 

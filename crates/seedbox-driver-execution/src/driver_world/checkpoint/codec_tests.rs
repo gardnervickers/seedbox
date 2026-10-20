@@ -119,7 +119,7 @@ fn drive(
     panic!("synthetic Driver did not complete the requested boundary");
 }
 #[test]
-fn codec_v3_service_descriptor_roundtrip_distinguishes_none_and_some_zero() {
+fn codec_service_descriptor_roundtrip_distinguishes_none_and_some_zero() {
     for already_ended in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let inventory = fixture_inventory(&root.path().join("authority"));
@@ -166,10 +166,9 @@ fn codec_v3_service_descriptor_roundtrip_distinguishes_none_and_some_zero() {
             },
             root.path(),
             "d6-roundtrip",
-            |state, mut batch| {
+            |state, batch| {
                 // This fixture prebinds current service state; no causal action
-                // is reconstructed from its optional publication copies.
-                batch.changes.clear();
+                // is reconstructed from its publication copies.
                 publisher.batch(state, &names, batch)
             },
             |saved, writer| {
@@ -217,7 +216,7 @@ fn codec_v3_service_descriptor_roundtrip_distinguishes_none_and_some_zero() {
                 .unwrap();
             let result = drive(&mut branch, Timestamp::from_nanos(now.as_nanos() + 10));
             if already_ended {
-                let settled = branch.drain_events();
+                let settled = branch.drain_observations().events;
                 assert!(
                     matches!(
                         &result,
@@ -231,7 +230,8 @@ fn codec_v3_service_descriptor_roundtrip_distinguishes_none_and_some_zero() {
             } else {
                 result.unwrap();
                 let values: Vec<_> = branch
-                    .drain_events()
+                    .drain_observations()
+                    .events
                     .iter()
                     .map(|event| crate::driver_world::events::encode(&names, event).unwrap())
                     .collect();

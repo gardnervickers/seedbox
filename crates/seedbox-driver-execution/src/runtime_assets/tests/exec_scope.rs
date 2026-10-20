@@ -58,7 +58,7 @@ fn extract_paused(name: &str, mode: u32) -> (bool, Vec<u8>, u32) {
         path
     });
     wait.recv().unwrap();
-    let excluded = crate::exec_files::try_spawning().is_none();
+    let excluded = seedbox_exec::try_spawning().is_none();
     release.send(()).unwrap();
     let path = extraction.join().unwrap();
     let file = path.join(name);

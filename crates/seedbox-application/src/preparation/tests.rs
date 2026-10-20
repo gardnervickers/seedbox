@@ -45,12 +45,12 @@ impl FixturePreparer {
                 |epoch, blocks| TestBoot::new(&self.runtime, epoch, blocks),
             ),
         )?;
-        seedbox_application::preparation::retain_oci_prepared(
+        seedbox_driver_execution::driver_world::preparation::retain_oci_prepared(
             &mut inputs,
             simulation,
             &self.runtime,
             store,
-            context,
+            &|| context.check(),
         )?;
         Ok(inputs)
     }

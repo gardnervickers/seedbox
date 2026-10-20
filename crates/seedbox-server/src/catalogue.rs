@@ -1,26 +1,18 @@
-//! Durable resource ownership. Each accepted submission is one atomically
-//! replaced record containing both the resource and its original request. The
-//! request index can therefore be rebuilt without a separate journal.
+//! Session-scoped resource ownership. Each accepted submission is one entry
+//! containing both the resource and its original request; nothing is read from
+//! or written to disk.
 
 mod seeds;
 use seedbox_api::{
     ControlReceipt, ControlRequest, ControlState, InputSource, Metadata, Phase, Simulation,
     SimulationId, SubmitRequest,
 };
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
-    os::{
-        fd::AsRawFd,
-        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
-    },
-    path::{Path, PathBuf},
+    io,
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
-
-const RECORD_LIMIT: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -28,9 +20,9 @@ pub enum Error {
     Unavailable,
     #[error("catalogue {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
-    #[error("catalogue is already owned by another server: {0}")]
-    AlreadyOwned(PathBuf),
-    #[error("catalogue storage failed; restart the server before accepting further mutations")]
+    #[error(
+        "catalogue state is unavailable; restart the server before accepting further mutations"
+    )]
     StorageFailed,
     #[error("worker control failed: {0}")]
     WorkerControl(String),
@@ -52,168 +44,30 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone)]
 struct Entry {
-    #[serde(default)]
     range: Option<seeds::Range>,
-    #[serde(default)]
     imported_checkpoints: Option<BTreeMap<String, seedbox_spec::definition::Definition>>,
     request: SubmitRequest,
     resource: Simulation,
-    #[serde(default)]
     controls: BTreeMap<String, ControlReceipt>,
-    #[serde(default)]
     deleted_checkpoints: BTreeSet<String>,
-    #[serde(default)]
     deleting: bool,
 }
 
 pub struct Catalogue {
-    directory: Option<PathBuf>,
-    // Dropping the catalogue releases ownership. Never unlink the lock file:
-    // that would let another process lock a different inode at the same path.
-    _lock: Option<File>,
     entries: BTreeMap<SimulationId, Entry>,
     requests: BTreeMap<String, SimulationId>,
-    storage_failed: bool,
     pending: BTreeMap<SimulationId, String>,
 }
 
 impl Catalogue {
-    /// Session-only catalogue: no records are read from or written to disk.
     pub fn in_memory() -> Self {
         Self {
-            directory: None,
-            _lock: None,
             entries: BTreeMap::new(),
             requests: BTreeMap::new(),
-            storage_failed: false,
             pending: BTreeMap::new(),
         }
-    }
-
-    pub fn open(directory: &Path) -> Result<Self> {
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true).mode(0o700);
-        at(directory, builder.create(directory))?;
-        let metadata = at(directory, fs::symlink_metadata(directory))?;
-        // SAFETY: geteuid has no pointer arguments or preconditions.
-        if !metadata.is_dir()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.mode() & 0o077 != 0
-        {
-            return Err(Error::Invalid(format!(
-                "{} must be a private directory owned by the server user",
-                directory.display()
-            )));
-        }
-        let lock_path = directory.join("catalogue.lock");
-        let lock = at(
-            &lock_path,
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&lock_path),
-        )?;
-        // SAFETY: the file descriptor remains live for the catalogue lifetime.
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let source = io::Error::last_os_error();
-            if source.kind() == io::ErrorKind::WouldBlock {
-                return Err(Error::AlreadyOwned(directory.to_owned()));
-            }
-            return Err(Error::Io {
-                path: lock_path,
-                source,
-            });
-        }
-        let mut catalogue = Self {
-            directory: Some(directory.to_owned()),
-            _lock: Some(lock),
-            entries: BTreeMap::new(),
-            requests: BTreeMap::new(),
-            storage_failed: false,
-            pending: BTreeMap::new(),
-        };
-        for item in at(directory, fs::read_dir(directory))? {
-            let path = at(directory, item)?.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                continue;
-            }
-            let id: SimulationId = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .ok_or_else(|| Error::Invalid("invalid record filename".into()))?
-                .parse()
-                .map_err(|e: seedbox_api::InvalidSimulationId| Error::Invalid(e.to_string()))?;
-            let file = at(
-                &path,
-                OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_NOFOLLOW)
-                    .open(&path),
-            )?;
-            let mut bytes = Vec::new();
-            at(&path, file.take(RECORD_LIMIT + 1).read_to_end(&mut bytes))?;
-            if bytes.len() as u64 > RECORD_LIMIT {
-                return Err(Error::Invalid(format!(
-                    "{} exceeds record limit",
-                    path.display()
-                )));
-            }
-            let entry: Entry = serde_json::from_slice(&bytes)
-                .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
-            if let Some(range) = &entry.range {
-                range.validate(entry.resource.spec.seed)?;
-            }
-            let mut pending = 0;
-            for (request_id, control) in &entry.controls {
-                validate_request_id(request_id)?;
-                let accepted = control.state == ControlState::Accepted;
-                pending += usize::from(accepted);
-                if *request_id != control.request.request_id
-                    || control.revision != if accepted { 1 } else { 2 }
-                    || (accepted
-                        && !matches!(
-                            entry.resource.status.phase,
-                            Phase::Running | Phase::Finalizing
-                        ))
-                {
-                    return Err(Error::Invalid("inconsistent control receipt".into()));
-                }
-            }
-            if pending > 1 || entry.controls.len() > 4096 {
-                return Err(Error::Invalid("control bounds exceeded".into()));
-            }
-            if entry.resource.metadata.id != id || entry.resource.metadata.revision == 0 {
-                return Err(Error::Invalid(format!(
-                    "{} has inconsistent identity",
-                    path.display()
-                )));
-            }
-            if catalogue
-                .requests
-                .insert(entry.request.request_id.clone(), id.clone())
-                .is_some()
-            {
-                return Err(Error::Invalid("duplicate submission request ID".into()));
-            }
-            if let Some(control) = entry
-                .controls
-                .values()
-                .find(|control| control.state == ControlState::Accepted)
-            {
-                catalogue
-                    .pending
-                    .insert(id.clone(), control.request.request_id.clone());
-            }
-            catalogue.entries.insert(id, entry);
-        }
-        Ok(catalogue)
     }
 
     pub fn get(&self, id: &SimulationId) -> Result<&Simulation> {
@@ -227,20 +81,9 @@ impl Catalogue {
         self.entries.values().map(|e| &e.resource)
     }
 
-    pub fn pending_deletions(&self) -> Vec<SimulationId> {
-        self.entries
-            .iter()
-            .filter(|(_, entry)| entry.deleting)
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
-
     /// Freeze the ownership tree before cancellation; submission uses this same
     /// catalogue lock and cannot create new descendants after the mark.
     pub fn begin_delete(&mut self, root: &SimulationId) -> Result<Vec<SimulationId>> {
-        if self.storage_failed {
-            return Err(Error::StorageFailed);
-        }
         let mut ids = vec![root.clone()];
         for id in &ids {
             if let Some(entry) = self.entries.get(id) {
@@ -271,7 +114,6 @@ impl Catalogue {
                 if let Some(range) = &mut entry.range {
                     range.stop_requested = true;
                 }
-                self.persist(&entry)?;
                 self.entries.insert(id.clone(), entry);
             }
         }
@@ -282,9 +124,6 @@ impl Catalogue {
     /// Delete only terminal, unreferenced resources. Request identity lasts for
     /// the resource lifetime; explicit deletion permits a later resubmission.
     pub fn delete(&mut self, id: &SimulationId) -> Result<()> {
-        if self.storage_failed {
-            return Err(Error::StorageFailed);
-        }
         let Some(entry) = self.entries.get(id) else {
             return Ok(());
         };
@@ -300,13 +139,6 @@ impl Catalogue {
         }
         let request = entry.request.request_id.clone();
         self.remove_seed_member(&request)?;
-        if let Some(directory) = &self.directory {
-            let path = directory.join(format!("{id}.json"));
-            if let Err(error) = at(&path, fs::remove_file(&path)) {
-                self.storage_failed = true;
-                return Err(error);
-            }
-        }
         self.entries.remove(id);
         self.requests.remove(&request);
         self.pending.remove(id);
@@ -339,9 +171,6 @@ impl Catalogue {
         snapshot: &seedbox_artifacts::archive::Snapshot,
         prepare: impl FnOnce(&Simulation) -> Result<()>,
     ) -> Result<Simulation> {
-        if self.storage_failed {
-            return Err(Error::StorageFailed);
-        }
         resolve_program(&snapshot.simulation.spec)?;
         let id = loop {
             let id = random_id()?;
@@ -392,7 +221,6 @@ impl Catalogue {
             range: None,
         };
         prepare(&resource)?;
-        self.persist(&entry)?;
         self.requests
             .insert(entry.request.request_id.clone(), id.clone());
         self.entries.insert(id, entry);
@@ -400,7 +228,7 @@ impl Catalogue {
     }
 
     /// Returns (resource, newly_created). Retrying after an uncertain response
-    /// returns the existing ID, including after server restart.
+    /// returns the existing ID.
     pub fn submit(&mut self, request: SubmitRequest) -> Result<(Simulation, bool)> {
         validate_submission_request_id(&request.request_id)?;
         self.submit_inner(request, None)
@@ -411,14 +239,11 @@ impl Catalogue {
         request: SubmitRequest,
         range: Option<seeds::Range>,
     ) -> Result<(Simulation, bool)> {
-        if self.storage_failed {
-            return Err(Error::StorageFailed);
-        }
         let mut request = request;
         if request.metadata.name.is_empty() {
             request.metadata.name = request.spec.configuration.name.clone();
         }
-        // Keep the durable and in-memory representations identical across public schema projection.
+        // Keep the stored and served representations identical across public schema projection.
         request = serde_json::from_value(
             serde_json::to_value(&request).map_err(|e| Error::Invalid(e.to_string()))?,
         )
@@ -439,150 +264,10 @@ impl Catalogue {
                 break id;
             }
         };
-        let mut spec = request.spec.clone();
-        resolve_program(&spec)?;
-        // Explicit submission seed wins over the project's seed, then randomness.
-        spec.seed = Some(match spec.seed.or(spec.configuration.seed) {
-            Some(seed) => seed,
-            None => {
-                let mut bytes = [0; 8];
-                random(&mut bytes)?;
-                u64::from_le_bytes(bytes)
-            }
-        });
-        spec = serde_json::from_value(
-            serde_json::to_value(&spec).map_err(|e| Error::Invalid(e.to_string()))?,
-        )
-        .map_err(|e| Error::Invalid(e.to_string()))?;
-        if let Some(range) = &range {
-            spec.seed
-                .and_then(|seed| seed.checked_add(u64::from(range.count - 1)))
-                .ok_or_else(|| Error::Invalid("seed range overflows u64".into()))?;
-        }
-        let reference = match &spec.inputs {
-            InputSource::Project | InputSource::Resolved { .. } => None,
-            InputSource::Retained { simulation }
-            | InputSource::Prepared { simulation }
-            | InputSource::Checkpoint { simulation, .. } => Some(simulation),
-        };
-        let referenced_backend = if let Some(source) = reference {
-            let entry = self
-                .entries
-                .get(source)
-                .ok_or_else(|| Error::NotFound(source.clone()))?;
-            if entry.deleting {
-                return Err(Error::Invalid("source simulation is being deleted".into()));
-            }
-            entry.resource.options.backend
-        } else {
-            None
-        };
-        let parent = match &spec.inputs {
-            InputSource::Resolved { definition } => {
-                definition
-                    .start
-                    .validate_overrides(&definition.overrides)
-                    .map_err(Error::Invalid)?;
-                if definition.machines.contains_key(definition.oracle_name()) {
-                    return Err(Error::Invalid(
-                        "oracle must have its own dedicated declaration".into(),
-                    ));
-                }
-                None
-            }
-            InputSource::Project => {
-                let config = &spec.configuration;
-                if config.check.exit_code != 0 {
-                    return Err(Error::Invalid(
-                        "oracle success is always exit code zero".into(),
-                    ));
-                }
-
-                if config.schedule.stop_tolerance_ns != 0 {
-                    return Err(Error::Invalid(
-                        "new simulations use default stop tolerance settings".into(),
-                    ));
-                }
-                None
-            }
-            InputSource::Checkpoint {
-                simulation,
-                checkpoint,
-            } => {
-                validate_request_id(checkpoint)?;
-                let original = self.get(simulation)?;
-                if original.spec.configuration != spec.configuration
-                    || original.spec.seed != spec.seed
-                    || original.spec.program != spec.program
-                {
-                    return Err(Error::Invalid(
-                        "checkpoint requires its source configuration and seed".into(),
-                    ));
-                }
-                self.captured_checkpoint(simulation, checkpoint)?;
-                None
-            }
-            InputSource::Retained { simulation } | InputSource::Prepared { simulation } => {
-                let original = self.get(simulation)?;
-                if original.status.phase != Phase::Completed {
-                    return Err(Error::Invalid(
-                        "rerun requires a completed simulation".into(),
-                    ));
-                }
-                if matches!(spec.inputs, InputSource::Retained { .. })
-                    && original.spec.seed != spec.seed
-                {
-                    return Err(Error::Invalid(
-                        "retained execution requires its source seed; use prepared inputs to vary the seed".into(),
-                    ));
-                }
-                if original.spec.configuration != spec.configuration
-                    || (matches!(spec.inputs, InputSource::Retained { .. })
-                        && original.spec.program != spec.program)
-                {
-                    return Err(Error::Invalid(
-                        "retained input configuration differs from its source".into(),
-                    ));
-                }
-                None
-            }
-        };
-        // Imported resources own portable definitions, not executable attempt
-        // paths. Existing reference validation above still applies.
-        if let Some(source) = reference {
-            let entry = &self.entries[source];
-            if let Some(checkpoints) = &entry.imported_checkpoints {
-                let mut definition = match &spec.inputs {
-                    InputSource::Checkpoint { checkpoint, .. } => checkpoints
-                        .get(checkpoint)
-                        .ok_or_else(|| Error::Invalid("imported checkpoint unavailable".into()))?
-                        .clone(),
-                    _ => match &entry.resource.spec.inputs {
-                        InputSource::Resolved { definition } => definition.as_ref().clone(),
-                        _ => return Err(Error::Invalid("imported definition unavailable".into())),
-                    },
-                };
-                if matches!(spec.inputs, InputSource::Prepared { .. }) {
-                    definition.start = seedbox_spec::definition::Start::Fresh;
-                }
-                definition.seed = spec.seed.expect("resolved above");
-                definition.overrides = spec
-                    .program
-                    .iter()
-                    .map(|input| seedbox_spec::definition::Override {
-                        id: input.key.clone(),
-                        at_ns: input.at_ns,
-                        action: input.action.clone(),
-                        timeout_ns: input.timeout_ns,
-                    })
-                    .collect();
-                definition
-                    .start
-                    .validate_overrides(&definition.overrides)
-                    .map_err(Error::Invalid)?;
-                spec = seedbox_api::SimulationSpec::resolved(definition).map_err(Error::Invalid)?;
-            }
-        }
+        let mut spec = seeded_spec(&request.spec, range.as_ref())?;
+        let referenced_backend = self.referenced_backend(&spec)?;
+        let parent = self.validate_source(&spec)?;
+        self.adopt_imported_definition(&mut spec)?;
         let recorded_backend = match &spec.inputs {
             InputSource::Resolved { definition } => definition
                 .runtime
@@ -638,19 +323,140 @@ impl Catalogue {
             deleting: false,
             range,
         };
-        self.persist(&entry)?;
         self.requests
             .insert(entry.request.request_id.clone(), id.clone());
         self.entries.insert(id, entry);
         Ok((resource, true))
     }
 
-    /// Compare-and-swap prevents a late worker callback from overwriting newer
-    /// control state. Publication happens only after the returned revision is durable.
-    pub fn update(&mut self, mut resource: Simulation) -> Result<Simulation> {
-        if self.storage_failed {
-            return Err(Error::StorageFailed);
+    /// The backend recorded by the submission's source simulation, if it has one.
+    fn referenced_backend(
+        &self,
+        spec: &seedbox_api::SimulationSpec,
+    ) -> Result<Option<seedbox_spec::backend::CpuBackend>> {
+        let Some(source) = source_reference(spec) else {
+            return Ok(None);
+        };
+        let entry = self
+            .entries
+            .get(source)
+            .ok_or_else(|| Error::NotFound(source.clone()))?;
+        if entry.deleting {
+            return Err(Error::Invalid("source simulation is being deleted".into()));
         }
+        Ok(entry.resource.options.backend)
+    }
+
+    /// Check the submission against its input source; returns the resource's parent.
+    fn validate_source(&self, spec: &seedbox_api::SimulationSpec) -> Result<Option<SimulationId>> {
+        match &spec.inputs {
+            InputSource::Resolved { definition } => {
+                definition
+                    .start
+                    .validate_overrides(&definition.overrides)
+                    .map_err(Error::Invalid)?;
+                if definition.machines.contains_key(definition.oracle_name()) {
+                    return Err(Error::Invalid(
+                        "oracle must have its own dedicated declaration".into(),
+                    ));
+                }
+                Ok(None)
+            }
+            InputSource::Project => {
+                let config = &spec.configuration;
+                if config.check.exit_code != 0 {
+                    return Err(Error::Invalid(
+                        "oracle success is always exit code zero".into(),
+                    ));
+                }
+
+                if config.schedule.stop_tolerance_ns != 0 {
+                    return Err(Error::Invalid(
+                        "new simulations use default stop tolerance settings".into(),
+                    ));
+                }
+                Ok(None)
+            }
+            InputSource::Checkpoint {
+                simulation,
+                checkpoint,
+            } => {
+                validate_request_id(checkpoint)?;
+                let original = self.get(simulation)?;
+                if original.spec.configuration != spec.configuration
+                    || original.spec.seed != spec.seed
+                    || original.spec.program != spec.program
+                {
+                    return Err(Error::Invalid(
+                        "checkpoint requires its source configuration and seed".into(),
+                    ));
+                }
+                self.captured_checkpoint(simulation, checkpoint)?;
+                Ok(None)
+            }
+            InputSource::Retained { simulation } | InputSource::Prepared { simulation } => {
+                let original = self.get(simulation)?;
+                if original.status.phase != Phase::Completed {
+                    return Err(Error::Invalid(
+                        "rerun requires a completed simulation".into(),
+                    ));
+                }
+                if matches!(spec.inputs, InputSource::Retained { .. })
+                    && original.spec.seed != spec.seed
+                {
+                    return Err(Error::Invalid(
+                        "retained execution requires its source seed; use prepared inputs to vary the seed".into(),
+                    ));
+                }
+                if original.spec.configuration != spec.configuration
+                    || (matches!(spec.inputs, InputSource::Retained { .. })
+                        && original.spec.program != spec.program)
+                {
+                    return Err(Error::Invalid(
+                        "retained input configuration differs from its source".into(),
+                    ));
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// Imported resources own portable definitions, not executable attempt
+    /// paths. Existing reference validation still applies before this.
+    fn adopt_imported_definition(&self, spec: &mut seedbox_api::SimulationSpec) -> Result<()> {
+        let Some(source) = source_reference(spec) else {
+            return Ok(());
+        };
+        let entry = &self.entries[source];
+        let Some(checkpoints) = &entry.imported_checkpoints else {
+            return Ok(());
+        };
+        let mut definition = match &spec.inputs {
+            InputSource::Checkpoint { checkpoint, .. } => checkpoints
+                .get(checkpoint)
+                .ok_or_else(|| Error::Invalid("imported checkpoint unavailable".into()))?
+                .clone(),
+            _ => match &entry.resource.spec.inputs {
+                InputSource::Resolved { definition } => definition.as_ref().clone(),
+                _ => return Err(Error::Invalid("imported definition unavailable".into())),
+            },
+        };
+        if matches!(spec.inputs, InputSource::Prepared { .. }) {
+            definition.start = seedbox_spec::definition::Start::Fresh;
+        }
+        definition.seed = spec.seed.expect("resolved above");
+        definition.overrides = spec.program.clone();
+        definition
+            .start
+            .validate_overrides(&definition.overrides)
+            .map_err(Error::Invalid)?;
+        *spec = seedbox_api::SimulationSpec::resolved(definition).map_err(Error::Invalid)?;
+        Ok(())
+    }
+
+    /// Compare-and-swap prevents a late worker callback from overwriting newer
+    /// control state.
+    pub fn update(&mut self, mut resource: Simulation) -> Result<Simulation> {
         let original = self
             .entries
             .get(&resource.metadata.id)
@@ -724,7 +530,6 @@ impl Catalogue {
                 }
             }
         }
-        self.persist(&entry)?;
         if resource.status.phase == Phase::Completed {
             self.pending.remove(&resource.metadata.id);
         }
@@ -778,7 +583,6 @@ impl Catalogue {
         }
         let mut entry = entry.clone();
         entry.deleted_checkpoints.insert(name.to_owned());
-        self.persist(&entry)?;
         self.entries.insert(id.clone(), entry);
         Ok(())
     }
@@ -849,9 +653,6 @@ impl Catalogue {
         id: &SimulationId,
         request: ControlRequest,
     ) -> Result<(ControlReceipt, bool)> {
-        if self.storage_failed {
-            return Err(Error::StorageFailed);
-        }
         validate_request_id(&request.request_id)?;
         if serde_json::to_vec(&request)
             .map_err(|e| Error::Invalid(e.to_string()))?
@@ -902,7 +703,6 @@ impl Catalogue {
         entry
             .controls
             .insert(control.request.request_id.clone(), control.clone());
-        self.persist(&entry)?;
         self.pending
             .insert(id.clone(), control.request.request_id.clone());
         self.entries.insert(id.clone(), entry);
@@ -915,9 +715,6 @@ impl Catalogue {
         request_id: &str,
         state: ControlState,
     ) -> Result<ControlReceipt> {
-        if self.storage_failed {
-            return Err(Error::StorageFailed);
-        }
         if matches!(state, ControlState::Accepted | ControlState::Interrupted) {
             return Err(Error::Invalid("invalid control acknowledgement".into()));
         }
@@ -943,43 +740,48 @@ impl Catalogue {
         entry
             .controls
             .insert(request_id.to_owned(), control.clone());
-        self.persist(&entry)?;
         self.pending.remove(id);
         self.entries.insert(id.clone(), entry);
         Ok(control)
     }
-
-    fn persist(&mut self, entry: &Entry) -> Result<()> {
-        let bytes = serde_json::to_vec(entry).map_err(|e| Error::Invalid(e.to_string()))?;
-        if bytes.len() as u64 > RECORD_LIMIT {
-            return Err(Error::Invalid(
-                "simulation exceeds record size limit".into(),
-            ));
-        }
-        let Some(directory) = &self.directory else {
-            return Ok(());
-        };
-        let path = directory.join(format!("{}.json", entry.resource.metadata.id));
-        let result = (|| -> io::Result<()> {
-            let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-            temporary.write_all(&bytes)?;
-            temporary.persist(&path).map_err(|e| e.error)?;
-            Ok(())
-        })();
-        if result.is_err() {
-            // Stop accepting mutations after a storage failure; preserve the
-            // last published in-memory state for inspection.
-            self.storage_failed = true;
-        }
-        at(&path, result)
-    }
 }
 
-fn at<T>(path: &Path, result: io::Result<T>) -> Result<T> {
-    result.map_err(|source| Error::Io {
-        path: path.to_owned(),
-        source,
-    })
+/// Resolve the submission's seed and project it through the public schema.
+fn seeded_spec(
+    spec: &seedbox_api::SimulationSpec,
+    range: Option<&seeds::Range>,
+) -> Result<seedbox_api::SimulationSpec> {
+    let mut spec = spec.clone();
+    resolve_program(&spec)?;
+    // Explicit submission seed wins over the project's seed, then randomness.
+    spec.seed = Some(match spec.seed.or(spec.configuration.seed) {
+        Some(seed) => seed,
+        None => {
+            let mut bytes = [0; 8];
+            random(&mut bytes)?;
+            u64::from_le_bytes(bytes)
+        }
+    });
+    spec = serde_json::from_value(
+        serde_json::to_value(&spec).map_err(|e| Error::Invalid(e.to_string()))?,
+    )
+    .map_err(|e| Error::Invalid(e.to_string()))?;
+    if let Some(range) = range {
+        spec.seed
+            .and_then(|seed| seed.checked_add(u64::from(range.count - 1)))
+            .ok_or_else(|| Error::Invalid("seed range overflows u64".into()))?;
+    }
+    Ok(spec)
+}
+
+/// The existing simulation whose inputs a submission reuses.
+fn source_reference(spec: &seedbox_api::SimulationSpec) -> Option<&SimulationId> {
+    match &spec.inputs {
+        InputSource::Project | InputSource::Resolved { .. } => None,
+        InputSource::Retained { simulation }
+        | InputSource::Prepared { simulation }
+        | InputSource::Checkpoint { simulation, .. } => Some(simulation),
+    }
 }
 
 fn random(bytes: &mut [u8]) -> Result<()> {
@@ -1039,11 +841,11 @@ pub(crate) fn resolve_program(
         .iter()
         .map(|input| {
             Ok(seedbox_engine_protocol::input_program::TimedInput {
-                key: input.key.clone(),
+                key: input.id.clone(),
                 at_ns: input.at_ns,
                 timeout_ns: input.timeout_ns,
                 action: serde_json::from_value(input.action.clone())
-                    .map_err(|error| Error::Invalid(format!("program {}: {error}", input.key)))?,
+                    .map_err(|error| Error::Invalid(format!("program {}: {error}", input.id)))?,
             })
         })
         .collect::<Result<Vec<_>>>()?;

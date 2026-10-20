@@ -18,7 +18,7 @@
 // Counts are u64, so they impose no run limit narrower than memory.
 // The client and the worker each use one direction of each trailer.
 #![allow(dead_code)]
-use crate::pv::{
+use seedbox_machine::pv::{
     ethernet::{MAX_FRAME_BYTES, MIN_FRAME_BYTES},
     transport::{GuestWrite, LifecycleWrite},
 };

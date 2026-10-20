@@ -5,7 +5,7 @@
 use super::boot::RAM_BASE as BASE;
 use super::virtio::*;
 use super::Result;
-use crate::pv::transport::LifecycleOutput;
+use seedbox_machine::pv::transport::LifecycleOutput;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 const PORT: &[u8] = b"seedbox-lifecycle";
@@ -234,19 +234,19 @@ impl Console {
 mod tests;
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::machine::pv::codec::record::Record for Console {
-    const MIN: u64 = <[Queue; 4] as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <[u32; 2] as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <VecDeque<Vec<u8>> as crate::machine::pv::codec::record::Record>::MIN
-        + <VecDeque<u8> as crate::machine::pv::codec::record::Record>::MIN
-        + <bool as crate::machine::pv::codec::record::Record>::MIN
-        + <bool as crate::machine::pv::codec::record::Record>::MIN
-        + <LifecycleOutput as crate::machine::pv::codec::record::Record>::MIN;
+impl seedbox_machine::snapshot::Record for Console {
+    const MIN: u64 = <[Queue; 4] as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <[u32; 2] as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <VecDeque<Vec<u8>> as seedbox_machine::snapshot::Record>::MIN
+        + <VecDeque<u8> as seedbox_machine::snapshot::Record>::MIN
+        + <bool as seedbox_machine::snapshot::Record>::MIN
+        + <bool as seedbox_machine::snapshot::Record>::MIN
+        + <LifecycleOutput as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -283,18 +283,18 @@ impl crate::machine::pv::codec::record::Record for Console {
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
         Ok(Self {
-            queues: crate::machine::pv::codec::record::Record::decode(r)?,
-            selector: crate::machine::pv::codec::record::Record::decode(r)?,
-            feature_selector: crate::machine::pv::codec::record::Record::decode(r)?,
-            driver_selector: crate::machine::pv::codec::record::Record::decode(r)?,
-            features: crate::machine::pv::codec::record::Record::decode(r)?,
-            status: crate::machine::pv::codec::record::Record::decode(r)?,
-            interrupt: crate::machine::pv::codec::record::Record::decode(r)?,
-            controls: crate::machine::pv::codec::record::Record::decode(r)?,
-            data: crate::machine::pv::codec::record::Record::decode(r)?,
-            announced: crate::machine::pv::codec::record::Record::decode(r)?,
-            open: crate::machine::pv::codec::record::Record::decode(r)?,
-            output: crate::machine::pv::codec::record::Record::decode(r)?,
+            queues: seedbox_machine::snapshot::Record::decode(r)?,
+            selector: seedbox_machine::snapshot::Record::decode(r)?,
+            feature_selector: seedbox_machine::snapshot::Record::decode(r)?,
+            driver_selector: seedbox_machine::snapshot::Record::decode(r)?,
+            features: seedbox_machine::snapshot::Record::decode(r)?,
+            status: seedbox_machine::snapshot::Record::decode(r)?,
+            interrupt: seedbox_machine::snapshot::Record::decode(r)?,
+            controls: seedbox_machine::snapshot::Record::decode(r)?,
+            data: seedbox_machine::snapshot::Record::decode(r)?,
+            announced: seedbox_machine::snapshot::Record::decode(r)?,
+            open: seedbox_machine::snapshot::Record::decode(r)?,
+            output: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }

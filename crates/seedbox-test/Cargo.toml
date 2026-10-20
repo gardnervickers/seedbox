@@ -10,7 +10,6 @@ path = "src/lib.rs"
 [dependencies]
 libc.workspace = true
 seedbox-exec.workspace = true
-serde_json.workspace = true
 
 [dev-dependencies]
 seedbox-test-time.workspace = true
@@ -18,8 +17,9 @@ sha2.workspace = true
 tempfile.workspace = true
 libc.workspace = true
 hex.workspace = true
+serde_json.workspace = true
 
-# Developer tool: never runs inside a Seedbox server or worker, so its spawns
-# cannot race an executable write there (see clippy.toml).
+# Integration tests never run inside a Seedbox server or worker, so their
+# direct spawns cannot race an executable write there (see clippy.toml).
 [lints.clippy]
 disallowed_methods = "allow"

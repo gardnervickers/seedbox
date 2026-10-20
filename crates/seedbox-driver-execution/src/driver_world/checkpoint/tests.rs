@@ -1,6 +1,6 @@
 use super::*;
-#[path = "codec_v3_tests.rs"]
-mod codec_v3_tests;
+#[path = "codec_tests.rs"]
+mod codec_tests;
 #[path = "controller_tests.rs"]
 mod controller_tests;
 #[path = "lazy_restore_tests.rs"]
@@ -299,9 +299,14 @@ fn streamed_world_capture_survives_source_drop_and_branches_with_one_or_four_wor
         &output,
         "saved",
         |state, batch| {
-            for change in &batch.changes {
-                if let seedbox_driver::driver::CommittedChange::Ready { machine, .. } =
-                    &change.change
+            for event in &batch.events {
+                if let seedbox_driver::driver::EventKind::Output(
+                    seedbox_driver::driver::MachineResponse {
+                        machine,
+                        payload: seedbox_machine::pv::Response::Ready,
+                        ..
+                    },
+                ) = &event.kind
                 {
                     let index = identities.iter().position(|id| id == machine).unwrap();
                     state.world.readiness.observe(names[index]);
@@ -316,11 +321,11 @@ fn streamed_world_capture_survives_source_drop_and_branches_with_one_or_four_wor
     assert_eq!(live.load(Ordering::SeqCst), 0);
     assert!(state.world.readiness.latched);
     assert!(
-        source_driver.drain_events().is_empty(),
+        source_driver.drain_observations().events.is_empty(),
         "capture must drain publications once"
     );
     source_driver.step(Timestamp::from_nanos(20)).unwrap();
-    let expected = session_events(source_driver.drain_events());
+    let expected = session_events(source_driver.drain_observations().events);
     drop(source_driver);
     fs::remove_dir_all(source).unwrap();
     let envelope = read(&manifest).unwrap();
@@ -333,11 +338,11 @@ fn streamed_world_capture_survives_source_drop_and_branches_with_one_or_four_wor
         let checkpoint = resolve(&envelope, limits(), decode).unwrap();
         let mut branch = restored(&checkpoint, workers);
         assert!(
-            branch.drain_events().is_empty(),
+            branch.drain_observations().events.is_empty(),
             "restoration must not reemit published prefix"
         );
         branch.step(Timestamp::from_nanos(20)).unwrap();
-        assert_eq!(session_events(branch.drain_events()), expected);
+        assert_eq!(session_events(branch.drain_observations().events), expected);
     }
 }
 
@@ -434,7 +439,7 @@ fn prepared_capture_refusal_does_not_drain_or_call_native_snapshot() {
     )
     .is_err());
     assert_eq!(peak.load(Ordering::SeqCst), 0);
-    assert!(!driver.drain_events().is_empty());
+    assert!(!driver.drain_observations().events.is_empty());
 }
 
 #[test]
@@ -613,7 +618,7 @@ fn publish_failure_is_terminal_for_capture_without_native_calls_or_republication
     assert_eq!(peak.load(Ordering::SeqCst), 0);
     assert_eq!(fs::read_dir(output).unwrap().count(), 0);
     assert!(
-        driver.drain_events().is_empty(),
+        driver.drain_observations().events.is_empty(),
         "the worker owner must terminate, never reemit or retry the drained prefix"
     );
 }

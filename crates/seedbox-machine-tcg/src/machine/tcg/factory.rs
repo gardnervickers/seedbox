@@ -1,8 +1,6 @@
 use super::{Error, TcgMachine};
-use crate::{
-    application::{GuestBootstrap, GuestEnvironment, Kernel},
-    definition::{BackendPolicy, MachineDefinition},
-};
+use seedbox_machine::application::{GuestBootstrap, GuestEnvironment, Kernel};
+use seedbox_machine::definition::{BackendPolicy, MachineDefinition};
 use std::path::{Path, PathBuf};
 /// ELF machine of the guest `init`.
 const EM_X86_64: u16 = 62;
@@ -38,7 +36,7 @@ impl Factory {
     // image and snapshots; neither the Driver's time mapping nor ambient state
     // can supply it to arbitrary machines.
     pub fn new(qemu: &Path, guest_assets: &Path, epoch_seconds: u32) -> Result<Self, Error> {
-        use super::super::assets;
+        use seedbox_machine::machine::assets;
         assets::executable(qemu)?;
         let kernel = assets::read(guest_assets, "kernel")?;
         assets::bzimage(&kernel)?;
@@ -133,41 +131,26 @@ impl Factory {
         definition: &MachineDefinition,
         environment: &GuestEnvironment,
     ) -> Result<Vec<u8>, Error> {
-        self.check_environment(definition, Some(environment))?;
+        environment
+            .check_attachments(definition.disk.is_some(), self.formatter.is_some())
+            .map_err(|e| Error(e.into()))?;
         self.assemble_selected(&definition.application, &self.bootstrap, Some(environment))
             .map_err(|error| Error(error.to_string()))
     }
-    fn check_environment(
-        &self,
-        definition: &MachineDefinition,
-        environment: Option<&GuestEnvironment>,
-    ) -> Result<(), Error> {
-        if environment.is_some_and(|e| !e.named_volumes.is_empty()) {
-            if definition.disk.is_none() {
-                return Err(Error(
-                    "named guest volumes require a machine disk at /dev/vda".into(),
-                ));
-            }
-            if self.formatter.is_none() {
-                return Err(Error("named guest volumes require guest asset mke2fs; package the static guest formatter".into()));
-            }
-        }
-        Ok(())
-    }
     fn assemble_selected(
         &self,
-        application: &crate::definition::PreparedApplication,
+        application: &seedbox_machine::definition::PreparedApplication,
         bootstrap: &GuestBootstrap,
         environment: Option<&GuestEnvironment>,
-    ) -> Result<Vec<u8>, crate::definition::DefinitionError> {
+    ) -> Result<Vec<u8>, seedbox_machine::definition::DefinitionError> {
         match environment {
-            Some(environment) => crate::application::boot_archive_configured(
+            Some(environment) => seedbox_machine::application::boot_archive_configured(
                 application,
                 bootstrap,
                 environment,
                 self.formatter.as_deref(),
             ),
-            None => crate::application::boot_archive(application, bootstrap),
+            None => seedbox_machine::application::boot_archive(application, bootstrap),
         }
     }
     /// Construct with an already complete Linux boot archive, used verbatim.
@@ -184,53 +167,40 @@ impl Factory {
         definition: &MachineDefinition,
         archive: Vec<u8>,
     ) -> Result<TcgMachine, Error> {
-        let mut machine = TcgMachine::new_with_boot_archive_in(
-            &self.qemu,
-            self.firmware.clone(),
-            &self.bootstrap,
-            definition.clone(),
-            self.scratch_root.as_deref(),
-            move |_, _| Ok(archive),
-        )?;
-        if let Some(policy) = &self.policy {
-            machine.configure_policy(&definition.name, policy)?;
-        }
-        Ok(machine)
+        self.create_with(definition, move |_, _| Ok(archive))
     }
     fn create_selected(
         &mut self,
         definition: &MachineDefinition,
         environment: Option<&GuestEnvironment>,
     ) -> Result<TcgMachine, Error> {
-        self.check_environment(definition, environment)?;
-        let mut machine = if environment.is_none() {
-            match self.scratch_root.as_deref() {
-                Some(root) => TcgMachine::new_with_scratch(
-                    &self.qemu,
-                    self.firmware.clone(),
-                    &self.bootstrap,
-                    definition.clone(),
-                    Some(root),
-                ),
-                None => TcgMachine::new(
-                    &self.qemu,
-                    self.firmware.clone(),
-                    &self.bootstrap,
-                    definition.clone(),
-                ),
-            }?
-        } else {
-            TcgMachine::new_with_boot_archive_in(
-                &self.qemu,
-                self.firmware.clone(),
-                &self.bootstrap,
-                definition.clone(),
-                self.scratch_root.as_deref(),
-                |application, bootstrap| {
-                    self.assemble_selected(application, bootstrap, environment)
-                },
-            )?
-        };
+        if let Some(environment) = environment {
+            environment
+                .check_attachments(definition.disk.is_some(), self.formatter.is_some())
+                .map_err(|e| Error(e.into()))?;
+        }
+        self.create_with(definition, |application, bootstrap| {
+            self.assemble_selected(application, bootstrap, environment)
+        })
+    }
+    /// Construct with this factory's QEMU, firmware, bootstrap and scratch
+    /// root, then apply its configured policy.
+    fn create_with(
+        &self,
+        definition: &MachineDefinition,
+        package: impl FnOnce(
+            &seedbox_machine::definition::PreparedApplication,
+            &GuestBootstrap,
+        ) -> Result<Vec<u8>, seedbox_machine::definition::DefinitionError>,
+    ) -> Result<TcgMachine, Error> {
+        let mut machine = TcgMachine::prepare(
+            &self.qemu,
+            self.firmware.clone(),
+            &self.bootstrap,
+            definition.clone(),
+            self.scratch_root.as_deref(),
+            package,
+        )?;
         if let Some(policy) = &self.policy {
             machine.configure_policy(&definition.name, policy)?;
         }

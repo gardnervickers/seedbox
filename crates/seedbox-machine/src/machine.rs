@@ -28,7 +28,9 @@ pub mod assets;
 pub mod disk;
 
 mod evidence;
-pub use evidence::{EvidenceDisposition, RamRegion, StateEvidence};
+pub use evidence::{
+    combined_digest, hex, is_sha256_hex, EvidenceDisposition, RamRegion, StateEvidence,
+};
 pub mod execution_evidence;
 pub use execution_evidence::ExecutionEvidence;
 
@@ -48,6 +50,20 @@ impl Timestamp {
     /// Return the timestamp in nanoseconds of the carrying boundary's domain.
     pub const fn as_nanos(self) -> u64 {
         self.0
+    }
+}
+impl crate::snapshot::Record for Timestamp {
+    const MIN: u64 = 8;
+    fn encode<W: std::io::Write>(
+        &self,
+        w: &mut crate::snapshot::Writer<'_, W>,
+    ) -> crate::snapshot::Result<()> {
+        w.u64(self.0)
+    }
+    fn decode<R: std::io::Read>(
+        r: &mut crate::snapshot::Reader<'_, R>,
+    ) -> crate::snapshot::Result<Self> {
+        Ok(Self(r.u64()?))
     }
 }
 

@@ -67,7 +67,6 @@ fn load_spec(
         };
         SimulationSpec {
             program: Vec::new(),
-            start_paused: false,
             seed: None,
             inputs: InputSource::Project,
             configuration: seedbox_application::config::parse_for_architecture(
@@ -202,7 +201,7 @@ pub(super) fn run_checkpoint(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn explore(
+pub(super) fn run_count(
     server: &ServerArgs,
     project: &ProjectArg,
     seed: Option<u64>,
@@ -413,7 +412,7 @@ pub(super) fn replay(
     )
 }
 
-pub(super) fn rerun(
+pub(super) fn run_from(
     server: &ServerArgs,
     id: &SimulationId,
     paused: bool,
@@ -593,7 +592,7 @@ pub(super) fn delete(server: &ServerArgs, id: &SimulationId) -> Result<u8> {
     Ok(0)
 }
 
-pub(super) fn get(server: &ServerArgs, id: &SimulationId, json: bool) -> Result<u8> {
+pub(super) fn show_status(server: &ServerArgs, id: &SimulationId, json: bool) -> Result<u8> {
     let client = daemon::connect(server)?;
     let resource = runtime()?
         .block_on(client.describe(id))
@@ -705,7 +704,7 @@ fn age(seconds: u128) -> String {
     }
 }
 
-pub(super) fn describe(server: &ServerArgs, id: &SimulationId, json: bool) -> Result<u8> {
+pub(super) fn show_definition(server: &ServerArgs, id: &SimulationId, json: bool) -> Result<u8> {
     let client = daemon::connect(server)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
@@ -746,7 +745,7 @@ pub(super) fn playback(
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
         if let Some(request_id) = request_id {
-            let receipt = client
+            let receipt: seedbox_api::ControlReceipt = client
                 .control_receipt(id, request_id)
                 .await
                 .map_err(client_error)?;
@@ -786,7 +785,7 @@ pub(super) fn mutate_control(
             request_id,
             command,
         };
-        let mut receipt = client
+        let mut receipt: seedbox_api::ControlReceipt = client
             .request_control(&mutation.id, &request)
             .await
             .map_err(client_error)?;
@@ -857,17 +856,25 @@ mod tests {
     #[test]
     fn backend_selection_defaults_projects_but_preserves_retained_tcg() {
         use seedbox_spec::{backend::CpuBackend, definition as d};
-        let spec: SimulationSpec =
-            serde_json::from_value(serde_json::json!({"oracle":{"image":"example/oracle"}}))
-                .unwrap();
+        let spec = SimulationSpec {
+            program: Vec::new(),
+            seed: None,
+            inputs: InputSource::Project,
+            configuration: seedbox_application::config::parse(
+                "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+                std::path::Path::new("/project/seedbox.yaml"),
+                &Default::default(),
+            )
+            .unwrap(),
+        };
         assert_eq!(select_backend(&spec, None).unwrap(), CpuBackend::Pv);
         assert_eq!(
             select_backend(&spec, Some(CpuBackend::Tcg)).unwrap(),
             CpuBackend::Tcg
         );
-        assert!(serde_json::to_value(&spec).unwrap()["simulator"]
-            .get("backend")
-            .is_none());
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert!(wire.get("backend").is_none());
+        assert!(wire["configuration"]["simulator"].get("backend").is_none());
         // DTO-only fixture: no execution, guest or fabricated native report.
         let asset = d::Asset(format!("sha256:{}", "0".repeat(64)));
         let definition = d::Definition {

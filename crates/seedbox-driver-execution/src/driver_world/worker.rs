@@ -22,7 +22,6 @@ use seedbox_engine_protocol::{
     intervention::Intervention,
 };
 use seedbox_machine::machine::{ExitReason, Machine, Timestamp};
-#[cfg(test)]
 use seedbox_machine::pv::Response;
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -114,10 +113,10 @@ where
         }
         let result = (|| {
             let mut facts = Facts::default();
-            let mut batch = self.driver.drain_observations();
-            for committed in &batch.changes {
-                match &committed.change {
-                    driver::CommittedChange::MachineAdded { machine, .. } => {
+            let batch = self.driver.drain_observations();
+            for event in &batch.events {
+                match &event.kind {
+                    driver::EventKind::MachineAdded { machine, .. } => {
                         let name = self
                             .constructed
                             .lock()
@@ -131,25 +130,31 @@ where
                         }
                         self.state.world.machine_names.push(name);
                     }
-                    driver::CommittedChange::Ready { machine, .. } => {
+                    driver::EventKind::Output(driver::MachineResponse {
+                        machine,
+                        payload: Response::Ready,
+                        ..
+                    }) => {
                         let name = self
                             .names
                             .get(machine)
                             .ok_or_else(|| fail("Driver ready fact has no machine binding"))?;
                         self.state.world.readiness.observe(name);
                     }
-                    driver::CommittedChange::FaultAdmitted(record) => {
+                    driver::EventKind::FaultAdmitted(record) => {
                         facts.admissions.push(record.clone())
                     }
-                    driver::CommittedChange::InputRejected { key, rejection } => facts
+                    driver::EventKind::InputRejected { key, rejection } => facts
                         .rejections
                         .push((key.clone(), rejection.detail.clone())),
-                    driver::CommittedChange::ApplicationOutcome { machine, code, .. }
-                        if self.names.get(machine) == self.state.world.machine_names.first() =>
-                    {
+                    driver::EventKind::Output(driver::MachineResponse {
+                        machine,
+                        payload: Response::ApplicationOutcome { code },
+                        ..
+                    }) if self.names.get(machine) == self.state.world.machine_names.first() => {
                         self.state.world.publication.oracle_exit = Some(*code);
                     }
-                    driver::CommittedChange::FaultSettled {
+                    driver::EventKind::FaultSettled {
                         record,
                         status,
                         outcome_at,
@@ -161,7 +166,7 @@ where
                         self.state.world.publication.session.applied_faults.push(
                             seedbox_engine_protocol::driver_world::AppliedFault {
                                 requested_at_ns: record.requested_at.as_nanos(),
-                                applied_at_ns: outcome_at.unwrap_or(committed.at).as_nanos(),
+                                applied_at_ns: outcome_at.unwrap_or(event.at).as_nanos(),
                                 service: machine.unwrap_or("").into(),
                                 action: super::events::action_name(record.action)?.into(),
                                 detail: detail.clone(),
@@ -171,7 +176,6 @@ where
                     _ => {}
                 }
             }
-            batch.changes.clear(); // Required bookkeeping above consumed this prefix.
             self.publisher.batch(&mut self.state, &self.names, batch)?;
             Ok(facts)
         })();
@@ -206,7 +210,7 @@ where
             position: self.state.world.position,
             terminal: self.terminal,
             application_ready: self.state.world.readiness.latched,
-            rate: rate_to_wire(playback.rate),
+            rate: playback.rate,
             achieved_rate,
             stepping: !self.terminal && playback.stepping,
             before_next_fault: playback.before_next_fault,
@@ -257,12 +261,12 @@ where
                 }
                 return Ok(Dispatch::Reply(reply));
             }
-            Command::SetRate { rate } => self
-                .driver
-                .with_barrier(|barrier| barrier.set_rate(rate_from_wire(*rate))),
+            Command::SetRate { rate } => {
+                self.driver.with_barrier(|barrier| barrier.set_rate(*rate))
+            }
             Command::PauseBeforeNextFault { rate } => self
                 .driver
-                .with_barrier(|barrier| barrier.pause_before_next_fault(rate_from_wire(*rate))),
+                .with_barrier(|barrier| barrier.pause_before_next_fault(*rate)),
             Command::Step => self.driver.with_barrier(|barrier| barrier.step_quantum()),
             Command::Checkpoint { request_id } => {
                 let playback = self.playback()?;
@@ -880,32 +884,6 @@ pub(super) fn position(position: driver::Position) -> host::BoundaryPosition {
         boundary_index: position.boundary_index,
         completed_rounds: position.completed_quanta,
         simulated_time_ns: position.at.as_nanos(),
-    }
-}
-pub(super) fn rate_from_wire(rate: host::PlaybackRate) -> driver::PlaybackRate {
-    match rate {
-        host::PlaybackRate::Paused => driver::PlaybackRate::Paused,
-        host::PlaybackRate::Unlimited => driver::PlaybackRate::Unlimited,
-        host::PlaybackRate::Limited {
-            numerator,
-            denominator,
-        } => driver::PlaybackRate::Limited {
-            numerator,
-            denominator,
-        },
-    }
-}
-fn rate_to_wire(rate: driver::PlaybackRate) -> host::PlaybackRate {
-    match rate {
-        driver::PlaybackRate::Paused => host::PlaybackRate::Paused,
-        driver::PlaybackRate::Unlimited => host::PlaybackRate::Unlimited,
-        driver::PlaybackRate::Limited {
-            numerator,
-            denominator,
-        } => host::PlaybackRate::Limited {
-            numerator,
-            denominator,
-        },
     }
 }
 fn valid_request_id(id: &str) -> bool {

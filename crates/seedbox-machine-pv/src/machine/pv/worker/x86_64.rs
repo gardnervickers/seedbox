@@ -475,14 +475,14 @@ mod resource_tests;
 mod tests;
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::machine::pv::codec::record::Record for Pic {
-    const MIN: u64 = <u8 as crate::machine::pv::codec::record::Record>::MIN
-        + <u8 as crate::machine::pv::codec::record::Record>::MIN
-        + <u8 as crate::machine::pv::codec::record::Record>::MIN
-        + <u8 as crate::machine::pv::codec::record::Record>::MIN
-        + <bool as crate::machine::pv::codec::record::Record>::MIN
-        + <u8 as crate::machine::pv::codec::record::Record>::MIN
-        + <u8 as crate::machine::pv::codec::record::Record>::MIN;
+impl seedbox_machine::snapshot::Record for Pic {
+    const MIN: u64 = <u8 as seedbox_machine::snapshot::Record>::MIN
+        + <u8 as seedbox_machine::snapshot::Record>::MIN
+        + <u8 as seedbox_machine::snapshot::Record>::MIN
+        + <u8 as seedbox_machine::snapshot::Record>::MIN
+        + <bool as seedbox_machine::snapshot::Record>::MIN
+        + <u8 as seedbox_machine::snapshot::Record>::MIN
+        + <u8 as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -509,26 +509,26 @@ impl crate::machine::pv::codec::record::Record for Pic {
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
         Ok(Self {
-            imr: crate::machine::pv::codec::record::Record::decode(r)?,
-            isr: crate::machine::pv::codec::record::Record::decode(r)?,
-            base: crate::machine::pv::codec::record::Record::decode(r)?,
-            icw: crate::machine::pv::codec::record::Record::decode(r)?,
-            read_isr: crate::machine::pv::codec::record::Record::decode(r)?,
-            slave_imr: crate::machine::pv::codec::record::Record::decode(r)?,
-            slave_icw: crate::machine::pv::codec::record::Record::decode(r)?,
+            imr: seedbox_machine::snapshot::Record::decode(r)?,
+            isr: seedbox_machine::snapshot::Record::decode(r)?,
+            base: seedbox_machine::snapshot::Record::decode(r)?,
+            icw: seedbox_machine::snapshot::Record::decode(r)?,
+            read_isr: seedbox_machine::snapshot::Record::decode(r)?,
+            slave_imr: seedbox_machine::snapshot::Record::decode(r)?,
+            slave_icw: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::machine::pv::codec::record::Record for Uart {
-    const MIN: u64 = <u8 as crate::machine::pv::codec::record::Record>::MIN
-        + <u8 as crate::machine::pv::codec::record::Record>::MIN
-        + <u8 as crate::machine::pv::codec::record::Record>::MIN
-        + <u8 as crate::machine::pv::codec::record::Record>::MIN
-        + <u8 as crate::machine::pv::codec::record::Record>::MIN
-        + <u8 as crate::machine::pv::codec::record::Record>::MIN
-        + <bool as crate::machine::pv::codec::record::Record>::MIN;
+impl seedbox_machine::snapshot::Record for Uart {
+    const MIN: u64 = <u8 as seedbox_machine::snapshot::Record>::MIN
+        + <u8 as seedbox_machine::snapshot::Record>::MIN
+        + <u8 as seedbox_machine::snapshot::Record>::MIN
+        + <u8 as seedbox_machine::snapshot::Record>::MIN
+        + <u8 as seedbox_machine::snapshot::Record>::MIN
+        + <u8 as seedbox_machine::snapshot::Record>::MIN
+        + <bool as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -555,22 +555,22 @@ impl crate::machine::pv::codec::record::Record for Uart {
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
         Ok(Self {
-            ier: crate::machine::pv::codec::record::Record::decode(r)?,
-            lcr: crate::machine::pv::codec::record::Record::decode(r)?,
-            mcr: crate::machine::pv::codec::record::Record::decode(r)?,
-            scr: crate::machine::pv::codec::record::Record::decode(r)?,
-            dll: crate::machine::pv::codec::record::Record::decode(r)?,
-            dlm: crate::machine::pv::codec::record::Record::decode(r)?,
-            thre: crate::machine::pv::codec::record::Record::decode(r)?,
+            ier: seedbox_machine::snapshot::Record::decode(r)?,
+            lcr: seedbox_machine::snapshot::Record::decode(r)?,
+            mcr: seedbox_machine::snapshot::Record::decode(r)?,
+            scr: seedbox_machine::snapshot::Record::decode(r)?,
+            dll: seedbox_machine::snapshot::Record::decode(r)?,
+            dlm: seedbox_machine::snapshot::Record::decode(r)?,
+            thre: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::machine::pv::codec::record::Record for Devices {
-    const MIN: u64 = <Pic as crate::machine::pv::codec::record::Record>::MIN
-        + <Uart as crate::machine::pv::codec::record::Record>::MIN
-        + <u8 as crate::machine::pv::codec::record::Record>::MIN;
+impl seedbox_machine::snapshot::Record for Devices {
+    const MIN: u64 = <Pic as seedbox_machine::snapshot::Record>::MIN
+        + <Uart as seedbox_machine::snapshot::Record>::MIN
+        + <u8 as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -585,9 +585,9 @@ impl crate::machine::pv::codec::record::Record for Devices {
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
         Ok(Self {
-            pic: crate::machine::pv::codec::record::Record::decode(r)?,
-            uart: crate::machine::pv::codec::record::Record::decode(r)?,
-            lines: crate::machine::pv::codec::record::Record::decode(r)?,
+            pic: seedbox_machine::snapshot::Record::decode(r)?,
+            uart: seedbox_machine::snapshot::Record::decode(r)?,
+            lines: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }

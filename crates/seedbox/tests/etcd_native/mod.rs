@@ -842,7 +842,6 @@ mod tests {
             identity,
             attempt: "one".into(),
             performance_parameters: BTreeMap::new(),
-            allow_engine_change: false,
             log_policy: Default::default(),
             omitted_logs: BTreeMap::new(),
             outcome: Outcome::Pass,
@@ -875,8 +874,6 @@ mod tests {
                     ContentDigest::of(worker_stderr.as_bytes()),
                 ),
             ]),
-            replay_of: None,
-            replay: None,
         };
         write_record(&attempt, &record).unwrap();
     }

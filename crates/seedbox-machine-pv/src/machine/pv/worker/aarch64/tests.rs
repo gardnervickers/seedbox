@@ -79,7 +79,7 @@ fn idle() -> Exit {
 }
 #[test]
 fn pending_cross_channel_writes_capture_ties_and_drain_once() {
-    use crate::pv::transport::{GuestWrite, LifecycleWrite};
+    use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
     let mut vm = machine();
     vm.state.now = 3;
     vm.uart(0, 4, true, b'A' as u64).unwrap();

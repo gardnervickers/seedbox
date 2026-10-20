@@ -49,8 +49,12 @@ fn shutdown_latching_and_zero_budget_delivery_execute_nothing() {
     let ram = machine.process().unwrap().memory(STACK_PAGE, 4096).unwrap();
     let stopped = machine.process().unwrap().stopped_result().unwrap();
     let rng = machine.rng.clone().next_u64();
-    machine.request(crate::pv::Request::Shutdown).unwrap();
-    machine.request(crate::pv::Request::Shutdown).unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Shutdown)
+        .unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Shutdown)
+        .unwrap();
     assert!(machine.shutdown_requested);
     assert_eq!(
         machine.process().unwrap().stopped_result().unwrap(),
@@ -95,7 +99,9 @@ fn unhandled_request_keeps_idle_state_and_lifecycle_resets_discard_it() {
         }
     );
     clock.0.store(idle + 9, Ordering::Relaxed);
-    machine.request(crate::pv::Request::Shutdown).unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Shutdown)
+        .unwrap();
     assert_eq!(
         machine.run(&mut (), at(idle + 9)).unwrap(),
         StopReason::Blocked {
@@ -103,15 +109,27 @@ fn unhandled_request_keeps_idle_state_and_lifecycle_resets_discard_it() {
             deadline: None
         }
     );
-    machine.request(crate::pv::Request::Crash).unwrap();
-    machine.request(crate::pv::Request::Shutdown).unwrap(); // Already crashed is harmless.
+    machine
+        .request(seedbox_machine::pv::Request::Crash)
+        .unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Shutdown)
+        .unwrap(); // Already crashed is harmless.
     assert!(!machine.shutdown_requested);
-    machine.request(crate::pv::Request::Reboot).unwrap();
-    machine.request(crate::pv::Request::Shutdown).unwrap();
-    machine.request(crate::pv::Request::Reboot).unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Reboot)
+        .unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Shutdown)
+        .unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Reboot)
+        .unwrap();
     assert!(!machine.shutdown_requested);
     machine.state = State::Invalid;
-    assert!(machine.request(crate::pv::Request::Shutdown).is_err());
+    assert!(machine
+        .request(seedbox_machine::pv::Request::Shutdown)
+        .is_err());
 }
 
 /// ACPI is how firmware powers off or resets the microvm board, and a triple

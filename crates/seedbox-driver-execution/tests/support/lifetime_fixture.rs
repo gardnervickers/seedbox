@@ -1,8 +1,8 @@
 //! Process-only fixture. No VM or QEMU acceptance is implied.
-use seedbox_driver_execution::exec_files::Guarded;
 use seedbox_driver_execution::process_lifetime::{
     self, OwnedExecution, ANCHOR_ENTRY, MONITOR_ENTRY,
 };
+use seedbox_exec::Guarded;
 use std::{
     fs, io,
     path::Path,

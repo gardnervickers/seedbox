@@ -384,9 +384,7 @@ fn boot_generation_overflow_fails_before_reset_or_response_publication() {
             0,
             0,
             0,
-            crate::oracle::observation::Admission::Applied(
-                crate::oracle::observation::Transition::Reboot { new_boot: u64::MAX },
-            ),
+            crate::oracle::observation::Transition::Reboot { new_boot: u64::MAX },
         )
         .unwrap();
     raw(&mut driver, at(0), MachineId(0), Request::Reboot);

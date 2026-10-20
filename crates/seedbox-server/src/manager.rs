@@ -1,5 +1,5 @@
 //! Serializes resource mutations with status subscription. Execution happens
-//! outside this lock; only durable lifecycle changes and their publication use it.
+//! outside this lock; only lifecycle changes and their publication use it.
 
 use crate::catalogue::{Catalogue, Error};
 use crate::stream::{History, Payload, PublishError, Stream, Subscription};
@@ -135,7 +135,7 @@ impl Live {
 
     fn publish_event(&self, mut event: SimulationEvent) {
         // An oversized observation loses only its payload, never the live stream.
-        // Durable control receipts remain available through resource inspection.
+        // Control receipts remain available through resource inspection.
         match self.events.publish(event.clone()) {
             Err(PublishError::TooLarge { .. }) => {
                 event.event = EventKind::SourceUnavailable;
@@ -549,29 +549,6 @@ impl Manager {
         Ok(state.live.get(id).and_then(|live| live.worker.clone()))
     }
 
-    /// Call after acquiring the server catalogue lock. Current native workers
-    /// are tied to their owner's pipe and cannot survive its disappearance.
-    /// Queued submissions remain runnable; partially executed worlds do not.
-    pub fn recover_interrupted(&self) -> Result<(), Error> {
-        for id in self.read(|catalogue| catalogue.stopped_seed_members())? {
-            self.stop(&id)?;
-        }
-        let ids = self.read(|catalogue| {
-            Ok(catalogue
-                .list()
-                .filter(|s| !matches!(s.status.phase, Phase::Queued | Phase::Completed))
-                .map(|s| s.metadata.id.clone())
-                .collect::<Vec<_>>())
-        })?;
-        for id in ids {
-            self.update(&id, |s| {
-                s.status.phase = Phase::Completed;
-                s.status.stage = None;
-                s.status.termination = Some(ExecutionTermination::Interrupted);
-            })?;
-        }
-        Ok(())
-    }
     pub fn new(catalogue: Catalogue) -> Self {
         let log_history = Arc::new(History::new(64 * 1024 * 1024));
         let event_history = Arc::new(History::new(16 * 1024 * 1024));
@@ -604,7 +581,7 @@ impl Manager {
     }
 
     /// Durations reflect the query instant; their projection does not change
-    /// the revision of the last durable lifecycle mutation.
+    /// the revision of the last lifecycle mutation.
     pub fn describe(&self, id: &SimulationId) -> Result<Simulation, Error> {
         let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
         Ok(state.project(state.catalogue.get(id)?.clone(), Instant::now()))
@@ -1277,8 +1254,7 @@ mod tests {
 
     #[test]
     fn log_tracking_keeps_configured_attribution_and_survives_completion() {
-        let directory = tempfile::tempdir().unwrap();
-        let manager = Manager::new(Catalogue::open(&directory.path().join("catalogue")).unwrap());
+        let manager = Manager::new(Catalogue::in_memory());
         let configuration = seedbox_application::config::parse(
             "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
             std::path::Path::new("/project/seedbox.yaml"),
@@ -1292,7 +1268,6 @@ mod tests {
                 request_id: "world-logs".into(),
                 spec: SimulationSpec {
                     program: Vec::new(),
-                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,
@@ -1337,8 +1312,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_observations_keep_event_stream_and_durable_receipts_available() {
         use crate::stream::Delivery;
-        let directory = tempfile::tempdir().unwrap();
-        let manager = Manager::new(Catalogue::open(&directory.path().join("catalogue")).unwrap());
+        let manager = Manager::new(Catalogue::in_memory());
         let configuration = seedbox_application::config::parse(
             "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
             std::path::Path::new("/project/seedbox.yaml"),
@@ -1352,7 +1326,6 @@ mod tests {
                 request_id: "oversized-events".into(),
                 spec: SimulationSpec {
                     program: Vec::new(),
-                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,
@@ -1481,11 +1454,9 @@ mod tests {
     }
 
     #[test]
-    fn committed_oracle_exit_survives_missing_final_report_and_catalogue_restart() {
+    fn committed_oracle_exit_survives_missing_final_report() {
         for code in [0, 7] {
-            let directory = tempfile::tempdir().unwrap();
-            let catalogue = directory.path().join("catalogue");
-            let manager = Manager::new(Catalogue::open(&catalogue).unwrap());
+            let manager = Manager::new(Catalogue::in_memory());
             let configuration = seedbox_application::config::parse(
                 "name: test\nmachines:\n  other:\n    image: example/other\noracle:\n  image: example/oracle\n",
                 std::path::Path::new("/project/seedbox.yaml"),
@@ -1499,7 +1470,6 @@ mod tests {
                     request_id: "oracle-observation".into(),
                     spec: SimulationSpec {
                         program: Vec::new(),
-                        start_paused: false,
                         seed: Some(1),
                         inputs: InputSource::Project,
                         configuration,
@@ -1561,16 +1531,12 @@ mod tests {
                 completed.status.termination,
                 Some(ExecutionTermination::Error { .. })
             ));
-            drop(manager);
-            let reopened = Manager::new(Catalogue::open(&catalogue).unwrap());
-            assert_eq!(reopened.describe(&id).unwrap(), completed);
         }
     }
 
     #[test]
     fn committed_readiness_closes_boot_stage_once_and_ignores_stale_samples() {
-        let directory = tempfile::tempdir().unwrap();
-        let manager = Manager::new(Catalogue::open(&directory.path().join("catalogue")).unwrap());
+        let manager = Manager::new(Catalogue::in_memory());
         let configuration = seedbox_application::config::parse(
             "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
             std::path::Path::new("/project/seedbox.yaml"),
@@ -1584,7 +1550,6 @@ mod tests {
                 request_id: "readiness".into(),
                 spec: SimulationSpec {
                     program: Vec::new(),
-                    start_paused: false,
                     seed: Some(1),
                     inputs: InputSource::Project,
                     configuration,

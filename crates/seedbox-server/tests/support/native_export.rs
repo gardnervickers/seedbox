@@ -50,8 +50,8 @@ pub async fn pv_large_export_under_load() {
     // New size/load scenario: 600 seconds is only a failure/hang guard, not an
     // expected duration or completion oracle. Existing native budgets unchanged.
     native_case_with_guard(Duration::from_secs(600), |owner| Box::pin(async move {
-        let session = owner.session(DriverBackend::Pv);
-        let mut request = submission_with_machines(DriverBackend::Pv, session.root.path(), &session.store, 2_000_000, 123, vec!["export-one", "export-two"]);
+        let session = owner.session(CpuBackend::Pv);
+        let mut request = submission_with_machines(CpuBackend::Pv, session.root.path(), &session.store, 2_000_000, 123, vec!["export-one", "export-two"]);
         request.options.start_paused = true;
         let source = session.submit(request, 1).await;
         session.worker(&source).await;
@@ -65,7 +65,7 @@ pub async fn pv_large_export_under_load() {
             check_bound(
                 &session.client,
                 &source,
-                DriverBackend::Pv,
+                CpuBackend::Pv,
                 state.position.simulated_time_ns,
                 "its three-machine capture point",
             )

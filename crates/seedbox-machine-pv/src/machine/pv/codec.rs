@@ -4,10 +4,10 @@
 //! then kernel, initrd, page+mapped RAM, native overlays, client overlays, base.
 //! All lengths precede raw bodies, allowing one exact retained-body reservation.
 use super::*;
-use seedbox_machine::snapshot::{reserve, CodecError, DecodeLimits, Reader, Result, Writer};
+use seedbox_machine::snapshot::{
+    reserve, CodecError, DecodeLimits, Reader, Record, Result, Writer,
+};
 use std::io::{Read, Write};
-pub(super) mod record;
-use record::Record;
 const MAGIC: &[u8; 8] = b"SBXPVS01";
 const HEADER_BYTES: u64 = 24;
 const VERSION: u32 = 3;
@@ -77,7 +77,7 @@ fn validate(c: &Capture, disk: Option<&DiskImage>) -> Result<()> {
     boot::RamLayout::native(c.memory_bytes).map_err(|_| invalid("RAM layout"))?;
     boot::arguments(&c.command_line).map_err(|_| invalid("kernel arguments"))?;
     if let Some(mac) = c.network {
-        crate::definition::MacAddress::new(mac).map_err(|_| invalid("network MAC"))?;
+        seedbox_machine::definition::MacAddress::new(mac).map_err(|_| invalid("network MAC"))?;
     }
     if c.disk != disk.map(DiskImage::sectors) {
         return Err(invalid("disk base capacity"));
@@ -105,7 +105,7 @@ fn validate(c: &Capture, disk: Option<&DiskImage>) -> Result<()> {
 }
 fn validate_overlay(bytes: &[u8], sectors: Option<u64>) -> Result<()> {
     match sectors {
-        Some(capacity) => crate::machine::disk::codec::validate_overlays(bytes, capacity)
+        Some(capacity) => seedbox_machine::machine::disk::codec::validate_overlays(bytes, capacity)
             .map_err(|_| invalid("disk overlays")),
         None if bytes.is_empty() => Ok(()),
         None => Err(invalid("diskless overlays")),
@@ -395,7 +395,7 @@ impl Snapshot {
                 client_len
             };
             if overlays < 32
-                || overlays as u128 > crate::machine::disk::codec::encoded_limit(sectors)
+                || overlays as u128 > seedbox_machine::machine::disk::codec::encoded_limit(sectors)
             {
                 return Err(invalid("overlay length exceeds disk geometry"));
             }
@@ -531,72 +531,5 @@ impl Record for State {
         }
     }
 }
-impl Record for crate::pv::bridge::GuestBridge {
-    const MIN: u64 = 1;
-    fn encode<W: Write>(&self, w: &mut Writer<'_, W>) -> Result<()> {
-        self.write_snapshot(w)
-    }
-    fn decode<R: Read>(r: &mut Reader<'_, R>) -> Result<Self> {
-        Self::read_snapshot(r, u64::MAX, true)
-    }
-}
-impl Record for crate::pv::transport::LifecycleWrite {
-    const MIN: u64 = 16;
-    fn encode<W: Write>(&self, w: &mut Writer<'_, W>) -> Result<()> {
-        let Self { time, bytes } = self;
-        time.encode(w)?;
-        w.bytes(bytes)
-    }
-    fn decode<R: Read>(r: &mut Reader<'_, R>) -> Result<Self> {
-        Ok(Self {
-            time: r.u64()?,
-            bytes: r.bytes()?,
-        })
-    }
-}
-impl Record for crate::pv::transport::GuestWrite {
-    const MIN: u64 = 17;
-    fn encode<W: Write>(&self, w: &mut Writer<'_, W>) -> Result<()> {
-        match self {
-            Self::Console(v) => {
-                w.u8(0)?;
-                v.encode(w)
-            }
-            Self::Lifecycle(v) => {
-                w.u8(1)?;
-                v.encode(w)
-            }
-            Self::Frame(v) => {
-                w.u8(2)?;
-                v.encode(w)
-            }
-        }
-    }
-    fn decode<R: Read>(r: &mut Reader<'_, R>) -> Result<Self> {
-        match r.u8()? {
-            0 => Ok(Self::Console(Record::decode(r)?)),
-            1 => Ok(Self::Lifecycle(Record::decode(r)?)),
-            2 => Ok(Self::Frame(Record::decode(r)?)),
-            _ => Err(invalid("guest write tag")),
-        }
-    }
-}
-impl Record for crate::pv::transport::LifecycleOutput {
-    const MIN: u64 = 8;
-    fn encode<W: Write>(&self, w: &mut Writer<'_, W>) -> Result<()> {
-        if !self.is_empty() {
-            return Err(invalid("undrained lifecycle device output"));
-        }
-        w.u64(0)
-    }
-    fn decode<R: Read>(r: &mut Reader<'_, R>) -> Result<Self> {
-        let count = r.count::<crate::pv::transport::LifecycleWrite>(16)?;
-        if count != 0 {
-            return Err(invalid("undrained lifecycle device output"));
-        }
-        Ok(Self::default())
-    }
-}
-
 #[cfg(test)]
 mod tests;
