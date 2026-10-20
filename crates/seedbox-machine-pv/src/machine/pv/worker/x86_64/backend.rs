@@ -700,15 +700,15 @@ impl Backend for Native {
 mod tests;
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::machine::pv::codec::record::Record for Architecture {
-    const MIN: u64 = <Vec<u8> as crate::machine::pv::codec::record::Record>::MIN
-        + <Vec<u8> as crate::machine::pv::codec::record::Record>::MIN
-        + <Vec<u8> as crate::machine::pv::codec::record::Record>::MIN
-        + <Vec<u8> as crate::machine::pv::codec::record::Record>::MIN
-        + <Vec<(u32, u64)> as crate::machine::pv::codec::record::Record>::MIN
-        + <Vec<u8> as crate::machine::pv::codec::record::Record>::MIN
-        + <Vec<u8> as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN;
+impl seedbox_machine::snapshot::Record for Architecture {
+    const MIN: u64 = <Vec<u8> as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<u8> as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<u8> as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<u8> as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<(u32, u64)> as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<u8> as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<u8> as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -737,14 +737,14 @@ impl crate::machine::pv::codec::record::Record for Architecture {
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
         Ok(Self {
-            regs: crate::machine::pv::codec::record::Record::decode(r)?,
-            sregs: crate::machine::pv::codec::record::Record::decode(r)?,
-            xsave: crate::machine::pv::codec::record::Record::decode(r)?,
-            xcrs: crate::machine::pv::codec::record::Record::decode(r)?,
-            msrs: crate::machine::pv::codec::record::Record::decode(r)?,
-            debugregs: crate::machine::pv::codec::record::Record::decode(r)?,
-            events: crate::machine::pv::codec::record::Record::decode(r)?,
-            mp_state: crate::machine::pv::codec::record::Record::decode(r)?,
+            regs: seedbox_machine::snapshot::Record::decode(r)?,
+            sregs: seedbox_machine::snapshot::Record::decode(r)?,
+            xsave: seedbox_machine::snapshot::Record::decode(r)?,
+            xcrs: seedbox_machine::snapshot::Record::decode(r)?,
+            msrs: seedbox_machine::snapshot::Record::decode(r)?,
+            debugregs: seedbox_machine::snapshot::Record::decode(r)?,
+            events: seedbox_machine::snapshot::Record::decode(r)?,
+            mp_state: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }

@@ -1,10 +1,15 @@
 use super::{CodecError, Reader, Result, Writer};
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io::{Read, Write},
     num::NonZeroU32,
 };
-pub(crate) trait Record: Sized {
+/// Closed, quota-checked snapshot encoding shared by every backend codec.
+/// Fields encode in declaration order with no tags or padding; see [`record!`].
+///
+/// [`record!`]: crate::record
+pub trait Record: Sized {
+    /// Smallest encoded size, used to bound collection counts by the body.
     const MIN: u64;
     fn encode<W: Write>(&self, w: &mut Writer<'_, W>) -> Result<()>;
     fn decode<R: Read>(r: &mut Reader<'_, R>) -> Result<Self>;
@@ -66,6 +71,7 @@ impl Record for u8 {
         w.raw(second)
     }
 }
+scalar!(u16, u16, 2);
 scalar!(u32, u32, 4);
 scalar!(u64, u64, 8);
 impl Record for bool {
@@ -124,6 +130,23 @@ impl<A: Record, B: Record> Record for (A, B) {
         Ok((A::decode(r)?, B::decode(r)?))
     }
 }
+impl<T: Record, const N: usize> Record for [T; N] {
+    const MIN: u64 = T::MIN * N as u64;
+    fn encode<W: Write>(&self, w: &mut Writer<'_, W>) -> Result<()> {
+        for x in self {
+            x.encode(w)?;
+        }
+        Ok(())
+    }
+    fn decode<R: Read>(r: &mut Reader<'_, R>) -> Result<Self> {
+        // Fixed arrays are schema-bounded, never sized by imported input.
+        let mut out: [Option<T>; N] = std::array::from_fn(|_| None);
+        for x in &mut out {
+            *x = Some(T::decode(r)?);
+        }
+        Ok(out.map(|x| x.expect("initialized fixed array")))
+    }
+}
 impl<T: Record> Record for Vec<T> {
     const MIN: u64 = 8;
     fn encode<W: Write>(&self, w: &mut Writer<'_, W>) -> Result<()> {
@@ -169,6 +192,32 @@ impl<T: Record + Ord + Copy> Record for BTreeSet<T> {
     }
 }
 
+impl<K: Record + Ord + Copy, V: Record> Record for BTreeMap<K, V> {
+    const MIN: u64 = 8;
+    fn encode<W: Write>(&self, w: &mut Writer<'_, W>) -> Result<()> {
+        w.u64(self.len() as u64)?;
+        for (k, v) in self {
+            k.encode(w)?;
+            v.encode(w)?;
+        }
+        Ok(())
+    }
+    fn decode<R: Read>(r: &mut Reader<'_, R>) -> Result<Self> {
+        let n = r.count::<(K, V)>(K::MIN + V::MIN)?;
+        let mut v = BTreeMap::new();
+        let mut last = None;
+        for _ in 0..n {
+            let k = K::decode(r)?;
+            if last.is_some_and(|p| p >= k) {
+                return Err(CodecError::Invalid("map order or duplicate"));
+            }
+            last = Some(k);
+            v.insert(k, V::decode(r)?);
+        }
+        Ok(v)
+    }
+}
+
 /// Logical scratch index, not allocator/RSS accounting. The index is separate
 /// from its retained collection and consumes both item and element-byte quotas.
 pub(crate) fn charge_index<T, R: Read>(r: &mut Reader<'_, R>, n: u64) -> Result<()> {
@@ -177,4 +226,29 @@ pub(crate) fn charge_index<T, R: Read>(r: &mut Reader<'_, R>, n: u64) -> Result<
         n.checked_mul(std::mem::size_of::<T>() as u64)
             .ok_or(CodecError::Limit("validation index storage"))?,
     )
+}
+
+/// Implement [`Record`] for a struct by encoding its fields in order.
+#[macro_export]
+macro_rules! record {
+    ($ty:ty { $($field:ident : $kind:ty),* $(,)? }) => {
+        impl $crate::snapshot::Record for $ty {
+            const MIN: u64 = 0 $(+ <$kind as $crate::snapshot::Record>::MIN)*;
+            fn encode<W: ::std::io::Write>(
+                &self,
+                w: &mut $crate::snapshot::Writer<'_, W>,
+            ) -> $crate::snapshot::Result<()> {
+                let Self { $($field),* } = self;
+                $($crate::snapshot::Record::encode($field, w)?;)*
+                Ok(())
+            }
+            fn decode<R: ::std::io::Read>(
+                r: &mut $crate::snapshot::Reader<'_, R>,
+            ) -> $crate::snapshot::Result<Self> {
+                Ok(Self {
+                    $($field: <$kind as $crate::snapshot::Record>::decode(r)?),*
+                })
+            }
+        }
+    };
 }

@@ -1,8 +1,8 @@
 //! Closed client policy, physical owner and ended evidence. Separate from the
 //! bounded private JSON header: page records remain quota-checked raw blobs.
-use super::codec::record::Record;
 use super::*;
-use seedbox_machine::machine::{EvidenceDisposition, RamRegion, StateEvidence};
+use seedbox_machine::machine::{EvidenceDisposition, StateEvidence};
+use seedbox_machine::snapshot::Record;
 #[derive(Clone, Debug, Default)]
 pub(super) struct Aux {
     pub policy: Option<policy::Named>,
@@ -200,40 +200,20 @@ impl Aux {
         Ok(())
     }
 }
-macro_rules! record {($ty:ty {$($field:ident:$kind:ty),*$(,)?})=>{impl Record for $ty{const MIN:u64=0$(+<$kind as Record>::MIN)*;fn encode<W:std::io::Write>(&self,w:&mut seedbox_machine::snapshot::Writer<'_,W>)->seedbox_machine::snapshot::Result<()>{let Self{$($field),*}=self;$($field.encode(w)?;)*Ok(())}fn decode<R:std::io::Read>(r:&mut seedbox_machine::snapshot::Reader<'_,R>)->seedbox_machine::snapshot::Result<Self>{Ok(Self{$($field:<$kind as Record>::decode(r)?),*})}}}}
-record!(Aux{policy:Option<policy::Named>,logical:u64,active:Option<u64>,last:Option<Ended>,cache:Option<Cached>,execution:Option<EndedExecution>,retiring:Option<[u8;32]>,pending:std::collections::VecDeque<Report>});
-record!(EndedExecution {
+seedbox_machine::record!(Aux{policy:Option<policy::Named>,logical:u64,active:Option<u64>,last:Option<Ended>,cache:Option<Cached>,execution:Option<EndedExecution>,retiring:Option<[u8;32]>,pending:std::collections::VecDeque<Report>});
+seedbox_machine::record!(EndedExecution {
     boot: u64,
     shutdown: bool,
     witness: [u8; 32],
     mark: u8,
     at: u64
 });
-record!(Ended {
+seedbox_machine::record!(Ended {
     boot: u64,
     shutdown: bool,
     native: bool
 });
-record!(Report{at:u64,end:Ended,lost:u64,disk:Option<String>,retired:Option<String>});
-impl Record for RamRegion {
-    const MIN: u64 = 16;
-    fn encode<W: std::io::Write>(
-        &self,
-        w: &mut seedbox_machine::snapshot::Writer<'_, W>,
-    ) -> seedbox_machine::snapshot::Result<()> {
-        let Self { base, length } = self;
-        base.encode(w)?;
-        length.encode(w)
-    }
-    fn decode<R: std::io::Read>(
-        r: &mut seedbox_machine::snapshot::Reader<'_, R>,
-    ) -> seedbox_machine::snapshot::Result<Self> {
-        Ok(Self {
-            base: Record::decode(r)?,
-            length: Record::decode(r)?,
-        })
-    }
-}
+seedbox_machine::record!(Report{at:u64,end:Ended,lost:u64,disk:Option<String>,retired:Option<String>});
 impl Record for Cached {
     const MIN: u64 = 41;
     fn encode<W: std::io::Write>(

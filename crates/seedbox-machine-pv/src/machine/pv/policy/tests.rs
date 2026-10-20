@@ -1,5 +1,5 @@
 use super::*;
-use seedbox_machine::snapshot::{DecodeLimits, Reader, Writer};
+use seedbox_machine::snapshot::{DecodeLimits, Reader, Record, Writer};
 fn setup(boot: u64) -> BootPolicy {
     Named::new(
         "node",

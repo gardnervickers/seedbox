@@ -9,6 +9,10 @@ pub struct RamRegion {
     pub base: u64,
     pub length: u64,
 }
+crate::record!(RamRegion {
+    base: u64,
+    length: u64,
+});
 
 /// The lifetime represented by a stopped-state capture.
 // TODO: Re-evaluate: teardown destroys native RAM; callers must distinguish a

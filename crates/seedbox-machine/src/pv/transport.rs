@@ -60,3 +60,59 @@ impl LifecycleOutput {
         writes.is_empty()
     }
 }
+
+crate::record!(LifecycleWrite {
+    time: u64,
+    bytes: Vec<u8>,
+});
+impl crate::snapshot::Record for GuestWrite {
+    const MIN: u64 = 17;
+    fn encode<W: std::io::Write>(
+        &self,
+        w: &mut crate::snapshot::Writer<'_, W>,
+    ) -> crate::snapshot::Result<()> {
+        let (tag, write) = match self {
+            Self::Console(v) => (0, v),
+            Self::Lifecycle(v) => (1, v),
+            Self::Frame(v) => (2, v),
+        };
+        w.u8(tag)?;
+        crate::snapshot::Record::encode(write, w)
+    }
+    fn decode<R: std::io::Read>(
+        r: &mut crate::snapshot::Reader<'_, R>,
+    ) -> crate::snapshot::Result<Self> {
+        use crate::snapshot::Record;
+        match r.u8()? {
+            0 => Ok(Self::Console(Record::decode(r)?)),
+            1 => Ok(Self::Lifecycle(Record::decode(r)?)),
+            2 => Ok(Self::Frame(Record::decode(r)?)),
+            _ => Err(crate::snapshot::CodecError::Invalid("guest write tag")),
+        }
+    }
+}
+/// Captures occur at stopped boundaries, after all device output has drained.
+impl crate::snapshot::Record for LifecycleOutput {
+    const MIN: u64 = 8;
+    fn encode<W: std::io::Write>(
+        &self,
+        w: &mut crate::snapshot::Writer<'_, W>,
+    ) -> crate::snapshot::Result<()> {
+        if !self.is_empty() {
+            return Err(crate::snapshot::CodecError::Invalid(
+                "undrained lifecycle device output",
+            ));
+        }
+        w.u64(0)
+    }
+    fn decode<R: std::io::Read>(
+        r: &mut crate::snapshot::Reader<'_, R>,
+    ) -> crate::snapshot::Result<Self> {
+        if r.count::<LifecycleWrite>(16)? != 0 {
+            return Err(crate::snapshot::CodecError::Invalid(
+                "undrained lifecycle device output",
+            ));
+        }
+        Ok(Self::default())
+    }
+}

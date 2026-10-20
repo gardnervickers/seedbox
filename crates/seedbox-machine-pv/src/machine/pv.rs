@@ -1130,22 +1130,22 @@ mod progress_tests;
 pub mod test_support;
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::machine::pv::codec::record::Record for Capture {
-    const MIN: u64 = <u64 as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <String as crate::machine::pv::codec::record::Record>::MIN
-        + <u64 as crate::machine::pv::codec::record::Record>::MIN
-        + <u64 as crate::machine::pv::codec::record::Record>::MIN
-        + <State as crate::machine::pv::codec::record::Record>::MIN
-        + <bool as crate::machine::pv::codec::record::Record>::MIN
-        + <bool as crate::machine::pv::codec::record::Record>::MIN
-        + <u64 as crate::machine::pv::codec::record::Record>::MIN
-        + <Option<u64> as crate::machine::pv::codec::record::Record>::MIN
-        + <Vec<crate::pv::transport::GuestWrite> as crate::machine::pv::codec::record::Record>::MIN
-        + <Vec<u8> as crate::machine::pv::codec::record::Record>::MIN
-        + <crate::pv::bridge::GuestBridge as crate::machine::pv::codec::record::Record>::MIN
-        + <Option<u64> as crate::machine::pv::codec::record::Record>::MIN
-        + <Option<[u8; 6]> as crate::machine::pv::codec::record::Record>::MIN;
+impl seedbox_machine::snapshot::Record for Capture {
+    const MIN: u64 = <u64 as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <String as seedbox_machine::snapshot::Record>::MIN
+        + <u64 as seedbox_machine::snapshot::Record>::MIN
+        + <u64 as seedbox_machine::snapshot::Record>::MIN
+        + <State as seedbox_machine::snapshot::Record>::MIN
+        + <bool as seedbox_machine::snapshot::Record>::MIN
+        + <bool as seedbox_machine::snapshot::Record>::MIN
+        + <u64 as seedbox_machine::snapshot::Record>::MIN
+        + <Option<u64> as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<crate::pv::transport::GuestWrite> as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<u8> as seedbox_machine::snapshot::Record>::MIN
+        + <crate::pv::bridge::GuestBridge as seedbox_machine::snapshot::Record>::MIN
+        + <Option<u64> as seedbox_machine::snapshot::Record>::MIN
+        + <Option<[u8; 6]> as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -1187,7 +1187,7 @@ impl crate::machine::pv::codec::record::Record for Capture {
     fn decode<R: std::io::Read>(
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
-        use crate::machine::pv::codec::record::Record;
+        use seedbox_machine::snapshot::Record;
         let memory_bytes = Record::decode(r)?;
         let layout_version = Record::decode(r)?;
         let command_line = Record::decode(r)?;

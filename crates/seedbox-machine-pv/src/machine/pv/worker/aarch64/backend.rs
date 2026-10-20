@@ -68,12 +68,12 @@ pub(in super::super) trait Backend: Sized {
 }
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::machine::pv::codec::record::Record for Architecture {
-    const MIN: u64 = <Vec<u64> as crate::machine::pv::codec::record::Record>::MIN
-        + <BTreeMap<u16, u64> as crate::machine::pv::codec::record::Record>::MIN
-        + <Vec<[u8; 16]> as crate::machine::pv::codec::record::Record>::MIN
-        + <BTreeMap<u16, u64> as crate::machine::pv::codec::record::Record>::MIN
-        + <Vec<u8> as crate::machine::pv::codec::record::Record>::MIN;
+impl seedbox_machine::snapshot::Record for Architecture {
+    const MIN: u64 = <Vec<u64> as seedbox_machine::snapshot::Record>::MIN
+        + <BTreeMap<u16, u64> as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<[u8; 16]> as seedbox_machine::snapshot::Record>::MIN
+        + <BTreeMap<u16, u64> as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<u8> as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -96,11 +96,11 @@ impl crate::machine::pv::codec::record::Record for Architecture {
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
         Ok(Self {
-            core: crate::machine::pv::codec::record::Record::decode(r)?,
-            system: crate::machine::pv::codec::record::Record::decode(r)?,
-            simd: crate::machine::pv::codec::record::Record::decode(r)?,
-            icc: crate::machine::pv::codec::record::Record::decode(r)?,
-            gic: crate::machine::pv::codec::record::Record::decode(r)?,
+            core: seedbox_machine::snapshot::Record::decode(r)?,
+            system: seedbox_machine::snapshot::Record::decode(r)?,
+            simd: seedbox_machine::snapshot::Record::decode(r)?,
+            icc: seedbox_machine::snapshot::Record::decode(r)?,
+            gic: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }

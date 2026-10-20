@@ -340,9 +340,9 @@ mod resource_tests;
 mod tests;
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::machine::pv::codec::record::Record for Frame {
-    const MIN: u64 = <u64 as crate::machine::pv::codec::record::Record>::MIN
-        + <Vec<u8> as crate::machine::pv::codec::record::Record>::MIN;
+impl seedbox_machine::snapshot::Record for Frame {
+    const MIN: u64 = <u64 as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<u8> as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -356,18 +356,18 @@ impl crate::machine::pv::codec::record::Record for Frame {
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
         Ok(Self {
-            time: crate::machine::pv::codec::record::Record::decode(r)?,
-            bytes: crate::machine::pv::codec::record::Record::decode(r)?,
+            time: seedbox_machine::snapshot::Record::decode(r)?,
+            bytes: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::machine::pv::codec::record::Record for Stats {
-    const MIN: u64 = <u64 as crate::machine::pv::codec::record::Record>::MIN
-        + <u64 as crate::machine::pv::codec::record::Record>::MIN
-        + <u64 as crate::machine::pv::codec::record::Record>::MIN
-        + <u64 as crate::machine::pv::codec::record::Record>::MIN;
+impl seedbox_machine::snapshot::Record for Stats {
+    const MIN: u64 = <u64 as seedbox_machine::snapshot::Record>::MIN
+        + <u64 as seedbox_machine::snapshot::Record>::MIN
+        + <u64 as seedbox_machine::snapshot::Record>::MIN
+        + <u64 as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -388,27 +388,27 @@ impl crate::machine::pv::codec::record::Record for Stats {
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
         Ok(Self {
-            tx_frames: crate::machine::pv::codec::record::Record::decode(r)?,
-            tx_dropped: crate::machine::pv::codec::record::Record::decode(r)?,
-            rx_frames: crate::machine::pv::codec::record::Record::decode(r)?,
-            rx_dropped: crate::machine::pv::codec::record::Record::decode(r)?,
+            tx_frames: seedbox_machine::snapshot::Record::decode(r)?,
+            tx_dropped: seedbox_machine::snapshot::Record::decode(r)?,
+            rx_frames: seedbox_machine::snapshot::Record::decode(r)?,
+            rx_dropped: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::machine::pv::codec::record::Record for Net {
-    const MIN: u64 = <[Queue; 2] as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <[u32; 2] as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <[u8; 6] as crate::machine::pv::codec::record::Record>::MIN
-        + <VecDeque<Vec<u8>> as crate::machine::pv::codec::record::Record>::MIN
-        + <Vec<Frame> as crate::machine::pv::codec::record::Record>::MIN
-        + <Stats as crate::machine::pv::codec::record::Record>::MIN;
+impl seedbox_machine::snapshot::Record for Net {
+    const MIN: u64 = <[Queue; 2] as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <[u32; 2] as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <[u8; 6] as seedbox_machine::snapshot::Record>::MIN
+        + <VecDeque<Vec<u8>> as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<Frame> as seedbox_machine::snapshot::Record>::MIN
+        + <Stats as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -443,17 +443,17 @@ impl crate::machine::pv::codec::record::Record for Net {
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
         Ok(Self {
-            queues: crate::machine::pv::codec::record::Record::decode(r)?,
-            selector: crate::machine::pv::codec::record::Record::decode(r)?,
-            feature_selector: crate::machine::pv::codec::record::Record::decode(r)?,
-            driver_selector: crate::machine::pv::codec::record::Record::decode(r)?,
-            features: crate::machine::pv::codec::record::Record::decode(r)?,
-            status: crate::machine::pv::codec::record::Record::decode(r)?,
-            interrupt: crate::machine::pv::codec::record::Record::decode(r)?,
-            mac: crate::machine::pv::codec::record::Record::decode(r)?,
-            backlog: crate::machine::pv::codec::record::Record::decode(r)?,
-            transmitted: crate::machine::pv::codec::record::Record::decode(r)?,
-            stats: crate::machine::pv::codec::record::Record::decode(r)?,
+            queues: seedbox_machine::snapshot::Record::decode(r)?,
+            selector: seedbox_machine::snapshot::Record::decode(r)?,
+            feature_selector: seedbox_machine::snapshot::Record::decode(r)?,
+            driver_selector: seedbox_machine::snapshot::Record::decode(r)?,
+            features: seedbox_machine::snapshot::Record::decode(r)?,
+            status: seedbox_machine::snapshot::Record::decode(r)?,
+            interrupt: seedbox_machine::snapshot::Record::decode(r)?,
+            mac: seedbox_machine::snapshot::Record::decode(r)?,
+            backlog: seedbox_machine::snapshot::Record::decode(r)?,
+            transmitted: seedbox_machine::snapshot::Record::decode(r)?,
+            stats: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }

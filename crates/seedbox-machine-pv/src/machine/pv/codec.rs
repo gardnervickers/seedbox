@@ -4,10 +4,10 @@
 //! then kernel, initrd, page+mapped RAM, native overlays, client overlays, base.
 //! All lengths precede raw bodies, allowing one exact retained-body reservation.
 use super::*;
-use seedbox_machine::snapshot::{reserve, CodecError, DecodeLimits, Reader, Result, Writer};
+use seedbox_machine::snapshot::{
+    reserve, CodecError, DecodeLimits, Reader, Record, Result, Writer,
+};
 use std::io::{Read, Write};
-pub(super) mod record;
-use record::Record;
 const MAGIC: &[u8; 8] = b"SBXPVS01";
 const HEADER_BYTES: u64 = 24;
 const VERSION: u32 = 3;
@@ -531,72 +531,5 @@ impl Record for State {
         }
     }
 }
-impl Record for crate::pv::bridge::GuestBridge {
-    const MIN: u64 = 1;
-    fn encode<W: Write>(&self, w: &mut Writer<'_, W>) -> Result<()> {
-        self.write_snapshot(w)
-    }
-    fn decode<R: Read>(r: &mut Reader<'_, R>) -> Result<Self> {
-        Self::read_snapshot(r, u64::MAX, true)
-    }
-}
-impl Record for crate::pv::transport::LifecycleWrite {
-    const MIN: u64 = 16;
-    fn encode<W: Write>(&self, w: &mut Writer<'_, W>) -> Result<()> {
-        let Self { time, bytes } = self;
-        time.encode(w)?;
-        w.bytes(bytes)
-    }
-    fn decode<R: Read>(r: &mut Reader<'_, R>) -> Result<Self> {
-        Ok(Self {
-            time: r.u64()?,
-            bytes: r.bytes()?,
-        })
-    }
-}
-impl Record for crate::pv::transport::GuestWrite {
-    const MIN: u64 = 17;
-    fn encode<W: Write>(&self, w: &mut Writer<'_, W>) -> Result<()> {
-        match self {
-            Self::Console(v) => {
-                w.u8(0)?;
-                v.encode(w)
-            }
-            Self::Lifecycle(v) => {
-                w.u8(1)?;
-                v.encode(w)
-            }
-            Self::Frame(v) => {
-                w.u8(2)?;
-                v.encode(w)
-            }
-        }
-    }
-    fn decode<R: Read>(r: &mut Reader<'_, R>) -> Result<Self> {
-        match r.u8()? {
-            0 => Ok(Self::Console(Record::decode(r)?)),
-            1 => Ok(Self::Lifecycle(Record::decode(r)?)),
-            2 => Ok(Self::Frame(Record::decode(r)?)),
-            _ => Err(invalid("guest write tag")),
-        }
-    }
-}
-impl Record for crate::pv::transport::LifecycleOutput {
-    const MIN: u64 = 8;
-    fn encode<W: Write>(&self, w: &mut Writer<'_, W>) -> Result<()> {
-        if !self.is_empty() {
-            return Err(invalid("undrained lifecycle device output"));
-        }
-        w.u64(0)
-    }
-    fn decode<R: Read>(r: &mut Reader<'_, R>) -> Result<Self> {
-        let count = r.count::<crate::pv::transport::LifecycleWrite>(16)?;
-        if count != 0 {
-            return Err(invalid("undrained lifecycle device output"));
-        }
-        Ok(Self::default())
-    }
-}
-
 #[cfg(test)]
 mod tests;

@@ -1,69 +1,13 @@
 //! Dedicated named policy streams; never consume the caller's guest entropy.
-use super::codec::record::Record;
 use crate::definition::BackendPolicy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Settings {
-    pub seed: u64,
-    pub timer_jitter_ns: u64,
-    pub stop_tolerance_ns: u64,
-    pub torn_writes: bool,
-    pub full_state: bool,
-    pub seeded_pv_speed: bool,
-    pub boot_end_evidence: bool,
-    pub controller: Option<String>,
-}
-impl From<&BackendPolicy> for Settings {
-    fn from(p: &BackendPolicy) -> Self {
-        let BackendPolicy {
-            seed,
-            timer_jitter_ns,
-            stop_tolerance_ns,
-            torn_writes,
-            full_state,
-            seeded_pv_speed,
-            boot_end_evidence,
-            controller,
-        } = p;
-        Self {
-            seed: *seed,
-            timer_jitter_ns: *timer_jitter_ns,
-            stop_tolerance_ns: *stop_tolerance_ns,
-            torn_writes: *torn_writes,
-            full_state: *full_state,
-            seeded_pv_speed: *seeded_pv_speed,
-            boot_end_evidence: *boot_end_evidence,
-            controller: controller.clone(),
-        }
-    }
-}
-impl Settings {
-    fn validated_without_controller_copy(&self) -> Result<(), String> {
-        let policy = BackendPolicy {
-            seed: self.seed,
-            timer_jitter_ns: self.timer_jitter_ns,
-            stop_tolerance_ns: self.stop_tolerance_ns,
-            torn_writes: self.torn_writes,
-            full_state: self.full_state,
-            seeded_pv_speed: self.seeded_pv_speed,
-            boot_end_evidence: self.boot_end_evidence,
-            controller: None,
-        };
-        policy.validate().map_err(str::to_owned)?;
-        if self.controller.as_ref().is_some_and(String::is_empty) {
-            return Err("PV controller name is empty".into());
-        }
-        Ok(())
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct Named {
     pub name: String,
-    pub settings: Settings,
+    pub settings: BackendPolicy,
     pub speed_permille: u64,
 }
 impl Named {
@@ -80,12 +24,12 @@ impl Named {
         };
         Ok(Self {
             name: name.into(),
-            settings: Settings::from(p),
+            settings: p.clone(),
             speed_permille,
         })
     }
     pub fn validate(&self) -> Result<(), String> {
-        self.settings.validated_without_controller_copy()?;
+        self.settings.validate().map_err(str::to_owned)?;
         if self.name.contains('\0') {
             return Err("PV policy name contains NUL".into());
         }
@@ -116,7 +60,7 @@ pub(super) fn authority(
     name: &str,
     expected: Option<&BackendPolicy>,
 ) -> Result<(), String> {
-    match(retained,expected){(None,None)=>Ok(()),(Some(p),Some(e))if p.name==name&&p.settings==Settings::from(e)=>Ok(()),_=>Err("PV snapshot named backend policy differs from factory authority; absence and explicit default are distinct".into())}
+    match(retained,expected){(None,None)=>Ok(()),(Some(p),Some(e))if p.name==name&&p.settings==*e=>Ok(()),_=>Err("PV snapshot named backend policy differs from factory authority; absence and explicit default are distinct".into())}
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -250,14 +194,12 @@ impl Runtime {
         u64::try_from(n.div_ceil(1000)).map_err(|_| "PV seeded syscall charge overflow".into())
     }
 }
-macro_rules! record {($ty:ty {$($field:ident:$kind:ty),*$(,)?})=>{impl Record for $ty{const MIN:u64=0$(+<$kind as Record>::MIN)*;fn encode<W:std::io::Write>(&self,w:&mut seedbox_machine::snapshot::Writer<'_,W>)->seedbox_machine::snapshot::Result<()>{let Self{$($field),*}=self;$($field.encode(w)?;)*Ok(())}fn decode<R:std::io::Read>(r:&mut seedbox_machine::snapshot::Reader<'_,R>)->seedbox_machine::snapshot::Result<Self>{Ok(Self{$($field:<$kind as Record>::decode(r)?),*})}}}}
-record!(Settings{seed:u64,timer_jitter_ns:u64,stop_tolerance_ns:u64,torn_writes:bool,full_state:bool,seeded_pv_speed:bool,boot_end_evidence:bool,controller:Option<String>});
-record!(Named {
+seedbox_machine::record!(Named {
     name: String,
-    settings: Settings,
+    settings: BackendPolicy,
     speed_permille: u64
 });
-record!(BootPolicy {
+seedbox_machine::record!(BootPolicy {
     name: String,
     seed: u64,
     boot: u64,
@@ -265,11 +207,11 @@ record!(BootPolicy {
     stop_tolerance_ns: u64,
     speed_permille: u64
 });
-record!(Counter {
+seedbox_machine::record!(Counter {
     key: [u8; 32],
     counter: u64
 });
-record!(Runtime {
+seedbox_machine::record!(Runtime {
     setup: BootPolicy,
     timer: Counter
 });

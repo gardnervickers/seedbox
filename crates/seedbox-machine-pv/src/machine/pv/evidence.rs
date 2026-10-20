@@ -176,7 +176,7 @@ pub(super) fn policy_digest(
         settings,
         speed_permille,
     } = policy;
-    let policy::Settings {
+    let crate::definition::BackendPolicy {
         seed,
         timer_jitter_ns,
         stop_tolerance_ns,
