@@ -2,8 +2,9 @@
 use seedbox_engine_protocol::driver_world as wire;
 use seedbox_engine_protocol::driver_world::BackendPolicy;
 
-pub(super) const PV_INCOMPLETE: &str = "Driver PV execution requires Linux x86-64 (KVM) or macOS aarch64 (HVF); keep the existing legacy service path on this host";
-pub(super) const CONTROLLER_INCOMPLETE: &str = "Driver controller execution requires Linux x86-64 (KVM) or macOS aarch64 (HVF); keep the existing legacy service path on this host";
+pub(super) const PV_INCOMPLETE: &str = "Driver PV execution requires Linux x86-64 (KVM) or macOS aarch64 (HVF); run this simulation with the TCG backend on this host";
+pub(super) const CONTROLLER_INCOMPLETE: &str =
+    "Driver controller execution requires Linux x86-64 (KVM) or macOS aarch64 (HVF)";
 
 /// Native machines accept only range-checked policy.
 pub(super) fn checked(value: &BackendPolicy) -> Result<BackendPolicy, String> {
