@@ -1,7 +1,7 @@
 //! Shared fault-handle allocation and execution-fault state, without scheduling.
 //! The dispatcher validates operation arguments and resolves targets before
 //! reserving a handle. Targets are canonical machine names, so service aliases
-//! cannot bypass the per-machine reservation. Legacy planning allocates pN before checking live
+//! cannot bypass the per-machine reservation. Planning allocates pN before checking live
 //! fault state, so a later state rejection consumes that number. Other fault
 //! categories must use this same owner/allocator when their records are added.
 use crate::{clock::ClockRate, execution::ExecutionConfig};
@@ -178,7 +178,7 @@ impl Handles {
         self.allocator.reserve()
     }
     /// Target membership and configuration are already validated. Reserve the
-    /// handle before checking fault state, matching legacy planning/admission.
+    /// handle before checking fault state, matching planning/admission.
     pub(crate) fn throttle(
         &mut self,
         target: String,
@@ -342,7 +342,7 @@ impl Handles {
     /// None only for a step outside its installation bound (a corrupt record).
     fn inverse(change: Change) -> Option<Change> {
         Some(match change {
-            // Nominal cost is the legacy inverse, not a captured previous rate.
+            // Nominal cost is the inverse, not a captured previous rate.
             Change::Execution(_) => Change::Execution(ExecutionConfig::default()),
             // Nominal rate keeps the offset accrued so far.
             Change::Drift(_) => Change::Drift(ClockRate::NOMINAL),
@@ -478,7 +478,7 @@ impl Handles {
             .filter(|(_, record)| record.phase != Phase::Pending)
             .map(|(_, record)| record.text.to_string())
             .collect();
-        active.sort(); // Legacy inspection uses lexical handle order.
+        active.sort(); // Inspection uses lexical handle order.
         Ok(active)
     }
 }

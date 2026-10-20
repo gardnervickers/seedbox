@@ -119,7 +119,7 @@ fn drive(
     panic!("synthetic Driver did not complete the requested boundary");
 }
 #[test]
-fn codec_v3_service_descriptor_roundtrip_distinguishes_none_and_some_zero() {
+fn codec_service_descriptor_roundtrip_distinguishes_none_and_some_zero() {
     for already_ended in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let inventory = fixture_inventory(&root.path().join("authority"));

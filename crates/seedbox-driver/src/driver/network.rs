@@ -19,7 +19,7 @@ use parity::{Flight, Layer};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fmt, time::Duration};
 
-/// Largest combined latency and jitter: one hour, as for legacy link policies.
+/// Largest combined latency and jitter: one hour.
 const MAX_DELAY_NS: u64 = 3_600_000_000_000;
 /// Parts per million in a certain loss.
 const MAX_LOSS_PPM: u32 = 1_000_000;
@@ -31,8 +31,8 @@ const MAX_LOSS_PPM: u32 = 1_000_000;
 ///
 /// Every frame is delayed by `latency` plus an additional seeded jitter in
 /// `0..=jitter`, and lost at a seeded rate of about `loss_ppm` per million.
-/// Both map one 64-bit draw as legacy links did (multiply-high and threshold
-/// comparison), so they are not exactly uniform unless the span divides 2^64.
+/// Both map one 64-bit draw (multiply-high and threshold comparison), so they
+/// are not exactly uniform unless the span divides 2^64.
 /// Latency is
 /// strictly positive: it is the minimum delay that bounds how far machines may
 /// execute before others can observe their frames.

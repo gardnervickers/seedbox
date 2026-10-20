@@ -496,7 +496,7 @@ impl<M> Adapter for View<'_, M> {
             };
             machines.push(serde_json::json!({"name":name,"state":state}));
         }
-        let mut result = serde_json::json!({"services":services,"machines":machines,"active_handles":handles,"network_counters":network.legacy_counts()});
+        let mut result = serde_json::json!({"services":services,"machines":machines,"active_handles":handles,"network_counters":network.inspect_counts()});
         if !triggers.is_empty() {
             let mut records = Vec::new();
             for r in triggers {
