@@ -114,6 +114,10 @@ pub(crate) enum HandleTarget {
     Connection(crate::driver::Connection),
 }
 impl Change {
+    /// Whether this change installs a handle rather than restoring one.
+    pub(crate) fn installs(self) -> bool {
+        !matches!(self, Self::Unpartition | Self::Unshape | Self::Unselect)
+    }
     fn same_kind(self, other: Self) -> bool {
         std::mem::discriminant(&self) == std::mem::discriminant(&other)
     }

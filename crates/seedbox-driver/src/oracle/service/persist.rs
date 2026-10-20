@@ -88,18 +88,7 @@ wire_struct!(Service {
 impl Service {
     fn check_pending_handle_persist(&self, p: &Pending) -> crate::persistence::Result<()> {
         use crate::persistence::require;
-        let expected = match p.effect {
-            Effect::Execution(c) => Some(Change::Execution(c)),
-            Effect::Drift(c) => Some(Change::Drift(c)),
-            Effect::StepRealtime(n) => Some(Change::Step(n)),
-            Effect::Partition => Some(Change::Partition),
-            Effect::Unpartition => Some(Change::Unpartition),
-            Effect::Shape(p, f) => Some(Change::Shape(p, f)),
-            Effect::Unshape => Some(Change::Unshape),
-            Effect::Select => Some(Change::Select),
-            Effect::Unselect => Some(Change::Unselect),
-            _ => None,
-        };
+        let expected = p.effect.handle_change();
         require(
             p.handle.is_some() == expected.is_some(),
             "pending handle effect",

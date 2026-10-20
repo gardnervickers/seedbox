@@ -675,18 +675,9 @@ where
     }
 
     fn creates_handle(action: &crate::oracle::service::FaultAction) -> bool {
-        use crate::oracle::service::{Effect, FaultAction};
-        matches!(
-            action,
-            FaultAction::Effect(
-                Effect::Execution(_)
-                    | Effect::Drift(_)
-                    | Effect::StepRealtime(_)
-                    | Effect::Partition
-                    | Effect::Shape(..)
-                    | Effect::Select
-            )
-        )
+        use crate::oracle::service::FaultAction;
+        matches!(action, FaultAction::Effect(effect)
+            if effect.handle_change().is_some_and(|change| change.installs()))
     }
 
     /// Follow a host input key from admission to settlement and, for a

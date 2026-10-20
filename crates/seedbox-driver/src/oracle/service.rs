@@ -196,7 +196,44 @@ impl Scope {
         self.machine() == Some((target, boot))
     }
 }
+impl From<Change> for Effect {
+    fn from(change: Change) -> Self {
+        match change {
+            Change::Execution(c) => Self::Execution(c),
+            Change::Drift(c) => Self::Drift(c),
+            Change::Step(n) => Self::StepRealtime(n),
+            Change::Partition => Self::Partition,
+            Change::Unpartition => Self::Unpartition,
+            Change::Shape(p, f) => Self::Shape(p, f),
+            Change::Unshape => Self::Unshape,
+            Change::Select => Self::Select,
+            Change::Unselect => Self::Unselect,
+        }
+    }
+}
 impl Effect {
+    /// The handle change this effect installs or restores; the inverse of
+    /// `Effect::from(Change)`.
+    pub(crate) fn handle_change(&self) -> Option<Change> {
+        Some(match *self {
+            Self::Execution(c) => Change::Execution(c),
+            Self::Drift(c) => Change::Drift(c),
+            Self::StepRealtime(n) => Change::Step(n),
+            Self::Partition => Change::Partition,
+            Self::Unpartition => Change::Unpartition,
+            Self::Shape(p, f) => Change::Shape(p, f),
+            Self::Unshape => Change::Unshape,
+            Self::Select => Change::Select,
+            Self::Unselect => Change::Unselect,
+            Self::Spawn
+            | Self::Pause
+            | Self::Resume
+            | Self::Crash
+            | Self::Reboot
+            | Self::Shutdown
+            | Self::Process(_) => return None,
+        })
+    }
     /// Effects carried out by the guest and completed by its acknowledgment.
     pub(crate) fn guest_command(&self) -> bool {
         self.command_kind().is_some()
@@ -1146,13 +1183,10 @@ impl Service {
             }
         };
         let effect = match plan.change {
-            Change::Execution(c) => Effect::Execution(c),
-            Change::Drift(c) => Effect::Drift(c),
-            Change::Step(n) => Effect::StepRealtime(n),
-            Change::Unpartition => Effect::Unpartition,
-            Change::Unshape => Effect::Unshape,
-            Change::Unselect => Effect::Unselect,
-            _ => return Err(Failure::from("heal reapplies installed policy").into()),
+            Change::Partition | Change::Shape(..) | Change::Select => {
+                return Err(Failure::from("heal reapplies installed policy").into())
+            }
+            change => Effect::from(change),
         };
         Ok((subject, effect, Some(plan), true))
     }
