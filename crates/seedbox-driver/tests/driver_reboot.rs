@@ -94,7 +94,7 @@ fn self_crashed_target_reboots_directly_but_self_shutdown_needs_a_crash() {
         driver.step(at(100)).unwrap(),
         StepOutcome::Blocked { at: at(2) }
     );
-    driver.drain_observations().events;
+    driver.drain_observations();
     driver
         .with_barrier(|barrier| {
             assert_eq!(
@@ -230,7 +230,7 @@ fn future_lifecycle_inputs_survive_exit_with_the_same_identity() {
 fn same_time_crash_then_reboot_inputs_apply_the_crash_and_reject_the_reboot() {
     let mut driver = controlled_targets(2, &[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
-    driver.drain_observations().events;
+    driver.drain_observations();
     driver
         .with_barrier(|barrier| {
             barrier.schedule(at(0), key("crash"), Action::Crash(Target::Machine(id)))?;

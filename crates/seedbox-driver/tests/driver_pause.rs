@@ -214,7 +214,7 @@ fn settled(events: &[seedbox_driver::driver::Event]) -> Vec<(FaultAction, Settle
 fn pause_and_resume_follow_policy_state_and_rejected_inputs_never_consume_the_arm() {
     let mut driver = controlled_targets(2, &[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
-    driver.drain_observations().events;
+    driver.drain_observations();
     let target = || Target::Machine(id);
     driver
         .with_barrier(|barrier| {

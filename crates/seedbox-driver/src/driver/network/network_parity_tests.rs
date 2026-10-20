@@ -398,7 +398,7 @@ fn guest_queries_pagination_reincarnation_and_heal_ignore_frame_retention() {
                 d.set_frame_capacity(1);
             }
             if drain {
-                d.drain_observations().frames;
+                d.drain_observations();
             }
             schedule(
                 &mut d,
@@ -415,7 +415,7 @@ fn guest_queries_pagination_reincarnation_and_heal_ignore_frame_retention() {
             for end in [3, 4, 5, 6, 7, 8, 9, 11, 12, 30] {
                 advance(&mut d, end);
                 if drain {
-                    d.drain_observations().frames;
+                    d.drain_observations();
                 }
             }
             let actual_replies = replies(&d);

@@ -44,7 +44,7 @@ fn policy_projection_does_not_capture_native_state_draw_rng_or_retain_publicatio
     d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
         .unwrap();
     assert!(!d.drain_events().is_empty());
-    d.drain_observations().frames;
+    d.drain_observations();
     assert_eq!(evidence(&mut d), before);
     assert_eq!(evidence(&mut d), before);
     let captured = d.checkpoint().unwrap();

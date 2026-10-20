@@ -173,7 +173,7 @@ fn ready() -> (Driver<Fixture>, MachineId) {
         driver.step(at(10)).unwrap(),
         StepOutcome::BarrierReached { at: at(10) }
     );
-    driver.drain_observations().events;
+    driver.drain_observations();
     (driver, id)
 }
 
@@ -330,7 +330,7 @@ fn process_commands_wait_for_readiness_and_unavailable_targets_reject_before_adm
         ..Fixture::default()
     });
     driver.step(at(10)).unwrap();
-    driver.drain_observations().events;
+    driver.drain_observations();
     driver
         .with_barrier(|barrier| barrier.schedule(at(10), key("late"), stop(id)))
         .unwrap();
@@ -435,7 +435,7 @@ fn same_time_process_effects_follow_fifo_input_order() {
         })
         .unwrap();
     driver.step(at(20)).unwrap();
-    driver.drain_observations().events;
+    driver.drain_observations();
     let oracle = driver
         .with_barrier(|barrier| Ok(barrier.machines().next().unwrap().0))
         .unwrap();

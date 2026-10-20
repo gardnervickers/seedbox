@@ -175,7 +175,7 @@ fn repeated_in_progress_and_exited_shutdown_requests_do_not_latch_or_deliver_aga
             barrier.schedule(at(5), key("exited"), Action::Shutdown(Target::Machine(id)))
         })
         .unwrap();
-    driver.drain_observations().events;
+    driver.drain_observations();
     assert_eq!(
         driver.step(at(100)).unwrap(),
         StepOutcome::BarrierReached { at: at(1) }

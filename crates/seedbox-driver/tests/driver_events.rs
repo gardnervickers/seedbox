@@ -283,7 +283,7 @@ fn host_inputs_publish_effective_changes_with_their_fault_cause() {
     let (mut driver, ids) = world(10, 2, &["m"], |_| Scripted::default());
     let m = ids[1];
     let slow = ExecutionConfig::new(2000).unwrap();
-    driver.drain_observations().events;
+    driver.drain_observations();
     let mut events = Vec::new();
     // One input per barrier, all at time 5: each is admitted against the state
     // its predecessor left. Repeats are rejected rather than ignored.
@@ -724,7 +724,7 @@ fn failed_step_keeps_confirmed_prefix_and_failure_path_settlement() {
 #[test]
 fn successful_addition_survives_its_callback_error() {
     let (mut driver, _) = world(10, 1, &[], |_| Scripted::default());
-    driver.drain_observations().events;
+    driver.drain_observations();
     let mut added = None;
     let result = driver.with_barrier(|b| {
         added = Some(b.add(|| Ok(Scripted::default()))?);

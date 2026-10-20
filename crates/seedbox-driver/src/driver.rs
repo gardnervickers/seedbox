@@ -256,22 +256,12 @@ struct ExecutionState<M> {
 
 /// Already-committed descriptions owned by one observer session. These are
 /// distinct from Entry::staged, whose accepted outputs still drive execution.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct ObservationState {
     staged_events: Vec<Staged>,
     published: Vec<Event>,
     next_sequence: u64,
     frames: observation::FrameObservations,
-}
-impl Default for ObservationState {
-    fn default() -> Self {
-        Self {
-            staged_events: Vec::new(),
-            published: Vec::new(),
-            next_sequence: 0,
-            frames: observation::FrameObservations::default(),
-        }
-    }
 }
 
 /// Owns simulation scheduling and shared time.

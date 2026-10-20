@@ -681,7 +681,7 @@ fn pending_inputs_are_never_admitted_after_stop_or_failure() {
         "after-stop",
         Action::Pause(Target::Machine(ids[1])),
     );
-    driver.drain_observations().events;
+    driver.drain_observations();
     driver
         .with_barrier(|b| {
             b.stop();
