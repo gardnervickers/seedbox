@@ -281,7 +281,7 @@ fn copy_state_report(
     attempt: &Path,
     destination: &Path,
     logs: &std::collections::BTreeMap<String, seedbox_application::store::ContentDigest>,
-) -> Result<()> {
+) -> Result<seedbox_application::evidence::StateReport> {
     let name = format!("machines/{}", seedbox_application::evidence::STATE_REPORT);
     let bytes = diagnostic_bytes(&attempt.join("output").join(&name))?;
     if logs.get(&name) != Some(&seedbox_application::store::ContentDigest::of(&bytes)) {
@@ -290,6 +290,38 @@ fn copy_state_report(
     let state: seedbox_application::evidence::StateReport =
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     state.validate().map_err(|e| e.to_string())?;
+    fs::write(destination, bytes).map_err(|e| e.to_string())?;
+    Ok(state)
+}
+
+fn copy_oracle_page_hashes(
+    attempt: &Path,
+    destination: &Path,
+    logs: &std::collections::BTreeMap<String, seedbox_application::store::ContentDigest>,
+    state: &seedbox_application::evidence::StateReport,
+) -> Result<()> {
+    let oracle = state
+        .machines
+        .get("oracle")
+        .ok_or("stopped-state report has no oracle page hashes")?;
+    let name = format!("machines/{}", oracle.page_log);
+    let expected = oracle.page_bytes().map_err(|e| e.to_string())?;
+    if expected > DIAGNOSTIC_LIMIT {
+        return Err(format!("oracle page hashes exceed 8 MiB: {name}"));
+    }
+    let recorded = logs
+        .get(&name)
+        .ok_or_else(|| format!("oracle page hash log absent from manifest: {name}"))?;
+    let bytes = diagnostic_bytes(&attempt.join("output").join(&name))
+        .map_err(|error| format!("oracle page hash log {name}: {error}"))?;
+    if bytes.len() as u64 != expected {
+        return Err(format!("oracle page hash length mismatch: {name}"));
+    }
+    if recorded != &seedbox_application::store::ContentDigest::of(&bytes) {
+        return Err(format!("oracle page hash log digest mismatch: {name}"));
+    }
+    // The CI collector accepts .out and caps each file at 8 MiB. These are
+    // page hashes, not guest RAM contents.
     fs::write(destination, bytes).map_err(|e| e.to_string())
 }
 
@@ -339,13 +371,19 @@ impl Cli {
                         .map_err(|e| e.to_string())?;
                     fs::write(directory.join(format!("{label}-manifest.json")), manifest)
                         .map_err(|e| e.to_string())?;
-                    copy_state_report(
+                    let state = copy_state_report(
                         attempt,
                         &directory.join(format!(
                             "{label}-{}",
                             seedbox_application::evidence::STATE_REPORT
                         )),
                         &record.logs,
+                    )?;
+                    copy_oracle_page_hashes(
+                        attempt,
+                        &directory.join(format!("{label}-oracle-pages.out")),
+                        &record.logs,
+                        &state,
                     )?;
                     Ok(())
                 };
@@ -813,6 +851,14 @@ esac
             let bytes = fs::read(failure.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
         }
+        assert_eq!(
+            fs::read(failure.join("baseline-oracle-pages.out")).unwrap(),
+            u64::from(b'b').to_le_bytes()
+        );
+        assert_eq!(
+            fs::read(failure.join("repeat-oracle-pages.out")).unwrap(),
+            u64::from(b'r').to_le_bytes()
+        );
         assert!(fs::read_to_string(failure.join("replay-oracle-log.stdout"))
             .unwrap()
             .contains("RESULT pass"));

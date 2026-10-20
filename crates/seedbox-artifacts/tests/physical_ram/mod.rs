@@ -28,6 +28,7 @@ fn capture(ram: &[u8], digest: &[u8]) -> StateCapture {
         digest: ContentDigest::of(digest),
         parts: BTreeMap::from([
             ("ram".into(), ContentDigest::of(ram)),
+            ("ram_pages".into(), ContentDigest::of(ram)),
             ("ram_regions".into(), ContentDigest::of(&encoded)),
             ("cpu".into(), ContentDigest::of(b"synthetic cpu part")),
         ]),
