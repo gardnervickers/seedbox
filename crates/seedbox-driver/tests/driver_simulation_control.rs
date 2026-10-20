@@ -144,7 +144,8 @@ fn distinct_machines_route_identical_rpc_ids_to_exact_sources() {
         }
         drop(got);
         let outputs = driver
-            .drain_events()
+            .drain_observations()
+            .events
             .into_iter()
             .filter_map(|event| match event.kind {
                 EventKind::Output(output) => Some(output),

@@ -173,7 +173,7 @@ fn ready() -> (Driver<Fixture>, MachineId) {
         driver.step(at(10)).unwrap(),
         StepOutcome::BarrierReached { at: at(10) }
     );
-    driver.drain_events();
+    driver.drain_observations().events;
     (driver, id)
 }
 
@@ -224,7 +224,7 @@ fn process_commands_receive_boot_scoped_ids_and_settle_on_acknowledgment() {
         .unwrap();
     driver.step(at(40)).unwrap();
     driver.step(at(40)).unwrap();
-    let events = driver.drain_events();
+    let events = driver.drain_observations().events;
     assert_eq!(
         settled(&events),
         [
@@ -294,7 +294,7 @@ fn process_commands_wait_for_readiness_and_unavailable_targets_reject_before_adm
         .unwrap();
     driver.step(at(10)).unwrap();
     driver.step(at(10)).unwrap();
-    let events = driver.drain_events();
+    let events = driver.drain_observations().events;
     assert_eq!(
         settled(&events),
         [
@@ -330,12 +330,12 @@ fn process_commands_wait_for_readiness_and_unavailable_targets_reject_before_adm
         ..Fixture::default()
     });
     driver.step(at(10)).unwrap();
-    driver.drain_events();
+    driver.drain_observations().events;
     driver
         .with_barrier(|barrier| barrier.schedule(at(10), key("late"), stop(id)))
         .unwrap();
     driver.step(at(10)).unwrap();
-    let events = driver.drain_events();
+    let events = driver.drain_observations().events;
     assert!(events
         .iter()
         .all(|event| !matches!(event.kind, EventKind::FaultAdmitted(_))));
@@ -372,7 +372,7 @@ fn an_unacknowledged_process_command_fails_the_driver_at_its_own_deadline() {
         }
     }
     assert!(matches!(result, Err(Error::Control(_))));
-    let events = driver.drain_events();
+    let events = driver.drain_observations().events;
     let failed = events
         .iter()
         .find_map(|event| match &event.kind {
@@ -421,7 +421,7 @@ fn failed_admission_run_poisons_before_any_response_can_be_observed() {
         Err(Error::Failed)
     ));
     // The failed batch publishes none of its staged outputs.
-    assert!(outputs(&driver.drain_events()).is_empty());
+    assert!(outputs(&driver.drain_observations().events).is_empty());
     assert!(matches!(driver.step(at(0)), Err(Error::Failed)));
 }
 
@@ -435,7 +435,7 @@ fn same_time_process_effects_follow_fifo_input_order() {
         })
         .unwrap();
     driver.step(at(20)).unwrap();
-    driver.drain_events();
+    driver.drain_observations().events;
     let oracle = driver
         .with_barrier(|barrier| Ok(barrier.machines().next().unwrap().0))
         .unwrap();
@@ -452,7 +452,7 @@ fn same_time_process_effects_follow_fifo_input_order() {
             ..
         }
     ));
-    let responses = outputs(&driver.drain_events());
+    let responses = outputs(&driver.drain_observations().events);
     assert_eq!(
         responses
             .iter()
@@ -513,7 +513,7 @@ fn process_dispatch_is_held_before_the_next_fault_and_applies_once() {
         })
         .unwrap();
     assert_eq!(
-        settled(&driver.drain_events()),
+        settled(&driver.drain_observations().events),
         [
             (
                 "freeze".into(),

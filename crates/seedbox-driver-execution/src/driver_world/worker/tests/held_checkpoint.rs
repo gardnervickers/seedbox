@@ -139,7 +139,7 @@ fn restore(envelope: &wire::Checkpoint, workers: usize, output: &Path) -> Worker
     )
     .unwrap();
     assert!(
-        driver.drain_events().is_empty(),
+        driver.drain_observations().events.is_empty(),
         "no observed effect may be stored in the capture"
     );
     Worker::new(

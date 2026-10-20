@@ -528,7 +528,8 @@ fn spawned_machines_join_the_network_and_host_additions_stay_unattached() {
     driver.drain_events();
     assert!(matches!(driver.step(at(MS)), Err(Error::InvalidFrame { id }) if id == added));
     assert!(driver
-        .drain_events()
+        .drain_observations()
+        .events
         .iter()
         .all(|event| !matches!(&event.kind, EventKind::Output(_))));
 }
@@ -938,7 +939,8 @@ fn exhausted_frame_sequences_fail_with_position_overflow_before_publication() {
     driver.drain_events();
     assert!(matches!(driver.step(at(MS)), Err(Error::PositionOverflow)));
     assert!(driver
-        .drain_events()
+        .drain_observations()
+        .events
         .iter()
         .all(|event| !matches!(event.kind, EventKind::Output(_))));
     assert!(matches!(driver.step(at(MS)), Err(Error::Failed)));

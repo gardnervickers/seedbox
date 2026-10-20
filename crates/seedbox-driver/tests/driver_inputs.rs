@@ -154,10 +154,10 @@ fn world(
     (driver, ids)
 }
 fn run_to(driver: &mut Driver<Scripted>, upto: u64) -> Vec<Event> {
-    let mut events = driver.drain_events();
+    let mut events = driver.drain_observations().events;
     loop {
         let outcome = driver.step(at(upto)).unwrap();
-        events.extend(driver.drain_events());
+        events.extend(driver.drain_observations().events);
         match outcome {
             StepOutcome::BarrierReached { at: now } if now < at(upto) => {}
             _ => return events,
@@ -596,7 +596,7 @@ fn pause_before_next_fault_holds_trigger_guest_and_input_effects_alike() {
     let mut events = Vec::new();
     for _ in 0..100 {
         let outcome = driver.step(at(12)).unwrap();
-        events.extend(driver.drain_events());
+        events.extend(driver.drain_observations().events);
         if let StepOutcome::BeforeFault { at, fault } = &outcome {
             // Repeated steps return the same hold without progress.
             assert_eq!(driver.step(*at).unwrap(), outcome);
@@ -681,7 +681,7 @@ fn pending_inputs_are_never_admitted_after_stop_or_failure() {
         "after-stop",
         Action::Pause(Target::Machine(ids[1])),
     );
-    driver.drain_events();
+    driver.drain_observations().events;
     driver
         .with_barrier(|b| {
             b.stop();
@@ -692,7 +692,7 @@ fn pending_inputs_are_never_admitted_after_stop_or_failure() {
         driver.step(at(10)).unwrap(),
         StepOutcome::Stopped { at: at(0) }
     );
-    assert!(driver.drain_events().is_empty());
+    assert!(driver.drain_observations().events.is_empty());
     // Failure before the input is due.
     let (mut driver, ids) = world(1, &["target"], &[], |name| Scripted {
         fail_at: (name == "target").then_some(2),
@@ -712,9 +712,9 @@ fn pending_inputs_are_never_admitted_after_stop_or_failure() {
         }
     }
     assert!(matches!(result, Err(Error::Machine { .. })));
-    assert!(input_record(&driver.drain_events(), "after-failure").is_none());
+    assert!(input_record(&driver.drain_observations().events, "after-failure").is_none());
     assert!(matches!(driver.step(at(10)), Err(Error::Failed)));
-    assert!(driver.drain_events().is_empty());
+    assert!(driver.drain_observations().events.is_empty());
 }
 
 fn mixed(workers: usize, by_name: bool) -> Vec<Event> {
@@ -860,7 +860,7 @@ fn oracle_completion_cuts_off_pending_inputs_without_per_key_events() {
     );
     assert!(input_record(&events, "after").is_none());
     assert_eq!(rejection(&events, "after"), None);
-    assert!(driver.drain_events().is_empty());
+    assert!(driver.drain_observations().events.is_empty());
     // Completion also refuses further scheduling.
     assert!(matches!(
         driver.with_barrier(|b| b.schedule(

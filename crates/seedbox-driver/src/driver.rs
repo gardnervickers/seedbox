@@ -38,7 +38,7 @@ pub mod faults;
 pub use controller::ControllerSetup;
 mod event;
 mod observation;
-pub use observation::{Committed, CommittedChange, FlushResults};
+pub use observation::FlushResults;
 mod input;
 mod network;
 #[cfg(test)]
@@ -261,8 +261,6 @@ struct ObservationState {
     staged_events: Vec<Staged>,
     published: Vec<Event>,
     next_sequence: u64,
-    capacity: usize,
-    omitted: u64,
     frames: observation::FrameObservations,
 }
 impl Default for ObservationState {
@@ -271,8 +269,6 @@ impl Default for ObservationState {
             staged_events: Vec::new(),
             published: Vec::new(),
             next_sequence: 0,
-            capacity: usize::MAX,
-            omitted: 0,
             frames: observation::FrameObservations::default(),
         }
     }
@@ -338,7 +334,7 @@ impl Default for ObservationState {
 /// stays queued while paused; crashes still terminate paused machines.
 /// Guest simulation-control calls are interpreted after their full round commits.
 /// Their effects and replies join the same ordered timeline at that barrier;
-/// draining events (`Driver::drain_events`) only observes them. Accepted control work survives caller
+/// draining events (`Driver::drain_observations`) only observes them. Accepted control work survives caller
 /// loss. Calls generated together are queued before their generated effects;
 /// dependent operations must await acknowledgment rather than assume that a
 /// concurrent Pause/Resume sequence succeeds. Oracle completion publishes the full response batch before stopping
@@ -348,7 +344,6 @@ pub struct Driver<M: Machine> {
     execution: ExecutionState<M>,
     playback: Playback,
     observations: ObservationState,
-    committed: Vec<Committed>,
     factory: MachineFactory<M>,
 }
 
@@ -580,7 +575,6 @@ where
                 frames,
                 ..ObservationState::default()
             },
-            committed: Vec::new(),
             playback: Playback::default(),
             factory: Box::new(factory),
         };
@@ -608,80 +602,14 @@ where
         self.observations.frames.set_capacity(capacity);
     }
 
-    /// Drain committed bounded frame observations independently of EventKind.
-    /// Works after failure/stop/completion, does no machine work, and never
-    /// changes authoritative counters or dense event/witness sequencing.
-    /// This legacy selective drain also consumes the required-change prefix;
-    /// hosts needing that prefix must use `drain_observations` exclusively.
-    pub fn drain_frames(&mut self) -> FrameFacts {
-        let mut batch = self.drain_observations();
-        let frames = std::mem::take(&mut batch.frames);
-        self.restore_other_observations(batch);
-        frames
-    }
-
-    /// Bound retained Event copies; zero disables copies, never committed changes.
-    /// Shrink and overflow count actual omissions returned by the unified drain.
-    // TODO: Re-evaluate: host retention must be changeable without changing causal
-    // bookkeeping; constructor-only configuration cannot rebind restored viewers.
-    pub fn set_event_capacity(&mut self, capacity: usize) {
-        self.observations.capacity = capacity;
-        let removed = self.observations.published.len().saturating_sub(capacity);
-        self.observations.published.truncate(capacity);
-        self.observations.omitted = self.observations.omitted.saturating_add(removed as u64);
-    }
-
-    /// Transfer committed bookkeeping and optional descriptions exactly once.
-    /// Changes are never capacity-limited. Retained events and frames may have
-    /// explicit gaps; this never executes work or drains future scheduled inputs.
-    /// Use this API exclusively when consuming required changes: legacy selective
-    /// drains consume that prefix without returning its typed duplicate.
-    // TODO: Re-evaluate: one handoff prevents service input/status continuation
-    // from depending on optional Event retention or a second publication path.
-    pub fn drain_observations(&mut self) -> FlushResults {
-        FlushResults {
-            position: self.position(),
-            changes: std::mem::take(&mut self.committed),
-            events: std::mem::take(&mut self.observations.published),
-            frames: self.observations.frames.drain(),
-            omitted_events: std::mem::take(&mut self.observations.omitted),
-            next_event_sequence: self.observations.next_sequence,
-        }
-    }
-
-    // Legacy selective drains delegate to the same handoff and leave other
-    // optional streams untouched. They consume the required-change prefix too:
-    // legacy clients process their own Event facts, and must not retain an
-    // unbounded, inaccessible duplicate. Hosts needing required changes use
-    // drain_observations exclusively; the service does so.
-    fn restore_other_observations(&mut self, batch: FlushResults) {
-        self.observations.published = batch.events;
-        self.observations.omitted = batch.omitted_events;
-        self.observations.frames.restore(batch.frames);
-    }
-
-    /// Read cumulative per-pair decisions and confirmed receive offers without
-    /// machine work, draining observations or changing event/witness sequencing.
-    /// These totals remain independent of bounded frame-fact omission. Like
-    /// Driver state generally, terminal failure does not promise rollback.
-    // TODO: Re-evaluate: world counters cannot be reconstructed from an omitted
-    // observation stream; a typed network-only projection avoids generic Inspect.
-    /// Keys are directed insertion identities, not concatenated display names;
-    /// all pairs are retained even when names contain `->` or other punctuation.
-    pub fn network_counters(&self) -> BTreeMap<NetworkPair, NetworkPairCounts> {
-        self.execution.network.counts()
-    }
-
-    /// Take all undrained events in publication order.
+    /// Transfer committed bookkeeping, events and frame facts exactly once.
     ///
     /// This works in every state, including after a failed `step`, a
-    /// permanent stop and oracle completion, and never runs simulation work.
-    /// Each event is returned exactly once. The driver keeps no history of
-    /// drained events: the host owns retained history. Default retention is
-    /// unbounded; hosts should drain after every `step` and barrier callback.
-    /// This legacy selective drain also consumes the required-change prefix.
-    /// Use `drain_observations` exclusively for required changes and explicit loss
-    /// watermarks when `set_event_capacity` limits optional copies.
+    /// permanent stop and oracle completion, and never runs simulation work or
+    /// drains future scheduled inputs. The driver keeps no history of drained
+    /// events: the host owns retained history. Retention is unbounded; hosts
+    /// should drain after every `step` and barrier callback. Frame facts are
+    /// bounded by `set_frame_capacity` and report their own omissions.
     ///
     /// # Order
     ///
@@ -726,11 +654,14 @@ where
     /// the machine definitions, the seed and host inputs (barrier operations
     /// and the `upto` bounds passed to `step`). Worker count and playback rate
     /// never change it.
-    pub fn drain_events(&mut self) -> Vec<Event> {
-        let mut batch = self.drain_observations();
-        let events = std::mem::take(&mut batch.events);
-        self.restore_other_observations(batch);
-        events
+    // TODO: Re-evaluate: one handoff prevents service input/status continuation
+    // from depending on optional Event retention or a second publication path.
+    pub fn drain_observations(&mut self) -> FlushResults {
+        FlushResults {
+            position: self.position(),
+            events: std::mem::take(&mut self.observations.published),
+            frames: self.observations.frames.drain(),
+        }
     }
 
     fn stage_notices(&mut self) {
@@ -839,28 +770,17 @@ where
                     }
                 },
             };
-            if let Some(change) = CommittedChange::from_event(&kind) {
-                self.committed.push(Committed {
-                    position,
-                    at,
-                    change,
-                });
-            }
             // Observer exhaustion can lose descriptions, never poison execution.
             let sequence = self.observations.next_sequence;
             if let Some(next) = sequence.checked_add(1) {
                 self.observations.next_sequence = next;
-                if self.observations.published.len() < self.observations.capacity {
-                    self.observations.published.push(Event {
-                        sequence,
-                        position,
-                        at,
-                        kind,
-                    });
-                    continue;
-                }
+                self.observations.published.push(Event {
+                    sequence,
+                    position,
+                    at,
+                    kind,
+                });
             }
-            self.observations.omitted = self.observations.omitted.saturating_add(1);
         }
         result
     }
@@ -3384,7 +3304,7 @@ pub enum StepOutcome {
     /// An application outcome reports ProgramExit while its guest may remain alive. A confirmed
     /// application Stop reports Shutdown without claiming that its machine exited.
     /// Other machines and queued work remain stopped. This result is permanent;
-    /// committed events remain available through `Driver::drain_events`.
+    /// committed events remain available through `Driver::drain_observations`.
     Finished { at: Timestamp, reason: ExitReason },
 }
 

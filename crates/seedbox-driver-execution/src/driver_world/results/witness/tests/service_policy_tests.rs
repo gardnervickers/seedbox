@@ -76,7 +76,7 @@ fn cold_mock_without_reports_keeps_evidence_getter_apis_available() {
     )
     .unwrap();
     driver.step(Timestamp::from_nanos(10)).unwrap();
-    assert!(driver.drain_events().iter().all(|event| !matches!(event.kind,
+    assert!(driver.drain_observations().events.iter().all(|event| !matches!(event.kind,
         seedbox_driver::driver::EventKind::Output(ref output) if matches!(output.payload, seedbox_machine::pv::Response::BootEnded { .. })
     )), "cold mock emits no boot-end output");
     driver
@@ -92,7 +92,7 @@ fn cold_mock_without_reports_keeps_evidence_getter_apis_available() {
 fn existing_interaction_component_still_collects_without_boot_end_reports() {
     let (mut driver, names, reads) = driver(Some(component()), false);
     driver.step(Timestamp::from_nanos(10)).unwrap();
-    assert!(driver.drain_events().iter().all(|event| !matches!(event.kind,
+    assert!(driver.drain_observations().events.iter().all(|event| !matches!(event.kind,
         seedbox_driver::driver::EventKind::Output(ref output) if matches!(output.payload, seedbox_machine::pv::Response::BootEnded { .. })
     )));
     collect(

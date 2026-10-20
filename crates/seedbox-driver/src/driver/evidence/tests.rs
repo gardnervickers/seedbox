@@ -44,7 +44,7 @@ fn policy_projection_does_not_capture_native_state_draw_rng_or_retain_publicatio
     d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
         .unwrap();
     assert!(!d.drain_events().is_empty());
-    d.drain_frames();
+    d.drain_observations().frames;
     assert_eq!(evidence(&mut d), before);
     assert_eq!(evidence(&mut d), before);
     let captured = d.checkpoint().unwrap();
@@ -156,18 +156,21 @@ fn optional_frame_capture_capacity_and_draining_never_change_policy_evidence() {
     let (encoded, store) = artifact(disabled.checkpoint().unwrap());
     let captured = decode(&encoded, &store);
     let mut restored_cleared = restore(&captured, 4);
-    let cleared = disabled.drain_frames();
-    assert_eq!(restored_cleared.drain_frames(), FrameFacts::default());
+    let cleared = disabled.drain_observations().frames;
+    assert_eq!(
+        restored_cleared.drain_observations().frames,
+        FrameFacts::default()
+    );
     assert!(cleared.facts.is_empty());
     assert_eq!(cleared.omitted, 3);
-    assert_eq!(disabled.drain_frames(), FrameFacts::default());
+    assert_eq!(disabled.drain_observations().frames, FrameFacts::default());
     advance(&mut quiet, 50);
     advance(&mut observed, 50);
     let before = evidence(&mut observed);
     assert_eq!(evidence(&mut quiet), before);
     assert_eq!(evidence(&mut disabled), before);
     observed.set_frame_capacity(1);
-    let facts = observed.drain_frames();
+    let facts = observed.drain_observations().frames;
     assert_eq!(facts.facts.len(), 1);
     assert_eq!(facts.omitted, 2);
     assert_eq!(evidence(&mut observed), before);
@@ -177,7 +180,7 @@ fn optional_frame_capture_capacity_and_draining_never_change_policy_evidence() {
     let mut source = make(8);
     advance(&mut source, 3);
     let checkpoint = source.checkpoint().unwrap();
-    let retained = source.drain_frames();
+    let retained = source.drain_observations().frames;
     assert!(!retained.facts.is_empty());
     let mut uninterrupted = make(0);
     advance(&mut uninterrupted, 80);
@@ -186,7 +189,7 @@ fn optional_frame_capture_capacity_and_draining_never_change_policy_evidence() {
         for capacity in [0, 8] {
             let mut branch = restore(&checkpoint, workers);
             branch.set_frame_capacity(capacity);
-            let observations = branch.drain_frames();
+            let observations = branch.drain_observations().frames;
             assert_eq!(observations, FrameFacts::default());
             advance(&mut branch, 80);
             assert_eq!(evidence(&mut branch), expected);

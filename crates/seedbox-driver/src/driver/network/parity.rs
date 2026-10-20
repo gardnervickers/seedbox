@@ -323,6 +323,7 @@ impl Network {
     pub(crate) fn unselect(&mut self, handle: &str) -> bool {
         self.connections.selections.remove(handle).is_some()
     }
+    #[cfg(test)]
     pub(crate) fn counts(&self) -> BTreeMap<NetworkPair, NetworkPairCounts> {
         self.counts
             .iter()

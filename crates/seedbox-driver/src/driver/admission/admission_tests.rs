@@ -47,12 +47,11 @@ fn throttle() -> Action {
 /// Honest internal fingerprint: no capture/validation is claimed for poisoned or
 /// intermediate synthetic states. Encode every deterministic Driver field plus
 /// failed and native mock state; compare Playback itself too (including anchor).
-fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback, Vec<Committed>) {
+fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
     let Driver {
         execution,
         playback,
         observations,
-        committed,
         workers: _,
         factory: _,
     } = d;
@@ -81,8 +80,6 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback, Vec<Committed>) {
         staged_events,
         published,
         next_sequence,
-        capacity: _,
-        omitted: _,
         frames: _,
     } = observations;
     let SimulationRng::Seeded(rng) = rng else {
@@ -132,7 +129,7 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback, Vec<Committed>) {
         .put(&mut e)
         .unwrap();
     }
-    (e.output, playback.clone(), committed.clone())
+    (e.output, playback.clone())
 }
 fn bytes(d: &mut Driver<Mock>) -> (Vec<u8>, Store) {
     artifact(d.checkpoint().unwrap())
@@ -860,7 +857,11 @@ fn immediate_unavailable_admission_has_exact_record_even_without_pending_effect(
         }
     );
     assert!(matches!(commit(&mut d, &p), DueOutcome::Applied { .. }));
-    assert!(d.drain_events().iter().any(|e| matches!(&e.kind,
+    assert!(d
+        .drain_observations()
+        .events
+        .iter()
+        .any(|e| matches!(&e.kind,
         EventKind::FaultSettled { record: actual, status: SettlementStatus::Unavailable, .. }
         if actual == record(&p))));
 }

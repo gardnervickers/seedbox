@@ -152,7 +152,8 @@ fn oracle_exit_publishes_whole_round_then_sticks_before_due_effects() {
         };
         assert_eq!(driver.step(Timestamp::from_nanos(10)).unwrap(), expected);
         let outputs = driver
-            .drain_events()
+            .drain_observations()
+            .events
             .into_iter()
             .filter_map(|event| match event.kind {
                 EventKind::Output(output) => Some(output),
@@ -177,7 +178,7 @@ fn oracle_exit_publishes_whole_round_then_sticks_before_due_effects() {
                 Ok(())
             })
             .unwrap();
-        assert!(driver.drain_events().is_empty());
+        assert!(driver.drain_observations().events.is_empty());
     }
 }
 #[test]
@@ -217,7 +218,7 @@ fn crash_terminates_and_cuts_off_later_inputs_but_pause_does_not() {
     assert_eq!(calls.lock().unwrap().len(), 1);
     // The same-time input was admitted before the crash effect applied, but its
     // effect is cut off; the future input is never admitted and has no event.
-    let events = driver.drain_events();
+    let events = driver.drain_observations().events;
     assert!(!events.iter().any(|event| matches!(&event.kind,
         EventKind::FaultAdmitted(record) | EventKind::FaultSettled { record, .. }
             if record.origin == FaultOrigin::Input { key: key("later") })));
@@ -243,7 +244,7 @@ fn crash_terminates_and_cuts_off_later_inputs_but_pause_does_not() {
             Ok(())
         })
         .unwrap();
-    assert!(driver.drain_events().is_empty());
+    assert!(driver.drain_observations().events.is_empty());
     let (mut driver, calls, ids) = build(1, ExitReason::Shutdown, false);
     driver
         .with_barrier(|b| {
@@ -373,7 +374,8 @@ fn only_a_consumed_stop_with_its_successful_acknowledgment_finishes() {
         }
     );
     assert!(driver
-        .drain_events()
+        .drain_observations()
+        .events
         .iter()
         .any(|event| matches!(&event.kind,
         EventKind::FaultSettled { record, status: SettlementStatus::Applied, .. }
@@ -391,7 +393,8 @@ fn oracle_application_outcome_finishes_without_claiming_machine_exit() {
         }
     );
     assert!(driver
-        .drain_events()
+        .drain_observations()
+        .events
         .into_iter()
         .filter_map(|event| match event.kind {
             EventKind::Output(output) => Some(output),

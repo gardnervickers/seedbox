@@ -213,7 +213,8 @@ where
         outcomes.push(result.clone());
         events.extend(
             driver
-                .drain_events()
+                .drain_observations()
+                .events
                 .into_iter()
                 .filter_map(|event| match event.kind {
                     crate::driver::EventKind::Output(output) => Some(output),

@@ -97,7 +97,8 @@ fn machine_id(driver: &mut Harness) -> MachineId {
 }
 fn output(driver: &mut Harness, id: MachineId) -> String {
     let batch = driver
-        .drain_events()
+        .drain_observations()
+        .events
         .into_iter()
         .filter_map(|event| match event.kind {
             EventKind::Output(output) => Some(output),

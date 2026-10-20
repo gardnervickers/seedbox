@@ -260,98 +260,95 @@ fn crash_proposal(worker: &mut Worker<Mock>, key: &str) -> PreparedInput {
 fn authored_same_time_entries_drain_individually_and_rejection_consumes_no_fault_id() {
     let mut reference = None;
     for workers in [1, 4] {
-        for capacity in [0, 1, usize::MAX] {
-            let (_root, mut worker, _) = worker(workers);
-            worker.driver.set_event_capacity(capacity);
-            worker.step(Timestamp::from_nanos(10)).unwrap();
-            let actions = [
-                (
-                    "crash",
-                    seedbox_control::Action::Crash {
-                        machine: "n1".into(),
-                    },
-                    Action::Crash(Target::Name("n1".into())),
-                ),
-                (
-                    "reboot",
-                    seedbox_control::Action::Reboot {
-                        machine: "n1".into(),
-                    },
-                    Action::Reboot(Target::Name("n1".into())),
-                ),
-                (
-                    "invalid-resume",
-                    seedbox_control::Action::Resume {
-                        machine: "n1".into(),
-                    },
-                    Action::Resume(Target::Name("n1".into())),
-                ),
-                (
-                    "pause",
-                    seedbox_control::Action::Pause {
-                        machine: "n1".into(),
-                    },
-                    Action::Pause(Target::Name("n1".into())),
-                ),
-            ];
-            worker.state.world.input_program.inputs = actions
-                .iter()
-                .map(
-                    |(key, action, _)| seedbox_engine_protocol::input_program::TimedInput {
-                        key: (*key).into(),
-                        at_ns: 10,
-                        timeout_ns: 10,
-                        action: action.clone(),
-                    },
-                )
-                .collect();
-            for (index, (_, _, action)) in actions.into_iter().enumerate() {
-                assert!(worker.authored(action, None).unwrap());
-                assert_eq!(worker.state.world.input_program.next, index + 1);
-                assert_eq!(
-                    worker.playback().unwrap().position.at,
-                    Timestamp::from_nanos(10)
-                );
-            }
-            let program = &worker.state.world.input_program;
+        let (_root, mut worker, _) = worker(workers);
+        worker.step(Timestamp::from_nanos(10)).unwrap();
+        let actions = [
+            (
+                "crash",
+                seedbox_control::Action::Crash {
+                    machine: "n1".into(),
+                },
+                Action::Crash(Target::Name("n1".into())),
+            ),
+            (
+                "reboot",
+                seedbox_control::Action::Reboot {
+                    machine: "n1".into(),
+                },
+                Action::Reboot(Target::Name("n1".into())),
+            ),
+            (
+                "invalid-resume",
+                seedbox_control::Action::Resume {
+                    machine: "n1".into(),
+                },
+                Action::Resume(Target::Name("n1".into())),
+            ),
+            (
+                "pause",
+                seedbox_control::Action::Pause {
+                    machine: "n1".into(),
+                },
+                Action::Pause(Target::Name("n1".into())),
+            ),
+        ];
+        worker.state.world.input_program.inputs = actions
+            .iter()
+            .map(
+                |(key, action, _)| seedbox_engine_protocol::input_program::TimedInput {
+                    key: (*key).into(),
+                    at_ns: 10,
+                    timeout_ns: 10,
+                    action: action.clone(),
+                },
+            )
+            .collect();
+        for (index, (_, _, action)) in actions.into_iter().enumerate() {
+            assert!(worker.authored(action, None).unwrap());
+            assert_eq!(worker.state.world.input_program.next, index + 1);
             assert_eq!(
-                program
-                    .admissions
-                    .iter()
-                    .map(|row| row.plan.id)
-                    .collect::<Vec<_>>(),
-                [1, 2, 3]
+                worker.playback().unwrap().position.at,
+                Timestamp::from_nanos(10)
             );
-            assert_eq!(
-                program
-                    .admissions
-                    .iter()
-                    .map(|row| row.key.as_str())
-                    .collect::<Vec<_>>(),
-                ["crash", "reboot", "pause"]
-            );
-            assert_eq!(program.rejections.len(), 1);
-            assert_eq!(program.rejections[0].key, "invalid-resume");
-            program.validate_at(10).unwrap();
-            let machine = *worker
-                .names
+        }
+        let program = &worker.state.world.input_program;
+        assert_eq!(
+            program
+                .admissions
                 .iter()
-                .find(|(_, name)| name.as_str() == "n1")
-                .unwrap()
-                .0;
-            assert!(worker
-                .driver
-                .with_barrier(|barrier| barrier.paused(machine))
-                .unwrap());
-            let continuing = (
-                fingerprint(&mut worker),
-                serde_json::to_value(&worker.state).unwrap(),
-            );
-            if let Some(reference) = &reference {
-                assert_eq!(&continuing, reference);
-            } else {
-                reference = Some(continuing);
-            }
+                .map(|row| row.plan.id)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            program
+                .admissions
+                .iter()
+                .map(|row| row.key.as_str())
+                .collect::<Vec<_>>(),
+            ["crash", "reboot", "pause"]
+        );
+        assert_eq!(program.rejections.len(), 1);
+        assert_eq!(program.rejections[0].key, "invalid-resume");
+        program.validate_at(10).unwrap();
+        let machine = *worker
+            .names
+            .iter()
+            .find(|(_, name)| name.as_str() == "n1")
+            .unwrap()
+            .0;
+        assert!(worker
+            .driver
+            .with_barrier(|barrier| barrier.paused(machine))
+            .unwrap());
+        let continuing = (
+            fingerprint(&mut worker),
+            serde_json::to_value(&worker.state).unwrap(),
+        );
+        if let Some(reference) = &reference {
+            assert_eq!(&continuing, reference);
+        } else {
+            reference = Some(continuing);
         }
     }
 }
@@ -360,149 +357,146 @@ fn authored_same_time_entries_drain_individually_and_rejection_consumes_no_fault
 fn paused_real_driver_prepare_journal_commit_receipt_holds_effect_and_releases_once() {
     let mut reference = None;
     for workers in [1, 4] {
-        for capacity in [0, 1, usize::MAX] {
-            let (root, mut worker, runs) = worker(workers);
-            worker.driver.set_event_capacity(capacity);
-            worker.step(Timestamp::from_nanos(10)).unwrap();
-            assert!(worker.state.world.readiness.latched);
-            assert_eq!(
-                playback(
-                    &mut worker,
-                    1,
-                    Command::SetRate {
-                        rate: host::PlaybackRate::Paused
-                    }
-                )
-                .error,
-                None
-            );
-            let before = fingerprint(&mut worker);
-            let calls = runs.load(Ordering::SeqCst);
-            let state = worker.state.clone();
-            let prepare = request(
-                2,
-                Command::PrepareFault {
-                    request_id: "crash".into(),
-                    action: seedbox_control::Action::Crash {
-                        machine: "n1".into(),
-                    },
-                    timeout_ns: 100,
-                },
-            );
-            let proposal = crash_proposal(&mut worker, "crash");
-            let reply = worker.prepared(&prepare, proposal).unwrap();
-            let record = reply.intervention.unwrap();
-            assert_eq!(fingerprint(&mut worker), before);
-            assert_eq!(worker.state, state);
-            assert_eq!(runs.load(Ordering::SeqCst), calls);
-            let denied = playback(
-                &mut worker,
-                3,
-                Command::Checkpoint {
-                    request_id: "too-early".into(),
-                },
-            );
-            assert_eq!(denied.error, Some(ControlError::FaultPending));
-            assert!(worker.capture_pending().unwrap().is_none());
-            let journal_path = root.path().join("interventions.json");
-            let mut journal =
-                seedbox_artifacts::interventions::Journal::initialize(&journal_path).unwrap();
-            journal.append(record.clone()).unwrap();
-            assert_eq!(
-                seedbox_artifacts::interventions::read(&journal_path)
-                    .unwrap()
-                    .entries
-                    .as_slice(),
-                std::slice::from_ref(&record)
-            );
-            let committed = worker
-                .commit(&request(
-                    4,
-                    Command::CommitFault {
-                        request_id: "crash".into(),
-                    },
-                ))
-                .unwrap();
-            let mut committed_reply = serde_json::to_value(&committed).unwrap();
-            // Read-only host-rate telemetry is not the deterministic receipt.
-            // Compare every semantic reply field, never host speed samples.
-            committed_reply
-                .as_object_mut()
-                .unwrap()
-                .remove("achievedRate");
-            assert_eq!(committed.intervention, Some(record));
-            assert_eq!(committed.error, None);
-            assert_eq!(committed.rate, host::PlaybackRate::Paused);
-            assert!(!committed.stepping);
-            assert_eq!(runs.load(Ordering::SeqCst), calls);
-            assert_eq!(worker.state.world.input_program.next, 1);
-            assert_eq!(worker.state.world.intervention_next, 1);
-            assert_eq!(
-                playback(
-                    &mut worker,
-                    5,
-                    Command::Checkpoint {
-                        request_id: "held".into()
-                    }
-                )
-                .error,
-                None
-            );
-            let captured = worker.capture_pending().unwrap().unwrap();
-            assert_eq!(captured.state, host::CheckpointState::Captured);
-            assert!(worker
-                .state
-                .world
-                .publication
-                .session
-                .applied_faults
-                .is_empty());
+        let (root, mut worker, runs) = worker(workers);
+        worker.step(Timestamp::from_nanos(10)).unwrap();
+        assert!(worker.state.world.readiness.latched);
+        assert_eq!(
             playback(
                 &mut worker,
-                6,
+                1,
                 Command::SetRate {
-                    rate: host::PlaybackRate::Unlimited,
+                    rate: host::PlaybackRate::Paused
+                }
+            )
+            .error,
+            None
+        );
+        let before = fingerprint(&mut worker);
+        let calls = runs.load(Ordering::SeqCst);
+        let state = worker.state.clone();
+        let prepare = request(
+            2,
+            Command::PrepareFault {
+                request_id: "crash".into(),
+                action: seedbox_control::Action::Crash {
+                    machine: "n1".into(),
                 },
-            );
-            worker.step(Timestamp::from_nanos(10)).unwrap();
-            let crashes = worker
-                .driver
-                .with_barrier(|barrier| {
-                    Ok(barrier
-                        .machines()
-                        .map(|(_, machine)| machine.data.crashes)
-                        .sum::<u64>())
-                })
-                .unwrap();
-            assert_eq!(crashes, 1);
-            worker.step(Timestamp::from_nanos(20)).unwrap();
-            assert!(
-                worker.state.world.readiness.latched,
-                "crash must not clear ever-ready latch"
-            );
-            assert_eq!(
-                worker.state.world.publication.session.applied_faults.len(),
-                1
-            );
-            assert_eq!(
-                worker
-                    .report(StopReason::SimulatedTimeLimit, None, None, None)
-                    .unwrap()
-                    .faults
-                    .len(),
-                1
-            );
-            let continuing = (
-                fingerprint(&mut worker),
-                serde_json::to_value(&worker.state).unwrap(),
-                std::fs::read(&journal_path).unwrap(),
-                committed_reply,
-            );
-            if let Some(reference) = &reference {
-                assert_eq!(&continuing, reference);
-            } else {
-                reference = Some(continuing);
-            }
+                timeout_ns: 100,
+            },
+        );
+        let proposal = crash_proposal(&mut worker, "crash");
+        let reply = worker.prepared(&prepare, proposal).unwrap();
+        let record = reply.intervention.unwrap();
+        assert_eq!(fingerprint(&mut worker), before);
+        assert_eq!(worker.state, state);
+        assert_eq!(runs.load(Ordering::SeqCst), calls);
+        let denied = playback(
+            &mut worker,
+            3,
+            Command::Checkpoint {
+                request_id: "too-early".into(),
+            },
+        );
+        assert_eq!(denied.error, Some(ControlError::FaultPending));
+        assert!(worker.capture_pending().unwrap().is_none());
+        let journal_path = root.path().join("interventions.json");
+        let mut journal =
+            seedbox_artifacts::interventions::Journal::initialize(&journal_path).unwrap();
+        journal.append(record.clone()).unwrap();
+        assert_eq!(
+            seedbox_artifacts::interventions::read(&journal_path)
+                .unwrap()
+                .entries
+                .as_slice(),
+            std::slice::from_ref(&record)
+        );
+        let committed = worker
+            .commit(&request(
+                4,
+                Command::CommitFault {
+                    request_id: "crash".into(),
+                },
+            ))
+            .unwrap();
+        let mut committed_reply = serde_json::to_value(&committed).unwrap();
+        // Read-only host-rate telemetry is not the deterministic receipt.
+        // Compare every semantic reply field, never host speed samples.
+        committed_reply
+            .as_object_mut()
+            .unwrap()
+            .remove("achievedRate");
+        assert_eq!(committed.intervention, Some(record));
+        assert_eq!(committed.error, None);
+        assert_eq!(committed.rate, host::PlaybackRate::Paused);
+        assert!(!committed.stepping);
+        assert_eq!(runs.load(Ordering::SeqCst), calls);
+        assert_eq!(worker.state.world.input_program.next, 1);
+        assert_eq!(worker.state.world.intervention_next, 1);
+        assert_eq!(
+            playback(
+                &mut worker,
+                5,
+                Command::Checkpoint {
+                    request_id: "held".into()
+                }
+            )
+            .error,
+            None
+        );
+        let captured = worker.capture_pending().unwrap().unwrap();
+        assert_eq!(captured.state, host::CheckpointState::Captured);
+        assert!(worker
+            .state
+            .world
+            .publication
+            .session
+            .applied_faults
+            .is_empty());
+        playback(
+            &mut worker,
+            6,
+            Command::SetRate {
+                rate: host::PlaybackRate::Unlimited,
+            },
+        );
+        worker.step(Timestamp::from_nanos(10)).unwrap();
+        let crashes = worker
+            .driver
+            .with_barrier(|barrier| {
+                Ok(barrier
+                    .machines()
+                    .map(|(_, machine)| machine.data.crashes)
+                    .sum::<u64>())
+            })
+            .unwrap();
+        assert_eq!(crashes, 1);
+        worker.step(Timestamp::from_nanos(20)).unwrap();
+        assert!(
+            worker.state.world.readiness.latched,
+            "crash must not clear ever-ready latch"
+        );
+        assert_eq!(
+            worker.state.world.publication.session.applied_faults.len(),
+            1
+        );
+        assert_eq!(
+            worker
+                .report(StopReason::SimulatedTimeLimit, None, None, None)
+                .unwrap()
+                .faults
+                .len(),
+            1
+        );
+        let continuing = (
+            fingerprint(&mut worker),
+            serde_json::to_value(&worker.state).unwrap(),
+            std::fs::read(&journal_path).unwrap(),
+            committed_reply,
+        );
+        if let Some(reference) = &reference {
+            assert_eq!(&continuing, reference);
+        } else {
+            reference = Some(continuing);
         }
     }
 }

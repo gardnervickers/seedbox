@@ -225,7 +225,8 @@ fn unknown_duplicate_and_already_spawned_rejections_allocate_nothing() {
     assert_eq!(draws.load(Ordering::SeqCst), 3);
     assert_eq!(driver.execution.machines.len(), 3);
     let records: Vec<_> = driver
-        .drain_events()
+        .drain_observations()
+        .events
         .into_iter()
         .filter_map(|e| {
             if let EventKind::FaultAdmitted(r) = e.kind {

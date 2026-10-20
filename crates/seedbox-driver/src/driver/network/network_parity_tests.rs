@@ -210,7 +210,7 @@ fn named_host_guest_cross_heals_inspect_numbering_and_typed_counts() {
         SettlementStatus::Applied
     );
     advance(&mut d, 100);
-    let counts = d.network_counters();
+    let counts = d.execution.network.counts();
     assert_eq!(
         counts[&NetworkPair {
             from: MachineId(1),
@@ -239,24 +239,27 @@ fn observations_are_bounded_not_persisted_and_never_change_events_entropy_or_cou
     let expected = advance(&mut off, 40);
     assert_eq!(advance(&mut on, 40), expected);
     assert_eq!(states(&off), states(&on));
-    assert_eq!(off.network_counters(), on.network_counters());
-    assert_eq!(off.drain_frames(), FrameFacts::default());
+    assert_eq!(
+        off.execution.network.counts(),
+        on.execution.network.counts()
+    );
+    assert_eq!(off.drain_observations().frames, FrameFacts::default());
     for (i, e) in expected.iter().enumerate() {
         assert_eq!(e.sequence, i as u64);
     }
     let (bytes, store) = artifact(on.checkpoint().unwrap());
     let c = decode(&bytes, &store);
-    let source_facts = on.drain_frames();
+    let source_facts = on.drain_observations().frames;
     assert_eq!(source_facts.facts.len(), 1);
     assert_eq!(source_facts.omitted, 2);
     drop(on);
     let mut a = restore(&c, 1);
     let mut b = restore(&c, 4);
-    let facts = a.drain_frames();
+    let facts = a.drain_observations().frames;
     assert_eq!(facts, FrameFacts::default());
-    assert_eq!(facts, b.drain_frames());
-    assert_eq!(a.drain_frames(), FrameFacts::default());
-    assert_eq!(a.network_counters(), off.network_counters());
+    assert_eq!(facts, b.drain_observations().frames);
+    assert_eq!(a.drain_observations().frames, FrameFacts::default());
+    assert_eq!(a.execution.network.counts(), off.execution.network.counts());
     assert_eq!(advance(&mut a, 60), advance(&mut b, 60));
 }
 #[test]
@@ -298,10 +301,10 @@ fn every_frame_fate_including_exited_receiver_has_independent_authority() {
             );
         }
         advance(&mut d, 30);
-        let facts = d.drain_frames();
+        let facts = d.drain_observations().frames;
         assert_eq!(facts.omitted, 0);
         assert_eq!(facts.facts.last().unwrap().fate, expected);
-        let c = d.network_counters()[&NetworkPair {
+        let c = d.execution.network.counts()[&NetworkPair {
             from: MachineId(1),
             to: MachineId(2),
         }];
@@ -395,7 +398,7 @@ fn guest_queries_pagination_reincarnation_and_heal_ignore_frame_retention() {
                 d.set_frame_capacity(1);
             }
             if drain {
-                d.drain_frames();
+                d.drain_observations().frames;
             }
             schedule(
                 &mut d,
@@ -412,7 +415,7 @@ fn guest_queries_pagination_reincarnation_and_heal_ignore_frame_retention() {
             for end in [3, 4, 5, 6, 7, 8, 9, 11, 12, 30] {
                 advance(&mut d, end);
                 if drain {
-                    d.drain_frames();
+                    d.drain_observations().frames;
                 }
             }
             let actual_replies = replies(&d);
@@ -447,7 +450,7 @@ fn guest_queries_pagination_reincarnation_and_heal_ignore_frame_retention() {
             assert_eq!(actual_replies[&6]["result"]["active_handles"], json!([]));
             let actual = (
                 actual_replies,
-                d.network_counters(),
+                d.execution.network.counts(),
                 states(&d),
                 artifact(d.checkpoint().unwrap()).0,
             );
@@ -456,7 +459,7 @@ fn guest_queries_pagination_reincarnation_and_heal_ignore_frame_retention() {
             } else {
                 reference = Some(actual);
             }
-            let facts = d.drain_frames();
+            let facts = d.drain_observations().frames;
             if capacity == 1 && !drain {
                 assert!(facts.omitted > 0);
             }
@@ -874,17 +877,17 @@ fn pending_network_shape_is_codec_closed_and_continues_with_sessions_burst_and_q
     reference_observer_session(&mut d);
     d.set_frame_capacity(64);
     let expected_events = advance(&mut d, 120);
-    let expected_frames = d.drain_frames();
-    let expected_counts = d.network_counters();
+    let expected_frames = d.drain_observations().frames;
+    let expected_counts = d.execution.network.counts();
     let expected_states = states(&d);
     drop(d);
     for workers in [1, 4] {
         let mut restored = restore(&decode(&bytes, &store), workers);
-        assert_eq!(restored.drain_frames(), FrameFacts::default());
+        assert_eq!(restored.drain_observations().frames, FrameFacts::default());
         restored.set_frame_capacity(64);
         assert_eq!(advance(&mut restored, 120), expected_events);
-        assert_eq!(restored.drain_frames(), expected_frames);
-        assert_eq!(restored.network_counters(), expected_counts);
+        assert_eq!(restored.drain_observations().frames, expected_frames);
+        assert_eq!(restored.execution.network.counts(), expected_counts);
         assert_eq!(states(&restored), expected_states);
     }
 }
@@ -1047,7 +1050,7 @@ fn structured_counter_pairs_survive_colliding_display_names_and_restore() {
     ]);
     let mut d = net(specs, setup(8), 1);
     advance(&mut d, 25);
-    let before = d.network_counters();
+    let before = d.execution.network.counts();
     let a = NetworkPair {
         from: MachineId(0),
         to: MachineId(1),
@@ -1063,18 +1066,18 @@ fn structured_counter_pairs_survive_colliding_display_names_and_restore() {
     reference_observer_session(&mut d);
     d.set_frame_capacity(64);
     let events = advance(&mut d, 50);
-    let after = d.network_counters();
-    let facts = d.drain_frames();
+    let after = d.execution.network.counts();
+    let facts = d.drain_observations().frames;
     assert_eq!(after[&a].delivered, 3);
     assert_eq!(after[&b].delivered, 3);
     drop(d);
     for workers in [1, 4] {
         let mut restored = restore(&decode(&bytes, &store), workers);
-        assert_eq!(restored.network_counters(), before);
-        assert_eq!(restored.drain_frames(), FrameFacts::default());
+        assert_eq!(restored.execution.network.counts(), before);
+        assert_eq!(restored.drain_observations().frames, FrameFacts::default());
         restored.set_frame_capacity(64);
         assert_eq!(advance(&mut restored, 50), events);
-        assert_eq!(restored.network_counters(), after);
-        assert_eq!(restored.drain_frames(), facts);
+        assert_eq!(restored.execution.network.counts(), after);
+        assert_eq!(restored.drain_observations().frames, facts);
     }
 }
