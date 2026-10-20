@@ -1,7 +1,6 @@
-// Source-cache watcher shared by the canonical engine-core and control
-// packages and by the standalone VMM's wrapper packages, which name this file
-// as their `build` script. A wrapper's `src/lib.rs` links into the canonical
-// source directory, so every package resolves the same checkout and sources.
+// Source-cache watcher for seedbox-engine-core, also named as the `build`
+// script of seedbox-engine-protocol and seedbox-spec. Each package resolves
+// its own `src/lib.rs`, so the checkout check applies to every user.
 fn main() {
     // Cargo supplies this build-only input through the checkout's config. Unlike
     // Cargo's built-in variables, it invalidates warm cross-checkout fingerprints.
