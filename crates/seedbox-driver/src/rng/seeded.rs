@@ -2,12 +2,9 @@
 //! tag supplies 32-byte blocks. This defines deterministic bytes, not a security
 //! guarantee. The u64 counter counts blocks; exhaustion panics before reuse.
 use super::RngStream;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone)]
 pub(crate) struct SeededRng {
-    #[serde(default)]
     domain: Domain,
     seed: u64,
     block: u64,
@@ -16,10 +13,9 @@ pub(crate) struct SeededRng {
 }
 /// Domain-separated byte streams derived from one machine seed. Each stream
 /// has its own cursor; consuming one does not advance another.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Domain {
     /// The machine's own stream (boot and guest entropy).
-    #[default]
     Machine,
     /// Seeded clock-fault values drawn for that machine as a target.
     ClockFaults,
@@ -49,8 +45,6 @@ impl Domain {
     }
 }
 impl SeededRng {
-    // This file is also compiled by standalone examples without Driver codecs.
-    #[allow(dead_code)]
     pub(super) fn parts(&self) -> (Domain, u64, u64, [u8; 32], u8) {
         (
             self.domain,
@@ -60,7 +54,6 @@ impl SeededRng {
             self.position,
         )
     }
-    #[allow(dead_code)]
     pub(super) fn from_parts(
         domain: Domain,
         seed: u64,
@@ -78,7 +71,6 @@ impl SeededRng {
         value.check_state(domain, None)?;
         Ok(value)
     }
-    #[allow(dead_code)]
     pub(super) fn check_state(
         &self,
         domain: Domain,
@@ -108,7 +100,6 @@ impl SeededRng {
     }
     // Only Driver admission consumes its simulation stream, eight bytes per
     // admitted machine. Machine streams retain arbitrary byte-fill widths.
-    #[allow(dead_code)]
     pub(super) fn check_admission_state(
         &self,
         seeds: impl ExactSizeIterator<Item = u64>,
