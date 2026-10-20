@@ -385,22 +385,18 @@ impl Owned {
                     .filter(|pid| *pid != leader),
             );
             for pid in owned.clone() {
-                if forced || notified.insert(pid) {
-                    if let Err(error) =
-                        send(pid, if forced { libc::SIGKILL } else { libc::SIGTERM })
-                    {
-                        descendant_kill_failed |= forced;
-                        failure.get_or_insert(error);
-                    }
-                }
                 // Only wait on this job's direct adopted children. ECHILD for
                 // the entire coordinator says nothing about this job's cleanup.
+                // Reap before signalling: a privileged zombie is waitable by
+                // its normal-user subreaper even though kill(pid, signal) is
+                // denied by the ownership check.
                 let mut status = 0;
                 let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
                 if rc == pid {
                     notified.remove(&pid);
                     owned.remove(&pid);
                     reaped = true;
+                    continue;
                 } else if rc == 0 {
                     pending = true;
                 } else {
@@ -408,7 +404,16 @@ impl Owned {
                     if error.raw_os_error() == Some(libc::ECHILD) {
                         owned.remove(&pid);
                         notified.remove(&pid);
+                        continue;
                     } else {
+                        failure.get_or_insert(error);
+                    }
+                }
+                if forced || notified.insert(pid) {
+                    if let Err(error) =
+                        send(pid, if forced { libc::SIGKILL } else { libc::SIGTERM })
+                    {
+                        descendant_kill_failed |= forced;
                         failure.get_or_insert(error);
                     }
                 }
@@ -607,6 +612,58 @@ mod cleanup_tests {
             process::CommandExt,
         },
     };
+
+    #[test]
+    #[ignore = "requires a normal user with passwordless sudo"]
+    fn privileged_zombie_is_reaped_without_signaling() {
+        const MODE: &str = "SEEDBOX_CHECK_PRIVILEGED_ZOMBIE";
+        const TEST: &str = "process::cleanup_tests::privileged_zombie_is_reaped_without_signaling";
+        if std::env::var_os(MODE).is_some() {
+            assert_eq!(unsafe { libc::geteuid() }, 0);
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "exit 0"]);
+            let child = seedbox_exec::spawn(&mut command).unwrap();
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        child.id(),
+                        &mut info,
+                        libc::WEXITED | libc::WNOWAIT,
+                    )
+                },
+                0
+            );
+            assert_ne!(info.si_signo, 0);
+            // Leave the exited root child for the normal-user subreaper. The
+            // owner may reap it, but may not signal it.
+            std::mem::forget(child);
+            return;
+        }
+
+        assert_ne!(unsafe { libc::geteuid() }, 0);
+        let mut environment: Environment = std::env::vars().collect();
+        environment.insert(MODE.into(), "1".into());
+        let job = Job::new(
+            "privileged zombie cleanup",
+            vec![
+                "sudo".into(),
+                "-n".into(),
+                "env".into(),
+                format!("{MODE}=1"),
+                std::env::current_exe().unwrap().to_string_lossy().into(),
+                "--exact".into(),
+                TEST.into(),
+                "--ignored".into(),
+                "--nocapture".into(),
+            ],
+            &environment,
+            &std::env::current_dir().unwrap(),
+        );
+        let mut real = Real::install_signals().unwrap();
+        assert_eq!(real.execute(&job).unwrap().code, 0);
+    }
 
     #[test]
     fn job_scoped_cleanup_failures() {
