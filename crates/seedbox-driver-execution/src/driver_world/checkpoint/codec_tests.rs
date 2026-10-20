@@ -233,7 +233,9 @@ fn codec_service_descriptor_roundtrip_distinguishes_none_and_some_zero() {
                     .drain_observations()
                     .events
                     .iter()
-                    .map(|event| crate::driver_world::events::encode(&names, event).unwrap())
+                    .map(|event| {
+                        crate::driver_world::events::evidence::encode(&names, event).unwrap()
+                    })
                     .collect();
                 let ended = values
                     .iter()

@@ -597,12 +597,10 @@ fn event_chain_ignores_absent_observation_socket_and_worker_count() {
         );
         assert!(
             report.witness.is_none(),
-            "event chain alone is not the final execution witness"
+            "published events alone are not the final execution witness"
         );
-        results.push((
-            worker.state.world.publication.session.witness,
-            worker.state.world.publication.session.witness_records,
-        ));
+        results.push(worker.publisher.published.clone());
     }
+    assert!(!results[0].is_empty());
     assert_eq!(results[0], results[1]);
 }

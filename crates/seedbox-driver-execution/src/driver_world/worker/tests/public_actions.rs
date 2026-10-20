@@ -128,10 +128,8 @@ fn public_authored_clock_draw_heal_draw_runs_in_order_without_a_service_alias_ta
             [1, 2, 3]
         );
         worker.state.world.input_program.validate_at(10).unwrap();
-        results.push((
-            worker.state.world.publication.session.witness,
-            worker.state.world.publication.session.witness_records,
-        ));
+        results.push(worker.publisher.published.clone());
     }
+    assert!(!results[0].is_empty());
     assert_eq!(results[0], results[1]);
 }

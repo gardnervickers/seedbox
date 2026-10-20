@@ -294,8 +294,6 @@ pub struct Publication {
 pub struct PublicationSession {
     pub next_driver_sequence: u64,
     pub observation_records: u64,
-    pub witness: [u8; 32],
-    pub witness_records: u64,
     pub applied_faults: Vec<AppliedFault>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

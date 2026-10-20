@@ -855,8 +855,7 @@ where
                     .unwrap_or_default(),
                 code,
             }),
-            // The event chain is only one evidence component. The concrete
-            // native worker supplies validated execution/disk/network evidence;
+            // The concrete native worker supplies validated execution/disk/network evidence;
             // encoded snapshots and observation samples are not substitutes.
             witness,
             full_state,
