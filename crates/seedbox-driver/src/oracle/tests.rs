@@ -275,7 +275,6 @@ fn replies_preserve_complete_metadata_and_error_shape() {
         ErrorCode::InvalidRequest,
         ErrorCode::Unsupported,
         ErrorCode::InvalidState,
-        ErrorCode::EffectFailed,
         ErrorCode::ResultTooLarge,
     ] {
         let bytes = encode::<Value>(

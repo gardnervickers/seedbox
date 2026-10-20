@@ -501,14 +501,7 @@ fn stale_position_id_and_boot_state_are_detected_before_any_real_mutation() {
     // Read-only preview uses the actual committed lifecycle, not position alone.
     d.execution.machines[1]
         .lifecycle
-        .admission(
-            0,
-            3,
-            3,
-            crate::oracle::observation::Admission::Applied(
-                crate::oracle::observation::Transition::Crash,
-            ),
-        )
+        .admission(0, 3, 3, crate::oracle::observation::Transition::Crash)
         .unwrap();
     d.execution.machines[1]
         .lifecycle
@@ -516,9 +509,7 @@ fn stale_position_id_and_boot_state_are_detected_before_any_real_mutation() {
             0,
             3,
             3,
-            crate::oracle::observation::Admission::Applied(
-                crate::oracle::observation::Transition::Reboot { new_boot: 1 },
-            ),
+            crate::oracle::observation::Transition::Reboot { new_boot: 1 },
         )
         .unwrap();
     let before = internal(&d);

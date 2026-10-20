@@ -128,8 +128,7 @@ fn host_pause_is_separate_from_application_pause_and_execution_setting() {
     ready(&mut s, 1);
     command(&mut s, 1, ApplicationCommand::Pause, 2);
     ack(&mut s, 1, CommandResult::Completed, 3, 3);
-    s.admission(0, 4, 4, Admission::Applied(Transition::Pause))
-        .unwrap();
+    s.admission(0, 4, 4, Transition::Pause).unwrap();
     let before = s.view().unwrap();
     assert_eq!(before.machine, MachineCondition::Paused);
     assert_eq!(before.application.condition, ApplicationCondition::Paused);
@@ -137,15 +136,14 @@ fn host_pause_is_separate_from_application_pause_and_execution_setting() {
         0,
         5,
         5,
-        Admission::Applied(Transition::Execution(ExecutionConfig::new(2000).unwrap())),
+        Transition::Execution(ExecutionConfig::new(2000).unwrap()),
     )
     .unwrap();
     let view = s.view().unwrap();
     assert_eq!(view.condition_since, 4);
     assert_eq!(view.application.changed_at, 3);
     assert_eq!(s.facts().unwrap().vm, Vm::Paused);
-    s.admission(0, 6, 6, Admission::Applied(Transition::Resume))
-        .unwrap();
+    s.admission(0, 6, 6, Transition::Resume).unwrap();
     assert_eq!(s.view().unwrap().machine, MachineCondition::Ready);
     assert_eq!(s.facts().unwrap().process, Process::Frozen);
     assert_eq!(s.view().unwrap().application.changed_at, 3);
@@ -158,15 +156,14 @@ fn logical_crash_preserves_sticky_program_exit_then_reboot_clears_boot_view() {
         0,
         2,
         2,
-        Admission::Applied(Transition::Execution(ExecutionConfig::new(2000).unwrap())),
+        Transition::Execution(ExecutionConfig::new(2000).unwrap()),
     )
     .unwrap();
     s.response(0, 3, 3, &Response::ApplicationOutcome { code: 0 })
         .unwrap();
     s.terminal(0, 4, 4, ExitReason::ProgramExit { code: 0 })
         .unwrap();
-    s.admission(0, 5, 5, Admission::Applied(Transition::Crash))
-        .unwrap();
+    s.admission(0, 5, 5, Transition::Crash).unwrap();
     assert_eq!(s.facts().unwrap().vm, Vm::Down);
     assert_eq!(s.view().unwrap().machine, MachineCondition::Down);
     assert_eq!(s.view().unwrap().first_terminal.unwrap().at, 4);
@@ -178,13 +175,8 @@ fn logical_crash_preserves_sticky_program_exit_then_reboot_clears_boot_view() {
         s.command_owner(0, id(42)).unwrap(),
         CommandOwner::RetiredBoot
     ));
-    s.admission(
-        0,
-        6,
-        6,
-        Admission::Applied(Transition::Reboot { new_boot: 1 }),
-    )
-    .unwrap();
+    s.admission(0, 6, 6, Transition::Reboot { new_boot: 1 })
+        .unwrap();
     let view = s.view().unwrap();
     assert_eq!(view.boot, 1);
     assert_eq!(view.machine, MachineCondition::Starting);
@@ -205,8 +197,7 @@ fn crash_policy_does_not_invent_physical_terminal_time() {
     let mut s = state();
     ready(&mut s, 1);
     command(&mut s, 5, ApplicationCommand::Stop, 2);
-    s.admission(0, 3, 3, Admission::Applied(Transition::Crash))
-        .unwrap();
+    s.admission(0, 3, 3, Transition::Crash).unwrap();
     assert!(s.commands.is_empty());
     assert_eq!(s.view().unwrap().first_terminal, None);
     assert_eq!(
@@ -234,26 +225,12 @@ fn first_terminal_is_not_replaced_by_later_zero_budget_adoption() {
     assert_eq!(s.view().unwrap().natural_outcome, None);
 }
 #[test]
-fn rejected_no_effect_and_invalid_admissions_preserve_projection() {
+fn invalid_admissions_preserve_projection() {
     let mut s = state();
     ready(&mut s, 1);
     let before = s.view().unwrap();
     assert_eq!(
-        s.admission(0, 2, 2, Admission::Rejected),
-        Ok(Change::Unchanged)
-    );
-    assert_eq!(
-        s.admission(0, 3, 3, Admission::NoEffect),
-        Ok(Change::Unchanged)
-    );
-    assert_eq!(s.view().unwrap(), before);
-    assert_eq!(
-        s.admission(
-            0,
-            4,
-            4,
-            Admission::Applied(Transition::Reboot { new_boot: 0 })
-        ),
+        s.admission(0, 4, 4, Transition::Reboot { new_boot: 0 }),
         Err(Error::InvalidTransition)
     );
     assert_eq!(s.view().unwrap(), before);
@@ -306,13 +283,8 @@ fn only_accepted_current_boot_commands_can_acknowledge() {
         ),
         Err(Error::UnknownCommand)
     );
-    s.admission(
-        0,
-        7,
-        7,
-        Admission::Applied(Transition::Reboot { new_boot: 1 }),
-    )
-    .unwrap();
+    s.admission(0, 7, 7, Transition::Reboot { new_boot: 1 })
+        .unwrap();
     assert_eq!(
         s.response(
             0,
@@ -346,23 +318,14 @@ fn copies_retain_current_pending_state_without_claiming_whole_world_snapshot() {
 }
 
 #[test]
-fn confirmed_repeated_transitions_refresh_time_but_no_effect_does_not() {
+fn confirmed_repeated_transitions_refresh_time() {
     let mut s = state();
-    s.admission(
-        0,
-        4,
-        4,
-        Admission::Applied(Transition::Reboot { new_boot: 1 }),
-    )
-    .unwrap();
+    s.admission(0, 4, 4, Transition::Reboot { new_boot: 1 })
+        .unwrap();
     assert_eq!(s.view().unwrap().condition_since, 4);
     assert_eq!(s.view().unwrap().application.changed_at, 4);
-    s.admission(1, 5, 5, Admission::NoEffect).unwrap();
-    assert_eq!(s.view().unwrap().condition_since, 4);
-    s.admission(1, 6, 6, Admission::Applied(Transition::Crash))
-        .unwrap();
-    s.admission(1, 7, 7, Admission::Applied(Transition::Crash))
-        .unwrap();
+    s.admission(1, 6, 6, Transition::Crash).unwrap();
+    s.admission(1, 7, 7, Transition::Crash).unwrap();
     assert_eq!(s.view().unwrap().condition_since, 7);
     assert_eq!(s.view().unwrap().application.changed_at, 7);
     let mut s = state();
@@ -516,13 +479,8 @@ fn confirmed_physical_crash_is_logical_down_but_shutdown_is_not() {
     // The confirmed state, not the crash's origin, owns reboot eligibility.
     assert_eq!(s.facts().unwrap().vm, Vm::Down);
     assert!(s.facts().unwrap().physically_ended);
-    s.admission(
-        0,
-        11,
-        11,
-        Admission::Applied(Transition::Reboot { new_boot: 1 }),
-    )
-    .unwrap();
+    s.admission(0, 11, 11, Transition::Reboot { new_boot: 1 })
+        .unwrap();
     assert_eq!(s.facts().unwrap().vm, Vm::Up);
     assert!(!s.facts().unwrap().physically_ended);
     assert!(s.view().unwrap().first_terminal.is_none());
@@ -532,8 +490,7 @@ fn confirmed_physical_crash_is_logical_down_but_shutdown_is_not() {
     s.terminal(0, 4, 10, ExitReason::Shutdown).unwrap();
     assert_eq!(s.view().unwrap().machine, MachineCondition::Exited);
     assert_eq!(s.facts().unwrap().vm, Vm::Up, "shutdown still needs Crash");
-    s.admission(0, 11, 11, Admission::Applied(Transition::Crash))
-        .unwrap();
+    s.admission(0, 11, 11, Transition::Crash).unwrap();
     assert_eq!(s.facts().unwrap().vm, Vm::Down);
     assert_eq!(s.view().unwrap().condition_since, 11);
     assert_eq!(s.view().unwrap().first_terminal.unwrap().at, 4);

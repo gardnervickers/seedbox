@@ -626,7 +626,7 @@ impl Control {
         at: Timestamp,
         transition: crate::oracle::observation::Transition,
     ) -> Result<Vec<crate::oracle::service::Plan>, String> {
-        use crate::oracle::observation::{Admission, Transition};
+        use crate::oracle::observation::Transition;
         let boot = machines[id.0].lifecycle.boot();
         let mut plans = vec![];
         if matches!(transition, Transition::Crash | Transition::Reboot { .. }) {
@@ -638,12 +638,7 @@ impl Control {
         }
         machines[id.0]
             .lifecycle
-            .admission(
-                boot,
-                at.as_nanos(),
-                at.as_nanos(),
-                Admission::Applied(transition),
-            )
+            .admission(boot, at.as_nanos(), at.as_nanos(), transition)
             .map_err(|e| format!("control observation admission: {e:?}"))?;
         if matches!(transition, Transition::Reboot { .. }) {
             self.reset_commands(id);

@@ -58,19 +58,6 @@ pub(crate) enum Transition {
     Execution(ExecutionConfig),
     ClockRate(crate::clock::ClockRate),
 }
-/// Applied means confirmed logical effect, not that native RAM changed. A
-/// logical Crash still applies to an exited machine whose ProgramExit is sticky.
-/// NoEffect/Rejected promise no logical transition; uncertainty must poison.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Admission {
-    Applied(Transition),
-    // Explicit no-transition admissions are exercised by policy tests;
-    // backend admission integration will supply them.
-    #[cfg_attr(not(test), allow(dead_code))]
-    NoEffect,
-    #[cfg_attr(not(test), allow(dead_code))]
-    Rejected,
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Origin {
     External,
@@ -271,26 +258,22 @@ impl State {
             process: self.process,
             physically_ended: self.terminal.is_some(),
             ready: self.ready,
-            execution: self.execution,
         })
     }
     /// All actual logical effects, including external controls, must be supplied.
-    /// Rejected/no-op admissions do not imply a transition. Backend no-op alone
-    /// is not evidence of a logical no-op (notably Crash after natural exit).
+    /// The transition is a confirmed logical effect, not proof that native RAM
+    /// changed: a logical Crash still applies to an exited machine whose
+    /// ProgramExit is sticky.
     pub(crate) fn admission(
         &mut self,
         boot: u64,
         at: u64,
         commit: u64,
-        admission: Admission,
+        transition: Transition,
     ) -> Result<Change, Error> {
         if self.check(boot, at, commit)? == Change::Retired {
             return Ok(Change::Retired);
         }
-        let Admission::Applied(transition) = admission else {
-            self.committed_at = commit;
-            return Ok(Change::Unchanged);
-        };
         match transition {
             Transition::Pause if self.vm() != Vm::Up => return Err(Error::InvalidTransition),
             Transition::Resume if self.vm() != Vm::Paused => {

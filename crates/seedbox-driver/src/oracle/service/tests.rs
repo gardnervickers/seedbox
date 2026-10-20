@@ -16,7 +16,6 @@ impl Default for Owner {
                 process: Process::Running,
                 physically_ended: false,
                 ready: true,
-                execution: ExecutionConfig::default(),
             },
             next: 40,
             commands: BTreeMap::new(),
@@ -284,7 +283,6 @@ fn throttle_heal_only_confirm_after_effect_receipts() {
         json!({"op":"throttle","target":{"service":"service"},"factor_permille":3000}),
     );
     assert_eq!(reply(&rejected)["error"]["code"], "invalid_state");
-    o.facts.execution = ExecutionConfig::new(2000).unwrap();
     let r = reply(&s.applied(fault(&p), 10, 10).unwrap());
     assert_eq!(r["result"]["handle"], "p1");
     o.facts.vm = Vm::Down;
@@ -304,7 +302,6 @@ fn throttle_heal_only_confirm_after_effect_receipts() {
     assert_eq!(reply(&r)["ok"], false);
     assert_eq!(s.handles.active_handles().unwrap(), ["p1"]);
     let heal = call(&mut s, &mut o, 4, 20, json!({"op":"heal","handle":"p1"}));
-    o.facts.execution = ExecutionConfig::default();
     s.applied(fault(&heal), 20, 20).unwrap();
     assert!(s.handles.active_handles().unwrap().is_empty());
 }

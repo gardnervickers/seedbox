@@ -38,9 +38,6 @@ pub(crate) struct Facts {
     pub process: Process,
     pub physically_ended: bool,
     pub ready: bool,
-    // Retained for upcoming live execution-setting control.
-    #[allow(dead_code)]
-    pub execution: ExecutionConfig,
 }
 /// Authoritative stopped-state view, not an output-derived mirror. Inspection
 /// must supply the complete legacy projection, or explicitly return Unsupported.
@@ -952,7 +949,6 @@ impl Service {
                         process: Process::Running,
                         physically_ended: false,
                         ready: false,
-                        execution: ExecutionConfig::default(),
                     }),
                     Effect::Spawn,
                     None,
