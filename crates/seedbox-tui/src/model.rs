@@ -1356,7 +1356,6 @@ impl App {
     }
 
     fn apply_update(&mut self, update: Update) -> Vec<Request> {
-        let mut requests = Vec::new();
         if self.focus.as_ref().is_some_and(Focus::terminal)
             && matches!(
                 update,
@@ -1364,321 +1363,37 @@ impl App {
             )
         {
             self.close_terminal_menu();
-            return requests;
+            return Vec::new();
         }
+        let mut requests = Vec::new();
         match update {
             Update::Focused(id, update) => {
                 if self.focus_for(&id).is_some() {
                     return self.apply_update(*update);
                 }
             }
-            Update::Missing(id) => {
-                if self.focus_for(&id).is_some() {
-                    self.focus = None;
-                    self.fault_form = None;
-                    self.fault_menu = None;
-                    if self.quit_pending {
-                        self.quit = true;
-                    }
-                    self.screen = Screen::Catalogue;
-                    self.inspector = None;
-                    self.notify(
-                        format!("{id} is no longer available on the server"),
-                        Tone::Bad,
-                    );
-                    requests.push(Request::Close);
-                }
-            }
-            Update::List(mut list) => {
-                let selected = self.selected_summary();
-                list.sort_by(|a, b| {
-                    b.metadata
-                        .created_at_unix_ms
-                        .cmp(&a.metadata.created_at_unix_ms)
-                        .then_with(|| a.metadata.id.cmp(&b.metadata.id))
-                });
-                self.list = list;
-                self.list_selected = selected
-                    .and_then(|id| self.tree().iter().position(|(_, s)| s.metadata.id == id))
-                    .unwrap_or_else(|| self.list_selected.min(self.list.len().saturating_sub(1)));
-            }
-            Update::Resource(resource) => {
-                if let Some(focus) = self.focus_for(&resource.metadata.id) {
-                    if focus.resource.as_ref().is_none_or(|current| {
-                        current.metadata.revision <= resource.metadata.revision
-                    }) {
-                        focus.resource = Some(resource);
-                    }
-                }
-                self.close_terminal_menu();
-            }
-            Update::World(world) => {
-                if let Some(focus) = self.focus_for(&world.simulation) {
-                    if focus.world.as_ref().is_some_and(|current| {
-                        current.revision > world.revision
-                            || (current.revision == world.revision
-                                && current.simulated_time_ns > world.simulated_time_ns)
-                    }) {
-                        return requests;
-                    }
-                    let names: Vec<&String> = world.machines.iter().map(|m| &m.name).collect();
-                    if focus.selected.as_ref().is_some_and(|s| !names.contains(&s)) {
-                        focus.selected = None;
-                    }
-                    for machine in &world.machines {
-                        if !focus.seen.contains(&machine.name) {
-                            focus.seen.push(machine.name.clone());
-                        }
-                    }
-                    focus.traffic.observe(&world);
-                    focus.world = Some(world);
-                    focus.reconcile_heals();
-                }
-            }
-            Update::FaultMenuReady(result) => match result {
-                Ok(rate) => {
-                    self.fault_menu = Some(FaultMenu::Editing(rate));
-                    if self.quit_pending {
-                        return self.cancel_fault_menu();
-                    }
-                    if let Some(catalogue) = self.focus.as_ref().and_then(|f| f.fault_types.clone())
-                    {
-                        let context = self
-                            .focus
-                            .as_ref()
-                            .map(Focus::form_context)
-                            .unwrap_or_default();
-                        self.fault_form = Some(FaultForm::new(catalogue).with_context(context));
-                        for key in std::mem::take(&mut self.typeahead) {
-                            requests.extend(self.input_raw(Event::Key(key)));
-                        }
-                        if requests.iter().any(|r| matches!(r, Request::Fault(..))) {
-                            self.fault_menu = Some(FaultMenu::Finishing);
-                        }
-                    } else {
-                        return self.cancel_fault_menu();
-                    }
-                }
-                Err(error) => {
-                    self.typeahead.clear();
-                    self.fault_menu = Some(FaultMenu::Failed);
-                    self.notify(error, Tone::Bad);
-                    if self.quit_pending {
-                        self.quit = true;
-                    }
-                }
-            },
-            Update::FaultRejected(rate, error) => {
-                self.fault_menu = Some(FaultMenu::Editing(rate));
-                if let Some(form) = self.fault_form.as_mut() {
-                    form.set_error(error);
-                }
-                if self.quit_pending {
-                    return self.cancel_fault_menu();
-                }
-            }
-            Update::FaultMenuDone(ok) => {
-                if ok {
-                    self.fault_form = None;
-                }
-                self.fault_menu = if ok { None } else { Some(FaultMenu::Failed) };
-                if self.quit_pending {
-                    self.quit = true;
-                }
-            }
+            Update::Missing(id) => requests.extend(self.apply_missing(id)),
+            Update::List(list) => self.apply_list(list),
+            Update::Resource(resource) => self.apply_resource(resource),
+            Update::World(world) => self.apply_world(world),
+            Update::FaultMenuReady(result) => return self.apply_fault_menu_ready(result),
+            Update::FaultRejected(rate, error) => return self.apply_fault_rejected(rate, error),
+            Update::FaultMenuDone(ok) => self.apply_fault_menu_done(ok),
             Update::ControlDone => {
                 self.control_pending = false;
                 if self.quit_pending {
                     self.quit = true;
                 }
             }
-            Update::Playback(sample) => {
-                if let Some(focus) = self.focus.as_mut() {
-                    if !matches!(sample.state.rate, PlaybackRate::Paused) {
-                        focus.resume_rate = sample.state.rate;
-                    }
-                    focus.observe_achieved(&sample);
-                    focus.playback = Some((sample, Instant::now()));
-                }
-                self.close_terminal_menu();
-            }
-            Update::Event(delivery) => {
-                if let Some(focus) = self.focus.as_mut() {
-                    match delivery {
-                        EventDelivery::Event {
-                            sequence,
-                            observation,
-                        } if sequence > focus.event_sequence => {
-                            focus.event_sequence = sequence;
-                            let at = observation
-                                .simulated_time_ns
-                                .unwrap_or_else(|| focus.now_ns(Instant::now()));
-                            match &observation.event {
-                                EventKind::MachineLifecycle {
-                                    machine,
-                                    incarnation,
-                                    transition,
-                                } => focus.record(
-                                    at,
-                                    machine,
-                                    *incarnation,
-                                    Change::from_lifecycle(transition),
-                                ),
-                                EventKind::MachineReady {
-                                    machine,
-                                    incarnation,
-                                } => focus.record(at, machine, *incarnation, Change::Ready),
-                                EventKind::MachineExited {
-                                    machine,
-                                    incarnation,
-                                    code,
-                                } => focus.record(at, machine, *incarnation, Change::Exited(*code)),
-                                EventKind::PreparationProgress { machine, stage } => {
-                                    focus.preparation.insert(machine.clone(), *stage);
-                                }
-                                _ => {}
-                            }
-                            if let EventKind::ControlChanged { control } = &observation.event {
-                                focus.observe_heal_receipt(control);
-                            }
-                            let refresh = matches!(
-                                &observation.event,
-                                EventKind::FaultChanged { .. }
-                                    | EventKind::OverrideRejected { .. }
-                                    | EventKind::MachineLifecycle { .. }
-                                    | EventKind::MachineReady { .. }
-                                    | EventKind::MachineExited { .. }
-                                    | EventKind::ControlChanged { .. }
-                            );
-                            if refresh {
-                                requests.push(Request::RefreshWorld(focus.id.clone()));
-                            }
-                            focus.events.push_back(observation);
-                            if focus.events.len() > MAX_EVENTS {
-                                focus.events.pop_front();
-                            }
-                        }
-                        EventDelivery::Event { .. } => {}
-                        EventDelivery::Gap { first, last } if last > focus.event_sequence => {
-                            let first = first.max(focus.event_sequence + 1);
-                            focus.lost += last - first + 1;
-                            focus.event_sequence = last;
-                        }
-                        EventDelivery::Gap { .. } => {}
-                        EventDelivery::Closed => {}
-                    }
-                }
-            }
-            Update::Log(id, delivery) => {
-                if let Some(focus) = self.focus_for(&id) {
-                    let entry = match delivery {
-                        LogDelivery::Entry { sequence, entry } => {
-                            if sequence <= focus.log_sequence {
-                                return requests;
-                            }
-                            focus.log_sequence = sequence;
-                            Some(entry)
-                        }
-                        LogDelivery::Gap { first, last } => {
-                            let first = first.max(focus.log_sequence.saturating_add(1));
-                            if first <= last {
-                                focus.log_sequence = last;
-                                focus.log_gap(last - first + 1, "output records were lost");
-                            }
-                            None
-                        }
-                        LogDelivery::Closed => None,
-                    };
-                    match entry {
-                        Some(LogEntry::Bytes {
-                            machine,
-                            simulated_time_ns,
-                            stream,
-                            bytes,
-                            ..
-                        }) => {
-                            focus.logs.entry(machine).or_default().push(
-                                simulated_time_ns,
-                                stream,
-                                &bytes,
-                            );
-                        }
-                        Some(LogEntry::MachineGap {
-                            machine,
-                            simulated_time_ns,
-                            records,
-                            ..
-                        }) => focus.logs.entry(machine).or_default().note(
-                            simulated_time_ns,
-                            format!("[{records} output records were lost]"),
-                        ),
-                        Some(LogEntry::SourceGap { first, last }) => {
-                            focus.log_gap(last - first + 1, "worker output records were lost");
-                        }
-                        Some(LogEntry::SourceUnavailable) => {
-                            focus.log_gap(0, "output source unavailable");
-                        }
-                        None => {}
-                    }
-                }
-            }
-            Update::Frames(delivery) => {
-                if let Some(focus) = self.focus.as_mut() {
-                    match delivery {
-                        FrameDelivery::Frames {
-                            simulated_time_ns,
-                            frames,
-                            ..
-                        } => {
-                            focus.frame_time_ns = focus.frame_time_ns.max(simulated_time_ns);
-                            focus.frames.extend(frames);
-                            let now = focus.now_ns(Instant::now());
-                            focus.prune_frames(now);
-                        }
-                        FrameDelivery::Gap { first, last } => focus.lost += last - first + 1,
-                        FrameDelivery::Closed => {}
-                    }
-                }
-            }
+            Update::Playback(sample) => self.apply_playback(sample),
+            Update::Event(delivery) => requests.extend(self.apply_event(delivery)),
+            Update::Log(id, delivery) => self.apply_log(&id, delivery),
+            Update::Frames(delivery) => self.apply_frames(delivery),
             Update::Receipt {
                 title,
                 request,
                 result,
-            } => {
-                if title == "checkpoint"
-                    && result
-                        .as_ref()
-                        .is_ok_and(|r| r.state == seedbox_api::ControlState::Accepted)
-                {
-                    self.notify(
-                        "checkpoint requested; it is captured at the next boundary (step or resume)",
-                        Tone::Info,
-                    );
-                }
-                let (ok, result) = match result {
-                    Ok(receipt) => {
-                        let ok = match &receipt.state {
-                            seedbox_api::ControlState::Acknowledged { error, .. } => {
-                                error.is_none()
-                            }
-                            seedbox_api::ControlState::Accepted => true,
-                            _ => false,
-                        };
-                        (ok, describe_receipt(&receipt))
-                    }
-                    Err(error) => (false, error),
-                };
-                self.inspector = Some(Inspector {
-                    title,
-                    request,
-                    result,
-                    ok,
-                    at: Instant::now(),
-                });
-                if let Some(focus) = &self.focus {
-                    requests.push(Request::RefreshWorld(focus.id.clone()));
-                }
-            }
+            } => requests.extend(self.apply_receipt(title, request, result)),
             Update::Timeline(timeline) => {
                 if let Some(focus) = self.focus_for(&timeline.simulation) {
                     focus.timeline.clone_from(&timeline.entries);
@@ -1698,104 +1413,12 @@ impl App {
                     form.accept_preview(action, revision, result);
                 }
             }
-            Update::FaultTypes(catalogue) => {
-                if self
-                    .focus
-                    .as_ref()
-                    .is_some_and(|focus| focus.id == catalogue.simulation)
-                {
-                    if let Some(form) = self.fault_form.as_mut() {
-                        form.update_catalogue(catalogue.clone());
-                    }
-                    if let Some(focus) = self.focus.as_mut() {
-                        focus.fault_types = Some(catalogue);
-                    }
-                }
-            }
+            Update::FaultTypes(catalogue) => self.apply_fault_types(catalogue),
             Update::FaultReceipt {
                 title,
                 request,
                 result,
-            } => {
-                if let (Some(focus), Ok(receipt)) = (&self.focus, &result) {
-                    if let Some(entry) = receipt_timeline_entry(receipt) {
-                        let timeline = seedbox_api::FaultTimeline {
-                            simulation: focus.id.clone(),
-                            entries: vec![entry],
-                        };
-                        self.timeline_update(timeline);
-                    }
-                }
-
-                let action = serde_json::from_str::<serde_json::Value>(&request)
-                    .ok()
-                    .and_then(|request| {
-                        request
-                            .get("command")
-                            .and_then(|c| c.get("action"))
-                            .cloned()
-                    });
-                let (ok, text) = match &result {
-                    Ok(receipt) => {
-                        let state = &receipt["state"];
-                        let ok = state["type"] == "accepted"
-                            || (state["type"] == "acknowledged" && state["error"].is_null());
-                        if let Some(handle) = action
-                            .as_ref()
-                            .filter(|a| a["action"] == "heal")
-                            .and_then(|a| a["handle"].as_str())
-                        {
-                            if let Some(focus) = self.focus.as_mut() {
-                                if ok {
-                                    let id = state["intervention"]["plan"]["id"]
-                                        .as_u64()
-                                        .and_then(|id| u32::try_from(id).ok());
-                                    focus.pending_heals.insert(handle.to_owned(), id);
-                                } else {
-                                    focus.pending_heals.remove(handle);
-                                }
-                            }
-                        }
-                        (
-                            ok,
-                            format!(
-                                "{}{}{}",
-                                state["type"].as_str().unwrap_or("unknown"),
-                                state["error"]
-                                    .as_str()
-                                    .map(|error| format!(": {error}"))
-                                    .unwrap_or_default(),
-                                state["detail"]
-                                    .as_str()
-                                    .map(|detail| format!(" — {detail}"))
-                                    .unwrap_or_default()
-                            ),
-                        )
-                    }
-                    Err(error) => {
-                        if let Some(handle) = action
-                            .as_ref()
-                            .filter(|a| a["action"] == "heal")
-                            .and_then(|a| a["handle"].as_str())
-                        {
-                            if let Some(focus) = self.focus.as_mut() {
-                                focus.pending_heals.remove(handle);
-                            }
-                        }
-                        (false, error.clone())
-                    }
-                };
-                self.inspector = Some(Inspector {
-                    title,
-                    request,
-                    result: text,
-                    ok,
-                    at: Instant::now(),
-                });
-                if let Some(focus) = &self.focus {
-                    requests.push(Request::RefreshWorld(focus.id.clone()));
-                }
-            }
+            } => requests.extend(self.apply_fault_receipt(title, request, result)),
             Update::Checkpoints(checkpoints) => {
                 if let Some(focus) = self.focus.as_mut() {
                     focus.checkpoints = checkpoints;
@@ -1816,35 +1439,435 @@ impl App {
                 title,
                 request,
                 result,
-            } => {
-                let (ok, text) = match &result {
-                    Ok(simulation) => (true, format!("created {}", simulation.metadata.id)),
-                    Err(error) => (false, error.clone()),
-                };
-                // Follow a new rerun or branch into its own view.
-                let opened = match &result {
-                    Ok(simulation)
-                        if matches!(self.screen, Screen::Simulation | Screen::Timeline) =>
-                    {
-                        self.open(simulation.metadata.id.clone())
-                    }
-                    _ => Vec::new(),
-                };
-                requests.extend(opened);
-                self.notify(
-                    format!("{title}: {text}"),
-                    if ok { Tone::Good } else { Tone::Bad },
-                );
-                self.inspector = Some(Inspector {
-                    title,
-                    request,
-                    result: text,
-                    ok,
-                    at: Instant::now(),
-                });
-            }
+            } => requests.extend(self.apply_submitted(title, request, result)),
             Update::Notice(text) => self.notify(text, Tone::Info),
             Update::Error(text) => self.notify(text, Tone::Bad),
+        }
+        requests
+    }
+
+    /// Leave a focused simulation the server no longer has.
+    fn apply_missing(&mut self, id: SimulationId) -> Vec<Request> {
+        let mut requests = Vec::new();
+        if self.focus_for(&id).is_some() {
+            self.focus = None;
+            self.fault_form = None;
+            self.fault_menu = None;
+            if self.quit_pending {
+                self.quit = true;
+            }
+            self.screen = Screen::Catalogue;
+            self.inspector = None;
+            self.notify(
+                format!("{id} is no longer available on the server"),
+                Tone::Bad,
+            );
+            requests.push(Request::Close);
+        }
+        requests
+    }
+
+    fn apply_list(&mut self, mut list: Vec<SimulationSummary>) {
+        let selected = self.selected_summary();
+        list.sort_by(|a, b| {
+            b.metadata
+                .created_at_unix_ms
+                .cmp(&a.metadata.created_at_unix_ms)
+                .then_with(|| a.metadata.id.cmp(&b.metadata.id))
+        });
+        self.list = list;
+        self.list_selected = selected
+            .and_then(|id| self.tree().iter().position(|(_, s)| s.metadata.id == id))
+            .unwrap_or_else(|| self.list_selected.min(self.list.len().saturating_sub(1)));
+    }
+
+    fn apply_resource(&mut self, resource: Simulation) {
+        if let Some(focus) = self.focus_for(&resource.metadata.id) {
+            if focus
+                .resource
+                .as_ref()
+                .is_none_or(|current| current.metadata.revision <= resource.metadata.revision)
+            {
+                focus.resource = Some(resource);
+            }
+        }
+        self.close_terminal_menu();
+    }
+
+    fn apply_world(&mut self, world: WorldState) {
+        if let Some(focus) = self.focus_for(&world.simulation) {
+            if focus.world.as_ref().is_some_and(|current| {
+                current.revision > world.revision
+                    || (current.revision == world.revision
+                        && current.simulated_time_ns > world.simulated_time_ns)
+            }) {
+                return;
+            }
+            let names: Vec<&String> = world.machines.iter().map(|m| &m.name).collect();
+            if focus.selected.as_ref().is_some_and(|s| !names.contains(&s)) {
+                focus.selected = None;
+            }
+            for machine in &world.machines {
+                if !focus.seen.contains(&machine.name) {
+                    focus.seen.push(machine.name.clone());
+                }
+            }
+            focus.traffic.observe(&world);
+            focus.world = Some(world);
+            focus.reconcile_heals();
+        }
+    }
+
+    fn apply_fault_menu_ready(&mut self, result: Result<PlaybackRate, String>) -> Vec<Request> {
+        let mut requests = Vec::new();
+        match result {
+            Ok(rate) => {
+                self.fault_menu = Some(FaultMenu::Editing(rate));
+                if self.quit_pending {
+                    return self.cancel_fault_menu();
+                }
+                if let Some(catalogue) = self.focus.as_ref().and_then(|f| f.fault_types.clone()) {
+                    let context = self
+                        .focus
+                        .as_ref()
+                        .map(Focus::form_context)
+                        .unwrap_or_default();
+                    self.fault_form = Some(FaultForm::new(catalogue).with_context(context));
+                    for key in std::mem::take(&mut self.typeahead) {
+                        requests.extend(self.input_raw(Event::Key(key)));
+                    }
+                    if requests.iter().any(|r| matches!(r, Request::Fault(..))) {
+                        self.fault_menu = Some(FaultMenu::Finishing);
+                    }
+                } else {
+                    return self.cancel_fault_menu();
+                }
+            }
+            Err(error) => {
+                self.typeahead.clear();
+                self.fault_menu = Some(FaultMenu::Failed);
+                self.notify(error, Tone::Bad);
+                if self.quit_pending {
+                    self.quit = true;
+                }
+            }
+        }
+        requests
+    }
+
+    fn apply_fault_rejected(&mut self, rate: PlaybackRate, error: String) -> Vec<Request> {
+        self.fault_menu = Some(FaultMenu::Editing(rate));
+        if let Some(form) = self.fault_form.as_mut() {
+            form.set_error(error);
+        }
+        if self.quit_pending {
+            return self.cancel_fault_menu();
+        }
+        Vec::new()
+    }
+
+    fn apply_fault_menu_done(&mut self, ok: bool) {
+        if ok {
+            self.fault_form = None;
+        }
+        self.fault_menu = if ok { None } else { Some(FaultMenu::Failed) };
+        if self.quit_pending {
+            self.quit = true;
+        }
+    }
+
+    fn apply_playback(&mut self, sample: PlaybackObservation) {
+        if let Some(focus) = self.focus.as_mut() {
+            if !matches!(sample.state.rate, PlaybackRate::Paused) {
+                focus.resume_rate = sample.state.rate;
+            }
+            focus.observe_achieved(&sample);
+            focus.playback = Some((sample, Instant::now()));
+        }
+        self.close_terminal_menu();
+    }
+
+    fn apply_event(&mut self, delivery: EventDelivery) -> Vec<Request> {
+        let mut requests = Vec::new();
+        if let Some(focus) = self.focus.as_mut() {
+            match delivery {
+                EventDelivery::Event {
+                    sequence,
+                    observation,
+                } if sequence > focus.event_sequence => {
+                    focus.event_sequence = sequence;
+                    let at = observation
+                        .simulated_time_ns
+                        .unwrap_or_else(|| focus.now_ns(Instant::now()));
+                    match &observation.event {
+                        EventKind::MachineLifecycle {
+                            machine,
+                            incarnation,
+                            transition,
+                        } => focus.record(
+                            at,
+                            machine,
+                            *incarnation,
+                            Change::from_lifecycle(transition),
+                        ),
+                        EventKind::MachineReady {
+                            machine,
+                            incarnation,
+                        } => focus.record(at, machine, *incarnation, Change::Ready),
+                        EventKind::MachineExited {
+                            machine,
+                            incarnation,
+                            code,
+                        } => focus.record(at, machine, *incarnation, Change::Exited(*code)),
+                        EventKind::PreparationProgress { machine, stage } => {
+                            focus.preparation.insert(machine.clone(), *stage);
+                        }
+                        _ => {}
+                    }
+                    if let EventKind::ControlChanged { control } = &observation.event {
+                        focus.observe_heal_receipt(control);
+                    }
+                    let refresh = matches!(
+                        &observation.event,
+                        EventKind::FaultChanged { .. }
+                            | EventKind::OverrideRejected { .. }
+                            | EventKind::MachineLifecycle { .. }
+                            | EventKind::MachineReady { .. }
+                            | EventKind::MachineExited { .. }
+                            | EventKind::ControlChanged { .. }
+                    );
+                    if refresh {
+                        requests.push(Request::RefreshWorld(focus.id.clone()));
+                    }
+                    focus.events.push_back(observation);
+                    if focus.events.len() > MAX_EVENTS {
+                        focus.events.pop_front();
+                    }
+                }
+                EventDelivery::Event { .. } => {}
+                EventDelivery::Gap { first, last } if last > focus.event_sequence => {
+                    let first = first.max(focus.event_sequence + 1);
+                    focus.lost += last - first + 1;
+                    focus.event_sequence = last;
+                }
+                EventDelivery::Gap { .. } => {}
+                EventDelivery::Closed => {}
+            }
+        }
+        requests
+    }
+
+    fn apply_log(&mut self, id: &SimulationId, delivery: LogDelivery) {
+        if let Some(focus) = self.focus_for(id) {
+            let entry = match delivery {
+                LogDelivery::Entry { sequence, entry } => {
+                    if sequence <= focus.log_sequence {
+                        return;
+                    }
+                    focus.log_sequence = sequence;
+                    Some(entry)
+                }
+                LogDelivery::Gap { first, last } => {
+                    let first = first.max(focus.log_sequence.saturating_add(1));
+                    if first <= last {
+                        focus.log_sequence = last;
+                        focus.log_gap(last - first + 1, "output records were lost");
+                    }
+                    None
+                }
+                LogDelivery::Closed => None,
+            };
+            match entry {
+                Some(LogEntry::Bytes {
+                    machine,
+                    simulated_time_ns,
+                    stream,
+                    bytes,
+                    ..
+                }) => {
+                    focus
+                        .logs
+                        .entry(machine)
+                        .or_default()
+                        .push(simulated_time_ns, stream, &bytes);
+                }
+                Some(LogEntry::MachineGap {
+                    machine,
+                    simulated_time_ns,
+                    records,
+                    ..
+                }) => focus.logs.entry(machine).or_default().note(
+                    simulated_time_ns,
+                    format!("[{records} output records were lost]"),
+                ),
+                Some(LogEntry::SourceGap { first, last }) => {
+                    focus.log_gap(last - first + 1, "worker output records were lost");
+                }
+                Some(LogEntry::SourceUnavailable) => {
+                    focus.log_gap(0, "output source unavailable");
+                }
+                None => {}
+            }
+        }
+    }
+
+    fn apply_frames(&mut self, delivery: FrameDelivery) {
+        if let Some(focus) = self.focus.as_mut() {
+            match delivery {
+                FrameDelivery::Frames {
+                    simulated_time_ns,
+                    frames,
+                    ..
+                } => {
+                    focus.frame_time_ns = focus.frame_time_ns.max(simulated_time_ns);
+                    focus.frames.extend(frames);
+                    let now = focus.now_ns(Instant::now());
+                    focus.prune_frames(now);
+                }
+                FrameDelivery::Gap { first, last } => focus.lost += last - first + 1,
+                FrameDelivery::Closed => {}
+            }
+        }
+    }
+
+    fn apply_receipt(
+        &mut self,
+        title: String,
+        request: String,
+        result: Result<ControlReceipt, String>,
+    ) -> Vec<Request> {
+        if title == "checkpoint"
+            && result
+                .as_ref()
+                .is_ok_and(|r| r.state == seedbox_api::ControlState::Accepted)
+        {
+            self.notify(
+                "checkpoint requested; it is captured at the next boundary (step or resume)",
+                Tone::Info,
+            );
+        }
+        let (ok, result) = match result {
+            Ok(receipt) => {
+                let ok = match &receipt.state {
+                    seedbox_api::ControlState::Acknowledged { error, .. } => error.is_none(),
+                    seedbox_api::ControlState::Accepted => true,
+                    _ => false,
+                };
+                (ok, describe_receipt(&receipt))
+            }
+            Err(error) => (false, error),
+        };
+        self.inspect(title, request, result, ok);
+        self.refresh_focused_world()
+    }
+
+    fn apply_fault_types(&mut self, catalogue: FaultCatalogue) {
+        if self
+            .focus
+            .as_ref()
+            .is_some_and(|focus| focus.id == catalogue.simulation)
+        {
+            if let Some(form) = self.fault_form.as_mut() {
+                form.update_catalogue(catalogue.clone());
+            }
+            if let Some(focus) = self.focus.as_mut() {
+                focus.fault_types = Some(catalogue);
+            }
+        }
+    }
+
+    fn apply_fault_receipt(
+        &mut self,
+        title: String,
+        request: String,
+        result: Result<serde_json::Value, String>,
+    ) -> Vec<Request> {
+        if let (Some(focus), Ok(receipt)) = (&self.focus, &result) {
+            if let Some(entry) = receipt_timeline_entry(receipt) {
+                let timeline = seedbox_api::FaultTimeline {
+                    simulation: focus.id.clone(),
+                    entries: vec![entry],
+                };
+                self.timeline_update(timeline);
+            }
+        }
+
+        let heal = heal_handle(&request);
+        let (ok, text) = match &result {
+            Ok(receipt) => {
+                let state = &receipt["state"];
+                let ok = state["type"] == "accepted"
+                    || (state["type"] == "acknowledged" && state["error"].is_null());
+                if let Some(handle) = heal.as_deref() {
+                    if let Some(focus) = self.focus.as_mut() {
+                        if ok {
+                            let id = state["intervention"]["plan"]["id"]
+                                .as_u64()
+                                .and_then(|id| u32::try_from(id).ok());
+                            focus.pending_heals.insert(handle.to_owned(), id);
+                        } else {
+                            focus.pending_heals.remove(handle);
+                        }
+                    }
+                }
+                (ok, describe_fault_state(state))
+            }
+            Err(error) => {
+                if let Some(handle) = heal.as_deref() {
+                    if let Some(focus) = self.focus.as_mut() {
+                        focus.pending_heals.remove(handle);
+                    }
+                }
+                (false, error.clone())
+            }
+        };
+        self.inspect(title, request, text, ok);
+        self.refresh_focused_world()
+    }
+
+    fn apply_submitted(
+        &mut self,
+        title: String,
+        request: String,
+        result: Result<Simulation, String>,
+    ) -> Vec<Request> {
+        let mut requests = Vec::new();
+        let (ok, text) = match &result {
+            Ok(simulation) => (true, format!("created {}", simulation.metadata.id)),
+            Err(error) => (false, error.clone()),
+        };
+        // Follow a new rerun or branch into its own view.
+        let opened = match &result {
+            Ok(simulation) if matches!(self.screen, Screen::Simulation | Screen::Timeline) => {
+                self.open(simulation.metadata.id.clone())
+            }
+            _ => Vec::new(),
+        };
+        requests.extend(opened);
+        self.notify(
+            format!("{title}: {text}"),
+            if ok { Tone::Good } else { Tone::Bad },
+        );
+        self.inspect(title, request, text, ok);
+        requests
+    }
+
+    /// Show a request and its outcome in the inspector.
+    fn inspect(&mut self, title: String, request: String, result: String, ok: bool) {
+        self.inspector = Some(Inspector {
+            title,
+            request,
+            result,
+            ok,
+            at: Instant::now(),
+        });
+    }
+
+    /// Ask for the focused simulation's world again, if one is focused.
+    fn refresh_focused_world(&self) -> Vec<Request> {
+        let mut requests = Vec::new();
+        if let Some(focus) = &self.focus {
+            requests.push(Request::RefreshWorld(focus.id.clone()));
         }
         requests
     }
@@ -2637,6 +2660,39 @@ fn receipt_timeline_entry(receipt: &serde_json::Value) -> Option<seedbox_api::Ti
             .as_u64()
             .and_then(|id| u32::try_from(id).ok()),
     })
+}
+
+/// The machine handle a submitted fault request heals, if it is a heal.
+fn heal_handle(request: &str) -> Option<String> {
+    let action = serde_json::from_str::<serde_json::Value>(request)
+        .ok()
+        .and_then(|request| {
+            request
+                .get("command")
+                .and_then(|c| c.get("action"))
+                .cloned()
+        });
+    action
+        .as_ref()
+        .filter(|a| a["action"] == "heal")
+        .and_then(|a| a["handle"].as_str())
+        .map(str::to_owned)
+}
+
+/// Summarise an opaque fault receipt's state for the inspector.
+fn describe_fault_state(state: &serde_json::Value) -> String {
+    format!(
+        "{}{}{}",
+        state["type"].as_str().unwrap_or("unknown"),
+        state["error"]
+            .as_str()
+            .map(|error| format!(": {error}"))
+            .unwrap_or_default(),
+        state["detail"]
+            .as_str()
+            .map(|detail| format!(" — {detail}"))
+            .unwrap_or_default()
+    )
 }
 
 fn describe_receipt(receipt: &ControlReceipt) -> String {
