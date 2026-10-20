@@ -12,6 +12,9 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
+#[path = "support/failure_capture.rs"]
+mod failure_capture;
+
 // Every discovered workload proves a PASS. These four retain the expensive
 // independent same-seed and retained-input comparisons, covering dynamic
 // network faults, volume durability across crashes, clock state across reboot,
@@ -60,6 +63,63 @@ fn invoke(
         String::from_utf8_lossy(&fs::read(&logfile).map_err(|error| error.to_string())?)
             .into_owned(),
     )
+}
+
+fn first_run(cli: &Path, directory: &Path, state: &Path, args: &[&str]) -> Result<String, String> {
+    let result = invoke(cli, directory, state, "first", args);
+    if let Err(error) = &result {
+        let failure = directory.join("failure");
+        failure_capture::note(&failure, error);
+        let capture = || -> Result<(), String> {
+            let bytes = failure_capture::read(&directory.join("first.log"))?;
+            fs::write(failure.join("first.log"), &bytes).map_err(|e| e.to_string())?;
+            let output = String::from_utf8_lossy(&bytes);
+            let id = output
+                .lines()
+                .find_map(|line| line.strip_prefix("simulation: "))
+                .or_else(|| output.lines().find_map(|line| line.strip_prefix("FAIL: ")))
+                .ok_or("failed first run has no simulation ID")?;
+            // Validate before using the ID as a public observation argument.
+            let id: seedbox_api::SimulationId =
+                id.parse().map_err(|e| format!("simulation ID: {e}"))?;
+            for (label, args) in [
+                (
+                    "oracle-logs",
+                    vec!["logs", id.as_str(), "oracle", "--tail", "100"],
+                ),
+                (
+                    "application-logs",
+                    vec!["logs", id.as_str(), "--tail", "100"],
+                ),
+                (
+                    "definition",
+                    vec!["show", "--view", "definition", id.as_str(), "--json"],
+                ),
+                (
+                    "world",
+                    vec!["show", "--view", "world", id.as_str(), "--json"],
+                ),
+                (
+                    "timeline",
+                    vec!["show", "--view", "timeline", id.as_str(), "--json"],
+                ),
+            ] {
+                let mut command = Command::new(cli);
+                command
+                    .args(args)
+                    .env_remove("SEEDBOX_VMM")
+                    .env("SEEDBOX_STATE", state);
+                if let Err(error) = failure_capture::command(&mut command, &failure, label) {
+                    failure_capture::note(&failure, &format!("{label}: {error}"));
+                }
+            }
+            Ok(())
+        };
+        if let Err(error) = capture() {
+            failure_capture::note(&failure, &error);
+        }
+    }
+    result
 }
 
 fn simulation_id(output: &str) -> Result<&str, String> {
@@ -181,11 +241,10 @@ fn every_application_passes_and_representatives_repeat_through_the_server() {
             .join(workload.file_stem().unwrap());
         fs::create_dir_all(&directory).unwrap();
         let check = || -> Result<(), String> {
-            let first_output = invoke(
+            let first_output = first_run(
                 Path::new(&cli),
                 &directory,
                 state,
-                "first",
                 &["run", workload.to_str().unwrap(), "--wall-time", "30m"],
             )?;
             let first = simulation_id(&first_output)?;
@@ -340,3 +399,83 @@ impl Drop for Server {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[path = "support/driver_preparation.rs"]
 mod driver_preparation_native;
+
+#[test]
+fn first_run_failure_captures_live_guest_errors_and_preserves_exit() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("reports");
+    let state = temporary.path().join("state");
+    fs::create_dir_all(&directory).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::write(state.join("live"), b"ready").unwrap();
+    let cli = temporary.path().join("cli");
+    seedbox_test::process::install_executable(&cli, br#"#!/bin/sh
+case "$1" in
+run) printf 'simulation: kmm5wkwf\nFAIL: kmm5wkwf\n'; exit 1;;
+*) test -f "$SEEDBOX_STATE/live" || exit 9
+   printf '%s\n' "$*" >> "$SEEDBOX_STATE/observations"
+   case "$1" in
+   logs) printf 'Traceback: failed rate assertion\n'; printf 'runtime-probe: assertion failed\n' >&2;;
+   show) printf 'observation unavailable\n' >&2; exit 7;;
+   esac;;
+esac
+"#, 0o755).unwrap();
+    let error = first_run(&cli, &directory, &state, &["run", "fixture"]).unwrap_err();
+    // Cleanup after the actual first-run helper; fixtures reject observations
+    // after this boundary rather than inferring order from elapsed host time.
+    let observed = fs::read_to_string(state.join("observations")).unwrap();
+    fs::remove_dir_all(&state).unwrap();
+    assert!(error.starts_with("first: exit status: 1;"), "{error}");
+    assert_eq!(observed.lines().count(), 5);
+    assert!(observed.contains("logs kmm5wkwf oracle --tail 100"));
+    let failure = directory.join("failure");
+    assert!(fs::read_to_string(failure.join("oracle-logs.stdout"))
+        .unwrap()
+        .contains("Traceback"));
+    assert!(fs::read_to_string(failure.join("application-logs.stderr"))
+        .unwrap()
+        .contains("assertion failed"));
+    let summary = fs::read_to_string(failure.join("summary.txt")).unwrap();
+    assert!(summary.contains(&error));
+    assert!(summary.contains("definition: definition: exit status: 7"));
+    assert!(summary.contains("timeline:"));
+}
+
+#[test]
+fn first_run_success_avoids_failure_capture() {
+    let temporary = tempfile::tempdir().unwrap();
+    let cli = temporary.path().join("cli");
+    seedbox_test::process::install_executable(
+        &cli,
+        b"#!/bin/sh\ntest \"$1\" = run || exit 9\nprintf 'PASS: kmm5wkwf\\n'\n",
+        0o755,
+    )
+    .unwrap();
+    assert_eq!(
+        first_run(&cli, temporary.path(), temporary.path(), &["run"]).unwrap(),
+        "PASS: kmm5wkwf\n"
+    );
+    assert!(!temporary.path().join("failure").exists());
+}
+
+#[test]
+fn failure_capture_bounds_a_long_guest_line_and_drains_both_pipes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut command = Command::new("/bin/sh");
+    command.args([
+        "-c",
+        "head -c 8388627 /dev/zero; printf 'assertion marker\\n' >&2",
+    ]);
+    let error = failure_capture::command(&mut command, temporary.path(), "oracle-log").unwrap_err();
+    assert!(error.contains("omitted 19 bytes"), "{error}");
+    assert_eq!(
+        fs::metadata(temporary.path().join("oracle-log.stdout"))
+            .unwrap()
+            .len(),
+        failure_capture::LIMIT
+    );
+    assert_eq!(
+        fs::read_to_string(temporary.path().join("oracle-log.stderr")).unwrap(),
+        "assertion marker\n"
+    );
+}

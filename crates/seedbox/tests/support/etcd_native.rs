@@ -18,6 +18,9 @@ use tokio::{
     process::{Child, Command},
 };
 
+#[path = "failure_capture.rs"]
+mod failure_capture;
+
 type Result<T> = std::result::Result<T, String>;
 
 struct Cli {
@@ -77,6 +80,51 @@ impl Cli {
             ));
         }
         fs::read(stdout).map_err(|e| e.to_string())
+    }
+
+    async fn replay(&self, guard: &HangGuard, baseline: &str) -> Result<Vec<u8>> {
+        let result = self
+            .invoke(
+                guard,
+                "replay",
+                &words(&["replay", baseline, "--json", "--wall-time", "20m"]),
+            )
+            .await;
+        if let Err(error) = &result {
+            let directory = self.directory.join("failure");
+            failure_capture::note(&directory, error);
+            let capture = || -> Result<()> {
+                let bytes = failure_capture::read(&self.directory.join("replay.stdout"))?;
+                fs::write(directory.join("replay.stdout"), &bytes).map_err(|e| e.to_string())?;
+                let stderr = failure_capture::read(&self.directory.join("replay.stderr"))?;
+                fs::write(directory.join("replay.stderr"), stderr).map_err(|e| e.to_string())?;
+                let comparison: SimulationComparison = serde_json::from_slice(&bytes)
+                    .map_err(|e| format!("replay comparison: {e}"))?;
+                if comparison.baseline.as_str() != baseline
+                    || comparison.simulation.as_str() == baseline
+                {
+                    return Err(
+                        "replay comparison does not name a fresh simulation of this baseline"
+                            .into(),
+                    );
+                }
+                self.capture_comparison_failure(baseline, comparison.simulation.as_str());
+                // Use the same CLI environment as the scenario, with bounded pipe readers.
+                let mut command = self.command().into_std();
+                command.args([
+                    "logs",
+                    comparison.simulation.as_str(),
+                    "oracle",
+                    "--tail",
+                    "100",
+                ]);
+                failure_capture::command(&mut command, &directory, "replay-oracle-log")
+            };
+            if let Err(error) = capture() {
+                failure_capture::note(&directory, &error);
+            }
+        }
+        result
     }
 
     async fn describe(&self, guard: &HangGuard, label: &str, id: &str) -> Result<Simulation> {
@@ -235,6 +283,8 @@ fn copy_state_report(
 
 impl Cli {
     fn capture_comparison_failure(&self, baseline: &str, repeated: &str) {
+        let directory = self.directory.join("failure");
+        failure_capture::note(&directory, &format!("comparison {baseline} / {repeated}"));
         let capture = || -> Result<()> {
             let left = attempt_directory(&self.state, baseline)?;
             let right = attempt_directory(&self.state, repeated)?;
@@ -243,14 +293,11 @@ impl Cli {
                     let manifest = diagnostic_bytes(&attempt.join("manifest.json"))?;
                     let record = seedbox_application::record::inspect_bytes(&manifest)
                         .map_err(|e| e.to_string())?;
-                    fs::write(
-                        self.directory.join(format!("{label}-manifest.json")),
-                        manifest,
-                    )
-                    .map_err(|e| e.to_string())?;
+                    fs::write(directory.join(format!("{label}-manifest.json")), manifest)
+                        .map_err(|e| e.to_string())?;
                     copy_state_report(
                         attempt,
-                        &self.directory.join(format!(
+                        &directory.join(format!(
                             "{label}-{}",
                             seedbox_application::evidence::STATE_REPORT
                         )),
@@ -259,7 +306,10 @@ impl Cli {
                     Ok(())
                 };
                 if let Err(error) = copy() {
-                    eprintln!("etcd {label} diagnostic capture failed: {error}");
+                    failure_capture::note(
+                        &directory,
+                        &format!("etcd {label} diagnostic capture failed: {error}"),
+                    );
                 }
             }
             // These readers verify retained log digests and never execute guests.
@@ -281,16 +331,22 @@ impl Cli {
                     if bytes.len() as u64 > DIAGNOSTIC_LIMIT {
                         return Err("comparison diagnostic exceeds 8 MiB".into());
                     }
-                    fs::write(self.directory.join(name), bytes).map_err(|e| e.to_string())
+                    fs::write(directory.join(name), bytes).map_err(|e| e.to_string())
                 });
                 if let Err(error) = write {
-                    eprintln!("etcd {name} diagnostic capture failed: {error}");
+                    failure_capture::note(
+                        &directory,
+                        &format!("etcd {name} diagnostic capture failed: {error}"),
+                    );
                 }
             }
             Ok(())
         };
         if let Err(error) = capture() {
-            eprintln!("etcd comparison diagnostic capture failed: {error}");
+            failure_capture::note(
+                &directory,
+                &format!("etcd comparison diagnostic capture failed: {error}"),
+            );
         }
     }
 }
@@ -398,15 +454,9 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
     cli.invoke(guard, "delete-repeat", &words(&["delete", &repeated_id]))
         .await?;
     // No new backend selection on replay: the retained runtime must own it.
-    let replay: SimulationComparison = serde_json::from_slice(
-        &cli.invoke(
-            guard,
-            "replay",
-            &words(&["replay", &baseline_id, "--json", "--wall-time", "20m"]),
-        )
-        .await?,
-    )
-    .map_err(|e| e.to_string())?;
+    let replay: SimulationComparison =
+        serde_json::from_slice(&cli.replay(guard, &baseline_id).await?)
+            .map_err(|e| e.to_string())?;
     if replay.baseline != baseline.metadata.id
         || replay.simulation == baseline.metadata.id
         || replay.simulation == repeated.metadata.id
@@ -545,6 +595,206 @@ pub fn run(backend: Backend) {
 mod tests {
     use super::*;
     use std::{collections::BTreeMap, ffi::OsStr};
+
+    fn retained_attempt(state: &Path, id: &str, content: &[u8]) {
+        use seedbox_application::{evidence::*, execution::*, record::*, store::ContentDigest};
+        let attempt = state
+            .join("sessions/session-fixture/runs")
+            .join(id)
+            .join("attempts/one");
+        let output = attempt.join("output/machines");
+        fs::create_dir_all(&output).unwrap();
+        let digest = ContentDigest::of(content);
+        let layout = [0u64.to_le_bytes(), 4096u64.to_le_bytes()].concat();
+        let state_report = StateReport {
+            version: 1,
+            machines: BTreeMap::from([(
+                "oracle".into(),
+                StateCapture {
+                    boot: 1,
+                    disposition: StateDisposition::Live,
+                    digest: digest.clone(),
+                    parts: BTreeMap::from([
+                        ("ram".into(), digest.clone()),
+                        ("ram_regions".into(), ContentDigest::of(&layout)),
+                    ]),
+                    regions: vec![RamRegion {
+                        base: 0,
+                        length: 4096,
+                    }],
+                    page_log: "oracle.pages".into(),
+                },
+            )]),
+        };
+        let bytes = serde_json::to_vec(&state_report).unwrap();
+        fs::write(output.join(STATE_REPORT), &bytes).unwrap();
+        let pages = [u64::from(content[0]).to_le_bytes()].concat();
+        let samples = [
+            0u64.to_le_bytes(),
+            1u64.to_le_bytes(),
+            u64::from(content[0]).to_le_bytes(),
+        ]
+        .concat();
+        fs::write(output.join("oracle.witness-log"), &samples).unwrap();
+        fs::write(output.join("oracle.pages"), &pages).unwrap();
+        let identity = RunIdentity {
+            version: FORMAT_VERSION,
+            seed: 123,
+            configuration: seedbox_application::config::parse(
+                "name: fixture\noracle: {image: busybox}\n",
+                Path::new("/fixture/seedbox.yaml"),
+                &BTreeMap::new(),
+            )
+            .unwrap(),
+            inputs: PreparedInputs {
+                machine_memory_mb: BTreeMap::from([("oracle".into(), 512)]),
+                wall_clock_epoch: None,
+                images: BTreeMap::new(),
+                placement: BTreeMap::from([("oracle".into(), "oracle".into())]),
+                guests: BTreeMap::from([("oracle".into(), ContentDigest::of(b"fixture-boot"))]),
+                profile: ExecutionProfile {
+                    backend: "fixture".into(),
+                    witness_mode: WitnessMode::FullState,
+                    semantic_parameters: Default::default(),
+                },
+                auxiliary: BTreeMap::new(),
+                provenance: BTreeMap::new(),
+            },
+            program: vec![],
+            interventions: None,
+        };
+        let record = RunRecord {
+            run_id: ContentDigest::of(&serde_json::to_vec(&identity).unwrap()),
+            identity,
+            attempt: "one".into(),
+            performance_parameters: BTreeMap::new(),
+            allow_engine_change: false,
+            log_policy: Default::default(),
+            omitted_logs: BTreeMap::new(),
+            outcome: Outcome::Pass,
+            report: Some(ExecutionReport {
+                host_wait_ns: 0,
+                simulated_time_ns: Some(100),
+                reason: StopReason::Completed,
+                workload_exit: Some(WorkloadExit {
+                    service: "oracle".into(),
+                    code: 0,
+                }),
+                witness: Some(digest.clone()),
+                full_state: Some(BTreeMap::from([("oracle".into(), digest)])),
+                faults: vec![],
+                detail: None,
+            }),
+            error: None,
+            logs: BTreeMap::from([
+                (
+                    format!("machines/{STATE_REPORT}"),
+                    ContentDigest::of(&bytes),
+                ),
+                ("machines/oracle.pages".into(), ContentDigest::of(&pages)),
+                (
+                    "machines/oracle.witness-log".into(),
+                    ContentDigest::of(&samples),
+                ),
+            ]),
+            replay_of: None,
+            replay: None,
+        };
+        write_record(&attempt, &record).unwrap();
+    }
+
+    #[tokio::test]
+    async fn replay_nonzero_failure_captures_retained_comparison_before_cleanup() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state = temporary.path().join("state");
+        fs::create_dir_all(&state).unwrap();
+        retained_attempt(&state, "awqwjt9m", b"baseline");
+        retained_attempt(&state, "xmevbn3p", b"replay");
+        fs::write(state.join("comparison.json"), br#"{
+            "baseline":"awqwjt9m", "simulation":"xmevbn3p", "status":"MISMATCH",
+            "outcomeMatches":true, "witnessMatches":false, "fullStateMatches":false, "faultHistoryMatches":true
+        }"#).unwrap();
+        let executable = temporary.path().join("cli");
+        seedbox_test::process::install_executable(
+            &executable,
+            br#"#!/bin/sh
+case "$1" in
+replay) cat "$SEEDBOX_STATE/comparison.json"; exit 1;;
+logs) test -d "$SEEDBOX_STATE/sessions" || exit 9
+      printf 'RESULT pass despite witness mismatch\n';;
+*) exit 8;;
+esac
+"#,
+            0o755,
+        )
+        .unwrap();
+        let cli = Cli {
+            executable,
+            directory: temporary.path().into(),
+            state: state.clone(),
+        };
+        let guard = HangGuard::new("synthetic replay observation", Duration::from_secs(30));
+        let error = cli.replay(&guard, "awqwjt9m").await.unwrap_err();
+        // Remove the actual fixture attempts at the same boundary as scenario cleanup.
+        fs::remove_dir_all(state).unwrap();
+        assert!(error.starts_with("CLI replay: exit status: 1;"), "{error}");
+        let failure = temporary.path().join("failure");
+        for name in [
+            "baseline-manifest.json",
+            "repeat-manifest.json",
+            "baseline-driver-state.json",
+            "repeat-driver-state.json",
+            "compare-state.json",
+            "compare-divergence.json",
+            "compare-ram-pages.json",
+        ] {
+            let bytes = fs::read(failure.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+        }
+        assert!(fs::read_to_string(failure.join("replay-oracle-log.stdout"))
+            .unwrap()
+            .contains("RESULT pass"));
+        let divergence: serde_json::Value =
+            serde_json::from_slice(&fs::read(failure.join("compare-divergence.json")).unwrap())
+                .unwrap();
+        assert_eq!(divergence["divergence"]["machine"], "oracle");
+        let pages: serde_json::Value =
+            serde_json::from_slice(&fs::read(failure.join("compare-ram-pages.json")).unwrap())
+                .unwrap();
+        assert_eq!(pages["machines"]["oracle"]["differing_pfns"], 1);
+        let summary = fs::read_to_string(failure.join("summary.txt")).unwrap();
+        assert!(summary.contains(&error));
+        assert!(!summary.contains("capture failed"), "{summary}");
+    }
+
+    #[tokio::test]
+    async fn replay_capture_errors_do_not_replace_the_original_failure() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("cli");
+        seedbox_test::process::install_executable(&executable, br#"#!/bin/sh
+case "$1" in
+replay) printf '{"baseline":"awqwjt9m","simulation":"xmevbn3p","status":"MISMATCH","outcomeMatches":true,"witnessMatches":false,"fullStateMatches":false,"faultHistoryMatches":true}'; exit 1;;
+logs) printf 'oracle observation denied\n' >&2; exit 7;;
+esac
+"#, 0o755).unwrap();
+        let cli = Cli {
+            executable,
+            directory: temporary.path().into(),
+            state: temporary.path().join("absent"),
+        };
+        let guard = HangGuard::new("synthetic failed observation", Duration::from_secs(30));
+        let error = cli.replay(&guard, "awqwjt9m").await.unwrap_err();
+        assert!(error.starts_with("CLI replay: exit status: 1;"), "{error}");
+        let summary = fs::read_to_string(temporary.path().join("failure/summary.txt")).unwrap();
+        assert!(summary.contains(&error));
+        assert!(summary.contains("comparison diagnostic capture failed"));
+        assert!(summary.contains("exit status: 7"));
+        assert!(
+            fs::read_to_string(temporary.path().join("failure/replay-oracle-log.stderr"))
+                .unwrap()
+                .contains("denied")
+        );
+    }
 
     #[test]
     fn comparison_capture_copies_state_from_retained_machine_output() {
