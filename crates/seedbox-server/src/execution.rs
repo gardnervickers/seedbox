@@ -394,7 +394,7 @@ impl ExecutionService {
         capacity: NonZeroUsize,
         shutdown: CancellationToken,
     ) -> Result<(), Error> {
-        // Establish ownership before recovery or any other await can suspend.
+        // Establish ownership before any await can suspend.
         let mut cancel_on_drop = CancelExecutionsOnDrop {
             manager: self.manager.clone(),
             shutdown: shutdown.clone(),
@@ -404,17 +404,6 @@ impl ExecutionService {
             .lock()
             .map_err(|_| catalogue::Error::StorageFailed)?
             .0 = capacity.get();
-        let recovery = self.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), Error> {
-            for id in recovery
-                .manager
-                .read(|catalogue| Ok(catalogue.pending_deletions()))?
-            {
-                recovery.delete(&id)?;
-            }
-            Ok(())
-        })
-        .await??;
         let mut tasks = JoinSet::new();
         let mut stopping = false;
         let mut cleanup_started = false;
@@ -927,9 +916,7 @@ mod tests {
     async fn capacity_api_tracks_real_admission_and_releases_joined_tasks() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        let manager = Arc::new(Manager::new(
-            catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
-        ));
+        let manager = Arc::new(Manager::new(catalogue::Catalogue::in_memory()));
         let provider = Arc::new(WaitingProvider(AtomicBool::new(false), Default::default()));
         let execution = Arc::new(
             ExecutionService::new(
@@ -1184,9 +1171,7 @@ mod tests {
 
     #[test]
     fn final_report_cannot_regress_a_committed_oracle_observation() {
-        let directory = tempfile::tempdir().unwrap();
-        let manager =
-            Manager::new(catalogue::Catalogue::open(&directory.path().join("catalogue")).unwrap());
+        let manager = Manager::new(catalogue::Catalogue::in_memory());
         let configuration = seedbox_application::config::parse(
             "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
             Path::new("/project/seedbox.yaml"),
@@ -1242,9 +1227,7 @@ mod tests {
     fn deletion_drains_control_io_and_retires_stale_handles_before_removing_files() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        let manager = Arc::new(Manager::new(
-            catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
-        ));
+        let manager = Arc::new(Manager::new(catalogue::Catalogue::in_memory()));
         let service = Arc::new(
             ExecutionService::new(
                 manager.clone(),
@@ -1340,9 +1323,7 @@ mod tests {
     fn completion_retires_control_handles_before_later_deletion() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        let manager = Arc::new(Manager::new(
-            catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
-        ));
+        let manager = Arc::new(Manager::new(catalogue::Catalogue::in_memory()));
         let service = Arc::new(
             ExecutionService::new(
                 manager.clone(),
@@ -1442,9 +1423,7 @@ mod tests {
     fn preparation_timeout_waits_for_cleanup_and_finishes_without_an_oracle_exit() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        let manager = Arc::new(Manager::new(
-            catalogue::Catalogue::open(&root.join("catalogue")).unwrap(),
-        ));
+        let manager = Arc::new(Manager::new(catalogue::Catalogue::in_memory()));
         let provider = Arc::new(WaitingProvider(AtomicBool::new(false), Default::default()));
         let mut service = ExecutionService::new(
             manager.clone(),

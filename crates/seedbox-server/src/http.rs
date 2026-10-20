@@ -350,9 +350,9 @@ async fn submit(
     request: Result<Json<SubmitRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Simulation>), HttpError> {
     let Json(request) = request.map_err(|e| HttpError::invalid(e.body_text()))?;
-    // Reserve work capacity before persisting acceptance. The blocking task owns
+    // Reserve work capacity before recording acceptance. The blocking task owns
     // both operations, so disconnecting the HTTP client cannot strand a newly
-    // accepted resource between the durable write and queue publication.
+    // accepted resource between the catalogue insert and queue publication.
     let permit = state.submissions.try_reserve_owned().map_err(|_| {
         HttpError::new(
             StatusCode::SERVICE_UNAVAILABLE,

@@ -141,9 +141,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_worker_reply_cancels_only_its_simulation_and_preserves_oracle() {
         let directory = tempfile::tempdir().unwrap();
-        let manager = Arc::new(Manager::new(
-            crate::catalogue::Catalogue::open(&directory.path().join("catalogue")).unwrap(),
-        ));
+        let manager = Arc::new(Manager::new(crate::catalogue::Catalogue::in_memory()));
         let shutdown = CancellationToken::default();
         let stop_peers = Arc::new(AtomicBool::new(false));
         let (request_seen, seen) = std::sync::mpsc::channel();

@@ -1,26 +1,18 @@
-//! Durable resource ownership. Each accepted submission is one atomically
-//! replaced record containing both the resource and its original request. The
-//! request index can therefore be rebuilt without a separate journal.
+//! Session-scoped resource ownership. Each accepted submission is one entry
+//! containing both the resource and its original request; nothing is read from
+//! or written to disk.
 
 mod seeds;
 use seedbox_api::{
     ControlReceipt, ControlRequest, ControlState, InputSource, Metadata, Phase, Simulation,
     SimulationId, SubmitRequest,
 };
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
-    os::{
-        fd::AsRawFd,
-        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
-    },
-    path::{Path, PathBuf},
+    io,
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
-
-const RECORD_LIMIT: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -28,9 +20,9 @@ pub enum Error {
     Unavailable,
     #[error("catalogue {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
-    #[error("catalogue is already owned by another server: {0}")]
-    AlreadyOwned(PathBuf),
-    #[error("catalogue storage failed; restart the server before accepting further mutations")]
+    #[error(
+        "catalogue state is unavailable; restart the server before accepting further mutations"
+    )]
     StorageFailed,
     #[error("worker control failed: {0}")]
     WorkerControl(String),
@@ -52,168 +44,30 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone)]
 struct Entry {
-    #[serde(default)]
     range: Option<seeds::Range>,
-    #[serde(default)]
     imported_checkpoints: Option<BTreeMap<String, seedbox_spec::definition::Definition>>,
     request: SubmitRequest,
     resource: Simulation,
-    #[serde(default)]
     controls: BTreeMap<String, ControlReceipt>,
-    #[serde(default)]
     deleted_checkpoints: BTreeSet<String>,
-    #[serde(default)]
     deleting: bool,
 }
 
 pub struct Catalogue {
-    directory: Option<PathBuf>,
-    // Dropping the catalogue releases ownership. Never unlink the lock file:
-    // that would let another process lock a different inode at the same path.
-    _lock: Option<File>,
     entries: BTreeMap<SimulationId, Entry>,
     requests: BTreeMap<String, SimulationId>,
-    storage_failed: bool,
     pending: BTreeMap<SimulationId, String>,
 }
 
 impl Catalogue {
-    /// Session-only catalogue: no records are read from or written to disk.
     pub fn in_memory() -> Self {
         Self {
-            directory: None,
-            _lock: None,
             entries: BTreeMap::new(),
             requests: BTreeMap::new(),
-            storage_failed: false,
             pending: BTreeMap::new(),
         }
-    }
-
-    pub fn open(directory: &Path) -> Result<Self> {
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true).mode(0o700);
-        at(directory, builder.create(directory))?;
-        let metadata = at(directory, fs::symlink_metadata(directory))?;
-        // SAFETY: geteuid has no pointer arguments or preconditions.
-        if !metadata.is_dir()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.mode() & 0o077 != 0
-        {
-            return Err(Error::Invalid(format!(
-                "{} must be a private directory owned by the server user",
-                directory.display()
-            )));
-        }
-        let lock_path = directory.join("catalogue.lock");
-        let lock = at(
-            &lock_path,
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&lock_path),
-        )?;
-        // SAFETY: the file descriptor remains live for the catalogue lifetime.
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let source = io::Error::last_os_error();
-            if source.kind() == io::ErrorKind::WouldBlock {
-                return Err(Error::AlreadyOwned(directory.to_owned()));
-            }
-            return Err(Error::Io {
-                path: lock_path,
-                source,
-            });
-        }
-        let mut catalogue = Self {
-            directory: Some(directory.to_owned()),
-            _lock: Some(lock),
-            entries: BTreeMap::new(),
-            requests: BTreeMap::new(),
-            storage_failed: false,
-            pending: BTreeMap::new(),
-        };
-        for item in at(directory, fs::read_dir(directory))? {
-            let path = at(directory, item)?.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                continue;
-            }
-            let id: SimulationId = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .ok_or_else(|| Error::Invalid("invalid record filename".into()))?
-                .parse()
-                .map_err(|e: seedbox_api::InvalidSimulationId| Error::Invalid(e.to_string()))?;
-            let file = at(
-                &path,
-                OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_NOFOLLOW)
-                    .open(&path),
-            )?;
-            let mut bytes = Vec::new();
-            at(&path, file.take(RECORD_LIMIT + 1).read_to_end(&mut bytes))?;
-            if bytes.len() as u64 > RECORD_LIMIT {
-                return Err(Error::Invalid(format!(
-                    "{} exceeds record limit",
-                    path.display()
-                )));
-            }
-            let entry: Entry = serde_json::from_slice(&bytes)
-                .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
-            if let Some(range) = &entry.range {
-                range.validate(entry.resource.spec.seed)?;
-            }
-            let mut pending = 0;
-            for (request_id, control) in &entry.controls {
-                validate_request_id(request_id)?;
-                let accepted = control.state == ControlState::Accepted;
-                pending += usize::from(accepted);
-                if *request_id != control.request.request_id
-                    || control.revision != if accepted { 1 } else { 2 }
-                    || (accepted
-                        && !matches!(
-                            entry.resource.status.phase,
-                            Phase::Running | Phase::Finalizing
-                        ))
-                {
-                    return Err(Error::Invalid("inconsistent control receipt".into()));
-                }
-            }
-            if pending > 1 || entry.controls.len() > 4096 {
-                return Err(Error::Invalid("control bounds exceeded".into()));
-            }
-            if entry.resource.metadata.id != id || entry.resource.metadata.revision == 0 {
-                return Err(Error::Invalid(format!(
-                    "{} has inconsistent identity",
-                    path.display()
-                )));
-            }
-            if catalogue
-                .requests
-                .insert(entry.request.request_id.clone(), id.clone())
-                .is_some()
-            {
-                return Err(Error::Invalid("duplicate submission request ID".into()));
-            }
-            if let Some(control) = entry
-                .controls
-                .values()
-                .find(|control| control.state == ControlState::Accepted)
-            {
-                catalogue
-                    .pending
-                    .insert(id.clone(), control.request.request_id.clone());
-            }
-            catalogue.entries.insert(id, entry);
-        }
-        Ok(catalogue)
     }
 
     pub fn get(&self, id: &SimulationId) -> Result<&Simulation> {
@@ -227,20 +81,9 @@ impl Catalogue {
         self.entries.values().map(|e| &e.resource)
     }
 
-    pub fn pending_deletions(&self) -> Vec<SimulationId> {
-        self.entries
-            .iter()
-            .filter(|(_, entry)| entry.deleting)
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
-
     /// Freeze the ownership tree before cancellation; submission uses this same
     /// catalogue lock and cannot create new descendants after the mark.
     pub fn begin_delete(&mut self, root: &SimulationId) -> Result<Vec<SimulationId>> {
-        if self.storage_failed {
-            return Err(Error::StorageFailed);
-        }
         let mut ids = vec![root.clone()];
         for id in &ids {
             if let Some(entry) = self.entries.get(id) {
@@ -271,7 +114,6 @@ impl Catalogue {
                 if let Some(range) = &mut entry.range {
                     range.stop_requested = true;
                 }
-                self.persist(&entry)?;
                 self.entries.insert(id.clone(), entry);
             }
         }
@@ -282,9 +124,6 @@ impl Catalogue {
     /// Delete only terminal, unreferenced resources. Request identity lasts for
     /// the resource lifetime; explicit deletion permits a later resubmission.
     pub fn delete(&mut self, id: &SimulationId) -> Result<()> {
-        if self.storage_failed {
-            return Err(Error::StorageFailed);
-        }
         let Some(entry) = self.entries.get(id) else {
             return Ok(());
         };
@@ -300,13 +139,6 @@ impl Catalogue {
         }
         let request = entry.request.request_id.clone();
         self.remove_seed_member(&request)?;
-        if let Some(directory) = &self.directory {
-            let path = directory.join(format!("{id}.json"));
-            if let Err(error) = at(&path, fs::remove_file(&path)) {
-                self.storage_failed = true;
-                return Err(error);
-            }
-        }
         self.entries.remove(id);
         self.requests.remove(&request);
         self.pending.remove(id);
@@ -339,9 +171,6 @@ impl Catalogue {
         snapshot: &seedbox_artifacts::archive::Snapshot,
         prepare: impl FnOnce(&Simulation) -> Result<()>,
     ) -> Result<Simulation> {
-        if self.storage_failed {
-            return Err(Error::StorageFailed);
-        }
         resolve_program(&snapshot.simulation.spec)?;
         let id = loop {
             let id = random_id()?;
@@ -392,7 +221,6 @@ impl Catalogue {
             range: None,
         };
         prepare(&resource)?;
-        self.persist(&entry)?;
         self.requests
             .insert(entry.request.request_id.clone(), id.clone());
         self.entries.insert(id, entry);
@@ -400,7 +228,7 @@ impl Catalogue {
     }
 
     /// Returns (resource, newly_created). Retrying after an uncertain response
-    /// returns the existing ID, including after server restart.
+    /// returns the existing ID.
     pub fn submit(&mut self, request: SubmitRequest) -> Result<(Simulation, bool)> {
         validate_submission_request_id(&request.request_id)?;
         self.submit_inner(request, None)
@@ -411,14 +239,11 @@ impl Catalogue {
         request: SubmitRequest,
         range: Option<seeds::Range>,
     ) -> Result<(Simulation, bool)> {
-        if self.storage_failed {
-            return Err(Error::StorageFailed);
-        }
         let mut request = request;
         if request.metadata.name.is_empty() {
             request.metadata.name = request.spec.configuration.name.clone();
         }
-        // Keep the durable and in-memory representations identical across public schema projection.
+        // Keep the stored and served representations identical across public schema projection.
         request = serde_json::from_value(
             serde_json::to_value(&request).map_err(|e| Error::Invalid(e.to_string()))?,
         )
@@ -638,7 +463,6 @@ impl Catalogue {
             deleting: false,
             range,
         };
-        self.persist(&entry)?;
         self.requests
             .insert(entry.request.request_id.clone(), id.clone());
         self.entries.insert(id, entry);
@@ -646,11 +470,8 @@ impl Catalogue {
     }
 
     /// Compare-and-swap prevents a late worker callback from overwriting newer
-    /// control state. Publication happens only after the returned revision is durable.
+    /// control state.
     pub fn update(&mut self, mut resource: Simulation) -> Result<Simulation> {
-        if self.storage_failed {
-            return Err(Error::StorageFailed);
-        }
         let original = self
             .entries
             .get(&resource.metadata.id)
@@ -724,7 +545,6 @@ impl Catalogue {
                 }
             }
         }
-        self.persist(&entry)?;
         if resource.status.phase == Phase::Completed {
             self.pending.remove(&resource.metadata.id);
         }
@@ -778,7 +598,6 @@ impl Catalogue {
         }
         let mut entry = entry.clone();
         entry.deleted_checkpoints.insert(name.to_owned());
-        self.persist(&entry)?;
         self.entries.insert(id.clone(), entry);
         Ok(())
     }
@@ -849,9 +668,6 @@ impl Catalogue {
         id: &SimulationId,
         request: ControlRequest,
     ) -> Result<(ControlReceipt, bool)> {
-        if self.storage_failed {
-            return Err(Error::StorageFailed);
-        }
         validate_request_id(&request.request_id)?;
         if serde_json::to_vec(&request)
             .map_err(|e| Error::Invalid(e.to_string()))?
@@ -902,7 +718,6 @@ impl Catalogue {
         entry
             .controls
             .insert(control.request.request_id.clone(), control.clone());
-        self.persist(&entry)?;
         self.pending
             .insert(id.clone(), control.request.request_id.clone());
         self.entries.insert(id.clone(), entry);
@@ -915,9 +730,6 @@ impl Catalogue {
         request_id: &str,
         state: ControlState,
     ) -> Result<ControlReceipt> {
-        if self.storage_failed {
-            return Err(Error::StorageFailed);
-        }
         if matches!(state, ControlState::Accepted | ControlState::Interrupted) {
             return Err(Error::Invalid("invalid control acknowledgement".into()));
         }
@@ -943,43 +755,10 @@ impl Catalogue {
         entry
             .controls
             .insert(request_id.to_owned(), control.clone());
-        self.persist(&entry)?;
         self.pending.remove(id);
         self.entries.insert(id.clone(), entry);
         Ok(control)
     }
-
-    fn persist(&mut self, entry: &Entry) -> Result<()> {
-        let bytes = serde_json::to_vec(entry).map_err(|e| Error::Invalid(e.to_string()))?;
-        if bytes.len() as u64 > RECORD_LIMIT {
-            return Err(Error::Invalid(
-                "simulation exceeds record size limit".into(),
-            ));
-        }
-        let Some(directory) = &self.directory else {
-            return Ok(());
-        };
-        let path = directory.join(format!("{}.json", entry.resource.metadata.id));
-        let result = (|| -> io::Result<()> {
-            let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-            temporary.write_all(&bytes)?;
-            temporary.persist(&path).map_err(|e| e.error)?;
-            Ok(())
-        })();
-        if result.is_err() {
-            // Stop accepting mutations after a storage failure; preserve the
-            // last published in-memory state for inspection.
-            self.storage_failed = true;
-        }
-        at(&path, result)
-    }
-}
-
-fn at<T>(path: &Path, result: io::Result<T>) -> Result<T> {
-    result.map_err(|source| Error::Io {
-        path: path.to_owned(),
-        source,
-    })
 }
 
 fn random(bytes: &mut [u8]) -> Result<()> {

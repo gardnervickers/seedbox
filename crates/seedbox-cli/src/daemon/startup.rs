@@ -1,5 +1,5 @@
-//! Race-free automatic startup. The lock coordinates clients; the catalogue
-//! lock separately prevents two server processes from owning the same state.
+//! Race-free automatic startup. The lock coordinates clients; the server lock
+//! separately prevents two server processes from owning the same state.
 
 use seedbox_application::{Error, Result};
 use seedbox_client::Client;
