@@ -649,8 +649,8 @@ fn read_snapshot(path: &Path, inputs: &BootInputs) -> Result<Saved> {
 
 /// Restore into an unpublished target, reading mapped segments directly into
 /// native backing. Failure drops the complete temporary VM; it is not resumable.
-// TODO: Re-evaluate: staged segment reads avoid a multi-GiB Saved.ram copy and
-// keep resource/layout validation ahead of native allocation.
+// Reading segments straight from the file avoids a multi-GiB intermediate RAM
+// copy and keeps resource/layout validation ahead of native allocation.
 fn restore_machine(inputs: &BootInputs, mut saved: Saved) -> Result<Machine> {
     let block = match (saved.capture.block.take(), &inputs.disk) {
         (Some(transport), Some(base)) => {

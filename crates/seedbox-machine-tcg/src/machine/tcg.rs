@@ -16,8 +16,8 @@
 //! instructions and translator-raised exceptions such as `ud2` cost one step.
 //! REP string I/O costs one step per iteration plus a final zero-count check;
 //! even an initially zero repeat count costs one step.
-// TODO: Re-evaluate: REP can stop between iterations, so step pricing is
-// observable Machine behavior, not merely a translator implementation detail.
+// REP can stop between iterations, so step pricing is observable Machine
+// behavior, not merely a translator implementation detail.
 //!
 //! The board is QEMU's x86-64 `microvm` with one fixed `qemu64` CPU, RAM from
 //! physical address 0, the ISA COM1 UART as the console, PIC, PIT and an RTC
@@ -29,7 +29,7 @@
 //! position. Restore requires the caller to provide a compatible patched QEMU
 //! executable. This implementation supports one CPU only. It uses software
 //! emulation on macOS and Linux, whatever the host architecture.
-// TODO: Re-evaluate: microvm keeps the legacy virtio-mmio devices shared by
+// microvm keeps the legacy virtio-mmio devices shared by
 // lifecycle, disk and NIC; ACPI is its only guest power-off path, so
 // `Shutdown` stays distinct from a reset; qboot is the firmware that boots
 // Linux without option ROMs, keeping every guest input owned by the machine.
@@ -141,7 +141,7 @@ pub(crate) struct Manifest {
     pub network: Option<[u8; 6]>,
 }
 
-// TODO: Re-evaluate: QEMU's device owns the live disk so requests complete
+// QEMU's device owns the live disk so requests complete
 // in-process at the kick; this machine owns it between boots so boot-end
 // export and the single unflushed discard stay Machine policy, not C's.
 /// The machine's disk between boots and its host input files.
@@ -320,8 +320,8 @@ impl Snapshot {
     /// Check retained named policy against the caller's factory authority before
     /// creating native restore resources. Absence differs from an explicit
     /// default; a snapshot never silently selects a different controller.
-    // TODO: Re-evaluate: factory inventories supply external policy authority;
-    // this narrow check does not expose private migration or machine state.
+    // Policy authority comes from factory inventories, never from snapshot
+    // data; this narrow check exposes no private migration or machine state.
     pub fn validate_policy(
         &self,
         name: &str,
@@ -521,9 +521,6 @@ impl TcgMachine {
     /// absolute scratch pathname (including CWD/default-temp parents) must be
     /// UTF-8 for QMP JSON and QEMU options. Encoding errors are returned before
     /// creating scratch or spawning a child; valid UTF-8 characters are preserved.
-    // TODO: Re-evaluate: service restart reclamation needs explicit session-owned
-    // scratch. Neither decoded machine state nor process-global temp settings
-    // can provide host cleanup authority.
     pub fn from_snapshot_in(
         qemu: &Path,
         snapshot: &Snapshot,
@@ -1019,7 +1016,7 @@ impl TcgMachine {
     }
 }
 
-// TODO: Re-evaluate: QEMU keeps console/lifecycle and NIC output in separate
+// QEMU keeps console/lifecycle and NIC output in separate
 // device queues, so one ordered stream must be rebuilt here before emission;
 // Driver sorting cannot repair an output stream that went backwards.
 /// Merge transmitted frames into the guest's console and lifecycle writes by
@@ -1313,8 +1310,8 @@ mod network_unit_tests;
 /// Explicit fixture-only construction and stopped evidence for retained scenarios.
 /// These helpers are absent unless `test-support` is enabled; they never export
 /// native handles, boot manifests or mutable machine state.
-// TODO: Re-evaluate: Driver scenarios need backend-local construction/assertions.
-// A reverse dev-dependency or general private-state inspection would be broader.
+// Driver scenarios need backend-local construction and assertions; a reverse
+// dev-dependency or general private-state inspection would be broader.
 #[cfg(feature = "test-support")]
 pub mod test_support;
 

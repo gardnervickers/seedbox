@@ -28,8 +28,9 @@ pub(super) fn admit_execution(
 /// [`admit_execution`] for an explicit host. PV runs only where the host has
 /// a native leaf; a controller runs wherever that host runs Driver. TCG
 /// without a controller keeps its host-independent admission.
-// TODO: Re-evaluate: macOS aarch64 HVF admission is compiled and unit-tested
-// only; Gardner verifies it on hardware (bd-877).
+// TODO: macOS aarch64 HVF admission is only compiled and unit-tested here, so
+// a wrong host entry or HVF leaf would surface only on Apple hardware; resolve
+// by running the PV and controller suites on macOS aarch64 (bd-877).
 pub(super) fn admit_on(
     host: super::platform::Host,
     backend: seedbox_spec::backend::CpuBackend,

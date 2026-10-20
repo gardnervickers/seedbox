@@ -24,8 +24,8 @@ fn segment(s: &kvm_segment) -> [u64; 12] {
 /// The exception KVM would deliver. Without `injected` or `pending`, KVM keeps
 /// the vector and error code of an earlier host-assisted delivery, which
 /// depends on host exits and is never delivered again, so it is canonicalized.
-// TODO: Re-evaluate: evidence describes what the next entry delivers; KVM
-// ignores these fields on restore unless injected or pending is set.
+// Evidence describes what the next entry delivers; KVM ignores these fields on
+// restore unless injected or pending is set.
 pub(super) fn exception_evidence(e: &kvm_vcpu_events) -> [u64; 7] {
     let x = &e.exception;
     if x.injected == 0 && x.pending == 0 {

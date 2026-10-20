@@ -159,8 +159,9 @@ impl Runtime {
     /// Guest files are read as bytes; their host execute bits are irrelevant.
     /// Guest ELF ISA and real host executable modes are checked here; concrete
     /// factories validate complete formats and give guest boot files their modes.
-    // TODO: Re-evaluate: merge this small selection enum with the service's
-    // backend type if that type becomes transport-independent and public.
+    // TODO: `Backend` duplicates the public, transport-independent
+    // `seedbox_spec::backend::CpuBackend` (same Pv/Tcg variants and default);
+    // replace it with CpuBackend here and in callers so selection has one type.
     pub fn select(&self, backend: Backend, architecture: Architecture) -> Result<Inputs> {
         let arch = match architecture {
             Architecture::X86_64 => "x86_64",

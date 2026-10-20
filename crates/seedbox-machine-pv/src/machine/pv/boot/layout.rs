@@ -14,8 +14,8 @@ pub(crate) struct RamLayout {
 impl RamLayout {
     /// Validate resource arithmetic before allocation. Mapped segments contain
     /// exactly capacity bytes; device holes never count as RAM or allow DMA.
-    // TODO: Re-evaluate: one private layout must govern boot, native slots,
-    // DMA and capture. A backing slice length alone includes MMIO holes.
+    // This one layout governs boot, native slots, DMA and capture; a backing
+    // slice length alone would include MMIO holes.
     pub fn native(capacity: u64) -> Result<Self, String> {
         #[cfg(target_arch = "x86_64")]
         {

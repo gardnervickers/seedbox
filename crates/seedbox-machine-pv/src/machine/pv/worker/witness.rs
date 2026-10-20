@@ -1,4 +1,4 @@
-//! Native-family mapping (legacy family names, new-engine hash format):
+//! Native evidence families and where each is recorded:
 //! I: x86::Machine::prepare after successful Native::inject(vector); ARM irq/
 //! interrupts after successful previously-unasserted Native::irq(vector,true).
 //! O/i/w/r: Machine::run -> record_exit after Interrupted/maintenance exclusions
@@ -10,12 +10,12 @@
 //! generation is physical boot ordinal. No runtime page-reseed API exists.
 //! C: fresh Boot after predecessor successor() fold, for forced marks1/2 only.
 //! Y: actual EVENT_MMIO+24 soft-bound write. Console bytes are O or PL011 w.
-//! X/E: legacy 0xf4/0xf5 debug-exit/init-error devices are NOT mapped by this
-//! Linux PV board: those ports float/ignore, and are ordinary O/i, not terminal
-//! requests. Native outcomes use PV power-off MMIO, PSCI or architectural reset.
-//! R/B: no release/parked-launch input or legacy BARRIER_PORT device exists in
-//! this Machine ABI: fresh boot begins at caller's now; READY is kernel ABI,
-//! not the legacy launch barrier. P: no native fork-park API; snapshot must be
+//! X/E: this Linux PV board maps no 0xf4/0xf5 debug-exit/init-error devices:
+//! those ports float/ignore, and are ordinary O/i, not terminal requests.
+//! Native outcomes use PV power-off MMIO, PSCI or architectural reset.
+//! R/B: this Machine ABI has no release/parked-launch input or barrier port:
+//! fresh boot begins at caller's now; READY is kernel ABI, not a launch
+//! barrier. P: no native fork-park API; snapshot must be
 //! an observation, never a synthetic P. Z/U: no native pause/resume API; Driver
 //! gating is separate logical-world witness, app freezing is actual guest IO.
 //! These absence reasons describe the current native contract, not a claim

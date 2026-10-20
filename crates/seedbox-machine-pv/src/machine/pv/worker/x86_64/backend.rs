@@ -212,9 +212,8 @@ fn pmu_needs_disable(
 /// hypervisor leaves, and Hyper-V access is CPUID-enforced), while their
 /// counters (for example Hyper-V VP_RUNTIME and TIME_REF_COUNT) advance with
 /// host time. They are never captured, restored or witnessed.
-// TODO: Re-evaluate: a register belongs to simulated state only if the guest
-// can observe it; host-clock counters it cannot read would make every run's
-// stopped state differ.
+// Only guest-observable registers are simulated state; host-clock counters the
+// guest cannot read would make every run's stopped state differ.
 fn host_owned_msr(index: u32) -> bool {
     matches!(index, 0x10 | 0x11 | 0x12 | 0x1b | 0x3b | 0x6e0)
         || (0x4b56_4d00..=0x4b56_4dff).contains(&index)

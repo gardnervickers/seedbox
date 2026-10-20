@@ -67,8 +67,8 @@ fn bad(message: impl Into<String>) -> Error {
 /// prepared Driver world, then its typed manifest. No image engine, builder or
 /// guest is invoked. The manifest replaces source host paths with logical
 /// content references and joins PreparedInputs' ordinary materialization set.
-// TODO: Re-evaluate: preparation and execution are separate lifetimes; retaining
-// only the current boot loses stateless future-factory authority on branch/spawn.
+// Preparation and execution are separate lifetimes; retaining only the current
+// boot would lose the factory inputs later branches and spawns need.
 pub fn retain_prepared(
     inputs: &mut PreparedInputs,
     prepared: &Prepared,
@@ -164,8 +164,8 @@ impl Closure {
 /// This reads only bounded retained metadata and verifies closure membership and
 /// length. It never searches startup/default assets, builds inputs or executes
 /// a worker. The caller materializes precisely this content in its owned session.
-// TODO: Re-evaluate: the CLI must acquire runtime ownership before launch, but
-// must not duplicate private manifest parsing or infer authority from provenance.
+// The CLI acquires the runtime before launch through this, without duplicating
+// private manifest parsing or inferring authority from provenance.
 pub fn runtime_digest(inputs: &PreparedInputs, store: &ContentStore) -> Result<ContentDigest> {
     validate_contract(&inputs.profile)?;
     let closure = Closure::from_inputs(inputs)?
