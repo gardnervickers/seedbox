@@ -173,7 +173,7 @@ fn fresh_and_restored_frame_observation_and_workers_preserve_policy_and_native_c
             }
             let checkpoint = source.checkpoint().unwrap();
             // Capture leaves source observations intact but does not retain them.
-            let retained = source.drain_frames();
+            let retained = source.drain_observations().frames;
             assert_eq!(retained.facts.len(), capacity);
             assert_eq!(retained.omitted, if capacity == 0 { 0 } else { 2 });
             advance(&mut source, 11, 80);
@@ -202,7 +202,7 @@ fn fresh_and_restored_frame_observation_and_workers_preserve_policy_and_native_c
                         |definition| Ok(NetworkModel::new(definition.name == "sender")),
                     )
                     .unwrap();
-                    assert_eq!(branch.drain_frames(), FrameFacts::default());
+                    assert_eq!(branch.drain_observations().frames, FrameFacts::default());
                     branch.set_frame_capacity(restored_capacity);
                     assert_eq!(evidence(&mut branch), pending);
                     advance(&mut branch, 11, 80);

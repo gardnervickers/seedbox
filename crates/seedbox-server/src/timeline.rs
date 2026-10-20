@@ -2,10 +2,11 @@
 //! evidence; authored inputs have stable keys independent of execution fault IDs.
 use crate::catalogue::Error;
 use seedbox_api::{
-    DeriveRequest, FaultTimeline, Phase, ProgramInput, Simulation, SubmitRequest, TimelineEntry,
-    TimelineOrigin, WorldState,
+    DeriveRequest, FaultTimeline, Phase, Simulation, SubmitRequest, TimelineEntry, TimelineOrigin,
+    WorldState,
 };
 use seedbox_engine_protocol::intervention::History;
+use seedbox_spec::definition::Override;
 use std::collections::BTreeSet;
 
 pub(crate) fn project(
@@ -18,25 +19,25 @@ pub(crate) fn project(
         .program
         .iter()
         .map(|input| TimelineEntry {
-            id: format!("program:{}", input.key),
+            id: format!("program:{}", input.id),
             at_ns: input.at_ns,
             action: input.action.clone(),
             origin: TimelineOrigin::Program,
             position: history
                 .entries
                 .iter()
-                .find(|entry| entry.request_id == input.key)
+                .find(|entry| entry.request_id == input.id)
                 .map(|entry| entry.position),
             fault_id: world
                 .faults
                 .iter()
-                .find(|fault| fault.input_key.as_deref() == Some(&input.key))
+                .find(|fault| fault.input_key.as_deref() == Some(&input.id))
                 .map(|fault| fault.id)
                 .or_else(|| {
                     history
                         .entries
                         .iter()
-                        .find(|entry| entry.request_id == input.key)
+                        .find(|entry| entry.request_id == input.id)
                         .map(|entry| entry.plan.id)
                 }),
         })
@@ -121,7 +122,7 @@ pub(crate) fn derive(
     let mut spec = resource.spec;
     // Oracle actions remain observations; only external overrides form the edited program.
     spec.program
-        .retain(|entry| included.contains(&format!("program:{}", entry.key)));
+        .retain(|entry| included.contains(&format!("program:{}", entry.id)));
     Ok(SubmitRequest {
         metadata,
         options,
@@ -131,22 +132,22 @@ pub(crate) fn derive(
 }
 
 pub(crate) fn merge_external(
-    program: &[ProgramInput],
+    program: &[Override],
     history: &History,
-) -> Result<Vec<ProgramInput>, Error> {
+) -> Result<Vec<Override>, Error> {
     let mut result = program.to_vec();
     for entry in &history.entries {
-        let input = ProgramInput {
-            key: entry.request_id.clone(),
+        let input = Override {
+            id: entry.request_id.clone(),
             at_ns: entry.plan.at_ns,
             action: serde_json::to_value(&entry.plan.action).expect("actions serialize"),
             timeout_ns: entry.plan.deadline_ns.saturating_sub(entry.plan.at_ns),
         };
-        if let Some(existing) = result.iter_mut().find(|p| p.key == input.key) {
+        if let Some(existing) = result.iter_mut().find(|p| p.id == input.id) {
             if existing != &input {
                 return Err(Error::Invalid(format!(
                     "external override {} conflicts with its authored identity",
-                    input.key
+                    input.id
                 )));
             }
         } else {

@@ -43,8 +43,8 @@ impl ClockCase {
 
 fn clock_request(session: &NativeSession) -> SubmitRequest {
     let key = match session.backend {
-        DriverBackend::Pv => "SEEDBOX_PV_CLOCK_APPLICATION",
-        DriverBackend::Tcg => "SEEDBOX_TCG_CLOCK_APPLICATION",
+        CpuBackend::Pv => "SEEDBOX_PV_CLOCK_APPLICATION",
+        CpuBackend::Tcg => "SEEDBOX_TCG_CLOCK_APPLICATION",
     };
     let binary =
         fs::read(std::env::var_os(key).unwrap_or_else(|| panic!("missing {key}"))).unwrap();
@@ -207,7 +207,7 @@ fn assert_clocks(case: ClockCase, output: &str, times: &[(usize, u64)], healed: 
     }
 }
 
-async fn clock_case(backend: DriverBackend, case: ClockCase) {
+async fn clock_case(backend: CpuBackend, case: ClockCase) {
     native_case(move |owner| Box::pin(async move {
         let session = owner.session(backend);
         // Existing backend boot allowance plus idle role's exact 12.5s guest
@@ -258,17 +258,17 @@ async fn clock_case(backend: DriverBackend, case: ClockCase) {
 
 #[cfg(feature = "kvm-tests")]
 pub async fn pv_clock_skew_heal_replay() {
-    clock_case(DriverBackend::Pv, ClockCase::Skew).await;
+    clock_case(CpuBackend::Pv, ClockCase::Skew).await;
 }
 #[cfg(feature = "kvm-tests")]
 pub async fn pv_clock_drift_heal_replay() {
-    clock_case(DriverBackend::Pv, ClockCase::Drift).await;
+    clock_case(CpuBackend::Pv, ClockCase::Drift).await;
 }
 #[cfg(feature = "tcg-tests")]
 pub async fn tcg_clock_skew_heal_replay() {
-    clock_case(DriverBackend::Tcg, ClockCase::Skew).await;
+    clock_case(CpuBackend::Tcg, ClockCase::Skew).await;
 }
 #[cfg(feature = "tcg-tests")]
 pub async fn tcg_clock_drift_heal_replay() {
-    clock_case(DriverBackend::Tcg, ClockCase::Drift).await;
+    clock_case(CpuBackend::Tcg, ClockCase::Drift).await;
 }

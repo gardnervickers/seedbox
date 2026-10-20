@@ -13,7 +13,7 @@
 //! calling machine's drifted time base; see the Driver's time-base docs.
 //!
 //! Network operations use the Driver-owned canonical network policies.
-//! The legacy guest schema defines no disk RPC operation; disk policy is likewise
+//! The guest schema defines no disk RPC operation; disk policy is likewise
 //! unsupported, and this parser does not invent disk operation names. Inspect
 //! results use a generic typed serialization seam so the complete projection
 //! (services, machines, active handles, network counters, optional triggers) can
@@ -153,9 +153,6 @@ pub(crate) enum ErrorCode {
     Unsupported,
     InvalidState,
     TargetUnavailable,
-    // Reserved wire classification for failed backend effects.
-    #[cfg_attr(not(test), allow(dead_code))]
-    EffectFailed,
     ResultTooLarge,
 }
 

@@ -332,11 +332,15 @@ fn crash_terminates_process_without_changing_saved_state() {
     let mut machine = start(counting_loop()); // inc ebx; jmp back.
     machine.run(&mut (), at(after(4))).unwrap();
     let snapshot = machine.snapshot().unwrap();
-    machine.request(crate::pv::Request::Crash).unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Crash)
+        .unwrap();
     assert!(machine.process.is_none());
     assert!(machine.run(&mut (), at(after(6))).is_err());
     assert!(matches!(
-        machine.request(crate::pv::Request::Crash).unwrap(),
+        machine
+            .request(seedbox_machine::pv::Request::Crash)
+            .unwrap(),
         StopReason::Exited {
             reason: ExitReason::Crashed,
             ..
@@ -532,7 +536,7 @@ fn linux_lifecycle_tx_retains_fragments_and_snapshot_drain_position() {
             source.advance(now).unwrap();
         }
     }
-    use crate::pv::transport::GuestWrite;
+    use seedbox_machine::pv::transport::GuestWrite;
     let pending = source.snapshot().unwrap();
     let writes = source.drain_guest().unwrap();
     assert!(writes.windows(2).all(|w| w[0].time() <= w[1].time()));
@@ -654,7 +658,7 @@ fn application_outcome_remains_distinct_from_later_shutdown_across_snapshot() {
         machine: &mut super::TcgMachine,
         clock: &TestClock,
         rng: &mut SeededRng,
-        outputs: &mut Vec<crate::pv::Output>,
+        outputs: &mut Vec<seedbox_machine::pv::Output>,
         progress: &mut LinuxProgress,
     ) -> StopReason {
         if let State::Blocked {
@@ -676,8 +680,11 @@ fn application_outcome_remains_distinct_from_later_shutdown_across_snapshot() {
                     worker: &mut (),
                     clock,
                     rng,
-                    inbox: crate::pv::Inbox::new(&mut Default::default(), at(clock.now())),
-                    outbox: crate::pv::Outbox::new(outputs, at(clock.now()), at(end)),
+                    inbox: seedbox_machine::pv::Inbox::new(
+                        &mut Default::default(),
+                        at(clock.now()),
+                    ),
+                    outbox: seedbox_machine::pv::Outbox::new(outputs, at(clock.now()), at(end)),
                 },
                 at(end),
             )
@@ -687,7 +694,7 @@ fn application_outcome_remains_distinct_from_later_shutdown_across_snapshot() {
         machine: &mut super::TcgMachine,
         clock: &TestClock,
         rng: &mut SeededRng,
-        outputs: &mut Vec<crate::pv::Output>,
+        outputs: &mut Vec<seedbox_machine::pv::Output>,
     ) -> StopReason {
         // PID1 delays poweroff by 50ms after reporting the application exit.
         let mut progress =
@@ -703,7 +710,7 @@ fn application_outcome_remains_distinct_from_later_shutdown_across_snapshot() {
         machine: &mut super::TcgMachine,
         clock: &TestClock,
         rng: &mut SeededRng,
-        outputs: &mut Vec<crate::pv::Output>,
+        outputs: &mut Vec<seedbox_machine::pv::Output>,
     ) -> StopReason {
         clock.0.store(
             clock.now().max(machine.reached.as_nanos()),
@@ -717,8 +724,8 @@ fn application_outcome_remains_distinct_from_later_shutdown_across_snapshot() {
                     worker: &mut (),
                     clock,
                     rng,
-                    inbox: crate::pv::Inbox::new(&mut Default::default(), now),
-                    outbox: crate::pv::Outbox::new(outputs, now, now),
+                    inbox: seedbox_machine::pv::Inbox::new(&mut Default::default(), now),
+                    outbox: seedbox_machine::pv::Outbox::new(outputs, now, now),
                 },
                 now,
             )
@@ -769,13 +776,13 @@ printf 'SBX_EXIT1 status=%s\n' "$status" >&9
         };
         let clock = clock(0);
         let mut rng = SeededRng::new(7);
-        let mut outputs: Vec<crate::pv::Output> = Vec::new();
+        let mut outputs: Vec<seedbox_machine::pv::Output> = Vec::new();
         let mut source = super::TcgMachine::new_raw(&qemu, manifest).unwrap();
         let mut progress = LinuxProgress::new(at(0), 0);
         while !outputs.iter().any(|output| {
             matches!(
                 output.payload,
-                crate::pv::Response::ApplicationOutcome { .. }
+                seedbox_machine::pv::Response::ApplicationOutcome { .. }
             )
         }) {
             assert!(!matches!(
@@ -783,10 +790,8 @@ printf 'SBX_EXIT1 status=%s\n' "$status" >&9
                 StopReason::Exited { .. }
             ));
         }
-        assert!(outputs
-            .iter()
-            .any(|output| output.payload
-                == crate::pv::Response::ApplicationOutcome { code: code as u8 }));
+        assert!(outputs.iter().any(|output| output.payload
+            == seedbox_machine::pv::Response::ApplicationOutcome { code: code as u8 }));
         let pending_rng = rng.clone();
         assert!(
             !matches!(source.state, State::Exited(_)),
@@ -860,7 +865,7 @@ printf 'SBX_EXIT1 status=%s\n' "$status" >&9
                 &mut crashed,
                 crash_clock.as_ref(),
                 &mut pending_rng.clone(),
-                [crate::pv::Request::Crash],
+                [seedbox_machine::pv::Request::Crash],
                 at(crash_clock.now())
             )
             .unwrap(),
@@ -881,11 +886,11 @@ fn bios_image() -> Vec<u8> {
     vec![3; 64 * 1024]
 }
 fn common_inputs() -> (
-    crate::application::GuestBootstrap,
-    crate::definition::MachineDefinition,
+    seedbox_machine::application::GuestBootstrap,
+    seedbox_machine::definition::MachineDefinition,
 ) {
-    use crate::application::{GuestBootstrap, Kernel};
-    use crate::definition::*;
+    use seedbox_machine::application::{GuestBootstrap, Kernel};
+    use seedbox_machine::definition::*;
     let mut tar = tar::Builder::new(Vec::new());
     let mut header = tar::Header::new_gnu();
     header.set_size(1);
@@ -972,7 +977,8 @@ fn common_constructor_rejects_initramfs_larger_than_guest_memory() {
     definition.resources.memory_bytes = 1 << 20;
     // The packed archive includes the helper as well as the prepared filesystem.
     bootstrap.init = vec![2; 1 << 20];
-    let packed = crate::application::boot_archive(&definition.application, &bootstrap).unwrap();
+    let packed =
+        seedbox_machine::application::boot_archive(&definition.application, &bootstrap).unwrap();
     assert!(packed.len() > definition.resources.memory_bytes as usize);
     let error = super::TcgMachine::new(
         Path::new("/missing/qemu"),

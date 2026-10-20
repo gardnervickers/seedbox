@@ -83,11 +83,12 @@ mod factory;
 mod native_witness;
 mod policy;
 mod retained;
-use super::{ExitReason, Machine, RunContext, StopReason, Timestamp};
-use crate::{definition::DiskImage, machine::disk::Store};
 pub use factory::Factory;
 use policy::PolicyState;
 use retained::{EndReport, Ended};
+use seedbox_machine::definition::DiskImage;
+use seedbox_machine::machine::disk::Store;
+use seedbox_machine::machine::{ExitReason, Machine, RunContext, StopReason, Timestamp};
 use seedbox_machine::{
     definition::BackendPolicy,
     machine::{EvidenceDisposition, StateEvidence},
@@ -212,9 +213,9 @@ pub struct Snapshot {
     pending_boots: u64,
     pending_at: Option<Timestamp>,
     shutdown_requested: bool,
-    writes: Vec<crate::pv::transport::GuestWrite>,
+    writes: Vec<seedbox_machine::pv::transport::GuestWrite>,
     input: Vec<u8>,
-    guest: crate::pv::bridge::GuestBridge,
+    guest: seedbox_machine::pv::bridge::GuestBridge,
     /// SBXSTOR1 overlays of a disk no QEMU process owns; with a live process
     /// its migration `image` carries them instead.
     disk: Option<Vec<u8>>,
@@ -246,9 +247,9 @@ pub struct TcgMachine {
     pending_boots: u64,
     pending_at: Option<Timestamp>,
     shutdown_requested: bool,
-    writes: Vec<crate::pv::transport::GuestWrite>,
+    writes: Vec<seedbox_machine::pv::transport::GuestWrite>,
     input: Vec<u8>,
-    guest: crate::pv::bridge::GuestBridge,
+    guest: seedbox_machine::pv::bridge::GuestBridge,
     console: Vec<u8>,
     disk: Option<Disk>,
     policy: Option<PolicyState>,
@@ -331,50 +332,43 @@ impl Snapshot {
 }
 
 impl TcgMachine {
-    /// Prepare a stopped machine using the project's patched QEMU binary.
-    /// Boot initialization occurs in the first run, consuming eight bytes from
-    /// its context RNG in little-endian order without executing instructions.
-    /// Each pending reboot consumes another eight bytes on the next run.
+    /// Prepare a stopped machine using the project's patched QEMU binary and
+    /// the default boot archive, without a factory scratch root.
+    #[cfg(test)]
     pub(crate) fn new(
         qemu: &Path,
         firmware: Vec<u8>,
-        bootstrap: &crate::application::GuestBootstrap,
-        definition: crate::definition::MachineDefinition,
+        bootstrap: &seedbox_machine::application::GuestBootstrap,
+        definition: seedbox_machine::definition::MachineDefinition,
     ) -> Result<Self, Error> {
-        Self::new_with_scratch(qemu, firmware, bootstrap, definition, None)
-    }
-
-    /// The factory supplies host scratch authority separately from guest inputs.
-    pub(crate) fn new_with_scratch(
-        qemu: &Path,
-        firmware: Vec<u8>,
-        bootstrap: &crate::application::GuestBootstrap,
-        definition: crate::definition::MachineDefinition,
-        scratch_root: Option<&Path>,
-    ) -> Result<Self, Error> {
-        Self::new_with_boot_archive_in(
+        Self::prepare(
             qemu,
             firmware,
             bootstrap,
             definition,
-            scratch_root,
-            crate::application::boot_archive,
+            None,
+            seedbox_machine::application::boot_archive,
         )
     }
 
-    /// Package once at the original preparation point, after resource/argument
-    /// checks. Factory-owned environment configuration does not alter validation
-    /// order or require duplicating construction and host scratch ownership.
-    pub(crate) fn new_with_boot_archive_in(
+    /// Prepare a stopped machine using the project's patched QEMU binary.
+    /// Boot initialization occurs in the first run, consuming eight bytes from
+    /// its context RNG in little-endian order without executing instructions.
+    /// Each pending reboot consumes another eight bytes on the next run.
+    ///
+    /// The factory supplies host scratch authority separately from guest
+    /// inputs. `package` runs once, after resource/argument checks, so
+    /// factory-owned environment configuration does not alter validation order.
+    pub(crate) fn prepare(
         qemu: &Path,
         firmware: Vec<u8>,
-        bootstrap: &crate::application::GuestBootstrap,
-        definition: crate::definition::MachineDefinition,
+        bootstrap: &seedbox_machine::application::GuestBootstrap,
+        definition: seedbox_machine::definition::MachineDefinition,
         scratch_root: Option<&Path>,
         package: impl FnOnce(
-            &crate::definition::PreparedApplication,
-            &crate::application::GuestBootstrap,
-        ) -> Result<Vec<u8>, crate::definition::DefinitionError>,
+            &seedbox_machine::definition::PreparedApplication,
+            &seedbox_machine::application::GuestBootstrap,
+        ) -> Result<Vec<u8>, seedbox_machine::definition::DefinitionError>,
     ) -> Result<Self, Error> {
         const MIB: u64 = 1024 * 1024;
         let memory = definition.resources.memory_bytes;
@@ -458,8 +452,8 @@ impl TcgMachine {
                 ..
             } => {
                 let invalid = |error: std::io::Error| Error(format!("TCG boot input: {error}"));
-                super::assets::bzimage(kernel).map_err(invalid)?;
-                super::assets::bios(firmware).map_err(invalid)?;
+                seedbox_machine::machine::assets::bzimage(kernel).map_err(invalid)?;
+                seedbox_machine::machine::assets::bios(firmware).map_err(invalid)?;
                 let memory = u64::from(manifest.memory_mib) * 1024 * 1024;
                 if initramfs.len() as u64 > memory {
                     return Err(Error(format!(
@@ -930,7 +924,7 @@ impl TcgMachine {
     fn flush_ends(&mut self, context: &mut RunContext<'_, ()>) -> Result<(), Error> {
         while let Some(report) = self.pending_ends.front() {
             let at = report.at.max(Timestamp::from_nanos(context.clock.now()));
-            if let Err(error) = context.outbox.emit(crate::pv::Output {
+            if let Err(error) = context.outbox.emit(seedbox_machine::pv::Output {
                 at,
                 payload: report.response(),
             }) {
@@ -952,7 +946,7 @@ impl TcgMachine {
     fn execute(
         &mut self,
         upto: Timestamp,
-        execution: crate::execution::ExecutionConfig,
+        execution: seedbox_machine::execution::ExecutionConfig,
     ) -> Result<(), Error> {
         let start = self.reached;
         let result = self.process()?.execute(start, upto, execution)?;
@@ -1033,10 +1027,10 @@ impl TcgMachine {
 /// equal timestamps console and lifecycle writes deterministically precede
 /// frames.
 fn merge_frames(
-    writes: Vec<crate::pv::transport::GuestWrite>,
-    frames: Vec<crate::pv::transport::LifecycleWrite>,
-) -> Vec<crate::pv::transport::GuestWrite> {
-    use crate::pv::transport::GuestWrite;
+    writes: Vec<seedbox_machine::pv::transport::GuestWrite>,
+    frames: Vec<seedbox_machine::pv::transport::LifecycleWrite>,
+) -> Vec<seedbox_machine::pv::transport::GuestWrite> {
+    use seedbox_machine::pv::transport::GuestWrite;
     let mut merged = Vec::with_capacity(writes.len() + frames.len());
     let mut frames = frames.into_iter().peekable();
     for write in writes {
@@ -1086,19 +1080,19 @@ impl Machine for TcgMachine {
         let accepted = (|| -> Result<(), Error> {
             while let Some(input) = context.inbox.front() {
                 match &input.payload {
-                    crate::pv::Request::Crash => {
+                    seedbox_machine::pv::Request::Crash => {
                         crashed_this_run |=
                             !matches!(self.state, State::Exited(_)) || self.pending_boots > 0;
                         self.request_crash()?;
                         frames.clear();
                     }
-                    crate::pv::Request::Reboot => {
+                    seedbox_machine::pv::Request::Reboot => {
                         self.request_reboot(now.max(self.reached))?;
                         frames.clear();
                     }
-                    crate::pv::Request::Shutdown => self.request_shutdown()?,
-                    crate::pv::Request::ReceiveFrame { bytes } => {
-                        if !crate::pv::frame_in_bounds(bytes) {
+                    seedbox_machine::pv::Request::Shutdown => self.request_shutdown()?,
+                    seedbox_machine::pv::Request::ReceiveFrame { bytes } => {
+                        if !seedbox_machine::pv::frame_in_bounds(bytes) {
                             return Err(Error("receive frame outside frame bounds".into()));
                         }
                         if self.manifest.network.is_some()
@@ -1107,9 +1101,9 @@ impl Machine for TcgMachine {
                             frames.push(bytes.clone());
                         }
                     }
-                    request @ (crate::pv::Request::Application { .. }
-                    | crate::pv::Request::StepRealtime { .. }
-                    | crate::pv::Request::SimulationReply { .. }) => {
+                    request @ (seedbox_machine::pv::Request::Application { .. }
+                    | seedbox_machine::pv::Request::StepRealtime { .. }
+                    | seedbox_machine::pv::Request::SimulationReply { .. }) => {
                         if !matches!(self.state, State::Exited(_)) || self.pending_boots > 0 {
                             self.input
                                 .extend(self.guest.request(request).map_err(Error)?);

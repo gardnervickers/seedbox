@@ -103,7 +103,6 @@ mod tests {
                 checkpoint: None,
             },
             SimulationSpec {
-                start_paused: false,
                 seed: Some(1),
                 inputs: seedbox_api::InputSource::Project,
                 configuration,

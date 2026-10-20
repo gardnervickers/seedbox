@@ -1,9 +1,8 @@
 //! Actual application outcomes leave the kernel and retained launch recipe alive.
 use super::*;
-use crate::{
-    clock::SimulationClock,
-    pv::{Inbox, Outbox, Output, Request as GuestRequest, Response as GuestResponse},
-    rng::SeededRng,
+use crate::{clock::SimulationClock, rng::SeededRng};
+use seedbox_machine::pv::{
+    Inbox, Outbox, Output, Request as GuestRequest, Response as GuestResponse,
 };
 use seedbox_test_time::{GuestProgress, HangGuard};
 use std::{collections::VecDeque, time::Duration};
@@ -103,7 +102,7 @@ fn run(
     let mut inbox = requests
         .iter()
         .cloned()
-        .map(|payload| crate::pv::Input {
+        .map(|payload| seedbox_machine::pv::Input {
             at: at(now),
             payload,
         })
@@ -188,7 +187,7 @@ fn native_linux_program_exit_zero_and_nonzero_survive_snapshot_and_zero_runs() {
                 now,
                 &[GuestRequest::Application {
                     id,
-                    command: crate::pv::ApplicationCommand::Start,
+                    command: seedbox_machine::pv::ApplicationCommand::Start,
                 }],
             );
             assert!(outputs.is_empty());
@@ -211,7 +210,7 @@ fn native_linux_program_exit_zero_and_nonzero_survive_snapshot_and_zero_runs() {
                     match output.payload {
                         GuestResponse::CommandAcknowledged {
                             id: actual,
-                            result: crate::pv::CommandResult::Completed,
+                            result: seedbox_machine::pv::CommandResult::Completed,
                         } if actual == id => ack += 1,
                         GuestResponse::ApplicationOutcome { code: actual } => {
                             assert_eq!(i32::from(actual), code);

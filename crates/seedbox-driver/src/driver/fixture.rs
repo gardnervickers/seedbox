@@ -103,3 +103,11 @@ where
 
 /// Owned-machine fixtures shared by Driver private invariant suites.
 pub(super) mod owned;
+
+impl<M: Machine> Driver<M> {
+    /// Take published events only, leaving bounded frame facts for a later
+    /// `drain_observations`. Production hosts drain both together.
+    pub(crate) fn drain_events(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.observations.published)
+    }
+}

@@ -94,7 +94,7 @@ pub(super) async fn target_log(
 
 pub async fn pv_lifecycle_replay(pair: LifecyclePair) {
     native_case(move |owner| Box::pin(async move {
-        let session = owner.session(DriverBackend::Pv);
+        let session = owner.session(CpuBackend::Pv);
         let request = cpu_request(session);
         let baseline_delta = if pair.pauses() {
             let baseline = session.submit(request.clone(), 1).await;

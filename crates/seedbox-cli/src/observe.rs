@@ -275,11 +275,6 @@ fn target(action: &serde_json::Value) -> String {
         .join(" ")
 }
 
-fn seconds(ns: u64) -> String {
-    let text = format!("{:.3}", ns as f64 / 1e9);
-    format!("{}s", text.trim_end_matches('0').trim_end_matches('.'))
-}
-
 /// Machines, links with their counters and faults as the server observes them now.
 pub(super) fn world(server: &ServerArgs, id: &SimulationId, json: bool) -> Result<u8> {
     let client = daemon::connect(server)?;
@@ -358,7 +353,8 @@ pub(super) fn world(server: &ServerArgs, id: &SimulationId, json: bool) -> Resul
                             .or_else(|| f.machine.clone())
                             .unwrap_or_default(),
                         output::word(&f.status).to_lowercase(),
-                        f.applied_time_ns.map_or_else(|| "-".into(), seconds),
+                        f.applied_time_ns
+                            .map_or_else(|| "-".into(), seedbox_tui::short_time),
                         if f.active { "yes".into() } else { "-".into() },
                     ]
                 })
@@ -366,7 +362,10 @@ pub(super) fn world(server: &ServerArgs, id: &SimulationId, json: bool) -> Resul
         )?;
     }
     println!();
-    output::field("simulated time", seconds(world.simulated_time_ns));
+    output::field(
+        "simulated time",
+        seedbox_tui::short_time(world.simulated_time_ns),
+    );
     Ok(0)
 }
 
@@ -409,7 +408,7 @@ pub(super) fn timeline(server: &ServerArgs, id: &SimulationId, json: bool) -> Re
             .iter()
             .map(|entry| {
                 [
-                    seconds(entry.at_ns),
+                    seedbox_tui::short_time(entry.at_ns),
                     entry.action["action"].as_str().unwrap_or("-").to_owned(),
                     target(&entry.action),
                     output::word(&entry.origin).to_lowercase(),
@@ -445,7 +444,7 @@ impl std::fmt::Display for Condition {
             Condition::Completed => write!(f, "completed"),
             Condition::Executing => write!(f, "executing"),
             Condition::Paused => write!(f, "paused"),
-            Condition::SimTime(ns) => write!(f, "sim-time={}", seconds(*ns)),
+            Condition::SimTime(ns) => write!(f, "sim-time={}", seedbox_tui::short_time(*ns)),
             Condition::Machine(name, state) => {
                 write!(f, "machine/{name}={}", output::word(state).to_lowercase())
             }
@@ -607,7 +606,10 @@ pub(super) fn wait(
     } else {
         output::status(&output::word(&report.outcome), id);
         output::field("condition", &report.condition);
-        output::field("simulated time", seconds(report.simulated_time_ns));
+        output::field(
+            "simulated time",
+            seedbox_tui::short_time(report.simulated_time_ns),
+        );
     }
     Ok(match report.outcome {
         WaitOutcome::Met => 0,

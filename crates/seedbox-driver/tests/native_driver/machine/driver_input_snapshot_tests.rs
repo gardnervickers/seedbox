@@ -155,7 +155,7 @@ where
         let outcome = driver
             .step(at(limit.as_nanos().try_into().unwrap()))
             .unwrap();
-        events.extend(driver.drain_events());
+        events.extend(driver.drain_observations().events);
         match outcome {
             StepOutcome::BarrierReached { at } | StepOutcome::Blocked { at } => at,
             other => panic!("unexpected outcome {other:?}"),

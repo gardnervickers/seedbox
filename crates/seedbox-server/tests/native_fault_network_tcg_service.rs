@@ -3,14 +3,14 @@
 
 #[path = "support/native_service.rs"]
 pub mod native_service;
-use native_service::DriverBackend;
+use native_service::CpuBackend;
 
 #[tokio::test]
 async fn public_tcg_partition_heal_recovers_and_replays() {
-    native_service::network_partition_heal_replay(DriverBackend::Tcg).await;
+    native_service::network_partition_heal_replay(CpuBackend::Tcg).await;
 }
 
 #[tokio::test]
 async fn public_tcg_shape_heal_recovers_and_replays() {
-    native_service::network_shape_heal_replay(DriverBackend::Tcg).await;
+    native_service::network_shape_heal_replay(CpuBackend::Tcg).await;
 }

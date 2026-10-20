@@ -71,16 +71,8 @@ impl BackendProvider for NativeBackends {
             .ok_or_else(|| {
                 Error::Integrity("Driver contract has no executable descriptor".into())
             })?;
-        let backend = match driver_backend
-            .ok_or_else(|| Error::Setup("Driver contract has no validated CPU backend".into()))?
-        {
-            seedbox_spec::backend::CpuBackend::Pv => {
-                seedbox_driver_execution::driver_world::DriverBackend::Pv
-            }
-            seedbox_spec::backend::CpuBackend::Tcg => {
-                seedbox_driver_execution::driver_world::DriverBackend::Tcg
-            }
-        };
+        let backend = driver_backend
+            .ok_or_else(|| Error::Setup("Driver contract has no validated CPU backend".into()))?;
         let digest = seedbox_driver_execution::driver_world::runtime_digest(inputs, store)?;
         let mut archive = tempfile::NamedTempFile::new_in(&self.session_root).map_err(|error| {
             Error::Setup(format!(
@@ -94,10 +86,10 @@ impl BackendProvider for NativeBackends {
             &self.session_root,
         )?;
         let runtime_backend = match backend {
-            seedbox_driver_execution::driver_world::DriverBackend::Pv => {
+            seedbox_spec::backend::CpuBackend::Pv => {
                 seedbox_driver_execution::runtime_assets::Backend::Pv
             }
-            seedbox_driver_execution::driver_world::DriverBackend::Tcg => {
+            seedbox_spec::backend::CpuBackend::Tcg => {
                 seedbox_driver_execution::runtime_assets::Backend::Tcg
             }
         };

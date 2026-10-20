@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs,
     io::{self, Read, Seek, Write},
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -55,11 +55,8 @@ pub struct ContentStore {
     root: PathBuf,
     evidence_root: Option<PathBuf>,
     /// Objects this process hashed, with the file identity they had then.
-    /// Clones share it, so exploration workers verify each object once.
+    /// Clones share it, so concurrent users verify each object once.
     verified: Arc<Mutex<HashMap<ContentDigest, Stamp>>>,
-    /// Shared copies made by `materialize_linked`, with the identity each had
-    /// when this process wrote it. Holding the lock serializes their creation.
-    shared: Arc<Mutex<HashMap<PathBuf, Stamp>>>,
 }
 
 /// What any write, truncate, rename over or chmod of an object changes.
@@ -119,7 +116,6 @@ impl ContentStore {
             root: root.into(),
             evidence_root: None,
             verified: Arc::default(),
-            shared: Arc::default(),
         }
     }
 
@@ -406,7 +402,7 @@ impl ContentStore {
     }
 
     /// `materialize` for a file this process (or one it launches) will execute,
-    /// such as the retained engine. The write holds [`crate::exec_files::writing`]
+    /// such as the retained engine. The write holds [`seedbox_exec::writing`]
     /// from opening the destination until every descriptor to it is closed, so
     /// no concurrent fork can keep a writable copy that makes the first
     /// execution fail with ETXTBSY. Only executables pay the exclusion; guest
@@ -416,86 +412,8 @@ impl ContentStore {
         digest: &ContentDigest,
         directory: &Path,
     ) -> Result<PathBuf> {
-        let _writing = crate::exec_files::writing();
+        let _writing = seedbox_exec::writing();
         self.materialize(digest, directory)
-    }
-
-    /// Like `materialize`, but copies each object once into `shared` and
-    /// hard-links that read-only copy into `directory`. Exploration attempts
-    /// use it so a batch copies its engine and images once, not per seed.
-    ///
-    /// The shared copy is reused only while both it and the store object are
-    /// unchanged since this process verified them; otherwise it is replaced
-    /// through `materialize`, which hashes again. Without hard links (another
-    /// filesystem) this falls back to a private copy.
-    pub fn materialize_linked(
-        &self,
-        digest: &ContentDigest,
-        shared: &Path,
-        directory: &Path,
-    ) -> Result<PathBuf> {
-        self.link_materialized(digest, shared, directory, false)
-    }
-
-    /// `materialize_linked` for an executable such as the retained engine; every
-    /// write it makes is covered like [`Self::materialize_executable`]. Reusing
-    /// an existing shared copy writes nothing and takes no exclusion.
-    pub fn materialize_linked_executable(
-        &self,
-        digest: &ContentDigest,
-        shared: &Path,
-        directory: &Path,
-    ) -> Result<PathBuf> {
-        self.link_materialized(digest, shared, directory, true)
-    }
-
-    fn link_materialized(
-        &self,
-        digest: &ContentDigest,
-        shared: &Path,
-        directory: &Path,
-        executable: bool,
-    ) -> Result<PathBuf> {
-        let write = |directory: &Path| {
-            if executable {
-                self.materialize_executable(digest, directory)
-            } else {
-                self.materialize(digest, directory)
-            }
-        };
-        let source = shared.join(digest.hex());
-        let mut copies = self.shared.lock().unwrap_or_else(|e| e.into_inner());
-        let reusable = match (copies.get(&source), fs::File::open(&source)) {
-            (Some(stamp), Ok(copy)) => {
-                Stamp::of(&copy)? == *stamp && self.trusted(digest, &self.open(digest)?)?.is_some()
-            }
-            _ => false,
-        };
-        if !reusable {
-            copies.remove(&source);
-            match fs::remove_file(&source) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
-                _ => {}
-            }
-            let copy = write(shared)?;
-            // Read-only for every attempt; the engine copy also needs execute.
-            fs::set_permissions(&copy, fs::Permissions::from_mode(0o500))?;
-            copies.insert(copy, Stamp::of(&fs::File::open(&source)?)?);
-        }
-        fs::create_dir_all(directory)?;
-        let path = directory.join(digest.hex());
-        match fs::hard_link(&source, &path) {
-            // Linking changes the copy's ctime; remember the new identity.
-            Ok(()) => {
-                copies.insert(source.clone(), Stamp::of(&fs::File::open(&source)?)?);
-                Ok(path)
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e.into()),
-            Err(_) => {
-                drop(copies);
-                write(directory)
-            }
-        }
     }
 }
 

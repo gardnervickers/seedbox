@@ -264,7 +264,7 @@ where
     )
     .unwrap();
     let mut running_phase = false;
-    let mut events = driver.drain_events();
+    let mut events = driver.drain_observations().events;
     let mut held = Vec::new();
     let mut migrated = !migrate;
     let mut now = at(0);
@@ -289,7 +289,7 @@ where
             });
         let upto = at(limit.as_nanos().try_into().unwrap());
         let result = driver.step(upto).unwrap();
-        events.extend(driver.drain_events());
+        events.extend(driver.drain_observations().events);
         match result {
             StepOutcome::Finished { reason, .. } => {
                 assert_eq!(reason, ExitReason::ProgramExit { code: 0 });

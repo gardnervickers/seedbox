@@ -430,7 +430,6 @@ where
             },
             workers,
             observations: ObservationState::default(),
-            committed: Vec::new(),
             playback: Playback::from_intent(checkpoint.playback.clone()),
             factory: Box::new(factory),
         })

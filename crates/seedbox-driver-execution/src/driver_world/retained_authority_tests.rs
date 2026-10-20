@@ -1,26 +1,22 @@
 //! Metadata/launch-adaptation fixtures only: no executable or guest is started.
 use super::*;
 use crate::{
-    driver_world::{DriverBackend, DriverExecutor},
+    driver_world::DriverExecutor,
     execution::{CancellationToken, ExecutionProfile, SemanticParameters, WitnessMode},
 };
 
-fn profile(backend: DriverBackend) -> ExecutionProfile {
+fn profile(backend: CpuBackend) -> ExecutionProfile {
     let mut parameters = SemanticParameters::new();
     parameters.engine = Some(DriverExecutor::descriptor("x86_64"));
     ExecutionProfile {
-        backend: match backend {
-            DriverBackend::Pv => "driver-pv",
-            DriverBackend::Tcg => "driver-tcg",
-        }
-        .into(),
+        backend: backend.recorded_name().into(),
         witness_mode: WitnessMode::Exits,
         semantic_parameters: parameters,
     }
 }
-fn inventory(backend: DriverBackend, artifact: &Artifact) -> wire::Inventory {
+fn inventory(backend: CpuBackend, artifact: &Artifact) -> wire::Inventory {
     match backend {
-        DriverBackend::Pv => wire::Inventory::Pv {
+        CpuBackend::Pv => wire::Inventory::Pv {
             policy: None,
             executable: artifact.clone(),
             kernel: artifact.clone(),
@@ -34,7 +30,7 @@ fn inventory(backend: DriverBackend, artifact: &Artifact) -> wire::Inventory {
             progress_budget: std::num::NonZeroU32::new(32).unwrap().into(),
             epoch_seconds: 86400,
         },
-        DriverBackend::Tcg => wire::Inventory::Tcg {
+        CpuBackend::Tcg => wire::Inventory::Tcg {
             policy: None,
             executable: artifact.clone(),
             kernel: artifact.clone(),
@@ -49,7 +45,7 @@ fn inventory(backend: DriverBackend, artifact: &Artifact) -> wire::Inventory {
         },
     }
 }
-fn fixture(root: &Path, backend: DriverBackend) -> (PreparedInputs, Prepared, Artifact) {
+fn fixture(root: &Path, backend: CpuBackend) -> (PreparedInputs, Prepared, Artifact) {
     let bytes = b"metadata fixture";
     let source = root.join("source");
     fs::write(&source, bytes).unwrap();
@@ -94,10 +90,10 @@ fn fixture(root: &Path, backend: DriverBackend) -> (PreparedInputs, Prepared, Ar
     };
     (inputs, prepared, artifact)
 }
-fn pairs() -> [(DriverBackend, DriverBackend); 2] {
+fn pairs() -> [(CpuBackend, CpuBackend); 2] {
     [
-        (DriverBackend::Pv, DriverBackend::Tcg),
-        (DriverBackend::Tcg, DriverBackend::Pv),
+        (CpuBackend::Pv, CpuBackend::Tcg),
+        (CpuBackend::Tcg, CpuBackend::Pv),
     ]
 }
 fn mismatch(error: crate::Error) {
@@ -204,7 +200,7 @@ fn backend_authority_checks_saved_inventory_in_runtime_and_both_launch_paths() {
 fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
     use crate::execution::PreparedImage;
     use seedbox_artifacts::image::Launch;
-    for backend in [DriverBackend::Pv, DriverBackend::Tcg] {
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
         let root = tempfile::tempdir().unwrap();
         let store = ContentStore::new(root.path().join("store"));
         let (mut inputs, prepared, artifact) = fixture(root.path(), backend);

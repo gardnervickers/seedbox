@@ -24,7 +24,6 @@ seedbox-server.workspace = true
 seedbox-api.workspace = true
 seedbox-client.workspace = true
 seedbox-artifacts.workspace = true
-seedbox-engine-core.workspace = true
 seedbox-spec.workspace = true
 serde_yaml_ng.workspace = true
 tar.workspace = true

@@ -1,8 +1,8 @@
 //! Closed client policy, physical owner and ended evidence. Separate from the
 //! bounded private JSON header: page records remain quota-checked raw blobs.
-use super::codec::record::Record;
 use super::*;
-use seedbox_machine::machine::{EvidenceDisposition, RamRegion, StateEvidence};
+use seedbox_machine::machine::{EvidenceDisposition, StateEvidence};
+use seedbox_machine::snapshot::Record;
 #[derive(Clone, Debug, Default)]
 pub(super) struct Aux {
     pub policy: Option<policy::Named>,
@@ -38,8 +38,8 @@ pub(super) struct Report {
     pub retired: Option<String>,
 }
 impl Report {
-    pub fn response(&self) -> crate::pv::Response {
-        crate::pv::Response::BootEnded {
+    pub fn response(&self) -> seedbox_machine::pv::Response {
+        seedbox_machine::pv::Response::BootEnded {
             ended_boot: self.end.boot,
             disposition: if self.end.shutdown {
                 EvidenceDisposition::Shutdown
@@ -191,7 +191,7 @@ impl Aux {
                 || r.disk
                     .iter()
                     .chain(&r.retired)
-                    .any(|s| !super::evidence::valid_hash(s))
+                    .any(|s| !seedbox_machine::machine::is_sha256_hex(s))
             {
                 return Err("PV pending end shape".into());
             }
@@ -200,88 +200,45 @@ impl Aux {
         Ok(())
     }
 }
-macro_rules! record {($ty:ty {$($field:ident:$kind:ty),*$(,)?})=>{impl Record for $ty{const MIN:u64=0$(+<$kind as Record>::MIN)*;fn encode<W:std::io::Write>(&self,w:&mut seedbox_machine::snapshot::Writer<'_,W>)->seedbox_machine::snapshot::Result<()>{let Self{$($field),*}=self;$($field.encode(w)?;)*Ok(())}fn decode<R:std::io::Read>(r:&mut seedbox_machine::snapshot::Reader<'_,R>)->seedbox_machine::snapshot::Result<Self>{Ok(Self{$($field:<$kind as Record>::decode(r)?),*})}}}}
-record!(Aux{policy:Option<policy::Named>,logical:u64,active:Option<u64>,last:Option<Ended>,cache:Option<Cached>,execution:Option<EndedExecution>,retiring:Option<[u8;32]>,pending:std::collections::VecDeque<Report>});
-record!(EndedExecution {
+seedbox_machine::record!(Aux{policy:Option<policy::Named>,logical:u64,active:Option<u64>,last:Option<Ended>,cache:Option<Cached>,execution:Option<EndedExecution>,retiring:Option<[u8;32]>,pending:std::collections::VecDeque<Report>});
+seedbox_machine::record!(EndedExecution {
     boot: u64,
     shutdown: bool,
     witness: [u8; 32],
     mark: u8,
     at: u64
 });
-record!(Ended {
+seedbox_machine::record!(Ended {
     boot: u64,
     shutdown: bool,
     native: bool
 });
-record!(Report{at:u64,end:Ended,lost:u64,disk:Option<String>,retired:Option<String>});
-impl Record for RamRegion {
-    const MIN: u64 = 16;
+seedbox_machine::record!(Report{at:u64,end:Ended,lost:u64,disk:Option<String>,retired:Option<String>});
+/// PV retires only crashed or shut-down boots; other dispositions are rejected.
+impl Record for Cached {
+    const MIN: u64 = <StateEvidence as Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
     ) -> seedbox_machine::snapshot::Result<()> {
-        let Self { base, length } = self;
-        base.encode(w)?;
-        length.encode(w)
+        Self::check(&self.data)?;
+        self.data.encode(w)
     }
     fn decode<R: std::io::Read>(
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
-        Ok(Self {
-            base: Record::decode(r)?,
-            length: Record::decode(r)?,
-        })
+        let data = StateEvidence::decode(r)?;
+        Self::check(&data)?;
+        Ok(Self { data })
     }
 }
-impl Record for Cached {
-    const MIN: u64 = 41;
-    fn encode<W: std::io::Write>(
-        &self,
-        w: &mut seedbox_machine::snapshot::Writer<'_, W>,
-    ) -> seedbox_machine::snapshot::Result<()> {
-        let Self { data } = self;
-        let StateEvidence {
-            boot,
-            disposition,
-            parts,
-            regions,
-            page_hashes,
-            digest,
-        } = data;
-        boot.encode(w)?;
-        match disposition {
-            EvidenceDisposition::Crashed => false.encode(w)?,
-            EvidenceDisposition::Shutdown => true.encode(w)?,
-            _ => {
-                return Err(seedbox_machine::snapshot::CodecError::Invalid(
-                    "PV cached live disposition",
-                ))
-            }
-        };
-        parts.encode(w)?;
-        regions.encode(w)?;
-        page_hashes.encode(w)?;
-        digest.encode(w)
-    }
-    fn decode<R: std::io::Read>(
-        r: &mut seedbox_machine::snapshot::Reader<'_, R>,
-    ) -> seedbox_machine::snapshot::Result<Self> {
-        let boot = Record::decode(r)?;
-        let shutdown = bool::decode(r)?;
-        Ok(Self {
-            data: StateEvidence {
-                boot,
-                disposition: if shutdown {
-                    EvidenceDisposition::Shutdown
-                } else {
-                    EvidenceDisposition::Crashed
-                },
-                parts: Record::decode(r)?,
-                regions: Record::decode(r)?,
-                page_hashes: Record::decode(r)?,
-                digest: Record::decode(r)?,
-            },
-        })
+impl Cached {
+    fn check(data: &StateEvidence) -> seedbox_machine::snapshot::Result<()> {
+        match data.disposition {
+            EvidenceDisposition::Crashed | EvidenceDisposition::Shutdown => Ok(()),
+            _ => Err(seedbox_machine::snapshot::CodecError::Invalid(
+                "PV cached disposition",
+            )),
+        }
     }
 }

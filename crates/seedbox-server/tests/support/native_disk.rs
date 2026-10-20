@@ -18,10 +18,10 @@ const DONE: &str = "DISK volume done count=1 direct sum=2d1131fc008c0383\n";
 const SUBMITTED_FIRST: &str = "DISK volume submitted 1\n";
 const SYNCED_FIRST: &str = "DISK volume synced 1\n";
 
-fn probe(backend: DriverBackend) -> Vec<u8> {
+fn probe(backend: CpuBackend) -> Vec<u8> {
     let key = match backend {
-        DriverBackend::Pv => "SEEDBOX_PV_DISK_PROBE",
-        DriverBackend::Tcg => "SEEDBOX_TCG_DISK_PROBE",
+        CpuBackend::Pv => "SEEDBOX_PV_DISK_PROBE",
+        CpuBackend::Tcg => "SEEDBOX_TCG_DISK_PROBE",
     };
     fs::read(std::env::var_os(key).unwrap_or_else(|| panic!("{key}: disk-probe fixture"))).unwrap()
 }
@@ -96,7 +96,7 @@ fn driver_blob_bytes(session: &NativeSession, id: &seedbox_api::SimulationId) ->
 
 /// Same input twice, on one and four machine workers: both runs pass with the
 /// expected durable volume contents and equal raw/compared witnesses.
-pub async fn disk_repeat_workers(backend: DriverBackend) {
+pub async fn disk_repeat_workers(backend: CpuBackend) {
     native_case(move |owner| {
         Box::pin(async move {
             let session = owner.session(backend);
@@ -134,7 +134,7 @@ pub async fn disk_repeat_workers(backend: DriverBackend) {
 /// Capture while the first round's completed device write is still unflushed
 /// and its sleep pending, export, delete the source, import on four workers and continue:
 /// output and raw witness equal the uninterrupted run.
-pub async fn disk_checkpoint_continuation(backend: DriverBackend) {
+pub async fn disk_checkpoint_continuation(backend: CpuBackend) {
     native_case(move |owner| {
         Box::pin(async move {
             let session = owner.session(backend);

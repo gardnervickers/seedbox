@@ -78,7 +78,7 @@ async fn until_disk(
 
 pub async fn pv_disk_crash_reboot_replay() {
     native_case(|owner| Box::pin(async move {
-        let session = owner.session(DriverBackend::Pv);
+        let session = owner.session(CpuBackend::Pv);
         // The real finite oracle sleeps 12.5 guest seconds. Include the normal
         // boot allowance; this is a simulated workload bound, not host speed.
         session.bound = simulated_bound(session.backend) + 12_500_000_000;

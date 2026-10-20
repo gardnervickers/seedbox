@@ -373,7 +373,7 @@ fn tcg_refusal() -> Error {
     Error::Setup(format!(
         "--backend tcg requires {}, and the normal Driver runtime",
         seedbox_driver_execution::driver_world::platform::hosts_for(
-            seedbox_driver_execution::driver_world::DriverBackend::Tcg
+            seedbox_spec::backend::CpuBackend::Tcg
         )
     ))
 }
@@ -502,18 +502,16 @@ impl RuntimeInputs {
             witness,
             cpu_backend,
         )?;
-        let (backend, runtime_backend) = match cpu_backend {
-            seedbox_spec::backend::CpuBackend::Pv => (
-                seedbox_driver_execution::driver_world::DriverBackend::Pv,
-                seedbox_driver_execution::runtime_assets::Backend::Pv,
-            ),
-            seedbox_spec::backend::CpuBackend::Tcg => (
-                seedbox_driver_execution::driver_world::DriverBackend::Tcg,
-                seedbox_driver_execution::runtime_assets::Backend::Tcg,
-            ),
+        let runtime_backend = match cpu_backend {
+            seedbox_spec::backend::CpuBackend::Pv => {
+                seedbox_driver_execution::runtime_assets::Backend::Pv
+            }
+            seedbox_spec::backend::CpuBackend::Tcg => {
+                seedbox_driver_execution::runtime_assets::Backend::Tcg
+            }
         };
         let architecture = seedbox_driver_execution::driver_world::platform::Host::current()
-            .guest(backend)
+            .guest(cpu_backend)
             .ok_or_else(|| {
                 Error::Setup("the Driver runtime requires Linux x86-64 or macOS aarch64".into())
             })?;
@@ -619,7 +617,7 @@ fn run(cli: Cli) -> Result<u8> {
         } => {
             let selection = backend.selection(execution);
             if let Some(id) = from {
-                return simulations::rerun(server, &id, paused, detach, json, selection);
+                return simulations::run_from(server, &id, paused, detach, json, selection);
             }
             let input = input.unwrap_or_else(|| PathBuf::from("."));
             if bundles::is_checkpoint(&input)? {
@@ -634,7 +632,7 @@ fn run(cli: Cli) -> Result<u8> {
             }
             let project = ProjectArg { project: input };
             match count {
-                Some(count) => simulations::explore(
+                Some(count) => simulations::run_count(
                     server, &project, seed, count, paused, detach, json, selection,
                 ),
                 None => simulations::run(server, &project, seed, paused, detach, json, selection),
@@ -674,8 +672,8 @@ fn run(cli: Cli) -> Result<u8> {
                 return simulations::seed_range(server, &id, json);
             }
             match view {
-                ShowView::Status => simulations::get(server, &id, json),
-                ShowView::Definition => simulations::describe(server, &id, json),
+                ShowView::Status => simulations::show_status(server, &id, json),
+                ShowView::Definition => simulations::show_definition(server, &id, json),
                 ShowView::World => observe::world(server, &id, json),
                 ShowView::Timeline => observe::timeline(server, &id, json),
                 ShowView::Playback => simulations::playback(server, &id, None, json),

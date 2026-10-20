@@ -108,7 +108,7 @@ where
         guard.remaining().expect("kernel exit infrastructure hang");
         assert!(now.as_nanos() < 3 * BOOT_LIMIT, "simulated bound");
         let outcome = driver.step(at(now.as_nanos() + QUANTUM)).unwrap();
-        events.extend(driver.drain_events());
+        events.extend(driver.drain_observations().events);
         *now = match outcome {
             StepOutcome::BarrierReached { at } | StepOutcome::Blocked { at } => at,
             other => panic!("unexpected outcome {other:?}"),

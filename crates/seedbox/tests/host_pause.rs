@@ -137,7 +137,8 @@ async fn set_rate(client: &Client, id: &SimulationId, rate: PlaybackRate) -> Pla
         request_id: Client::request_id().unwrap(),
         command: ControlCommand::SetRate { rate },
     };
-    let mut receipt = client.request_control(id, &request).await.unwrap();
+    let mut receipt: seedbox_api::ControlReceipt =
+        client.request_control(id, &request).await.unwrap();
     tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             match receipt.state {

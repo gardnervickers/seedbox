@@ -4,9 +4,8 @@
 // A cfg(test)-only module cannot be consumed by tests in another crate.
 pub use crate::machine::{ExitReason, Machine, RunContext, StopReason, Timestamp};
 mod rng;
+pub use crate::clock::{FixedClock, SimulationClock};
 pub use rng::SeededRng;
-mod clock;
-pub use clock::{FixedClock, SimulationClock};
 pub mod assets;
 pub mod disk_scenario;
 pub mod factory_definition;

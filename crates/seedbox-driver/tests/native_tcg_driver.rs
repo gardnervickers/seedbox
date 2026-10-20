@@ -14,15 +14,7 @@ use seedbox_machine_tcg::machine::tcg::{
     test_support as fixture, Error, Snapshot, TcgMachine as RawMachine,
 };
 use seedbox_test_time::HangGuard;
-use std::{
-    fs,
-    path::Path,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::{fs, path::Path, sync::Arc, time::Duration};
 type TcgMachine = Environment<RawMachine>;
 struct Environment<M, R = SeededRng>(
     seedbox_machine::test_support::test_environment::Environment<M, R>,
@@ -199,16 +191,8 @@ fn timer_then_increment() -> Vec<u8> {
         .image()
 }
 
-struct TestClock(AtomicU64);
-
-impl Clock for TestClock {
-    fn now(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
-    }
-}
-
-fn clock(nanos: u64) -> Arc<TestClock> {
-    Arc::new(TestClock(AtomicU64::new(nanos)))
+fn clock(nanos: u64) -> Arc<SimulationClock> {
+    Arc::new(SimulationClock::new(nanos))
 }
 
 fn at(nanos: u64) -> Timestamp {
@@ -870,7 +854,7 @@ mod machine {
                 assert!(!driver.with_barrier(|barrier| barrier.paused(id)).unwrap());
                 let resumed = driver.with_barrier(|barrier| barrier.snapshot(id)).unwrap();
                 fixture::assert_snapshot_reached(&resumed, at(STUB + 20));
-                let clock = Arc::new(TestClock(AtomicU64::new(STUB + 20)));
+                let clock = Arc::new(SimulationClock::new(STUB + 20));
                 let mut paused_copy =
                     TcgMachine::from_snapshot(Path::new(QEMU), &paused, clock.clone()).unwrap();
                 let mut resumed_copy =
@@ -885,7 +869,7 @@ mod machine {
                 let mut copy = TcgMachine::from_snapshot(
                     Path::new(QEMU),
                     &after,
-                    Arc::new(TestClock(AtomicU64::new(STUB + 24))),
+                    Arc::new(SimulationClock::new(STUB + 24)),
                 )
                 .unwrap();
                 assert_eq!(registers(&mut copy)[RBX], 4);
@@ -952,7 +936,7 @@ mod machine {
                 let resumed = driver.with_barrier(|barrier| barrier.snapshot(id)).unwrap();
                 fixture::assert_snapshot_reached(&resumed, at(resumed_at));
                 fixture::assert_snapshot_ready(&resumed);
-                let clock = Arc::new(TestClock(AtomicU64::new(resumed_at)));
+                let clock = Arc::new(SimulationClock::new(resumed_at));
                 let mut copy =
                     TcgMachine::from_snapshot(Path::new(QEMU), &resumed, clock.clone()).unwrap();
                 assert_eq!(registers(&mut copy)[RBX], 0);
@@ -1057,13 +1041,13 @@ mod machine {
                 let mut old = TcgMachine::from_snapshot(
                     Path::new(QEMU),
                     &before,
-                    Arc::new(TestClock(AtomicU64::new(10 + 5))),
+                    Arc::new(SimulationClock::new(10 + 5)),
                 )
                 .unwrap();
                 let mut fresh = TcgMachine::from_snapshot(
                     Path::new(QEMU),
                     &after,
-                    Arc::new(TestClock(AtomicU64::new(10 + 5))),
+                    Arc::new(SimulationClock::new(10 + 5)),
                 )
                 .unwrap();
                 assert!(fixture::registers(&mut old).unwrap()[RBX] > 0);

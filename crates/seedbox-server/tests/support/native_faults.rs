@@ -28,7 +28,7 @@ fn cpu_request(session: &NativeSession) -> SubmitRequest {
     // its finite region at twice the CPU cost. This is guest work, not a host
     // delay; the shared simulated bound applies to every step.
     let mut request = submission_with_machines(
-        DriverBackend::Pv,
+        CpuBackend::Pv,
         session.root.path(),
         &session.store,
         2_000_000,
@@ -110,7 +110,7 @@ async fn active_throttle(session: &mut NativeSession) -> (seedbox_api::Simulatio
 
 pub async fn pv_throttle_heal_replay() {
     native_case(|owner| Box::pin(async move {
-        let session = owner.session(DriverBackend::Pv);
+        let session = owner.session(CpuBackend::Pv);
         let request = cpu_request(session);
         let baseline = session.submit(request.clone(), 1).await;
         session.worker(&baseline).await;

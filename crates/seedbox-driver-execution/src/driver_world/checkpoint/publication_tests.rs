@@ -34,7 +34,7 @@ fn cheap_output_and_identity_refusals_precede_drain_and_native_capture() {
         .unwrap_err();
         assert!(matches!(error, CaptureFailure::Refused(_)));
         assert_eq!(peak.load(Ordering::SeqCst), 0);
-        assert!(!driver.drain_events().is_empty());
+        assert!(!driver.drain_observations().events.is_empty());
         if existing {
             assert_eq!(
                 fs::read(output.join("checkpoint-saved.json")).unwrap(),
@@ -66,7 +66,7 @@ fn missing_factory_authority_is_a_benign_pre_drain_refusal() {
     )
     .unwrap_err();
     assert!(matches!(error, CaptureFailure::Refused(_)));
-    assert!(!driver.drain_events().is_empty());
+    assert!(!driver.drain_observations().events.is_empty());
     assert_eq!(fs::read_dir(output).unwrap().count(), 0);
 }
 #[test]
@@ -92,7 +92,7 @@ fn publication_after_drain_failure_is_distinctly_terminal_not_an_ordinary_refusa
     .unwrap_err();
     assert!(matches!(error, CaptureFailure::Publication(_)));
     assert!(error.to_string().contains("stop execution"));
-    assert!(driver.drain_events().is_empty());
+    assert!(driver.drain_observations().events.is_empty());
     assert_eq!(fs::read_dir(output).unwrap().count(), 0);
 }
 #[test]
@@ -172,10 +172,9 @@ fn actual_driver_before_fault_hold_is_captured_without_applying_effect() {
         root.path(),
         "held",
         |state, batch| {
-            for change in &batch.changes {
-                if let seedbox_driver::driver::CommittedChange::FaultSettled { .. } = &change.change
-                {
-                    effects.push(change.clone());
+            for event in &batch.events {
+                if let seedbox_driver::driver::EventKind::FaultSettled { .. } = &event.kind {
+                    effects.push(event.clone());
                 }
             }
             publish(state, batch)
@@ -194,7 +193,7 @@ fn actual_driver_before_fault_hold_is_captured_without_applying_effect() {
         before
     );
     assert!(
-        restored.drain_events().is_empty(),
+        restored.drain_observations().events.is_empty(),
         "capture must not replay observations"
     );
     assert_eq!(

@@ -8,10 +8,10 @@
 use super::{Factory, TcgMachine};
 use crate::{
     clock::{Clock, SimulationClock},
-    machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
-    pv::{Inbox, Input, Outbox, Output, Request, Response},
     rng::SeededRng,
 };
+use seedbox_machine::machine::{ExitReason, Machine, RunContext, StopReason, Timestamp};
+use seedbox_machine::pv::{Inbox, Input, Outbox, Output, Request, Response};
 use seedbox_machine::test_support::network_scenario::{definition, ipv4, mac, udp_frame, PORT};
 use std::{fs, path::PathBuf};
 

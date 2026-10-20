@@ -1,56 +1,16 @@
 use super::*;
 use seedbox_api::{SeedRangeRequest, SeedRangeStatus, SimulationSummary};
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone)]
 pub(super) struct Range {
     pub(super) count: u32,
     next: u32,
-    #[serde(default)]
     deleted: BTreeSet<u32>,
     pub(super) stop_requested: bool,
     error: Option<String>,
 }
 
-impl Range {
-    pub(super) fn validate(&self, seed: Option<u64>) -> Result<()> {
-        if !(1..=4096).contains(&self.count)
-            || !(1..=self.count).contains(&self.next)
-            || self
-                .deleted
-                .iter()
-                .any(|index| *index == 0 || *index >= self.next)
-            || seed
-                .and_then(|seed| seed.checked_add(u64::from(self.count - 1)))
-                .is_none()
-        {
-            return Err(Error::Invalid("invalid retained seed range".into()));
-        }
-        Ok(())
-    }
-}
-
 impl Catalogue {
-    pub fn stopped_seed_members(&self) -> Result<Vec<SimulationId>> {
-        let mut ids = Vec::new();
-        for (id, entry) in &self.entries {
-            if entry
-                .range
-                .as_ref()
-                .is_some_and(|range| range.stop_requested)
-            {
-                ids.extend(
-                    self.seed_range(id)?
-                        .members
-                        .into_iter()
-                        .filter(|m| m.status.phase != Phase::Completed)
-                        .map(|m| m.metadata.id),
-                );
-            }
-        }
-        Ok(ids)
-    }
-
     pub fn submit_seeds(&mut self, mut request: SeedRangeRequest) -> Result<(Simulation, bool)> {
         validate_submission_request_id(&request.request_id)?;
         if !(1..=4096).contains(&request.count) {
@@ -106,7 +66,6 @@ impl Catalogue {
             }
         }
         for (id, entry) in updates {
-            self.persist(&entry)?;
             self.entries.insert(id, entry);
         }
         Ok(())
@@ -166,7 +125,6 @@ impl Catalogue {
             .as_mut()
             .ok_or_else(|| Error::Invalid("simulation has no seed range".into()))?;
         range.stop_requested = true;
-        self.persist(&entry)?;
         self.entries.insert(id.clone(), entry);
         Ok(self
             .seed_range(id)?
@@ -177,8 +135,7 @@ impl Catalogue {
     }
 
     /// Admit at most one member per call, so the owner can reserve queue capacity
-    /// before accepting work. Each member's deterministic request ID closes the
-    /// crash window between accepting it and advancing the range cursor.
+    /// before accepting work. Each member has a deterministic request ID.
     pub fn advance_seeds(&mut self) -> Result<Option<(Simulation, bool)>> {
         let ready = self.entries.iter().find_map(|(id, entry)| {
             let range = entry.range.as_ref()?;
@@ -198,7 +155,6 @@ impl Catalogue {
             InputSource::Resolved { .. } | InputSource::Retained { .. }
         ) {
             range.error = Some("source simulation did not retain prepared inputs".into());
-            self.persist(&entry)?;
             self.entries.insert(id, entry);
             return Ok(None);
         }
@@ -225,16 +181,13 @@ impl Catalogue {
             None,
         ) {
             Ok(member) => member,
-            Err(error @ (Error::Io { .. } | Error::StorageFailed)) => return Err(error),
             Err(error) => {
                 range.error = Some(error.to_string());
-                self.persist(&entry)?;
                 self.entries.insert(id, entry);
                 return Ok(None);
             }
         };
         range.next += 1;
-        self.persist(&entry)?;
         self.entries.insert(id, entry);
         Ok(Some(member))
     }
@@ -247,6 +200,7 @@ fn member_request_id(id: &SimulationId, index: u32) -> String {
 mod tests {
     use super::*;
     use seedbox_api::SimulationSpec;
+    use std::path::Path;
 
     fn request(name: &str) -> SeedRangeRequest {
         SeedRangeRequest {
@@ -256,7 +210,6 @@ mod tests {
             count: 3,
             spec: SimulationSpec {
                 program: Vec::new(),
-                start_paused: false,
                 seed: Some(123),
                 inputs: InputSource::Project,
                 configuration: seedbox_application::config::parse(
@@ -280,10 +233,8 @@ mod tests {
     }
 
     #[test]
-    fn member_namespace_is_reserved_and_range_failure_is_durable_and_isolated() {
-        let temp = tempfile::tempdir().unwrap();
-        let directory = temp.path().join("catalogue");
-        let mut catalogue = Catalogue::open(&directory).unwrap();
+    fn member_namespace_is_reserved_and_range_failure_is_isolated() {
+        let mut catalogue = Catalogue::in_memory();
         let (source, _) = catalogue.submit_seeds(request("broken-range")).unwrap();
         let id = source.metadata.id.clone();
         let collision = SubmitRequest {
@@ -318,8 +269,6 @@ mod tests {
             .contains("request ID"));
         let peer = catalogue.submit_seeds(request("healthy-range")).unwrap().0;
         let peer = complete(&mut catalogue, peer);
-        drop(catalogue);
-        let mut catalogue = Catalogue::open(&directory).unwrap();
         assert!(catalogue.seed_range(&id).unwrap().error.is_some());
         let (member, _) = catalogue.advance_seeds().unwrap().unwrap();
         assert_eq!(member.metadata.parent, None);
@@ -337,8 +286,7 @@ mod tests {
 
     #[test]
     fn retained_execution_keeps_seed_while_prepared_inputs_allow_exploration() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut catalogue = Catalogue::open(&temp.path().join("catalogue")).unwrap();
+        let mut catalogue = Catalogue::in_memory();
         let base = request("source");
         let source = catalogue
             .submit(SubmitRequest {

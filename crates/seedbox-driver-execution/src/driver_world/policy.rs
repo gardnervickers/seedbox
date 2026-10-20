@@ -40,7 +40,7 @@ pub(super) fn encode(value: &BackendPolicy) -> Result<wire::BackendPolicy, Strin
 /// One execution policy for both parent admission and native inventory.
 /// Build binds the controller service name to Driver authority on both CPUs.
 pub(super) fn admit_execution(
-    backend: super::DriverBackend,
+    backend: seedbox_spec::backend::CpuBackend,
     controller: bool,
 ) -> Result<(), String> {
     admit_on(super::platform::Host::current(), backend, controller)
@@ -52,13 +52,13 @@ pub(super) fn admit_execution(
 // only; Gardner verifies it on hardware (bd-877).
 pub(super) fn admit_on(
     host: super::platform::Host,
-    backend: super::DriverBackend,
+    backend: seedbox_spec::backend::CpuBackend,
     controller: bool,
 ) -> Result<(), String> {
     if controller && host.guest(backend).is_none() {
         return Err(CONTROLLER_INCOMPLETE.into());
     }
-    if backend == super::DriverBackend::Pv && host.guest(backend).is_none() {
+    if backend == seedbox_spec::backend::CpuBackend::Pv && host.guest(backend).is_none() {
         return Err(PV_INCOMPLETE.into());
     }
     Ok(())
@@ -67,8 +67,8 @@ pub(super) fn admit_on(
 pub(super) fn admit(inventory: &wire::Inventory) -> Result<(), String> {
     let policy = decode_optional(inventory.backend_policy())?;
     let backend = match inventory {
-        wire::Inventory::Pv { .. } => super::DriverBackend::Pv,
-        wire::Inventory::Tcg { .. } => super::DriverBackend::Tcg,
+        wire::Inventory::Pv { .. } => seedbox_spec::backend::CpuBackend::Pv,
+        wire::Inventory::Tcg { .. } => seedbox_spec::backend::CpuBackend::Tcg,
     };
     admit_execution(
         backend,
@@ -89,7 +89,7 @@ pub(super) fn admit_restore(inventory: &wire::Inventory) -> Result<(), String> {
             .as_ref()
             .is_some_and(|policy| policy.controller.is_some())
         && super::platform::Host::current()
-            .guest(super::DriverBackend::Pv)
+            .guest(seedbox_spec::backend::CpuBackend::Pv)
             .is_none()
     {
         return Err("Driver PV controller checkpoint continuation requires Linux x86-64 (KVM) or macOS aarch64 (HVF)".into());
@@ -101,7 +101,8 @@ mod tests {
     use super::*;
     #[test]
     fn admission_derives_from_host_not_compile_target() {
-        use super::super::{platform::Host, DriverBackend};
+        use super::super::platform::Host;
+        use seedbox_spec::backend::CpuBackend;
         for (os, arch, driver) in [
             ("linux", "x86_64", true),
             ("macos", "aarch64", true),
@@ -111,12 +112,12 @@ mod tests {
             let host = Host { os, arch };
             for controller in [false, true] {
                 assert_eq!(
-                    admit_on(host, DriverBackend::Pv, controller).is_ok(),
+                    admit_on(host, CpuBackend::Pv, controller).is_ok(),
                     driver,
                     "{host:?} PV controller={controller}"
                 );
                 assert_eq!(
-                    admit_on(host, DriverBackend::Tcg, controller).is_ok(),
+                    admit_on(host, CpuBackend::Tcg, controller).is_ok(),
                     driver || !controller,
                     "{host:?} TCG controller={controller}"
                 );
@@ -127,7 +128,7 @@ mod tests {
                 os: "linux",
                 arch: "aarch64",
             },
-            DriverBackend::Pv,
+            CpuBackend::Pv,
             false,
         )
         .unwrap_err();

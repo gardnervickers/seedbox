@@ -323,16 +323,17 @@ impl Network {
     pub(crate) fn unselect(&mut self, handle: &str) -> bool {
         self.connections.selections.remove(handle).is_some()
     }
+    #[cfg(test)]
     pub(crate) fn counts(&self) -> BTreeMap<NetworkPair, NetworkPairCounts> {
         self.counts
             .iter()
             .map(|(&(from, to), &c)| (NetworkPair { from, to }, c))
             .collect()
     }
-    /// Compatibility-only guest inspect projection, using the unchanged canonical
-    /// legacy display helper. Its concatenated names are not authoritative pair
-    /// identities for arbitrary Driver names; host views use counts() and IDs.
-    pub(crate) fn legacy_counts(&self) -> serde_json::Value {
+    /// Guest inspect projection, using the canonical engine-core display
+    /// helper. Its concatenated names are not authoritative pair identities for
+    /// arbitrary Driver names.
+    pub(crate) fn inspect_counts(&self) -> serde_json::Value {
         use seedbox_engine_core::network_counters as c;
         let counts = self
             .counts

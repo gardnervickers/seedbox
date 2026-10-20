@@ -103,10 +103,8 @@ fn unknown_input_sources_return_not_found_without_creating_resources() {
 }
 
 #[test]
-fn accepted_submission_and_request_identity_survive_restart() {
-    let temp = tempfile::tempdir().unwrap();
-    let directory = temp.path().join("catalogue");
-    let mut catalogue = Catalogue::open(&directory).unwrap();
+fn accepted_submission_and_request_identity_are_idempotent() {
+    let mut catalogue = Catalogue::in_memory();
     let mut invalid = request();
     invalid.spec.configuration.check.exit_code = 7;
     assert!(matches!(catalogue.submit(invalid), Err(Error::Invalid(_))));
@@ -120,9 +118,6 @@ fn accepted_submission_and_request_identity_survive_restart() {
         catalogue.update(resource),
         Err(Error::RevisionConflict)
     ));
-    drop(catalogue);
-
-    let mut catalogue = Catalogue::open(&directory).unwrap();
     let (retried, created) = catalogue.submit(request()).unwrap();
     assert!(!created);
     assert_eq!(retried, running);
@@ -136,22 +131,8 @@ fn accepted_submission_and_request_identity_survive_restart() {
 }
 
 #[test]
-fn catalogue_excludes_competing_servers_and_releases_ownership_on_drop() {
-    let temp = tempfile::tempdir().unwrap();
-    let directory = temp.path().join("catalogue");
-    let first = Catalogue::open(&directory).unwrap();
-    assert!(matches!(
-        Catalogue::open(&directory),
-        Err(Error::AlreadyOwned(_))
-    ));
-    drop(first);
-    assert!(Catalogue::open(&directory).is_ok());
-}
-
-#[test]
 fn random_seed_is_allocated_once_and_collision_checked_ids_are_distinct() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut catalogue = Catalogue::open(&temp.path().join("catalogue")).unwrap();
+    let mut catalogue = Catalogue::in_memory();
     let mut submit = request();
     submit.spec.seed = None;
     let (first, _) = catalogue.submit(submit.clone()).unwrap();
@@ -163,14 +144,12 @@ fn random_seed_is_allocated_once_and_collision_checked_ids_are_distinct() {
 }
 
 #[test]
-fn control_receipts_share_ordering_survive_restart_and_never_reapply_after_completion() {
+fn control_receipts_share_ordering_and_never_reapply_after_completion() {
     use seedbox_api::{
         BoundaryPosition, ControlCommand, ControlRequest, ControlState, PlaybackRate,
         PlaybackStatus,
     };
-    let temp = tempfile::tempdir().unwrap();
-    let directory = temp.path().join("catalogue");
-    let mut catalogue = Catalogue::open(&directory).unwrap();
+    let mut catalogue = Catalogue::in_memory();
     let (mut resource, _) = catalogue.submit(request()).unwrap();
     let id = resource.metadata.id.clone();
     resource.status.phase = Phase::Preparing;
@@ -202,8 +181,6 @@ fn control_receipts_share_ordering_survive_restart_and_never_reapply_after_compl
         catalogue.accept_control(&id, conflicting),
         Err(Error::RequestConflict)
     ));
-    drop(catalogue);
-    let mut catalogue = Catalogue::open(&directory).unwrap();
     assert_eq!(
         catalogue.accept_control(&id, request.clone()).unwrap(),
         (accepted, false)
@@ -231,30 +208,26 @@ fn control_receipts_share_ordering_survive_restart_and_never_reapply_after_compl
         .acknowledge_control(&id, &request.request_id, state.clone())
         .unwrap();
     catalogue.accept_control(&id, other.clone()).unwrap();
-    drop(catalogue);
-    let manager = seedbox_server::manager::Manager::new(Catalogue::open(&directory).unwrap());
-    manager.recover_interrupted().unwrap();
-    manager
-        .read(|catalogue| {
-            assert_eq!(
-                catalogue
-                    .control_receipt(&id, &request.request_id)?
-                    .unwrap(),
-                &ack
-            );
-            assert_eq!(
-                catalogue
-                    .control_receipt(&id, &other.request_id)?
-                    .unwrap()
-                    .state,
-                ControlState::Interrupted
-            );
-            assert!(catalogue.pending_controls().is_empty());
-            Ok(())
-        })
-        .unwrap();
-    drop(manager);
-    let mut catalogue = Catalogue::open(&directory).unwrap();
+    let mut completed = catalogue.get(&id).unwrap().clone();
+    completed.status.phase = Phase::Completed;
+    completed.status.termination = Some(seedbox_api::ExecutionTermination::Interrupted);
+    catalogue.update(completed).unwrap();
+    assert_eq!(
+        catalogue
+            .control_receipt(&id, &request.request_id)
+            .unwrap()
+            .unwrap(),
+        &ack
+    );
+    assert_eq!(
+        catalogue
+            .control_receipt(&id, &other.request_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        ControlState::Interrupted
+    );
+    assert!(catalogue.pending_controls().is_empty());
     assert_eq!(
         catalogue.accept_control(&id, request).unwrap(),
         (ack, false)
@@ -275,8 +248,7 @@ fn captured_checkpoint_registry_is_independent_of_descendant_ownership() {
         PlaybackStatus,
     };
     use seedbox_engine_protocol::host_control::{CheckpointState, CheckpointStatus};
-    let temp = tempfile::tempdir().unwrap();
-    let mut catalogue = Catalogue::open(&temp.path().join("catalogue")).unwrap();
+    let mut catalogue = Catalogue::in_memory();
     let (mut source, _) = catalogue
         .submit(support::resolved_request("source"))
         .unwrap();
@@ -377,40 +349,27 @@ fn captured_checkpoint_registry_is_independent_of_descendant_ownership() {
     assert!(catalogue.captured_checkpoint(&id, "spare").is_err());
     let checkpoints = catalogue.checkpoints(&id).unwrap();
     assert!(checkpoints.is_empty());
-    drop(catalogue);
-    let mut reopened = Catalogue::open(&temp.path().join("catalogue")).unwrap();
-    assert_eq!(reopened.checkpoints(&id).unwrap(), checkpoints);
-    assert!(reopened.captured_checkpoint(&id, "spare").is_err());
-    assert_eq!(reopened.begin_delete(&id).unwrap(), vec![id.clone()]);
-    let marked = reopened.get(&id).unwrap().metadata.clone();
+    assert_eq!(catalogue.begin_delete(&id).unwrap(), vec![id.clone()]);
+    let marked = catalogue.get(&id).unwrap().metadata.clone();
     assert!(marked.deletion_requested_at_unix_ms.is_some());
-    reopened.begin_delete(&id).unwrap();
-    assert_eq!(reopened.get(&id).unwrap().metadata, marked);
-    reopened.delete(&id).unwrap();
-    assert!(reopened.get(&created.metadata.id).is_ok());
-    let mut child = reopened.get(&created.metadata.id).unwrap().clone();
+    catalogue.begin_delete(&id).unwrap();
+    assert_eq!(catalogue.get(&id).unwrap().metadata, marked);
+    catalogue.delete(&id).unwrap();
+    assert!(catalogue.get(&created.metadata.id).is_ok());
+    let mut child = catalogue.get(&created.metadata.id).unwrap().clone();
     child.status.phase = Phase::Completed;
     child.status.termination = Some(seedbox_api::ExecutionTermination::Stopped);
-    reopened.update(child).unwrap();
-    reopened.delete(&created.metadata.id).unwrap();
-    reopened.delete(&id).unwrap();
-    reopened.delete(&id).unwrap();
-    drop(reopened);
-    assert_eq!(
-        Catalogue::open(&temp.path().join("catalogue"))
-            .unwrap()
-            .list()
-            .count(),
-        0
-    );
+    catalogue.update(child).unwrap();
+    catalogue.delete(&created.metadata.id).unwrap();
+    catalogue.delete(&id).unwrap();
+    catalogue.delete(&id).unwrap();
+    assert_eq!(catalogue.list().count(), 0);
 }
 
 #[test]
-fn seed_range_waits_for_frozen_inputs_and_continues_once_after_restart() {
+fn seed_range_waits_for_frozen_inputs_and_continues_once() {
     use seedbox_api::{InputSource, SeedRangeRequest};
-    let temp = tempfile::tempdir().unwrap();
-    let directory = temp.path().join("catalogue");
-    let mut catalogue = Catalogue::open(&directory).unwrap();
+    let mut catalogue = Catalogue::in_memory();
     let base = request();
     let request = SeedRangeRequest {
         metadata: Default::default(),
@@ -436,8 +395,6 @@ fn seed_range_waits_for_frozen_inputs_and_continues_once_after_restart() {
     let (second, _) = catalogue.advance_seeds().unwrap().unwrap();
     assert_eq!(second.spec.seed, Some(124));
     assert!(matches!(second.spec.inputs, InputSource::Resolved { .. }));
-    drop(catalogue);
-    let mut catalogue = Catalogue::open(&directory).unwrap();
     assert!(!catalogue.submit_seeds(request).unwrap().1);
     let (third, _) = catalogue.advance_seeds().unwrap().unwrap();
     assert_eq!(third.spec.seed, Some(125));
@@ -445,10 +402,13 @@ fn seed_range_waits_for_frozen_inputs_and_continues_once_after_restart() {
     assert!(catalogue.advance_seeds().unwrap().is_none());
     let range = catalogue.seed_range(&source.metadata.id).unwrap();
     assert_eq!(range.members.len(), 3);
-    catalogue.stop_seeds(&source.metadata.id).unwrap();
-    drop(catalogue);
-    let mut catalogue = Catalogue::open(&directory).unwrap();
-    assert_eq!(catalogue.stopped_seed_members().unwrap().len(), 2);
+    assert_eq!(catalogue.stop_seeds(&source.metadata.id).unwrap().len(), 3);
+    assert!(
+        catalogue
+            .seed_range(&source.metadata.id)
+            .unwrap()
+            .stop_requested
+    );
     // The range is a management grouping; each submitted simulation is independent.
     for id in [&second.metadata.id, &third.metadata.id] {
         let mut member = catalogue.get(id).unwrap().clone();
@@ -469,15 +429,13 @@ fn seed_range_waits_for_frozen_inputs_and_continues_once_after_restart() {
         ));
         catalogue.delete(id).unwrap();
     }
-    drop(catalogue);
-    assert_eq!(Catalogue::open(&directory).unwrap().list().count(), 0);
+    assert_eq!(catalogue.list().count(), 0);
 }
 
 #[test]
 fn deletion_rejects_new_controls_but_keeps_existing_receipt_retries() {
     use seedbox_api::{ControlCommand, ControlRequest};
-    let temp = tempfile::tempdir().unwrap();
-    let mut catalogue = Catalogue::open(&temp.path().join("catalogue")).unwrap();
+    let mut catalogue = Catalogue::in_memory();
     let (mut resource, _) = catalogue.submit(request()).unwrap();
     let id = resource.metadata.id.clone();
     resource.status.phase = Phase::Preparing;
@@ -509,8 +467,7 @@ fn deletion_rejects_new_controls_but_keeps_existing_receipt_retries() {
 #[test]
 fn resolved_definitions_allow_independent_edits_and_outlive_their_source() {
     use seedbox_api::InputSource;
-    let temp = tempfile::tempdir().unwrap();
-    let mut catalogue = Catalogue::open(&temp.path().join("catalogue")).unwrap();
+    let mut catalogue = Catalogue::in_memory();
     let (mut original, _) = catalogue
         .submit(support::resolved_request("original"))
         .unwrap();
@@ -524,12 +481,15 @@ fn resolved_definitions_allow_independent_edits_and_outlive_their_source() {
         .metadata
         .annotations
         .insert("derived-from".into(), original.metadata.id.to_string());
-    edited.spec.program.push(seedbox_api::ProgramInput {
-        timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
-        key: "authored-1".into(),
-        at_ns: 1_000_000_000,
-        action: serde_json::json!({"action":"stop","machine":"oracle"}),
-    });
+    edited
+        .spec
+        .program
+        .push(seedbox_spec::definition::Override {
+            timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+            id: "authored-1".into(),
+            at_ns: 1_000_000_000,
+            action: serde_json::json!({"action":"stop","machine":"oracle"}),
+        });
     let InputSource::Resolved { definition } = &mut edited.spec.inputs else {
         panic!("expected resolved fixture")
     };
@@ -555,8 +515,7 @@ fn resolved_definitions_allow_independent_edits_and_outlive_their_source() {
 
 #[test]
 fn malformed_timeline_actions_reject_but_state_dependent_heals_are_admitted() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut catalogue = Catalogue::open(&temp.path().join("catalogue")).unwrap();
+    let mut catalogue = Catalogue::in_memory();
     for action in [
         seedbox_control::Action::Stop {
             machine: "unknown".into(),
@@ -568,12 +527,15 @@ fn malformed_timeline_actions_reject_but_state_dependent_heals_are_admitted() {
         },
     ] {
         let mut invalid = request();
-        invalid.spec.program.push(seedbox_api::ProgramInput {
-            timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
-            key: "authored-1".into(),
-            at_ns: 1,
-            action: serde_json::to_value(action).unwrap(),
-        });
+        invalid
+            .spec
+            .program
+            .push(seedbox_spec::definition::Override {
+                timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+                id: "authored-1".into(),
+                at_ns: 1,
+                action: serde_json::to_value(action).unwrap(),
+            });
         assert!(matches!(catalogue.submit(invalid), Err(Error::Invalid(_))));
         assert_eq!(catalogue.list().count(), 0);
     }
@@ -583,12 +545,15 @@ fn malformed_timeline_actions_reject_but_state_dependent_heals_are_admitted() {
 fn state_dependent_heal_can_be_submitted_for_deterministic_runtime_rejection() {
     let mut catalogue = Catalogue::in_memory();
     let mut submission = request();
-    submission.spec.program.push(seedbox_api::ProgramInput {
-        timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
-        key: "heal-removed-prior-action".into(),
-        at_ns: 1,
-        action: serde_json::json!({"action":"heal","handle":"deleted-owner"}),
-    });
+    submission
+        .spec
+        .program
+        .push(seedbox_spec::definition::Override {
+            timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+            id: "heal-removed-prior-action".into(),
+            at_ns: 1,
+            action: serde_json::json!({"action":"heal","handle":"deleted-owner"}),
+        });
     let (accepted, _) = catalogue.submit(submission).unwrap();
-    assert_eq!(accepted.spec.program[0].key, "heal-removed-prior-action");
+    assert_eq!(accepted.spec.program[0].id, "heal-removed-prior-action");
 }

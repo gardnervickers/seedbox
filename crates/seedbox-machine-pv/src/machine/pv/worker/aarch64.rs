@@ -300,10 +300,10 @@ impl<B: Backend> Machine<B> {
 mod tests;
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::machine::pv::codec::record::Record for Devices {
-    const MIN: u64 = <BTreeSet<u32> as crate::machine::pv::codec::record::Record>::MIN
-        + <BTreeSet<u32> as crate::machine::pv::codec::record::Record>::MIN
-        + <[u32; 16] as crate::machine::pv::codec::record::Record>::MIN;
+impl seedbox_machine::snapshot::Record for Devices {
+    const MIN: u64 = <BTreeSet<u32> as seedbox_machine::snapshot::Record>::MIN
+        + <BTreeSet<u32> as seedbox_machine::snapshot::Record>::MIN
+        + <[u32; 16] as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -322,9 +322,9 @@ impl crate::machine::pv::codec::record::Record for Devices {
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
         Ok(Self {
-            deferred: crate::machine::pv::codec::record::Record::decode(r)?,
-            asserted: crate::machine::pv::codec::record::Record::decode(r)?,
-            uart: crate::machine::pv::codec::record::Record::decode(r)?,
+            deferred: seedbox_machine::snapshot::Record::decode(r)?,
+            asserted: seedbox_machine::snapshot::Record::decode(r)?,
+            uart: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }

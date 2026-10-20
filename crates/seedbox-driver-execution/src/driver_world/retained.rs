@@ -6,6 +6,7 @@ use crate::{
     Error, Result,
 };
 use seedbox_engine_protocol::driver_world::{self as wire, Artifact, Prepared};
+use seedbox_spec::backend::CpuBackend;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -14,20 +15,16 @@ use std::{
     path::Path,
 };
 pub(super) const MANIFEST: &str = "driver-world/manifest";
-pub fn validate_contract(
-    profile: &crate::execution::ExecutionProfile,
-) -> Result<super::DriverBackend> {
+pub fn validate_contract(profile: &crate::execution::ExecutionProfile) -> Result<CpuBackend> {
     if profile.semantic_parameters.launch() != Some(crate::engine::ExecutableKind::DriverWorld) {
         return Err(bad(
             "Driver execution requires its recorded driver-world-v1 contract",
         ));
     }
-    let backend = match profile.driver_backend().map_err(bad)? {
-        Some(seedbox_spec::backend::CpuBackend::Pv) => super::DriverBackend::Pv,
-        Some(seedbox_spec::backend::CpuBackend::Tcg) => super::DriverBackend::Tcg,
-        None => return Err(bad("Driver execution requires a recorded CPU backend")),
-    };
-    Ok(backend)
+    profile
+        .driver_backend()
+        .map_err(bad)?
+        .ok_or_else(|| bad("Driver execution requires a recorded CPU backend"))
 }
 
 /// The validated profile is the CPU authority, including generic launch paths
@@ -39,8 +36,8 @@ fn validate_inventory(
 ) -> Result<()> {
     let backend = validate_contract(profile)?;
     let actual = match inventory {
-        wire::Inventory::Pv { .. } => super::DriverBackend::Pv,
-        wire::Inventory::Tcg { .. } => super::DriverBackend::Tcg,
+        wire::Inventory::Pv { .. } => CpuBackend::Pv,
+        wire::Inventory::Tcg { .. } => CpuBackend::Tcg,
     };
     if backend != actual {
         return Err(bad(

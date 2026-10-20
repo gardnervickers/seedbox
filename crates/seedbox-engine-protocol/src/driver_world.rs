@@ -154,16 +154,6 @@ impl Inventory {
             Self::Pv { policy, .. } | Self::Tcg { policy, .. } => policy.as_ref(),
         }
     }
-    /// Selected TCG semantics without defaulting an absent configuration.
-    /// PV selection remains unavailable until its real worker policy hooks exist.
-    // TODO: Re-evaluate: snapshot admission must compare the optional value,
-    // not coerce legacy None into explicit named policy with sockets disabled.
-    pub fn tcg_policy(&self) -> Option<&BackendPolicy> {
-        match self {
-            Self::Tcg { policy, .. } => policy.as_ref(),
-            Self::Pv { .. } => None,
-        }
-    }
     pub fn validate(&self) -> Result<(), String> {
         for artifact in self.artifacts() {
             artifact.validate()?;

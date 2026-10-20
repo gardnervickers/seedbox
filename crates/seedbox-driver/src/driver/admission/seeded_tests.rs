@@ -103,7 +103,8 @@ fn bounded_clock_prepare_is_pure_and_commit_matches_the_single_projected_draw() 
             d.with_barrier(|barrier| barrier.commit_input(&first))
                 .unwrap();
             let admitted: Vec<_> = d
-                .drain_events()
+                .drain_observations()
+                .events
                 .into_iter()
                 .filter_map(|event| match event.kind {
                     EventKind::FaultAdmitted(record) => Some(record),
@@ -263,7 +264,8 @@ fn pending_bounded_actions_round_trip_and_restore_without_redrawing() {
         assert_eq!(bytes(&mut restored), encoded);
         restored.step(Timestamp::from_nanos(10)).unwrap();
         let actual: Vec<_> = restored
-            .drain_events()
+            .drain_observations()
+            .events
             .into_iter()
             .filter_map(|event| match event.kind {
                 EventKind::FaultAdmitted(record) => Some(record.action),
@@ -286,7 +288,8 @@ fn pending_bounded_actions_round_trip_and_restore_without_redrawing() {
             .unwrap();
         reference.step(Timestamp::from_nanos(10)).unwrap();
         let expected: Vec<_> = reference
-            .drain_events()
+            .drain_observations()
+            .events
             .into_iter()
             .filter_map(|event| match event.kind {
                 EventKind::FaultAdmitted(record) => Some(record.action),

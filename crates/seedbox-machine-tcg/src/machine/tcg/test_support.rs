@@ -1,5 +1,5 @@
 use super::{Boot, Error, Manifest, Snapshot, State, TcgMachine};
-use crate::machine::Timestamp;
+use seedbox_machine::machine::Timestamp;
 use std::path::Path;
 /// x86 raw-program fixtures: a 64 KiB BIOS image builder whose fixed stub
 /// enters 32-bit flat protected mode, a minimal assembler, and the shared

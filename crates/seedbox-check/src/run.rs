@@ -12,7 +12,6 @@ use std::{
 pub struct Options {
     pub suites: Vec<Suite>,
     pub list: bool,
-    pub portable_stage: bool,
     pub test_time_policy: bool,
     pub probe: bool,
     pub help: bool,
@@ -20,14 +19,12 @@ pub struct Options {
 pub fn options(args: Vec<String>) -> Result<Options, String> {
     let mut names = Vec::new();
     let mut list = false;
-    let mut portable_stage = false;
     let mut test_time_policy = false;
     let mut probe = false;
     let mut help = false;
     for arg in args {
         match arg.as_str() {
             "--list" => list = true,
-            "--portable-stage" => portable_stage = true,
             "--test-time-policy" => test_time_policy = true,
             "--probe-linux" => probe = true,
             "--help" | "-h" => help = true,
@@ -35,24 +32,20 @@ pub fn options(args: Vec<String>) -> Result<Options, String> {
             _ => names.push(arg),
         }
     }
-    if test_time_policy && (!names.is_empty() || list || portable_stage || probe) {
+    if test_time_policy && (!names.is_empty() || list || probe) {
         return Err("--test-time-policy must be used without suites or other modes".into());
     }
     let suites = expand(&names)?;
-    if portable_stage && suites != [Suite::Portable] {
-        return Err("--portable-stage accepts only portable".into());
-    }
     Ok(Options {
         suites,
         list,
-        portable_stage,
         test_time_policy,
         probe,
         help,
     })
 }
 fn help() {
-    println!("Run explicitly named test suites; Cargo discovers tests.\n\nUsage: seedbox-check [--list] [SUITE ...]\n\n  --list             Check requirements without building or running tests.\n  --portable-stage   Run portable checks without the outer fmt/clippy steps.\n  --test-time-policy Scan test code for host sleeps without running other checks.\n  --help             Show this help.\n\nsuites:");
+    println!("Run explicitly named test suites; Cargo discovers tests.\n\nUsage: seedbox-check [--list] [SUITE ...]\n\n  --list             Check requirements without building or running tests.\n  --test-time-policy Scan test code for host sleeps without running other checks.\n  --help             Show this help.\n\nsuites:");
     for s in SUITES {
         println!("  {:16} {}", s.name(), s.description());
     }
@@ -317,22 +310,20 @@ pub fn coordinate<C: Commands>(
     if options.list {
         return Ok(0);
     }
-    if !options.portable_stage {
-        checks.step("fmt", words(&["cargo", "fmt", "--all", "--check"]));
-        checks.step(
+    checks.step("fmt", words(&["cargo", "fmt", "--all", "--check"]));
+    checks.step(
+        "clippy",
+        words(&[
+            "cargo",
             "clippy",
-            words(&[
-                "cargo",
-                "clippy",
-                "--workspace",
-                "--all-targets",
-                "--locked",
-                "--",
-                "-D",
-                "warnings",
-            ]),
-        );
-    }
+            "--workspace",
+            "--all-targets",
+            "--locked",
+            "--",
+            "-D",
+            "warnings",
+        ]),
+    );
     portable(checks)?;
     if checks.failed || options.suites == [Suite::Portable] {
         return Ok(u8::from(checks.failed));

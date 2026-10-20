@@ -10,7 +10,7 @@
 //! the store, including unflushed writes, is not a power loss.
 use super::virtio::*;
 use super::Result;
-use crate::machine::disk::{
+use seedbox_machine::machine::disk::{
     request::{self, representable, Buffers},
     Store,
 };
@@ -234,14 +234,14 @@ impl Buffers for Chain<'_> {
 mod tests;
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::machine::pv::codec::record::Record for Transport {
-    const MIN: u64 = <[Queue; 1] as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <[u32; 2] as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN
-        + <u32 as crate::machine::pv::codec::record::Record>::MIN;
+impl seedbox_machine::snapshot::Record for Transport {
+    const MIN: u64 = <[Queue; 1] as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <[u32; 2] as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN
+        + <u32 as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -268,13 +268,13 @@ impl crate::machine::pv::codec::record::Record for Transport {
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
         Ok(Self {
-            queue: crate::machine::pv::codec::record::Record::decode(r)?,
-            selector: crate::machine::pv::codec::record::Record::decode(r)?,
-            feature_selector: crate::machine::pv::codec::record::Record::decode(r)?,
-            driver_selector: crate::machine::pv::codec::record::Record::decode(r)?,
-            features: crate::machine::pv::codec::record::Record::decode(r)?,
-            status: crate::machine::pv::codec::record::Record::decode(r)?,
-            interrupt: crate::machine::pv::codec::record::Record::decode(r)?,
+            queue: seedbox_machine::snapshot::Record::decode(r)?,
+            selector: seedbox_machine::snapshot::Record::decode(r)?,
+            feature_selector: seedbox_machine::snapshot::Record::decode(r)?,
+            driver_selector: seedbox_machine::snapshot::Record::decode(r)?,
+            features: seedbox_machine::snapshot::Record::decode(r)?,
+            status: seedbox_machine::snapshot::Record::decode(r)?,
+            interrupt: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }

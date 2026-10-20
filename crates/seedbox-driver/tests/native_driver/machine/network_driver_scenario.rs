@@ -205,7 +205,7 @@ where
         let outcome = driver
             .step(Timestamp::from_nanos(scenario.limit))
             .unwrap_or_else(|error| panic!("driver step: {error:?}"));
-        for event in driver.drain_events() {
+        for event in driver.drain_observations().events {
             if let EventKind::Output(output) = &event.kind {
                 let index = ids.iter().position(|id| *id == output.machine).unwrap();
                 match &output.payload {

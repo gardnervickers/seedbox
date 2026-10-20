@@ -289,8 +289,8 @@ fn owner_state_boundary_and_disk_mismatches_are_rejected() {
             2 => c.pending_at = Some(0),
             3 => c.input = vec![1],
             4 => {
-                c.writes = vec![crate::pv::transport::GuestWrite::Console(
-                    crate::pv::transport::LifecycleWrite {
+                c.writes = vec![seedbox_machine::pv::transport::GuestWrite::Console(
+                    seedbox_machine::pv::transport::LifecycleWrite {
                         time: 0,
                         bytes: vec![1],
                     },

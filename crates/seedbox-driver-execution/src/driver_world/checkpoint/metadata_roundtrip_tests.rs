@@ -26,12 +26,12 @@ fn tcg_policy_option_survives_envelope_and_descriptor_roundtrip_without_defaulti
             .remove("blocks_per_progress_call");
         value["policy"] = serde_json::to_value(&selected).unwrap();
         let inventory: wire::Inventory = serde_json::from_value(value).unwrap();
-        assert_eq!(inventory.tcg_policy(), selected.as_ref());
+        assert_eq!(inventory.backend_policy(), selected.as_ref());
         if selected.is_none() {
             let mut older = serde_json::to_value(&inventory).unwrap();
             older.as_object_mut().unwrap().remove("policy");
             let older: wire::Inventory = serde_json::from_value(older).unwrap();
-            assert!(older.tcg_policy().is_none());
+            assert!(older.backend_policy().is_none());
         }
         let mut driver = driver(1, 1, Arc::default(), Arc::default(), None);
         let mut state = state(1);
@@ -50,7 +50,7 @@ fn tcg_policy_option_survives_envelope_and_descriptor_roundtrip_without_defaulti
         .unwrap();
         let envelope = read(&path).unwrap();
         assert_eq!(envelope.version, wire::ENVELOPE_VERSION);
-        assert_eq!(envelope.inventory.tcg_policy(), selected.as_ref());
+        assert_eq!(envelope.inventory.backend_policy(), selected.as_ref());
         super::super::open(&envelope, limits()).unwrap();
         crate::driver_world::build::validate_policy_binding(&inventory, &envelope.inventory)
             .unwrap();

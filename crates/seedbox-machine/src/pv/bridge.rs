@@ -198,9 +198,9 @@ impl GuestBridge {
 mod tests;
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::snapshot::record::Record for SessionMap {
-    const MIN: u64 = <NonZeroU32 as crate::snapshot::record::Record>::MIN
-        + <NonZeroU32 as crate::snapshot::record::Record>::MIN;
+impl crate::snapshot::Record for SessionMap {
+    const MIN: u64 =
+        <NonZeroU32 as crate::snapshot::Record>::MIN + <NonZeroU32 as crate::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut crate::snapshot::Writer<'_, W>,
@@ -214,18 +214,18 @@ impl crate::snapshot::record::Record for SessionMap {
         r: &mut crate::snapshot::Reader<'_, R>,
     ) -> crate::snapshot::Result<Self> {
         Ok(Self {
-            wire: crate::snapshot::record::Record::decode(r)?,
-            public: crate::snapshot::record::Record::decode(r)?,
+            wire: crate::snapshot::Record::decode(r)?,
+            public: crate::snapshot::Record::decode(r)?,
         })
     }
 }
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::snapshot::record::Record for GuestBridge {
-    const MIN: u64 = <Codec as crate::snapshot::record::Record>::MIN
-        + <u32 as crate::snapshot::record::Record>::MIN
-        + <Option<SessionMap> as crate::snapshot::record::Record>::MIN
-        + <Vec<oracle::Correlation> as crate::snapshot::record::Record>::MIN;
+impl crate::snapshot::Record for GuestBridge {
+    const MIN: u64 = <Codec as crate::snapshot::Record>::MIN
+        + <u32 as crate::snapshot::Record>::MIN
+        + <Option<SessionMap> as crate::snapshot::Record>::MIN
+        + <Vec<oracle::Correlation> as crate::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut crate::snapshot::Writer<'_, W>,
@@ -258,7 +258,7 @@ impl GuestBridge {
         &self,
         output: &mut crate::snapshot::Writer<'_, W>,
     ) -> crate::snapshot::Result<()> {
-        crate::snapshot::record::Record::encode(self, output)
+        crate::snapshot::Record::encode(self, output)
     }
     /// Decode one closed bridge record under the enclosing body's quotas and
     /// validate identities, poison, correlations and time without performing I/O
@@ -334,10 +334,7 @@ impl GuestBridge {
         r: &mut crate::snapshot::Reader<'_, R>,
         capture_boundary: bool,
     ) -> crate::snapshot::Result<Self> {
-        use crate::snapshot::{
-            record::{charge_index, Record},
-            CodecError,
-        };
+        use crate::snapshot::{charge_index, CodecError, Record};
         let codec = Record::decode(r)?;
         let session_highwater = Record::decode(r)?;
         let session = Record::decode(r)?;

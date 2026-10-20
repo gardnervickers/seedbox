@@ -5,7 +5,6 @@ wire_enum!(Process; units {0=>Running,1=>Stopped,2=>Frozen} tuples {} records {}
 wire_enum!(CommandKind; units {1=>StepRealtime} tuples {0=>Application(v0)} records {});
 wire_enum!(Effect; units {0=>Spawn,1=>Pause,2=>Resume,3=>Crash,4=>Reboot,5=>Shutdown,10=>Partition,11=>Unpartition,13=>Unshape,14=>Select,15=>Unselect} tuples {6=>Execution(v0),7=>Drift(v0),8=>StepRealtime(v0),9=>Process(v0),12=>Shape(v0,v1)} records {});
 wire_enum!(Scope; units {} tuples {} records {0=>Machine{name,boot},1=>Links{left,right},2=>DirectedLinks{from,to},3=>Connection{connection}});
-wire_enum!(SettlementStatus; units {0=>Applied,1=>Unavailable,2=>Rejected,3=>Failed} tuples {} records {});
 wire_enum!(FaultAction; units {1=>Heal} tuples {0=>Effect(v0)} records {});
 wire_enum!(Requester; units {} tuples {1=>Trigger(v0),2=>Input(v0)} records {0=>Call{source,id}});
 wire_struct!(Admitted {
@@ -89,18 +88,7 @@ wire_struct!(Service {
 impl Service {
     fn check_pending_handle_persist(&self, p: &Pending) -> crate::persistence::Result<()> {
         use crate::persistence::require;
-        let expected = match p.effect {
-            Effect::Execution(c) => Some(Change::Execution(c)),
-            Effect::Drift(c) => Some(Change::Drift(c)),
-            Effect::StepRealtime(n) => Some(Change::Step(n)),
-            Effect::Partition => Some(Change::Partition),
-            Effect::Unpartition => Some(Change::Unpartition),
-            Effect::Shape(p, f) => Some(Change::Shape(p, f)),
-            Effect::Unshape => Some(Change::Unshape),
-            Effect::Select => Some(Change::Select),
-            Effect::Unselect => Some(Change::Unselect),
-            _ => None,
-        };
+        let expected = p.effect.handle_change();
         require(
             p.handle.is_some() == expected.is_some(),
             "pending handle effect",

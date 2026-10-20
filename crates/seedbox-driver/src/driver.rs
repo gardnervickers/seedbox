@@ -16,6 +16,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     num::NonZeroU32,
+    ops::ControlFlow,
     panic::{catch_unwind, AssertUnwindSafe},
     sync::{mpsc, Arc},
     time::{Duration, Instant},
@@ -23,6 +24,7 @@ use std::{
 
 mod admission;
 pub use admission::{DueOutcome, PreparedInput, PreparedOutcome};
+mod batch;
 mod boot_end;
 mod checkpoint;
 mod evidence;
@@ -31,6 +33,7 @@ pub use crate::persistence::{CodecError, DecodeLimits, SnapshotReference};
 pub use checkpoint::{Checkpoint, CheckpointMapError};
 mod control;
 mod controller;
+mod due;
 // TODO: Re-evaluate: the service needs a pure compilation seam in the executing
 // owner; keeping it in application or engine-core would duplicate Driver policy.
 // This exports no scheduler, lifecycle or admission-state setters.
@@ -38,7 +41,7 @@ pub mod faults;
 pub use controller::ControllerSetup;
 mod event;
 mod observation;
-pub use observation::{Committed, CommittedChange, FlushResults};
+pub use observation::FlushResults;
 mod input;
 mod network;
 #[cfg(test)]
@@ -256,26 +259,12 @@ struct ExecutionState<M> {
 
 /// Already-committed descriptions owned by one observer session. These are
 /// distinct from Entry::staged, whose accepted outputs still drive execution.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct ObservationState {
     staged_events: Vec<Staged>,
     published: Vec<Event>,
     next_sequence: u64,
-    capacity: usize,
-    omitted: u64,
     frames: observation::FrameObservations,
-}
-impl Default for ObservationState {
-    fn default() -> Self {
-        Self {
-            staged_events: Vec::new(),
-            published: Vec::new(),
-            next_sequence: 0,
-            capacity: usize::MAX,
-            omitted: 0,
-            frames: observation::FrameObservations::default(),
-        }
-    }
 }
 
 /// Owns simulation scheduling and shared time.
@@ -338,7 +327,7 @@ impl Default for ObservationState {
 /// stays queued while paused; crashes still terminate paused machines.
 /// Guest simulation-control calls are interpreted after their full round commits.
 /// Their effects and replies join the same ordered timeline at that barrier;
-/// draining events (`Driver::drain_events`) only observes them. Accepted control work survives caller
+/// draining events (`Driver::drain_observations`) only observes them. Accepted control work survives caller
 /// loss. Calls generated together are queued before their generated effects;
 /// dependent operations must await acknowledgment rather than assume that a
 /// concurrent Pause/Resume sequence succeeds. Oracle completion publishes the full response batch before stopping
@@ -348,7 +337,6 @@ pub struct Driver<M: Machine> {
     execution: ExecutionState<M>,
     playback: Playback,
     observations: ObservationState,
-    committed: Vec<Committed>,
     factory: MachineFactory<M>,
 }
 
@@ -580,7 +568,6 @@ where
                 frames,
                 ..ObservationState::default()
             },
-            committed: Vec::new(),
             playback: Playback::default(),
             factory: Box::new(factory),
         };
@@ -608,80 +595,14 @@ where
         self.observations.frames.set_capacity(capacity);
     }
 
-    /// Drain committed bounded frame observations independently of EventKind.
-    /// Works after failure/stop/completion, does no machine work, and never
-    /// changes authoritative counters or dense event/witness sequencing.
-    /// This legacy selective drain also consumes the required-change prefix;
-    /// hosts needing that prefix must use `drain_observations` exclusively.
-    pub fn drain_frames(&mut self) -> FrameFacts {
-        let mut batch = self.drain_observations();
-        let frames = std::mem::take(&mut batch.frames);
-        self.restore_other_observations(batch);
-        frames
-    }
-
-    /// Bound retained Event copies; zero disables copies, never committed changes.
-    /// Shrink and overflow count actual omissions returned by the unified drain.
-    // TODO: Re-evaluate: host retention must be changeable without changing causal
-    // bookkeeping; constructor-only configuration cannot rebind restored viewers.
-    pub fn set_event_capacity(&mut self, capacity: usize) {
-        self.observations.capacity = capacity;
-        let removed = self.observations.published.len().saturating_sub(capacity);
-        self.observations.published.truncate(capacity);
-        self.observations.omitted = self.observations.omitted.saturating_add(removed as u64);
-    }
-
-    /// Transfer committed bookkeeping and optional descriptions exactly once.
-    /// Changes are never capacity-limited. Retained events and frames may have
-    /// explicit gaps; this never executes work or drains future scheduled inputs.
-    /// Use this API exclusively when consuming required changes: legacy selective
-    /// drains consume that prefix without returning its typed duplicate.
-    // TODO: Re-evaluate: one handoff prevents service input/status continuation
-    // from depending on optional Event retention or a second publication path.
-    pub fn drain_observations(&mut self) -> FlushResults {
-        FlushResults {
-            position: self.position(),
-            changes: std::mem::take(&mut self.committed),
-            events: std::mem::take(&mut self.observations.published),
-            frames: self.observations.frames.drain(),
-            omitted_events: std::mem::take(&mut self.observations.omitted),
-            next_event_sequence: self.observations.next_sequence,
-        }
-    }
-
-    // Legacy selective drains delegate to the same handoff and leave other
-    // optional streams untouched. They consume the required-change prefix too:
-    // legacy clients process their own Event facts, and must not retain an
-    // unbounded, inaccessible duplicate. Hosts needing required changes use
-    // drain_observations exclusively; the service does so.
-    fn restore_other_observations(&mut self, batch: FlushResults) {
-        self.observations.published = batch.events;
-        self.observations.omitted = batch.omitted_events;
-        self.observations.frames.restore(batch.frames);
-    }
-
-    /// Read cumulative per-pair decisions and confirmed receive offers without
-    /// machine work, draining observations or changing event/witness sequencing.
-    /// These totals remain independent of bounded frame-fact omission. Like
-    /// Driver state generally, terminal failure does not promise rollback.
-    // TODO: Re-evaluate: world counters cannot be reconstructed from an omitted
-    // observation stream; a typed network-only projection avoids generic Inspect.
-    /// Keys are directed insertion identities, not concatenated display names;
-    /// all pairs are retained even when names contain `->` or other punctuation.
-    pub fn network_counters(&self) -> BTreeMap<NetworkPair, NetworkPairCounts> {
-        self.execution.network.counts()
-    }
-
-    /// Take all undrained events in publication order.
+    /// Transfer committed bookkeeping, events and frame facts exactly once.
     ///
     /// This works in every state, including after a failed `step`, a
-    /// permanent stop and oracle completion, and never runs simulation work.
-    /// Each event is returned exactly once. The driver keeps no history of
-    /// drained events: the host owns retained history. Default retention is
-    /// unbounded; hosts should drain after every `step` and barrier callback.
-    /// This legacy selective drain also consumes the required-change prefix.
-    /// Use `drain_observations` exclusively for required changes and explicit loss
-    /// watermarks when `set_event_capacity` limits optional copies.
+    /// permanent stop and oracle completion, and never runs simulation work or
+    /// drains future scheduled inputs. The driver keeps no history of drained
+    /// events: the host owns retained history. Retention is unbounded; hosts
+    /// should drain after every `step` and barrier callback. Frame facts are
+    /// bounded by `set_frame_capacity` and report their own omissions.
     ///
     /// # Order
     ///
@@ -726,11 +647,14 @@ where
     /// the machine definitions, the seed and host inputs (barrier operations
     /// and the `upto` bounds passed to `step`). Worker count and playback rate
     /// never change it.
-    pub fn drain_events(&mut self) -> Vec<Event> {
-        let mut batch = self.drain_observations();
-        let events = std::mem::take(&mut batch.events);
-        self.restore_other_observations(batch);
-        events
+    // TODO: Re-evaluate: one handoff prevents service input/status continuation
+    // from depending on optional Event retention or a second publication path.
+    pub fn drain_observations(&mut self) -> FlushResults {
+        FlushResults {
+            position: self.position(),
+            events: std::mem::take(&mut self.observations.published),
+            frames: self.observations.frames.drain(),
+        }
     }
 
     fn stage_notices(&mut self) {
@@ -744,18 +668,9 @@ where
     }
 
     fn creates_handle(action: &crate::oracle::service::FaultAction) -> bool {
-        use crate::oracle::service::{Effect, FaultAction};
-        matches!(
-            action,
-            FaultAction::Effect(
-                Effect::Execution(_)
-                    | Effect::Drift(_)
-                    | Effect::StepRealtime(_)
-                    | Effect::Partition
-                    | Effect::Shape(..)
-                    | Effect::Select
-            )
-        )
+        use crate::oracle::service::FaultAction;
+        matches!(action, FaultAction::Effect(effect)
+            if effect.handle_change().is_some_and(|change| change.installs()))
     }
 
     /// Follow a host input key from admission to settlement and, for a
@@ -839,28 +754,17 @@ where
                     }
                 },
             };
-            if let Some(change) = CommittedChange::from_event(&kind) {
-                self.committed.push(Committed {
-                    position,
-                    at,
-                    change,
-                });
-            }
             // Observer exhaustion can lose descriptions, never poison execution.
             let sequence = self.observations.next_sequence;
             if let Some(next) = sequence.checked_add(1) {
                 self.observations.next_sequence = next;
-                if self.observations.published.len() < self.observations.capacity {
-                    self.observations.published.push(Event {
-                        sequence,
-                        position,
-                        at,
-                        kind,
-                    });
-                    continue;
-                }
+                self.observations.published.push(Event {
+                    sequence,
+                    position,
+                    at,
+                    kind,
+                });
             }
-            self.observations.omitted = self.observations.omitted.saturating_add(1);
         }
         result
     }
@@ -1119,46 +1023,8 @@ where
         }
         // Stable sorting preserves each machine's emission order at one time.
         outputs.sort_by_key(|output| (output.at, output.machine));
-        // Frames are routed in publication order; validated when their run was accepted.
-        let position = self.position();
-        let observation_mark = self.observations.frames.mark();
-        for output in &outputs {
-            if let Response::TransmitFrame { bytes } = &output.payload {
-                if let Err(error) = self.execution.network.route_at(
-                    position,
-                    output.machine,
-                    output.at.as_nanos(),
-                    bytes,
-                    &mut self.observations.frames,
-                ) {
-                    self.observations.frames.discard(observation_mark);
-                    return Err(match error {
-                        network::RouteError::ArrivalOverflow => Error::TimeOverflow,
-                        network::RouteError::SequenceOverflow => Error::PositionOverflow,
-                    });
-                }
-            }
-        }
-        let mut terminal = None;
-        for output in &outputs {
-            if output.machine != self.execution.oracle {
-                continue;
-            }
-            match output.payload {
-                Response::ApplicationOutcome { code } => {
-                    terminal.get_or_insert(ExitReason::ProgramExit {
-                        code: i32::from(code),
-                    });
-                }
-                Response::CommandAcknowledged { id, result }
-                    if self.execution.oracle_stops.remove(&(output.boot, id))
-                        && result == crate::pv::CommandResult::Completed =>
-                {
-                    terminal.get_or_insert(ExitReason::Shutdown);
-                }
-                _ => {}
-            }
-        }
+        self.route_frames(&outputs)?;
+        let terminal = self.oracle_terminal(&outputs);
         for output in &outputs {
             self.stage(output.at, EventKind::Output(output.clone()));
         }
@@ -1217,30 +1083,7 @@ where
                 .service
                 .cut_off_triggers(self.now().as_nanos());
         } else {
-            for call in calls {
-                let at = match &call {
-                    control::Event::Call { observed, .. }
-                        if self.execution.control.controller.is_some() =>
-                    {
-                        Timestamp::from_nanos(
-                            observed
-                                .checked_add(self.execution.control.service.reply_latency_ns)
-                                .ok_or(Error::TimeOverflow)?,
-                        )
-                    }
-                    _ => self.now(),
-                };
-                if at < self.now() {
-                    return Err(Error::Control(
-                        "control admission precedes committed boundary".into(),
-                    ));
-                }
-                self.execution
-                    .events
-                    .entry(at)
-                    .or_default()
-                    .push_back(Scheduled::Control(call));
-            }
+            self.schedule_calls(calls)?;
             self.control_plans(plans)?;
             let now = self.now().as_nanos();
             let plans = self
@@ -1254,6 +1097,88 @@ where
             self.sync_trigger_marker();
         }
         self.flush_events()
+    }
+
+    /// Route committed frames in publication order; they were validated when
+    /// their run was accepted. A routing failure discards this commit's frame
+    /// observations.
+    fn route_frames(&mut self, outputs: &[MachineResponse]) -> Result<(), Error<M::Error>> {
+        let position = self.position();
+        let observation_mark = self.observations.frames.mark();
+        for output in outputs {
+            if let Response::TransmitFrame { bytes } = &output.payload {
+                if let Err(error) = self.execution.network.route_at(
+                    position,
+                    output.machine,
+                    output.at.as_nanos(),
+                    bytes,
+                    &mut self.observations.frames,
+                ) {
+                    self.observations.frames.discard(observation_mark);
+                    return Err(match error {
+                        network::RouteError::ArrivalOverflow => Error::TimeOverflow,
+                        network::RouteError::SequenceOverflow => Error::PositionOverflow,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The oracle's terminal outcome among committed outputs: its application
+    /// outcome, or the completion of an offered Stop, which this consumes.
+    fn oracle_terminal(&mut self, outputs: &[MachineResponse]) -> Option<ExitReason> {
+        let mut terminal = None;
+        for output in outputs {
+            if output.machine != self.execution.oracle {
+                continue;
+            }
+            match output.payload {
+                Response::ApplicationOutcome { code } => {
+                    terminal.get_or_insert(ExitReason::ProgramExit {
+                        code: i32::from(code),
+                    });
+                }
+                Response::CommandAcknowledged { id, result }
+                    if self.execution.oracle_stops.remove(&(output.boot, id))
+                        && result == crate::pv::CommandResult::Completed =>
+                {
+                    terminal.get_or_insert(ExitReason::Shutdown);
+                }
+                _ => {}
+            }
+        }
+        terminal
+    }
+
+    /// Queue committed guest calls on the timeline: at the commit, or after
+    /// the reply latency from their observation with a controller configured.
+    fn schedule_calls(&mut self, calls: Vec<control::Event>) -> Result<(), Error<M::Error>> {
+        for call in calls {
+            let at = match &call {
+                control::Event::Call { observed, .. }
+                    if self.execution.control.controller.is_some() =>
+                {
+                    Timestamp::from_nanos(
+                        observed
+                            .checked_add(self.execution.control.service.reply_latency_ns)
+                            .ok_or(Error::TimeOverflow)?,
+                    )
+                }
+                _ => self.now(),
+            };
+            if at < self.now() {
+                return Err(Error::Control(
+                    "control admission precedes committed boundary".into(),
+                ));
+            }
+            self.execution
+                .events
+                .entry(at)
+                .or_default()
+                .push_back(Scheduled::Control(call));
+        }
+        Ok(())
     }
 
     fn sync_trigger_marker(&mut self) {
@@ -1457,955 +1382,6 @@ where
             return Ok(StepOutcome::BeforeFault { at, fault });
         }
         Ok(self.outcome())
-    }
-
-    fn run_batch(&mut self, ids: &[MachineId], upto: Timestamp) -> Result<(), Error<M::Error>> {
-        self.run_batch_as(ids, upto, None)
-    }
-
-    /// Run a batch. `rebooting` names the operation-local prospective boot of
-    /// a single machine's Reboot admission run: its outputs carry that boot,
-    /// which `Control::admission` commits only after the run is confirmed.
-    fn run_batch_as(
-        &mut self,
-        ids: &[MachineId],
-        upto: Timestamp,
-        rebooting: Option<u64>,
-    ) -> Result<(), Error<M::Error>> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-        debug_assert!(rebooting.is_none() || ids.len() == 1);
-        let boot_of = |entry: &Entry<M>| rebooting.unwrap_or(entry.lifecycle.boot());
-        let now = self.now();
-        let offered_commands: Vec<_> = ids
-            .iter()
-            .flat_map(|&machine| {
-                self.execution.machines[machine.0]
-                    .inbox
-                    .iter()
-                    .filter_map(move |input| {
-                        control::command(&input.payload).map(|(id, _)| (machine, id, input.at))
-                    })
-            })
-            .collect();
-        let offered_stops: Vec<_> = if ids.contains(&self.execution.oracle) {
-            self.execution.machines[self.execution.oracle.0]
-                .inbox
-                .iter()
-                .filter_map(|input| {
-                    if let Request::Application {
-                        id,
-                        command: crate::pv::ApplicationCommand::Stop,
-                    } = input.payload
-                    {
-                        Some(id)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        // Map the common barrier into every machine's own time base before
-        // submitting any work: start, bound and due inputs. Inputs that became
-        // due before the last rate change are offered at that change.
-        let mut bounds = BTreeMap::new();
-        let mut views = Vec::with_capacity(ids.len());
-        for &id in ids {
-            let entry = &self.execution.machines[id.0];
-            let start = entry.machine_time(id, now)?;
-            let bound = entry.machine_time(id, upto)?;
-            let anchor = Timestamp::from_nanos(entry.time.anchor());
-            let inbox = entry
-                .inbox
-                .iter()
-                .map(|input| {
-                    Ok(Input {
-                        at: entry.machine_time(id, input.at.max(anchor))?.min(start),
-                        payload: input.payload.clone(),
-                    })
-                })
-                .collect::<Result<VecDeque<_>, ClockOverflow>>()?;
-            bounds.insert(id, (start, bound, inbox.len()));
-            views.push((id, start, bound, inbox));
-        }
-        let (send, receive) = mpsc::channel();
-        let mut submission_error = None;
-        for (id, start, bound, mut inbox) in views {
-            let entry = &mut self.execution.machines[id.0];
-            let mut machine = entry.machine.take().expect("stopped machine");
-            let mut rng = entry.rng.take().expect("stopped machine RNG");
-            let execution = entry.lifecycle.execution();
-            let mut outputs = Vec::new();
-            let result = send.clone();
-            if let Err(error) = self.workers.submit(id.0, move |context| {
-                let stopped = catch_unwind(AssertUnwindSafe(|| {
-                    machine.run(
-                        &mut RunContext {
-                            worker: context,
-                            clock: &FixedClock(start.as_nanos()),
-                            rng: &mut rng,
-                            execution,
-                            inbox: Inbox::new(&mut inbox, start),
-                            outbox: Outbox::new(&mut outputs, start, bound),
-                        },
-                        bound,
-                    )
-                }))
-                .map_err(|_| Error::Panicked { id })
-                .and_then(|result| result.map_err(|source| Error::Machine { id, source }));
-                let _ = result.send((id, machine, rng, inbox.len(), outputs, stopped));
-            }) {
-                submission_error = Some(error);
-                break;
-            }
-        }
-        drop(send);
-        // All submitted jobs must finish before changing the clock or returning.
-        // Results are ordered by identity, never by worker completion time.
-        let mut reports: Vec<_> = receive.into_iter().collect();
-        reports.sort_by_key(|(id, _, _, _, _, _)| *id);
-        let mut stops = Vec::with_capacity(reports.len());
-        for (id, machine, rng, remaining, outputs, stopped) in reports {
-            let entry = &mut self.execution.machines[id.0];
-            entry.machine = Some(machine);
-            entry.rng = Some(rng);
-            // Accepted inputs are the taken prefix; the rest stay in simulation time.
-            let taken = bounds[&id]
-                .2
-                .saturating_sub(remaining)
-                .min(entry.inbox.len());
-            let admitted_end = entry
-                .inbox
-                .iter()
-                .take(taken)
-                .any(|input| matches!(input.payload, Request::Crash | Request::Reboot));
-            entry.inbox.drain(..taken);
-            stops.push((id, outputs, stopped, admitted_end));
-        }
-        if let Some(error) = submission_error {
-            return Err(error);
-        }
-        // Validate each stop in its machine's time base, then convert back.
-        // The conversion returns the earliest simulation time whose machine
-        // time reaches the reported one, so nothing is reported early, and a
-        // machine time at most the mapped bound maps to at most `upto`.
-        let mut accepted = Vec::with_capacity(stops.len());
-        for (id, outputs, result, admitted_end) in stops {
-            let stopped = result?;
-            let (start, bound, _) = bounds[&id];
-            let entry = &self.execution.machines[id.0];
-            let last_ended = boot_end::validate(
-                &outputs,
-                entry.lifecycle.boot(),
-                entry.last_ended_published,
-                entry.stopped,
-                stopped,
-                admitted_end,
-            )
-            .map_err(|detail| Error::InvalidBootEnd { id, detail })?;
-            let reached = match stopped {
-                StopReason::BoundaryReached => bound,
-                StopReason::Blocked { reached, deadline } => {
-                    if deadline.is_some_and(|at| at <= reached.max(start)) {
-                        return Err(Error::InvalidStop { id, stopped });
-                    }
-                    reached
-                }
-                StopReason::Exited { reached, .. } => reached,
-            };
-            if reached < entry.position.max(start) || reached > bound {
-                return Err(Error::InvalidStop { id, stopped });
-            }
-            if let Some(output) = outputs.iter().find(|output| output.at > reached) {
-                return Err(Error::InvalidOutput {
-                    id,
-                    at: output.at,
-                    reached,
-                });
-            }
-            if outputs.iter().any(|output| {
-                matches!(&output.payload, Response::TransmitFrame { bytes }
-                    if !self.execution.network.attached(id) || !crate::pv::frame_in_bounds(bytes))
-            }) {
-                return Err(Error::InvalidFrame { id });
-            }
-            let simulation = |at| entry.simulation_time(now, at).ok_or(ClockOverflow(id));
-            let (converted, timer) = match stopped {
-                StopReason::BoundaryReached => (StopReason::BoundaryReached, None),
-                StopReason::Blocked { deadline, .. } => (
-                    StopReason::Blocked {
-                        reached: simulation(reached)?,
-                        // A timer no simulation time can reach never fires.
-                        deadline: deadline.and_then(|at| entry.simulation_time(now, at)),
-                    },
-                    deadline,
-                ),
-                StopReason::Exited { reason, .. } => (
-                    StopReason::Exited {
-                        reached: simulation(reached)?,
-                        reason,
-                    },
-                    None,
-                ),
-            };
-            let outputs = outputs
-                .into_iter()
-                .map(|output| {
-                    Ok(crate::pv::Output {
-                        at: simulation(output.at)?,
-                        payload: output.payload,
-                    })
-                })
-                .collect::<Result<Vec<_>, ClockOverflow>>()?;
-            let simulated = match converted {
-                StopReason::BoundaryReached => upto,
-                StopReason::Blocked { reached, .. } | StopReason::Exited { reached, .. } => reached,
-            };
-            debug_assert!(simulated >= now && simulated <= upto);
-            accepted.push((
-                id, simulated, converted, outputs, reached, timer, last_ended,
-            ));
-        }
-        for &(id, command, at) in &offered_commands {
-            let entry = &mut self.execution.machines[id.0];
-            if !entry.inbox.iter().any(|input| {
-                control::command(&input.payload).is_some_and(|(pending, _)| pending == command)
-            }) {
-                let boot = boot_of(entry);
-                self.execution
-                    .control
-                    .accepted(id, &mut entry.lifecycle, boot, command, at, upto)
-                    .map_err(Error::Control)?;
-            }
-        }
-        for (id, reached, stopped, outputs, position, timer, last_ended) in accepted {
-            let entry = &mut self.execution.machines[id.0];
-            let boot = boot_of(entry);
-            if id == self.execution.oracle {
-                for &command in &offered_stops {
-                    let unconsumed = entry.inbox.iter().any(|input| matches!(input.payload,
-                        Request::Application { id, command: crate::pv::ApplicationCommand::Stop } if id == command));
-                    if !unconsumed {
-                        self.execution.oracle_stops.insert((boot, command));
-                    }
-                }
-            }
-            entry.reached = reached;
-            entry.stopped = stopped;
-            entry.position = position;
-            entry.timer = timer;
-            entry.last_ended_published = last_ended;
-            entry
-                .staged
-                .extend(outputs.into_iter().map(|output| MachineResponse {
-                    machine: id,
-                    boot,
-                    at: output.at,
-                    payload: output.payload,
-                }));
-            if matches!(stopped, StopReason::Exited { .. }) {
-                // Only admitted work belongs to this ended boot. Future
-                // requests remain ordered in the driver timeline.
-                entry.inbox.clear();
-            }
-        }
-        Ok(())
-    }
-
-    fn apply_due(&mut self, host_now: Instant) -> Result<Option<FaultRecord>, Error<M::Error>> {
-        self.apply_due_mode(host_now, false)
-    }
-
-    fn apply_due_mode(
-        &mut self,
-        host_now: Instant,
-        hold_paused: bool,
-    ) -> Result<Option<FaultRecord>, Error<M::Error>> {
-        let result = self.apply_due_inner(host_now, hold_paused);
-        // Facts of a final uncommitted item belong to the current barrier.
-        let flushed = self.flush_events();
-        let result = result?;
-        flushed.map(|()| result)
-    }
-
-    fn apply_due_inner(
-        &mut self,
-        host_now: Instant,
-        hold_paused: bool,
-    ) -> Result<Option<FaultRecord>, Error<M::Error>> {
-        if self.execution.finished.is_some() {
-            return Ok(None);
-        }
-        let now = self.now();
-        let mut waking = Vec::new();
-        // Keep the front event until its effect is admitted, including across
-        // a pre-fault stop. Driver controls and requests share one FIFO timeline.
-        // Frames due now follow every timeline item due now, then timers.
-        loop {
-            while let Some(scheduled) = self
-                .execution
-                .events
-                .get(&now)
-                .and_then(|events| events.front())
-                .cloned()
-            {
-                // Facts of the previous item that committed no barrier belong to
-                // the current one, before this item can commit another.
-                self.flush_events()?;
-                // An effect plan is effective when its dispatch check passes. That
-                // check runs before the plan leaves the FIFO front, so a hold keeps
-                // this exact plan, and every later same-time item, pending.
-                let mut checked = None;
-                if let Scheduled::Control(control::Event::Plan(
-                    crate::oracle::service::Plan::Effect { fault, .. },
-                )) = &scheduled
-                {
-                    let fault = *fault;
-                    let check = self
-                        .execution
-                        .control
-                        .invoke(&self.execution.machines, |service, view| {
-                            service.dispatch_check(view, fault)
-                        })
-                        .map_err(Error::Control)?;
-                    if matches!(check, Some(Ok(()))) {
-                        let was_held = self.playback.held.take().is_some();
-                        if self.playback.before_next && !was_held {
-                            let record = self
-                                .execution
-                                .control
-                                .pending_record(fault)
-                                .map_err(Error::Control)?;
-                            self.playback
-                                .hold(record.clone(), self.position(), host_now);
-                            return Ok(Some(record));
-                        }
-                        if hold_paused && !was_held && self.playback.holds_unarmed_effect() {
-                            let record = self
-                                .execution
-                                .control
-                                .pending_record(fault)
-                                .map_err(Error::Control)?;
-                            self.playback.held = Some(record.clone());
-                            return Ok(Some(record));
-                        }
-                    }
-                    checked = Some(check);
-                }
-                let events = self.execution.events.get_mut(&now).expect("due events");
-                events.pop_front();
-                if events.is_empty() {
-                    self.execution.events.remove(&now);
-                }
-                let mut service_effect = None;
-                let mut service_origin = None;
-                let mut accepted_fault = None;
-                let mut reply_boot = None;
-                let scheduled = match scheduled {
-                    Scheduled::Control(event) => {
-                        use crate::oracle::service::{Effect, Plan};
-                        match event {
-                            control::Event::Reply {
-                                target,
-                                boot,
-                                id,
-                                payload,
-                            } => {
-                                if self.execution.machines[target.0].lifecycle.boot() != boot
-                                    || matches!(
-                                        self.execution.machines[target.0].stopped,
-                                        StopReason::Exited { .. }
-                                    )
-                                {
-                                    continue;
-                                }
-                                reply_boot = Some(boot);
-                                Scheduled::Input {
-                                    id: target,
-                                    input: Input {
-                                        at: now,
-                                        payload: Request::SimulationReply { id, payload },
-                                    },
-                                }
-                            }
-                            control::Event::Call {
-                                source,
-                                boot,
-                                id,
-                                observed,
-                                payload,
-                            } => {
-                                let configured = self.execution.control.controller.is_some();
-                                if configured
-                                    && (self.execution.machines[source.0].lifecycle.boot() != boot
-                                        || matches!(
-                                            self.execution.machines[source.0].stopped,
-                                            StopReason::Exited { .. }
-                                        ))
-                                {
-                                    continue;
-                                }
-                                let excluded = self
-                                    .execution
-                                    .control
-                                    .controller
-                                    .and_then(|setup| setup.controller);
-                                if !configured {
-                                    self.execution.control.record_call(source, id, boot);
-                                }
-                                let plans = self
-                                    .execution
-                                    .control
-                                    .invoke_with_network(
-                                        &self.execution.machines,
-                                        Some(&self.execution.network),
-                                        |service, view| {
-                                            view.guest_controller = excluded;
-                                            if configured {
-                                                service.admit_for_boot(
-                                                    view,
-                                                    (control::Control::source(source), boot),
-                                                    id,
-                                                    observed,
-                                                    now.as_nanos(),
-                                                    &payload,
-                                                )
-                                            } else {
-                                                service.admit(
-                                                    view,
-                                                    control::Control::source(source),
-                                                    id,
-                                                    observed,
-                                                    now.as_nanos(),
-                                                    &payload,
-                                                )
-                                            }
-                                        },
-                                    )
-                                    .map_err(Error::Control)?;
-                                self.control_plans(plans)?;
-                                self.commit_boundary()?;
-                                continue;
-                            }
-                            control::Event::Input {
-                                key,
-                                action,
-                                handle,
-                            } => {
-                                self.admit_input(key, action, handle, now)?;
-                                self.commit_boundary()?;
-                                continue;
-                            }
-                            control::Event::TriggerBoundary => {
-                                self.execution
-                                    .events
-                                    .entry(now)
-                                    .or_default()
-                                    .push_back(Scheduled::Control(control::Event::TriggerFinalize));
-                                continue;
-                            }
-                            control::Event::TriggerFinalize => {
-                                self.execution
-                                    .control
-                                    .service
-                                    .expire_triggers(now.as_nanos());
-                                self.sync_trigger_marker();
-                                continue;
-                            }
-                            control::Event::Plan(Plan::Wake { token, .. }) => {
-                                let plan = self
-                                    .execution
-                                    .control
-                                    .service
-                                    .wake(token, now.as_nanos())
-                                    .map_err(|e| Error::Control(e.message))?;
-                                self.control_plans(vec![plan])?;
-                                continue;
-                            }
-                            control::Event::Plan(Plan::Deadline { fault, .. }) => {
-                                // A Failed settlement publishes through service notices.
-                                if let Err(failure) = self
-                                    .execution
-                                    .control
-                                    .service
-                                    .deadline(fault, now.as_nanos())
-                                {
-                                    return Err(Error::Control(failure.message));
-                                }
-                                continue;
-                            }
-                            control::Event::Plan(Plan::Reply {
-                                source,
-                                id,
-                                payload,
-                                ..
-                            }) => {
-                                let target = self
-                                    .execution
-                                    .control
-                                    .reply_target(&source)
-                                    .map_err(Error::Control)?;
-                                reply_boot = Some(
-                                    self.execution
-                                        .control
-                                        .take_call(target, id)
-                                        .map_err(Error::Control)?,
-                                );
-                                Scheduled::Input {
-                                    id: target,
-                                    input: Input {
-                                        at: now,
-                                        payload: Request::SimulationReply { id, payload },
-                                    },
-                                }
-                            }
-                            control::Event::Plan(Plan::Effect {
-                                fault,
-                                scope,
-                                effect,
-                                command,
-                                handle,
-                                ..
-                            }) => {
-                                let check = checked.take().expect("checked effect plan");
-                                match check {
-                                    None => continue,
-                                    Some(Err(reason)) => {
-                                        let collision =
-                                            self.execution.control.service.handle_collision(fault);
-                                        let plans = self
-                                            .execution
-                                            .control
-                                            .invoke_plans(&self.execution.machines, |service, _| {
-                                                if collision {
-                                                    service.failed_without_effect(
-                                                        fault,
-                                                        now.as_nanos(),
-                                                        reason.message,
-                                                    )
-                                                } else {
-                                                    service.rejected(
-                                                        fault,
-                                                        now.as_nanos(),
-                                                        now.as_nanos(),
-                                                        reason,
-                                                    )
-                                                }
-                                            })
-                                            .map_err(Error::Control)?;
-                                        self.control_plans(plans)?;
-                                        continue;
-                                    }
-                                    Some(Ok(())) => {}
-                                }
-                                let (target, boot) = match &scope {
-                                    crate::oracle::service::Scope::Machine { name, boot } => {
-                                        (name.clone(), *boot)
-                                    }
-                                    crate::oracle::service::Scope::Connection { connection } => {
-                                        self.apply_connection(fault, connection, &effect, handle)?;
-                                        self.commit_boundary()?;
-                                        continue;
-                                    }
-                                    crate::oracle::service::Scope::DirectedLinks {
-                                        from: left,
-                                        to: right,
-                                    }
-                                    | crate::oracle::service::Scope::Links { left, right } => {
-                                        self.apply_links(fault, left, right, &effect, handle)?;
-                                        self.commit_boundary()?;
-                                        continue;
-                                    }
-                                };
-                                if effect == Effect::Spawn {
-                                    let created = self.spawn(&target, fault);
-                                    if let Err(error) = created {
-                                        self.execution.control.service.execution_failed(
-                                            fault,
-                                            None,
-                                            now.as_nanos(),
-                                            "spawn construction failed".into(),
-                                        );
-                                        self.uncertain_failure();
-                                        return Err(error);
-                                    }
-                                    let plans = self
-                                        .execution
-                                        .control
-                                        .invoke_plans(&self.execution.machines, |service, _| {
-                                            service.applied(fault, now.as_nanos(), now.as_nanos())
-                                        })
-                                        .map_err(Error::Control)?;
-                                    self.control_plans(plans)?;
-                                    self.commit_boundary()?;
-                                    continue;
-                                }
-                                accepted_fault = Some(fault);
-                                let id = self
-                                    .execution
-                                    .control
-                                    .reply_target(&target)
-                                    .map_err(Error::Control)?;
-                                debug_assert_eq!(
-                                    self.execution.machines[id.0].lifecycle.boot(),
-                                    boot
-                                );
-                                if !effect.guest_command() {
-                                    service_effect = Some(fault);
-                                }
-                                match effect {
-                                    Effect::Spawn => unreachable!("spawn handled separately"),
-                                    Effect::Partition
-                                    | Effect::Unpartition
-                                    | Effect::Shape(..)
-                                    | Effect::Unshape
-                                    | Effect::Select
-                                    | Effect::Unselect => {
-                                        return Err(Error::Control(
-                                            "link effect bound to a machine".into(),
-                                        ));
-                                    }
-                                    Effect::Pause => Scheduled::Driver(DriverEvent::Pause(id)),
-                                    Effect::Resume => Scheduled::Driver(DriverEvent::Resume(id)),
-                                    Effect::Execution(config) => {
-                                        Scheduled::Driver(DriverEvent::SetExecution {
-                                            machine: id,
-                                            config,
-                                        })
-                                    }
-                                    Effect::Drift(rate) => {
-                                        Scheduled::Driver(DriverEvent::SetClockRate {
-                                            machine: id,
-                                            rate,
-                                        })
-                                    }
-                                    Effect::StepRealtime(nanoseconds) => {
-                                        service_origin =
-                                            Some(crate::oracle::observation::Origin::Service {
-                                                fault,
-                                            });
-                                        Scheduled::Input {
-                                            id,
-                                            input: Input {
-                                                at: now,
-                                                payload: Request::StepRealtime {
-                                                    id: command.ok_or_else(|| {
-                                                        Error::Control(
-                                                            "clock plan lacks command".into(),
-                                                        )
-                                                    })?,
-                                                    nanoseconds: std::num::NonZeroI64::new(
-                                                        nanoseconds,
-                                                    )
-                                                    .ok_or_else(|| {
-                                                        Error::Control(
-                                                            "zero clock step plan".into(),
-                                                        )
-                                                    })?,
-                                                },
-                                            },
-                                        }
-                                    }
-                                    Effect::Crash => Scheduled::Input {
-                                        id,
-                                        input: Input {
-                                            at: now,
-                                            payload: Request::Crash,
-                                        },
-                                    },
-                                    Effect::Reboot => Scheduled::Input {
-                                        id,
-                                        input: Input {
-                                            at: now,
-                                            payload: Request::Reboot,
-                                        },
-                                    },
-                                    Effect::Shutdown => Scheduled::Input {
-                                        id,
-                                        input: Input {
-                                            at: now,
-                                            payload: Request::Shutdown,
-                                        },
-                                    },
-                                    Effect::Process(action) => {
-                                        service_origin =
-                                            Some(crate::oracle::observation::Origin::Service {
-                                                fault,
-                                            });
-                                        Scheduled::Input {
-                                            id,
-                                            input: Input {
-                                                at: now,
-                                                payload: Request::Application {
-                                                    id: command.ok_or_else(|| {
-                                                        Error::Control(
-                                                            "process plan lacks command".into(),
-                                                        )
-                                                    })?,
-                                                    command: action,
-                                                },
-                                            },
-                                        }
-                                    }
-                                }
-                            }
-                            control::Event::Plan(Plan::Settled(_)) => {
-                                // Receipts transfer in invoke_plans and are consumed
-                                // by control_plans; they are never executable work.
-                                return Err(Error::Control(
-                                    "settlement entered execution queue".into(),
-                                ));
-                            }
-                        }
-                    }
-                    scheduled => scheduled,
-                };
-                let mut confirmed_transition = None;
-                let cause =
-                    accepted_fault.map_or(Cause::Host, |fault| Cause::Fault(FaultId(fault)));
-                // Published only after the item takes effect without error.
-                let mut effective = None;
-                let mechanical = (|| -> Result<(), Error<M::Error>> {
-                    match scheduled {
-                        Scheduled::Control(_) => unreachable!(),
-                        Scheduled::Input { id, input } => {
-                            if let Some((command, action)) = control::command(&input.payload) {
-                                // Public scheduling creates guest commands only from
-                                // admitted faults. Only private queue tests inject raw
-                                // (external) application requests.
-                                let origin = service_origin
-                                    .unwrap_or(crate::oracle::observation::Origin::External);
-                                if !matches!(
-                                    self.execution.machines[id.0].stopped,
-                                    StopReason::Exited { .. }
-                                ) {
-                                    self.execution
-                                        .control
-                                        .offered(id, command, action, origin)
-                                        .map_err(Error::Control)?;
-                                }
-                            }
-                            use crate::oracle::observation::Transition;
-                            let boot = self.execution.machines[id.0].lifecycle.boot();
-                            let new_boot = match input.payload {
-                                Request::Reboot => {
-                                    Some(boot.checked_add(1).ok_or(Error::BootOverflow { id })?)
-                                }
-                                _ => None,
-                            };
-                            let transition = match input.payload {
-                                Request::Crash => Some(Transition::Crash),
-                                Request::Reboot => {
-                                    new_boot.map(|new_boot| Transition::Reboot { new_boot })
-                                }
-                                _ => None,
-                            };
-                            // The pause gate is cleared when this transition commits.
-                            confirmed_transition = transition.map(|transition| (id, transition));
-                            let entry = &mut self.execution.machines[id.0];
-                            match &input.payload {
-                                Request::Reboot | Request::Crash => {
-                                    if id == self.execution.oracle {
-                                        self.execution.oracle_stops.clear();
-                                    }
-                                    entry.inbox.clear();
-                                }
-                                Request::Application { .. }
-                                | Request::StepRealtime { .. }
-                                | Request::SimulationReply { .. }
-                                | Request::ReceiveFrame { .. }
-                                    if matches!(entry.stopped, StopReason::Exited { .. }) =>
-                                {
-                                    return Ok(());
-                                }
-                                Request::Application { .. }
-                                | Request::StepRealtime { .. }
-                                | Request::SimulationReply { .. }
-                                | Request::ReceiveFrame { .. }
-                                | Request::Shutdown => {}
-                                // Request is non-exhaustive across the common crate boundary.
-                                _ => {
-                                    return Err(Error::Control(
-                                        "unsupported machine request".into(),
-                                    ));
-                                }
-                            }
-                            let exited = matches!(entry.stopped, StopReason::Exited { .. });
-                            let change = |change| EventKind::Transition {
-                                machine: id,
-                                boot,
-                                change,
-                                cause,
-                            };
-                            effective = match &input.payload {
-                                Request::Crash => Some(change(event::Transition::Crashed)),
-                                Request::Reboot => new_boot.map(|new_boot| {
-                                    change(event::Transition::Rebooted { new_boot })
-                                }),
-                                Request::Shutdown if !exited => {
-                                    Some(change(event::Transition::ShutdownRequested))
-                                }
-                                // A call from an earlier boot belongs to a retired
-                                // session, which the machine silently discards.
-                                Request::SimulationReply { id: call, .. }
-                                    if reply_boot.is_none_or(|called| called == boot) =>
-                                {
-                                    Some(EventKind::ReplyAdmitted {
-                                        machine: id,
-                                        boot,
-                                        id: *call,
-                                    })
-                                }
-                                _ => None,
-                            };
-                            entry.inbox.push_back(input);
-                            // A Reboot admission run executes the prospective boot.
-                            self.run_batch_as(&[id], now, new_boot)?;
-                        }
-                        Scheduled::Driver(event) => {
-                            let (DriverEvent::Pause(id)
-                            | DriverEvent::Resume(id)
-                            | DriverEvent::SetExecution { machine: id, .. }
-                            | DriverEvent::SetClockRate { machine: id, .. }) = event;
-                            use crate::oracle::observation::Transition;
-                            let entry = &self.execution.machines[id.0];
-                            let transition = match event {
-                                DriverEvent::SetExecution { config, .. } => {
-                                    Some(Transition::Execution(config))
-                                }
-                                DriverEvent::SetClockRate { rate, .. } => {
-                                    Some(Transition::ClockRate(rate))
-                                }
-                                DriverEvent::Pause(_)
-                                    if !entry.lifecycle.paused()
-                                        && !matches!(entry.stopped, StopReason::Exited { .. }) =>
-                                {
-                                    Some(Transition::Pause)
-                                }
-                                DriverEvent::Resume(_) if entry.lifecycle.paused() => {
-                                    Some(Transition::Resume)
-                                }
-                                _ => None,
-                            };
-                            confirmed_transition = transition.map(|transition| (id, transition));
-                            effective = transition.map(|transition| EventKind::Transition {
-                                machine: id,
-                                boot: entry.lifecycle.boot(),
-                                change: match transition {
-                                    Transition::Pause => event::Transition::Paused,
-                                    Transition::Resume => event::Transition::Resumed,
-                                    Transition::Execution(config) => {
-                                        event::Transition::ExecutionSet(config)
-                                    }
-                                    Transition::ClockRate(rate) => {
-                                        event::Transition::ClockRate(rate)
-                                    }
-                                    Transition::Crash | Transition::Reboot { .. } => unreachable!(),
-                                },
-                                cause,
-                            });
-                            // Pause, resume and execution settings change only
-                            // the lifecycle record, when the transition commits.
-                            let entry = &mut self.execution.machines[id.0];
-                            match event {
-                                DriverEvent::SetExecution { .. } | DriverEvent::Pause(_) => {}
-                                DriverEvent::SetClockRate { rate, .. } => {
-                                    // Reanchor keeping the mapped time at this
-                                    // barrier, then re-convert a pending timer.
-                                    entry
-                                        .time
-                                        .set_drift(now.as_nanos(), i64::from(rate.ppb()))
-                                        .map_err(|_| Error::ClockOverflow { id })?;
-                                    if let (StopReason::Blocked { reached, .. }, Some(timer)) =
-                                        (entry.stopped, entry.timer)
-                                    {
-                                        entry.stopped = StopReason::Blocked {
-                                            reached,
-                                            deadline: entry.simulation_time(now, timer),
-                                        };
-                                    }
-                                }
-                                DriverEvent::Resume(_)
-                                    if transition.is_some()
-                                        && !matches!(entry.stopped, StopReason::Exited { .. }) =>
-                                {
-                                    self.run_batch(&[id], now)?;
-                                }
-                                DriverEvent::Resume(_) => {}
-                            }
-                        }
-                    }
-                    Ok(())
-                })();
-                if let Err(error) = mechanical {
-                    if let Some(fault) = accepted_fault {
-                        // The Failed settlement publishes through service notices.
-                        let _ = self.execution.control.service.execution_failed(
-                            fault,
-                            None,
-                            now.as_nanos(),
-                            "machine effect failed; execution state is uncertain".into(),
-                        );
-                    }
-                    self.uncertain_failure();
-                    return Err(error);
-                }
-                if let Some(kind) = effective {
-                    self.stage(now, kind);
-                }
-                if let Some((id, transition)) = confirmed_transition {
-                    let plans = self
-                        .execution
-                        .control
-                        .admission(&mut self.execution.machines, id, now, transition)
-                        .map_err(Error::Control)?;
-                    self.control_plans(plans)?;
-                }
-                if let Some(fault) = service_effect {
-                    let plans = self
-                        .execution
-                        .control
-                        .invoke_plans(&self.execution.machines, |service, _| {
-                            service.applied(fault, now.as_nanos(), now.as_nanos())
-                        })
-                        .map_err(Error::Control)?;
-                    self.control_plans(plans)?;
-                }
-                self.commit_boundary()?;
-                if self.execution.finished.is_some() {
-                    return Ok(None);
-                }
-            }
-            if !self.deliver_frames(now)? {
-                break;
-            }
-            if self.execution.finished.is_some() {
-                return Ok(None);
-            }
-        }
-        for index in 0..self.execution.machines.len() {
-            let stopped = self.execution.machines[index].stopped;
-            if self.execution.machines[index].lifecycle.paused()
-                || matches!(stopped, StopReason::Exited { .. })
-            {
-                continue;
-            }
-            if matches!(stopped,
-                StopReason::Blocked { deadline: Some(at), .. } if at == now)
-            {
-                // Let the machine observe the new clock and deliver its timer,
-                // without executing beyond this barrier.
-                waking.push(MachineId(index));
-            }
-        }
-        self.run_batch(&waking, now)?;
-        if !waking.is_empty() {
-            self.commit_boundary()?;
-        }
-        Ok(None)
     }
 
     /// Offer every frame arriving at `now` to its receiver's current boot, in
@@ -3384,7 +2360,7 @@ pub enum StepOutcome {
     /// An application outcome reports ProgramExit while its guest may remain alive. A confirmed
     /// application Stop reports Shutdown without claiming that its machine exited.
     /// Other machines and queued work remain stopped. This result is permanent;
-    /// committed events remain available through `Driver::drain_events`.
+    /// committed events remain available through `Driver::drain_observations`.
     Finished { at: Timestamp, reason: ExitReason },
 }
 

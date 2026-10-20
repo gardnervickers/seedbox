@@ -162,7 +162,7 @@ fn run_to(driver: &mut Driver<Scripted>, upto: u64) -> Vec<Event> {
     loop {
         let outcome = driver.step(at(upto)).unwrap();
         // Hosts drain after every step.
-        events.extend(driver.drain_events());
+        events.extend(driver.drain_observations().events);
         match outcome {
             StepOutcome::BarrierReached { at: now } if now < at(upto) => {}
             _ => return events,
@@ -205,7 +205,7 @@ fn outputs_sort_within_a_commit_and_separate_commits_keep_publication_order() {
         },
         ..Scripted::default()
     });
-    let initial = driver.drain_events();
+    let initial = driver.drain_observations().events;
     assert_eq!(initial.len(), 3);
     for (index, event) in initial.iter().enumerate() {
         assert_eq!(event.sequence, index as u64);
@@ -218,7 +218,7 @@ fn outputs_sort_within_a_commit_and_separate_commits_keep_publication_order() {
         .with_barrier(|b| b.schedule(at(10), auto_key(), Action::Pause(Target::Machine(ids[2]))))
         .unwrap();
     assert!(
-        driver.drain_events().is_empty(),
+        driver.drain_observations().events.is_empty(),
         "enqueueing publishes nothing"
     );
     let events = run_to(&mut driver, 20);
@@ -272,7 +272,10 @@ fn outputs_sort_within_a_commit_and_separate_commits_keep_publication_order() {
     );
     assert_eq!(labelled[8].1.at, at(10));
     assert_eq!(labelled[10].1.at, at(20));
-    assert!(driver.drain_events().is_empty(), "each event is taken once");
+    assert!(
+        driver.drain_observations().events.is_empty(),
+        "each event is taken once"
+    );
 }
 
 #[test]
@@ -280,7 +283,7 @@ fn host_inputs_publish_effective_changes_with_their_fault_cause() {
     let (mut driver, ids) = world(10, 2, &["m"], |_| Scripted::default());
     let m = ids[1];
     let slow = ExecutionConfig::new(2000).unwrap();
-    driver.drain_events();
+    driver.drain_observations();
     let mut events = Vec::new();
     // One input per barrier, all at time 5: each is admitted against the state
     // its predecessor left. Repeats are rejected rather than ignored.
@@ -364,7 +367,7 @@ fn fault_script(name: &str) -> Scripted {
 
 fn fault_world(workers: usize) -> (Vec<Event>, Vec<MachineId>) {
     let (mut driver, ids) = world(1, workers, &["caller", "target"], fault_script);
-    let mut events = driver.drain_events();
+    let mut events = driver.drain_observations().events;
     events.extend(run_to(&mut driver, 14));
     (events, ids)
 }
@@ -535,11 +538,11 @@ fn trigger_world(workers: usize) -> (Vec<Event>, Vec<MachineId>, StepOutcome) {
             )
         })
         .unwrap();
-    let mut events = driver.drain_events();
+    let mut events = driver.drain_observations().events;
     let mut outcome;
     loop {
         outcome = driver.step(at(20)).unwrap();
-        events.extend(driver.drain_events());
+        events.extend(driver.drain_observations().events);
         if !matches!(outcome, StepOutcome::BarrierReached { .. }) {
             break;
         }
@@ -686,7 +689,7 @@ fn failed_step_keeps_confirmed_prefix_and_failure_path_settlement() {
     };
     assert!(matches!(error, Error::Machine { id, .. } if id == target));
     // Not drained between steps: the full confirmed history is retained.
-    let events = driver.drain_events();
+    let events = driver.drain_observations().events;
     assert_dense(&events, 0);
     let ready = events
         .iter()
@@ -715,13 +718,13 @@ fn failed_step_keeps_confirmed_prefix_and_failure_path_settlement() {
         "an uncertain effect is not a change"
     );
     assert!(matches!(driver.step(at(5)), Err(Error::Failed)));
-    assert!(driver.drain_events().is_empty());
+    assert!(driver.drain_observations().events.is_empty());
 }
 
 #[test]
 fn successful_addition_survives_its_callback_error() {
     let (mut driver, _) = world(10, 1, &[], |_| Scripted::default());
-    driver.drain_events();
+    driver.drain_observations();
     let mut added = None;
     let result = driver.with_barrier(|b| {
         added = Some(b.add(|| Ok(Scripted::default()))?);
@@ -729,7 +732,7 @@ fn successful_addition_survives_its_callback_error() {
         Err::<(), _>(Error::Stopped)
     });
     assert!(matches!(result, Err(Error::Stopped)));
-    let events = driver.drain_events();
+    let events = driver.drain_observations().events;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].sequence, 1);
     assert!(matches!(events[0].kind,

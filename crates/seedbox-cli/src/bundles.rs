@@ -479,7 +479,7 @@ async fn control(
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
         return Err(client_error(seedbox_client::Error::Cancelled));
     }
-    let mut receipt = client
+    let mut receipt: seedbox_api::ControlReceipt = client
         .request_control(id, &request)
         .await
         .map_err(client_error)?;

@@ -1,10 +1,7 @@
 //! Factory policy identity and dedicated atomic disk-loss streams.
 use super::{qemu::TimerSetup, Error};
-use crate::{
-    definition::BackendPolicy,
-    machine::disk::{Store, SECTOR},
-};
-use sha2::{Digest, Sha256};
+use seedbox_machine::definition::BackendPolicy;
+use seedbox_machine::machine::disk::Store;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PolicyState {
@@ -39,6 +36,30 @@ impl PolicyState {
         }
     }
 }
+/// Restored names and configurations pass the same checks as factory input.
+impl seedbox_machine::snapshot::Record for PolicyState {
+    const MIN: u64 = <String as seedbox_machine::snapshot::Record>::MIN
+        + <BackendPolicy as seedbox_machine::snapshot::Record>::MIN;
+    fn encode<W: std::io::Write>(
+        &self,
+        w: &mut seedbox_machine::snapshot::Writer<'_, W>,
+    ) -> seedbox_machine::snapshot::Result<()> {
+        let Self {
+            name,
+            configuration,
+        } = self;
+        name.encode(w)?;
+        configuration.encode(w)
+    }
+    fn decode<R: std::io::Read>(
+        r: &mut seedbox_machine::snapshot::Reader<'_, R>,
+    ) -> seedbox_machine::snapshot::Result<Self> {
+        let name = String::decode(r)?;
+        let configuration = BackendPolicy::decode(r)?;
+        Self::new(&name, &configuration)
+            .map_err(|_| seedbox_machine::snapshot::CodecError::Invalid("backend policy"))
+    }
+}
 pub(super) fn validate_authority(
     retained: Option<&PolicyState>,
     name: &str,
@@ -50,65 +71,20 @@ pub(super) fn validate_authority(
         _ => Err(Error("TCG snapshot backend policy differs from retained factory authority; restore with the original named configured policy (absence and an explicit default are distinct)".into())),
     }
 }
-pub(super) fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|v| format!("{v:02x}")).collect()
-}
 pub(super) fn disk_digest(store: &Store, torn: bool) -> Result<String, Error> {
-    // Actual stable bytes and ordered latest volatile sectors, not codec bytes.
-    let mut volatile = Sha256::new();
-    let mut count = 0u64;
-    let (stable, _) = store.crashed_keeping(|sector, bytes| {
-        volatile.update(sector.to_le_bytes());
-        volatile.update(bytes);
-        count += 1;
-        false
-    });
-    let mut all = Sha256::new();
-    all.update(b"seedbox-disk-state-v1");
-    all.update(store.capacity().to_le_bytes());
-    all.update([u8::from(torn)]);
-    let mut sector = [0u8; SECTOR];
-    for index in 0..stable.capacity() {
-        stable
-            .read(index, &mut sector)
-            .map_err(|e| Error(format!("TCG disk evidence: {e:?}")))?;
-        all.update(sector);
-    }
-    all.update(count.to_le_bytes());
-    all.update(volatile.finalize());
-    Ok(hex(&all.finalize()))
+    store
+        .state_digest(torn)
+        .map_err(|e| Error(format!("TCG disk evidence: {e:?}")))
 }
 pub(super) fn lose(
     store: &Store,
     policy: Option<&PolicyState>,
     boot: u64,
 ) -> Result<(Store, u64), Error> {
-    let Some(p) = policy.filter(|p| p.configuration.torn_writes) else {
-        return Ok(store.crashed_keeping(|_, _| false)); // exactly zero random draws
-    };
-    let mut key = Sha256::new();
-    key.update(b"seedbox-v1");
-    key.update(p.configuration.seed.to_le_bytes());
-    key.update(format!("disk-loss/{}/{boot}", p.name).as_bytes());
-    let key = key.finalize();
-    let mut counter = 0u64;
-    let mut failed = false;
-    let result = store.crashed_keeping(|_, _| {
-        let Some(next) = counter.checked_add(1) else {
-            failed = true;
-            return false;
-        };
-        let mut draw = Sha256::new();
-        draw.update(key);
-        draw.update(counter.to_le_bytes());
-        counter = next;
-        let bytes = draw.finalize();
-        let draw = u64::from_le_bytes(bytes[..8].try_into().expect("eight digest bytes"));
-        // Match legacy floating-point threshold, including rounding near 0.5.
-        (draw as f64 / (u64::MAX as f64 + 1.0)) < 0.5
-    });
-    if failed {
-        return Err(Error("TCG disk-loss counter overflow".into()));
-    }
-    Ok(result)
+    let torn = policy
+        .filter(|p| p.configuration.torn_writes)
+        .map(|p| (p.configuration.seed, p.name.as_str()));
+    store
+        .crash(torn, boot)
+        .map_err(|e| Error(format!("TCG {e}")))
 }

@@ -11,9 +11,6 @@ mod runtime;
 // Spawns and executable writes go through the process-wide seedbox_exec scope
 // (runtime.rs writes the QEMU launcher and copies its closure). Production
 // build-assets is sequential; the unit tests share one descriptor table.
-fn guarded_status(command: &mut Command) -> io::Result<std::process::ExitStatus> {
-    seedbox_exec::spawn(command)?.wait()
-}
 /// Like `Command::output` with stdin null and stdout captured; stderr is
 /// whatever the caller set (std's default would capture it).
 fn guarded_output(command: &mut Command) -> io::Result<std::process::Output> {
@@ -22,7 +19,7 @@ fn guarded_output(command: &mut Command) -> io::Result<std::process::Output> {
 }
 
 fn run(command: &mut Command) -> Result<()> {
-    let status = guarded_status(
+    let status = seedbox_exec::status(
         command
             .stdout(Stdio::from(io::stderr()))
             .stderr(Stdio::inherit()),
@@ -43,10 +40,6 @@ fn command(program: &str, root: &Path) -> Command {
     let mut command = Command::new(program);
     command.current_dir(root);
     command
-}
-fn linux(root: &Path, output: &Path) -> Result<()> {
-    runtime::guest(root, &output.join("driver"), env::consts::ARCH)?;
-    Ok(())
 }
 fn checkout_files(root: &Path) -> Result<Vec<u8>> {
     // Expand gitlinks into tracked files. Passing a submodule directory to tar
@@ -94,7 +87,7 @@ fn mac(root: &Path, output: &Path) -> Result<()> {
     let client = candidates
         .into_iter()
         .find(|p| {
-            guarded_status(
+            seedbox_exec::status(
                 Command::new(p)
                     .arg("info")
                     .stdout(Stdio::null())
@@ -167,7 +160,9 @@ fn build(root: &Path) -> Result<PathBuf> {
     }
     publish(root, |output| {
         match (env::consts::OS, env::consts::ARCH) {
-            ("linux", "x86_64" | "aarch64") => linux(root, output)?,
+            ("linux", "x86_64" | "aarch64") => {
+                runtime::guest(root, &output.join("driver"), env::consts::ARCH)?
+            }
             ("macos", "aarch64") => mac(root, output)?,
             _ => return Err("requires Linux x86-64/AArch64 or Apple Silicon macOS".into()),
         }

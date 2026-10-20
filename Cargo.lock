@@ -1844,7 +1844,6 @@ dependencies = [
  "seedbox-cli",
  "seedbox-client",
  "seedbox-driver-execution",
- "seedbox-engine-core",
  "seedbox-engine-protocol",
  "seedbox-machine-pv",
  "seedbox-server",
@@ -1900,7 +1899,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "walkdir",
- "xattr",
 ]
 
 [[package]]
@@ -1948,6 +1946,7 @@ dependencies = [
  "seedbox-client",
  "seedbox-driver-execution",
  "seedbox-engine-protocol",
+ "seedbox-exec",
  "seedbox-server",
  "seedbox-spec",
  "seedbox-test",
@@ -1999,6 +1998,7 @@ dependencies = [
  "rayon",
  "seedbox-control",
  "seedbox-engine-core",
+ "seedbox-engine-protocol",
  "seedbox-machine",
  "seedbox-machine-pv",
  "seedbox-machine-tcg",
@@ -2021,8 +2021,8 @@ dependencies = [
  "seedbox-artifacts",
  "seedbox-control",
  "seedbox-driver",
- "seedbox-engine-core",
  "seedbox-engine-protocol",
+ "seedbox-exec",
  "seedbox-machine",
  "seedbox-machine-pv",
  "seedbox-machine-tcg",
@@ -2041,14 +2041,11 @@ dependencies = [
 name = "seedbox-engine-core"
 version = "0.1.0"
 dependencies = [
- "hex",
  "seedbox-control",
  "seedbox-engine-protocol",
- "seedbox-test-time",
  "serde",
  "serde_json",
  "sha2",
- "tempfile",
 ]
 
 [[package]]
@@ -2154,6 +2151,7 @@ dependencies = [
 name = "seedbox-spec"
 version = "0.1.0"
 dependencies = [
+ "seedbox-control",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -2189,7 +2187,6 @@ dependencies = [
  "seedbox-test-time",
  "serde",
  "serde_json",
- "serde_yaml_ng",
  "tempfile",
  "tokio",
 ]

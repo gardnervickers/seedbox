@@ -333,15 +333,15 @@ fn decimal(text: &str) -> Result<u64, Error> {
 mod tests;
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::snapshot::record::Record for Codec {
-    const MIN: u64 = <Vec<u8> as crate::snapshot::record::Record>::MIN
-        + <VecDeque<(NonZeroU32, String)> as crate::snapshot::record::Record>::MIN
-        + <BTreeSet<NonZeroU32> as crate::snapshot::record::Record>::MIN
-        + <Option<u64> as crate::snapshot::record::Record>::MIN
-        + <bool as crate::snapshot::record::Record>::MIN
-        + <bool as crate::snapshot::record::Record>::MIN
-        + <bool as crate::snapshot::record::Record>::MIN
-        + <oracle::Decoder as crate::snapshot::record::Record>::MIN;
+impl crate::snapshot::Record for Codec {
+    const MIN: u64 = <Vec<u8> as crate::snapshot::Record>::MIN
+        + <VecDeque<(NonZeroU32, String)> as crate::snapshot::Record>::MIN
+        + <BTreeSet<NonZeroU32> as crate::snapshot::Record>::MIN
+        + <Option<u64> as crate::snapshot::Record>::MIN
+        + <bool as crate::snapshot::Record>::MIN
+        + <bool as crate::snapshot::Record>::MIN
+        + <bool as crate::snapshot::Record>::MIN
+        + <oracle::Decoder as crate::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut crate::snapshot::Writer<'_, W>,
@@ -369,25 +369,25 @@ impl crate::snapshot::record::Record for Codec {
     fn decode<R: std::io::Read>(
         r: &mut crate::snapshot::Reader<'_, R>,
     ) -> crate::snapshot::Result<Self> {
-        let partial = crate::snapshot::record::Record::decode(r)?;
+        let partial = crate::snapshot::Record::decode(r)?;
         let n = r.count::<(NonZeroU32, String)>(12)?;
         // Reserve the validation index's full quota before reading any pending
         // element or reserving its retained Vec/VecDeque storage.
-        crate::snapshot::record::charge_index::<NonZeroU32, _>(r, n as u64)?;
+        crate::snapshot::charge_index::<NonZeroU32, _>(r, n as u64)?;
         let mut pending = Vec::new();
         crate::snapshot::reserve(&mut pending, n)?;
         for _ in 0..n {
-            pending.push(crate::snapshot::record::Record::decode(r)?);
+            pending.push(crate::snapshot::Record::decode(r)?);
         }
         Ok(Self {
             partial,
             pending: pending.into(),
-            used_ids: crate::snapshot::record::Record::decode(r)?,
-            last_time: crate::snapshot::record::Record::decode(r)?,
-            ready: crate::snapshot::record::Record::decode(r)?,
-            outcome: crate::snapshot::record::Record::decode(r)?,
-            failed: crate::snapshot::record::Record::decode(r)?,
-            oracle: crate::snapshot::record::Record::decode(r)?,
+            used_ids: crate::snapshot::Record::decode(r)?,
+            last_time: crate::snapshot::Record::decode(r)?,
+            ready: crate::snapshot::Record::decode(r)?,
+            outcome: crate::snapshot::Record::decode(r)?,
+            failed: crate::snapshot::Record::decode(r)?,
+            oracle: crate::snapshot::Record::decode(r)?,
         })
     }
 }

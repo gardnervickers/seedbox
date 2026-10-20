@@ -50,7 +50,9 @@ fn reboot_resets_live_ram_without_executing_and_preserves_snapshot_entropy() {
     let snapshot = machine.snapshot().unwrap();
     let saved_rng = machine.rng.clone();
     clock.0.store(rebooted, Ordering::Relaxed);
-    machine.request(crate::pv::Request::Reboot).unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Reboot)
+        .unwrap();
     assert_eq!(machine.reached, at(rebooted));
     assert_eq!(machine.pending_boots, 0);
     machine.run(&mut (), at(rebooted)).unwrap();
@@ -80,10 +82,14 @@ fn reboot_resets_live_ram_without_executing_and_preserves_snapshot_entropy() {
     let branch_clock = Arc::new(TestClock(AtomicU64::new(rebooted)));
     let mut branch = TcgMachine::from_snapshot(Path::new(QEMU), &snapshot, branch_clock).unwrap();
     branch.rng = saved_rng;
-    branch.request(crate::pv::Request::Reboot).unwrap();
+    branch
+        .request(seedbox_machine::pv::Request::Reboot)
+        .unwrap();
     branch.run(&mut (), at(rebooted)).unwrap();
     assert_eq!(branch.boot_seed, first_seed);
-    branch.request(crate::pv::Request::Reboot).unwrap();
+    branch
+        .request(seedbox_machine::pv::Request::Reboot)
+        .unwrap();
     branch.run(&mut (), at(rebooted)).unwrap();
     assert_ne!(branch.boot_seed, first_seed);
     assert_eq!(branch.boot_seed, seed_after_boots(3));
@@ -102,19 +108,29 @@ fn reboot_accepts_exit_and_crash_but_rejects_invalid_or_wrong_barrier() {
         }
     ));
     clock.0.store(100, Ordering::Relaxed);
-    machine.request(crate::pv::Request::Reboot).unwrap();
-    machine.request(crate::pv::Request::Crash).unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Reboot)
+        .unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Crash)
+        .unwrap();
     let snapshot = machine.snapshot().unwrap();
     let mut branch = TcgMachine::from_snapshot(Path::new(QEMU), &snapshot, clock.clone()).unwrap();
-    branch.request(crate::pv::Request::Reboot).unwrap();
+    branch
+        .request(seedbox_machine::pv::Request::Reboot)
+        .unwrap();
     assert!(branch.run(&mut (), at(99)).is_err());
     assert_eq!(
         branch.run(&mut (), at(100)).unwrap(),
         StopReason::BoundaryReached
     );
     branch.state = State::Invalid;
-    assert!(branch.request(crate::pv::Request::Reboot).is_err());
-    machine.request(crate::pv::Request::Reboot).unwrap();
+    assert!(branch
+        .request(seedbox_machine::pv::Request::Reboot)
+        .is_err());
+    machine
+        .request(seedbox_machine::pv::Request::Reboot)
+        .unwrap();
     assert!(matches!(
         machine.run(&mut (), at(200)).unwrap(),
         StopReason::Exited {

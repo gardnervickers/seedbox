@@ -175,7 +175,7 @@ fn repeated_in_progress_and_exited_shutdown_requests_do_not_latch_or_deliver_aga
             barrier.schedule(at(5), key("exited"), Action::Shutdown(Target::Machine(id)))
         })
         .unwrap();
-    driver.drain_events();
+    driver.drain_observations();
     assert_eq!(
         driver.step(at(100)).unwrap(),
         StepOutcome::BarrierReached { at: at(1) }
@@ -186,7 +186,7 @@ fn repeated_in_progress_and_exited_shutdown_requests_do_not_latch_or_deliver_aga
     );
     // A request to the physically exited boot is unavailable: no admission
     // run, so the machine keeps its exit position.
-    assert!(driver.drain_events().iter().any(|event| matches!(
+    assert!(driver.drain_observations().events.iter().any(|event| matches!(
         &event.kind,
         EventKind::InputRejected { key: found, rejection }
             if *found == key("exited")
@@ -416,7 +416,7 @@ fn every_effective_fault_holds_in_order_and_worker_count_does_not_change_results
                     .collect::<Vec<_>>())
             })
             .unwrap();
-        let result = (outcomes, observed, driver.drain_events());
+        let result = (outcomes, observed, driver.drain_observations().events);
         if let Some(reference) = &reference {
             assert_eq!(&result, reference);
         } else {

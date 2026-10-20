@@ -82,6 +82,22 @@ impl GuestEnvironment {
             control_socket,
         }
     }
+    /// Named volumes are formatted onto the machine disk (`/dev/vda`) by the
+    /// guest asset `mke2fs`. Reject a configuration missing either attachment
+    /// before preparing a machine.
+    pub fn check_attachments(&self, disk: bool, formatter: bool) -> Result<(), &'static str> {
+        if !self.named_volumes.is_empty() {
+            if !disk {
+                return Err("named guest volumes require a machine disk at /dev/vda");
+            }
+            if !formatter {
+                return Err(
+                    "named guest volumes require guest asset mke2fs; package the static guest formatter",
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(super) const MAGIC: &[u8; 8] = b"SBXENV1\0";

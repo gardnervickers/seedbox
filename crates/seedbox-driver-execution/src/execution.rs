@@ -57,12 +57,12 @@ pub trait ExecutionBackend: Send + Sync {
     fn preflight(&self, _output: Option<&Path>) -> Result<()> {
         Ok(())
     }
-    /// Admission proof and inputs must be checked even for old retained records.
+    /// Check the admission proof and retained inputs before they are used.
     fn validate_retained(&self, _inputs: &PreparedInputs) -> Result<()> {
         Ok(())
     }
     /// Reject an unsupported resume from bounded metadata before any retained
-    /// execution inputs are materialized. Legacy adapters keep their own checks.
+    /// execution inputs are materialized.
     fn preflight_resume(
         &self,
         _checkpoint: Option<&Path>,

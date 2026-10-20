@@ -1,5 +1,31 @@
 //! Stopped physical-state evidence, independent of snapshot encodings.
 
+/// Lowercase hexadecimal, as digests, witnesses and evidence parts record it.
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Whether `value` is a lowercase hexadecimal SHA-256 digest.
+pub fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// SHA-256 over ordered `name NUL value` parts: both backends' combined
+/// [`StateEvidence::digest`].
+pub fn combined_digest(parts: &[(String, String)]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for (name, value) in parts {
+        h.update(name.as_bytes());
+        h.update([0]);
+        h.update(value.as_bytes());
+    }
+    hex(&h.finalize())
+}
+
 /// One actual guest RAM extent, ordered by guest physical address.
 /// Holes are not RAM and contribute neither bytes nor page hashes.
 // TODO: Re-evaluate: sparse RAM needs address metadata at the common evidence
@@ -9,6 +35,10 @@ pub struct RamRegion {
     pub base: u64,
     pub length: u64,
 }
+crate::record!(RamRegion {
+    base: u64,
+    length: u64,
+});
 
 /// The lifetime represented by a stopped-state capture.
 // TODO: Re-evaluate: teardown destroys native RAM; callers must distinguish a
@@ -19,6 +49,39 @@ pub enum EvidenceDisposition {
     Crashed,
     Shutdown,
     Exited { code: i32 },
+}
+/// Retained evidence describes an ended boot: `Live` has no encoding.
+/// Tags are 0 crashed, 1 shutdown and 2 exited followed by its code.
+impl crate::snapshot::Record for EvidenceDisposition {
+    const MIN: u64 = 1;
+    fn encode<W: std::io::Write>(
+        &self,
+        w: &mut crate::snapshot::Writer<'_, W>,
+    ) -> crate::snapshot::Result<()> {
+        match *self {
+            Self::Crashed => w.u8(0),
+            Self::Shutdown => w.u8(1),
+            Self::Exited { code } => {
+                w.u8(2)?;
+                w.u32(code as u32)
+            }
+            Self::Live => Err(crate::snapshot::CodecError::Invalid(
+                "live retired disposition",
+            )),
+        }
+    }
+    fn decode<R: std::io::Read>(
+        r: &mut crate::snapshot::Reader<'_, R>,
+    ) -> crate::snapshot::Result<Self> {
+        match r.u8()? {
+            0 => Ok(Self::Crashed),
+            1 => Ok(Self::Shutdown),
+            2 => Ok(Self::Exited {
+                code: r.u32()? as i32,
+            }),
+            _ => Err(crate::snapshot::CodecError::Invalid("retired disposition")),
+        }
+    }
 }
 
 /// Actual state of the live boot, or the most recently ended boot.
@@ -50,23 +113,25 @@ pub struct StateEvidence {
     pub page_hashes: Vec<u8>,
     pub digest: String,
 }
+crate::record!(StateEvidence {
+    boot: u64,
+    disposition: EvidenceDisposition,
+    parts: Vec<(String, String)>,
+    regions: Vec<RamRegion>,
+    page_hashes: Vec<u8>,
+    digest: String,
+});
 
 impl StateEvidence {
     /// Validate common shape. The backend additionally validates its exact part
     /// set and computes the digests from stopped state, never serialised state.
     pub fn validate(&self) -> Result<(), &'static str> {
-        fn sha256(value: &str) -> bool {
-            value.len() == 64
-                && value
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        }
-        if !sha256(&self.digest) {
+        if !is_sha256_hex(&self.digest) {
             return Err("state evidence: invalid combined SHA-256");
         }
         let mut names = std::collections::BTreeSet::new();
         for (name, digest) in &self.parts {
-            if name.is_empty() || !names.insert(name.as_str()) || !sha256(digest) {
+            if name.is_empty() || !names.insert(name.as_str()) || !is_sha256_hex(digest) {
                 return Err("state evidence: invalid or repeated part");
             }
         }

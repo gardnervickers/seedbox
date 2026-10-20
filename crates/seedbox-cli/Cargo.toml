@@ -9,6 +9,7 @@ publish.workspace = true
 seedbox-spec.workspace = true
 seedbox-application.workspace = true
 seedbox-driver-execution.workspace = true
+seedbox-exec.workspace = true
 seedbox-api.workspace = true
 seedbox-client.workspace = true
 seedbox-tui.workspace = true

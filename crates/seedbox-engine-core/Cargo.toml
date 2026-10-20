@@ -5,13 +5,9 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-hex.workspace = true
 seedbox-engine-protocol.workspace = true
 seedbox-control.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 
-[dev-dependencies]
-seedbox-test-time.workspace = true
-tempfile.workspace = true

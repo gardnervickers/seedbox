@@ -1,4 +1,4 @@
-use crate::application::{boot_derived, with_runtime};
+use seedbox_machine::application::{boot_derived, with_runtime};
 use seedbox_machine::test_support::prepared_fixture::bootstrap;
 use seedbox_machine::test_support::prepared_image::*;
 use std::fs;

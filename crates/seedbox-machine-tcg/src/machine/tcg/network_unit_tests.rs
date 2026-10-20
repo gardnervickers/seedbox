@@ -2,7 +2,7 @@
 //! drain validation, output ordering and receive-input validation.
 use super::qemu::{drain_chunk, hex, unhex};
 use super::*;
-use crate::pv::transport::{GuestWrite, LifecycleWrite};
+use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
 use serde_json::json;
 
 fn frame(time: u64, byte: u8) -> LifecycleWrite {
@@ -107,12 +107,9 @@ fn frames_merge_into_guest_output_by_timestamp() {
 
 #[test]
 fn invalid_received_frames_fail_the_run_before_any_qemu_work() {
-    use crate::{
-        clock::SimulationClock,
-        execution::ExecutionConfig,
-        pv::{Inbox, Input, Outbox, Request},
-        rng::SeededRng,
-    };
+    use crate::{clock::SimulationClock, rng::SeededRng};
+    use seedbox_machine::execution::ExecutionConfig;
+    use seedbox_machine::pv::{Inbox, Input, Outbox, Request};
     for bytes in [vec![0; 13], vec![0; 1515]] {
         // A missing executable proves no QEMU was started.
         let mut machine = TcgMachine::new_raw(

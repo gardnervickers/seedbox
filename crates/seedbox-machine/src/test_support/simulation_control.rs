@@ -1,27 +1,14 @@
 use crate::{
-    clock::Clock,
+    clock::{Clock, SimulationClock},
     machine::{Machine, RunContext, StopReason, Timestamp},
     pv::{self, SimulationControlId},
     rng::RngStream,
 };
 use seedbox_test_time::{GuestProgress, HangGuard};
-use std::{
-    collections::VecDeque,
-    fmt::Debug,
-    num::NonZeroU32,
-    path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+use std::{collections::VecDeque, fmt::Debug, num::NonZeroU32, path::PathBuf, time::Duration};
 
 pub fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
-}
-struct TestClock(AtomicU64);
-impl Clock for TestClock {
-    fn now(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
-    }
 }
 
 #[derive(Clone)]
@@ -46,7 +33,7 @@ pub struct Call {
 
 pub struct Session<M> {
     pub machine: M,
-    now: TestClock,
+    now: SimulationClock,
     rng: TestRng,
     inbox: VecDeque<pv::Input>,
     pub outputs: Vec<pv::Output>,
@@ -73,7 +60,7 @@ where
     fn continued(machine: M, now: u64, rng: TestRng, boot: u64, deadline: u64) -> Self {
         Self {
             machine,
-            now: TestClock(AtomicU64::new(now)),
+            now: SimulationClock::new(now),
             rng,
             inbox: VecDeque::new(),
             outputs: Vec::new(),
@@ -164,7 +151,7 @@ where
         }
         self.outputs.extend(outputs);
         self.exited = matches!(stop, StopReason::Exited { .. });
-        self.now.0.store(end.as_nanos(), Ordering::Relaxed);
+        self.now.set(end.as_nanos());
     }
     pub fn until_call(&mut self, marker: &str) -> Call {
         let payload = format!("\"fixture\":\"{marker}\"");

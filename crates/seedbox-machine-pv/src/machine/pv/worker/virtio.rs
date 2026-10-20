@@ -200,13 +200,13 @@ pub(super) fn configure(
 }
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::machine::pv::codec::record::Record for Queue {
-    const MIN: u64 = <u16 as crate::machine::pv::codec::record::Record>::MIN
-        + <bool as crate::machine::pv::codec::record::Record>::MIN
-        + <u64 as crate::machine::pv::codec::record::Record>::MIN
-        + <u64 as crate::machine::pv::codec::record::Record>::MIN
-        + <u64 as crate::machine::pv::codec::record::Record>::MIN
-        + <u16 as crate::machine::pv::codec::record::Record>::MIN;
+impl seedbox_machine::snapshot::Record for Queue {
+    const MIN: u64 = <u16 as seedbox_machine::snapshot::Record>::MIN
+        + <bool as seedbox_machine::snapshot::Record>::MIN
+        + <u64 as seedbox_machine::snapshot::Record>::MIN
+        + <u64 as seedbox_machine::snapshot::Record>::MIN
+        + <u64 as seedbox_machine::snapshot::Record>::MIN
+        + <u16 as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -231,12 +231,12 @@ impl crate::machine::pv::codec::record::Record for Queue {
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
         Ok(Self {
-            size: crate::machine::pv::codec::record::Record::decode(r)?,
-            ready: crate::machine::pv::codec::record::Record::decode(r)?,
-            descriptor: crate::machine::pv::codec::record::Record::decode(r)?,
-            available: crate::machine::pv::codec::record::Record::decode(r)?,
-            used: crate::machine::pv::codec::record::Record::decode(r)?,
-            cursor: crate::machine::pv::codec::record::Record::decode(r)?,
+            size: seedbox_machine::snapshot::Record::decode(r)?,
+            ready: seedbox_machine::snapshot::Record::decode(r)?,
+            descriptor: seedbox_machine::snapshot::Record::decode(r)?,
+            available: seedbox_machine::snapshot::Record::decode(r)?,
+            used: seedbox_machine::snapshot::Record::decode(r)?,
+            cursor: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }

@@ -24,6 +24,9 @@ pub mod codec;
 mod abi;
 #[cfg_attr(seedbox_disk_abi, path = "disk/request.rs")]
 pub mod request;
+// Hashing needs sha2, which the standalone QEMU disk library does not link.
+#[cfg(not(seedbox_disk_abi))]
+mod policy;
 
 pub const SECTOR: usize = 512;
 

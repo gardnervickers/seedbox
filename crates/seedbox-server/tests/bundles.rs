@@ -87,7 +87,6 @@ fn fixture(store: &ContentStore, checkpoint: bool) -> Snapshot {
         identity,
         attempt: "untrusted-original-attempt".into(),
         performance_parameters: BTreeMap::new(),
-        allow_engine_change: false,
         log_policy: Default::default(),
         omitted_logs: BTreeMap::from([(
             "worker-stderr".into(),
@@ -109,8 +108,6 @@ fn fixture(store: &ContentStore, checkpoint: bool) -> Snapshot {
         }),
         error: None,
         logs: BTreeMap::from([("worker-stdout".into(), diagnostic)]),
-        replay_of: None,
-        replay: None,
     };
     let logs = vec![
         LogDelivery::Gap { first: 1, last: 3 },
@@ -759,7 +756,7 @@ fn crate_program(spec: &SimulationSpec) -> Vec<seedbox_engine_protocol::input_pr
     spec.program
         .iter()
         .map(|input| seedbox_engine_protocol::input_program::TimedInput {
-            key: input.key.clone(),
+            key: input.id.clone(),
             at_ns: input.at_ns,
             action: serde_json::from_value(input.action.clone()).unwrap(),
             timeout_ns: input.timeout_ns,
@@ -946,8 +943,8 @@ fn export_captures_owned_native_checkpoint_files_and_preserves_consumed_override
     let mut catalogue = Catalogue::in_memory();
     let mut request = support::resolved_request("native-source");
     request.spec = fixture.simulation.spec.clone();
-    let pending = ProgramInput {
-        key: "pending-after-capture".into(),
+    let pending = seedbox_spec::definition::Override {
+        id: "pending-after-capture".into(),
         at_ns: 100,
         action: serde_json::json!({"action":"pause_process", "machine":"oracle"}),
         timeout_ns: 500,
@@ -1015,7 +1012,7 @@ fn export_captures_owned_native_checkpoint_files_and_preserves_consumed_override
         archive::import_checkpoint(checkpoint_bytes.as_slice(), &store, &Options::default())
             .unwrap();
     assert_eq!(portable_checkpoint.overrides.len(), 1);
-    assert_eq!(portable_checkpoint.overrides[0].id, pending.key);
+    assert_eq!(portable_checkpoint.overrides[0].id, pending.id);
     assert_eq!(portable_checkpoint.overrides[0].action, pending.action);
     let mut bytes = Vec::new();
     execution

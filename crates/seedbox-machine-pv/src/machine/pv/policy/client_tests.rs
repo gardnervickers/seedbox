@@ -1,9 +1,10 @@
 //! Real client-only transitions and closed persistence; no worker or native VM.
 #![cfg(target_arch = "x86_64")]
 use super::*;
-use crate::machine::{Machine, RunContext, Timestamp};
-use crate::pv::{Inbox, Input, Outbox, Output, Response};
-use crate::{execution::ExecutionConfig, rng::RngStream};
+use crate::rng::RngStream;
+use seedbox_machine::execution::ExecutionConfig;
+use seedbox_machine::machine::{Machine, RunContext, Timestamp};
+use seedbox_machine::pv::{Inbox, Input, Outbox, Output, Response};
 use seedbox_machine::snapshot::DecodeLimits;
 use seedbox_machine::test_support::FixedClock;
 use std::{collections::VecDeque, path::Path};
@@ -99,8 +100,8 @@ fn no_ram_retirement_pending_report_and_named_policy_survive_closed_restore() {
 }
 #[test]
 fn actual_client_loss_selects_latest_sectors_without_guest_entropy() {
-    use crate::definition::DiskImage;
-    use crate::machine::disk::Store;
+    use seedbox_machine::definition::DiskImage;
+    use seedbox_machine::machine::disk::Store;
     for torn in [false, true] {
         let mut m = machine();
         m.disk = Some(super::super::Disk::new(DiskImage::zeroed(2048).unwrap()));

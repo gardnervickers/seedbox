@@ -297,7 +297,6 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
             attempt: name.into(),
             identity,
             performance_parameters: Default::default(),
-            allow_engine_change: false,
             log_policy: LogPolicy::default(),
             omitted_logs: Default::default(),
             outcome: Outcome::Pass,
@@ -316,8 +315,6 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
             }),
             error: None,
             logs: Default::default(),
-            replay_of: None,
-            replay: None,
         };
         let definition = definition.clone();
         let (resource, _) = manager.submit(request).unwrap();
@@ -437,7 +434,7 @@ async fn public_dispatch_retains_oracle_and_missing_witness_errors_without_compa
             ));
             assert!(matches!(
                 host.client
-                    .request_control(
+                    .request_control::<seedbox_api::ControlReceipt>(
                         id,
                         &seedbox_api::ControlRequest {
                             request_id: "terminal-step".into(),
@@ -596,7 +593,7 @@ async fn public_stop_and_service_shutdown_cancel_dispatched_host_execution() {
             };
             assert_eq!(
                 host.client
-                    .request_control(&accepted.metadata.id, &control)
+                    .request_control::<seedbox_api::ControlReceipt>(&accepted.metadata.id, &control)
                     .await
                     .unwrap()
                     .state,
@@ -630,13 +627,19 @@ async fn public_stop_and_service_shutdown_cancel_dispatched_host_execution() {
             if !shutdown {
                 let receipt = host
                     .client
-                    .control_receipt(&accepted.metadata.id, "pending-step")
+                    .control_receipt::<seedbox_api::ControlReceipt>(
+                        &accepted.metadata.id,
+                        "pending-step",
+                    )
                     .await
                     .unwrap();
                 assert_eq!(receipt.state, seedbox_api::ControlState::Interrupted);
                 assert_eq!(
                     host.client
-                        .request_control(&accepted.metadata.id, &control)
+                        .request_control::<seedbox_api::ControlReceipt>(
+                            &accepted.metadata.id,
+                            &control
+                        )
                         .await
                         .unwrap(),
                     receipt

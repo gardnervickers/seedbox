@@ -5,7 +5,7 @@
 //!
 //! Keep this library's normal dependencies to `libc` and `seedbox-exec`: many
 //! crates dev-depend on it.
-// The package allows disallowed spawns for its developer-tool binaries; this
-// library is shared test support and must spawn only through seedbox_exec.
+// The package allows disallowed spawns for its integration tests; this library
+// is shared test support and must spawn only through seedbox_exec.
 #![deny(clippy::disallowed_methods)]
 pub mod process;

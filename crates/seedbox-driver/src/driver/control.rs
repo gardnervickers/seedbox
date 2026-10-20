@@ -496,7 +496,7 @@ impl<M> Adapter for View<'_, M> {
             };
             machines.push(serde_json::json!({"name":name,"state":state}));
         }
-        let mut result = serde_json::json!({"services":services,"machines":machines,"active_handles":handles,"network_counters":network.legacy_counts()});
+        let mut result = serde_json::json!({"services":services,"machines":machines,"active_handles":handles,"network_counters":network.inspect_counts()});
         if !triggers.is_empty() {
             let mut records = Vec::new();
             for r in triggers {
@@ -626,7 +626,7 @@ impl Control {
         at: Timestamp,
         transition: crate::oracle::observation::Transition,
     ) -> Result<Vec<crate::oracle::service::Plan>, String> {
-        use crate::oracle::observation::{Admission, Transition};
+        use crate::oracle::observation::Transition;
         let boot = machines[id.0].lifecycle.boot();
         let mut plans = vec![];
         if matches!(transition, Transition::Crash | Transition::Reboot { .. }) {
@@ -638,12 +638,7 @@ impl Control {
         }
         machines[id.0]
             .lifecycle
-            .admission(
-                boot,
-                at.as_nanos(),
-                at.as_nanos(),
-                Admission::Applied(transition),
-            )
+            .admission(boot, at.as_nanos(), at.as_nanos(), transition)
             .map_err(|e| format!("control observation admission: {e:?}"))?;
         if matches!(transition, Transition::Reboot { .. }) {
             self.reset_commands(id);
@@ -862,11 +857,8 @@ impl Control {
         &self,
         notice: crate::oracle::service::Notice,
     ) -> Result<(Timestamp, super::EventKind), String> {
-        use super::{EventKind, SettlementStatus as Public, TriggerResult};
-        use crate::oracle::{
-            service::{Notice, SettlementStatus},
-            triggers::Status,
-        };
+        use super::{EventKind, TriggerResult};
+        use crate::oracle::{service::Notice, triggers::Status};
         Ok(match notice {
             Notice::Admitted(a) => (
                 Timestamp::from_nanos(a.admitted_at),
@@ -890,12 +882,7 @@ impl Control {
                         &s.handle,
                         s.requested_at,
                     )?,
-                    status: match s.status {
-                        SettlementStatus::Applied => Public::Applied,
-                        SettlementStatus::Unavailable => Public::Unavailable,
-                        SettlementStatus::Rejected => Public::Rejected,
-                        SettlementStatus::Failed => Public::Failed,
-                    },
+                    status: s.status,
                     outcome_at: s.outcome_at.map(Timestamp::from_nanos),
                     detail: s.detail,
                     network: s.network,

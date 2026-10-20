@@ -88,8 +88,8 @@ fn mandatory_runtime_derivation_owns_inputs_and_preserves_original_workload() {
     // the networkless command line above is unchanged.
     let mut networked = definition.clone();
     networked.network = Some(
-        crate::definition::NetworkInterface::new(
-            crate::definition::MacAddress::new([2, 0, 0, 0, 0, 1]).unwrap(),
+        seedbox_machine::definition::NetworkInterface::new(
+            seedbox_machine::definition::MacAddress::new([2, 0, 0, 0, 0, 1]).unwrap(),
             std::net::Ipv4Addr::new(10, 0, 0, 1),
             24,
         )

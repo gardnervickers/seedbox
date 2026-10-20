@@ -223,7 +223,8 @@ impl World {
         let outcome = self.driver.step(at(upto)).unwrap();
         self.trace.extend(
             self.driver
-                .drain_events()
+                .drain_observations()
+                .events
                 .into_iter()
                 .filter_map(|event| match event.kind {
                     EventKind::Output(output) => Some(output),
