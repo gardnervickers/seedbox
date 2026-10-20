@@ -132,7 +132,7 @@ fn start(root: &Path, options: &crate::server_args::ServerArgs, deadline: Instan
         .stderr(Stdio::null())
         .process_group(0);
     options.append_startup_args(&mut command);
-    let mut child = seedbox_application::exec_files::spawn(&mut command)
+    let mut child = seedbox_exec::spawn(&mut command)
         .map_err(|e| Error::Setup(format!("start server {}: {e}", executable.display())))?;
     let result = (|| {
         let mut output = child

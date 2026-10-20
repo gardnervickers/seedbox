@@ -320,4 +320,4 @@ fn validate_config_target(path: &str) -> Result<()> {
     Ok(())
 }
 
-pub use crate::driver_preparation::{retain_oci_prepared, validate_oci_runtime};
+pub use crate::driver_preparation::validate_oci_runtime;

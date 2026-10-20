@@ -126,12 +126,12 @@ impl PreparationBackend for Preparer {
             &transport,
             &self.driver_inputs,
         )?;
-        seedbox_application::preparation::retain_oci_prepared(
+        seedbox_driver_execution::driver_world::preparation::retain_oci_prepared(
             &mut prepared,
             simulation,
             &self.driver_inputs,
             store,
-            context,
+            &|| context.check(),
         )?;
         Ok(prepared)
     }

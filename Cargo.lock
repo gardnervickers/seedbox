@@ -1900,7 +1900,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "walkdir",
- "xattr",
 ]
 
 [[package]]
@@ -1948,6 +1947,7 @@ dependencies = [
  "seedbox-client",
  "seedbox-driver-execution",
  "seedbox-engine-protocol",
+ "seedbox-exec",
  "seedbox-server",
  "seedbox-spec",
  "seedbox-test",
@@ -2023,6 +2023,7 @@ dependencies = [
  "seedbox-driver",
  "seedbox-engine-core",
  "seedbox-engine-protocol",
+ "seedbox-exec",
  "seedbox-machine",
  "seedbox-machine-pv",
  "seedbox-machine-tcg",

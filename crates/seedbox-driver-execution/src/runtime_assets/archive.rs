@@ -131,7 +131,7 @@ pub(super) fn extract<R: Read>(archive: &mut tar::Archive<R>, root: &Path) -> Re
             // The host QEMU launcher, loader and binary are executed by other
             // processes of this execution. No fork may hold a writable copy of
             // one until it execs; guest inputs are bytes and are not covered.
-            let _writing = executable.then(crate::exec_files::writing);
+            let _writing = executable.then(seedbox_exec::writing);
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)

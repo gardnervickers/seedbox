@@ -54,7 +54,6 @@ fn bundle(path: &Path) {
         identity,
         attempt: "/never/follow/archived/host/path".into(),
         performance_parameters: BTreeMap::new(),
-        allow_engine_change: false,
         log_policy: Default::default(),
         omitted_logs: BTreeMap::from([(
             "vmm.stderr".into(),
@@ -82,8 +81,6 @@ fn bundle(path: &Path) {
             ("vmm.stdout".into(), digest.clone()),
             ("vmm.stderr".into(), digest),
         ]),
-        replay_of: None,
-        replay: None,
     };
     let mut observations = BTreeMap::new();
     // serde tags belong to the public delivery types.

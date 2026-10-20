@@ -7,8 +7,6 @@ pub mod config;
 pub mod diff;
 pub mod engine;
 pub mod evidence;
-/// Process-wide exec-file ordering, re-exported with its original path.
-pub use seedbox_exec as exec_files;
 pub mod execution;
 pub mod image;
 pub mod interventions;
@@ -32,8 +30,6 @@ pub enum Error {
     Integrity(String),
     #[error("preparation cancelled")]
     PreparationCancelled,
-    #[error("preparation cleanup-unverified: {0}")]
-    PreparationCleanupUnverified(String),
     #[error("execution: {0}")]
     Execution(String),
     /// A missing or unusable input or host tool the caller can fix; the

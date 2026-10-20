@@ -173,7 +173,7 @@ impl WorkerLaunch {
             ));
         }
         let started = seedbox_engine_protocol::host_clock::Instant::now()?;
-        let child = crate::exec_files::spawn(&mut self.command).map_err(|error| {
+        let child = seedbox_exec::spawn(&mut self.command).map_err(|error| {
             Error::Setup(format!(
                 "engine worker {}: {error}; {}",
                 self.engine.display(),

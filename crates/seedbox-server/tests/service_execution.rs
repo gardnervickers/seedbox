@@ -297,7 +297,6 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
             attempt: name.into(),
             identity,
             performance_parameters: Default::default(),
-            allow_engine_change: false,
             log_policy: LogPolicy::default(),
             omitted_logs: Default::default(),
             outcome: Outcome::Pass,
@@ -316,8 +315,6 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
             }),
             error: None,
             logs: Default::default(),
-            replay_of: None,
-            replay: None,
         };
         let definition = definition.clone();
         let (resource, _) = manager.submit(request).unwrap();

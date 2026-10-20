@@ -38,12 +38,12 @@ impl FixturePreparer {
             transport,
             &self.runtime,
         )?;
-        seedbox_application::preparation::retain_oci_prepared(
+        seedbox_driver_execution::driver_world::preparation::retain_oci_prepared(
             &mut inputs,
             simulation,
             &self.runtime,
             store,
-            context,
+            &|| context.check(),
         )?;
         Ok(inputs)
     }
@@ -461,12 +461,12 @@ fn cold_driver_factory(backend: seedbox_driver_execution::runtime_assets::Backen
         assert!(inputs.auxiliary.contains_key("guest-firmware"));
     }
     let original_boots = inputs.guests.clone();
-    seedbox_application::preparation::retain_oci_prepared(
+    seedbox_driver_execution::driver_world::preparation::retain_oci_prepared(
         &mut inputs,
         &simulation,
         &selected,
         &store,
-        &context,
+        &|| context.check(),
     )
     .unwrap();
     for runtime_asset in [

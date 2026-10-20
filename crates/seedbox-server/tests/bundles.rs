@@ -87,7 +87,6 @@ fn fixture(store: &ContentStore, checkpoint: bool) -> Snapshot {
         identity,
         attempt: "untrusted-original-attempt".into(),
         performance_parameters: BTreeMap::new(),
-        allow_engine_change: false,
         log_policy: Default::default(),
         omitted_logs: BTreeMap::from([(
             "worker-stderr".into(),
@@ -109,8 +108,6 @@ fn fixture(store: &ContentStore, checkpoint: bool) -> Snapshot {
         }),
         error: None,
         logs: BTreeMap::from([("worker-stdout".into(), diagnostic)]),
-        replay_of: None,
-        replay: None,
     };
     let logs = vec![
         LogDelivery::Gap { first: 1, last: 3 },
