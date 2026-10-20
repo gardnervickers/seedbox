@@ -33,6 +33,25 @@ impl StateDigestParts {
     }
 }
 
+impl TryFrom<BTreeMap<String, String>> for StateDigestParts {
+    type Error = Error;
+
+    fn try_from(parts: BTreeMap<String, String>) -> Result<Self> {
+        for value in parts.values() {
+            ContentDigest::try_from(value.clone())?;
+        }
+        Ok(Self(parts))
+    }
+}
+
+/// Per-machine output directory relative to retained run output.
+pub const MACHINE_OUTPUT_DIR: &str = "machines";
+
+/// Manifest-relative page evidence, beside per-machine traces.
+pub fn page_hash_log(machine: &str) -> String {
+    format!("{MACHINE_OUTPUT_DIR}/{machine}.pages")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,23 +72,4 @@ mod tests {
         assert!(baseline.ram_only_difference(&parts(b"ram A", b"pages B", b"cpu A")));
         assert!(!baseline.ram_only_difference(&parts(b"ram A", b"pages A", b"cpu A")));
     }
-}
-
-impl TryFrom<BTreeMap<String, String>> for StateDigestParts {
-    type Error = Error;
-
-    fn try_from(parts: BTreeMap<String, String>) -> Result<Self> {
-        for value in parts.values() {
-            ContentDigest::try_from(value.clone())?;
-        }
-        Ok(Self(parts))
-    }
-}
-
-/// Per-machine output directory relative to retained run output.
-pub const MACHINE_OUTPUT_DIR: &str = "machines";
-
-/// Manifest-relative page evidence, beside per-machine traces.
-pub fn page_hash_log(machine: &str) -> String {
-    format!("{MACHINE_OUTPUT_DIR}/{machine}.pages")
 }
