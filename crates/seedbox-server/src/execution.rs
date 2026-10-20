@@ -189,32 +189,6 @@ impl ExecutionService {
         Ok(())
     }
 
-    /// Block new branches before removing the completed simulation's capture.
-    /// Repeated deletion retries cleanup using the retained attempt reference.
-    pub fn delete_checkpoint(&self, id: &SimulationId, name: &str) -> Result<(), Error> {
-        let _evidence = self
-            .evidence
-            .lock()
-            .map_err(|_| catalogue::Error::StorageFailed)?;
-        self.manager.delete_checkpoint(id, name)?;
-        if self.manager.read(|catalogue| catalogue.is_imported(id))? {
-            return Ok(());
-        }
-        let inputs: RetainedInputs = serde_json::from_reader(fs::File::open(
-            self.root.join("inputs").join(format!("{id}.json")),
-        )?)
-        .map_err(std::io::Error::other)?;
-        let attempt = inputs
-            .attempt
-            .ok_or_else(|| std::io::Error::other("checkpoint source has no execution attempt"))?;
-        crate::checkpoint_cleanup::remove(&attempt, name).map_err(|e| {
-            Error::Storage(std::io::Error::new(
-                e.kind(),
-                format!("checkpoint {name} cleanup: {e}"),
-            ))
-        })
-    }
-
     /// Snapshot the atomically published semantic journal using owned paths.
     /// Reading never acquires the writer lock or mutates the source simulation.
     pub fn timeline(&self, id: &SimulationId) -> Result<seedbox_api::FaultTimeline, Error> {

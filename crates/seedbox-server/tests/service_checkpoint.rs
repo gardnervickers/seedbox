@@ -309,13 +309,11 @@ async fn checkpoint_roundtrip() {
     );
     let original = state.captured.lock().unwrap().clone().unwrap();
     assert!(original.is_file());
-    client.delete_checkpoint(id, "saved").await.unwrap();
+    client.delete(id).await.unwrap();
     assert!(
         !original.exists(),
-        "public deletion must reclaim owned checkpoint bytes"
+        "simulation deletion must reclaim owned checkpoint bytes"
     );
-    assert!(client.checkpoints(id).await.unwrap().is_empty());
-    client.delete(id).await.unwrap();
     let restored = client
         .submit_definition(&serde_json::to_value(exported).unwrap(), false)
         .await

@@ -1563,7 +1563,6 @@ pub async fn pv_checkpoint_continuation() {
 
         // Import must use the exported content closure, not the source paths.
 
-        session.client.delete_checkpoint(&source, "saved").await.unwrap();
         session.client.delete(&source).await.unwrap();
         assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
 
@@ -2140,7 +2139,6 @@ pub async fn checkpoint_in_flight_continuation(backend: CpuBackend) {
         eprintln!("in flight at capture: frames={} data_client_to_server={up} data_server_to_client={down} in_flight={in_flight:?} oracle_sleep_pending=true captured_ns={captured_ns}", frames.len());
         assert!(up > 0 && down > 0, "stream data had not crossed both ways");
         assert!(!in_flight.is_empty(), "no routed frame in flight at capture");
-        session.client.delete_checkpoint(&source, "saved").await.unwrap();
         session.client.delete(&source).await.unwrap();
         assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
 
@@ -2364,7 +2362,6 @@ pub async fn pv_network_frames_are_observation_only() {
             }
             assert_eq!(continued, uninterrupted, "restored observed={observed} workers={workers}");
         }
-        session.client.delete_checkpoint(&source, "saved").await.unwrap();
         session.client.delete(&source).await.unwrap();
         eprintln!("frames observation-only: witness={uninterrupted} fresh=on1,on4,off1,off4 restored=on4,off1");
     })).await;

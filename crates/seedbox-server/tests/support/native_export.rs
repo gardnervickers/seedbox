@@ -116,7 +116,6 @@ pub async fn pv_large_export_under_load() {
         eprintln!("large public-client PV export: machines=3 native_snapshot_bytes={machine_bytes} unique_closure_bytes={bytes} cpu_load_threads=2 cpu_iterations={cpu_work} concurrent_api_probes={probes}");
         session.client.stop(&source).await.unwrap();
         session.complete(&source, true, 1, 123).await;
-        session.client.delete_checkpoint(&source, "saved").await.unwrap();
         session.client.delete(&source).await.unwrap();
     })).await;
 }

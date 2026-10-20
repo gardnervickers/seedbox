@@ -236,15 +236,6 @@ impl Client {
             .await
     }
 
-    pub async fn delete_checkpoint(
-        &self,
-        id: &SimulationId,
-        name: &str,
-    ) -> Result<serde_json::Value, Error> {
-        let path = simulation_path(id, &["checkpoints", name])?;
-        self.document(self.request(Method::DELETE, &path)).await
-    }
-
     pub async fn stop(&self, id: &SimulationId) -> Result<Simulation, Error> {
         self.document(self.request(Method::POST, &format!("/v1/simulations/{id}/stop")))
             .await

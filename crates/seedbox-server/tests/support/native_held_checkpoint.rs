@@ -144,7 +144,6 @@ pub async fn native_held_checkpoint(backend: CpuBackend) {
 
         session.client.stop(&source).await.unwrap();
         session.complete(&source, true, 1, 123).await;
-        session.client.delete_checkpoint(&source, "held").await.unwrap();
         session.client.delete(&source).await.unwrap();
         assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
 

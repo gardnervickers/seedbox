@@ -100,7 +100,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .route(
             "/v1/simulations/{id}/checkpoints/{request_id}",
-            get(checkpoint).delete(delete_checkpoint),
+            get(checkpoint),
         )
         .route("/v1/simulations/{id}/controls", post(request_control))
         .route(
@@ -595,26 +595,6 @@ async fn delete_simulation(
     })
     .await
     .map_err(|_| HttpError::internal("simulation deletion task failed"))?
-}
-
-async fn delete_checkpoint(
-    State(state): State<ApiState>,
-    path: Result<Path<(SimulationId, String)>, PathRejection>,
-) -> Result<Json<serde_json::Value>, HttpError> {
-    let Path((id, name)) = path.map_err(|e| HttpError::invalid(e.body_text()))?;
-    let execution = state
-        .execution
-        .ok_or_else(|| HttpError::internal("execution evidence is unavailable"))?;
-    tokio::task::spawn_blocking(move || {
-        execution
-            .delete_checkpoint(&id, &name)
-            .map_err(HttpError::from)?;
-        Ok(Json(
-            serde_json::json!({"simulation": id, "checkpoint": name, "deleted": true}),
-        ))
-    })
-    .await
-    .map_err(|_| HttpError::internal("checkpoint deletion task failed"))?
 }
 
 async fn checkpoint(

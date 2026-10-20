@@ -594,12 +594,6 @@ async fn import_roundtrip_is_independent_preserves_evidence_gaps_and_branches_wi
         matches!(&branch.spec.inputs, InputSource::Resolved { definition } if matches!(definition.start, seedbox_spec::definition::Start::Checkpoint { .. }))
     );
     assert!(branch.metadata.parent.is_none());
-    execution
-        .delete_checkpoint(&imported.metadata.id, "capture")
-        .unwrap();
-    assert!(execution
-        .checkpoint_definition(&imported.metadata.id, "capture")
-        .is_err());
     execution.delete(&imported.metadata.id).unwrap();
     assert!(
         manager.describe(&branch.metadata.id).is_ok(),
@@ -1144,7 +1138,6 @@ fn export_holds_a_stable_snapshot_until_spooled_before_deletion() {
     let id = resource.metadata.id.clone();
     let (deleted, done) = std::sync::mpsc::channel();
     let deletion = std::thread::spawn(move || {
-        deleter.delete_checkpoint(&id, "capture").unwrap();
         deleter.delete(&id).unwrap();
         deleted.send(()).unwrap();
     });
