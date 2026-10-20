@@ -20,6 +20,14 @@ impl CpuBackend {
             _ => Ok(None),
         }
     }
+
+    /// The recorded backend name decoded by `from_recorded_name`.
+    pub fn recorded_name(self) -> &'static str {
+        match self {
+            Self::Pv => "driver-pv",
+            Self::Tcg => "driver-tcg",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -39,5 +47,11 @@ mod backend_authority_tests {
             .unwrap_err()
             .contains("unknown Driver backend"));
         assert_eq!(CpuBackend::from_recorded_name("fixture").unwrap(), None);
+        for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+            assert_eq!(
+                CpuBackend::from_recorded_name(backend.recorded_name()).unwrap(),
+                Some(backend)
+            );
+        }
     }
 }

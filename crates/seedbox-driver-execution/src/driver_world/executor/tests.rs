@@ -11,8 +11,8 @@ fn profile() -> ExecutionProfile {
 #[test]
 fn backend_authority_rejects_conflicting_constructor_backend_before_worker_launch() {
     for (backend, tag, other) in [
-        (DriverBackend::Pv, "driver-pv", "driver-tcg"),
-        (DriverBackend::Tcg, "driver-tcg", "driver-pv"),
+        (CpuBackend::Pv, "driver-pv", "driver-tcg"),
+        (CpuBackend::Tcg, "driver-tcg", "driver-pv"),
     ] {
         let mut matching = profile();
         matching.backend = tag.into();
@@ -33,8 +33,8 @@ fn backend_authority_rejects_conflicting_constructor_backend_before_worker_launc
 #[test]
 fn backend_authority_requires_contract_and_matching_constructor_argument() {
     for (backend, opposite, tag) in [
-        (DriverBackend::Pv, DriverBackend::Tcg, "driver-pv"),
-        (DriverBackend::Tcg, DriverBackend::Pv, "driver-tcg"),
+        (CpuBackend::Pv, CpuBackend::Tcg, "driver-pv"),
+        (CpuBackend::Tcg, CpuBackend::Pv, "driver-tcg"),
     ] {
         let mut matching = profile();
         matching.backend = tag.into();
@@ -120,7 +120,7 @@ fn controller_scope_follows_driver_host_for_pv_and_tcg() {
     let mut pv = profile();
     pv.backend = "driver-pv".into();
     pv.semantic_parameters.engine = Some(DriverExecutor::descriptor("x86_64"));
-    let pv = DriverExecutor::new(pv, DriverBackend::Pv, 1).unwrap();
+    let pv = DriverExecutor::new(pv, CpuBackend::Pv, 1).unwrap();
     if crate::driver_world::platform::Host::current().runs_driver() {
         pv.preflight(None).unwrap();
         pv.admit_execution(false).unwrap();
@@ -137,7 +137,7 @@ fn controller_scope_follows_driver_host_for_pv_and_tcg() {
         pv.admit_execution(true).is_ok(),
         crate::driver_world::platform::Host::current().runs_driver()
     );
-    let tcg = DriverExecutor::new(profile(), DriverBackend::Tcg, 1).unwrap();
+    let tcg = DriverExecutor::new(profile(), CpuBackend::Tcg, 1).unwrap();
     if crate::driver_world::platform::Host::current().runs_driver() {
         tcg.admit_execution(true).unwrap();
     } else {
@@ -155,20 +155,20 @@ fn controller_scope_follows_driver_host_for_pv_and_tcg() {
 fn driver_constructor_validates_contract_and_worker_range_without_running_tools() {
     let mut legacy = profile();
     legacy.semantic_parameters.engine = None;
-    assert!(DriverExecutor::new(legacy, DriverBackend::Tcg, 1)
+    assert!(DriverExecutor::new(legacy, CpuBackend::Tcg, 1)
         .err()
         .unwrap()
         .to_string()
         .contains("recorded driver-world-v1 contract"));
     for count in [0, 65] {
-        assert!(DriverExecutor::new(profile(), DriverBackend::Tcg, count)
+        assert!(DriverExecutor::new(profile(), CpuBackend::Tcg, count)
             .err()
             .unwrap()
             .to_string()
             .contains("1..64"));
     }
     assert_eq!(
-        DriverExecutor::new(profile(), DriverBackend::Tcg, 4)
+        DriverExecutor::new(profile(), CpuBackend::Tcg, 4)
             .unwrap()
             .performance_parameters()["SEEDBOX_MACHINE_WORKERS"],
         "4"
@@ -200,7 +200,7 @@ fn non_oracle_legacy_controller_refuses_before_retaining_engine_or_preparing_ima
 
 #[test]
 fn retained_profile_drift_is_refused_before_reading_runtime_or_launching_workers() {
-    let executor = DriverExecutor::new(profile(), DriverBackend::Tcg, 1).unwrap();
+    let executor = DriverExecutor::new(profile(), CpuBackend::Tcg, 1).unwrap();
     for change in [0, 1] {
         let mut recorded = profile();
         if change == 0 {

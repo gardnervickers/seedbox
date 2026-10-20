@@ -52,7 +52,7 @@ async fn assert_unapplied(session: &NativeSession, id: &seedbox_api::SimulationI
     );
 }
 
-pub async fn native_held_checkpoint(backend: DriverBackend) {
+pub async fn native_held_checkpoint(backend: CpuBackend) {
     native_case(move |owner| Box::pin(async move {
         let session = owner.session(backend);
         let mut request = submission(backend, session.root.path(), &session.store, 2_000_000, 123);

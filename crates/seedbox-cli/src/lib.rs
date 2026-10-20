@@ -373,7 +373,7 @@ fn tcg_refusal() -> Error {
     Error::Setup(format!(
         "--backend tcg requires {}, and the normal Driver runtime",
         seedbox_driver_execution::driver_world::platform::hosts_for(
-            seedbox_driver_execution::driver_world::DriverBackend::Tcg
+            seedbox_spec::backend::CpuBackend::Tcg
         )
     ))
 }
@@ -502,18 +502,16 @@ impl RuntimeInputs {
             witness,
             cpu_backend,
         )?;
-        let (backend, runtime_backend) = match cpu_backend {
-            seedbox_spec::backend::CpuBackend::Pv => (
-                seedbox_driver_execution::driver_world::DriverBackend::Pv,
-                seedbox_driver_execution::runtime_assets::Backend::Pv,
-            ),
-            seedbox_spec::backend::CpuBackend::Tcg => (
-                seedbox_driver_execution::driver_world::DriverBackend::Tcg,
-                seedbox_driver_execution::runtime_assets::Backend::Tcg,
-            ),
+        let runtime_backend = match cpu_backend {
+            seedbox_spec::backend::CpuBackend::Pv => {
+                seedbox_driver_execution::runtime_assets::Backend::Pv
+            }
+            seedbox_spec::backend::CpuBackend::Tcg => {
+                seedbox_driver_execution::runtime_assets::Backend::Tcg
+            }
         };
         let architecture = seedbox_driver_execution::driver_world::platform::Host::current()
-            .guest(backend)
+            .guest(cpu_backend)
             .ok_or_else(|| {
                 Error::Setup("the Driver runtime requires Linux x86-64 or macOS aarch64".into())
             })?;

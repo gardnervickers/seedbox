@@ -209,7 +209,7 @@ pub fn doctor_kernel(
     seedbox_driver_execution::runtime_assets::Inputs,
 )> {
     let architecture = seedbox_driver_execution::driver_world::platform::Host::current()
-        .guest(seedbox_driver_execution::driver_world::DriverBackend::Pv)
+        .guest(seedbox_spec::backend::CpuBackend::Pv)
         .ok_or_else(|| {
             seedbox_application::Error::Setup(
                 "Driver readiness requires Linux x86-64 or macOS aarch64".into(),
@@ -299,19 +299,17 @@ mod tests {
     #[test]
     fn backend_progress_names_tcg_from_profile_not_host() {
         use seedbox_application::execution::{ExecutionProfile, SemanticParameters, WitnessMode};
-        use seedbox_driver_execution::driver_world::{DriverBackend, DriverExecutor};
-        for (cpu, tag) in [
-            (DriverBackend::Pv, "driver-pv"),
-            (DriverBackend::Tcg, "driver-tcg"),
-        ] {
+        use seedbox_driver_execution::driver_world::DriverExecutor;
+        use seedbox_spec::backend::CpuBackend;
+        for cpu in [CpuBackend::Pv, CpuBackend::Tcg] {
             let mut semantic_parameters = SemanticParameters::new();
             semantic_parameters.engine = Some(DriverExecutor::descriptor("x86_64"));
             let mut profile = ExecutionProfile {
-                backend: tag.into(),
+                backend: cpu.recorded_name().into(),
                 witness_mode: WitnessMode::Exits,
                 semantic_parameters,
             };
-            let expected = if cpu == DriverBackend::Tcg {
+            let expected = if cpu == CpuBackend::Tcg {
                 "TCG"
             } else if cfg!(target_os = "macos") {
                 "HVF"

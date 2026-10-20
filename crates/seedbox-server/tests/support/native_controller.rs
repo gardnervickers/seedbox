@@ -7,10 +7,10 @@ const SLEEP_NS: u64 = 20_000_000;
 
 /// The backend's own-source prepared fixture; both are built from
 /// `guest_prepared_fixture.c` and share its `--control-probe` mode.
-fn prepared_fixture(backend: DriverBackend) -> Vec<u8> {
+fn prepared_fixture(backend: CpuBackend) -> Vec<u8> {
     let (name, package) = match backend {
-        DriverBackend::Pv => ("SEEDBOX_PV_PREPARED_FIXTURE", "machinePvTestFixtures"),
-        DriverBackend::Tcg => ("SEEDBOX_TCG_PREPARED_FIXTURE", "machineTcgTestFixtures"),
+        CpuBackend::Pv => ("SEEDBOX_PV_PREPARED_FIXTURE", "machinePvTestFixtures"),
+        CpuBackend::Tcg => ("SEEDBOX_TCG_PREPARED_FIXTURE", "machineTcgTestFixtures"),
     };
     let path = std::env::var_os(name)
         .unwrap_or_else(|| panic!("{name}: own-source {package}/bin/prepared-fixture"));
@@ -115,7 +115,7 @@ fn occurrences(bytes: &[u8], marker: &[u8]) -> usize {
 }
 
 /// Same input with 1 and 4 workers: identical guest replies and raw witness.
-pub async fn controller_repeat(backend: DriverBackend) {
+pub async fn controller_repeat(backend: CpuBackend) {
     native_case(|owner| Box::pin(async move {
         let session = owner.session(backend);
         let request = request(session);
@@ -145,7 +145,7 @@ pub async fn controller_repeat(backend: DriverBackend) {
 
 /// Capture with an oracle Sleep pending, export, import and continue: no call
 /// is resent and the raw witness equals the uninterrupted run.
-pub async fn controller_checkpoint(backend: DriverBackend) {
+pub async fn controller_checkpoint(backend: CpuBackend) {
     native_case(|owner| Box::pin(async move {
         let session = owner.session(backend);
         let request = request(session);

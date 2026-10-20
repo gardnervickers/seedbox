@@ -6,7 +6,7 @@ pub async fn pv_fault_worker_failure() {
     let processes = Arc::new(Mutex::new(None));
     let captured = processes.clone();
     native_case(move |owner| Box::pin(async move {
-        let session = owner.session(DriverBackend::Pv);
+        let session = owner.session(CpuBackend::Pv);
         let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
         let executable = release_executable(&checkout);
         let monitor = executable.parent().unwrap().parent().unwrap().join("debug/seedbox-lifetime-fixture");

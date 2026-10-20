@@ -67,7 +67,6 @@ use seedbox_application::{
     store::{ContentDigest, ContentStore},
 };
 use seedbox_client::Client;
-pub use seedbox_driver_execution::driver_world::DriverBackend;
 use seedbox_driver_execution::{
     driver_world::{self, DriverExecutor},
     process_lifetime::{reclaim_barrier, EXECUTION_LEASE_FILE, SESSION_LEASE_FILE},
@@ -85,6 +84,7 @@ use seedbox_server::{
     execution::{BackendProvider, Backends, ExecutionService},
     manager::Manager,
 };
+pub use seedbox_spec::backend::CpuBackend;
 use std::{
     collections::BTreeMap,
     fs,
@@ -104,10 +104,10 @@ use std::{
 /// and 400k iterations, and prints `START=`, by 1.962 s; PV finishes 200k by
 /// 21 ms and the checkpoint scenario's 2M by 133 ms; the controller fixture's
 /// one 20 ms sleep is far shorter. The bounds are about 20 times the largest.
-pub fn simulated_bound(backend: DriverBackend) -> u64 {
+pub fn simulated_bound(backend: CpuBackend) -> u64 {
     match backend {
-        DriverBackend::Pv => 3_000_000_000,
-        DriverBackend::Tcg => 40_000_000_000,
+        CpuBackend::Pv => 3_000_000_000,
+        CpuBackend::Tcg => 40_000_000_000,
     }
 }
 
@@ -123,7 +123,7 @@ pub const HANG_GUARD: Duration = Duration::from_secs(1200);
 async fn check_bound(
     client: &Client,
     id: &seedbox_api::SimulationId,
-    backend: DriverBackend,
+    backend: CpuBackend,
     simulated_ns: u64,
     goal: &str,
 ) {
@@ -141,7 +141,7 @@ async fn check_bound(
 async fn check_bound_at(
     client: &Client,
     id: &seedbox_api::SimulationId,
-    backend: DriverBackend,
+    backend: CpuBackend,
     bound: u64,
     simulated_ns: u64,
     goal: &str,
@@ -203,7 +203,7 @@ type WorkerFailureSetup = Arc<
 struct NativeProvider {
     #[cfg(feature = "worker-failure-tests")]
     worker_failure: WorkerFailureSetup,
-    backend: DriverBackend,
+    backend: CpuBackend,
     session: PathBuf,
     runtimes: Arc<Mutex<Vec<PathBuf>>>,
     workers: Arc<AtomicUsize>,
@@ -346,7 +346,7 @@ fn application_tar(path: &Path, binary: &[u8]) -> PathBuf {
     path.to_owned()
 }
 fn submission(
-    backend: DriverBackend,
+    backend: CpuBackend,
     root: &Path,
     store: &ContentStore,
     iterations: u64,
@@ -365,7 +365,7 @@ fn submission(
     submission_with_machines(backend, root, store, iterations, seed, vec![])
 }
 fn submission_with_machines(
-    backend: DriverBackend,
+    backend: CpuBackend,
     root: &Path,
     store: &ContentStore,
     iterations: u64,
@@ -414,7 +414,7 @@ struct NativeFixture {
     volumes: Vec<seedbox_spec::VolumeMount>,
 }
 fn fixture_submission(
-    backend: DriverBackend,
+    backend: CpuBackend,
     root: &Path,
     store: &ContentStore,
     seed: u64,
@@ -472,7 +472,7 @@ fn fixture_submission(
         })
         .collect();
     let boot = match backend {
-        DriverBackend::Pv => seedbox_machine_pv::machine::pv::Factory::new(
+        CpuBackend::Pv => seedbox_machine_pv::machine::pv::Factory::new(
             &executable,
             &selected.guest_assets,
             946_684_800,
@@ -481,7 +481,7 @@ fn fixture_submission(
         .with_progress_budget(NonZeroU32::new(32).unwrap())
         .boot_archive_configured(&definition, &environment)
         .unwrap(),
-        DriverBackend::Tcg => seedbox_machine_tcg::machine::tcg::Factory::new(
+        CpuBackend::Tcg => seedbox_machine_tcg::machine::tcg::Factory::new(
             selected
                 .qemu
                 .as_ref()
@@ -563,7 +563,7 @@ fn fixture_submission(
         },
     )]);
     let inventory = match backend {
-        DriverBackend::Pv => wire::Inventory::Pv {
+        CpuBackend::Pv => wire::Inventory::Pv {
             policy: None,
             kernel: artifact(&assets.join("kernel")),
             init: artifact(&assets.join("init")),
@@ -577,7 +577,7 @@ fn fixture_submission(
             progress: artifact(&assets.join("progress.tar")),
             progress_budget: NonZeroU32::new(32).unwrap().into(),
         },
-        DriverBackend::Tcg => wire::Inventory::Tcg {
+        CpuBackend::Tcg => wire::Inventory::Tcg {
             policy: None,
             kernel: artifact(&assets.join("kernel")),
             init: artifact(&assets.join("init")),
@@ -689,7 +689,7 @@ fn fixture_submission(
 struct NativeSession {
     #[cfg(feature = "worker-failure-tests")]
     worker_failure: WorkerFailureSetup,
-    backend: DriverBackend,
+    backend: CpuBackend,
     cancel: CancelServer,
     server: Option<tokio::task::JoinHandle<Result<(), seedbox_server::execution::Error>>>,
     root: TestDirectory,
@@ -706,7 +706,7 @@ struct NativeSession {
     bound: u64,
 }
 impl NativeSession {
-    fn new(backend: DriverBackend) -> Self {
+    fn new(backend: CpuBackend) -> Self {
         let root = TestDirectory(Some(tempfile::tempdir().unwrap()));
         let store = ContentStore::new(root.path().join("store"));
         let session = TestDirectory(Some(
@@ -1174,13 +1174,13 @@ struct NativeCase {
     barriers: Vec<fs::File>,
 }
 impl NativeCase {
-    fn session(&mut self, backend: DriverBackend) -> &mut NativeSession {
+    fn session(&mut self, backend: CpuBackend) -> &mut NativeSession {
         self.sessions.push(NativeSession::new(backend));
         self.sessions.last_mut().unwrap()
     }
     async fn scenario(
         &mut self,
-        backend: DriverBackend,
+        backend: CpuBackend,
         runs: &[NativeRun],
         cancelled: bool,
         expected_match: Option<bool>,
@@ -1417,7 +1417,7 @@ async fn native_runs(
     }
 }
 pub async fn native_session(
-    backend: DriverBackend,
+    backend: CpuBackend,
     iterations: &[u64],
     cancelled: bool,
     expected_match: Option<bool>,
@@ -1436,7 +1436,7 @@ pub async fn native_session(
     .await;
 }
 
-pub async fn native_completion_and_cancellation(backend: DriverBackend) {
+pub async fn native_completion_and_cancellation(backend: CpuBackend) {
     // Preserve ONE aggregate case guard and two fresh scenario sessions.
     native_case(move |owner| {
         Box::pin(async move {
@@ -1455,7 +1455,7 @@ pub async fn pv_worker_counts() {
         Box::pin(async move {
             owner
                 .scenario(
-                    DriverBackend::Pv,
+                    CpuBackend::Pv,
                     &[
                         NativeRun::cpu(200_000),
                         NativeRun {
@@ -1477,7 +1477,7 @@ pub async fn pv_seed_report() {
         Box::pin(async move {
             owner
                 .scenario(
-                    DriverBackend::Pv,
+                    CpuBackend::Pv,
                     &[
                         NativeRun::cpu(200_000),
                         NativeRun {
@@ -1497,9 +1497,9 @@ pub async fn pv_checkpoint_continuation() {
     use seedbox_api::{CheckpointState, ControlCommand, ControlState, InputSource, PlaybackRate};
 
     native_case(move |owner| Box::pin(async move {
-        let session = owner.session(DriverBackend::Pv);
+        let session = owner.session(CpuBackend::Pv);
         // More than one virtual window of CPU work, still a finite stock fixture.
-        let request = submission(DriverBackend::Pv, session.root.path(), &session.store, 2_000_000, 123);
+        let request = submission(CpuBackend::Pv, session.root.path(), &session.store, 2_000_000, 123);
 
         let baseline = session.submit(request.clone(), 1).await;
 
@@ -1526,7 +1526,7 @@ pub async fn pv_checkpoint_continuation() {
                 check_bound(
                     &session.client,
                     &source,
-                    DriverBackend::Pv,
+                    CpuBackend::Pv,
                     status.position.simulated_time_ns,
                     "its mid-workload capture point",
                 )
@@ -1629,7 +1629,7 @@ const IDLE_SLEEP_NS: u64 = 12_500_000_000;
 /// Simulated bound of the network world: the oracle's sleep, which alone ends
 /// the run, plus the CPU-fixture allowance for boot, the exchange and drain.
 /// Measured: PV completes at 12.508 s and TCG at 14.461 s.
-fn network_bound(backend: DriverBackend) -> u64 {
+fn network_bound(backend: CpuBackend) -> u64 {
     IDLE_SLEEP_NS + simulated_bound(backend)
 }
 const PROBE_READY: &str = "NETPROBE ready port=7000\n";
@@ -1662,7 +1662,7 @@ const PROBE_MACHINES: [ProbeMachine; 3] = [
     },
 ];
 fn network_submission(
-    backend: DriverBackend,
+    backend: CpuBackend,
     root: &Path,
     store: &ContentStore,
     seed: u64,
@@ -1672,7 +1672,7 @@ fn network_submission(
 /// A network world of `machines`, the first being the oracle; with
 /// `controller`, the oracle also holds the guest control socket.
 fn network_world_submission(
-    backend: DriverBackend,
+    backend: CpuBackend,
     root: &Path,
     store: &ContentStore,
     seed: u64,
@@ -1743,14 +1743,14 @@ fn network_world_submission(
         let environment =
             GuestEnvironment::new(machine.name, "127.0.0.1 localhost\n", control(machine.name));
         let boot = match backend {
-            DriverBackend::Pv => {
+            CpuBackend::Pv => {
                 seedbox_machine_pv::machine::pv::Factory::new(&executable, assets, 946_684_800)
                     .unwrap()
                     .with_progress_budget(NonZeroU32::new(32).unwrap())
                     .boot_archive_configured(&definition, &environment)
                     .unwrap()
             }
-            DriverBackend::Tcg => seedbox_machine_tcg::machine::tcg::Factory::new(
+            CpuBackend::Tcg => seedbox_machine_tcg::machine::tcg::Factory::new(
                 selected
                     .qemu
                     .as_ref()
@@ -1860,7 +1860,7 @@ fn network_world_submission(
         provenance: BTreeMap::new(),
     };
     let inventory = match backend {
-        DriverBackend::Pv => wire::Inventory::Pv {
+        CpuBackend::Pv => wire::Inventory::Pv {
             policy: None,
             kernel: artifact(&assets.join("kernel")),
             init: artifact(&assets.join("init")),
@@ -1874,7 +1874,7 @@ fn network_world_submission(
             progress: artifact(&assets.join("progress.tar")),
             progress_budget: NonZeroU32::new(32).unwrap().into(),
         },
-        DriverBackend::Tcg => wire::Inventory::Tcg {
+        CpuBackend::Tcg => wire::Inventory::Tcg {
             policy: None,
             kernel: artifact(&assets.join("kernel")),
             init: artifact(&assets.join("init")),
@@ -2015,7 +2015,7 @@ fn marker_time((text, times): &(String, Vec<(usize, u64)>), marker: &str) -> u64
 /// Checkpoint, export and import a world captured while the oracle's sleep is
 /// pending and the client's TCP stream is mid-transfer; the continuation must
 /// reach the uninterrupted raw witness and output.
-pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
+pub async fn checkpoint_in_flight_continuation(backend: CpuBackend) {
     use seedbox_api::{CheckpointState, ControlCommand, ControlState, InputSource, PlaybackRate};
     native_case_with_guard(Duration::from_secs(600), move |owner| Box::pin(async move {
         let seed = 123;
@@ -2221,7 +2221,7 @@ fn scheduled(frames: &[seedbox_api::Frame], from: &str, to: &str) -> (u64, u64) 
 /// witness. Observed runs publish their routed frames and link counters.
 pub async fn pv_network_frames_are_observation_only() {
     use seedbox_api::{CheckpointState, ControlCommand, ControlState, PlaybackRate};
-    let backend = DriverBackend::Pv;
+    let backend = CpuBackend::Pv;
     native_case_with_guard(Duration::from_secs(900), move |owner| Box::pin(async move {
         let seed = 123;
         let session = owner.session(backend);
@@ -2377,22 +2377,22 @@ pub async fn pv_network_frames_are_observation_only() {
         eprintln!("frames observation-only: witness={uninterrupted} fresh=on1,on4,off1,off4 restored=on4,off1");
     })).await;
 }
-fn runtime_backend(backend: DriverBackend) -> runtime_assets::Backend {
+fn runtime_backend(backend: CpuBackend) -> runtime_assets::Backend {
     match backend {
-        DriverBackend::Pv => runtime_assets::Backend::Pv,
-        DriverBackend::Tcg => runtime_assets::Backend::Tcg,
+        CpuBackend::Pv => runtime_assets::Backend::Pv,
+        CpuBackend::Tcg => runtime_assets::Backend::Tcg,
     }
 }
-fn label(backend: DriverBackend) -> &'static str {
+fn label(backend: CpuBackend) -> &'static str {
     match backend {
-        DriverBackend::Pv => "pv",
-        DriverBackend::Tcg => "tcg",
+        CpuBackend::Pv => "pv",
+        CpuBackend::Tcg => "tcg",
     }
 }
-fn scratch_prefix(backend: DriverBackend) -> &'static str {
+fn scratch_prefix(backend: CpuBackend) -> &'static str {
     match backend {
-        DriverBackend::Pv => "seedbox-pv-",
-        DriverBackend::Tcg => "seedbox-tcg-",
+        CpuBackend::Pv => "seedbox-pv-",
+        CpuBackend::Tcg => "seedbox-tcg-",
     }
 }
 
@@ -2455,7 +2455,7 @@ impl ForcedFailureProof {
     }
 }
 
-pub async fn native_forced_failure(backend: DriverBackend, timeout: bool) {
+pub async fn native_forced_failure(backend: CpuBackend, timeout: bool) {
     let proof = Arc::new(Mutex::new(None));
     let body_proof = proof.clone();
     let (expire, expired) = tokio::sync::oneshot::channel();
