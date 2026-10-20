@@ -10,7 +10,7 @@
 //! the store, including unflushed writes, is not a power loss.
 use super::virtio::*;
 use super::Result;
-use crate::machine::disk::{
+use seedbox_machine::machine::disk::{
     request::{self, representable, Buffers},
     Store,
 };

@@ -1,13 +1,13 @@
 //! Actual private DynamoRIO injection; wrapper-only tests are not this proof.
 use super::*;
 use crate::{
-    application::{boot_derived, with_runtime, GuestBootstrap, Kernel},
     clock::{Clock, SimulationClock},
-    definition::{FilesystemArchive, Launch, PreparedApplication},
-    execution::ExecutionConfig,
-    pv::{Inbox, Outbox, Output, Response, Stream},
     rng::SeededRng,
 };
+use seedbox_machine::application::{boot_derived, with_runtime, GuestBootstrap, Kernel};
+use seedbox_machine::definition::{FilesystemArchive, Launch, PreparedApplication};
+use seedbox_machine::execution::ExecutionConfig;
+use seedbox_machine::pv::{Inbox, Outbox, Output, Response, Stream};
 use seedbox_test_time::{GuestProgress, HangGuard};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -58,7 +58,7 @@ fn machine(iterations: u64, instrumented: bool) -> PVMachine {
             super::factory::runtime_prefix(seedbox_spec::progress::ProgressBudget::MACHINE_DEFAULT);
         boot_derived(&with_runtime(&app, &runtime, &prefix).unwrap(), &bootstrap).unwrap()
     } else {
-        crate::application::boot_archive(&app, &bootstrap).unwrap()
+        seedbox_machine::application::boot_archive(&app, &bootstrap).unwrap()
     };
     PVMachine::from_boot_inputs(&input("SEEDBOX_PV_WORKER"), bootstrap.kernel.image, archive)
         .unwrap()

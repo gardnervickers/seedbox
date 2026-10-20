@@ -39,7 +39,9 @@ fn reboot_clears_timers_at_current_time_and_preserves_entropy_across_snapshot() 
     let snapshot = machine.snapshot().unwrap();
     let saved_rng = machine.rng.clone();
     clock.set(3);
-    machine.request(crate::pv::Request::Reboot).unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Reboot)
+        .unwrap();
     assert_eq!(clock.now(), 3);
     assert_eq!(machine.reached, 3);
     assert_eq!(machine.pending_boots, 0);
@@ -59,11 +61,15 @@ fn reboot_clears_timers_at_current_time_and_preserves_entropy_across_snapshot() 
     let mut branch =
         PVMachine::from_snapshot(Path::new(&executable), &snapshot, branch_clock).unwrap();
     branch.rng = saved_rng;
-    branch.request(crate::pv::Request::Reboot).unwrap();
+    branch
+        .request(seedbox_machine::pv::Request::Reboot)
+        .unwrap();
     branch.run(&mut (), at(3)).unwrap();
     assert_eq!(branch.seed, seed);
-    branch.request(crate::pv::Request::Crash).unwrap();
-    branch.request(crate::pv::Request::Reboot).unwrap();
+    branch.request(seedbox_machine::pv::Request::Crash).unwrap();
+    branch
+        .request(seedbox_machine::pv::Request::Reboot)
+        .unwrap();
     branch.run(&mut (), at(3)).unwrap();
     assert_ne!(branch.seed, seed);
     clock.set(8);
@@ -75,7 +81,9 @@ fn reboot_clears_timers_at_current_time_and_preserves_entropy_across_snapshot() 
         }
     ));
     clock.set(9);
-    machine.request(crate::pv::Request::Reboot).unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Reboot)
+        .unwrap();
     assert_eq!(
         machine.run(&mut (), at(9)).unwrap(),
         StopReason::BoundaryReached
@@ -171,8 +179,12 @@ fn zero_budget_shutdown_snapshots_preserve_request_once() {
         serde_json::to_vec(&expected).unwrap()
     );
     let rng = serde_json::to_vec(&machine.rng).unwrap();
-    machine.request(crate::pv::Request::Shutdown).unwrap();
-    machine.request(crate::pv::Request::Shutdown).unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Shutdown)
+        .unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Shutdown)
+        .unwrap();
     assert_eq!(machine.reached, 0);
     assert!(machine.console.is_empty());
     assert_eq!(serde_json::to_vec(&machine.rng).unwrap(), rng);
@@ -193,14 +205,20 @@ fn zero_budget_shutdown_snapshots_preserve_request_once() {
             PVMachine::from_snapshot(&executable, &snapshot, branch_clock.clone()).unwrap();
         assert_eq!(branch.seed, seed);
         branch.rng = serde_json::from_slice(&rng).unwrap();
-        branch.request(crate::pv::Request::Shutdown).unwrap();
+        branch
+            .request(seedbox_machine::pv::Request::Shutdown)
+            .unwrap();
         finish(&mut branch, &branch_clock);
-        branch.request(crate::pv::Request::Shutdown).unwrap();
+        branch
+            .request(seedbox_machine::pv::Request::Shutdown)
+            .unwrap();
         // Hard lifecycle reset discards the old latch/device backlog. If it
         // leaked into this boot, Linux would power off instead of waiting.
         branch_clock.set(branch.reached);
         let output_start = branch.console.len();
-        branch.request(crate::pv::Request::Reboot).unwrap();
+        branch
+            .request(seedbox_machine::pv::Request::Reboot)
+            .unwrap();
         assert!(!branch.shutdown);
         let guard = HangGuard::new(
             "lifecycle reboot worker transport",
@@ -231,9 +249,11 @@ fn zero_budget_shutdown_snapshots_preserve_request_once() {
                 break;
             }
         }
-        branch.request(crate::pv::Request::Crash).unwrap();
+        branch.request(seedbox_machine::pv::Request::Crash).unwrap();
         assert!(!branch.shutdown);
-        branch.request(crate::pv::Request::Shutdown).unwrap();
+        branch
+            .request(seedbox_machine::pv::Request::Shutdown)
+            .unwrap();
         assert!(!branch.shutdown);
     }
 }
@@ -273,7 +293,9 @@ fn live_linux_ring_dma_snapshot_preserves_shutdown_at_newer_clock() {
             other => panic!("unexpected boot stop {other:?}"),
         }
     }
-    machine.request(crate::pv::Request::Shutdown).unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Shutdown)
+        .unwrap();
     let pending = machine.snapshot().unwrap();
     let output = machine.console.clone();
     let now = clock.now();
@@ -285,7 +307,9 @@ fn live_linux_ring_dma_snapshot_preserves_shutdown_at_newer_clock() {
         let branch_clock = Arc::new(crate::clock::SimulationClock::new(now + 50_000_000));
         let mut branch =
             PVMachine::from_snapshot(&executable, &snapshot, branch_clock.clone()).unwrap();
-        branch.request(crate::pv::Request::Shutdown).unwrap();
+        branch
+            .request(seedbox_machine::pv::Request::Shutdown)
+            .unwrap();
         finish(&mut branch, &branch_clock);
     }
 }

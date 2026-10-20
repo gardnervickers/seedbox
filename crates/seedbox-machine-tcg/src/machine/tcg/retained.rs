@@ -20,8 +20,8 @@ pub(super) struct EndReport {
     pub retired: Option<String>,
 }
 impl EndReport {
-    pub fn response(&self) -> crate::pv::Response {
-        crate::pv::Response::BootEnded {
+    pub fn response(&self) -> seedbox_machine::pv::Response {
+        seedbox_machine::pv::Response::BootEnded {
             ended_boot: self.ended.boot,
             disposition: self.ended.disposition,
             native_booted: self.ended.native_booted,

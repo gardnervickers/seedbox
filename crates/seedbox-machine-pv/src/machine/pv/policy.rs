@@ -1,5 +1,5 @@
 //! Dedicated named policy streams; never consume the caller's guest entropy.
-use crate::definition::BackendPolicy;
+use seedbox_machine::definition::BackendPolicy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

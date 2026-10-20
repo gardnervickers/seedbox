@@ -44,15 +44,13 @@ mod protocol;
 mod retained;
 mod wire;
 mod worker;
-use super::{ExitReason, Machine, RunContext, StopReason, Timestamp};
-use crate::{
-    definition::{BackendPolicy, DiskImage},
-    machine::disk::Store,
-};
 use client::Worker;
 pub use factory::Factory;
 use protocol::{BootDisk, Request, Response, Stop};
+use seedbox_machine::definition::{BackendPolicy, DiskImage};
+use seedbox_machine::machine::disk::Store;
 use seedbox_machine::machine::{EvidenceDisposition, StateEvidence};
+use seedbox_machine::machine::{ExitReason, Machine, RunContext, StopReason, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -81,9 +79,9 @@ struct Capture {
     shutdown: bool,
     pending_boots: u64,
     pending_at: Option<u64>,
-    writes: Vec<crate::pv::transport::GuestWrite>,
+    writes: Vec<seedbox_machine::pv::transport::GuestWrite>,
     input: Vec<u8>,
-    guest: crate::pv::bridge::GuestBridge,
+    guest: seedbox_machine::pv::bridge::GuestBridge,
     /// Disk capacity in sectors. With a disk, a fourth blob carries the
     /// client store's overlays when no worker is live, or is empty.
     disk: Option<u64>,
@@ -146,9 +144,9 @@ pub struct PVMachine {
     shutdown: bool,
     pending_boots: u64,
     pending_at: Option<u64>,
-    writes: Vec<crate::pv::transport::GuestWrite>,
+    writes: Vec<seedbox_machine::pv::transport::GuestWrite>,
     input: Vec<u8>,
-    guest: crate::pv::bridge::GuestBridge,
+    guest: seedbox_machine::pv::bridge::GuestBridge,
     disk: Option<Disk>,
     /// The NIC's MAC address, when the definition has a network interface.
     network: Option<[u8; 6]>,
@@ -158,7 +156,7 @@ pub struct PVMachine {
 /// network interface, the guest's static address (`guest_network.h`).
 fn command_line(
     arguments: &str,
-    network: Option<&crate::definition::NetworkInterface>,
+    network: Option<&seedbox_machine::definition::NetworkInterface>,
 ) -> (String, Option<[u8; 6]>) {
     match network {
         Some(interface) => (
@@ -227,7 +225,7 @@ impl PVMachine {
         while let Some(r) = self.aux.pending.front() {
             context
                 .outbox
-                .emit(crate::pv::Output {
+                .emit(seedbox_machine::pv::Output {
                     at: Timestamp::from_nanos(r.at.max(context.clock.now())),
                     payload: r.response(),
                 })
@@ -243,14 +241,14 @@ impl PVMachine {
     #[cfg(test)]
     pub(crate) fn new(
         executable: &Path,
-        bootstrap: &crate::application::GuestBootstrap,
-        definition: crate::definition::MachineDefinition,
+        bootstrap: &seedbox_machine::application::GuestBootstrap,
+        definition: seedbox_machine::definition::MachineDefinition,
     ) -> Result<Self, std::io::Error> {
         boot::RamLayout::native(definition.resources.memory_bytes)
             .map_err(std::io::Error::other)?;
         // Preparation may derive a private application copy before packaging;
         // the original prepared workload is never mutated by the backend.
-        let initrd = crate::application::boot_archive(&definition.application, bootstrap)
+        let initrd = seedbox_machine::application::boot_archive(&definition.application, bootstrap)
             .map_err(std::io::Error::other)?;
         let (command_line, network) =
             command_line(&bootstrap.kernel.command_line, definition.network.as_ref());
@@ -662,7 +660,7 @@ impl PVMachine {
         self.guest.input_delivered()?;
         self.reached = time;
         for write in &writes {
-            if let crate::pv::transport::GuestWrite::Console(write) = write {
+            if let seedbox_machine::pv::transport::GuestWrite::Console(write) = write {
                 self.console.extend_from_slice(&write.bytes);
             }
         }
@@ -989,22 +987,22 @@ impl Machine for PVMachine {
         let result: Result<StopReason, String> = (|| {
             while let Some(input) = context.inbox.front() {
                 match &input.payload {
-                    crate::pv::Request::Crash => {
+                    seedbox_machine::pv::Request::Crash => {
                         crashed_this_run |= !matches!(self.state, State::Exited | State::Crashed)
                             || self.pending_boots > 0;
                         self.request_crash().map_err(|e| e.to_string())?;
                         frames.clear();
                     }
-                    crate::pv::Request::Reboot => {
+                    seedbox_machine::pv::Request::Reboot => {
                         self.request_reboot(Timestamp::from_nanos(now.max(self.reached)))
                             .map_err(|e| e.to_string())?;
                         frames.clear();
                     }
-                    crate::pv::Request::Shutdown => {
+                    seedbox_machine::pv::Request::Shutdown => {
                         self.request_shutdown().map_err(|e| e.to_string())?
                     }
-                    crate::pv::Request::ReceiveFrame { bytes } => {
-                        if !crate::pv::frame_in_bounds(bytes) {
+                    seedbox_machine::pv::Request::ReceiveFrame { bytes } => {
+                        if !seedbox_machine::pv::frame_in_bounds(bytes) {
                             return Err("PV receive frame outside frame bounds".into());
                         }
                         if self.network.is_some()
@@ -1014,9 +1012,9 @@ impl Machine for PVMachine {
                             frames.push(bytes.clone());
                         }
                     }
-                    request @ (crate::pv::Request::Application { .. }
-                    | crate::pv::Request::StepRealtime { .. }
-                    | crate::pv::Request::SimulationReply { .. }) => {
+                    request @ (seedbox_machine::pv::Request::Application { .. }
+                    | seedbox_machine::pv::Request::StepRealtime { .. }
+                    | seedbox_machine::pv::Request::SimulationReply { .. }) => {
                         if !matches!(self.state, State::Exited | State::Crashed)
                             || self.pending_boots > 0
                         {
@@ -1141,9 +1139,9 @@ impl seedbox_machine::snapshot::Record for Capture {
         + <bool as seedbox_machine::snapshot::Record>::MIN
         + <u64 as seedbox_machine::snapshot::Record>::MIN
         + <Option<u64> as seedbox_machine::snapshot::Record>::MIN
-        + <Vec<crate::pv::transport::GuestWrite> as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<seedbox_machine::pv::transport::GuestWrite> as seedbox_machine::snapshot::Record>::MIN
         + <Vec<u8> as seedbox_machine::snapshot::Record>::MIN
-        + <crate::pv::bridge::GuestBridge as seedbox_machine::snapshot::Record>::MIN
+        + <seedbox_machine::pv::bridge::GuestBridge as seedbox_machine::snapshot::Record>::MIN
         + <Option<u64> as seedbox_machine::snapshot::Record>::MIN
         + <Option<[u8; 6]> as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
@@ -1200,7 +1198,7 @@ impl seedbox_machine::snapshot::Record for Capture {
         let pending_at = Record::decode(r)?;
         let writes = Record::decode(r)?;
         let input = Record::decode(r)?;
-        let guest = crate::pv::bridge::GuestBridge::read_snapshot(r, reached, true)?;
+        let guest = seedbox_machine::pv::bridge::GuestBridge::read_snapshot(r, reached, true)?;
         let disk = Record::decode(r)?;
         let network = Record::decode(r)?;
         Ok(Self {

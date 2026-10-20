@@ -38,8 +38,8 @@ pub(super) struct Report {
     pub retired: Option<String>,
 }
 impl Report {
-    pub fn response(&self) -> crate::pv::Response {
-        crate::pv::Response::BootEnded {
+    pub fn response(&self) -> seedbox_machine::pv::Response {
+        seedbox_machine::pv::Response::BootEnded {
             ended_boot: self.end.boot,
             disposition: if self.end.shutdown {
                 EvidenceDisposition::Shutdown

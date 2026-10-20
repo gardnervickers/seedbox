@@ -1,6 +1,6 @@
 use super::super::boot::RAM_BASE as BASE;
 use super::*;
-use crate::machine::disk::{
+use seedbox_machine::machine::disk::{
     request::{STATUS_IOERR, STATUS_OK, STATUS_UNSUPP},
     SECTOR,
 };

@@ -1,8 +1,6 @@
 use super::{Error, TcgMachine};
-use crate::{
-    application::{GuestBootstrap, GuestEnvironment, Kernel},
-    definition::{BackendPolicy, MachineDefinition},
-};
+use seedbox_machine::application::{GuestBootstrap, GuestEnvironment, Kernel};
+use seedbox_machine::definition::{BackendPolicy, MachineDefinition};
 use std::path::{Path, PathBuf};
 /// ELF machine of the guest `init`.
 const EM_X86_64: u16 = 62;
@@ -38,7 +36,7 @@ impl Factory {
     // image and snapshots; neither the Driver's time mapping nor ambient state
     // can supply it to arbitrary machines.
     pub fn new(qemu: &Path, guest_assets: &Path, epoch_seconds: u32) -> Result<Self, Error> {
-        use super::super::assets;
+        use seedbox_machine::machine::assets;
         assets::executable(qemu)?;
         let kernel = assets::read(guest_assets, "kernel")?;
         assets::bzimage(&kernel)?;
@@ -141,18 +139,18 @@ impl Factory {
     }
     fn assemble_selected(
         &self,
-        application: &crate::definition::PreparedApplication,
+        application: &seedbox_machine::definition::PreparedApplication,
         bootstrap: &GuestBootstrap,
         environment: Option<&GuestEnvironment>,
-    ) -> Result<Vec<u8>, crate::definition::DefinitionError> {
+    ) -> Result<Vec<u8>, seedbox_machine::definition::DefinitionError> {
         match environment {
-            Some(environment) => crate::application::boot_archive_configured(
+            Some(environment) => seedbox_machine::application::boot_archive_configured(
                 application,
                 bootstrap,
                 environment,
                 self.formatter.as_deref(),
             ),
-            None => crate::application::boot_archive(application, bootstrap),
+            None => seedbox_machine::application::boot_archive(application, bootstrap),
         }
     }
     /// Construct with an already complete Linux boot archive, used verbatim.
@@ -191,9 +189,9 @@ impl Factory {
         &self,
         definition: &MachineDefinition,
         package: impl FnOnce(
-            &crate::definition::PreparedApplication,
+            &seedbox_machine::definition::PreparedApplication,
             &GuestBootstrap,
-        ) -> Result<Vec<u8>, crate::definition::DefinitionError>,
+        ) -> Result<Vec<u8>, seedbox_machine::definition::DefinitionError>,
     ) -> Result<TcgMachine, Error> {
         let mut machine = TcgMachine::prepare(
             &self.qemu,

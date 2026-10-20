@@ -5,7 +5,7 @@
 use super::boot::RAM_BASE as BASE;
 use super::virtio::*;
 use super::Result;
-use crate::pv::transport::LifecycleOutput;
+use seedbox_machine::pv::transport::LifecycleOutput;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 const PORT: &[u8] = b"seedbox-lifecycle";

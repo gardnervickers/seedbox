@@ -86,7 +86,7 @@ fn bounded_run_wait_is_peer_gated_and_has_no_transport_deadline() {
                 qmp.execute_bounded(
                     Timestamp::from_nanos(2),
                     Timestamp::from_nanos(22),
-                    crate::execution::ExecutionConfig::default(),
+                    seedbox_machine::execution::ExecutionConfig::default(),
                 )
             });
             // The guard only diagnoses a broken fixture; receiving the request

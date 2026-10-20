@@ -77,7 +77,7 @@ fn validate(c: &Capture, disk: Option<&DiskImage>) -> Result<()> {
     boot::RamLayout::native(c.memory_bytes).map_err(|_| invalid("RAM layout"))?;
     boot::arguments(&c.command_line).map_err(|_| invalid("kernel arguments"))?;
     if let Some(mac) = c.network {
-        crate::definition::MacAddress::new(mac).map_err(|_| invalid("network MAC"))?;
+        seedbox_machine::definition::MacAddress::new(mac).map_err(|_| invalid("network MAC"))?;
     }
     if c.disk != disk.map(DiskImage::sectors) {
         return Err(invalid("disk base capacity"));
@@ -105,7 +105,7 @@ fn validate(c: &Capture, disk: Option<&DiskImage>) -> Result<()> {
 }
 fn validate_overlay(bytes: &[u8], sectors: Option<u64>) -> Result<()> {
     match sectors {
-        Some(capacity) => crate::machine::disk::codec::validate_overlays(bytes, capacity)
+        Some(capacity) => seedbox_machine::machine::disk::codec::validate_overlays(bytes, capacity)
             .map_err(|_| invalid("disk overlays")),
         None if bytes.is_empty() => Ok(()),
         None => Err(invalid("diskless overlays")),
@@ -395,7 +395,7 @@ impl Snapshot {
                 client_len
             };
             if overlays < 32
-                || overlays as u128 > crate::machine::disk::codec::encoded_limit(sectors)
+                || overlays as u128 > seedbox_machine::machine::disk::codec::encoded_limit(sectors)
             {
                 return Err(invalid("overlay length exceeds disk geometry"));
             }

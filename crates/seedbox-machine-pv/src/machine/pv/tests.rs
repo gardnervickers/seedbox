@@ -61,7 +61,9 @@ fn native_indefinite_idle_and_capture_failure_keep_valid_machine() {
             deadline: None
         }
     );
-    machine.request(crate::pv::Request::Crash).unwrap();
+    machine
+        .request(seedbox_machine::pv::Request::Crash)
+        .unwrap();
     assert!(
         matches!(machine.run(&mut (), at(100)).unwrap(), StopReason::Exited { reached, reason: ExitReason::Crashed } if reached == at(100))
     );
@@ -291,8 +293,8 @@ fn complete_kernel_arguments_survive_uninitialized_snapshot() {
 
 #[test]
 fn network_identity_survives_uninitialized_snapshot_without_repeating_arguments() {
-    let interface = crate::definition::NetworkInterface::new(
-        crate::definition::MacAddress::new([2, 0, 0, 0, 0, 9]).unwrap(),
+    let interface = seedbox_machine::definition::NetworkInterface::new(
+        seedbox_machine::definition::MacAddress::new([2, 0, 0, 0, 0, 9]).unwrap(),
         std::net::Ipv4Addr::new(192, 168, 4, 9),
         0,
     )

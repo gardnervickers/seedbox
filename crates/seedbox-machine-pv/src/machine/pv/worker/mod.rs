@@ -24,9 +24,9 @@ use super::{
     boot,
     protocol::{self, BootDisk, Request, Response, Stop},
 };
-use crate::machine::disk::Store;
 use arch::{Architecture, Backend, Devices, Exit, Native};
 use memory::Memory;
+use seedbox_machine::machine::disk::Store;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
@@ -78,7 +78,7 @@ struct State {
     console: console::Console,
     /// The boot's NIC, including its backlog and untaken transmissions.
     net: Option<net::Net>,
-    writes: Vec<crate::pv::transport::GuestWrite>,
+    writes: Vec<seedbox_machine::pv::transport::GuestWrite>,
     #[serde(default)]
     policy: Option<super::policy::Runtime>,
 }
@@ -206,7 +206,7 @@ impl<B: Backend> Machine<B> {
                 .output
                 .drain()
                 .into_iter()
-                .map(crate::pv::transport::GuestWrite::Lifecycle),
+                .map(seedbox_machine::pv::transport::GuestWrite::Lifecycle),
         );
     }
     /// Move NIC transmissions, already stamped, into the ordered write stream.
@@ -215,10 +215,12 @@ impl<B: Backend> Machine<B> {
             self.state
                 .writes
                 .extend(net.take_transmitted().into_iter().map(|frame| {
-                    crate::pv::transport::GuestWrite::Frame(crate::pv::transport::LifecycleWrite {
-                        time: frame.time,
-                        bytes: frame.bytes,
-                    })
+                    seedbox_machine::pv::transport::GuestWrite::Frame(
+                        seedbox_machine::pv::transport::LifecycleWrite {
+                            time: frame.time,
+                            bytes: frame.bytes,
+                        },
+                    )
                 }));
         }
     }
@@ -243,8 +245,8 @@ impl<B: Backend> Machine<B> {
         self.output.push(byte);
         self.state
             .writes
-            .push(crate::pv::transport::GuestWrite::Console(
-                crate::pv::transport::LifecycleWrite {
+            .push(seedbox_machine::pv::transport::GuestWrite::Console(
+                seedbox_machine::pv::transport::LifecycleWrite {
                     time: self.state.now,
                     bytes: vec![byte],
                 },
@@ -612,7 +614,8 @@ fn read_snapshot(path: &Path, inputs: &BootInputs) -> Result<Saved> {
     match &inputs.disk {
         None if tail != 0 => return Err("PV snapshot trailing bytes".into()),
         Some(base)
-            if u128::from(tail) > crate::machine::disk::codec::encoded_limit(base.capacity()) =>
+            if u128::from(tail)
+                > seedbox_machine::machine::disk::codec::encoded_limit(base.capacity()) =>
         {
             return Err("PV snapshot disk exceeds capacity".into())
         }
@@ -633,7 +636,7 @@ fn read_snapshot(path: &Path, inputs: &BootInputs) -> Result<Saved> {
         return Err("PV snapshot truncated disk".into());
     }
     if let Some(base) = &inputs.disk {
-        crate::machine::disk::codec::validate_overlays(&overlays, base.capacity())
+        seedbox_machine::machine::disk::codec::validate_overlays(&overlays, base.capacity())
             .map_err(|e| format!("PV snapshot disk: {e:?}"))?;
     }
     Ok(Saved {
@@ -853,7 +856,7 @@ impl seedbox_machine::snapshot::Record for State {
         + <Devices as seedbox_machine::snapshot::Record>::MIN
         + <console::Console as seedbox_machine::snapshot::Record>::MIN
         + <Option<net::Net> as seedbox_machine::snapshot::Record>::MIN
-        + <Vec<crate::pv::transport::GuestWrite> as seedbox_machine::snapshot::Record>::MIN
+        + <Vec<seedbox_machine::pv::transport::GuestWrite> as seedbox_machine::snapshot::Record>::MIN
         + <Option<super::policy::Runtime> as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,

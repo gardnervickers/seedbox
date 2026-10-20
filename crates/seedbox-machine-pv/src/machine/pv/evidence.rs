@@ -120,7 +120,7 @@ pub(super) fn policy_digest(
         settings,
         speed_permille,
     } = policy;
-    let crate::definition::BackendPolicy {
+    let seedbox_machine::definition::BackendPolicy {
         seed,
         timer_jitter_ns,
         stop_tolerance_ns,

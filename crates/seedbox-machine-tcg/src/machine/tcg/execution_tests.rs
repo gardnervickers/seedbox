@@ -1,12 +1,9 @@
 //! Native reference-backend tests: inspect CPU state independently through GDB.
 use super::raw_program_data::{counting_loop, lapic, Asm, Reg, PROGRAM, RBX, RCX, RIP, STUB};
 use super::*;
-use crate::{
-    clock::SimulationClock,
-    execution::ExecutionConfig,
-    pv::{Inbox, Input, Outbox, Request},
-    rng::SeededRng,
-};
+use crate::{clock::SimulationClock, rng::SeededRng};
+use seedbox_machine::execution::ExecutionConfig;
+use seedbox_machine::pv::{Inbox, Input, Outbox, Request};
 use std::collections::VecDeque;
 
 const QEMU: &str = "qemu-system-x86_64";
@@ -308,7 +305,7 @@ fn execution_cost_timer_inside_partial_charge_matches_segmented_and_restored_cpu
 /// UART observation is the store's canonical completion, independent of polling.
 #[test]
 fn console_observations_keep_instruction_times_across_rates_partitions_and_snapshot() {
-    use crate::pv::transport::{GuestWrite, LifecycleWrite};
+    use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
     // COM1 at port 0x3F8: THR +0, MCR +4, MSR +6.
     let code = Asm::default()
         .mov_imm(Reg::Edx, 0x3F8)
@@ -395,7 +392,7 @@ fn console_observations_keep_instruction_times_across_rates_partitions_and_snaps
         let console: Vec<_> = outputs
             .into_iter()
             .filter_map(|output| match output.payload {
-                crate::pv::Response::BootConsole { bytes } => {
+                seedbox_machine::pv::Response::BootConsole { bytes } => {
                     Some(GuestWrite::Console(LifecycleWrite {
                         time: output.at.as_nanos(),
                         bytes,

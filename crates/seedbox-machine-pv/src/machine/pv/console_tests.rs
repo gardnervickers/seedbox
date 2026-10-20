@@ -1,10 +1,7 @@
 //! Actual UART/lifecycle interleave through the stopped PV worker protocol.
 use super::*;
-use crate::{
-    clock::SimulationClock,
-    pv::{Inbox, Outbox, Output, Response as GuestResponse},
-    rng::SeededRng,
-};
+use crate::{clock::SimulationClock, rng::SeededRng};
+use seedbox_machine::pv::{Inbox, Outbox, Output, Response as GuestResponse};
 use std::collections::VecDeque;
 
 /// Two lifecycle TX descriptors made available separately around console

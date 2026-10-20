@@ -1,6 +1,7 @@
 //! Factory policy identity and dedicated atomic disk-loss streams.
 use super::{qemu::TimerSetup, Error};
-use crate::{definition::BackendPolicy, machine::disk::Store};
+use seedbox_machine::definition::BackendPolicy;
+use seedbox_machine::machine::disk::Store;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PolicyState {

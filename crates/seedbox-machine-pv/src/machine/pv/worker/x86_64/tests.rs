@@ -61,11 +61,11 @@ impl Backend for Scripted {
 fn machine() -> Machine<Scripted> {
     machine_with(None)
 }
-fn machine_with(disk: Option<crate::machine::disk::Store>) -> Machine<Scripted> {
+fn machine_with(disk: Option<seedbox_machine::machine::disk::Store>) -> Machine<Scripted> {
     machine_full(disk, None)
 }
 fn machine_full(
-    disk: Option<crate::machine::disk::Store>,
+    disk: Option<seedbox_machine::machine::disk::Store>,
     network: Option<[u8; 6]>,
 ) -> Machine<Scripted> {
     // Minimal 64-bit bzImage header; the scripted backend executes nothing.
@@ -114,7 +114,7 @@ fn policy_fresh_arm_hook_draws_at_programming_not_wake_and_speed_is_published() 
     let mut vm = machine();
     let selected = super::super::super::policy::Named::new(
         "node",
-        &crate::definition::BackendPolicy {
+        &seedbox_machine::definition::BackendPolicy {
             seed: 42,
             timer_jitter_ns: 17,
             seeded_pv_speed: true,
@@ -144,7 +144,7 @@ fn actual_mapped_ram_and_shared_page_evidence_do_not_enter_or_snapshot() {
     let mut vm = machine();
     let selected = super::super::super::policy::Named::new(
         "node",
-        &crate::definition::BackendPolicy::default(),
+        &seedbox_machine::definition::BackendPolicy::default(),
     )
     .unwrap()
     .setup(0);
@@ -372,7 +372,9 @@ fn only_a_boot_with_a_disk_registers_and_maps_its_window() {
     let error = vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap_err();
     assert!(error.contains("unmapped MMIO 0xb020000"), "{error}");
 
-    let mut vm = machine_with(Some(crate::machine::disk::Store::zeroed(1 << 33).unwrap()));
+    let mut vm = machine_with(Some(
+        seedbox_machine::machine::disk::Store::zeroed(1 << 33).unwrap(),
+    ));
     assert_eq!(
         command_line(&vm),
         b"console=ttyS0 virtio_mmio.device=16K@0xb020000:6:1"
@@ -397,7 +399,7 @@ fn only_a_boot_with_a_disk_registers_and_maps_its_window() {
 }
 #[test]
 fn ended_boot_exports_both_disk_layers_unchanged() {
-    let mut store = crate::machine::disk::Store::zeroed(8).unwrap();
+    let mut store = seedbox_machine::machine::disk::Store::zeroed(8).unwrap();
     store.write(1, &[1; 512]).unwrap();
     store.flush();
     store.write(2, &[2; 512]).unwrap();
@@ -495,7 +497,7 @@ fn only_a_boot_with_a_nic_registers_and_maps_its_window() {
         command_line(&vm),
         b"console=ttyS0 virtio_mmio.device=4K@0xb030000:7:2"
     );
-    let disk = Some(crate::machine::disk::Store::zeroed(8).unwrap());
+    let disk = Some(seedbox_machine::machine::disk::Store::zeroed(8).unwrap());
     assert_eq!(
         command_line(&machine_full(disk, Some(MAC))),
         b"console=ttyS0 virtio_mmio.device=16K@0xb020000:6:1 virtio_mmio.device=4K@0xb030000:7:2"
@@ -537,7 +539,7 @@ fn tx_frames_join_the_write_stream_at_the_notify_and_rx_raises_line_seven() {
         vm.run(5, 10, 1000, false, &[], Vec::new()).unwrap(),
         Stop::Horizon
     );
-    use crate::pv::transport::{GuestWrite, LifecycleWrite};
+    use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
     let write = |time, bytes: &[u8]| LifecycleWrite {
         time,
         bytes: bytes.to_vec(),
@@ -645,8 +647,8 @@ fn actual_native_chain_excludes_host_landing_and_reads_ignore_returned_value() {
 
 #[test]
 fn canonical_pending_native_writes_preserve_channel_order_and_opaque_json_bytes() {
-    use crate::pv::transport::{GuestWrite, LifecycleWrite};
     use seedbox_machine::machine::execution_evidence::chain;
+    use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
     let mut vm = machine();
     let a = GuestWrite::Lifecycle(LifecycleWrite {
         time: 7,

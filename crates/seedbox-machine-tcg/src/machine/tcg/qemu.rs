@@ -71,7 +71,7 @@ pub(super) fn unhex(text: &str) -> Option<Vec<u8>> {
 /// the frame before it.
 pub(super) fn drain_chunk(
     chunk: &Value,
-    frames: &mut Vec<crate::pv::transport::LifecycleWrite>,
+    frames: &mut Vec<seedbox_machine::pv::transport::LifecycleWrite>,
 ) -> Result<bool, Error> {
     let invalid = || Error(format!("invalid seedbox-net-drain chunk: {chunk}"));
     let items = chunk["frames"].as_array().ok_or_else(invalid)?;
@@ -82,12 +82,12 @@ pub(super) fn drain_chunk(
     for item in items {
         let time = item["time"].as_u64().ok_or_else(invalid)?;
         let bytes = item["bytes"].as_str().and_then(unhex).ok_or_else(invalid)?;
-        if !crate::pv::frame_in_bounds(&bytes)
+        if !seedbox_machine::pv::frame_in_bounds(&bytes)
             || frames.last().is_some_and(|previous| previous.time > time)
         {
             return Err(invalid());
         }
-        frames.push(crate::pv::transport::LifecycleWrite { time, bytes });
+        frames.push(seedbox_machine::pv::transport::LifecycleWrite { time, bytes });
     }
     Ok(more)
 }
@@ -123,7 +123,7 @@ impl Process {
         &mut self,
         start: Timestamp,
         upto: Timestamp,
-        execution: crate::execution::ExecutionConfig,
+        execution: seedbox_machine::execution::ExecutionConfig,
     ) -> Result<Value, Error> {
         #[cfg(any(test, feature = "test-support"))]
         {
@@ -146,7 +146,7 @@ impl Process {
         &mut self,
         start: Timestamp,
         upto: Timestamp,
-        execution: crate::execution::ExecutionConfig,
+        execution: seedbox_machine::execution::ExecutionConfig,
     ) -> Result<Value, Error> {
         self.qmp.execute_bounded(start, upto, execution)
     }
@@ -163,7 +163,9 @@ impl Process {
         self.child.id()
     }
 
-    pub(super) fn drain_guest(&mut self) -> Result<Vec<crate::pv::transport::GuestWrite>, Error> {
+    pub(super) fn drain_guest(
+        &mut self,
+    ) -> Result<Vec<seedbox_machine::pv::transport::GuestWrite>, Error> {
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "lowercase")]
         enum Kind {
@@ -178,7 +180,7 @@ impl Process {
         }
         let writes: Vec<Write> =
             serde_json::from_value(self.qmp.command("seedbox-drain-lifecycle", json!({}))?)?;
-        use crate::pv::transport::{GuestWrite, LifecycleWrite};
+        use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
         Ok(writes
             .into_iter()
             .map(|write| {
@@ -198,14 +200,14 @@ impl Process {
     #[cfg(test)]
     pub(super) fn drain_lifecycle(
         &mut self,
-    ) -> Result<Vec<crate::pv::transport::LifecycleWrite>, Error> {
+    ) -> Result<Vec<seedbox_machine::pv::transport::LifecycleWrite>, Error> {
         Ok(self
             .drain_guest()?
             .into_iter()
             .filter_map(|write| match write {
-                crate::pv::transport::GuestWrite::Lifecycle(write) => Some(write),
-                crate::pv::transport::GuestWrite::Console(_)
-                | crate::pv::transport::GuestWrite::Frame(_) => None,
+                seedbox_machine::pv::transport::GuestWrite::Lifecycle(write) => Some(write),
+                seedbox_machine::pv::transport::GuestWrite::Console(_)
+                | seedbox_machine::pv::transport::GuestWrite::Frame(_) => None,
             })
             .collect())
     }
@@ -256,7 +258,9 @@ impl Process {
 
     /// Drain every frame the stopped NIC transmitted, oldest first, in as
     /// many QMP chunks as it takes; there is no overall count limit.
-    pub(super) fn net_drain(&mut self) -> Result<Vec<crate::pv::transport::LifecycleWrite>, Error> {
+    pub(super) fn net_drain(
+        &mut self,
+    ) -> Result<Vec<seedbox_machine::pv::transport::LifecycleWrite>, Error> {
         let mut frames = Vec::new();
         loop {
             let chunk = self.qmp.command("seedbox-net-drain", json!({}))?;
@@ -713,7 +717,7 @@ impl Qmp {
         &mut self,
         start: Timestamp,
         upto: Timestamp,
-        execution: crate::execution::ExecutionConfig,
+        execution: seedbox_machine::execution::ExecutionConfig,
     ) -> Result<Value, Error> {
         self.stopped = false;
         self.without_read_timeout(|qmp| {

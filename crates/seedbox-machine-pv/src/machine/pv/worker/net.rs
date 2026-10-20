@@ -33,7 +33,7 @@
 // matches the TCG device and cannot stall the ring; Linux posts 1526 bytes.
 use super::virtio::*;
 use super::Result;
-use crate::pv::ethernet::{
+use seedbox_machine::pv::ethernet::{
     MAX_FRAME_BYTES as MAX_FRAME, MIN_FRAME_BYTES as MIN_FRAME, RECEIVE_BACKLOG_FRAMES as BACKLOG,
 };
 use serde::{Deserialize, Serialize};
@@ -462,7 +462,10 @@ impl Net {
     pub(super) fn validate_snapshot(&self) -> Result<()> {
         validate_transport(&self.queues, self.interrupt)?;
         if self.backlog.len() > BACKLOG
-            || self.backlog.iter().any(|f| !crate::pv::frame_in_bounds(f))
+            || self
+                .backlog
+                .iter()
+                .any(|f| !seedbox_machine::pv::frame_in_bounds(f))
             || !self.transmitted.is_empty()
         {
             return Err("PV snapshot NIC backlog or undrained TX".into());

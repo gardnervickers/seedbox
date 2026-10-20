@@ -67,8 +67,8 @@ mod checks {
                 7 => {
                     h.0.state
                         .writes
-                        .push(crate::pv::transport::GuestWrite::Console(
-                            crate::pv::transport::LifecycleWrite {
+                        .push(seedbox_machine::pv::transport::GuestWrite::Console(
+                            seedbox_machine::pv::transport::LifecycleWrite {
                                 time: 7,
                                 bytes: vec![1],
                             },

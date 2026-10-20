@@ -1,6 +1,6 @@
 use super::protocol::{receive, send, Request, Response, Result, Stop};
 use super::wire;
-use crate::pv::transport::GuestWrite;
+use seedbox_machine::pv::transport::GuestWrite;
 use std::{
     io::{BufReader, BufWriter},
     path::Path,

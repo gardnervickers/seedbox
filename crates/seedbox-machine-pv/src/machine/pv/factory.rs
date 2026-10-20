@@ -1,11 +1,8 @@
 use super::{boot, PVMachine};
-use crate::{
-    application::{
-        boot_derived, boot_derived_configured, with_runtime, GuestBootstrap, GuestEnvironment,
-        Kernel,
-    },
-    definition::{BackendPolicy, FilesystemArchive, MachineDefinition},
+use seedbox_machine::application::{
+    boot_derived, boot_derived_configured, with_runtime, GuestBootstrap, GuestEnvironment, Kernel,
 };
+use seedbox_machine::definition::{BackendPolicy, FilesystemArchive, MachineDefinition};
 use std::{
     collections::BTreeSet,
     io,
@@ -41,7 +38,7 @@ impl Factory {
     // image and snapshots; neither the Driver's time mapping nor ambient state
     // can supply it to arbitrary machines.
     pub fn new(worker: &Path, guest_assets: &Path, epoch_seconds: u32) -> io::Result<Self> {
-        use super::super::assets;
+        use seedbox_machine::machine::assets;
         assets::executable(worker)?;
         let kernel = assets::read(guest_assets, "kernel")?;
         guest::kernel(&kernel)?;
@@ -259,7 +256,7 @@ mod guest {
     /// ARM exclusives become compare-and-swap with software reservations.
     pub(super) const TRANSLATOR_OPTIONS: &[&str] = &["-ldstex2cas"];
     pub(super) fn kernel(bytes: &[u8]) -> std::io::Result<()> {
-        super::super::super::assets::kernel(bytes)
+        super::seedbox_machine::machine::assets::kernel(bytes)
     }
 }
 #[cfg(target_arch = "x86_64")]
@@ -334,7 +331,7 @@ fn validate_runtime(bytes: &[u8]) -> io::Result<()> {
                 if !path.ends_with(".txt") && !path.ends_with(".LIB") {
                     let mut content = vec![];
                     std::io::Read::read_to_end(&mut entry, &mut content)?;
-                    super::super::assets::elf(&content, guest::ELF_MACHINE, false)?;
+                    seedbox_machine::machine::assets::elf(&content, guest::ELF_MACHINE, false)?;
                 }
             }
         }
