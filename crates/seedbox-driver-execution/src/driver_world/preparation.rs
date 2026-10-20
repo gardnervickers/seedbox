@@ -357,7 +357,7 @@ pub fn retain_oci_prepared(
         oracle,
         machines: machines.into_values().collect(),
         spawnable: vec![],
-        quantum_ns: 1_000_000,
+        quantum_ns: simulation.simulator.quantum_ns.get(),
         network: wire::Network {
             latency_ns: simulation.network.latency_ns,
             jitter_ns: simulation.network.jitter_ns,

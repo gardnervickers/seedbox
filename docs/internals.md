@@ -69,7 +69,7 @@ the selected gitlink, rather than a release archive label, identifies the API bu
 The recipe preserves C-only compiler flags for the baseline's type probes and uses
 RelWithDebInfo to match its public SDK exports.
 
-Follow the [README setup](../README.md#get-your-first-pass-and-match) after
+Follow the [README setup](../README.md#build) after
 cloning or switching Seedbox revisions. `inputs.self.submodules` includes gitlinks for flake consumers, but
 Nix can lock a clean parent before noticing edits confined to a submodule.
 From the checkout root, obtain a URL-encoded reference and build live DR edits:

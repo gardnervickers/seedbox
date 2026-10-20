@@ -135,3 +135,77 @@ fn tcg_controller_requests_are_admitted_only_on_driver_hosts() {
         );
     }
 }
+
+#[test]
+fn checkpoint_quantum_must_match_without_changing_saved_state() {
+    use seedbox_machine::{
+        definition::{Launch, PreparedApplication, Resources},
+        machine::{Machine, RunContext, StopReason},
+    };
+    struct Mock;
+    impl Machine for Mock {
+        type Context = ();
+        type Error = String;
+        type Snapshot = ();
+        fn run(
+            &mut self,
+            _: &mut RunContext<'_, ()>,
+            _: Timestamp,
+        ) -> std::result::Result<StopReason, String> {
+            Ok(StopReason::BoundaryReached)
+        }
+        fn snapshot(&mut self) -> std::result::Result<(), String> {
+            Ok(())
+        }
+    }
+    let oracle = MachineDefinition {
+        name: "oracle".into(),
+        resources: Resources {
+            memory_bytes: 128 << 20,
+        },
+        application: PreparedApplication {
+            filesystem: FilesystemArchive::new(tar::Builder::new(Vec::new()).into_inner().unwrap())
+                .unwrap(),
+            launch: Launch {
+                argv: vec!["/application".into()],
+                environment: BTreeMap::new(),
+                working_directory: "/".into(),
+                user: "0:0".into(),
+            },
+        },
+        disk: None,
+        network: None,
+    };
+    let mut source = Driver::new_seeded(
+        Timestamp::from_nanos(0),
+        Duration::from_nanos(1_000_000),
+        1,
+        0,
+        || Ok(()),
+        oracle,
+        vec![],
+        vec![],
+        NetworkConfig::default(),
+        |_| Ok(Mock),
+    )
+    .unwrap();
+    let saved = source
+        .checkpoint()
+        .unwrap()
+        .try_map_snapshots(|()| {
+            Ok::<_, String>(seedbox_driver::driver::SnapshotReference::new([0; 32], 1))
+        })
+        .unwrap();
+    let mut before = Vec::new();
+    saved.write_to(&mut before).unwrap();
+    validate_checkpoint_quantum(&saved, 1_000_000).unwrap();
+    let error = validate_checkpoint_quantum(&saved, 2_000_000)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("checkpoint quantum differs"), "{error}");
+    assert_eq!(saved.quantum(), Duration::from_nanos(1_000_000));
+    let mut after = Vec::new();
+    saved.write_to(&mut after).unwrap();
+    assert_eq!(before, after);
+    validate_checkpoint_quantum(&saved, 1_000_000).unwrap();
+}

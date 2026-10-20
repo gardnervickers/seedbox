@@ -12,4 +12,6 @@ oracle:
 network:
   latency: 1ms
 simulator:
+  quantum: 1ms
+  machineWorkers: 1
   blocksPerProgressCall: 10000

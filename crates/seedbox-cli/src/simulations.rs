@@ -151,7 +151,6 @@ pub(super) fn run(
     selection: super::BackendSelection,
 ) -> Result<u8> {
     let wall_time_ns = selection.wall_time;
-    let machine_workers = selection.machine_workers;
     let (spec, metadata) = load_spec(project, seed)?;
     let backend = Some(select_backend(&spec, selection.backend)?);
     submit(
@@ -161,7 +160,7 @@ pub(super) fn run(
             backend,
             start_paused: paused,
             wall_time_ns,
-            machine_workers,
+            machine_workers: None,
         },
         metadata,
         detach,
@@ -194,7 +193,7 @@ pub(super) fn run_checkpoint(
             backend,
             start_paused: paused,
             wall_time_ns: selection.wall_time,
-            machine_workers: selection.machine_workers,
+            machine_workers: None,
         },
         metadata,
         detach,
@@ -214,7 +213,6 @@ pub(super) fn explore(
     selection: super::BackendSelection,
 ) -> Result<u8> {
     let wall_time_ns = selection.wall_time;
-    let machine_workers = selection.machine_workers;
     let (spec, metadata) = load_spec(project, seed)?;
     let backend = Some(select_backend(&spec, selection.backend)?);
     if spec
@@ -229,7 +227,7 @@ pub(super) fn explore(
             backend,
             start_paused: paused,
             wall_time_ns,
-            machine_workers,
+            machine_workers: None,
         },
         metadata,
         request_id: Client::request_id().map_err(client_error)?,
@@ -388,7 +386,6 @@ pub(super) fn replay(
     selection: super::BackendSelection,
 ) -> Result<u8> {
     let wall_time_ns = selection.wall_time;
-    let machine_workers = selection.machine_workers;
     let client = daemon::connect(server)?;
     let resource = runtime()?
         .block_on(client.describe(id))
@@ -407,7 +404,7 @@ pub(super) fn replay(
             backend,
             start_paused: false,
             wall_time_ns,
-            machine_workers,
+            machine_workers: resource.options.machine_workers,
         },
         metadata,
         false,
@@ -425,7 +422,6 @@ pub(super) fn rerun(
     selection: super::BackendSelection,
 ) -> Result<u8> {
     let wall_time_ns = selection.wall_time;
-    let machine_workers = selection.machine_workers;
     let client = daemon::connect(server)?;
     let resource = runtime()?
         .block_on(client.describe(id))
@@ -444,7 +440,7 @@ pub(super) fn rerun(
             backend,
             start_paused: paused,
             wall_time_ns,
-            machine_workers,
+            machine_workers: resource.options.machine_workers,
         },
         metadata,
         detach,
@@ -900,6 +896,7 @@ mod tests {
             },
             network: spec.configuration.network.clone(),
             simulator: d::Simulator {
+                quantum_ns: spec.configuration.simulator.quantum_ns,
                 progress_budget: spec.configuration.simulator.progress_budget,
                 schedule: Default::default(),
                 disk: Default::default(),
@@ -947,6 +944,24 @@ mod tests {
 
     #[test]
     fn native_acceptance_projects_round_trip_through_submission_json() {
+        let custom = tempfile::tempdir().unwrap();
+        std::fs::write(
+            custom.path().join("seedbox.yaml"),
+            "name: custom\noracle: {image: busybox}\nsimulator: {quantum: 2.5ms, machineWorkers: 4}\n",
+        )
+        .unwrap();
+        let (spec, _) = load_spec(
+            &ProjectArg {
+                project: custom.path().to_path_buf(),
+            },
+            None,
+        )
+        .unwrap();
+        let restored: SimulationSpec =
+            serde_json::from_slice(&serde_json::to_vec(&spec).unwrap()).unwrap();
+        assert_eq!(restored.configuration.simulator.quantum_ns.get(), 2_500_000);
+        assert_eq!(restored.configuration.simulator.machine_workers.get(), 4);
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../harness/acceptance/workloads");
         let mut tested = 0;

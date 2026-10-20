@@ -22,7 +22,7 @@ pub struct Simulation {
     pub network: Network,
     /// PV instrumentation semantics retained with the simulation.
     #[serde(default)]
-    pub simulator: project::SimulatorDefaults,
+    pub simulator: SimulatorOptions,
     pub schedule: Schedule,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<Control>,
@@ -37,6 +37,26 @@ pub struct Simulation {
     pub machine: MachineOptions,
     #[serde(default, skip_serializing_if = "DiskOptions::is_default")]
     pub disk: DiskOptions,
+}
+
+/// Resolved simulator semantics and host execution capacity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SimulatorOptions {
+    pub progress_budget: progress::ProgressBudget,
+    pub quantum_ns: std::num::NonZeroU64,
+    /// Host performance setting, excluded from semantic identity.
+    pub machine_workers: project::WorkerCount,
+}
+
+impl Default for SimulatorOptions {
+    fn default() -> Self {
+        Self {
+            progress_budget: Default::default(),
+            quantum_ns: std::num::NonZeroU64::new(1_000_000).expect("nonzero quantum"),
+            machine_workers: Default::default(),
+        }
+    }
 }
 
 /// Default guest machine settings; per-service RAM may override memory_mb.

@@ -283,6 +283,7 @@ pub(crate) fn request(
             machine.filesystem = current;
         }
     }
+    prepared.quantum_ns = request.quantum_ns.get();
     prepared.network.latency_ns = request.network.latency_ns;
     prepared.network.jitter_ns = request.network.jitter_ns;
     prepared.network.bandwidth_bps = request.network.bandwidth_bps;

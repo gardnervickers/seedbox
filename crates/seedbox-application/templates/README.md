@@ -20,6 +20,12 @@ Use `seedbox logs <sim-id>` for application output or `seedbox tui <sim-id>`
 for the interactive console. Run more seeds with `seedbox run . --count 100`.
 Without KVM, use the slower software backend: `seedbox run . --backend tcg`.
 
+In `seedbox.yaml`, `simulator.quantum` sets the maximum timeslice (default `1ms`);
+network latency, timers and events can shorten it. `simulator.machineWorkers`
+sets the execution thread count (1–64, default 1). Workers steal queued machine
+runs; changing their count does not change results. Replay and checkpoints retain
+the quantum.
+
 Save an application-ready simulation before a bug:
 
 ```sh

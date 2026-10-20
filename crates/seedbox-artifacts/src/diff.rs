@@ -3,7 +3,8 @@
 pub use crate::comparison::*;
 use crate::{
     evidence::{
-        page_hash_log, RamRegion, StateDigestParts, StateDisposition, StateReport, STATE_REPORT,
+        page_hash_log, RamRegion, StateDigestParts, StateDisposition, StateReport,
+        MACHINE_OUTPUT_DIR, STATE_REPORT,
     },
     limits::{exceeds, read_bounded},
     record::{self as orchestration, RunRecord},
@@ -140,6 +141,10 @@ fn log(directory: &Path, record: &RunRecord, name: &str) -> Result<Option<File>>
     crate::retained::log(directory, record, name, "diff")
 }
 
+fn state_report_log() -> String {
+    format!("{MACHINE_OUTPUT_DIR}/{STATE_REPORT}")
+}
+
 fn load(directory: &Path) -> Result<Evidence> {
     let record =
         orchestration::inspect(directory).map_err(|e| bad(&directory.join("manifest.json"), e))?;
@@ -153,8 +158,9 @@ fn load(directory: &Path) -> Result<Evidence> {
         .keys()
         .map(|name| (name.clone(), Machine::default()))
         .collect();
-    if let Some(file) = log(directory, &record, STATE_REPORT)? {
-        let path = directory.join("output").join(STATE_REPORT);
+    let report_log = state_report_log();
+    if let Some(file) = log(directory, &record, &report_log)? {
+        let path = directory.join("output").join(&report_log);
         let bytes = read_bounded(file, REPORT_LIMIT, "stopped-state report")
             .map_err(|error| bad(&path, error))?;
         let state: StateReport =
@@ -191,7 +197,10 @@ fn load(directory: &Path) -> Result<Evidence> {
             }
             machine.state_digest = Some(capture.digest);
             machine.regions = Some(capture.regions);
-            machine.page_log = Some(capture.page_log);
+            // StateReport validates page_log as a relative path containing only
+            // normal components. It is relative to the worker output directory,
+            // alongside the report, rather than to the attempt output directory.
+            machine.page_log = Some(format!("{MACHINE_OUTPUT_DIR}/{}", capture.page_log));
             machine.end.state_boot = Some(capture.boot);
             machine.end.state_disposition = Some(capture.disposition);
             let parts = StateDigestParts::try_from(
@@ -417,8 +426,8 @@ fn compare(a: &Evidence, b: &Evidence) -> Result<DiffReport> {
         &serde_json::json!({"outcome": b.record.outcome, "report": b.record.report, "error": b.record.error}),
     )?;
     let evidence_differences = compare_values(
-        &serde_json::json!({"omitted_logs": a.record.omitted_logs, "state_report_retained": a.record.logs.contains_key(STATE_REPORT)}),
-        &serde_json::json!({"omitted_logs": b.record.omitted_logs, "state_report_retained": b.record.logs.contains_key(STATE_REPORT)}),
+        &serde_json::json!({"omitted_logs": a.record.omitted_logs, "state_report_retained": a.record.logs.contains_key(&state_report_log())}),
+        &serde_json::json!({"omitted_logs": b.record.omitted_logs, "state_report_retained": b.record.logs.contains_key(&state_report_log())}),
     )?;
     for (side, evidence) in [("a", a), ("b", b)] {
         if evidence
@@ -426,9 +435,9 @@ fn compare(a: &Evidence, b: &Evidence) -> Result<DiffReport> {
             .report
             .as_ref()
             .is_some_and(|report| report.full_state.is_some())
-            && !evidence.record.logs.contains_key(STATE_REPORT)
+            && !evidence.record.logs.contains_key(&state_report_log())
         {
-            limitations.push(format!("{side}: {STATE_REPORT} not retained"));
+            limitations.push(format!("{side}: {} not retained", state_report_log()));
         }
         for (name, reason) in &evidence.record.omitted_logs {
             limitations.push(format!("{side}: omitted {name}: {reason}"));

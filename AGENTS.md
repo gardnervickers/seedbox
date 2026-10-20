@@ -87,5 +87,5 @@ We do not need to support every possible application. If someone intentionally t
   Nonstreaming JSON is one library-shaped document. Raw logs/diagnostics preserve bytes.
 - CLI returns contextual errors, never panics/unwrap/exit. Preserve exit codes in
   `EXIT_CODES` and tests; cover reachable flags/defaults/errors in `crates/seedbox/tests/cli.rs`.
-- Keep help/examples and both quickstarts accurate. Public docs describe only tricky
-  current mechanisms in short sections; do not commit run reports or process diaries.
+- Keep help/examples and the README's etcd instructions accurate. Public docs describe
+  only tricky current mechanisms in short sections; do not commit run reports or process diaries.

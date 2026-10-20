@@ -777,6 +777,7 @@ impl NativeSession {
         workers: usize,
     ) -> seedbox_api::SimulationId {
         self.workers.store(workers, Ordering::SeqCst);
+        request.options.machine_workers = Some(workers as u32);
         request.request_id = format!("native-run-{}", self.submitted);
         request.metadata.name = format!("native-pv-service-{}", self.submitted);
         let accepted = self.client.submit(&request).await.unwrap();
@@ -1556,7 +1557,7 @@ pub async fn pv_checkpoint_continuation() {
         assert!(captured_ns >= target_ns && captured_ns < final_ns);
         eprintln!("C2 mid-workload capture: final_ns={final_ns} target_ns={target_ns} captured_ns={captured_ns} captured_rounds={captured_rounds} source_START_count=1 source_END_count=0");
 
-        let exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
+        let mut exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
 
         let InputSource::Resolved { definition } = &exported.spec.inputs else { panic!("resolved export required") };
         let seedbox_spec::definition::Start::Checkpoint { assets, .. } = &definition.start else { panic!("checkpoint export required") };
@@ -1572,6 +1573,7 @@ pub async fn pv_checkpoint_continuation() {
         assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
 
         session.workers.store(4, Ordering::SeqCst);
+        exported.options.machine_workers = Some(4);
         let restored = session.client.submit_definition(&serde_json::to_value(exported).unwrap(), true).await.unwrap().metadata.id;
         session.submitted += 1;
         assert_ne!(restored, source);
@@ -2107,7 +2109,7 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
         assert_eq!(oracle.name, "oracle");
         assert_eq!(oracle.exit_code, None, "oracle sleep must be pending at capture");
 
-        let exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
+        let mut exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
         let InputSource::Resolved { definition } = &exported.spec.inputs else {
             panic!("resolved export required")
         };
@@ -2152,6 +2154,7 @@ pub async fn checkpoint_in_flight_continuation(backend: DriverBackend) {
 
         // Import from the exported content closure alone, on four workers.
         session.workers.store(4, Ordering::SeqCst);
+        exported.options.machine_workers = Some(4);
         let restored = session
             .client
             .submit_definition(&serde_json::to_value(exported).unwrap(), true)
@@ -2341,6 +2344,8 @@ pub async fn pv_network_frames_are_observation_only() {
         for (observed, workers) in [(true, 4), (false, 1)] {
             session.observed.store(observed, Ordering::SeqCst);
             session.workers.store(workers, Ordering::SeqCst);
+            let mut definition = definition.clone();
+            definition["options"]["machineWorkers"] = workers.into();
             let restored = session.client.submit_definition(&definition, true).await.unwrap().metadata.id;
             session.submitted += 1;
             session.worker(&restored).await;

@@ -39,7 +39,8 @@ pub struct StateCapture {
     pub digest: ContentDigest,
     pub parts: BTreeMap<String, ContentDigest>,
     pub regions: Vec<RamRegion>,
-    /// Relative retained log path; independent of arbitrary machine-name text.
+    /// Page-file path relative to the directory containing the state report;
+    /// independent of arbitrary machine-name text.
     pub page_log: String,
 }
 impl StateCapture {

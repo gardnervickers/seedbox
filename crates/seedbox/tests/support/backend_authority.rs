@@ -33,6 +33,7 @@ fn resource(tag: &str) -> serde_json::Value {
         },
         network: project.configuration.network,
         simulator: d::Simulator {
+            quantum_ns: std::num::NonZeroU64::new(1_000_000).unwrap(),
             progress_budget: project.configuration.simulator.progress_budget,
             schedule: Default::default(),
             disk: Default::default(),

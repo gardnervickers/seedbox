@@ -29,6 +29,7 @@ fn source_destroyed_capture_reused_workers_and_nonclone_snapshots() {
     // Intra-block RNG cursors, not just u64-aligned draws, have accumulated.
     assert!(states(&d)[0].entropy.len() > 32);
     let c = d.checkpoint().unwrap();
+    assert_eq!(c.quantum(), Duration::from_nanos(d.execution.quantum_ns));
     reference_observer_session(&mut d);
     let expected = advance(&mut d, 60);
     let expected_states = states(&d);
@@ -37,6 +38,10 @@ fn source_destroyed_capture_reused_workers_and_nonclone_snapshots() {
     for workers in [1, 4] {
         let mut branch = restore(&c, workers);
         assert_eq!(branch.position(), before);
+        assert_eq!(
+            Duration::from_nanos(branch.execution.quantum_ns),
+            c.quantum()
+        );
         assert_eq!(advance(&mut branch, 60), expected);
         assert_eq!(states(&branch), expected_states);
         assert_eq!(branch.position(), expected_position);
