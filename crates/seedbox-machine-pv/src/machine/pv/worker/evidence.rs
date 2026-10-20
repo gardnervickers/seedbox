@@ -3,6 +3,15 @@
 use super::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+#[cfg(target_arch = "x86_64")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(target_arch = "x86_64")]
+const PRIVATE_ORACLE_PAGE_GPAS: [u64; 2] = [0x0459_1000, 0x0459_2000];
+#[cfg(target_arch = "x86_64")]
+const PRIVATE_ORACLE_CAPTURE_LIMIT: usize = 32;
+#[cfg(target_arch = "x86_64")]
+static PRIVATE_ORACLE_CAPTURE_COUNT: AtomicUsize = AtomicUsize::new(0);
 // Compile the pure ARM projection on the host for golden/model tests as well.
 // Native ARM adapters are still target-gated and never executed by these tests.
 #[cfg(any(target_arch = "aarch64", test))]
@@ -50,6 +59,29 @@ impl<B: Backend> Machine<B> {
         )?);
         parts.push(part("timer_policy", &self.state.policy)?);
         let layout = self.ram.layout()?;
+        // Private PR329 diagnostic: copy only the two stopped oracle pages that
+        // differed in the retained CI evidence. Never modify guest RAM.
+        #[cfg(target_arch = "x86_64")]
+        let private_pages = self
+            .state
+            .policy
+            .as_ref()
+            .filter(|policy| policy.setup.name == "oracle")
+            .map(|policy| {
+                let pages = PRIVATE_ORACLE_PAGE_GPAS
+                    .into_iter()
+                    .filter_map(|gpa| {
+                        layout.offset(gpa, 4096).ok().map(|offset| {
+                            let mut page = [0u8; 4096];
+                            page.copy_from_slice(unsafe {
+                                &self.ram.bytes()[offset..offset + 4096]
+                            });
+                            (gpa, page)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                (policy.setup.seed, policy.setup.boot, pages)
+            });
         let mut regions: Vec<_> = layout
             .segments
             .iter()
@@ -92,6 +124,30 @@ impl<B: Backend> Machine<B> {
         parts.push(("ram".into(), hex(&ram.finalize())));
         parts.push(("ram_regions".into(), hex(&region_hash.finalize())));
         parts.push(("ram_pages".into(), hex(&pages.finalize())));
+        #[cfg(target_arch = "x86_64")]
+        if let Some((seed, boot, private_pages)) = private_pages {
+            // Boot-end evidence may precede the final service state. Retain up
+            // to 32 stopped captures (64 raw pages, 256 KiB) per worker; the
+            // final markers must match the retained final page vector.
+            let sequence = PRIVATE_ORACLE_CAPTURE_COUNT.fetch_add(1, Ordering::Relaxed);
+            if sequence < PRIVATE_ORACLE_CAPTURE_LIMIT {
+                for (gpa, page) in private_pages {
+                    let digest = Sha256::digest(page);
+                    eprintln!(
+                        "SEEDBOX_PRIVATE_PV_ORACLE_PAGE pid={} sequence={sequence} seed={seed} boot={boot} time_ns={} gpa={gpa:#010x} sha256={} bytes={}",
+                        std::process::id(),
+                        self.state.now,
+                        hex(&digest),
+                        hex(&page)
+                    );
+                }
+            } else if sequence == PRIVATE_ORACLE_CAPTURE_LIMIT {
+                eprintln!(
+                    "SEEDBOX_PRIVATE_PV_ORACLE_PAGE capture_bound_exceeded pid={}",
+                    std::process::id()
+                );
+            }
+        }
         Ok(protocol::NativeEvidence {
             parts,
             regions: regions

@@ -325,6 +325,22 @@ fn copy_oracle_page_hashes(
     fs::write(destination, bytes).map_err(|e| e.to_string())
 }
 
+fn copy_worker_stderr(
+    attempt: &Path,
+    destination: &Path,
+    logs: &std::collections::BTreeMap<String, seedbox_application::store::ContentDigest>,
+) -> Result<()> {
+    let name = "vmm.stderr";
+    let expected = logs
+        .get(name)
+        .ok_or("retained worker stderr is unavailable")?;
+    let bytes = diagnostic_bytes(&attempt.join("output").join(name))?;
+    if expected != &seedbox_application::store::ContentDigest::of(&bytes) {
+        return Err("retained worker stderr digest mismatch".into());
+    }
+    fs::write(destination, bytes).map_err(|e| e.to_string())
+}
+
 impl Cli {
     async fn capture_comparison_failure(
         &self,
@@ -385,6 +401,13 @@ impl Cli {
                         &record.logs,
                         &state,
                     )?;
+                    if record.logs.contains_key("vmm.stderr") {
+                        copy_worker_stderr(
+                            attempt,
+                            &directory.join(format!("{label}-vmm.stderr")),
+                            &record.logs,
+                        )?;
+                    }
                     Ok(())
                 };
                 if let Err(error) = copy() {
@@ -705,7 +728,14 @@ mod tests {
         let output = attempt.join("output/machines");
         fs::create_dir_all(&output).unwrap();
         let digest = ContentDigest::of(content);
-        let layout = [0u64.to_le_bytes(), 4096u64.to_le_bytes()].concat();
+        let layout = [0x0459_1000u64.to_le_bytes(), (2 * 4096u64).to_le_bytes()].concat();
+        let first_page = [content[0]; 4096];
+        let second_page = [content[1]; 4096];
+        let ram = [first_page.as_slice(), second_page.as_slice()].concat();
+        let page_digests = [
+            ContentDigest::of(&first_page),
+            ContentDigest::of(&second_page),
+        ];
         let state_report = StateReport {
             version: 1,
             machines: BTreeMap::from([(
@@ -715,12 +745,12 @@ mod tests {
                     disposition: StateDisposition::Live,
                     digest: digest.clone(),
                     parts: BTreeMap::from([
-                        ("ram".into(), digest.clone()),
+                        ("ram".into(), ContentDigest::of(&ram)),
                         ("ram_regions".into(), ContentDigest::of(&layout)),
                     ]),
                     regions: vec![RamRegion {
-                        base: 0,
-                        length: 4096,
+                        base: 0x0459_1000,
+                        length: 2 * 4096,
                     }],
                     page_log: "oracle.pages".into(),
                 },
@@ -728,7 +758,14 @@ mod tests {
         };
         let bytes = serde_json::to_vec(&state_report).unwrap();
         fs::write(output.join(STATE_REPORT), &bytes).unwrap();
-        let pages = [u64::from(content[0]).to_le_bytes()].concat();
+        let pages = page_digests
+            .iter()
+            .flat_map(|digest| {
+                u64::from_str_radix(&digest.hex()[..16], 16)
+                    .unwrap()
+                    .to_be_bytes()
+            })
+            .collect::<Vec<_>>();
         let samples = [
             0u64.to_le_bytes(),
             1u64.to_le_bytes(),
@@ -737,6 +774,20 @@ mod tests {
         .concat();
         fs::write(output.join("oracle.witness-log"), &samples).unwrap();
         fs::write(output.join("oracle.pages"), &pages).unwrap();
+        let worker_stderr = [
+            (0x0459_1000u64, &first_page, &page_digests[0]),
+            (0x0459_2000u64, &second_page, &page_digests[1]),
+        ]
+        .into_iter()
+        .map(|(gpa, page, digest)| {
+            format!(
+                "SEEDBOX_PRIVATE_PV_ORACLE_PAGE pid=7 sequence=0 seed=123 boot=1 time_ns=100 gpa={gpa:#010x} sha256={} bytes={}\n",
+                digest.hex(),
+                page.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+            )
+        })
+        .collect::<String>();
+        fs::write(attempt.join("output/vmm.stderr"), &worker_stderr).unwrap();
         let identity = RunIdentity {
             version: FORMAT_VERSION,
             seed: 123,
@@ -796,11 +847,63 @@ mod tests {
                     "machines/oracle.witness-log".into(),
                     ContentDigest::of(&samples),
                 ),
+                (
+                    "vmm.stderr".into(),
+                    ContentDigest::of(worker_stderr.as_bytes()),
+                ),
             ]),
             replay_of: None,
             replay: None,
         };
         write_record(&attempt, &record).unwrap();
+    }
+
+    fn assert_captured_pages(directory: &Path, label: &str, fills: [u8; 2]) {
+        use seedbox_application::{record::inspect_bytes, store::ContentDigest};
+        let manifest = fs::read(directory.join(format!("{label}-manifest.json"))).unwrap();
+        let record = inspect_bytes(&manifest).unwrap();
+        let vector = fs::read(directory.join(format!("{label}-oracle-pages.out"))).unwrap();
+        assert_eq!(vector.len(), 16);
+        assert_eq!(
+            record.logs.get("machines/oracle.pages"),
+            Some(&ContentDigest::of(&vector))
+        );
+        let stderr = fs::read_to_string(directory.join(format!("{label}-vmm.stderr"))).unwrap();
+        let markers = stderr
+            .lines()
+            .filter(|line| line.starts_with("SEEDBOX_PRIVATE_PV_ORACLE_PAGE "))
+            .collect::<Vec<_>>();
+        assert_eq!(markers.len(), 2);
+        for (index, (line, gpa, fill)) in markers
+            .into_iter()
+            .zip([0x0459_1000u64, 0x0459_2000])
+            .zip(fills)
+            .map(|((line, gpa), fill)| (line, gpa, fill))
+            .enumerate()
+        {
+            assert!(line.contains(&format!("gpa={gpa:#010x}")), "{line}");
+            let hash = line
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix("sha256="))
+                .unwrap();
+            let encoded = line
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix("bytes="))
+                .unwrap();
+            assert_eq!(encoded.len(), 8192);
+            let page = encoded
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(page, vec![fill; 4096]);
+            let digest = ContentDigest::of(&page);
+            assert_eq!(hash, digest.hex());
+            assert_eq!(
+                &vector[index * 8..(index + 1) * 8],
+                &u64::from_str_radix(&hash[..16], 16).unwrap().to_be_bytes()
+            );
+        }
     }
 
     #[tokio::test]
@@ -847,18 +950,25 @@ esac
             "compare-state.json",
             "compare-divergence.json",
             "compare-ram-pages.json",
+            "baseline-vmm.stderr",
+            "repeat-vmm.stderr",
         ] {
-            let bytes = fs::read(failure.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(failure.join(name).is_file(), "{name}");
+        }
+        for name in [
+            "baseline-manifest.json",
+            "repeat-manifest.json",
+            "baseline-driver-state.json",
+            "repeat-driver-state.json",
+            "compare-state.json",
+            "compare-divergence.json",
+            "compare-ram-pages.json",
+        ] {
+            let bytes = fs::read(failure.join(name)).unwrap();
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
         }
-        assert_eq!(
-            fs::read(failure.join("baseline-oracle-pages.out")).unwrap(),
-            u64::from(b'b').to_le_bytes()
-        );
-        assert_eq!(
-            fs::read(failure.join("repeat-oracle-pages.out")).unwrap(),
-            u64::from(b'r').to_le_bytes()
-        );
+        assert_captured_pages(&failure, "baseline", [b'b', b'a']);
+        assert_captured_pages(&failure, "repeat", [b'r', b'e']);
         assert!(fs::read_to_string(failure.join("replay-oracle-log.stdout"))
             .unwrap()
             .contains("RESULT pass"));
@@ -869,7 +979,7 @@ esac
         let pages: serde_json::Value =
             serde_json::from_slice(&fs::read(failure.join("compare-ram-pages.json")).unwrap())
                 .unwrap();
-        assert_eq!(pages["machines"]["oracle"]["differing_pfns"], 1);
+        assert_eq!(pages["machines"]["oracle"]["differing_pfns"], 2);
         let summary = fs::read_to_string(failure.join("summary.txt")).unwrap();
         assert!(summary.contains(&error));
         assert!(!summary.contains("capture failed"), "{summary}");
