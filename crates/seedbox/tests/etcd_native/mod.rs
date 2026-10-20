@@ -18,8 +18,7 @@ use tokio::{
     process::{Child, Command},
 };
 
-#[path = "failure_capture.rs"]
-mod failure_capture;
+use crate::support::failure_capture;
 
 type Result<T> = std::result::Result<T, String>;
 

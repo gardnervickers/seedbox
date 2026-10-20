@@ -82,7 +82,6 @@ fn unavailable_driver_stderr(asset_directory: &Path) -> String {
     }
 }
 
-#[path = "support/backend_authority.rs"]
 mod backend_authority;
 
 #[cfg(unix)]
@@ -1054,10 +1053,8 @@ fn backend_flag_is_typed_and_only_on_execution_commands() {
 }
 
 #[cfg(unix)]
-#[path = "cli/checkpoint_history.rs"]
 mod checkpoint_history;
 #[cfg(unix)]
-#[path = "cli/checkpoint_version.rs"]
 mod checkpoint_version;
 
 #[test]

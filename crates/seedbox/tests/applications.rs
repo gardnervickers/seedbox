@@ -12,8 +12,10 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
-#[path = "support/failure_capture.rs"]
-mod failure_capture;
+mod support {
+    pub mod failure_capture;
+}
+use support::failure_capture;
 
 // Every discovered workload proves a PASS. These four retain the expensive
 // independent same-seed and retained-input comparisons, covering dynamic
@@ -397,7 +399,6 @@ impl Drop for Server {
 
 // Native CLI interactions share this discovered application acceptance target.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[path = "support/driver_preparation.rs"]
 mod driver_preparation_native;
 
 #[test]

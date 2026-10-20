@@ -1,8 +1,10 @@
 //! Host checks for preparation smoke inputs and strict comparison helpers.
 //! The 4-write/1-worker/180-second variant is ONLY a prep/fast test.
 //! bd-207 acceptance must run canonical examples/etcd unchanged.
-#[path = "support/etcd_project.rs"]
-mod etcd_project;
+mod support {
+    pub mod etcd_project;
+}
+use support::etcd_project;
 
 use etcd_project::*;
 use seedbox_api::{ComparisonStatus, SimulationComparison};

@@ -3,11 +3,13 @@
 //! unchanged, not substitute this smoke test. The existing linux-apps suite
 //! supplies a complete release CLI, OCI engine and caller-owned report root.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[path = "support/etcd_native.rs"]
 mod etcd_native;
-#[path = "support/etcd_project.rs"]
-mod etcd_project;
+mod support {
+    pub mod etcd_project;
+    pub mod failure_capture;
+}
 use etcd_project::Backend;
+use support::etcd_project;
 
 #[test]
 fn pv_etcd_preparation_smoke_through_normal_cli_service() {
