@@ -311,6 +311,8 @@ pub fn coordinate<C: Commands>(
         return Ok(0);
     }
     checks.step("fmt", words(&["cargo", "fmt", "--all", "--check"]));
+    // --all-features type-checks every feature-gated target (native service
+    // suites, worker-failure hooks) without a second full test build.
     checks.step(
         "clippy",
         words(&[
@@ -318,6 +320,7 @@ pub fn coordinate<C: Commands>(
             "clippy",
             "--workspace",
             "--all-targets",
+            "--all-features",
             "--locked",
             "--",
             "-D",
@@ -390,26 +393,13 @@ pub fn portable<C: Commands>(checks: &mut Checks<C>) -> Result<(), String> {
     })? {
         return Ok(());
     }
-    for (name, args) in [
-        (
-            "workspace-feature-build",
-            words(&[
-                "cargo",
-                "test",
-                "--workspace",
-                "--locked",
-                "--all-features",
-                "--no-run",
-            ]),
-        ),
-        (
+    if !timed(checks, "workspace-tests", |checks| {
+        Ok(checks.step(
             "workspace-tests",
             words(&["cargo", "test", "--workspace", "--locked"]),
-        ),
-    ] {
-        if !timed(checks, name, |checks| Ok(checks.step(name, args)))? {
-            return Ok(());
-        }
+        ))
+    })? {
+        return Ok(());
     }
     // seedbox-cli's native_acceptance_projects_round_trip_through_submission_json
     // discovers and validates every workload in the workspace tests above.

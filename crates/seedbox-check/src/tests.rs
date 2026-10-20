@@ -941,6 +941,22 @@ fn portable_failure_blocks_all_native_work_but_not_outer_prerequisites() {
             .collect::<Vec<_>>(),
         ["fmt", "clippy", "shell-discovery"]
     );
+    // Clippy type-checks every feature-gated target; there is no second
+    // all-features test build.
+    assert_eq!(
+        c.commands.jobs[1].args,
+        strings(&[
+            "cargo",
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--all-features",
+            "--locked",
+            "--",
+            "-D",
+            "warnings"
+        ])
+    );
 }
 #[test]
 fn empty_native_selection_and_empty_artifacts_are_errors() {
@@ -995,37 +1011,14 @@ fn portable_order_is_single_owned() {
     let jobs = &c.commands.jobs;
     assert_eq!(
         jobs.iter().map(|j| j.name.as_str()).collect::<Vec<_>>(),
-        [
-            "shell-discovery",
-            "workspace-feature-build",
-            "workspace-tests"
-        ]
+        ["shell-discovery", "workspace-tests"]
     );
-    assert!(jobs
-        .iter()
-        .filter(|j| j.name.starts_with("workspace"))
-        .all(|j| j.environment.contains_key("CARGO_TARGET_DIR")));
+    assert!(jobs[1].environment.contains_key("CARGO_TARGET_DIR"));
     assert_eq!(
         jobs[1].args,
-        strings(&[
-            "cargo",
-            "test",
-            "--workspace",
-            "--locked",
-            "--all-features",
-            "--no-run"
-        ])
-    );
-    assert_eq!(
-        jobs[2].args,
         strings(&["cargo", "test", "--workspace", "--locked"])
     );
-    let labels = [
-        "shell-syntax",
-        "test-time-policy",
-        "workspace-feature-build",
-        "workspace-tests",
-    ];
+    let labels = ["shell-syntax", "test-time-policy", "workspace-tests"];
     assert_eq!(c.timings.len(), labels.len());
     for (row, label) in c.timings.iter().zip(labels) {
         assert!(row.starts_with(&format!("timing: portable/{label}: ")));
