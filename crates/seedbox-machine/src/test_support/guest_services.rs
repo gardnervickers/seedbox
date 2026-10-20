@@ -1,31 +1,13 @@
 //! Shared guest-service protocol scenarios; each backend owns its native entrypoints.
 use crate::{
-    clock::Clock,
+    clock::{Clock, SimulationClock},
     machine::{Machine, RunContext, StopReason, Timestamp},
     pv,
     rng::RngStream,
 };
 use seedbox_test_time::{GuestProgress, HangGuard};
-use std::{
-    fmt::Debug,
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+use std::{fmt::Debug, time::Duration};
 
-struct SimulationClock(AtomicU64);
-impl SimulationClock {
-    fn new(n: u64) -> Self {
-        Self(AtomicU64::new(n))
-    }
-    fn set(&self, n: u64) {
-        self.0.store(n, Ordering::Relaxed);
-    }
-}
-impl Clock for SimulationClock {
-    fn now(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
-    }
-}
 struct FixtureRng(u8);
 impl RngStream for FixtureRng {
     fn fill_bytes(&mut self, bytes: &mut [u8]) {

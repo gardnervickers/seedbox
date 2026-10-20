@@ -2,7 +2,7 @@
 use crate as machine_crate;
 use machine_crate::machine::{ExitReason, Machine, RunContext, StopReason, Timestamp};
 use machine_crate::{
-    clock::Clock,
+    clock::{Clock, SimulationClock},
     definition::{FilesystemArchive, Launch, MachineDefinition, PreparedApplication, Resources},
     pv::{ApplicationCommand, CommandResult, Inbox, Input, Outbox, Request, Response, Stream},
     rng::RngStream,
@@ -15,20 +15,6 @@ use std::{
     path::PathBuf,
     time::Duration,
 };
-struct SimulationClock(std::sync::atomic::AtomicU64);
-impl SimulationClock {
-    fn new(now: u64) -> Self {
-        Self(std::sync::atomic::AtomicU64::new(now))
-    }
-    fn set(&self, now: u64) {
-        self.0.store(now, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-impl Clock for SimulationClock {
-    fn now(&self) -> u64 {
-        self.0.load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
 struct FixtureRng(u8);
 impl RngStream for FixtureRng {
     fn fill_bytes(&mut self, bytes: &mut [u8]) {

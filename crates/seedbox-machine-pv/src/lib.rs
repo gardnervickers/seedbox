@@ -23,7 +23,6 @@ pub fn serve_worker() -> Result<(), String> {
 #[cfg(test)]
 mod clock {
     pub use seedbox_machine::clock::*;
-    pub use seedbox_machine::test_support::SimulationClock;
 }
 #[cfg(test)]
 mod rng {
