@@ -1,9 +1,8 @@
 //! Closed policy, boot identity, cached RAM evidence and pending report records.
 use super::*;
 use seedbox_machine::{
-    definition::BackendPolicy,
-    machine::{EvidenceDisposition, RamRegion, StateEvidence},
-    snapshot::{reserve, CodecError, Reader, Writer},
+    machine::{EvidenceDisposition, StateEvidence},
+    snapshot::{CodecError, Reader, Record, Writer},
 };
 use std::io::{Read, Write};
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,106 +31,29 @@ impl EndReport {
         }
     }
 }
+seedbox_machine::record!(Ended {
+    boot: u64,
+    disposition: EvidenceDisposition,
+    native_booted: bool,
+});
+seedbox_machine::record!(EndReport {
+    at: Timestamp,
+    ended: Ended,
+    lost: u64,
+    disk: Option<String>,
+    retired: Option<String>,
+});
 fn invalid(s: &'static str) -> CodecError {
     CodecError::Invalid(s)
 }
-fn put_opt<W: Write>(w: &mut Writer<'_, W>, s: Option<&str>) -> Result<(), CodecError> {
-    w.boolean(s.is_some())?;
-    if let Some(s) = s {
-        w.string(s)?;
-    }
-    Ok(())
-}
-fn get_opt<R: Read>(r: &mut Reader<'_, R>) -> Result<Option<String>, CodecError> {
-    if r.boolean()? {
-        Ok(Some(r.string()?))
-    } else {
-        Ok(None)
-    }
-}
-fn disposition<W: Write>(w: &mut Writer<'_, W>, d: EvidenceDisposition) -> Result<(), CodecError> {
-    match d {
-        EvidenceDisposition::Crashed => w.u8(0),
-        EvidenceDisposition::Shutdown => w.u8(1),
-        EvidenceDisposition::Exited { code } => {
-            w.u8(2)?;
-            w.u32(code as u32)
-        }
-        EvidenceDisposition::Live => Err(invalid("live retired disposition")),
-    }
-}
-fn read_disposition<R: Read>(r: &mut Reader<'_, R>) -> Result<EvidenceDisposition, CodecError> {
-    match r.u8()? {
-        0 => Ok(EvidenceDisposition::Crashed),
-        1 => Ok(EvidenceDisposition::Shutdown),
-        2 => Ok(EvidenceDisposition::Exited {
-            code: r.u32()? as i32,
-        }),
-        _ => Err(invalid("retired disposition")),
-    }
-}
-fn put_end<W: Write>(w: &mut Writer<'_, W>, e: &Ended) -> Result<(), CodecError> {
-    w.u64(e.boot)?;
-    disposition(w, e.disposition)?;
-    w.boolean(e.native_booted)
-}
-fn get_end<R: Read>(r: &mut Reader<'_, R>) -> Result<Ended, CodecError> {
-    Ok(Ended {
-        boot: r.u64()?,
-        disposition: read_disposition(r)?,
-        native_booted: r.boolean()?,
-    })
-}
 pub(super) fn write<W: Write>(s: &Snapshot, w: &mut Writer<'_, W>) -> Result<(), CodecError> {
-    w.u64(s.logical_boot)?;
-    w.boolean(s.active_boot.is_some())?;
-    if let Some(b) = s.active_boot {
-        w.u64(b)?;
-    }
-    w.boolean(s.policy.is_some())?;
-    if let Some(p) = &s.policy {
-        let c = &p.configuration;
-        w.string(&p.name)?;
-        w.u64(c.seed)?;
-        w.u64(c.timer_jitter_ns)?;
-        w.u64(c.stop_tolerance_ns)?;
-        w.boolean(c.torn_writes)?;
-        w.boolean(c.full_state)?;
-        w.boolean(c.seeded_pv_speed)?;
-        w.boolean(c.boot_end_evidence)?;
-        put_opt(w, c.controller.as_deref())?;
-    }
-    w.boolean(s.last_ended.is_some())?;
-    if let Some(e) = &s.last_ended {
-        put_end(w, e)?;
-    }
-    w.boolean(s.last_evidence.is_some())?;
-    if let Some(e) = &s.last_evidence {
-        w.u64(e.boot)?;
-        disposition(w, e.disposition)?;
-        w.u64(e.parts.len() as u64)?;
-        for (n, h) in &e.parts {
-            w.string(n)?;
-            w.string(h)?;
-        }
-        w.u64(e.regions.len() as u64)?;
-        for r in &e.regions {
-            w.u64(r.base)?;
-            w.u64(r.length)?;
-        }
-        w.bytes(&e.page_hashes)?;
-        w.string(&e.digest)?;
-    }
+    s.logical_boot.encode(w)?;
+    s.active_boot.encode(w)?;
+    s.policy.encode(w)?;
+    s.last_ended.encode(w)?;
+    s.last_evidence.encode(w)?;
     s.native_witness.write(w)?;
-    w.u64(s.pending_ends.len() as u64)?;
-    for p in &s.pending_ends {
-        w.u64(p.at.as_nanos())?;
-        put_end(w, &p.ended)?;
-        w.u64(p.lost)?;
-        put_opt(w, p.disk.as_deref())?;
-        put_opt(w, p.retired.as_deref())?;
-    }
-    Ok(())
+    s.pending_ends.encode(w)
 }
 pub(super) struct Aux {
     pub logical_boot: u64,
@@ -143,81 +65,14 @@ pub(super) struct Aux {
     pub pending_ends: std::collections::VecDeque<EndReport>,
 }
 pub(super) fn read<R: Read>(r: &mut Reader<'_, R>) -> Result<Aux, CodecError> {
-    let logical_boot = r.u64()?;
-    let active_boot = if r.boolean()? { Some(r.u64()?) } else { None };
-    let policy = if r.boolean()? {
-        let name = r.string()?;
-        let c = BackendPolicy {
-            seed: r.u64()?,
-            timer_jitter_ns: r.u64()?,
-            stop_tolerance_ns: r.u64()?,
-            torn_writes: r.boolean()?,
-            full_state: r.boolean()?,
-            seeded_pv_speed: r.boolean()?,
-            boot_end_evidence: r.boolean()?,
-            controller: get_opt(r)?,
-        };
-        Some(policy::PolicyState::new(&name, &c).map_err(|_| invalid("backend policy"))?)
-    } else {
-        None
-    };
-    let last_ended = if r.boolean()? {
-        Some(get_end(r)?)
-    } else {
-        None
-    };
-    let last_evidence = if r.boolean()? {
-        let boot = r.u64()?;
-        let disposition = read_disposition(r)?;
-        let count = r.count::<(String, String)>(16)?;
-        let mut parts = Vec::new();
-        reserve(&mut parts, count)?;
-        for _ in 0..count {
-            parts.push((r.string()?, r.string()?));
-        }
-        let count = r.count::<RamRegion>(16)?;
-        let mut regions = Vec::new();
-        reserve(&mut regions, count)?;
-        for _ in 0..count {
-            regions.push(RamRegion {
-                base: r.u64()?,
-                length: r.u64()?,
-            });
-        }
-        Some(StateEvidence {
-            boot,
-            disposition,
-            parts,
-            regions,
-            page_hashes: r.bytes()?,
-            digest: r.string()?,
-        })
-    } else {
-        None
-    };
-    let native_witness = native_witness::NativeWitness::read(r)?;
-    let count = r.count::<EndReport>(28)?;
-    let mut pending_ends = std::collections::VecDeque::new();
-    pending_ends
-        .try_reserve(count)
-        .map_err(|_| CodecError::Limit("boot-end reports"))?;
-    for _ in 0..count {
-        pending_ends.push_back(EndReport {
-            at: Timestamp::from_nanos(r.u64()?),
-            ended: get_end(r)?,
-            lost: r.u64()?,
-            disk: get_opt(r)?,
-            retired: get_opt(r)?,
-        });
-    }
     Ok(Aux {
-        logical_boot,
-        active_boot,
-        policy,
-        last_ended,
-        last_evidence,
-        native_witness,
-        pending_ends,
+        logical_boot: Record::decode(r)?,
+        active_boot: Record::decode(r)?,
+        policy: Record::decode(r)?,
+        last_ended: Record::decode(r)?,
+        last_evidence: Record::decode(r)?,
+        native_witness: native_witness::NativeWitness::read(r)?,
+        pending_ends: Record::decode(r)?,
     })
 }
 pub(super) fn validate(s: &Snapshot) -> Result<(), CodecError> {

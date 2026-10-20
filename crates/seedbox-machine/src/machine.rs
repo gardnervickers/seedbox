@@ -50,6 +50,20 @@ impl Timestamp {
         self.0
     }
 }
+impl crate::snapshot::Record for Timestamp {
+    const MIN: u64 = 8;
+    fn encode<W: std::io::Write>(
+        &self,
+        w: &mut crate::snapshot::Writer<'_, W>,
+    ) -> crate::snapshot::Result<()> {
+        w.u64(self.0)
+    }
+    fn decode<R: std::io::Read>(
+        r: &mut crate::snapshot::Reader<'_, R>,
+    ) -> crate::snapshot::Result<Self> {
+        Ok(Self(r.u64()?))
+    }
+}
 
 pub trait Machine {
     /// Worker-local host resources required to execute this machine. They contain

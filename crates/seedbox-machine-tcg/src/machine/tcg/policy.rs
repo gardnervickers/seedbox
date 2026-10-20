@@ -39,6 +39,30 @@ impl PolicyState {
         }
     }
 }
+/// Restored names and configurations pass the same checks as factory input.
+impl seedbox_machine::snapshot::Record for PolicyState {
+    const MIN: u64 = <String as seedbox_machine::snapshot::Record>::MIN
+        + <BackendPolicy as seedbox_machine::snapshot::Record>::MIN;
+    fn encode<W: std::io::Write>(
+        &self,
+        w: &mut seedbox_machine::snapshot::Writer<'_, W>,
+    ) -> seedbox_machine::snapshot::Result<()> {
+        let Self {
+            name,
+            configuration,
+        } = self;
+        name.encode(w)?;
+        configuration.encode(w)
+    }
+    fn decode<R: std::io::Read>(
+        r: &mut seedbox_machine::snapshot::Reader<'_, R>,
+    ) -> seedbox_machine::snapshot::Result<Self> {
+        let name = String::decode(r)?;
+        let configuration = BackendPolicy::decode(r)?;
+        Self::new(&name, &configuration)
+            .map_err(|_| seedbox_machine::snapshot::CodecError::Invalid("backend policy"))
+    }
+}
 pub(super) fn validate_authority(
     retained: Option<&PolicyState>,
     name: &str,

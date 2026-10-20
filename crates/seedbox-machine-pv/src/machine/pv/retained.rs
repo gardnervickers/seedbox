@@ -214,54 +214,31 @@ seedbox_machine::record!(Ended {
     native: bool
 });
 seedbox_machine::record!(Report{at:u64,end:Ended,lost:u64,disk:Option<String>,retired:Option<String>});
+/// PV retires only crashed or shut-down boots; other dispositions are rejected.
 impl Record for Cached {
-    const MIN: u64 = 41;
+    const MIN: u64 = <StateEvidence as Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
     ) -> seedbox_machine::snapshot::Result<()> {
-        let Self { data } = self;
-        let StateEvidence {
-            boot,
-            disposition,
-            parts,
-            regions,
-            page_hashes,
-            digest,
-        } = data;
-        boot.encode(w)?;
-        match disposition {
-            EvidenceDisposition::Crashed => false.encode(w)?,
-            EvidenceDisposition::Shutdown => true.encode(w)?,
-            _ => {
-                return Err(seedbox_machine::snapshot::CodecError::Invalid(
-                    "PV cached live disposition",
-                ))
-            }
-        };
-        parts.encode(w)?;
-        regions.encode(w)?;
-        page_hashes.encode(w)?;
-        digest.encode(w)
+        Self::check(&self.data)?;
+        self.data.encode(w)
     }
     fn decode<R: std::io::Read>(
         r: &mut seedbox_machine::snapshot::Reader<'_, R>,
     ) -> seedbox_machine::snapshot::Result<Self> {
-        let boot = Record::decode(r)?;
-        let shutdown = bool::decode(r)?;
-        Ok(Self {
-            data: StateEvidence {
-                boot,
-                disposition: if shutdown {
-                    EvidenceDisposition::Shutdown
-                } else {
-                    EvidenceDisposition::Crashed
-                },
-                parts: Record::decode(r)?,
-                regions: Record::decode(r)?,
-                page_hashes: Record::decode(r)?,
-                digest: Record::decode(r)?,
-            },
-        })
+        let data = StateEvidence::decode(r)?;
+        Self::check(&data)?;
+        Ok(Self { data })
+    }
+}
+impl Cached {
+    fn check(data: &StateEvidence) -> seedbox_machine::snapshot::Result<()> {
+        match data.disposition {
+            EvidenceDisposition::Crashed | EvidenceDisposition::Shutdown => Ok(()),
+            _ => Err(seedbox_machine::snapshot::CodecError::Invalid(
+                "PV cached disposition",
+            )),
+        }
     }
 }

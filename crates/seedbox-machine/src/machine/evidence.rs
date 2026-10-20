@@ -24,6 +24,39 @@ pub enum EvidenceDisposition {
     Shutdown,
     Exited { code: i32 },
 }
+/// Retained evidence describes an ended boot: `Live` has no encoding.
+/// Tags are 0 crashed, 1 shutdown and 2 exited followed by its code.
+impl crate::snapshot::Record for EvidenceDisposition {
+    const MIN: u64 = 1;
+    fn encode<W: std::io::Write>(
+        &self,
+        w: &mut crate::snapshot::Writer<'_, W>,
+    ) -> crate::snapshot::Result<()> {
+        match *self {
+            Self::Crashed => w.u8(0),
+            Self::Shutdown => w.u8(1),
+            Self::Exited { code } => {
+                w.u8(2)?;
+                w.u32(code as u32)
+            }
+            Self::Live => Err(crate::snapshot::CodecError::Invalid(
+                "live retired disposition",
+            )),
+        }
+    }
+    fn decode<R: std::io::Read>(
+        r: &mut crate::snapshot::Reader<'_, R>,
+    ) -> crate::snapshot::Result<Self> {
+        match r.u8()? {
+            0 => Ok(Self::Crashed),
+            1 => Ok(Self::Shutdown),
+            2 => Ok(Self::Exited {
+                code: r.u32()? as i32,
+            }),
+            _ => Err(crate::snapshot::CodecError::Invalid("retired disposition")),
+        }
+    }
+}
 
 /// Actual state of the live boot, or the most recently ended boot.
 ///
@@ -54,6 +87,14 @@ pub struct StateEvidence {
     pub page_hashes: Vec<u8>,
     pub digest: String,
 }
+crate::record!(StateEvidence {
+    boot: u64,
+    disposition: EvidenceDisposition,
+    parts: Vec<(String, String)>,
+    regions: Vec<RamRegion>,
+    page_hashes: Vec<u8>,
+    digest: String,
+});
 
 impl StateEvidence {
     /// Validate common shape. The backend additionally validates its exact part
