@@ -235,7 +235,7 @@ fn configured_archive_exact_ownership_binary_closure_and_unchanged_default() {
     assert_eq!(at, bytes.len());
 }
 #[test]
-fn configured_runtime_is_bootstrap_owned_not_duplicated_and_fd_reserve_is_backend_specific() {
+fn configured_runtime_is_bootstrap_owned_and_preserves_the_application_fd_limit() {
     let env = environment();
     let packed = archive(&env, true);
     let e = entries(&packed);
@@ -246,17 +246,18 @@ fn configured_runtime_is_bootstrap_owned_not_duplicated_and_fd_reserve_is_backen
     field(bytes, &mut at);
     field(bytes, &mut at);
     assert_eq!(u32_field(bytes, &mut at), 262144);
-    assert_eq!(u32_field(bytes, &mut at), 1048576 + 96);
+    assert_eq!(u32_field(bytes, &mut at), 1048576);
     assert_eq!(&bytes[at..at + 2], &[0, 1]);
-    let mut invalid = env.clone();
-    invalid.limits.nofile = NonZeroU32::new(u32::MAX).unwrap();
-    let a = DerivedApplication {
-        application: application(),
-        execution_prefix: vec!["/seedbox/progress/bin64/drrun".into()],
-    };
-    assert!(
-        application::boot_derived_configured(&a, &bootstrap(), &invalid, Some(&elf(62))).is_err()
-    );
+    let mut custom = env.clone();
+    custom.limits.nofile = NonZeroU32::new(8192).unwrap();
+    for runtime in [false, true] {
+        let bytes = record(&custom, runtime);
+        let mut at = 16;
+        field(&bytes, &mut at);
+        field(&bytes, &mut at);
+        assert_eq!(u32_field(&bytes, &mut at), 262144);
+        assert_eq!(u32_field(&bytes, &mut at), 8192);
+    }
     let mut no_volume = GuestEnvironment::new("app", "", true);
     no_volume.limits = GuestLimits::default();
     let p = entries(
@@ -433,7 +434,7 @@ fn pure_c_setup_preserves_volume_metadata_order_binary_configs_devices_limits_an
         "fchown|/etc/demo|0|0",
         "mount|-|/etc/demo|-|4129|-",
         "write|/proc/sys/vm/max_map_count|3236323134340a",
-        "write|/proc/sys/fs/nr_open|313034383637320a",
+        "write|/proc/sys/fs/nr_open|313034383537360a",
     ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
@@ -445,7 +446,7 @@ fn pure_c_setup_preserves_volume_metadata_order_binary_configs_devices_limits_an
     assert!(position(&text, "root-switch-stub") < position(&text, "mount|tmpfs|/dev|"));
     assert!(position(&text, "mount|-|/etc/demo") < position(&text, "start-one"));
     assert_eq!(text.matches("formatter|").count(), 1);
-    assert_eq!(text.matches("rlimit|1048672|1048672").count(), 2);
+    assert_eq!(text.matches("rlimit|1048576|1048576").count(), 2);
     assert!(
         !text.contains("open|/rootfs/data"),
         "image target contents must not be copied"
