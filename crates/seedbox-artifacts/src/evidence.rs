@@ -40,8 +40,3 @@ impl TryFrom<BTreeMap<String, String>> for StateDigestParts {
 
 /// Per-machine output directory relative to retained run output.
 pub const MACHINE_OUTPUT_DIR: &str = "machines";
-
-/// Manifest-relative page evidence, beside per-machine traces.
-pub fn page_hash_log(machine: &str) -> String {
-    format!("{MACHINE_OUTPUT_DIR}/{machine}.pages")
-}

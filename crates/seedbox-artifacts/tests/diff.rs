@@ -16,7 +16,7 @@ fn ram_pages_are_read_from_the_current_capture_page_path() {
     for (name, raw, pfns) in [("a", &a, vec![]), ("b", &b, vec![3usize])] {
         let path = dir.path().join(name);
         let mut record = fixture();
-        write_fixture(&path, &mut record, Some(raw), None);
+        write_fixture(&path, &mut record, Some(raw));
         let mut bytes = vec![0u8; 1024 * 1024];
         for pfn in pfns {
             bytes[pfn * 8] = 1;
@@ -26,7 +26,7 @@ fn ram_pages_are_read_from_the_current_capture_page_path() {
             "machines/machines/server.pages".into(),
             ContentDigest::of(&bytes),
         );
-        write_fixture(&path, &mut record, Some(raw), None);
+        write_fixture(&path, &mut record, Some(raw));
     }
     let report = diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
     assert!(report.machines[0]
@@ -51,12 +51,12 @@ fn ram_pages_count_all_pfns_and_bound_the_sample() {
     let right = dir.path().join("b");
     let mut ra = fixture();
     let mut rb = fixture();
-    write_fixture(&left, &mut ra, Some(&a), None);
-    write_fixture(&right, &mut rb, Some(&b), None);
+    write_fixture(&left, &mut ra, Some(&a));
+    write_fixture(&right, &mut rb, Some(&b));
     write_pages(&left, &mut ra, &[]);
     write_pages(&right, &mut rb, &[0, 3, 9, 10, 11, 12, 13, 14, 15, 131071]);
-    write_fixture(&left, &mut ra, Some(&a), None);
-    write_fixture(&right, &mut rb, Some(&b), None);
+    write_fixture(&left, &mut ra, Some(&a));
+    write_fixture(&right, &mut rb, Some(&b));
     let result = diff(&left, &right).unwrap();
     let pages = result.machines[0].ram_pages.as_ref().unwrap();
     assert_eq!(pages.differing_pfns, 10);
@@ -67,7 +67,7 @@ fn ram_pages_count_all_pfns_and_bound_the_sample() {
     // Even another textual part changing rules out a RAM-only diagnostic.
     let mut mixed = b.clone();
     mixed["machines"][1]["state_digest_parts"]["events"] = "different events".into();
-    write_fixture(&right, &mut rb, Some(&mixed), None);
+    write_fixture(&right, &mut rb, Some(&mixed));
     assert!(diff(&left, &right)
         .unwrap()
         .machines
@@ -92,8 +92,8 @@ fn ram_page_evidence_is_optional_but_declared_bytes_are_validated() {
     assert!(diff(&left, &right).unwrap().machines[0].ram_pages.is_none());
     write_pages(&left, &mut ra, &[]);
     write_pages(&right, &mut rb, &[1]);
-    write_fixture(&left, &mut ra, Some(&a), None);
-    write_fixture(&right, &mut rb, Some(&b), None);
+    write_fixture(&left, &mut ra, Some(&a));
+    write_fixture(&right, &mut rb, Some(&b));
     std::fs::write(
         right.join("output/machines/machines/server.pages"),
         b"corrupt",
@@ -110,7 +110,7 @@ fn ram_page_evidence_is_optional_but_declared_bytes_are_validated() {
             "machines/machines/server.pages".into(),
             ContentDigest::of(&bytes),
         );
-        write_fixture(&right, &mut rb, Some(&b), None);
+        write_fixture(&right, &mut rb, Some(&b));
         assert!(diff(&left, &right)
             .unwrap_err()
             .to_string()
@@ -121,7 +121,7 @@ fn ram_page_evidence_is_optional_but_declared_bytes_are_validated() {
         "machines/machines/server.pages".into(),
         "retention cap".into(),
     );
-    write_fixture(&right, &mut rb, Some(&b), None);
+    write_fixture(&right, &mut rb, Some(&b));
     let result = diff(&left, &right).unwrap();
     assert!(result.machines[0].ram_pages.is_none());
     assert!(result
@@ -138,7 +138,7 @@ fn page_capture_presence_alone_does_not_change_diff_or_witnesses() {
         let mut record = fixture();
         let left = dir.path().join("a");
         write_pages(&left, &mut record, &[1]);
-        write_fixture(&left, &mut record, Some(&a), None);
+        write_fixture(&left, &mut record, Some(&a));
         let after = diff(&left, &dir.path().join("b")).unwrap();
         assert_eq!(
             serde_json::to_vec(&before).unwrap(),
@@ -149,8 +149,8 @@ fn page_capture_presence_alone_does_not_change_diff_or_witnesses() {
 
 fn pair(a: &Value, b: &Value) -> (tempfile::TempDir, DiffReport) {
     let dir = tempfile::tempdir().unwrap();
-    write_fixture(&dir.path().join("a"), &mut fixture(), Some(a), None);
-    write_fixture(&dir.path().join("b"), &mut fixture(), Some(b), None);
+    write_fixture(&dir.path().join("a"), &mut fixture(), Some(a));
+    write_fixture(&dir.path().join("b"), &mut fixture(), Some(b));
     let result = diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
     (dir, result)
 }
@@ -170,7 +170,7 @@ fn current_reports_without_full_state_preserve_witnesses() {
 }
 
 #[test]
-fn current_parts_report_ram_and_event_digests_with_trace_precedence() {
+fn current_parts_report_ram_and_event_digests() {
     for part in ["ram", "events"] {
         let a = current_report(true);
         let mut b = a.clone();
@@ -182,9 +182,8 @@ fn current_parts_report_ram_and_event_digests_with_trace_precedence() {
         let (_, result) = pair(&a, &b);
         let first = result.first_record.unwrap();
         assert_eq!(first.machine, "workload");
-        assert_eq!(first.source, "terminal");
         assert_eq!(
-            first.a.unwrap().value["state_digest_parts"][part],
+            first.a.unwrap()["state_digest_parts"][part],
             if part == "events" {
                 serde_json::to_value(ContentDigest::of(
                     a["machines"][0]["state_digest_parts"][part]
@@ -201,26 +200,6 @@ fn current_parts_report_ram_and_event_digests_with_trace_precedence() {
             .differences
             .iter()
             .any(|d| d.field == format!("/state_digest_parts/{part}")));
-
-        let dir = tempfile::tempdir().unwrap();
-        write_fixture(
-            &dir.path().join("a"),
-            &mut fixture(),
-            Some(&a),
-            Some(b"I 1 2 3\n"),
-        );
-        write_fixture(
-            &dir.path().join("b"),
-            &mut fixture(),
-            Some(&b),
-            Some(b"H 1 2 3\n"),
-        );
-        let first = diff(&dir.path().join("a"), &dir.path().join("b"))
-            .unwrap()
-            .first_record
-            .unwrap();
-        assert_eq!(first.source, "trace");
-        assert_eq!(first.record, Some(1));
     }
 }
 
@@ -245,13 +224,8 @@ fn world_difference_does_not_invent_a_machine_or_time() {
     let digest = ContentDigest::of(b"world changed, machines equal");
     b.report.as_mut().unwrap().witness = Some(digest.clone());
     raw["world_witness"] = serde_json::to_value(digest).unwrap();
-    write_fixture(
-        &dir.path().join("a"),
-        &mut fixture(),
-        Some(&raw_report()),
-        None,
-    );
-    write_fixture(&dir.path().join("b"), &mut b, Some(&raw), None);
+    write_fixture(&dir.path().join("a"), &mut fixture(), Some(&raw_report()));
+    write_fixture(&dir.path().join("b"), &mut b, Some(&raw));
     let result = diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
     assert_eq!(result.world_witness.matches, Some(false));
     assert!(result.machines.iter().all(|m| m.witness.matches.is_none()));
@@ -271,16 +245,14 @@ fn full_state_digest_differences_do_not_claim_an_exit_time() {
 }
 
 #[test]
-fn stopped_disposition_difference_does_not_fabricate_legacy_exit_times() {
+fn stopped_disposition_difference_reports_the_terminal_state() {
     let a = current_report(true);
     let mut b = a.clone();
     b["machines"][0]["guest_exit_code"] = 1.into();
     let (_, result) = pair(&a, &b);
     let first = result.first_record.unwrap();
     assert_eq!(first.machine, "workload");
-    assert_eq!(first.source, "terminal");
-    assert_eq!(first.a.unwrap().time_ns, None);
-    assert_eq!(first.b.unwrap().time_ns, None);
+    assert_ne!(first.a, first.b);
 }
 
 #[test]
@@ -290,8 +262,8 @@ fn identity_lists_semantics_and_ignores_attempt_and_performance() {
     b.attempt = "another".into();
     b.performance_parameters
         .insert("SEEDBOX_UNDO".into(), "0".into());
-    write_fixture(&dir.path().join("a"), &mut fixture(), None, None);
-    write_fixture(&dir.path().join("b"), &mut b, None, None);
+    write_fixture(&dir.path().join("a"), &mut fixture(), None);
+    write_fixture(&dir.path().join("b"), &mut b, None);
     assert_eq!(
         diff(&dir.path().join("a"), &dir.path().join("b"))
             .unwrap()
@@ -307,7 +279,7 @@ fn identity_lists_semantics_and_ignores_attempt_and_performance() {
         .inputs
         .machine_memory_mb
         .insert("workload".into(), 1024);
-    write_fixture(&dir.path().join("b"), &mut b, None, None);
+    write_fixture(&dir.path().join("b"), &mut b, None);
     let result = diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
     let paths: Vec<_> = result
         .identity_differences
@@ -325,45 +297,6 @@ fn identity_lists_semantics_and_ignores_attempt_and_performance() {
 }
 
 #[test]
-fn diff_reports_witness_log_divergence_and_one_sided_logs() {
-    let dir = tempfile::tempdir().unwrap();
-    let name = "machines/workload.witness-log";
-    let x = witness_log_bytes(&[[0, 1, 7], [1_000_000, 4, 8]]);
-    let y = witness_log_bytes(&[[0, 1, 7], [1_000_000, 4, 6]]);
-    for (side, log) in [("a", Some(&x[..])), ("b", Some(&y[..])), ("c", None)] {
-        write_fixture_logs(
-            &dir.path().join(side),
-            &mut fixture(),
-            Some(&raw_report()),
-            &[(name, log)],
-        );
-    }
-    let result = diff(&dir.path().join("a"), &dir.path().join("a")).unwrap();
-    assert_eq!(result.status, Status::Match);
-    assert!(result.divergence.is_none());
-    let result = diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
-    assert_eq!(result.status, Status::Different);
-    let d = result.divergence.unwrap();
-    assert_eq!((d.machine.as_str(), d.sample), ("workload", 2));
-    assert_eq!(d.last_match.unwrap().time_ns, 0);
-    let report = replay_divergence(&dir.path().join("a"), &dir.path().join("b")).unwrap();
-    assert_eq!(report.divergence.unwrap().sample, 2);
-    let result = diff(&dir.path().join("a"), &dir.path().join("c")).unwrap();
-    assert_eq!(result.status, Status::Different);
-    assert!(result.divergence.is_none());
-    assert!(result
-        .evidence_differences
-        .iter()
-        .any(|d| d.field == "/logs/machines~1workload.witness-log"));
-    let result = diff(&dir.path().join("c"), &dir.path().join("c")).unwrap();
-    assert_eq!(result.status, Status::Match);
-    assert!(result
-        .limitations
-        .iter()
-        .any(|l| l == "workload: no retained witness log on either side"));
-}
-
-#[test]
 fn absent_and_omitted_evidence_stays_explicit_and_is_not_read() {
     let dir = tempfile::tempdir().unwrap();
     let mut record = fixture();
@@ -372,7 +305,7 @@ fn absent_and_omitted_evidence_stays_explicit_and_is_not_read() {
     record
         .omitted_logs
         .insert("machines/driver-state.json".into(), "over quota".into());
-    write_fixture(dir.path(), &mut record, None, None);
+    write_fixture(dir.path(), &mut record, None);
     std::fs::write(
         dir.path().join("output").join("machines/driver-state.json"),
         "not retained",
@@ -392,7 +325,7 @@ fn full_state_survives_omitted_raw_report() {
         "workload".into(),
         ContentDigest::of(b"ram"),
     )]));
-    write_fixture(dir.path(), &mut record, None, None);
+    write_fixture(dir.path(), &mut record, None);
     let result = diff(dir.path(), dir.path()).unwrap();
     assert_eq!(result.machines[0].full_state.matches, Some(true));
     assert_eq!(result.machines[0].witness.matches, None);
@@ -406,8 +339,8 @@ fn full_state_only_difference_does_not_fabricate_terminal_record() {
         "workload".into(),
         ContentDigest::of(b"ram"),
     )]));
-    write_fixture(&dir.path().join("a"), &mut fixture(), None, None);
-    write_fixture(&dir.path().join("b"), &mut b, None, None);
+    write_fixture(&dir.path().join("a"), &mut fixture(), None);
+    write_fixture(&dir.path().join("b"), &mut b, None);
     let result = diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
     assert_eq!(result.status, Status::Different);
     assert!(result.first_record.is_none());

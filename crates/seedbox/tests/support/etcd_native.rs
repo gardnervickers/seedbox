@@ -266,15 +266,11 @@ impl Cli {
             let state = seedbox_application::diff::diff(&left, &right)
                 .map_err(|e| e.to_string())
                 .and_then(|report| serde_json::to_vec_pretty(&report).map_err(|e| e.to_string()));
-            let divergence = seedbox_application::diff::replay_divergence(&left, &right)
-                .map_err(|e| e.to_string())
-                .and_then(|report| serde_json::to_vec_pretty(&report).map_err(|e| e.to_string()));
             let pages = seedbox_application::diff::replay_ram_pages(&left, &right)
                 .map_err(|e| e.to_string())
                 .and_then(|report| serde_json::to_vec_pretty(&report).map_err(|e| e.to_string()));
             for (name, report) in [
                 ("compare-state.json", state),
-                ("compare-divergence.json", divergence),
                 ("compare-ram-pages.json", pages),
             ] {
                 let write = report.and_then(|bytes| {
