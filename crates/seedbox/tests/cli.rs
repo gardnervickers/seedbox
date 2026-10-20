@@ -1037,15 +1037,7 @@ fn show_world_prints_machine_and_link_tables() {
     use seedbox_api::{
         LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState, WorldState,
     };
-    use std::io::{Read, Write};
-    use std::os::unix::fs::DirBuilderExt;
     let directory = tempfile::tempdir().unwrap();
-    let state = directory.path().join(".local/state/seedbox");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&state)
-        .unwrap();
     let machine = |name: &str, oracle| MachineState {
         name: name.into(),
         incarnation: 0,
@@ -1087,29 +1079,11 @@ fn show_world_prints_machine_and_link_tables() {
         faults: Vec::new(),
     };
     let body = serde_json::to_string(&world).unwrap();
-    // A stand-in server answering the one world request on the default socket.
-    let listener = std::os::unix::net::UnixListener::bind(state.join("server.sock")).unwrap();
-    std::thread::spawn(move || {
-        for mut stream in listener.incoming().flatten() {
-            let mut request = Vec::new();
-            let mut buffer = [0; 1024];
-            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                match stream.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => request.extend_from_slice(&buffer[..n]),
-                }
-            }
-            if !request.starts_with(b"GET /v1/simulations/k7m2p9qx/world ") {
-                continue;
-            }
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            return;
-        }
-    });
+    let server = stand_in_server(
+        directory.path(),
+        "GET /v1/simulations/k7m2p9qx/world ",
+        body,
+    );
     let output = seedbox(&["show", "--view", "world", "k7m2p9qx"], directory.path());
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(
@@ -1126,6 +1100,164 @@ oracle  n1      2.5ms    500µs   100ppm  12      960    4        cut p1
 simulated time: 1s
 "
     );
+    server.join().unwrap();
+}
+
+/// A stand-in server on the default socket of `home` that answers the one
+/// request starting with `request` with the JSON `body`. Connections that send
+/// anything else (the CLI's liveness probe) are dropped unanswered.
+fn stand_in_server(
+    home: &Path,
+    request: &'static str,
+    body: String,
+) -> std::thread::JoinHandle<()> {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::DirBuilderExt;
+    let state = home.join(".local/state/seedbox");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&state)
+        .unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(state.join("server.sock")).unwrap();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut received = Vec::new();
+            let mut buffer = [0; 1024];
+            while !received.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => received.extend_from_slice(&buffer[..n]),
+                }
+            }
+            if !received.starts_with(request.as_bytes()) {
+                continue;
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            return;
+        }
+    })
+}
+
+fn seed_range_document(stop_requested: bool) -> String {
+    serde_json::to_string(&seedbox_api::SeedRangeStatus {
+        source: "k7m2p9qx".parse().unwrap(),
+        first_seed: 40,
+        count: 3,
+        members: Vec::new(),
+        deleted_members: 0,
+        stop_requested,
+        error: None,
+    })
+    .unwrap()
+}
+
+#[test]
+fn all_seeds_choices_are_validated_before_connecting() {
+    let root = tempfile::tempdir().unwrap();
+    for (args, phrase) in [
+        (vec!["show", "--all-seeds"], "<ID>"),
+        (
+            vec!["show", "k7m2p9qx", "--all-seeds", "--view", "world"],
+            "cannot be used with",
+        ),
+        (
+            vec!["show", "k7m2p9qx", "--all-seeds", "--watch"],
+            "cannot be used with",
+        ),
+        (
+            vec!["show", "k7m2p9qx", "--all-seeds", "--file", "vmm.stderr"],
+            "cannot be used with",
+        ),
+        (
+            vec!["show", "invalid", "--all-seeds"],
+            "simulation ID must contain",
+        ),
+        (vec!["stop", "--all-seeds"], "<ID>"),
+        (
+            vec!["stop", "invalid", "--all-seeds"],
+            "simulation ID must contain",
+        ),
+    ] {
+        let output = seedbox(&args, root.path());
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(
+            stderr(&output).contains(phrase),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
+    assert!(!root.path().join(".local/state/seedbox").exists());
+}
+
+#[test]
+fn show_all_seeds_prints_the_seed_range_table_and_document() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = stand_in_server(
+        directory.path(),
+        "GET /v1/simulations/k7m2p9qx/seeds ",
+        seed_range_document(false),
+    );
+    let output = seedbox(&["show", "k7m2p9qx", "--all-seeds"], directory.path());
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = String::from_utf8(output.stdout).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(
+        lines.next().unwrap().split_whitespace().collect::<Vec<_>>(),
+        [
+            "SOURCE",
+            "FIRST-SEED",
+            "COUNT",
+            "COMPLETED",
+            "DELETED",
+            "STATE"
+        ]
+    );
+    assert_eq!(
+        lines.next().unwrap().split_whitespace().collect::<Vec<_>>(),
+        ["k7m2p9qx", "40", "3", "0", "0", "running"]
+    );
+    server.join().unwrap();
+
+    let directory = tempfile::tempdir().unwrap();
+    let server = stand_in_server(
+        directory.path(),
+        "GET /v1/simulations/k7m2p9qx/seeds ",
+        seed_range_document(false),
+    );
+    let output = seedbox(
+        &["show", "k7m2p9qx", "--all-seeds", "--json"],
+        directory.path(),
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["source"], "k7m2p9qx");
+    assert_eq!(document["firstSeed"], 40);
+    assert_eq!(document["count"], 3);
+    server.join().unwrap();
+}
+
+#[test]
+fn stop_all_seeds_requests_the_range_stop() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = stand_in_server(
+        directory.path(),
+        "POST /v1/simulations/k7m2p9qx/seeds/stop ",
+        seed_range_document(true),
+    );
+    let output = seedbox(&["stop", "k7m2p9qx", "--all-seeds"], directory.path());
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "STOP_REQUESTED: k7m2p9qx\n"
+    );
+    server.join().unwrap();
 }
 
 #[test]
