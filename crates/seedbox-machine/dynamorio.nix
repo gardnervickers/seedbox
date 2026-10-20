@@ -7,7 +7,12 @@ assert pkgs.lib.assertMsg (builtins.pathExists (source + "/CMakeLists.txt"))
 pkgs.stdenv.mkDerivation {
   pname = "seedbox-dynamorio${pkgs.lib.optionalString debug "-debug"}";
   version = "11.3.0-1";
-  src = pkgs.lib.cleanSource source;
+  # Downstream test edits do not change the SDK/runtime build inputs.
+  src = pkgs.lib.cleanSourceWith {
+    src = source;
+    filter = path: type:
+      path != toString (source + "/seedbox-tests") && pkgs.lib.cleanSourceFilter path type;
+  };
   # Export the public SDK and runtime from one configuration. drsyms needs
   # optional elfutils sources and is not used by the packaged clients.
   postPatch = ''

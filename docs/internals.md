@@ -97,8 +97,15 @@ metadata and ignored build output, to its Linux container.
 ## External DynamoRIO tests
 
 The `dynamorio` named suite runs native Linux x86-64/ARM64 application fixtures
-from [seedbox-machine/tests/dynamorio](../crates/seedbox-machine/tests/dynamorio),
+from [the maintained DR fork](../vendor/dynamorio/seedbox-tests),
 with native controls, the packaged `drrun`, and a public drmgr/drreg client.
+The fork owns the case sources, corpora, clients and case-specific runners.
+Seedbox's existing Cargo targets compile the fork's Rust entrypoints directly,
+preserving libtest names and feature gates; Seedbox CI runs both architectures.
+Nix packages fixtures directly from the selected submodule, using its matching
+SDK/runtime. General Seedbox test support and guest/PV integration stay here.
+The time policy scans only `seedbox-tests/` within the fork, including its Rust
+helpers and the narrowly marked native syscall subjects.
 It checks signal context/vector/mask/alternate-stack restoration, live registers
 and flags under instrumentation, and ARM load/store-exclusive application semantics.
 Source-derived clients also check public flush operations, finite concurrent

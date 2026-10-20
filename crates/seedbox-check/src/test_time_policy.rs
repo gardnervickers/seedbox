@@ -493,7 +493,18 @@ pub fn check(root: &Path) -> Result<Report, String> {
     let root = root.as_path();
     let mut files = BTreeMap::new();
     collect(&root.join("crates"), &mut BTreeSet::new(), &mut files)?;
+    // Only the downstream suite is test policy input, never upstream DR tests.
+    let dr_suite = root.join("vendor/dynamorio/seedbox-tests");
+    if root.join("crates/seedbox-machine/Cargo.toml").is_file()
+        && !dr_suite.join("dynamorio.rs").is_file()
+    {
+        return Err("DynamoRIO fork tests missing; run git submodule update --init --recursive vendor/dynamorio from the Seedbox checkout".into());
+    }
+    let mut dr_files = BTreeMap::new();
+    collect(&dr_suite, &mut BTreeSet::new(), &mut dr_files)?;
     let mut force: BTreeSet<_> = files.keys().filter(|path| forced(path)).cloned().collect();
+    force.extend(dr_files.keys().cloned());
+    files.extend(dr_files);
     let asts: BTreeMap<_, _> = files
         .iter()
         .map(|(path, text)| {
@@ -544,11 +555,7 @@ pub fn check(root: &Path) -> Result<Report, String> {
         )?;
         report.findings.extend(local.findings);
     }
-    dr_c_sources(
-        root,
-        &root.join("crates/seedbox-machine/tests/dynamorio"),
-        &mut report,
-    )?;
+    dr_c_sources(root, &dr_suite, &mut report)?;
     report
         .findings
         .sort_by(|a, b| (&a.path, a.line, &a.detail).cmp(&(&b.path, b.line, &b.detail)));

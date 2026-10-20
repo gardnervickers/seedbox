@@ -1,5 +1,6 @@
 { pkgs, debug ? false }:
 let
+  source = ../../vendor/dynamorio/seedbox-tests/dynamorio;
   runtime = import ./dynamorio.nix { inherit pkgs debug; };
   configuration = if debug then "debug" else "release";
   # Exact WhiteBox sources from PR317's JDK21 runtime fixture, fetched during
@@ -12,10 +13,13 @@ let
     url = "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12-ga/test/lib/jdk/test/whitebox/parser/DiagnosticCommand.java";
     sha256 = "f807936a68041072ca4a8b217e279890e50cbbcca2874488ed11dea70e2952e7";
   };
-in pkgs.stdenv.mkDerivation {
+in
+assert pkgs.lib.assertMsg (builtins.pathExists (source + "/CMakeLists.txt"))
+  "DynamoRIO fork tests missing; run git submodule update --init --recursive vendor/dynamorio from the Seedbox checkout.";
+pkgs.stdenv.mkDerivation {
   pname = "seedbox-dynamorio-test-fixtures${pkgs.lib.optionalString debug "-debug"}";
   version = "0.1.0";
-  src = ./tests/dynamorio;
+  src = source;
   nativeBuildInputs = with pkgs; [
     cmake ninja patchelf jdk25 jdk21 python313 go_1_27 nodejs_24
     beam28Packages.erlang luajit dotnet-sdk_10

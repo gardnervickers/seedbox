@@ -347,7 +347,7 @@ fn controlled_timers_and_unrelated_sleep_named_functions_are_not_host_sleeps() {
 
 #[test]
 fn dr_syscall_subject_is_one_bounded_documented_call_not_a_pacing_exemption() {
-    let path = Path::new("crates/seedbox-machine/tests/dynamorio/unix/subject.c");
+    let path = Path::new("vendor/dynamorio/seedbox-tests/dynamorio/unix/subject.c");
     let marker = "/* seedbox-syscall-subject: nanosleep; bound-ms=200; invariant=observed blocked-entry EINTR and remainder */";
     assert!(dr_c_findings(
         path,
@@ -406,4 +406,47 @@ fn dr_syscall_subject_is_one_bounded_documented_call_not_a_pacing_exemption() {
         .len(),
         1
     );
+}
+
+#[test]
+fn fork_suite_helpers_are_scanned_without_scanning_upstream_tests() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (name, code) in [
+        ("vendor/dynamorio/seedbox-tests/dynamorio.rs", "mod helper;"),
+        (
+            "vendor/dynamorio/seedbox-tests/helper.rs",
+            "fn f(){std::thread::sleep(delay);}",
+        ),
+        (
+            "vendor/dynamorio/seedbox-tests/subject.c",
+            "nanosleep(&req,&rem);",
+        ),
+        ("vendor/dynamorio/suite/tests/subject.c", "sleep(1);"),
+        (
+            "vendor/dynamorio/suite/tests/helper.rs",
+            "fn f(){std::thread::sleep(delay);}",
+        ),
+    ] {
+        let path = root.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, code).unwrap();
+    }
+    let report = check(root).unwrap();
+    assert_eq!(report.findings.len(), 2);
+    assert!(report
+        .findings
+        .iter()
+        .all(|finding| finding.path.starts_with("vendor/dynamorio/seedbox-tests")));
+}
+
+#[test]
+fn missing_fork_suite_in_a_seedbox_checkout_is_actionable() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("crates/seedbox-machine/Cargo.toml");
+    fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    fs::write(manifest, "").unwrap();
+    assert!(check(dir.path())
+        .unwrap_err()
+        .contains("git submodule update --init --recursive vendor/dynamorio"));
 }

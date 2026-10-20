@@ -31,10 +31,10 @@ dynamorio-isolated = ["dynamorio-isolated-tests"]
 
 [[test]]
 name = "dynamorio"
-path = "tests/dynamorio.rs"
+path = "../../vendor/dynamorio/seedbox-tests/dynamorio.rs"
 required-features = ["dynamorio-tests"]
 
 [[test]]
 name = "dynamorio_isolated"
-path = "tests/dynamorio_isolated.rs"
+path = "../../vendor/dynamorio/seedbox-tests/dynamorio_isolated.rs"
 required-features = ["dynamorio-isolated-tests"]

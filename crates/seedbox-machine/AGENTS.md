@@ -10,6 +10,8 @@
 - Guest C/headers and fixtures stay in `src/pv/`: `guest.nix` collects them and tests
   compile them by path. Follow root test rules: no sleeps or annotations.
 
-- Native DynamoRIO black-box tests live in `tests/dynamorio/`, with the single
-  `tests/dynamorio.rs` entrypoint and `dynamorio-test-fixtures.nix`. Use public
-  application/SDK behavior only; guest epoch/handoff coverage stays with guests.
+- Native DynamoRIO black-box cases, Rust entrypoints, runners and fixtures live
+  in the maintained fork at `vendor/dynamorio/seedbox-tests/`. This crate's Cargo
+  targets compile those sources directly; `dynamorio-test-fixtures.nix` packages
+  their fixtures. Keep Seedbox's adapter thin. Use public application/SDK behavior
+  only; guest epoch/handoff coverage stays with guests.

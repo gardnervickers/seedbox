@@ -1841,7 +1841,7 @@ fn process_tree_boundary_reaps_nested_new_groups() {
         });
         let mut real = Real::install_signals().unwrap();
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../seedbox-machine/tests/dynamorio/unix/supervisor.c");
+            .join("../../vendor/dynamorio/seedbox-tests/dynamorio/unix/supervisor.c");
         let compile = Job::new(
             "actual fixture supervisor",
             vec![
@@ -1956,8 +1956,8 @@ fn process_tree_boundary_reaps_nested_new_groups() {
 fn process_phase_output_is_bounded_and_survives_timeout() {
     let t = fixture();
     fs::create_dir(t.0.join("bin")).unwrap();
-    let sources =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../seedbox-machine/tests/dynamorio");
+    let sources = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vendor/dynamorio/seedbox-tests/dynamorio");
     let environment = std::env::vars().collect();
     let mut compile = Job::new(
         "phase supervisor",
