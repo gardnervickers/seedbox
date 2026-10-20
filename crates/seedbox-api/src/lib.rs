@@ -41,9 +41,6 @@ pub use resource::{
 };
 pub use status::{ExecutionTermination, Phase, Stage, StageTiming, TestVerdict};
 
-/// Version of the local HTTP API, independent of retained worker formats.
-pub const API_VERSION: &str = "seedbox/v1";
-
 mod seeds;
 pub use seeds::{SeedRangeRequest, SeedRangeStatus};
 

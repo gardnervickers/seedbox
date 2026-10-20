@@ -20,10 +20,6 @@ impl CpuBackend {
             _ => Ok(None),
         }
     }
-
-    pub fn is_pv(&self) -> bool {
-        *self == Self::Pv
-    }
 }
 
 #[cfg(test)]
