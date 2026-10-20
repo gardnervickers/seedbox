@@ -30,7 +30,7 @@ pub(super) fn open(request: &wire::Request) -> Result<Worker<Native>> {
     if request.machine_workers == 0 {
         return Err(bad("Driver worker count must be positive"));
     }
-    super::policy::decode_optional(request.prepared.inventory.backend_policy()).map_err(bad)?;
+    super::policy::check_optional(request.prepared.inventory.backend_policy()).map_err(bad)?;
     super::controller::resolve(
         &request.prepared.inventory,
         &request.prepared.oracle.name,
@@ -170,8 +170,8 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     Ok(worker)
 }
 pub(super) fn validate_policy_binding(expected: &Inventory, captured: &Inventory) -> Result<()> {
-    super::policy::decode_optional(expected.backend_policy()).map_err(bad)?;
-    super::policy::decode_optional(captured.backend_policy()).map_err(bad)?;
+    super::policy::check_optional(expected.backend_policy()).map_err(bad)?;
+    super::policy::check_optional(captured.backend_policy()).map_err(bad)?;
     if std::mem::discriminant(expected) != std::mem::discriminant(captured)
         || expected.backend_policy() != captured.backend_policy()
     {
@@ -360,7 +360,7 @@ fn materialize_factory(
     output: &Path,
     binding: Option<&wire::RuntimeBinding>,
 ) -> Result<Assets> {
-    super::policy::decode_optional(inventory.backend_policy()).map_err(bad)?;
+    super::policy::check_optional(inventory.backend_policy()).map_err(bad)?;
     use crate::runtime_assets::{Backend, Runtime};
     use seedbox_spec::definition::Architecture;
     let (archive, backend, architecture) = match inventory {

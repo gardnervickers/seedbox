@@ -319,7 +319,7 @@ pub(crate) fn request(
         let policy = match &mut prepared.inventory {
             wire::Inventory::Pv { policy, .. } | wire::Inventory::Tcg { policy, .. } => policy,
         };
-        let resolved = seedbox_machine::definition::BackendPolicy {
+        let resolved = wire::BackendPolicy {
             seed: request.seed,
             timer_jitter_ns: request.schedule.timer_jitter_ns,
             stop_tolerance_ns: request.schedule.stop_tolerance_ns,
@@ -331,7 +331,7 @@ pub(crate) fn request(
             controller,
         };
         resolved.validate().map_err(bad)?;
-        *policy = Some(super::policy::encode(&resolved).map_err(bad)?);
+        *policy = Some(resolved);
     }
     let epoch = request
         .prepared

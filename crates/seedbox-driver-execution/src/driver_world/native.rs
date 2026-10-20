@@ -126,7 +126,7 @@ impl Native {
         limits: &seedbox_machine::snapshot::DecodeLimits,
         scratch_root: &Path,
     ) -> Result<Self, String> {
-        super::policy::decode_optional(inventory.backend_policy())?;
+        super::policy::check_optional(inventory.backend_policy())?;
         let decoded;
         let snapshot = if let Snapshot::Retained(file) = snapshot {
             decoded = Snapshot::read_from(inventory, &mut file.reader(), limits)?;
@@ -143,8 +143,8 @@ impl Native {
                 let Inventory::Pv { policy, .. } = inventory else {
                     return Err("PV native body differs from retained factory backend".into());
                 };
-                let policy = super::policy::decode_optional(policy.as_ref())?;
-                snapshot.validate_policy(&name, policy.as_ref())?;
+                let policy = super::policy::check_optional(policy.as_ref())?;
+                snapshot.validate_policy(&name, policy)?;
                 super::policy::admit_restore(inventory)?;
                 // Linux ARM64 KVM restore is not proven; HVF restore is
                 // compiled for bd-877 and verified on hardware separately.
@@ -172,9 +172,9 @@ impl Native {
                 let Inventory::Tcg { policy, .. } = inventory else {
                     return Err("TCG native body differs from retained factory backend".into());
                 };
-                let policy = super::policy::decode_optional(policy.as_ref())?;
+                let policy = super::policy::check_optional(policy.as_ref())?;
                 snapshot
-                    .validate_policy(&name, policy.as_ref())
+                    .validate_policy(&name, policy)
                     .map_err(|error| error.to_string())?;
                 super::policy::admit(inventory)?;
                 tcg::TcgMachine::from_snapshot_in(executable, snapshot, scratch_root)
@@ -207,7 +207,7 @@ impl Snapshot {
         reader: &mut impl Read,
         limits: &seedbox_machine::snapshot::DecodeLimits,
     ) -> Result<Self, String> {
-        super::policy::decode_optional(inventory.backend_policy())?;
+        super::policy::check_optional(inventory.backend_policy())?;
         match inventory {
             Inventory::Pv { .. } => {
                 #[cfg(any(
@@ -333,7 +333,7 @@ impl Factory {
                         .map_err(|error| error.to_string())?;
                     let factory = match policy {
                         Some(policy) => factory
-                            .with_policy(super::policy::decode(policy)?)
+                            .with_policy(super::policy::checked(policy)?)
                             .map_err(|error| error.to_string())?,
                         None => factory,
                     };
@@ -360,7 +360,7 @@ impl Factory {
                     .map_err(|error| error.to_string())?;
                 let factory = match policy {
                     Some(policy) => factory
-                        .with_policy(super::policy::decode(policy)?)
+                        .with_policy(super::policy::checked(policy)?)
                         .map_err(|error| error.to_string())?,
                     None => factory,
                 };

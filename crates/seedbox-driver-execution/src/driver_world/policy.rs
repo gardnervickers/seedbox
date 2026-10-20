@@ -1,41 +1,20 @@
 //! Explicit wire/native policy boundary. No native construction or host effects.
 use seedbox_engine_protocol::driver_world as wire;
-use seedbox_machine::definition::BackendPolicy;
+use seedbox_engine_protocol::driver_world::BackendPolicy;
 
 pub(super) const PV_INCOMPLETE: &str = "Driver PV execution requires Linux x86-64 (KVM) or macOS aarch64 (HVF); keep the existing legacy service path on this host";
 pub(super) const CONTROLLER_INCOMPLETE: &str = "Driver controller execution requires Linux x86-64 (KVM) or macOS aarch64 (HVF); keep the existing legacy service path on this host";
 
-pub(super) fn decode(value: &wire::BackendPolicy) -> Result<BackendPolicy, String> {
-    let policy = BackendPolicy {
-        seed: value.seed,
-        timer_jitter_ns: value.timer_jitter_ns,
-        stop_tolerance_ns: value.stop_tolerance_ns,
-        torn_writes: value.torn_writes,
-        full_state: value.full_state,
-        seeded_pv_speed: value.seeded_pv_speed,
-        boot_end_evidence: value.boot_end_evidence,
-        controller: value.controller.clone(),
-    };
-    policy.validate().map_err(str::to_owned)?;
-    Ok(policy)
-}
-pub(super) fn decode_optional(
-    value: Option<&wire::BackendPolicy>,
-) -> Result<Option<BackendPolicy>, String> {
-    value.map(decode).transpose()
-}
-pub(super) fn encode(value: &BackendPolicy) -> Result<wire::BackendPolicy, String> {
+/// Native machines accept only range-checked policy.
+pub(super) fn checked(value: &BackendPolicy) -> Result<BackendPolicy, String> {
     value.validate().map_err(str::to_owned)?;
-    Ok(wire::BackendPolicy {
-        seed: value.seed,
-        timer_jitter_ns: value.timer_jitter_ns,
-        stop_tolerance_ns: value.stop_tolerance_ns,
-        torn_writes: value.torn_writes,
-        full_state: value.full_state,
-        seeded_pv_speed: value.seeded_pv_speed,
-        boot_end_evidence: value.boot_end_evidence,
-        controller: value.controller.clone(),
-    })
+    Ok(value.clone())
+}
+pub(super) fn check_optional(
+    value: Option<&BackendPolicy>,
+) -> Result<Option<&BackendPolicy>, String> {
+    value.map(checked).transpose()?;
+    Ok(value)
 }
 /// One execution policy for both parent admission and native inventory.
 /// Build binds the controller service name to Driver authority on both CPUs.
@@ -65,7 +44,7 @@ pub(super) fn admit_on(
 }
 /// Admit the native inventory without changing backend selection.
 pub(super) fn admit(inventory: &wire::Inventory) -> Result<(), String> {
-    let policy = decode_optional(inventory.backend_policy())?;
+    let policy = check_optional(inventory.backend_policy())?;
     let backend = match inventory {
         wire::Inventory::Pv { .. } => seedbox_spec::backend::CpuBackend::Pv,
         wire::Inventory::Tcg { .. } => seedbox_spec::backend::CpuBackend::Tcg,
@@ -83,7 +62,7 @@ pub(super) fn admit(inventory: &wire::Inventory) -> Result<(), String> {
 /// x86-64 continuation is exercised (macOS aarch64 is unverified, bd-877).
 /// TCG controller continuation goes through the same binding and [`admit`].
 pub(super) fn admit_restore(inventory: &wire::Inventory) -> Result<(), String> {
-    let policy = decode_optional(inventory.backend_policy())?;
+    let policy = check_optional(inventory.backend_policy())?;
     if matches!(inventory, wire::Inventory::Pv { .. })
         && policy
             .as_ref()
@@ -135,7 +114,7 @@ mod tests {
         assert_eq!(refused, PV_INCOMPLETE);
     }
     #[test]
-    fn conversion_is_lossless_and_optional_absence_is_not_explicit_default() {
+    fn checks_keep_policy_and_optional_absence_is_not_explicit_default() {
         for policy in [
             BackendPolicy::default(),
             BackendPolicy {
@@ -149,21 +128,13 @@ mod tests {
                 controller: Some("oracle".into()),
             },
         ] {
-            let wire = encode(&policy).unwrap();
-            assert_eq!(decode(&wire).unwrap(), policy);
-            assert_eq!(
-                serde_json::to_value(&wire).unwrap(),
-                serde_json::to_value(&policy).unwrap()
-            );
+            assert_eq!(checked(&policy).unwrap(), policy);
+            assert_eq!(check_optional(Some(&policy)).unwrap(), Some(&policy));
         }
-        assert_eq!(decode_optional(None).unwrap(), None);
-        assert_eq!(
-            decode_optional(Some(&wire::BackendPolicy::default())).unwrap(),
-            Some(BackendPolicy::default())
-        );
+        assert_eq!(check_optional(None).unwrap(), None);
     }
     #[test]
-    fn conversions_reject_native_invalid_policy_in_both_directions() {
+    fn checks_reject_native_invalid_policy() {
         for policy in [
             BackendPolicy {
                 timer_jitter_ns: 3_600_000_000_001,
@@ -178,11 +149,8 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            assert!(encode(&policy).is_err());
-            let wire: wire::BackendPolicy =
-                serde_json::from_value(serde_json::to_value(policy).unwrap()).unwrap();
-            assert!(decode(&wire).is_err());
-            assert!(decode_optional(Some(&wire)).is_err());
+            assert!(checked(&policy).is_err());
+            assert!(check_optional(Some(&policy)).is_err());
         }
     }
 }

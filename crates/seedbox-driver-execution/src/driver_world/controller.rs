@@ -33,7 +33,7 @@ pub(super) fn resolve(
     network_latency_ns: u64,
 ) -> Result<Resolved> {
     let policy =
-        super::policy::decode_optional(inventory.backend_policy()).map_err(Error::Integrity)?;
+        super::policy::check_optional(inventory.backend_policy()).map_err(Error::Integrity)?;
     let controller = policy
         .as_ref()
         .and_then(|policy| policy.controller.as_deref());
