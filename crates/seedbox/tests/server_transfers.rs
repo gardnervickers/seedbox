@@ -77,6 +77,7 @@ fn bundle(path: &Path) {
         logs: BTreeMap::from([
             ("machines/oracle.console".into(), digest.clone()),
             ("machines/oracle.mgmt".into(), digest.clone()),
+            ("machines/oracle.console.chunks".into(), digest.clone()),
             ("vmm.stdout".into(), digest.clone()),
             ("vmm.stderr".into(), digest),
         ]),
@@ -235,6 +236,7 @@ fn show_diagnostics_and_compare_imported_fixtures_without_execution() {
     for name in [
         "machines/oracle.console",
         "machines/oracle.mgmt",
+        "machines/oracle.console.chunks",
         "vmm.stdout",
         "vmm.stderr",
     ] {
