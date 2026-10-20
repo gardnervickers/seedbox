@@ -72,10 +72,13 @@ jobs:
           python3 -m unittest discover -s tools/dynamorio-ci
           nix develop "$seedbox_flake" --command bash harness/check.sh portable
       - name: Ordinary native tests
+        id: ordinary
         timeout-minutes: 105
         run: |
           seedbox_flake=$(bash tools/dev-flake.sh)
-          nix develop "$seedbox_flake" --command bash harness/check.sh --skip-portable dynamorio
+          set -o pipefail
+          nix develop "$seedbox_flake" --command bash harness/check.sh --skip-portable dynamorio 2>&1 |
+            python3 tools/dynamorio-ci/artifacts.py --log "$RUNNER_TEMP/dr-logs/ordinary.log"
       - name: Separate isolated native fixture validation
         if: ${{ !cancelled() && steps.portable.outcome == 'success' }}
         timeout-minutes: 40
@@ -92,3 +95,13 @@ jobs:
             --property=Delegate=pids --property=RuntimeMaxSec=40min \
             python3 tools/dynamorio-ci/cgroup.py --owned-scope "$unit" --uid "$(id -u)" --gid "$(id -g)" -- \
             nix develop "$seedbox_flake" --command bash harness/check.sh --skip-portable dynamorio-isolated
+      - name: Retain bounded DR failure evidence
+        if: ${{ !cancelled() && failure() }}
+        run: python3 tools/dynamorio-ci/artifacts.py
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() && failure() }}
+        with:
+          name: dynamorio-failure-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dr-artifacts/
+          retention-days: 7
+          if-no-files-found: warn
