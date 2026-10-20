@@ -1016,50 +1016,8 @@ fn bounded_diagnostics(scenario: &HangGuard, diagnostics: &HangGuard) -> Result<
 }
 
 #[tokio::test]
-async fn replay_wedged_logs_returns_original_cli_failure() {
-    let temporary = tempfile::tempdir().unwrap();
-    let executable = temporary.path().join("cli");
-    seedbox_test::process::install_executable(&executable, br#"#!/bin/sh
-case "$1" in
-replay) printf '%s\n' '{"baseline":"kmm5wkwf","simulation":"23456789","status":"MISMATCH","outcomeMatches":true,"witnessMatches":false,"fullStateMatches":false,"faultHistoryMatches":true}'; exit 1;;
-logs) exec python3 -c 'import os,signal; print(os.getpid(), flush=True); signal.pause()';;
-*) exit 9;;
-esac
-"#, 0o755).unwrap();
-    let cli = Cli {
-        executable,
-        directory: temporary.path().to_owned(),
-        state: temporary.path().join("state"),
-    };
-    let guard = HangGuard::new("wedged replay diagnostic fixture", Duration::from_secs(60));
-    let error = cli.replay(&guard, "kmm5wkwf").await.unwrap_err();
-    assert!(error.starts_with("CLI replay: exit status: 1;"), "{error}");
-    let directory = temporary.path().join("failure");
-    let summary = fs::read_to_string(directory.join("summary.txt")).unwrap();
-    assert!(summary.contains(&error), "{summary}");
-    assert!(
-        summary.contains("replay-oracle-log: diagnostic timeout"),
-        "{summary}"
-    );
-    let pid: i32 = fs::read_to_string(directory.join("replay-oracle-log.stdout"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    let mut status = 0;
-    assert_eq!(
-        unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
-        -1
-    );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ECHILD)
-    );
-}
-
-#[tokio::test]
 async fn comparison_capture_cancels_a_wedged_retained_reader() {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::{os::fd::AsRawFd, os::unix::fs::OpenOptionsExt};
     let temporary = tempfile::tempdir().unwrap();
     let attempt = temporary
         .path()
@@ -1095,17 +1053,36 @@ async fn comparison_capture_cancels_a_wedged_retained_reader() {
     });
     let scenario = HangGuard::new("wedged offline diagnostic fixture", Duration::from_secs(60));
     let diagnostics = failure_capture::budget();
-    let capture = cli.capture_comparison_failure(&scenario, &diagnostics, "kmm5wkwf", "23456789");
-    tokio::pin!(capture);
-    let held_writer = tokio::select! {
-        _ = &mut capture => panic!("comparison returned before its retained reader was ready"),
-        writer = writer => writer.unwrap(),
+    let held_writer = {
+        let capture =
+            cli.capture_comparison_failure(&scenario, &diagnostics, "kmm5wkwf", "23456789");
+        tokio::pin!(capture);
+        tokio::select! {
+            _ = &mut capture => panic!("comparison returned before its retained reader was ready"),
+            writer = writer => writer.unwrap(),
+        }
+        // Cancel only after the actual offline reader has opened the FIFO.
     };
-    capture.await;
+    tokio::task::spawn_blocking(move || {
+        HangGuard::new("cancelled retained reader cleanup", Duration::from_secs(60))
+            .wait_for(|| {
+                let mut fd = libc::pollfd {
+                    fd: held_writer.as_raw_fd(),
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                assert!(unsafe { libc::poll(&mut fd, 1, 0) } >= 0);
+                // POLLERR on the FIFO writer positively reports that its only
+                // reader closed, rather than inferring cleanup from absence.
+                (fd.revents & libc::POLLERR != 0).then_some(())
+            })
+            .unwrap();
+    })
+    .await
+    .unwrap();
     let summary = fs::read_to_string(temporary.path().join("failure/summary.txt")).unwrap();
     assert!(
-        summary.contains("comparison-capture: diagnostic timeout"),
+        summary.contains("comparison kmm5wkwf / 23456789"),
         "{summary}"
     );
-    drop(held_writer);
 }

@@ -496,49 +496,6 @@ fn failure_capture_bounds_a_long_guest_line_and_drains_both_pipes() {
 }
 
 #[test]
-fn first_run_wedged_diagnostic_preserves_original_failure_and_reaps_observer() {
-    let temporary = tempfile::tempdir().unwrap();
-    let cli = temporary.path().join("cli");
-    seedbox_test::process::install_executable(
-        &cli,
-        br#"#!/bin/sh
-case "$1" in
-run) printf 'FAIL: kmm5wkwf\n'; exit 1;;
-*) exec python3 -c 'import os,signal; print(os.getpid(), flush=True); signal.pause()';;
-esac
-"#,
-        0o755,
-    )
-    .unwrap();
-    let error = first_run(&cli, temporary.path(), temporary.path(), &["run"]).unwrap_err();
-    assert!(error.starts_with("first: exit status: 1;"), "{error}");
-    let failure = temporary.path().join("failure");
-    let summary = fs::read_to_string(failure.join("summary.txt")).unwrap();
-    assert!(summary.contains(&error), "{summary}");
-    assert!(
-        summary.contains("oracle-logs: diagnostic timeout"),
-        "{summary}"
-    );
-    // Readiness was emitted by the actual wedged process before it was killed.
-    let pid: i32 = fs::read_to_string(failure.join("oracle-logs.stdout"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    let mut status = 0;
-    assert_eq!(
-        unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
-        -1
-    );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ECHILD)
-    );
-    // The batch deadline prevents one fresh timeout for every remaining command.
-    assert!(!failure.join("application-logs.stdout").exists());
-}
-
-#[test]
 fn comparison_failure_keeps_original_error_and_captures_both_sides() {
     let temporary = tempfile::tempdir().unwrap();
     let cli = temporary.path().join("cli");

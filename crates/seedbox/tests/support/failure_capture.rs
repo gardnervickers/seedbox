@@ -106,8 +106,17 @@ pub async fn command_async(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child =
+    let child =
         seedbox_test::process::spawn_with(|| command.spawn()).map_err(|error| error.to_string())?;
+    capture_child(child, directory, label, deadline).await
+}
+
+async fn capture_child(
+    mut child: tokio::process::Child,
+    directory: &Path,
+    label: &str,
+    deadline: tokio::time::Instant,
+) -> Result<(), String> {
     let stdout = child.stdout.take().ok_or("missing observation stdout")?;
     let stderr = child.stderr.take().ok_or("missing observation stderr")?;
     let out_path = directory.join(format!("{label}.stdout"));
@@ -154,6 +163,53 @@ pub async fn command_async(
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn diagnostic_timeout_reaps_a_ready_observer() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("ready.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let mut command = AsyncCommand::new("python3");
+        command.args(["-c", "import os,signal,socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.sendall(str(os.getpid()).encode()); s.close(); print('ready observer', flush=True); signal.pause()"]);
+        command
+            .arg(&socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let child = seedbox_test::process::spawn_with(|| command.spawn()).unwrap();
+        let readiness = budget();
+        let (mut ready, _) =
+            tokio::time::timeout(readiness.remaining().unwrap(), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+        let mut bytes = Vec::new();
+        tokio::time::timeout(
+            readiness.remaining().unwrap(),
+            ready.read_to_end(&mut bytes),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let pid = String::from_utf8(bytes).unwrap().parse::<i32>().unwrap();
+        // Start the short diagnostic deadline only after positive readiness.
+        // Production still passes its original absolute 30-second deadline.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+        let error = capture_child(child, directory.path(), "ready", deadline)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "ready: diagnostic timeout");
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
 
     #[tokio::test]
     async fn cancelling_capture_kills_owned_observer_without_blocking_runtime() {
