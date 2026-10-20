@@ -9,7 +9,6 @@ publish.workspace = true
 # standalone engines; no legacy scheduler or RNG implementation is adopted.
 seedbox-engine-core.workspace = true
 seedbox-engine-protocol.workspace = true
-seedbox-control.workspace = true
 seedbox-machine.workspace = true
 seedbox-machine-tcg.workspace = true
 seedbox-machine-pv.workspace = true

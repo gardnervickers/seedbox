@@ -517,10 +517,10 @@ fn resolved_definitions_allow_independent_edits_and_outlive_their_source() {
 fn malformed_timeline_actions_reject_but_state_dependent_heals_are_admitted() {
     let mut catalogue = Catalogue::in_memory();
     for action in [
-        seedbox_control::Action::Stop {
+        seedbox_engine_protocol::control::Action::Stop {
             machine: "unknown".into(),
         },
-        seedbox_control::Action::Throttle {
+        seedbox_engine_protocol::control::Action::Throttle {
             machine: "oracle".into(),
             handle: "slow".into(),
             factor_permille: 0,

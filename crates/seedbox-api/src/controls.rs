@@ -1,5 +1,5 @@
 use crate::{PlaybackRate, PlaybackStatus};
-pub use seedbox_control::Action as FaultAction;
+pub use seedbox_engine_protocol::control::Action as FaultAction;
 pub use seedbox_engine_protocol::host_control::{CheckpointState, CheckpointStatus};
 pub use seedbox_engine_protocol::intervention::Intervention;
 use serde::{Deserialize, Serialize};

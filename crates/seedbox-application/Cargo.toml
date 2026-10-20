@@ -12,7 +12,6 @@ seedbox-spec.workspace = true
 seedbox-engine-protocol.workspace = true
 seedbox-driver-execution.workspace = true
 serde.workspace = true
-seedbox-control.workspace = true
 seedbox-engine-core.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true

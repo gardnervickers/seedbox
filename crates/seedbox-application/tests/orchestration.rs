@@ -1139,11 +1139,11 @@ fn interactive_history_is_sealed_as_portable_overrides_and_replays_without_journ
                 completed_rounds: 1,
                 simulated_time_ns: 100,
             },
-            plan: seedbox_control::Plan {
+            plan: seedbox_engine_protocol::control::Plan {
                 id: 1,
                 at_ns: 100,
                 deadline_ns: 200,
-                action: seedbox_control::Action::Stop {
+                action: seedbox_engine_protocol::control::Action::Stop {
                     machine: "oracle".into(),
                 },
             },

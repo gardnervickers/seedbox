@@ -113,7 +113,7 @@ impl ExecutionBackend for FixtureExecutor {
                         completed_rounds: 1,
                         simulated_time_ns: 10,
                     },
-                    plan: seedbox_control::Plan {
+                    plan: seedbox_engine_protocol::control::Plan {
                         id: 1,
                         at_ns: 10,
                         deadline_ns: 510,

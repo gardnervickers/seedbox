@@ -3,7 +3,7 @@ use crate::{
     driver::{Action, FaultHandle, HealTarget, NetworkPolicy, Target},
     execution::ExecutionConfig,
 };
-use seedbox_control::Action as Public;
+use seedbox_engine_protocol::control::Action as Public;
 use seedbox_machine::clock::ClockRate;
 use std::{num::NonZeroI64, time::Duration};
 
@@ -117,7 +117,7 @@ pub fn translate(
             rate_ppb,
             max_rate_ppb,
         } => {
-            seedbox_control::validate_clock_drift(*rate_ppb, *max_rate_ppb)?;
+            seedbox_engine_protocol::control::validate_clock_drift(*rate_ppb, *max_rate_ppb)?;
             let action = match (rate_ppb, max_rate_ppb) {
                 (Some(rate), None) => Action::Drift {
                     target: target(machine),
@@ -137,7 +137,7 @@ pub fn translate(
             offset_ns,
             max_offset_ns,
         } => {
-            seedbox_control::validate_clock_skew(*offset_ns, *max_offset_ns)?;
+            seedbox_engine_protocol::control::validate_clock_skew(*offset_ns, *max_offset_ns)?;
             let action = match (offset_ns, max_offset_ns) {
                 (Some(offset), None) => Action::StepRealtime {
                     target: target(machine),
@@ -263,7 +263,10 @@ pub fn action_targets(
 ) -> Result<ActionTargets, String> {
     use crate::oracle::{OperationError, Target as Wire};
     use std::collections::BTreeSet;
-    let (action, _) = translate(action, seedbox_control::PROCESS_EFFECT_TIMEOUT_NS)?;
+    let (action, _) = translate(
+        action,
+        seedbox_engine_protocol::control::PROCESS_EFFECT_TIMEOUT_NS,
+    )?;
     let command = action
         .command(|_| Err(OperationError::invalid("input handle requires live state")))
         .map_err(|error| error.message)?;

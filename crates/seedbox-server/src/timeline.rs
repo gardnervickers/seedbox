@@ -57,11 +57,9 @@ pub(crate) fn project(
         });
     }
     for fault in world.faults.iter().filter(|f| f.input_key.is_none()) {
-        if let Some(plan) = fault
-            .plan
-            .as_ref()
-            .and_then(|v| serde_json::from_value::<seedbox_control::Plan>(v.clone()).ok())
-        {
+        if let Some(plan) = fault.plan.as_ref().and_then(|v| {
+            serde_json::from_value::<seedbox_engine_protocol::control::Plan>(v.clone()).ok()
+        }) {
             entries.push(TimelineEntry {
                 id: format!("oracle:{}", fault.id),
                 at_ns: plan.at_ns,

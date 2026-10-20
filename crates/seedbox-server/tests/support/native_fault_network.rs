@@ -413,7 +413,7 @@ pub async fn network_drop_connection_replay(backend: CpuBackend) {
                 .lines()
                 .find_map(|line| line.strip_prefix(DROP_CONNECTION))
                 .expect("observed connection line");
-            let connection: seedbox_control::Connection =
+            let connection: seedbox_engine_protocol::control::Connection =
                 serde_json::from_str(line).expect("oracle printed the control API's connection object");
             assert_eq!(
                 (connection.from.as_str(), connection.to.as_str(), connection.src_port),

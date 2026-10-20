@@ -411,8 +411,8 @@ pub(super) fn action_name(action: FaultAction) -> Result<&'static str> {
 fn legacy_action(
     names: &BTreeMap<MachineId, String>,
     record: &FaultRecord,
-) -> Result<Option<seedbox_control::Action>> {
-    use seedbox_control::Action;
+) -> Result<Option<seedbox_engine_protocol::control::Action>> {
+    use seedbox_engine_protocol::control::Action;
     let (target, _) = target_machine(names, &record.target)?;
     let machine = || {
         target

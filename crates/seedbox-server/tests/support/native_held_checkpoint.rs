@@ -79,7 +79,7 @@ pub async fn native_held_checkpoint(backend: CpuBackend) {
 
         request.spec.program.push(seedbox_spec::definition::Override {
             id: KEY.into(), at_ns: at, timeout_ns: 1_000_000_000,
-            action: serde_json::to_value(seedbox_control::Action::Throttle {
+            action: serde_json::to_value(seedbox_engine_protocol::control::Action::Throttle {
                 handle: "held-scale".into(), machine: "oracle".into(), factor_permille: 2000,
             }).unwrap(),
         });

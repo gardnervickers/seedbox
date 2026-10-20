@@ -1,6 +1,6 @@
 //! Fault metadata belongs to the server, alongside control admission.
 use seedbox_api::{FaultCatalogue, FaultCategory, FaultDescriptor, WorldState};
-use seedbox_control::{
+use seedbox_engine_protocol::control::{
     MAX_CLOCK_OFFSET_NS, MAX_CLOCK_RATE_PPB, MAX_LINK_DELAY_NS, MAX_PPM, THROTTLE_PERMILLE,
 };
 use serde_json::{json, Value};
@@ -106,14 +106,17 @@ pub(crate) fn discover(world: &WorldState, minimum_latency_ns: u64) -> FaultCata
         .iter()
         .filter(|f| f.active)
         .filter_map(|f| {
-            let plan: seedbox_control::Action = serde_json::from_value(f.plan.clone()?).ok()?;
+            let plan: seedbox_engine_protocol::control::Action =
+                serde_json::from_value(f.plan.clone()?).ok()?;
             match plan {
-                seedbox_control::Action::Partition { handle, .. }
-                | seedbox_control::Action::Shape { handle, .. }
-                | seedbox_control::Action::ClockSkew { handle, .. }
-                | seedbox_control::Action::ClockDrift { handle, .. }
-                | seedbox_control::Action::Throttle { handle, .. }
-                | seedbox_control::Action::DropConnection { handle, .. } => Some(handle.clone()),
+                seedbox_engine_protocol::control::Action::Partition { handle, .. }
+                | seedbox_engine_protocol::control::Action::Shape { handle, .. }
+                | seedbox_engine_protocol::control::Action::ClockSkew { handle, .. }
+                | seedbox_engine_protocol::control::Action::ClockDrift { handle, .. }
+                | seedbox_engine_protocol::control::Action::Throttle { handle, .. }
+                | seedbox_engine_protocol::control::Action::DropConnection { handle, .. } => {
+                    Some(handle.clone())
+                }
                 _ => None,
             }
         })
@@ -261,7 +264,7 @@ pub(crate) fn discover(world: &WorldState, minimum_latency_ns: u64) -> FaultCata
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seedbox_control::Action;
+    use seedbox_engine_protocol::control::Action;
 
     // Exhaustive match intentionally makes adding a variant require reviewing
     // its discoverable form, rather than silently omitting a new engine action.

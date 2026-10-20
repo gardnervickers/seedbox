@@ -445,7 +445,7 @@ mod tests {
                 .unwrap()
                 .program[0]
                 .timeout_ns,
-            seedbox_control::PROCESS_EFFECT_TIMEOUT_NS
+            seedbox_engine_protocol::control::PROCESS_EFFECT_TIMEOUT_NS
         );
     }
 

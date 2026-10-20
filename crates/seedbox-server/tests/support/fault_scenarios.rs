@@ -2,7 +2,7 @@
 //! This module constructs requests, not results. A drop target must come from
 //! the running world's public connection observation, never a guessed tuple.
 use seedbox_api::{FaultAction as Action, FaultCatalogue};
-use seedbox_control::{Connection, NetworkFaults};
+use seedbox_engine_protocol::control::{Connection, NetworkFaults};
 use std::collections::BTreeSet;
 
 pub struct FaultScenario {

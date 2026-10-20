@@ -91,7 +91,7 @@ pub enum Command {
     /// Prepare at the current committed horizon and hold execution until commit.
     PrepareFault {
         request_id: String,
-        action: seedbox_control::Action,
+        action: crate::control::Action,
         timeout_ns: u64,
     },
     /// The server has durably retained the exact prepared intervention.

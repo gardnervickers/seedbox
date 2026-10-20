@@ -1,5 +1,5 @@
 //! Authored external inputs and their runtime-assigned admission identities.
-use seedbox_control::{Action, Plan, PROCESS_EFFECT_TIMEOUT_NS};
+use crate::control::{Action, Plan, PROCESS_EFFECT_TIMEOUT_NS};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 pub const MAX_INPUTS: usize = 4096;

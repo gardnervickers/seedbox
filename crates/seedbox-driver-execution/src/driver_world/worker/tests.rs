@@ -265,28 +265,28 @@ fn authored_same_time_entries_drain_individually_and_rejection_consumes_no_fault
         let actions = [
             (
                 "crash",
-                seedbox_control::Action::Crash {
+                seedbox_engine_protocol::control::Action::Crash {
                     machine: "n1".into(),
                 },
                 Action::Crash(Target::Name("n1".into())),
             ),
             (
                 "reboot",
-                seedbox_control::Action::Reboot {
+                seedbox_engine_protocol::control::Action::Reboot {
                     machine: "n1".into(),
                 },
                 Action::Reboot(Target::Name("n1".into())),
             ),
             (
                 "invalid-resume",
-                seedbox_control::Action::Resume {
+                seedbox_engine_protocol::control::Action::Resume {
                     machine: "n1".into(),
                 },
                 Action::Resume(Target::Name("n1".into())),
             ),
             (
                 "pause",
-                seedbox_control::Action::Pause {
+                seedbox_engine_protocol::control::Action::Pause {
                     machine: "n1".into(),
                 },
                 Action::Pause(Target::Name("n1".into())),
@@ -378,7 +378,7 @@ fn paused_real_driver_prepare_journal_commit_receipt_holds_effect_and_releases_o
             2,
             Command::PrepareFault {
                 request_id: "crash".into(),
-                action: seedbox_control::Action::Crash {
+                action: seedbox_engine_protocol::control::Action::Crash {
                     machine: "n1".into(),
                 },
                 timeout_ns: 100,
@@ -519,7 +519,7 @@ fn failed_real_journal_never_commits_and_prepared_scope_blocks_execution() {
         2,
         Command::PrepareFault {
             request_id: "crash".into(),
-            action: seedbox_control::Action::Crash {
+            action: seedbox_engine_protocol::control::Action::Crash {
                 machine: "n1".into(),
             },
             timeout_ns: 100,

@@ -1,5 +1,5 @@
 //! Canonical link policy values shared by the executing Driver and public validation.
-use seedbox_control::{NetworkFaults, MAX_LINK_DELAY_NS, MAX_PPM};
+use seedbox_engine_protocol::control::{NetworkFaults, MAX_LINK_DELAY_NS, MAX_PPM};
 use sha2::{Digest, Sha256};
 
 /// Global link latency when the network config names none: one millisecond.

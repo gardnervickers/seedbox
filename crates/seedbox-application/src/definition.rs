@@ -847,7 +847,7 @@ mod tests {
         let pass_program = vec![seedbox_engine_protocol::input_program::TimedInput {
             key: "audit-stop".into(),
             at_ns: 37,
-            action: seedbox_control::Action::Stop {
+            action: seedbox_engine_protocol::control::Action::Stop {
                 machine: "oracle".into(),
             },
             timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),

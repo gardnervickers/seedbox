@@ -1,5 +1,5 @@
 //! Bounded Ethernet/IPv4/TCP classification; no application decoding or RNG.
-use seedbox_control::Connection;
+use seedbox_engine_protocol::control::Connection;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 

@@ -1,13 +1,13 @@
 //! Canonical pure policy types with Driver-owned streams and stopped routing.
 use super::*;
 use crate::driver::{Position, Timestamp};
-pub use seedbox_control::{Connection, NetworkFaults};
 use seedbox_engine_core::connections::{is_reset_frame, reset_frame};
 pub use seedbox_engine_core::{
     links::{Policy as NetworkPolicy, QueueCounts},
     network_counters::PairCounts as NetworkPairCounts,
     network_faults::Counts as NetworkFaultCounts,
 };
+pub use seedbox_engine_protocol::control::{Connection, NetworkFaults};
 use std::collections::BTreeSet;
 
 /// Collision-free identity of one directed counter pair within this Driver.

@@ -1,5 +1,5 @@
 use super::*;
-use seedbox_control::{Action, Plan};
+use crate::control::{Action, Plan};
 fn input(key: &str, at_ns: u64) -> TimedInput {
     TimedInput {
         key: key.into(),

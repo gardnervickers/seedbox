@@ -1861,7 +1861,6 @@ dependencies = [
 name = "seedbox-api"
 version = "0.1.0"
 dependencies = [
- "seedbox-control",
  "seedbox-engine-protocol",
  "seedbox-spec",
  "serde",
@@ -1881,7 +1880,6 @@ dependencies = [
  "libc",
  "ocirender",
  "seedbox-artifacts",
- "seedbox-control",
  "seedbox-driver-execution",
  "seedbox-engine-core",
  "seedbox-engine-protocol",
@@ -1979,24 +1977,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "seedbox-control"
-version = "0.1.0"
-dependencies = [
- "libc",
- "seedbox-test",
- "seedbox-test-time",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "seedbox-driver"
 version = "0.1.0"
 dependencies = [
  "hex",
  "rayon",
- "seedbox-control",
  "seedbox-engine-core",
  "seedbox-engine-protocol",
  "seedbox-machine",
@@ -2019,7 +2004,6 @@ dependencies = [
  "hex",
  "libc",
  "seedbox-artifacts",
- "seedbox-control",
  "seedbox-driver",
  "seedbox-engine-protocol",
  "seedbox-exec",
@@ -2041,7 +2025,6 @@ dependencies = [
 name = "seedbox-engine-core"
 version = "0.1.0"
 dependencies = [
- "seedbox-control",
  "seedbox-engine-protocol",
  "serde",
  "serde_json",
@@ -2053,11 +2036,12 @@ name = "seedbox-engine-protocol"
 version = "0.1.0"
 dependencies = [
  "libc",
- "seedbox-control",
  "seedbox-spec",
  "seedbox-test",
+ "seedbox-test-time",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2130,7 +2114,6 @@ dependencies = [
  "seedbox-application",
  "seedbox-artifacts",
  "seedbox-client",
- "seedbox-control",
  "seedbox-driver",
  "seedbox-driver-execution",
  "seedbox-engine-protocol",
@@ -2151,7 +2134,6 @@ dependencies = [
 name = "seedbox-spec"
 version = "0.1.0"
 dependencies = [
- "seedbox-control",
  "serde",
  "serde_json",
  "serde_yaml_ng",

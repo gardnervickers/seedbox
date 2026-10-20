@@ -19,7 +19,7 @@ fn public_bounded_prepare_retries_are_pure_and_commit_binds_the_exact_proposal()
         );
         let before = fingerprint(&mut worker);
         let calls = runs.load(Ordering::SeqCst);
-        let action = seedbox_control::Action::ClockDrift {
+        let action = seedbox_engine_protocol::control::Action::ClockDrift {
             handle: "caller-alias".into(),
             machine: "n1".into(),
             rate_ppb: None,
@@ -51,7 +51,7 @@ fn public_bounded_prepare_retries_are_pure_and_commit_binds_the_exact_proposal()
                 6,
                 Command::PrepareFault {
                     request_id: "other".into(),
-                    action: seedbox_control::Action::Crash {
+                    action: seedbox_engine_protocol::control::Action::Crash {
                         machine: "n1".into(),
                     },
                     timeout_ns: 5_000_000_000,
@@ -83,7 +83,7 @@ fn public_authored_clock_draw_heal_draw_runs_in_order_without_a_service_alias_ta
     for workers in [1, 4] {
         let (_root, mut worker, _) = worker(workers);
         worker.step(Timestamp::from_nanos(10)).unwrap();
-        let draw = seedbox_control::Action::ClockDrift {
+        let draw = seedbox_engine_protocol::control::Action::ClockDrift {
             handle: "caller-alias".into(),
             machine: "n1".into(),
             rate_ppb: None,
@@ -93,7 +93,7 @@ fn public_authored_clock_draw_heal_draw_runs_in_order_without_a_service_alias_ta
             ("draw-1", draw.clone()),
             (
                 "heal",
-                seedbox_control::Action::Heal {
+                seedbox_engine_protocol::control::Action::Heal {
                     handle: "caller-alias".into(),
                 },
             ),

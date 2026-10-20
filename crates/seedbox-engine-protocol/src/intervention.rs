@@ -1,8 +1,8 @@
 //! Retained semantic inputs for interactive faults. Host arrival times and
 //! delivery sequences deliberately do not participate in this history.
 
+use crate::control::Plan;
 use crate::host_control::BoundaryPosition;
-use seedbox_control::Plan;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
