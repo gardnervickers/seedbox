@@ -1109,46 +1109,8 @@ where
         }
         // Stable sorting preserves each machine's emission order at one time.
         outputs.sort_by_key(|output| (output.at, output.machine));
-        // Frames are routed in publication order; validated when their run was accepted.
-        let position = self.position();
-        let observation_mark = self.observations.frames.mark();
-        for output in &outputs {
-            if let Response::TransmitFrame { bytes } = &output.payload {
-                if let Err(error) = self.execution.network.route_at(
-                    position,
-                    output.machine,
-                    output.at.as_nanos(),
-                    bytes,
-                    &mut self.observations.frames,
-                ) {
-                    self.observations.frames.discard(observation_mark);
-                    return Err(match error {
-                        network::RouteError::ArrivalOverflow => Error::TimeOverflow,
-                        network::RouteError::SequenceOverflow => Error::PositionOverflow,
-                    });
-                }
-            }
-        }
-        let mut terminal = None;
-        for output in &outputs {
-            if output.machine != self.execution.oracle {
-                continue;
-            }
-            match output.payload {
-                Response::ApplicationOutcome { code } => {
-                    terminal.get_or_insert(ExitReason::ProgramExit {
-                        code: i32::from(code),
-                    });
-                }
-                Response::CommandAcknowledged { id, result }
-                    if self.execution.oracle_stops.remove(&(output.boot, id))
-                        && result == crate::pv::CommandResult::Completed =>
-                {
-                    terminal.get_or_insert(ExitReason::Shutdown);
-                }
-                _ => {}
-            }
-        }
+        self.route_frames(&outputs)?;
+        let terminal = self.oracle_terminal(&outputs);
         for output in &outputs {
             self.stage(output.at, EventKind::Output(output.clone()));
         }
@@ -1207,30 +1169,7 @@ where
                 .service
                 .cut_off_triggers(self.now().as_nanos());
         } else {
-            for call in calls {
-                let at = match &call {
-                    control::Event::Call { observed, .. }
-                        if self.execution.control.controller.is_some() =>
-                    {
-                        Timestamp::from_nanos(
-                            observed
-                                .checked_add(self.execution.control.service.reply_latency_ns)
-                                .ok_or(Error::TimeOverflow)?,
-                        )
-                    }
-                    _ => self.now(),
-                };
-                if at < self.now() {
-                    return Err(Error::Control(
-                        "control admission precedes committed boundary".into(),
-                    ));
-                }
-                self.execution
-                    .events
-                    .entry(at)
-                    .or_default()
-                    .push_back(Scheduled::Control(call));
-            }
+            self.schedule_calls(calls)?;
             self.control_plans(plans)?;
             let now = self.now().as_nanos();
             let plans = self
@@ -1244,6 +1183,88 @@ where
             self.sync_trigger_marker();
         }
         self.flush_events()
+    }
+
+    /// Route committed frames in publication order; they were validated when
+    /// their run was accepted. A routing failure discards this commit's frame
+    /// observations.
+    fn route_frames(&mut self, outputs: &[MachineResponse]) -> Result<(), Error<M::Error>> {
+        let position = self.position();
+        let observation_mark = self.observations.frames.mark();
+        for output in outputs {
+            if let Response::TransmitFrame { bytes } = &output.payload {
+                if let Err(error) = self.execution.network.route_at(
+                    position,
+                    output.machine,
+                    output.at.as_nanos(),
+                    bytes,
+                    &mut self.observations.frames,
+                ) {
+                    self.observations.frames.discard(observation_mark);
+                    return Err(match error {
+                        network::RouteError::ArrivalOverflow => Error::TimeOverflow,
+                        network::RouteError::SequenceOverflow => Error::PositionOverflow,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The oracle's terminal outcome among committed outputs: its application
+    /// outcome, or the completion of an offered Stop, which this consumes.
+    fn oracle_terminal(&mut self, outputs: &[MachineResponse]) -> Option<ExitReason> {
+        let mut terminal = None;
+        for output in outputs {
+            if output.machine != self.execution.oracle {
+                continue;
+            }
+            match output.payload {
+                Response::ApplicationOutcome { code } => {
+                    terminal.get_or_insert(ExitReason::ProgramExit {
+                        code: i32::from(code),
+                    });
+                }
+                Response::CommandAcknowledged { id, result }
+                    if self.execution.oracle_stops.remove(&(output.boot, id))
+                        && result == crate::pv::CommandResult::Completed =>
+                {
+                    terminal.get_or_insert(ExitReason::Shutdown);
+                }
+                _ => {}
+            }
+        }
+        terminal
+    }
+
+    /// Queue committed guest calls on the timeline: at the commit, or after
+    /// the reply latency from their observation with a controller configured.
+    fn schedule_calls(&mut self, calls: Vec<control::Event>) -> Result<(), Error<M::Error>> {
+        for call in calls {
+            let at = match &call {
+                control::Event::Call { observed, .. }
+                    if self.execution.control.controller.is_some() =>
+                {
+                    Timestamp::from_nanos(
+                        observed
+                            .checked_add(self.execution.control.service.reply_latency_ns)
+                            .ok_or(Error::TimeOverflow)?,
+                    )
+                }
+                _ => self.now(),
+            };
+            if at < self.now() {
+                return Err(Error::Control(
+                    "control admission precedes committed boundary".into(),
+                ));
+            }
+            self.execution
+                .events
+                .entry(at)
+                .or_default()
+                .push_back(Scheduled::Control(call));
+        }
+        Ok(())
     }
 
     fn sync_trigger_marker(&mut self) {
