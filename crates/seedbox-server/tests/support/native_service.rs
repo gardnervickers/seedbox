@@ -70,7 +70,7 @@ use seedbox_client::Client;
 use seedbox_driver_execution::{
     driver_world::{self, DriverExecutor},
     process_lifetime::{reclaim_barrier, EXECUTION_LEASE_FILE, SESSION_LEASE_FILE},
-    runtime_assets::{self, Runtime},
+    runtime_assets::Runtime,
 };
 use seedbox_engine_protocol::driver_world as wire;
 use seedbox_machine::{
@@ -260,10 +260,8 @@ impl BackendProvider for NativeProvider {
     ) -> seedbox_application::Result<Box<dyn ExecutionBackend>> {
         let digest = driver_world::runtime_digest(inputs, store)?;
         let runtime = Runtime::from_store(store, &digest, &self.session)?;
-        let selected = runtime.select(
-            runtime_backend(self.backend),
-            seedbox_spec::definition::Architecture::X86_64,
-        )?;
+        let selected =
+            runtime.select(self.backend, seedbox_spec::definition::Architecture::X86_64)?;
         self.runtimes
             .lock()
             .unwrap()
@@ -448,10 +446,7 @@ fn fixture_submission(
     };
     let runtime = Runtime::from_archive(&archive, root).unwrap();
     let selected = runtime
-        .select(
-            runtime_backend(backend),
-            seedbox_spec::definition::Architecture::X86_64,
-        )
+        .select(backend, seedbox_spec::definition::Architecture::X86_64)
         .unwrap();
     eprintln!(
         "native backend={}; fixture={:?}; executable={}; runtime_archive={}; selected_guest_assets={}; retained_qemu={:?}",
@@ -1694,10 +1689,7 @@ fn network_world_submission(
     );
     let runtime = Runtime::from_archive(&archive, root).unwrap();
     let selected = runtime
-        .select(
-            runtime_backend(backend),
-            seedbox_spec::definition::Architecture::X86_64,
-        )
+        .select(backend, seedbox_spec::definition::Architecture::X86_64)
         .unwrap();
     let assets = &selected.guest_assets;
     // Both backends run the same static x86 fixtures; the variable names are
@@ -2376,12 +2368,6 @@ pub async fn pv_network_frames_are_observation_only() {
         session.client.delete(&source).await.unwrap();
         eprintln!("frames observation-only: witness={uninterrupted} fresh=on1,on4,off1,off4 restored=on4,off1");
     })).await;
-}
-fn runtime_backend(backend: CpuBackend) -> runtime_assets::Backend {
-    match backend {
-        CpuBackend::Pv => runtime_assets::Backend::Pv,
-        CpuBackend::Tcg => runtime_assets::Backend::Tcg,
-    }
 }
 fn label(backend: CpuBackend) -> &'static str {
     match backend {

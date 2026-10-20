@@ -85,14 +85,6 @@ impl BackendProvider for NativeBackends {
             Some(archive.path().to_path_buf()),
             &self.session_root,
         )?;
-        let runtime_backend = match backend {
-            seedbox_spec::backend::CpuBackend::Pv => {
-                seedbox_driver_execution::runtime_assets::Backend::Pv
-            }
-            seedbox_spec::backend::CpuBackend::Tcg => {
-                seedbox_driver_execution::runtime_assets::Backend::Tcg
-            }
-        };
         let architecture = match descriptor.guest_arch.as_str() {
             "x86_64" => seedbox_spec::definition::Architecture::X86_64,
             "aarch64" => seedbox_spec::definition::Architecture::Aarch64,
@@ -102,7 +94,7 @@ impl BackendProvider for NativeBackends {
                 )))
             }
         };
-        let selected = runtime.select(runtime_backend, architecture)?;
+        let selected = runtime.select(backend, architecture)?;
         let executor = seedbox_driver_execution::driver_world::DriverExecutor::new(
             inputs.profile.clone(),
             backend,

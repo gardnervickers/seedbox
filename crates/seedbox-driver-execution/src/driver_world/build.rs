@@ -361,19 +361,20 @@ fn materialize_factory(
     binding: Option<&wire::RuntimeBinding>,
 ) -> Result<Assets> {
     super::policy::check_optional(inventory.backend_policy()).map_err(bad)?;
-    use crate::runtime_assets::{Backend, Runtime};
+    use crate::runtime_assets::Runtime;
+    use seedbox_spec::backend::CpuBackend;
     use seedbox_spec::definition::Architecture;
     let (archive, backend, architecture) = match inventory {
         Inventory::Pv { runtime, .. } => (
             runtime,
-            Backend::Pv,
+            CpuBackend::Pv,
             if cfg!(target_arch = "aarch64") {
                 Architecture::Aarch64
             } else {
                 Architecture::X86_64
             },
         ),
-        Inventory::Tcg { runtime, .. } => (runtime, Backend::Tcg, Architecture::X86_64),
+        Inventory::Tcg { runtime, .. } => (runtime, CpuBackend::Tcg, Architecture::X86_64),
     };
     checkpoint::verified(archive)?;
     let (guest_assets, qemu, inputs) = if let Some(binding) = binding {

@@ -502,21 +502,13 @@ impl RuntimeInputs {
             witness,
             cpu_backend,
         )?;
-        let runtime_backend = match cpu_backend {
-            seedbox_spec::backend::CpuBackend::Pv => {
-                seedbox_driver_execution::runtime_assets::Backend::Pv
-            }
-            seedbox_spec::backend::CpuBackend::Tcg => {
-                seedbox_driver_execution::runtime_assets::Backend::Tcg
-            }
-        };
         let architecture = seedbox_driver_execution::driver_world::platform::Host::current()
             .guest(cpu_backend)
             .ok_or_else(|| {
                 Error::Setup("the Driver runtime requires Linux x86-64 or macOS aarch64".into())
             })?;
         let runtime = backends::driver_runtime(None, scratch)?;
-        let selected = runtime.select(runtime_backend, architecture)?;
+        let selected = runtime.select(cpu_backend, architecture)?;
         let inputs = OciPreparer {
             docker: backends::container_engine()?,
             kernel: selected.guest_assets.join("kernel"),

@@ -215,10 +215,8 @@ pub fn doctor_kernel(
                 "Driver readiness requires Linux x86-64 or macOS aarch64".into(),
             )
         })?;
-    let inputs = driver_runtime(None, scratch)?.select(
-        seedbox_driver_execution::runtime_assets::Backend::Pv,
-        architecture,
-    )?;
+    let inputs = driver_runtime(None, scratch)?
+        .select(seedbox_spec::backend::CpuBackend::Pv, architecture)?;
     Ok((inputs.guest_assets.join("kernel"), inputs))
 }
 

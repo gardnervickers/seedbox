@@ -309,7 +309,9 @@ fn actual_gnu_and_bsd_pax_writers_preserve_long_library_names_bytes_and_modes() 
             String::from_utf8_lossy(&output.stderr)
         );
         let runtime = Runtime::from_archive(&archive_path, fixture.path()).unwrap();
-        let inputs = runtime.select(Backend::Tcg, Architecture::X86_64).unwrap();
+        let inputs = runtime
+            .select(CpuBackend::Tcg, Architecture::X86_64)
+            .unwrap();
         assert!(inputs.qemu.is_some());
         for (name, bytes, mode) in &members {
             let path = runtime.directory.path().join("assets").join(name);
