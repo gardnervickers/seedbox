@@ -288,8 +288,50 @@ impl Cli {
         if let Err(error) = capture() {
             eprintln!("etcd comparison diagnostic capture failed: {error}");
         }
+        self.log_comparison_summary();
+    }
+
+    /// CI keeps only the job log readily visible, so summarize the retained
+    /// comparison evidence there: the verdict, where the two resolved
+    /// definitions differ (prepared inputs included), and the state diff head.
+    fn log_comparison_summary(&self) {
+        let read = |name: &str| fs::read(self.directory.join(name)).ok();
+        match read("compare-repeat.stdout") {
+            Some(bytes) => eprintln!(
+                "etcd compare-repeat output: {}",
+                String::from_utf8_lossy(&bytes[..bytes.len().min(SUMMARY_BYTES)])
+            ),
+            None => eprintln!("etcd compare-repeat output unavailable"),
+        }
+        let spec = |name: &str| {
+            read(name)
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .map(|resource| resource["spec"].clone())
+        };
+        match (spec("baseline-result.stdout"), spec("repeat-result.stdout")) {
+            (Some(baseline), Some(repeat)) => {
+                let mut differences = Vec::new();
+                crate::json_diff::json_differences("spec", &baseline, &repeat, &mut differences);
+                eprintln!(
+                    "etcd baseline/repeat definitions differ at {} paths",
+                    differences.len()
+                );
+                for difference in differences.iter().take(SUMMARY_LINES) {
+                    eprintln!("  {difference}");
+                }
+            }
+            _ => eprintln!("etcd baseline/repeat definition diff unavailable"),
+        }
+        if let Some(bytes) = read("compare-state.json") {
+            for line in String::from_utf8_lossy(&bytes).lines().take(SUMMARY_LINES) {
+                eprintln!("etcd compare-state: {line}");
+            }
+        }
     }
 }
+
+const SUMMARY_BYTES: usize = 4096;
+const SUMMARY_LINES: usize = 60;
 
 // The CLI flattens catalogue pages into a bare array, not the API's
 // SimulationList page object. Each array element is a summary object.

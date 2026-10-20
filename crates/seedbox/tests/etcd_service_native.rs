@@ -7,6 +7,8 @@
 mod etcd_native;
 #[path = "support/etcd_project.rs"]
 mod etcd_project;
+#[path = "support/json_diff.rs"]
+mod json_diff;
 use etcd_project::Backend;
 
 #[test]

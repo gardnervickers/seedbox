@@ -3,6 +3,8 @@
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
 ))]
+#[path = "support/json_diff.rs"]
+mod json_diff;
 use seedbox_test::process::Guarded;
 use std::{
     collections::HashSet,
@@ -118,8 +120,33 @@ fn compare(
                 }
             }
         }
+        log_definition_differences(directory, name);
     }
     result
+}
+
+/// Show in the CI log where the two resolved definitions (prepared inputs
+/// included) differ, so a run tells MISMATCH and NOT_COMPARABLE causes apart.
+fn log_definition_differences(directory: &Path, name: &str) {
+    let spec = |side: &str| {
+        fs::read(directory.join(format!("{name}-{side}-definition.log")))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .map(|resource| resource["spec"].clone())
+    };
+    let (Some(baseline), Some(repeated)) = (spec("baseline"), spec("repeated")) else {
+        eprintln!("{name}: definition diff unavailable");
+        return;
+    };
+    let mut differences = Vec::new();
+    json_diff::json_differences("spec", &baseline, &repeated, &mut differences);
+    eprintln!(
+        "{name}: baseline/repeated definitions differ at {} paths",
+        differences.len()
+    );
+    for difference in differences.iter().take(60) {
+        eprintln!("  {difference}");
+    }
 }
 
 #[test]
