@@ -183,6 +183,8 @@ fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch
     assert!(help.contains("--detach"), "{help}");
     assert!(help.contains("--paused"), "{help}");
     assert!(help.contains("--seed"), "{help}");
+    // Project files carry no seed; only the server or a document supplies one.
+    assert!(!help.contains("project seed"), "{help}");
 }
 
 #[test]

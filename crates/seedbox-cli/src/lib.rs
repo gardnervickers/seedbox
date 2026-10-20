@@ -84,7 +84,7 @@ enum Command {
         from: Option<seedbox_api::SimulationId>,
         #[command(flatten)]
         backend: BackendArgs,
-        /// Simulation seed [default: project seed, otherwise allocated by the server].
+        /// Simulation seed [default: a simulation document's seed, otherwise allocated by the server].
         #[arg(long)]
         seed: Option<u64>,
         /// Run this many consecutive seeds using one frozen preparation [default: 1].

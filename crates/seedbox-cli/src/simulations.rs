@@ -214,6 +214,8 @@ pub(super) fn run_count(
     let wall_time_ns = selection.wall_time;
     let (spec, metadata) = load_spec(project, seed)?;
     let backend = Some(select_backend(&spec, selection.backend)?);
+    // Mirrors the server's first-seed choice: project files carry no seed, but
+    // an apiVersion simulation document may set spec.configuration.seed.
     if spec
         .seed
         .or(spec.configuration.seed)
