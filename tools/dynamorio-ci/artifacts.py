@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import struct
 import subprocess
 import sys
@@ -56,6 +57,31 @@ def debuglink(data):
             crc = struct.unpack_from('<I', section, (len(name) + 4) & ~3)[0]
             return name.decode(), crc
     return None
+
+
+def probe_elf_paths(source):
+    """Record the two probe ELFs' loader contract without changing their launch."""
+    result = subprocess.run(['readelf', '-W', '-l', '-d', str(source)],
+                            capture_output=True, text=True, timeout=10, check=True)
+    output = result.stdout
+    interpreter = re.search(r'Requesting program interpreter: ([^\]]+)', output)
+    needed = re.findall(r'\(NEEDED\).*?Shared library: \[([^\]]+)\]', output)
+    paths = {}
+    for tag, label in [('RPATH', 'rpath'), ('RUNPATH', 'runpath')]:
+        match = re.search(r'\(' + tag + r'\).*?Library (?:rpath|runpath): \[([^\]]*)\]', output)
+        paths[label] = match.group(1) if match else None
+    directories = []
+    for value in (paths['rpath'], paths['runpath']):
+        if value:
+            directories.extend(value.replace('${ORIGIN}', str(source.parent))
+                               .replace('$ORIGIN', str(source.parent)).split(':'))
+    return {'interpreter': interpreter.group(1) if interpreter else None,
+            'interpreter_exists': Path(interpreter.group(1)).is_file() if interpreter else None,
+            'needed': needed, **paths,
+            'needed_in_embedded_paths': {
+                name: next((str(candidate) for directory in directories
+                            if (candidate := Path(directory) / name).is_file()), None)
+                for name in needed}}
 
 
 def collect(root, temporary, environment):
@@ -111,6 +137,36 @@ def collect(root, temporary, environment):
                                           'crc32': zlib.crc32(data)})
             except (OSError, ValueError, IndexError, struct.error) as error:
                 warning(f'cannot retain {source}: {error}')
+        if environment.get('RUNNER_ARCH') == 'ARM64':
+            # The context case is AArch64-only. Keep its exact application and
+            # public client from each fixture alongside the selected runtime.
+            for relative in ('bin/translator_progress_context',
+                             'lib/libtranslator_progress.so'):
+                source = Path(fixture) / relative
+                try:
+                    size = source.stat().st_size
+                    if size > min(BINARY_FILE, remaining):
+                        warning(f'omitted oversized binary {source}: {size} bytes')
+                        continue
+                    with source.open('rb') as stream:
+                        data = stream.read(min(BINARY_FILE, remaining) + 1)
+                    if len(data) != size:
+                        raise ValueError('binary changed during collection')
+                    destination = output / 'fixtures' / flavor / Path(relative).name
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(data)
+                    remaining -= size
+                    record = {'source': str(source), 'resolved_source': str(source.resolve()),
+                              'retained': str(destination.relative_to(output)), 'bytes': size,
+                              'sha256': hashlib.sha256(data).hexdigest()}
+                    try:
+                        record['elf'] = probe_elf_paths(source)
+                    except (OSError, subprocess.CalledProcessError,
+                            subprocess.TimeoutExpired) as error:
+                        warning(f'cannot inspect ELF loader paths {source}: {error}')
+                    manifest['files'].append(record)
+                except (OSError, ValueError) as error:
+                    warning(f'cannot retain {source}: {error}')
     # Walk only the checker's retained report directory, never Cargo/Nix trees,
     # home directories, symlinked report paths, cores or arbitrary binary files.
     remaining, count, visited = TEXT_TOTAL, 0, 0

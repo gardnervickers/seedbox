@@ -87,6 +87,51 @@ class ArtifactTests(unittest.TestCase):
             self.assertFalse(manifest['files'][1]['companion_crc_verified'])
             self.assertTrue(any('CRC mismatch' in warning for warning in manifest['warnings']))
 
+    def test_arm_progress_probe_both_profiles_keep_exact_elves_and_loader_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            libc = root / 'glibc/lib/libc.so.6'
+            loader = root / 'glibc/lib/ld-linux-aarch64.so.1'
+            libc.parent.mkdir(parents=True)
+            libc.write_bytes(b'libc')
+            loader.write_bytes(b'loader')
+            environment = {'RUNNER_ARCH': 'ARM64'}
+            for flavor in ('release', 'debug'):
+                fixture = root / flavor
+                (fixture / 'bin').mkdir(parents=True)
+                (fixture / 'lib').mkdir()
+                (fixture / 'bin/translator_progress_context').write_bytes(b'probe-' + flavor.encode())
+                (fixture / 'lib/libtranslator_progress.so').write_bytes(b'client-' + flavor.encode())
+                variable = ('SEEDBOX_DYNAMORIO_FIXTURES' if flavor == 'release'
+                            else 'SEEDBOX_DYNAMORIO_DEBUG_FIXTURES')
+                environment[variable] = str(fixture)
+            headers = (f'      [Requesting program interpreter: {loader}]\n'
+                       ' 0x1 (NEEDED) Shared library: [libc.so.6]\n'
+                       f' 0x1d (RUNPATH) Library runpath: [{libc.parent}]\n')
+            with patch.object(artifacts.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                    ['readelf'], 0, headers, '')) as readelf:
+                manifest = self.collect(root, environment)
+            self.assertEqual(readelf.call_count, 4)
+            self.assertEqual(len(manifest['files']), 4)
+            for record in manifest['files']:
+                retained = root / 'temp/dr-artifacts' / record['retained']
+                self.assertEqual(retained.read_bytes(), Path(record['source']).read_bytes())
+                self.assertEqual(record['sha256'], hashlib.sha256(retained.read_bytes()).hexdigest())
+                self.assertEqual(record['elf']['interpreter'], str(loader))
+                self.assertTrue(record['elf']['interpreter_exists'])
+                self.assertEqual(record['elf']['needed_in_embedded_paths']['libc.so.6'], str(libc))
+
+    def test_arm_progress_probe_missing_binary_is_reported_without_placeholder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / 'fixture'
+            fixture.mkdir()
+            manifest = self.collect(root, {'RUNNER_ARCH': 'ARM64',
+                                           'SEEDBOX_DYNAMORIO_FIXTURES': str(fixture)})
+            self.assertFalse((root / 'temp/dr-artifacts/fixtures/release').exists())
+            self.assertTrue(any('translator_progress_context' in warning
+                                for warning in manifest['warnings']))
+
     def test_log_drains_all_bytes_and_retains_bounded_head_tail(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'ordinary.log'
