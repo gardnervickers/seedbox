@@ -89,22 +89,7 @@ impl Service {
         name: Option<String>,
     ) -> Result<HandleAdmission, PreparationError> {
         Ok(match command {
-            Command::Spawn { machine } => {
-                adapter.reserve_spawn(&machine)?;
-                (
-                    Subject::Machine(Facts {
-                        name: machine,
-                        boot: 0,
-                        vm: Vm::Up,
-                        process: Process::Running,
-                        physically_ended: false,
-                        ready: false,
-                    }),
-                    Effect::Spawn,
-                    None,
-                    false,
-                )
-            }
+            Command::Spawn { machine } => Self::prepare_spawn(adapter, machine)?,
             Command::Named { .. } => {
                 return Err(OperationError::invalid("nested named admission").into())
             }
@@ -205,6 +190,27 @@ impl Service {
                 false,
             ),
         })
+    }
+    /// Reserve a declared machine's construction; it joins as a fresh, unready
+    /// boot zero.
+    fn prepare_spawn(
+        adapter: &mut impl Adapter,
+        machine: String,
+    ) -> Result<HandleAdmission, PreparationError> {
+        adapter.reserve_spawn(&machine)?;
+        Ok((
+            Subject::Machine(Facts {
+                name: machine,
+                boot: 0,
+                vm: Vm::Up,
+                process: Process::Running,
+                physically_ended: false,
+                ready: false,
+            }),
+            Effect::Spawn,
+            None,
+            false,
+        ))
     }
     /// Reserve a connection selection, rolled back unless the incarnation is
     /// still available with selector capacity.
