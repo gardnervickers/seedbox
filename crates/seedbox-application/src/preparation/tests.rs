@@ -1,5 +1,5 @@
-//! Preparation policy with explicit test bootstrap dependencies. No native
-//! factory admission, hypervisor, kernel boot or application execution occurs.
+//! Preparation policy and production archive wiring with synthetic guest assets.
+//! No hypervisor, kernel boot or application execution occurs.
 use super::test_sdk::sdk;
 use super::*;
 use crate as seedbox_application;
@@ -370,45 +370,94 @@ fn preparation_derives_the_epoch_from_image_build_times_unless_resolved_configur
         assert_eq!(first, second);
         for digest in first.guests.values() {
             let archive = store.read(digest).unwrap();
-            let clock = archive
-                .windows(8)
-                .position(|bytes| bytes == b"SBXCLK1\0")
-                .unwrap()
-                + 8;
-            assert_eq!(
-                u32::from_le_bytes(archive[clock..clock + 4].try_into().unwrap()),
-                epoch
-            );
-            let start = archive
-                .windows(8)
-                .position(|bytes| bytes == b"SBXAPP2\0")
-                .unwrap()
-                + 8;
-            let mut cursor = start;
-            let read = |cursor: &mut usize| {
-                let count =
+            assert_boot_epoch_and_budget(&archive, epoch, budget);
+        }
+    }
+}
+
+fn assert_boot_epoch_and_budget(archive: &[u8], epoch: u32, budget: u32) {
+    let clock = archive
+        .windows(8)
+        .position(|bytes| bytes == b"SBXCLK1\0")
+        .unwrap()
+        + 8;
+    assert_eq!(
+        u32::from_le_bytes(archive[clock..clock + 4].try_into().unwrap()),
+        epoch
+    );
+    let start = archive
+        .windows(8)
+        .position(|bytes| bytes == b"SBXAPP2\0")
+        .unwrap()
+        + 8;
+    let mut cursor = start;
+    let read = |cursor: &mut usize| {
+        let count = u32::from_le_bytes(archive[*cursor..*cursor + 4].try_into().unwrap()) as usize;
+        *cursor += 4;
+        (0..count)
+            .map(|_| {
+                let len =
                     u32::from_le_bytes(archive[*cursor..*cursor + 4].try_into().unwrap()) as usize;
                 *cursor += 4;
-                (0..count)
-                    .map(|_| {
-                        let len =
-                            u32::from_le_bytes(archive[*cursor..*cursor + 4].try_into().unwrap())
-                                as usize;
-                        *cursor += 4;
-                        let value = archive[*cursor..*cursor + len].to_vec();
-                        *cursor += len;
-                        value
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let _argv = read(&mut cursor);
-            let prefix = read(&mut cursor);
-            let position = prefix
-                .iter()
-                .position(|value| value == b"--blocks-per-progress-call")
-                .unwrap();
-            assert_eq!(prefix[position + 1], budget.to_string().as_bytes());
-        }
+                let value = archive[*cursor..*cursor + len].to_vec();
+                *cursor += len;
+                value
+            })
+            .collect::<Vec<_>>()
+    };
+    let _argv = read(&mut cursor);
+    let prefix = read(&mut cursor);
+    let position = prefix
+        .iter()
+        .position(|value| value == b"--blocks-per-progress-call")
+        .unwrap();
+    assert_eq!(prefix[position + 1], budget.to_string().as_bytes());
+}
+
+// Exercise the production constructor and archive assembly, independently of
+// TestBoot's policy seam. Loading these synthetic assets does not start a worker
+// or require KVM/HVF. Linux ARM remains unsupported by OciBootFactory.
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
+#[test]
+fn production_oci_boot_factory_embeds_epoch_and_progress_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let (preparer, simulation, store) = fixture(root.path());
+    let launch = crate::image::Launch {
+        argv: vec!["/app".into()],
+        environment: BTreeMap::new(),
+        working_dir: "/".into(),
+        user: "".into(),
+        volumes: vec![],
+        disk_volumes: vec![],
+    };
+    let filesystem = tar::Builder::new(Vec::new()).into_inner().unwrap();
+    let configs = BTreeMap::new();
+    for (epoch, budget) in [(86_400, 1), (1_800_000_000, 17), (u32::MAX, u32::MAX)] {
+        let factory = OciBootFactory::new(
+            &preparer.engine,
+            &preparer.runtime,
+            epoch,
+            std::num::NonZeroU32::new(budget).unwrap().into(),
+        )
+        .unwrap();
+        let boot = factory
+            .boot(
+                OciBoot {
+                    name: "oracle",
+                    filesystem: filesystem.clone(),
+                    launch: &launch,
+                    simulation: &simulation,
+                    configs: &configs,
+                    hosts: "127.0.0.1 localhost\n",
+                },
+                &store,
+            )
+            .unwrap();
+        assert_eq!(store.read(&boot.filesystem).unwrap(), filesystem);
+        assert_boot_epoch_and_budget(&boot.bytes, epoch, budget);
     }
 }
 
