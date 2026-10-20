@@ -128,8 +128,14 @@ def launch(args):
         root.rmdir()
 
 
+class Cancelled(BaseException):
+    def __init__(self, number):
+        self.number = number
+        super().__init__(f"controller received signal {number}")
+
+
 def interrupted(number, _frame):
-    raise InterruptedError(f"controller received signal {number}")
+    raise Cancelled(number)
 
 
 def main():
@@ -143,6 +149,9 @@ def main():
     try:
         result = launch(args)
         return result if result >= 0 else 128 - result
+    except Cancelled as error:
+        print(f"isolate: cancelled: {error}", file=sys.stderr)
+        return 128 + error.number
     except (OSError, RuntimeError, StopIteration) as error:
         print(f"isolate: setup cgroup delegation: {error}", file=sys.stderr)
         return 2

@@ -2032,3 +2032,108 @@ fn dr_failures_stream_before_a_later_target_timeout() {
     }
     assert_eq!(c.commands.jobs.len(), 5);
 }
+
+#[test]
+fn skip_portable_selects_native_suites_explicitly() {
+    assert_eq!(
+        options(strings(&["dynamorio", "dynamorio-isolated", "dynamorio"]))
+            .unwrap()
+            .suites,
+        [Suite::Portable, Suite::Dynamorio, Suite::DynamorioIsolated]
+    );
+    assert_eq!(
+        options(strings(&[
+            "--skip-portable",
+            "dynamorio",
+            "dynamorio-isolated"
+        ]))
+        .unwrap()
+        .suites,
+        [Suite::Dynamorio, Suite::DynamorioIsolated]
+    );
+    for args in [
+        vec!["--skip-portable"],
+        vec!["--skip-portable", "portable", "dynamorio"],
+        vec!["--skip-portable", "--portable-stage", "dynamorio"],
+        vec!["--skip-portable", "--test-time-policy"],
+    ] {
+        assert!(options(strings(&args)).is_err());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn skip_portable_runs_only_selected_dr_target_without_portable_jobs() {
+    for (suite, feature, target) in [
+        ("dynamorio", "dynamorio-tests", "dynamorio"),
+        (
+            "dynamorio-isolated",
+            "dynamorio-isolated-tests",
+            "dynamorio_isolated",
+        ),
+    ] {
+        let t = fixture();
+        for file in [
+            "runtime/bin64/drrun",
+            "bin/application",
+            "lib/libpreserve.so",
+            "runtime/lib64/debug/libdynamorio.so",
+            "bin/unix-supervisor",
+            "bin/unix-signal-models-itimer",
+            "bin/unix-pid1",
+            "bin/unix-eagain",
+            "bin/seedbox-dr-isolate",
+        ] {
+            let path = t.0.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            install_executable(&path, "fixture");
+        }
+        fs::create_dir(t.0.join("cgroup")).unwrap();
+        let mut c = checks(&t.0);
+        c.environment = env(&[
+            ("SEEDBOX_DYNAMORIO_FIXTURES", t.0.to_str().unwrap()),
+            ("SEEDBOX_DYNAMORIO_DEBUG_FIXTURES", t.0.to_str().unwrap()),
+            (
+                "SEEDBOX_DYNAMORIO_CGROUP_ROOT",
+                t.0.join("cgroup").to_str().unwrap(),
+            ),
+        ]);
+        let mut h = host();
+        h.tools.extend(strings(&[
+            "dynamorio-isolate-pid1",
+            "dynamorio-isolate-pids",
+        ]));
+        c.commands.replies.extend([
+            Outcome {
+                code: 0,
+                stdout: json!({"packages": [{
+                    "name": "seedbox-machine",
+                    "features": {feature: []},
+                    "metadata": {"seedbox-check": {"suites": {suite: [feature]}}},
+                    "targets": [{"name": target, "kind": ["test"], "required-features": [feature]}]
+                }]})
+                .to_string(),
+            },
+            Outcome {
+                code: 0,
+                stdout: artifact(std::path::Path::new("/fixture/test"), target, true),
+            },
+            Outcome::default(),
+        ]);
+        let o = options(strings(&["--skip-portable", suite])).unwrap();
+        assert_eq!(coordinate(&mut c, &h, &o).unwrap(), 0);
+        assert_eq!(
+            c.commands
+                .jobs
+                .iter()
+                .map(|j| j.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "test-targets",
+                "seedbox-machine-build",
+                &format!("seedbox-machine/{target}")
+            ]
+        );
+        assert!(c.commands.jobs[1].args.contains(&feature.into()));
+    }
+}

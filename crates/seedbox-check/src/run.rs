@@ -21,6 +21,7 @@ pub fn options(args: Vec<String>) -> Result<Options, String> {
     let mut names = Vec::new();
     let mut list = false;
     let mut portable_stage = false;
+    let mut skip_portable = false;
     let mut test_time_policy = false;
     let mut probe = false;
     let mut help = false;
@@ -28,6 +29,7 @@ pub fn options(args: Vec<String>) -> Result<Options, String> {
         match arg.as_str() {
             "--list" => list = true,
             "--portable-stage" => portable_stage = true,
+            "--skip-portable" => skip_portable = true,
             "--test-time-policy" => test_time_policy = true,
             "--probe-linux" => probe = true,
             "--help" | "-h" => help = true,
@@ -35,10 +37,16 @@ pub fn options(args: Vec<String>) -> Result<Options, String> {
             _ => names.push(arg),
         }
     }
-    if test_time_policy && (!names.is_empty() || list || portable_stage || probe) {
+    if test_time_policy && (!names.is_empty() || list || portable_stage || skip_portable || probe) {
         return Err("--test-time-policy must be used without suites or other modes".into());
     }
-    let suites = expand(&names)?;
+    let mut suites = expand(&names)?;
+    if skip_portable {
+        if names.is_empty() || names.iter().any(|name| name == "portable") || portable_stage {
+            return Err("--skip-portable requires native suites and cannot select portable".into());
+        }
+        suites.retain(|suite| *suite != Suite::Portable);
+    }
     if portable_stage && suites != [Suite::Portable] {
         return Err("--portable-stage accepts only portable".into());
     }
@@ -52,7 +60,7 @@ pub fn options(args: Vec<String>) -> Result<Options, String> {
     })
 }
 fn help() {
-    println!("Run explicitly named test suites; Cargo discovers tests.\n\nUsage: seedbox-check [--list] [SUITE ...]\n\n  --list             Check requirements without building or running tests.\n  --portable-stage   Run portable checks without the outer fmt/clippy steps.\n  --test-time-policy Scan test code for host sleeps without running other checks.\n  --help             Show this help.\n\nsuites:");
+    println!("Run explicitly named test suites; Cargo discovers tests.\n\nUsage: seedbox-check [--list] [SUITE ...]\n\n  --list             Check requirements without building or running tests.\n  --portable-stage   Run portable checks without the outer fmt/clippy steps.\n  --skip-portable    Run native suites after portable passed earlier in this job.\n  --test-time-policy Scan test code for host sleeps without running other checks.\n  --help             Show this help.\n\nsuites:");
     for s in SUITES {
         println!("  {:16} {}", s.name(), s.description());
     }
@@ -350,23 +358,25 @@ pub fn coordinate<C: Commands>(
     if options.list {
         return Ok(0);
     }
-    if !options.portable_stage {
-        checks.step("fmt", words(&["cargo", "fmt", "--all", "--check"]));
-        checks.step(
-            "clippy",
-            words(&[
-                "cargo",
+    if options.suites.contains(&Suite::Portable) {
+        if !options.portable_stage {
+            checks.step("fmt", words(&["cargo", "fmt", "--all", "--check"]));
+            checks.step(
                 "clippy",
-                "--workspace",
-                "--all-targets",
-                "--locked",
-                "--",
-                "-D",
-                "warnings",
-            ]),
-        );
+                words(&[
+                    "cargo",
+                    "clippy",
+                    "--workspace",
+                    "--all-targets",
+                    "--locked",
+                    "--",
+                    "-D",
+                    "warnings",
+                ]),
+            );
+        }
+        portable(checks)?;
     }
-    portable(checks)?;
     if checks.failed || options.suites == [Suite::Portable] {
         return Ok(u8::from(checks.failed));
     }

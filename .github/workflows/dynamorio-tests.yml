@@ -25,7 +25,9 @@ jobs:
           - arch: ARM64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 100
+    # Step budgets total 345 minutes; reserve 15 for checkout/cache/reporting.
+    # Ordinary/isolated checker guards remain 90/30 minutes respectively.
+    timeout-minutes: 360
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -42,6 +44,7 @@ jobs:
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Prepare the development shell
+        timeout-minutes: 20
         run: |
           seedbox_flake=$(bash tools/dev-flake.sh)
           nix develop "$seedbox_flake" --profile "$RUNNER_TEMP/dr-dev" --command true
@@ -51,27 +54,36 @@ jobs:
           cmd-format: nix develop "git+file://${{ github.workspace }}?submodules=1" --command {0}
           cache-bin: false
       - name: Build native DR and public SDK fixtures
+        timeout-minutes: 90
         run: |
           seedbox_flake=$(bash tools/dev-flake.sh)
           fixtures=$(nix build "$seedbox_flake#dynamorioTestFixtures" --out-link "$RUNNER_TEMP/dr-fixtures" --print-out-paths)
           echo "SEEDBOX_DYNAMORIO_FIXTURES=$fixtures" >> "$GITHUB_ENV"
           debug_fixtures=$(nix build "$seedbox_flake#dynamorioDebugTestFixtures" --out-link "$RUNNER_TEMP/dr-debug-fixtures" --print-out-paths)
           echo "SEEDBOX_DYNAMORIO_DEBUG_FIXTURES=$debug_fixtures" >> "$GITHUB_ENV"
-      - name: Portable prerequisites and ordinary native tests
+      - name: Portable prerequisites
+        id: portable
+        timeout-minutes: 90
         run: |
           seedbox_flake=$(bash tools/dev-flake.sh)
           uname -m
           git rev-parse HEAD
           git -C vendor/dynamorio rev-parse HEAD
-          nix develop "$seedbox_flake" --command bash harness/check.sh portable dynamorio
+          nix develop "$seedbox_flake" --command bash harness/check.sh portable
+      - name: Ordinary native tests
+        timeout-minutes: 105
+        run: |
+          seedbox_flake=$(bash tools/dev-flake.sh)
+          nix develop "$seedbox_flake" --command bash harness/check.sh --skip-portable dynamorio
       - name: Separate isolated native fixture validation
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.portable.outcome == 'success' }}
+        timeout-minutes: 40
         run: |
           seedbox_flake=$(bash tools/dev-flake.sh)
           export SEEDBOX_DYNAMORIO_PID1_LAUNCHER="$SEEDBOX_DYNAMORIO_FIXTURES/bin/seedbox-dr-pid1"
           # Only this supervisor is privileged. It creates a unique delegation,
           # gates/moves its own child, then executes every build/test as runner.
-          # Missing parent pids delegation is an explicit setup failure.
+          # Missing parent pids delegation fails only this separate step.
           sudo --preserve-env=PATH,SEEDBOX_DYNAMORIO_FIXTURES,SEEDBOX_DYNAMORIO_DEBUG_FIXTURES,SEEDBOX_DYNAMORIO_PID1_LAUNCHER,CARGO_TARGET_DIR,CARGO_INCREMENTAL,CARGO_PROFILE_DEV_DEBUG,CARGO_PROFILE_TEST_DEBUG \
             python3 tools/dynamorio-ci/cgroup.py --uid "$(id -u)" --gid "$(id -g)" -- \
-            nix develop "$seedbox_flake" --command bash harness/check.sh dynamorio-isolated
+            nix develop "$seedbox_flake" --command bash harness/check.sh --skip-portable dynamorio-isolated
