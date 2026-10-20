@@ -69,6 +69,7 @@ jobs:
           uname -m
           git rev-parse HEAD
           git -C vendor/dynamorio rev-parse HEAD
+          python3 -m unittest discover -s tools/dynamorio-ci
           nix develop "$seedbox_flake" --command bash harness/check.sh portable
       - name: Ordinary native tests
         timeout-minutes: 105
@@ -81,9 +82,13 @@ jobs:
         run: |
           seedbox_flake=$(bash tools/dev-flake.sh)
           export SEEDBOX_DYNAMORIO_PID1_LAUNCHER="$SEEDBOX_DYNAMORIO_FIXTURES/bin/seedbox-dr-pid1"
-          # Only this supervisor is privileged. It creates a unique delegation,
-          # gates/moves its own child, then executes every build/test as runner.
-          # Missing parent pids delegation fails only this separate step.
+          unit="seedbox-dr-$(python3 -c 'import uuid; print(uuid.uuid4().hex)').scope"
+          # Ask systemd for a dedicated delegation, independent of the hosted
+          # runner service. The scope execs the root-only supervisor in place;
+          # builds/tests still run as runner. Signals reach its existing cleanup,
+          # and systemd collects the scope once its owned processes have exited.
           sudo --preserve-env=PATH,SEEDBOX_DYNAMORIO_FIXTURES,SEEDBOX_DYNAMORIO_DEBUG_FIXTURES,SEEDBOX_DYNAMORIO_PID1_LAUNCHER,CARGO_TARGET_DIR,CARGO_INCREMENTAL,CARGO_PROFILE_DEV_DEBUG,CARGO_PROFILE_TEST_DEBUG \
-            python3 tools/dynamorio-ci/cgroup.py --uid "$(id -u)" --gid "$(id -g)" -- \
+            systemd-run --scope --collect --expand-environment=no --unit="$unit" \
+            --property=Delegate=pids --property=RuntimeMaxSec=40min \
+            python3 tools/dynamorio-ci/cgroup.py --owned-scope "$unit" --uid "$(id -u)" --gid "$(id -g)" -- \
             nix develop "$seedbox_flake" --command bash harness/check.sh --skip-portable dynamorio-isolated

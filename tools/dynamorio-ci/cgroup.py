@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Run an ordinary-user fixture command in a uniquely owned pids delegation.
 
-The caller must already have pids delegated by its parent. This supervisor never
-changes a shared controller, sysctl, or the membership of an unrelated process.
+The caller must already have pids delegated by its parent, or run in a dedicated
+systemd scope with Delegate=pids. This supervisor never changes a shared
+controller, sysctl, or the membership of an unrelated process.
 """
 import argparse
 import ctypes
 import os
 import pwd
+import re
 from pathlib import Path
 import select
 import signal
@@ -17,6 +19,26 @@ import uuid
 
 def write(path, value):
     path.write_text(value)
+
+
+def prepare_owned_scope(parent, name):
+    # systemd-run --scope execs us in the new scope, preserving the caller's
+    # cwd, environment, process group and exit status. Only that scope may be
+    # rearranged: leave the hosted runner's service entirely to systemd.
+    if not re.fullmatch(r"seedbox-dr-[0-9a-f]{32}\.scope", name) or parent.name != name:
+        raise RuntimeError(f"current cgroup is not the requested owned scope: {name}")
+    if (parent / "cgroup.procs").read_text().split() != [str(os.getpid())]:
+        raise RuntimeError(f"{parent}: owned scope must contain only this supervisor")
+    if "pids" not in (parent / "cgroup.controllers").read_text().split():
+        raise RuntimeError(f"{parent}: systemd has not delegated pids to the owned scope")
+    # The cgroup-v2 no-internal-process rule requires an empty domain before
+    # enabling pids for its children. Move only ourselves, before forking.
+    supervisor = parent / "supervisor"
+    supervisor.mkdir(mode=0o700)
+    write(supervisor / "cgroup.procs", str(os.getpid()))
+    write(parent / "cgroup.subtree_control", "+pids")
+    # systemd removes this subgroup and collects the scope when we exit; the
+    # existing finally block drains/removes our separate fixture delegation.
 
 
 def wait_empty(root):
@@ -48,6 +70,8 @@ def launch(args):
     parent = (mount / membership.lstrip("/")).resolve()
     if not parent.is_relative_to(mount):
         raise RuntimeError("current cgroup is outside the visible cgroup-v2 mount")
+    if args.owned_scope:
+        prepare_owned_scope(parent, args.owned_scope)
     if "pids" not in (parent / "cgroup.subtree_control").read_text().split():
         raise RuntimeError(
             f"{parent}: parent has not delegated pids; provision runner delegation "
@@ -142,6 +166,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--uid", type=int, required=True)
     parser.add_argument("--gid", type=int, required=True)
+    parser.add_argument("--owned-scope", help="Dedicated systemd-run scope created with Delegate=pids")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     for number in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP]:
