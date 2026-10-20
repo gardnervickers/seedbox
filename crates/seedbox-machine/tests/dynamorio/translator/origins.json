@@ -12,8 +12,8 @@
     "source": "suite/tests/client-interface/a64_progress_like.dll.c",
     "commit": "356c1821045a4b5678d0813e132074324623df6e",
     "source_sha256": "d34809db1d085519d9c355e2e74e3a205a94b14d0014295bc86a701c298b307f",
-    "ported_sha256": "d28ef97e5d5d45e6601ce4b79fc4dc8efcc50181b573ca8f851a5d38e654fa5c",
-    "adaptation": "Always report refills; use public dr_register_exit_event available in maintained SDK. Original budget/TLS/drreg/redirect instrumentation unchanged."
+    "ported_sha256": "b953eface0841395f84ef2cf79f332cb860efedea4be1fea281f2e81ff64231d",
+    "adaptation": "Always report refills; use public dr_register_exit_event available in maintained SDK. Original budget/TLS/drreg/redirect instrumentation unchanged. Parse decimal client arguments through public dr_sscanf for libcOFF builds, retaining budgets and validation."
   },
   {
     "file": "jvm/JitStress.java",

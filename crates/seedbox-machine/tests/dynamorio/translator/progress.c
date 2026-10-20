@@ -69,7 +69,6 @@
 #include "drmgr.h"
 #include "drreg.h"
 #include <limits.h>
-#include <stdlib.h>
 #include <string.h>
 
 static ptr_int_t budget_per_refill;
@@ -223,6 +222,17 @@ event_exit(void)
     drmgr_exit();
 }
 
+/* Like atol for decimal client arguments, including zero when no digits match.
+ * Use the public standalone parser: this client is built without libc.
+ */
+static long
+parse_long(const char *text)
+{
+    long value = 0;
+    dr_sscanf(text, "%ld", &value);
+    return value;
+}
+
 DR_EXPORT void
 dr_client_main(client_id_t id, int argc, const char *argv[])
 {
@@ -230,14 +240,14 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     int positional = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--instructions-per-progress-call") == 0 && i + 1 < argc)
-            budget = atol(argv[++i]);
+            budget = parse_long(argv[++i]);
         else if (strcmp(argv[i], "--progress-points-per-block") == 0 && i + 1 < argc)
-            points = atol(argv[++i]);
+            points = parse_long(argv[++i]);
         else if (argv[i][0] != '-' && positional < 2) {
             if (positional++ == 0)
-                budget = atol(argv[i]);
+                budget = parse_long(argv[i]);
             else
-                points = atol(argv[i]);
+                points = parse_long(argv[i]);
         } else {
             dr_fprintf(STDERR, "a64_progress_like: unknown option %s\n", argv[i]);
             dr_abort();
