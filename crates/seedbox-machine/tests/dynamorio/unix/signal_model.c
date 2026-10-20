@@ -609,6 +609,12 @@ typedef struct {
 } sgrun_t;
 static sgrun_t g;
 
+/* One entry-frame observation for UDF, independent of per-case run state. */
+static struct a64p_frame_snapshot first_udf_frame;
+static int first_udf_index = -1;
+static uint64_t first_udf_seed, first_udf_sp_distance;
+static int first_udf_on_alt, first_udf_expected_alt, first_udf_below_sp;
+
 static int verbose;
 static int g_is_dr;
 static long model_stat[5];
@@ -939,7 +945,20 @@ check_frame(int sig, ucontext_t *uc, int expect_alt)
     char err[200];
     uint64_t layout;
     int sve_vl, za_vl;
-    if (a64p_check_frame_records(uc, &layout, &sve_vl, &za_vl, err, sizeof(err)) != 0) {
+    struct a64p_frame_snapshot *snapshot = NULL;
+    if (sig == SIGILL && g.c != NULL && g.c->kind == K_UDF &&
+        uc->uc_mcontext.pc == PC(a64ps_udf) && !first_udf_frame.attempted) {
+        snapshot = &first_udf_frame;
+        first_udf_index = g.c->idx;
+        first_udf_seed = g.c->seed;
+        uintptr_t frame = (uintptr_t)uc, sp = uc->uc_mcontext.sp;
+        first_udf_on_alt = frame >= SG_ALT_LO && frame < SG_ALT_LO + SG_ALT_SIZE;
+        first_udf_expected_alt = expect_alt;
+        first_udf_below_sp = frame <= sp;
+        first_udf_sp_distance = frame <= sp ? sp - frame : frame - sp;
+    }
+    if (a64p_check_frame_records_snapshot(uc, &layout, &sve_vl, &za_vl,
+                                          err, sizeof(err), snapshot) != 0) {
         hfail("signal %d: invalid frame records: %s", sig, err);
         return NULL;
     }
@@ -1904,6 +1923,88 @@ child_teardown(void)
 }
 
 
+/* Only called from main after run_case returns, never from a handler. The
+ * snapshot contains raw fixture register bits, but omits structural addresses
+ * and padding. SVE payload-present reports the actual full record extent, not
+ * an inference from the layout hash or proof the app initialized that state.
+ * Streaming-mode FFR interpretation additionally depends on SME_FA64 support.
+ * At most 12 headers and 9248 register bytes produce less than 24 KiB of text
+ * once per UDF process. No optional-record payload besides FPSIMD/SVE is dumped.
+ */
+static void
+dump_udf_bytes(const char *name, int reg, const uint8_t *data, size_t size)
+{
+    static const char digits[] = "0123456789abcdef";
+    char text[2 * A64P_SNAPSHOT_VL + 1];
+    for (size_t i = 0; i < size; i++) {
+        text[2 * i] = digits[data[i] >> 4];
+        text[2 * i + 1] = digits[data[i] & 15];
+    }
+    text[2 * size] = '\0';
+    if (reg < 0)
+        fprintf(stderr, "udf-frame: %s=%s\n", name, text);
+    else
+        fprintf(stderr, "udf-frame: %s%d=%s\n", name, reg, text);
+}
+
+static const char *
+udf_record_name(uint32_t magic)
+{
+    switch (magic) {
+    case 0: return "END";
+    case FPSIMD_MAGIC_: return "FPSIMD";
+    case ESR_MAGIC_: return "ESR";
+    case EXTRA_MAGIC_: return "EXTRA";
+    case SVE_MAGIC_: return "SVE";
+    case ZA_MAGIC_: return "ZA";
+    case ZT_MAGIC_: return "ZT";
+    case TPIDR2_MAGIC_: return "TPIDR2";
+    case FPMR_MAGIC_: return "FPMR";
+    case POE_MAGIC_: return "POE";
+    case GCS_MAGIC_: return "GCS";
+    default: return "UNKNOWN";
+    }
+}
+
+static void
+dump_first_udf_frame(void)
+{
+    const struct a64p_frame_snapshot *s = &first_udf_frame;
+    fprintf(stderr, "udf-frame: attempted=%d valid=%d case=%d seed=%llu "
+            "stage=before-effects headers=%u truncated=%d byte-order=memory\n",
+            s->attempted, s->valid, first_udf_index,
+            (unsigned long long)first_udf_seed, s->nrecords, s->metadata_truncated);
+    if (s->attempted)
+        fprintf(stderr, "udf-frame: frame-on-alt=%d expected-alt=%d position=%s-sp distance=%llu\n",
+                first_udf_on_alt, first_udf_expected_alt,
+                first_udf_below_sp ? "below" : "above",
+                (unsigned long long)first_udf_sp_distance);
+    for (unsigned i = 0; i < s->nrecords; i++) {
+        fprintf(stderr, "udf-frame: record=%u region=%s offset=%zu kind=%s "
+                "magic=%08x size=%u\n", i, s->records[i].extra ? "extra" : "reserved",
+                s->records[i].offset, udf_record_name(s->records[i].magic),
+                s->records[i].magic, s->records[i].size);
+    }
+    if (s->extra_present)
+        fprintf(stderr, "udf-frame: extra-bytes=%u position=%s-reserved-end distance=%zu\n",
+                s->extra_size, s->extra_after_reserved ? "after" : "before",
+                s->extra_distance);
+    if (s->fpsimd_present) {
+        fprintf(stderr, "udf-frame: fpcr=%08x fpsr=%08x\n", s->fpcr, s->fpsr);
+        for (int i = 0; i < 32; i++)
+            dump_udf_bytes("v", i, s->v + 16 * i, 16);
+    }
+    fprintf(stderr, "udf-frame: sve-present=%d vl-bytes=%u flags=%04x payload-present=%d\n",
+            s->sve_present, s->sve_vl, s->sve_flags, s->sve_payload_present);
+    if (s->sve_payload_present) {
+        for (int i = 0; i < 32; i++)
+            dump_udf_bytes("z", i, s->z + s->sve_vl * i, s->sve_vl);
+        for (int i = 0; i < 16; i++)
+            dump_udf_bytes("p", i, s->p + s->sve_vl / 8 * i, s->sve_vl / 8);
+        dump_udf_bytes("ffr", -1, s->ffr, s->sve_vl / 8);
+    }
+}
+
 /* CLI: unix-signal_model abi|paths KIND. Exact original seed/index and per-kind
  * populations (600 ABI, 150 paths). Model failures are fatal even natively;
  * no inconclusive-case floor or source RT-order suppression is imported.
@@ -1924,7 +2025,9 @@ int main(int argc,char **argv) {
     for(int i=0;i<count;i++) {
         int idx=i*nk+kind;sgcase_t c;sgres_t r;
         gen_case(kind,idx,1+(uint64_t)idx,&c,paths);
-        if(run_case(&c,&r)) {print_case(stderr,&c);return 1;}
+        int failed=run_case(&c,&r);
+        if(i==0 && kind==K_UDF)dump_first_udf_frame();
+        if(failed) {print_case(stderr,&c);return 1;}
         printf("%d",idx);
         for(int j=0;j<31;j++)if(j!=16 && !(kind==K_ISPIN && j==30))printf(" %llx",(unsigned long long)r.out_x[j]);
         printf(" %llx %llx %llx %llx %llx %d %d",(unsigned long long)r.out_sp,(unsigned long long)r.out_nzcv,(unsigned long long)r.out_dit,(unsigned long long)r.out_cont,(unsigned long long)r.layout,r.nobs,r.nlog);

@@ -100,7 +100,9 @@
  * printed if every check and floor passed.
  */
 
-/* Pure Linux signal ABI record validation only, extracted from a64_prop_support.c/h at 356c1821045a4b5678d0813e132074324623df6e. No upstream process harness or DR layout. */
+/* Linux signal ABI validation extracted from a64_prop_support.c/h at
+ * 356c1821045a4b5678d0813e132074324623df6e. Optional first-UDF snapshots
+ * observe accepted fields without changing validation. No DR-internal layout. */
 struct a64p_rec_head {
     uint32_t magic, size;
 };
@@ -154,13 +156,106 @@ a64p_find_rec(ucontext_t *uc, uint32_t magic)
 #define POE_MAGIC_ 0x504f4530
 #define GCS_MAGIC_ 0x47435300
 
+/* First-UDF diagnostics only: no addresses/padding, at most 12 record headers
+ * (10 distinct kinds plus two terminators) and the parser's maximum VL=256.
+ * Full SVE copies at most 8736 named register bytes, plus 512 FPSIMD bytes.
+ * Other optional records have metadata only. Header-only SVE has no payload.
+ * Caller supplies a zero-initialized snapshot once per process. Handler-side
+ * capture uses scalar volatile byte copies; formatting happens after return.
+ */
+#define A64P_SNAPSHOT_RECORDS 12
+#define A64P_SNAPSHOT_VL 256
+struct a64p_frame_snapshot {
+    volatile sig_atomic_t attempted; /* reentry guard, set before walking */
+    int valid, metadata_truncated;
+    unsigned nrecords;
+    struct {
+        uint32_t magic, size;
+        size_t offset;
+        int extra;
+    } records[A64P_SNAPSHOT_RECORDS];
+    uint32_t extra_size;
+    int extra_present, extra_after_reserved;
+    size_t extra_distance;
+    int fpsimd_present, sve_present, sve_payload_present;
+    uint32_t fpcr, fpsr;
+    uint16_t sve_vl, sve_flags;
+    uint8_t v[32 * 16];
+    uint8_t z[32 * A64P_SNAPSHOT_VL];
+    uint8_t p[16 * (A64P_SNAPSHOT_VL / 8)];
+    uint8_t ffr[A64P_SNAPSHOT_VL / 8];
+};
+
+static void
+a64p_snapshot_header(struct a64p_frame_snapshot *s, uint32_t magic, uint32_t size,
+                     size_t offset, int extra)
+{
+    if (s == NULL)
+        return;
+    if (s->nrecords == A64P_SNAPSHOT_RECORDS) {
+        s->metadata_truncated = 1;
+        return;
+    }
+    unsigned i = s->nrecords++;
+    s->records[i].magic = magic;
+    s->records[i].size = size;
+    s->records[i].offset = offset;
+    s->records[i].extra = extra;
+}
+
+static void
+a64p_snapshot_bytes(uint8_t *dst, const uint8_t *src, size_t size)
+{
+    /* Do not add libc calls or SIMD activity to the interrupted thread. */
+    volatile uint8_t *d = dst;
+    const volatile uint8_t *p = src;
+    for (size_t i = 0; i < size; i++)
+        d[i] = p[i];
+}
+
+static void
+a64p_snapshot_payload(struct a64p_frame_snapshot *s, const uint8_t *record,
+                      uint32_t magic, uint32_t size)
+{
+    if (s == NULL)
+        return;
+    /* Called only after the owning parser accepts bounds, kind, extent and
+     * uniqueness. Copy named fields, never record padding or pointers. */
+    if (magic == FPSIMD_MAGIC_) {
+        const struct a64p_fpsimd_rec *fp = (const void *)record;
+        a64p_snapshot_bytes((uint8_t *)&s->fpcr,
+                             (const uint8_t *)&fp->fpcr, sizeof(s->fpcr));
+        a64p_snapshot_bytes((uint8_t *)&s->fpsr,
+                             (const uint8_t *)&fp->fpsr, sizeof(s->fpsr));
+        a64p_snapshot_bytes(s->v, (const uint8_t *)fp->v, sizeof(s->v));
+        s->fpsimd_present = 1;
+    } else if (magic == SVE_MAGIC_) {
+        s->sve_present = 1;
+        s->sve_vl = *(const uint16_t *)(record + 8);
+        s->sve_flags = *(const uint16_t *)(record + 10);
+        size_t vl = s->sve_vl, pl = vl / 8;
+        /* The existing parser permits VL=0. Do not invent payload for it.
+         * Header-only records carry no scalable register data. */
+        if (size == 16 || vl < 16 || vl > A64P_SNAPSHOT_VL)
+            return;
+        size_t full = 16 + 32 * vl + 17 * pl;
+        if (size < full)
+            return;
+        a64p_snapshot_bytes(s->z, record + 16, 32 * vl);
+        a64p_snapshot_bytes(s->p, record + 16 + 32 * vl, 16 * pl);
+        a64p_snapshot_bytes(s->ffr, record + 16 + 32 * vl + 16 * pl, pl);
+        s->sve_payload_present = 1;
+    }
+}
+
 /* Walks one record list of limit bytes at base; extra (if not NULL) receives
  * an EXTRA record.  Returns 0 or writes an error.
  */
 static int
 check_record_list(const uint8_t *base, size_t limit, int top, uint64_t *layout,
                   uint32_t *seen, int *sve_vl, int *za_vl,
-                  const struct a64p_extra_rec **extra, char *err, size_t errlen)
+                  const struct a64p_extra_rec **extra, char *err, size_t errlen,
+                  struct a64p_frame_snapshot *snapshot)
 {
     size_t off = 0;
     for (int n = 0;; n++) {
@@ -171,6 +266,7 @@ check_record_list(const uint8_t *base, size_t limit, int top, uint64_t *layout,
         }
         const struct a64p_rec_head *h = (const struct a64p_rec_head *)(base + off);
         uint32_t magic = h->magic, size = h->size;
+        a64p_snapshot_header(snapshot, magic, size, off, !top);
         *layout = (*layout ^ magic) * 0x100000001b3ULL;
         *layout = (*layout ^ size) * 0x100000001b3ULL;
         if (magic == 0) {
@@ -283,15 +379,19 @@ check_record_list(const uint8_t *base, size_t limit, int top, uint64_t *layout,
             snprintf(err, errlen, "duplicate record 0x%x", magic);
             return 1;
         }
+        a64p_snapshot_payload(snapshot, base + off, magic, size);
         *seen |= 1u << bit;
         off += size;
     }
 }
 
 int
-a64p_check_frame_records(const ucontext_t *uc, uint64_t *layout, int *sve_vl, int *za_vl,
-                         char *err, size_t errlen)
+a64p_check_frame_records_snapshot(const ucontext_t *uc, uint64_t *layout, int *sve_vl,
+                                  int *za_vl, char *err, size_t errlen,
+                                  struct a64p_frame_snapshot *snapshot)
 {
+    if (snapshot != NULL)
+        snapshot->attempted = 1;
     const uint8_t *base = (const uint8_t *)uc->uc_mcontext.__reserved;
     uint32_t seen = 0;
     const struct a64p_extra_rec *extra = NULL;
@@ -304,7 +404,7 @@ a64p_check_frame_records(const ucontext_t *uc, uint64_t *layout, int *sve_vl, in
         return 1;
     }
     if (check_record_list(base, sizeof(uc->uc_mcontext.__reserved), 1, layout, &seen,
-                          sve_vl, za_vl, &extra, err, errlen))
+                          sve_vl, za_vl, &extra, err, errlen, snapshot))
         return 1;
     if (extra != NULL) {
         const uint8_t *p = (const uint8_t *)(uintptr_t)extra->datap;
@@ -312,9 +412,26 @@ a64p_check_frame_records(const ucontext_t *uc, uint64_t *layout, int *sve_vl, in
             snprintf(err, errlen, "EXTRA datap %p size %u", p, extra->size);
             return 1;
         }
+        if (snapshot != NULL) {
+            uintptr_t end = (uintptr_t)base + sizeof(uc->uc_mcontext.__reserved);
+            snapshot->extra_present = 1;
+            snapshot->extra_size = extra->size;
+            snapshot->extra_after_reserved = (uintptr_t)p >= end;
+            snapshot->extra_distance = (uintptr_t)p >= end
+                ? (uintptr_t)p - end : end - (uintptr_t)p;
+        }
         if (check_record_list(p, extra->size, 0, layout, &seen, sve_vl, za_vl, &extra,
-                              err, errlen))
+                              err, errlen, snapshot))
             return 1;
     }
+    if (snapshot != NULL)
+        snapshot->valid = 1;
     return 0;
+}
+
+int
+a64p_check_frame_records(const ucontext_t *uc, uint64_t *layout, int *sve_vl, int *za_vl,
+                         char *err, size_t errlen)
+{
+    return a64p_check_frame_records_snapshot(uc, layout, sve_vl, za_vl, err, errlen, NULL);
 }
