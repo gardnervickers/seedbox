@@ -3,13 +3,17 @@
 
 use crate::limits::read_bounded;
 use crate::{
-    config::Simulation,
+    config::{Service, Simulation},
     execution::{ExecutionProfile, PreparedInputs},
     guest::minimum_memory_mb,
-    store::ContentStore,
+    store::{ContentDigest, ContentStore},
     Error, Result,
 };
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 const CONFIG_LIMIT: u64 = 16 * 1024 * 1024;
 
@@ -52,122 +56,31 @@ impl OciPreparer {
         transport: &dyn crate::oci::ImageTransport,
         driver_runtime: &seedbox_driver_execution::runtime_assets::Inputs,
     ) -> Result<PreparedInputs> {
-        let architecture = crate::guest::Architecture::from_profile(&self.profile)?;
-        for (name, service) in &simulation.services {
-            if service.platform != architecture.platform() {
-                return Err(Error::Setup(format!(
-                    "service {name} requests {}; this engine requires {}",
-                    service.platform,
-                    architecture.platform()
-                )));
-            }
-        }
-
-        context.check()?;
-
-        for (name, service) in &simulation.services {
-            validate_machine_memory(
-                &self.profile,
-                name,
-                service.memory_mb.unwrap_or(simulation.machine.memory_mb),
-            )?;
-        }
+        let architecture = self.validate_services(simulation, context)?;
         let kernel = store.put_file(&self.kernel)?;
         let engine = store.put_file(&self.engine)?;
         architecture.validate_elf(&self.init)?;
-        for (name, service) in &simulation.services {
-            for mount in &service.volumes {
-                validate_config_target(&mount.target).map_err(|_| Error::Validation {
-                    path: format!("$.services.{name}.volumes"),
-                    message: format!("reserved guest runtime path {}", mount.target),
-                })?;
-            }
-        }
-        let volumes = simulation.services.values().any(|s| !s.volumes.is_empty());
-        let mut auxiliary = BTreeMap::from([("guest-init".into(), store.put_file(&self.init)?)]);
-        if driver_runtime.qemu.is_some() {
-            auxiliary.insert(
-                "guest-firmware".into(),
-                store.put_file(&driver_runtime.guest_assets.join("firmware"))?,
-            );
-        } else {
-            auxiliary.insert("guest-progress".into(), store.put_file(&self.progress)?);
-        }
-        if volumes {
-            let mke2fs = self.mke2fs.as_ref().ok_or_else(|| {
-                Error::Setup(
-                    "named volumes need the formatter from a complete Driver runtime package; rebuild the SDK"
-                        .into(),
-                )
-            })?;
-            architecture.validate_elf(mke2fs)?;
-            auxiliary.insert("guest-mke2fs".into(), store.put_file(mke2fs)?);
-        }
-        let mut configs = BTreeMap::new();
-        for (name, path) in &simulation.configs {
-            let data = read_bounded(
-                fs::File::open(path)?,
-                CONFIG_LIMIT,
-                format_args!("config {name}"),
-            )
-            .map_err(|e| e.or_too_large(Error::Execution))?;
-            auxiliary.insert(format!("config/{name}"), store.put(&data)?);
-            configs.insert(name, data);
-        }
+        validate_volume_targets(simulation)?;
+        let mut auxiliary =
+            self.guest_auxiliary(simulation, store, architecture, driver_runtime)?;
+        let configs = read_configs(simulation, store, &mut auxiliary)?;
 
         context.setup_inputs(&auxiliary, &engine, &kernel)?;
 
-        let addresses: BTreeMap<_, _> = simulation
-            .services
-            .keys()
-            .enumerate()
-            .map(|(index, name)| (name, format!("10.0.0.{}", index + 1)))
-            .collect();
-        let mut hosts = "127.0.0.1 localhost\n::1 localhost\n".to_owned();
-        for (name, address) in &addresses {
-            hosts.push_str(&format!("{address} {name}\n"));
-        }
+        let hosts = hosts_file(simulation);
         let temporary = tempfile::tempdir()?;
         let mut images = BTreeMap::new();
         let mut guests = BTreeMap::new();
         let mut provenance = BTreeMap::new();
-        let mut imported_sources = BTreeMap::new();
-        let mut launches = Vec::new();
-        for (name, service) in &simulation.services {
-            context.progress(name, PreparationStage::Image);
-
-            context.check()?;
-
-            let mounts = service
-                .configs
-                .iter()
-                .map(|mount| {
-                    validate_config_target(&mount.target)?;
-                    Ok((
-                        mount.target.clone(),
-                        configs
-                            .get(&mount.source)
-                            .ok_or_else(|| Error::Integrity("unknown config source".into()))?
-                            .clone(),
-                    ))
-                })
-                .collect::<Result<BTreeMap<_, _>>>()?;
-            let source = serde_json::to_string(&service.source)?;
-            let imported = successful_source(&mut imported_sources, source, || {
-                transport.import(
-                    service,
-                    &temporary.path().join(name),
-                    store,
-                    Some((context, name.as_str())),
-                    architecture,
-                )
-            })?
-            .for_service(service, store)?;
-
-            context.check()?;
-
-            launches.push((name, service, mounts, imported));
-        }
+        let launches = import_images(
+            simulation,
+            store,
+            context,
+            transport,
+            architecture,
+            &configs,
+            temporary.path(),
+        )?;
         // The guest clock starts at the resolved epoch,
         // or else at the latest build time recorded in any prepared image, so
         // certificates minted during a build are already valid and the same
@@ -175,20 +88,7 @@ impl OciPreparer {
         // than guest uptime, so the derived value is at least one day.
         let wall_clock_epoch = match simulation.wall_clock_epoch {
             Some(epoch) => epoch,
-            None => {
-                let mut latest = i64::from(crate::guest::MIN_WALL_CLOCK_EPOCH);
-                for (_, _, _, imported) in &launches {
-                    let config = store.read(&imported.image.config)?;
-                    if let Some(created) = crate::oci::image_created_epoch(&config)? {
-                        latest = latest.max(created);
-                    }
-                }
-                u32::try_from(latest).map_err(|_| {
-                    Error::Integrity(
-                        "image created time exceeds the supported wall-clock epoch".into(),
-                    )
-                })?
-            }
+            None => latest_image_epoch(store, &launches)?,
         };
         let driver_factory =
             seedbox_driver_execution::driver_world::preparation::OciBootFactory::new(
@@ -197,22 +97,14 @@ impl OciPreparer {
                 wall_clock_epoch,
                 simulation.simulator.progress_budget,
             )?;
-        for (name, service, mounts, imported) in launches {
+        for launch in launches {
+            let Launch { name, service, .. } = launch;
             context.progress(name, PreparationStage::Guest);
             context.check()?;
 
             let archive = temporary.path().join(format!("{name}.cpio"));
-            let boot = driver_factory.boot(
-                seedbox_driver_execution::driver_world::preparation::OciBoot {
-                    name,
-                    filesystem: crate::driver_preparation::filesystem(&imported.rootfs)?,
-                    launch: &imported.image.launch,
-                    simulation,
-                    configs: &mounts,
-                    hosts: &hosts,
-                },
-                store,
-            )?;
+            let boot = launch.boot(&driver_factory, simulation, store, &hosts)?;
+            let imported = launch.imported;
             auxiliary.insert(
                 format!(
                     "{}{name}",
@@ -222,10 +114,7 @@ impl OciPreparer {
             );
             fs::write(&archive, boot.bytes)?;
             let memory_mb = service.memory_mb.unwrap_or(simulation.machine.memory_mb);
-            let minimum = minimum_memory_mb(fs::metadata(&archive)?.len())?;
-            if memory_mb < minimum {
-                return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase memoryMiB for this machine (application memory may require more)")));
-            }
+            validate_archive_memory(name, memory_mb, &archive)?;
 
             context.check()?;
 
@@ -271,6 +160,221 @@ impl OciPreparer {
             provenance,
         })
     }
+
+    /// Check every service's platform and memory against this engine's profile.
+    fn validate_services(
+        &self,
+        simulation: &Simulation,
+        context: &PreparationContext,
+    ) -> Result<crate::guest::Architecture> {
+        let architecture = crate::guest::Architecture::from_profile(&self.profile)?;
+        for (name, service) in &simulation.services {
+            if service.platform != architecture.platform() {
+                return Err(Error::Setup(format!(
+                    "service {name} requests {}; this engine requires {}",
+                    service.platform,
+                    architecture.platform()
+                )));
+            }
+        }
+
+        context.check()?;
+
+        for (name, service) in &simulation.services {
+            validate_machine_memory(
+                &self.profile,
+                name,
+                service.memory_mb.unwrap_or(simulation.machine.memory_mb),
+            )?;
+        }
+        Ok(architecture)
+    }
+
+    /// Store the guest runtime binaries every machine boots with.
+    fn guest_auxiliary(
+        &self,
+        simulation: &Simulation,
+        store: &ContentStore,
+        architecture: crate::guest::Architecture,
+        driver_runtime: &seedbox_driver_execution::runtime_assets::Inputs,
+    ) -> Result<BTreeMap<String, ContentDigest>> {
+        let volumes = simulation.services.values().any(|s| !s.volumes.is_empty());
+        let mut auxiliary = BTreeMap::from([("guest-init".into(), store.put_file(&self.init)?)]);
+        if driver_runtime.qemu.is_some() {
+            auxiliary.insert(
+                "guest-firmware".into(),
+                store.put_file(&driver_runtime.guest_assets.join("firmware"))?,
+            );
+        } else {
+            auxiliary.insert("guest-progress".into(), store.put_file(&self.progress)?);
+        }
+        if volumes {
+            let mke2fs = self.mke2fs.as_ref().ok_or_else(|| {
+                Error::Setup(
+                    "named volumes need the formatter from a complete Driver runtime package; rebuild the SDK"
+                        .into(),
+                )
+            })?;
+            architecture.validate_elf(mke2fs)?;
+            auxiliary.insert("guest-mke2fs".into(), store.put_file(mke2fs)?);
+        }
+        Ok(auxiliary)
+    }
+}
+
+/// One service whose image is imported and awaits its guest archive.
+struct Launch<'a> {
+    name: &'a String,
+    service: &'a Service,
+    mounts: BTreeMap<String, Vec<u8>>,
+    imported: crate::oci::ImportedImage,
+}
+
+impl Launch<'_> {
+    /// Render this service's Driver boot archive from its imported image.
+    fn boot(
+        &self,
+        factory: &seedbox_driver_execution::driver_world::preparation::OciBootFactory,
+        simulation: &Simulation,
+        store: &ContentStore,
+        hosts: &str,
+    ) -> Result<seedbox_driver_execution::driver_world::preparation::BootArchive> {
+        factory.boot(
+            seedbox_driver_execution::driver_world::preparation::OciBoot {
+                name: self.name,
+                filesystem: crate::driver_preparation::filesystem(&self.imported.rootfs)?,
+                launch: &self.imported.image.launch,
+                simulation,
+                configs: &self.mounts,
+                hosts,
+            },
+            store,
+        )
+    }
+}
+
+fn validate_volume_targets(simulation: &Simulation) -> Result<()> {
+    for (name, service) in &simulation.services {
+        for mount in &service.volumes {
+            validate_config_target(&mount.target).map_err(|_| Error::Validation {
+                path: format!("$.services.{name}.volumes"),
+                message: format!("reserved guest runtime path {}", mount.target),
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Read and store each project config, keyed by name for service mounts.
+fn read_configs<'a>(
+    simulation: &'a Simulation,
+    store: &ContentStore,
+    auxiliary: &mut BTreeMap<String, ContentDigest>,
+) -> Result<BTreeMap<&'a String, Vec<u8>>> {
+    let mut configs = BTreeMap::new();
+    for (name, path) in &simulation.configs {
+        let data = read_bounded(
+            fs::File::open(path)?,
+            CONFIG_LIMIT,
+            format_args!("config {name}"),
+        )
+        .map_err(|e| e.or_too_large(Error::Execution))?;
+        auxiliary.insert(format!("config/{name}"), store.put(&data)?);
+        configs.insert(name, data);
+    }
+    Ok(configs)
+}
+
+/// The guest hosts file: loopback plus one address per service, in name order.
+fn hosts_file(simulation: &Simulation) -> String {
+    let addresses: BTreeMap<_, _> = simulation
+        .services
+        .keys()
+        .enumerate()
+        .map(|(index, name)| (name, format!("10.0.0.{}", index + 1)))
+        .collect();
+    let mut hosts = "127.0.0.1 localhost\n::1 localhost\n".to_owned();
+    for (name, address) in &addresses {
+        hosts.push_str(&format!("{address} {name}\n"));
+    }
+    hosts
+}
+
+/// Import each service's image, sharing verified bytes between identical sources.
+fn import_images<'a>(
+    simulation: &'a Simulation,
+    store: &ContentStore,
+    context: &PreparationContext,
+    transport: &dyn crate::oci::ImageTransport,
+    architecture: crate::guest::Architecture,
+    configs: &BTreeMap<&String, Vec<u8>>,
+    temporary: &Path,
+) -> Result<Vec<Launch<'a>>> {
+    let mut imported_sources = BTreeMap::new();
+    let mut launches = Vec::new();
+    for (name, service) in &simulation.services {
+        context.progress(name, PreparationStage::Image);
+
+        context.check()?;
+
+        let mounts = service
+            .configs
+            .iter()
+            .map(|mount| {
+                validate_config_target(&mount.target)?;
+                Ok((
+                    mount.target.clone(),
+                    configs
+                        .get(&mount.source)
+                        .ok_or_else(|| Error::Integrity("unknown config source".into()))?
+                        .clone(),
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let source = serde_json::to_string(&service.source)?;
+        let imported = successful_source(&mut imported_sources, source, || {
+            transport.import(
+                service,
+                &temporary.join(name),
+                store,
+                Some((context, name.as_str())),
+                architecture,
+            )
+        })?
+        .for_service(service, store)?;
+
+        context.check()?;
+
+        launches.push(Launch {
+            name,
+            service,
+            mounts,
+            imported,
+        });
+    }
+    Ok(launches)
+}
+
+/// The latest image build time, never earlier than the minimum guest epoch.
+fn latest_image_epoch(store: &ContentStore, launches: &[Launch<'_>]) -> Result<u32> {
+    let mut latest = i64::from(crate::guest::MIN_WALL_CLOCK_EPOCH);
+    for launch in launches {
+        let config = store.read(&launch.imported.image.config)?;
+        if let Some(created) = crate::oci::image_created_epoch(&config)? {
+            latest = latest.max(created);
+        }
+    }
+    u32::try_from(latest).map_err(|_| {
+        Error::Integrity("image created time exceeds the supported wall-clock epoch".into())
+    })
+}
+
+fn validate_archive_memory(name: &str, memory_mb: u32, archive: &Path) -> Result<()> {
+    let minimum = minimum_memory_mb(fs::metadata(archive)?.len())?;
+    if memory_mb < minimum {
+        return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase memoryMiB for this machine (application memory may require more)")));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_machine_memory(
