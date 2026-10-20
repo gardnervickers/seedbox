@@ -11,7 +11,6 @@ pub mod execution;
 pub mod image;
 pub mod interventions;
 pub mod limits;
-pub mod logs;
 pub mod record;
 mod retained;
 pub mod store;

@@ -2,7 +2,6 @@
 //! Platform adapters supply committed events and actual transmitted bytes.
 pub mod connections;
 pub mod links;
-pub mod log_index;
 pub mod network_counters;
 
 pub mod network_faults;

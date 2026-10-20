@@ -17,7 +17,6 @@ pub mod guest;
 pub mod image;
 mod image_archive;
 use seedbox_artifacts::limits;
-pub use seedbox_artifacts::logs;
 mod driver_preparation;
 pub mod oci;
 pub mod orchestration;

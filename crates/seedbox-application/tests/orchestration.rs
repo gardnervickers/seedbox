@@ -908,68 +908,6 @@ fn rejected_preflight_never_prepares_and_post_preparation_drift_never_executes()
 }
 
 #[test]
-fn timed_indexes_survive_success_backend_error_cancellation_and_retention_omissions() {
-    for (fail, cancel, omit) in [
-        (false, false, false),
-        (true, false, false),
-        (false, true, false),
-        (false, false, true),
-    ] {
-        let mut f = Fixture::new();
-        f.backend.fail = fail;
-        f.backend.cancel = cancel;
-        let mut index = b"SBLOG001".to_vec();
-        for v in [10u64, 0, 0, 0, 3] {
-            index.extend_from_slice(&v.to_le_bytes());
-        }
-        f.backend
-            .extra_logs
-            .insert("machines/oracle.console".into(), vec![0, 255, 10]);
-        f.backend
-            .extra_logs
-            .insert("machines/oracle.console.chunks".into(), index.clone());
-        if omit {
-            f.orchestrator = f.orchestrator.with_log_policy(LogPolicy {
-                max_file_bytes: 4,
-                max_total_bytes: 100,
-            });
-        }
-        let run = f.run();
-        assert_eq!(
-            run.record.outcome,
-            if fail {
-                Outcome::Error
-            } else if cancel {
-                Outcome::Incomplete
-            } else {
-                Outcome::Pass
-            }
-        );
-        let mut reader =
-            seedbox_application::logs::Reader::open(&run.directory, &Default::default()).unwrap();
-        if omit {
-            assert!(run
-                .record
-                .omitted_logs
-                .contains_key("machines/oracle.console.chunks"));
-            assert!(reader.report.chunks.is_empty());
-            assert!(reader
-                .report
-                .omissions
-                .contains_key("machines/oracle.console.chunks"));
-        } else {
-            assert_eq!(
-                run.record.logs["machines/oracle.console.chunks"],
-                ContentDigest::of(&index)
-            );
-            let mut bytes = Vec::new();
-            reader.copy_chunk(0, &mut bytes).unwrap();
-            assert_eq!(bytes, [0, 255, 10]);
-        }
-    }
-}
-
-#[test]
 fn torn_write_policy_changes_identity_and_replay_requires_the_recorded_policy() {
     let mut fixture = Fixture::new();
     let off = fixture.run();
