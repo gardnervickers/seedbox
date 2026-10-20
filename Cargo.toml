@@ -1,8 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-# Retired backends can leave ignored build output after switching branches.
-exclude = ["crates/seedbox-arm64", "crates/seedbox-vmm"]
 default-members = ["crates/seedbox"]
 
 [workspace.package]
