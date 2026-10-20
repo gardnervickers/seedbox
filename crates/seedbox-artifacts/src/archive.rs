@@ -3,7 +3,6 @@
 //! Archives contain one `simulation.json`, followed by exactly the referenced
 //! `objects/<sha256>` regular files. Archive paths are never extracted; any
 //! descriptive host paths in retained diagnostics are never followed on import.
-//! Legacy offline-run bundles are not accepted.
 use crate::{
     record::RunRecord,
     store::{ContentDigest, ContentStore},

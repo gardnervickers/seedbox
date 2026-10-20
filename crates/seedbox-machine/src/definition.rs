@@ -1,6 +1,6 @@
 //! Common configured-machine inputs, independent of execution backend.
 //!
-//! TODO: Re-evaluate: one definition owns a guest's resources and prepared launch.
+//! One definition owns a guest's resources and prepared launch.
 //! Splitting instance overrides from the definition would hide part of what runs.
 //! Backend boot inputs belong to concrete factories; caller-side templating needs no API.
 use std::{collections::BTreeMap, fmt, sync::Arc};
@@ -41,8 +41,6 @@ pub struct FilesystemArchive {
 }
 /// Explicit validation budgets for an imported flattened archive. Logical
 /// entry/path/file-content accounting is not a process RSS guarantee.
-// TODO: Re-evaluate: persistence needs bounded validation without materializing
-// every file payload or imposing backend memory/launch admission on future inputs.
 #[derive(Clone, Copy, Debug)]
 pub struct ArchiveValidationLimits {
     /// Raw extension/file records plus implicit directory nodes.
@@ -64,15 +62,12 @@ impl ArchiveValidationLimits {
 }
 impl FilesystemArchive {
     /// Borrow exact immutable validated tar bytes; never extracts guest paths.
-    // TODO: Re-evaluate: cross-crate streaming persistence needs the original
-    // byte closure, not a repacked boot archive or mutable filesystem inspector.
+    // Persistence streams these original bytes, not a repacked boot archive.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
     /// Validate and own imported bytes under explicit logical budgets. File
     /// contents are streamed during validation, not duplicated into node data.
-    // TODO: Re-evaluate: unbounded new cannot serve an import budget. This
-    // validates framing/paths/content without eagerly admitting future machines.
     pub fn new_bounded(
         bytes: Vec<u8>,
         limits: ArchiveValidationLimits,
@@ -94,7 +89,7 @@ impl FilesystemArchive {
 /// definition. Capacity is nonzero and a whole number of 512-byte
 /// sectors. Image bytes are immutable and may be shared between clones.
 /// Equality compares capacity and contents, however they were constructed.
-// TODO: Re-evaluate: one owned image or zero fill covers caller-supplied
+// One owned image or zero fill covers caller-supplied
 // filesystems without host paths or backend-specific formats; sparse or
 // layered images can be added as constructors without changing this type.
 #[derive(Clone)]
@@ -130,16 +125,14 @@ impl DiskImage {
         }
     }
     /// Capacity in 512-byte sectors, without allocation or mutation.
-    // TODO: Re-evaluate: separate adapters need the validated initial capacity.
-    // A crate-private view cannot serve those backend consumers.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn sectors(&self) -> u64 {
         self.capacity_bytes() / SECTOR_BYTES
     }
     /// Borrow the immutable initial image, or return None for zero fill.
     /// Cloning the Arc shares storage; this view includes no later guest writes.
-    // TODO: Re-evaluate: separate adapters prepare owned backing inputs from it.
-    // A private view would force materializing zero fill or copying the image.
+    // Backends prepare owned backing inputs from this borrow; a copy would
+    // materialize zero fill or duplicate the image.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn image(&self) -> Option<&Arc<[u8]>> {
         match &self.contents {

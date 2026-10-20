@@ -1,5 +1,5 @@
 /* Specific named-backend controller override. Archive recipe bytes stay owned
- * by preparation; absent override preserves the legacy/environment decision. */
+ * by preparation; absent override keeps the guest environment's decision. */
 #ifndef SEEDBOX_GUEST_POLICY_H
 #define SEEDBOX_GUEST_POLICY_H
 #include <ctype.h>

@@ -533,8 +533,6 @@ impl RuntimeInputs {
 /// The executable must dispatch its private engine worker before calling this.
 /// Clap retains process termination for help, version and argument errors; other
 /// commands return their existing exit status, with broken pipes treated as success.
-// TODO: Re-evaluate: keep this ambient process boundary separate from explicit
-// application/server inputs if another frontend entry is introduced.
 pub fn main() -> ExitCode {
     let mut arguments: Vec<_> = std::env::args_os().collect();
     let explicit_command = has_explicit_command(&arguments);

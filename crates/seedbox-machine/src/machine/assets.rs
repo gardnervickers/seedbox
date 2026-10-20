@@ -1,6 +1,4 @@
 //! Explicit, offline-built guest inputs. Loading never builds or searches.
-// TODO: Re-evaluate: separate backends consume this canonical helper.
-// Crate-private access cannot cross packages; representation remains private.
 use std::{fs, io, path::Path};
 /// Read and own all bytes at root.join(name), without search or building.
 /// Missing/unreadable files retain their IO error kind with path context; an

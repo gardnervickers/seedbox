@@ -19,7 +19,7 @@ use std::{fmt::Debug, fs, path::PathBuf, time::Duration};
 /// A boxed backend factory, as the Driver takes it.
 pub type Create<M> = Box<dyn FnMut(&MachineDefinition) -> Result<M, <M as Machine>::Error> + Send>;
 
-// TODO: Re-evaluate: PV and TCG must exercise the same durability assertions.
+// PV and TCG exercise the same durability assertions.
 // Only construction, stopped-store access and restore vary; these test-only
 // callbacks keep those differences out of the scenario bodies.
 /// Construction, restore and stopped-store operations for the shared scenarios.

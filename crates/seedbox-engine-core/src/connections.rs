@@ -42,8 +42,8 @@ pub struct Connections {
 /// Plain stopped classifier state for an owner-local closed codec. No RNG,
 /// scheduler or native resources are represented. Sessions and selections keep
 /// their canonical sorted keys; import checks identities before publication.
-// TODO: Re-evaluate: Driver must persist this canonical policy without serde
-// collection parsing or moving it across standalone workspace type boundaries.
+// The Driver persists this through its own bounded binary codec rather than
+// serde collection parsing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectionState {
     pub sessions: BTreeMap<Tuple, SessionState>,
@@ -53,7 +53,6 @@ pub struct ConnectionState {
     pub selections: BTreeMap<String, SelectionState>,
 }
 /// One classified TCP incarnation, including closed sessions retained for reuse.
-// TODO: Re-evaluate: this is owned plain data, not a shared serialized ABI.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionState {
     pub id: u64,
@@ -62,7 +61,6 @@ pub struct SessionState {
     pub closed: bool,
 }
 /// A selected direction, retained even after closure or tuple reincarnation.
-// TODO: Re-evaluate: stale selectors remain meaningful independently of sessions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectionState {
     pub fault_id: u32,
@@ -75,8 +73,6 @@ impl Connections {
     /// Export independently owned plain state without changing classification.
     /// This trusted operation allocates copies; an importing codec separately
     /// accounts its own element and ownership storage before constructing maps.
-    // TODO: Re-evaluate: a concrete plain-data seam preserves one tracker policy
-    // while allowing the Driver's bounded binary format rather than private serde.
     pub fn export_state(&self) -> ConnectionState {
         ConnectionState {
             sessions: self
@@ -121,8 +117,6 @@ impl Connections {
     /// are checked. A selected older incarnation need not remain in sessions:
     /// the same tuple can legitimately have opened a newer incarnation.
     /// Logical allocation admission belongs to the caller, not this constructor.
-    // TODO: Re-evaluate: the owner of classification must validate private
-    // relations without exposing mutable tracker fields or accepting serde maps.
     pub fn from_state(state: ConnectionState, names: &[String]) -> Result<Self, String> {
         if state.sessions.len() > CAPACITY || state.selections.len() > CAPACITY {
             return Err("connection capacity".into());

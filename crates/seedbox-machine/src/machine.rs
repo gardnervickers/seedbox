@@ -87,10 +87,9 @@ pub trait Machine {
     /// the first run after construction or reboot. Initialization may occur with
     /// zero execution budget, but must execute no program instructions.
     ///
-    // TODO: Re-evaluate: per-machine time bases change the meaning of every
-    // run timestamp (with Clock, Input, Output, Timestamp and StopReason docs).
-    // Drift must scale a whole machine (counters, timers, CPU) and be exact at
-    // barriers; changing only guest clocks or one backend cannot do that.
+    // Drift is a per-machine time base because it must scale a whole machine
+    // (counters, timers, CPU) and be exact at barriers; changing only guest
+    // clocks or one backend cannot do that.
     /// # Time and execution boundaries
     ///
     /// All timestamps (the clock, `upto`, input and output times and returned
@@ -156,12 +155,9 @@ pub trait Machine {
     /// promise rollback or a resumable state. The caller must stop scheduling
     /// the machine and propagate the failure rather than blindly retrying.
     ///
-    // TODO: Re-evaluate: guest termination is an outcome within this contract;
-    // `Err` means the contract could not be fulfilled. Requiring the caller's
-    // explicit Reboot keeps every new boot visible to the caller, with no
-    // hidden reset or change to its boot accounting. A halted CPU alone is not
-    // a portable power-off signal; this contract does not require detecting
-    // that an OS halt can never resume.
+    // Requiring the caller's explicit Reboot keeps every new boot visible to
+    // the caller, with no hidden reset or change to its boot accounting. A
+    // halted CPU alone is not a portable power-off signal.
     /// A guest's own termination is a machine outcome, not a failure: guest
     /// power-off ends execution as [`ExitReason::Shutdown`], and a guest
     /// reset request, including the restart after a kernel panic, as
@@ -238,7 +234,7 @@ pub trait Machine {
     /// requiring full state must fail, naming the machine and whether it has
     /// booted and whether capture was configured. Backend errors add context
     /// when a configured capture fails. Digests of snapshots are not evidence.
-    // TODO: Re-evaluate: evidence needs a stopped mutable backend transport,
+    // Evidence needs a stopped mutable backend transport,
     // but exposing arbitrary mutable machine access would permit execution.
     fn state_evidence(&mut self) -> Result<Option<StateEvidence>, Self::Error> {
         Ok(None)
@@ -252,7 +248,7 @@ pub trait Machine {
     /// `None` is no native boot ever observed (or unsupported generic Machine),
     /// never a successful substitute for a required native witness. Read errors
     /// are errors, not cached success. Never reset history merely on restore.
-    // TODO: Re-evaluate: one specific stopped read avoids a general inspection
+    // One specific stopped read avoids a general inspection
     // framework or forcing RAM collection while full-state mode is disabled.
     fn execution_evidence(&mut self) -> Result<Option<ExecutionEvidence>, Self::Error> {
         Ok(None)

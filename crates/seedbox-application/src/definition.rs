@@ -348,8 +348,8 @@ pub fn materialize_start(
 /// Inline settings omit values already defined by canonical binary or machine fields.
 /// Inline the retained launch profile and Driver's explicit binary input closure.
 /// Host paths and source provenance are never retained as factory authority.
-// TODO: Re-evaluate: the server round-trips preparation through Definition before
-// execution; an auxiliary-only manifest otherwise disappears during that step.
+// Inlined because the server round-trips preparation through Definition before
+// execution; a separate auxiliary manifest would be lost in that step.
 pub fn execution_settings_with_inputs(inputs: &PreparedInputs) -> Result<serde_json::Value> {
     let mut settings = execution_settings(&inputs.profile)?;
     if let Some(closure) =

@@ -6,9 +6,9 @@
  * no gateway, DHCP or DNS. Without the argument nothing is configured, and
  * `lo` stays down as before.
  *
- * TODO: Re-evaluate: header-only static helpers so the guest build keeps its
- * fixed object list. Ioctls rather than netlink keep the parser and setup
- * small. A later route or multi-NIC surface would replace this argument. */
+ * Header-only static helpers keep the guest build's fixed object list.
+ * Ioctls rather than netlink keep the parser and setup small. A later route
+ * or multi-NIC surface would replace this argument. */
 #ifndef SEEDBOX_GUEST_NETWORK_H
 #define SEEDBOX_GUEST_NETWORK_H
 #include <errno.h>

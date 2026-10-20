@@ -1,7 +1,6 @@
 //! Machine-owned guest service acceptance and observation. Whole-driver queues
 //! remain caller-owned; only accepted pending work belongs in this snapshot.
-// TODO: Re-evaluate: separate backends consume this canonical helper.
-// Crate-private access cannot cross packages; representation remains private.
+// Public for the PV and TCG backend crates; the representation stays private.
 #[cfg(test)]
 use super::transport::LifecycleWrite;
 use super::{
@@ -252,8 +251,6 @@ impl crate::snapshot::Record for GuestBridge {
 impl GuestBridge {
     /// Encode the complete closed bridge record without consuming delivery or
     /// changing protocol cursors. The backend supplies framing and quotas.
-    // TODO: Re-evaluate: concrete persistence must reach private bridge state
-    // without serde collection parsing or publishing protocol fields.
     pub fn write_snapshot<W: std::io::Write>(
         &self,
         output: &mut crate::snapshot::Writer<'_, W>,
@@ -267,8 +264,6 @@ impl GuestBridge {
     /// otherwise superseded prepared correlations are preserved. Identity-index
     /// scratch consumes the same enclosing item/allocation quotas before any
     /// allocation. Pending order is retained; validation sorts only copied IDs.
-    // TODO: Re-evaluate: the backend supplies its stopped-boundary proof while
-    // owner-local decoding/validation prevents exposing bridge fields.
     pub fn read_snapshot<R: std::io::Read>(
         input: &mut crate::snapshot::Reader<'_, R>,
         reached: u64,
@@ -285,8 +280,6 @@ impl GuestBridge {
     /// decode quota; read_snapshot precharges every such copy before calling it.
     /// Capture-boundary prepared ownership is checked before general validation.
     /// This is not CPU-time isolation or certification of usability after run Err.
-    // TODO: Re-evaluate: the backend knows the reached time and boundary; the
-    // bridge alone owns the private protocol relations that must be checked.
     pub fn validate_snapshot(
         &self,
         reached: u64,

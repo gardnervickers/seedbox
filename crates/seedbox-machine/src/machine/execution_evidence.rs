@@ -1,6 +1,6 @@
 //! Lightweight native interaction witness, independent of optional RAM capture.
 //!
-//! New-engine framing (within-backend comparison only, not legacy hash bytes):
+//! Framing (comparable only within one backend):
 //! `h0=SHA256(b"seedbox-execution-witness-v1\0")`;
 //! record `SHA256(h || b"rec\0" || kind:u8 || size:u8 || time:u64LE ||
 //! a:u64LE || b:u64LE)`; observation `SHA256(h || b"read\0" || len:u64LE ||
@@ -24,7 +24,7 @@
 //! | d | 0 / sector / full kind:u32 low32, status:u8 bits32..39 | block completion in completion order | Seedbox block completion order |
 //! | H | 0 / 0 / 0 | actual Halt/Wait | actual guest halt |
 //! | X | width / 0xf4 / code | no debug-exit device in Linux PV board; floating/ignored ports are ordinary O/i | only if debug-exit device exists; production nodefault board has none |
-//! | E | width / 0xf5 / code | no legacy init-error port; supervisor errors remain protocol errors | production board has no legacy init-error device |
+//! | E | width / 0xf5 / code | no init-error port; supervisor errors remain protocol errors | production board has no init-error device |
 //! | N | 0 / physical boot ordinal / 0 | physical boot, never restore | physical boot, never migration restore |
 //! | R | 0 / 0 / 0 | absent: current Machine contract has no release input | absent: current Machine contract has no release input |
 //! | S | 0 / entropy generation / 0 | actual entropy-generation change | none: production qemu64 board has no guest entropy delivery/reseed device |

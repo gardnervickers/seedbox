@@ -74,8 +74,8 @@ pub(crate) fn filesystem(rootfs: &crate::oci::RootFilesystem) -> Result<Vec<u8>>
     };
     Ok(bytes)
 }
-/// Validate the explicit SDK bootstrap package without legacy-format assumptions
-/// and without opening a hypervisor, starting a worker or contacting OCI.
+/// Validate the explicit SDK bootstrap package without opening a hypervisor,
+/// starting a worker or contacting OCI.
 pub fn validate_oci_runtime(preparer: &OciPreparer, runtime: &Inputs) -> Result<()> {
     seedbox_driver_execution::driver_world::retained::validate_contract(&preparer.profile)?;
     for (path, name) in [(&preparer.kernel, "kernel"), (&preparer.init, "init")] {

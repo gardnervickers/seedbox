@@ -201,7 +201,7 @@ fn resolve_driver_runtime(
 }
 
 /// Match the default service's Driver PV inputs. Keep their private extraction
-/// alive until the caller finishes probing. No legacy bootstrap lookup exists.
+/// alive until the caller finishes probing.
 pub fn doctor_kernel(
     scratch: &Path,
 ) -> Result<(

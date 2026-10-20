@@ -29,8 +29,8 @@ pub const MAX_ENVELOPE_BYTES: u64 = 16 * 1024 * 1024;
 /// A materialized, immutable artifact. Paths are service-supplied authority,
 /// never a field encoded inside a backend machine snapshot. Export replaces
 /// `artifact` with `asset:...` through the existing Start capture machinery.
-// TODO: Re-evaluate: the existing Start walker recognizes sha256 + artifact;
-// retaining that shape avoids a second export or content-store protocol.
+// Start capture recognizes any object with `sha256` and `artifact`; keeping
+// that shape avoids a second export or content-store protocol.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
@@ -147,8 +147,8 @@ impl Inventory {
     }
     /// Selected semantics without defaulting an absent configuration. The
     /// application converts and validates this data before materialization.
-    // TODO: Re-evaluate: PV and TCG retain the same wire policy schema while
-    // actual factory/restore validation remains backend-owned, not protocol code.
+    // PV and TCG share this wire schema; factory/restore validation stays
+    // backend-owned, not protocol code.
     pub fn backend_policy(&self) -> Option<&BackendPolicy> {
         match self {
             Self::Pv { policy, .. } | Self::Tcg { policy, .. } => policy.as_ref(),
@@ -210,7 +210,7 @@ impl Program {
     /// Relate the cursor to the committed position before native restoration.
     /// Pending entries may be due now but not in the past; consumed entries
     /// cannot be in the future. Errors name the inconsistent authored key.
-    // TODO: Re-evaluate: authored history is service-owned, so this relationship
+    // Authored history is service-owned, so this relationship
     // must be checked here rather than inferred from opaque native bodies.
     pub fn validate_at(&self, at: u64) -> Result<(), String> {
         self.validate()?;

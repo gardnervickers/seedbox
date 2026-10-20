@@ -8,7 +8,8 @@ pub struct PageHashDiff {
     /// Guest physical frame numbers, never sparse-vector indices.
     pub first_pfns: Vec<u64>,
     /// Explicit guest physical chunk addresses when retained region metadata is
-    /// present. Empty for the legacy flat-page format and omitted on its wire.
+    /// present. Empty, and omitted on the wire, for flat page files without
+    /// region metadata.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub first_gpas: Vec<u64>,
 }
