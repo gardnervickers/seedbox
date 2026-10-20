@@ -84,6 +84,9 @@
 #ifndef HWCAP_DIT
 #    define HWCAP_DIT (1 << 24)
 #endif
+#ifndef HWCAP2_AFP
+#    define HWCAP2_AFP (1 << 20)
+#endif
 
 /***************************************************************************
  * Sandbox layout.  Fixed addresses keep a case reproducible from its seed.
@@ -243,6 +246,7 @@ static uint8_t *g_data = (uint8_t *)DATA_BASE;
 static uint8_t g_pristine[DATA_SIZE];
 static uint64_t g_host_fpcr;
 static bool g_has_dit;
+static bool g_has_afp;
 static uint32_t *g_code_page;
 static uint64_t g_runs;
 static int opt_trace; /* -trace: print every run */
@@ -376,6 +380,7 @@ setup_sandbox(void)
 
     __asm__ volatile("mrs %0, fpcr" : "=r"(g_host_fpcr));
     g_has_dit = (getauxval(AT_HWCAP) & HWCAP_DIT) != 0;
+    g_has_afp = (getauxval(AT_HWCAP2) & HWCAP2_AFP) != 0;
 }
 
 static void
@@ -419,12 +424,12 @@ run_state(const state_t *in, outcome_t *out, uint8_t *mem)
     if (mem != NULL)
         memcpy(mem, g_data, DATA_SIZE);
     if (opt_trace) {
-        printf("  run: sig %d code %d pc %llx addr %llx%s nzcv %llx->%llx fpcr %x "
+        printf("  run: sig %d code %d pc %llx addr %llx%s nzcv %llx->%llx fpcr %x->%x "
                "fpsr %x->%x\n",
                out->sig, out->code, (unsigned long long)out->pc,
                (unsigned long long)out->addr, out->timeout ? " TIMEOUT" : "",
                (unsigned long long)in->nzcv >> 28, (unsigned long long)out->st.nzcv >> 28,
-               in->fpcr, in->fpsr, out->st.fpsr);
+               in->fpcr, out->st.fpcr, in->fpsr, out->st.fpsr);
         for (int i = 0; i < 31; i++) {
             if (in->x[i] != out->st.x[i] || opt_trace > 1)
                 printf("    x%d %llx -> %llx\n", i, (unsigned long long)in->x[i],
@@ -525,7 +530,11 @@ gen_fpcr(rng_t *r)
      * which makes scalar FP instructions merge into the destination's upper
      * bits: DR's IR describes NEP == 0, the Linux default.
      */
-    return (uint32_t)rnd(r) & 0x07c80003U;
+    /* AH and FIZ are RES0 without FEAT_AFP: the signal return cannot load
+     * those requested bits, so they must not be attributed to the tested word.
+     * Keep the same RNG draw and all supported controls.
+     */
+    return (uint32_t)rnd(r) & (g_has_afp ? 0x07c80003U : 0x07c80000U);
 }
 
 static void
@@ -2376,6 +2385,8 @@ main(int argc, char **argv)
         runnable += class_usable(&g_classes[i]);
     printf("a64_proptest %s: %d encoding classes, %d for this CPU; seed %llu\n", mode,
            g_nclasses, runnable, (unsigned long long)seed);
+    printf("FPCR controls: AFP=%d mask=%08x\n", g_has_afp,
+           g_has_afp ? 0x07c80003U : 0x07c80000U);
 
     if (strcmp(mode, "templates") == 0) {
         for (int i = 0; i < g_nclasses; i++) {

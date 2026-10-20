@@ -12,7 +12,10 @@ int main(int argc, char **argv)
     if (argc != 2) return 2;
     FILE *f = fopen(argv[1], "r");
     if (!f) return 2;
-    void *dc = dr_standalone_init();
+    /* drdecode needs no runtime initialization.  Match the source offline
+     * test's enable_all_test_cpu_features() vector-length setting as well. */
+    void *dc = GLOBAL_DCONTEXT;
+    if (!dr_set_vector_length(256)) return 2;
     char *line = NULL;
     size_t cap = 0, count = 0;
     int failures = 0;
@@ -56,7 +59,6 @@ int main(int argc, char **argv)
     }
     free(line);
     fclose(f);
-    dr_standalone_exit();
     if (count != 5079) { fprintf(stderr, "expected 5079 source rows, got %zu\n", count); return 1; }
     return failures ? 1 : 0;
 }

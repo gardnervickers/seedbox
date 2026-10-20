@@ -4,8 +4,8 @@
     "source": "suite/proptest/a64_proptest.c",
     "commit": "356c1821045a4b5678d0813e132074324623df6e",
     "source_sha256": "4821e856b3c8af324ff7c053b2e9f44b0ca28c646b24dfd7fafa01a2c18c19a6",
-    "ported_sha256": "4821e856b3c8af324ff7c053b2e9f44b0ca28c646b24dfd7fafa01a2c18c19a6",
-    "adaptation": "Unchanged source public hardware/IR sandbox; finite source CMake populations selected by Rust (80000 mutants/random)."
+    "ported_sha256": "94ab0138d66d3e1fa92812581dd3fa7c25a13e2e2a725ec4a44836382a2bfa83",
+    "adaptation": "Retain original words, populations, RNG draws and property assertions; generate AFP AH/FIZ controls only when Linux advertises HWCAP2_AFP (otherwise RES0). Report AFP control mask and both FPCR values in trace."
   },
   {
     "file": "progress.c",
@@ -571,9 +571,9 @@
     "file": "codec.c",
     "source": "suite/tests/api/dis-a64.c",
     "commit": "356c1821045a4b5678d0813e132074324623df6e",
-    "adaptation": "Public disassemble/decode/reencode oracle; inventory IDs, fresh instruction per vector.",
+    "adaptation": "Public disassemble/decode/reencode oracle; inventory IDs, fresh instruction per vector. Use public drdecode offline all-feature encoding and the original enable_all_test_cpu_features() vector length of 256 bits; all 5079 original assertions retained.",
     "source_sha256": "e4c42e5f4159b09a0b97e44eeda4cf9d48fedc885bf431577b41beec75940ec2",
-    "ported_sha256": "c7049bd01f908159854b53937de4564520ff8849a50ca5e2831fc69482071b1f"
+    "ported_sha256": "e8bd22c4571f34c9e411e32c478912b0d61e8ea15a031a0ea613aed1884cf825"
   },
   {
     "file": "flush_client.c",
