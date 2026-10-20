@@ -1,9 +1,6 @@
 name: DynamoRIO integration
 
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -37,8 +34,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          # Validate the published PR head, preserving the frozen source inputs.
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Validate the exact ref selected for the manual run.
+          ref: ${{ github.sha }}
           submodules: recursive
       - uses: cachix/install-nix-action@v31
         with:

@@ -86,6 +86,9 @@ We do not need to support every possible application. If someone intentionally t
 - Run portable checks in `nix develop`; engine changes also need relevant native
   suites. Portable compiles native cases without running them. Missing requirements
   are blockers. Suite discovery/policy lives in `crates/seedbox-check/src/`.
+- Ordinary Seedbox CI remains automatic. The expensive native DynamoRIO workflow
+  is manual-only; after updating `vendor/dynamorio`, dispatch it for both x86-64
+  and ARM64. See internals for local commands and hosted workflow details.
 - CLI conventions live in `crates/seedbox-cli/src/`: reuse clap argument groups,
   validate before preparation, and keep computed defaults in `defaults.rs`.
   Environment selects paths/state, never result-changing inputs.

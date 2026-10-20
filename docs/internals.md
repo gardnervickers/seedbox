@@ -101,7 +101,8 @@ from [the maintained DR fork](../vendor/dynamorio/seedbox-tests),
 with native controls, the packaged `drrun`, and a public drmgr/drreg client.
 The fork owns the case sources, corpora, clients and case-specific runners.
 Seedbox's existing Cargo targets compile the fork's Rust entrypoints directly,
-preserving libtest names and feature gates; Seedbox CI runs both architectures.
+preserving libtest names and feature gates. The manually dispatched native
+integration workflow runs both architectures; ordinary Seedbox CI remains automatic.
 Nix packages fixtures directly from the selected submodule, using its matching
 SDK/runtime. General Seedbox test support and guest/PV integration stay here.
 The time policy scans only `seedbox-tests/` within the fork, including its Rust
@@ -137,7 +138,12 @@ full eight transform populations require public decoder mode; their full
 standalone populations remain manual supplemental diagnostics.
 Signal storm and interval-timer models retain their source populations and pure
 clock-input oracles. Live elapsed-clock timing equivalence remains incomplete.
-[Hosted CI](../.github/workflows/dynamorio-tests.yml) runs both native architectures.
+[The hosted workflow](../.github/workflows/dynamorio-tests.yml) is manual-only
+because the complete native suite is expensive. After updating `vendor/dynamorio`,
+open **DynamoRIO integration** in GitHub Actions, choose **Run workflow**, select
+the Seedbox ref containing the update, and require both the x86-64 and ARM64 jobs.
+GitHub accepts a manual dispatch only when the workflow file is present on the
+default branch, so a newly added workflow cannot run before that file is merged.
 
 Ordinary Linux checker jobs share one sequential subreaper owner. Cancellation
 first signals TERM so fixture supervisors can finish cleanup; after two seconds
