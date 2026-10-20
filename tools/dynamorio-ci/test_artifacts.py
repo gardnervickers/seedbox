@@ -107,19 +107,33 @@ class ArtifactTests(unittest.TestCase):
                 environment[variable] = str(fixture)
             headers = (f'      [Requesting program interpreter: {loader}]\n'
                        ' 0x1 (NEEDED) Shared library: [libc.so.6]\n'
+                       ' 0x1 (NEEDED) Shared library: [ld-linux-aarch64.so.1]\n'
                        f' 0x1d (RUNPATH) Library runpath: [{libc.parent}]\n')
-            with patch.object(artifacts.subprocess, 'run', return_value=subprocess.CompletedProcess(
-                    ['readelf'], 0, headers, '')) as readelf:
+            def readelf_output(command, **kwargs):
+                output = headers if command[-1].endswith('translator_progress_context') else (
+                    ' 0x1 (NEEDED) Shared library: [libdynamorio.so]\n')
+                return subprocess.CompletedProcess(command, 0, output, '')
+
+            with patch.object(artifacts.subprocess, 'run', side_effect=readelf_output) as readelf:
                 manifest = self.collect(root, environment)
             self.assertEqual(readelf.call_count, 4)
-            self.assertEqual(len(manifest['files']), 4)
-            for record in manifest['files']:
+            self.assertEqual(len(manifest['files']), 5)
+            interpreter = next(record for record in manifest['files']
+                               if record['retained'] ==
+                               'fixtures/interpreter/ld-linux-aarch64.so.1')
+            self.assertEqual((root / 'temp/dr-artifacts' / interpreter['retained']).read_bytes(),
+                             loader.read_bytes())
+            self.assertEqual(interpreter['sha256'], hashlib.sha256(loader.read_bytes()).hexdigest())
+            for record in (record for record in manifest['files'] if 'elf' in record):
                 retained = root / 'temp/dr-artifacts' / record['retained']
                 self.assertEqual(retained.read_bytes(), Path(record['source']).read_bytes())
                 self.assertEqual(record['sha256'], hashlib.sha256(retained.read_bytes()).hexdigest())
-                self.assertEqual(record['elf']['interpreter'], str(loader))
-                self.assertTrue(record['elf']['interpreter_exists'])
-                self.assertEqual(record['elf']['needed_in_embedded_paths']['libc.so.6'], str(libc))
+                if retained.name == 'translator_progress_context':
+                    self.assertEqual(record['elf']['interpreter'], str(loader))
+                    self.assertTrue(record['elf']['interpreter_exists'])
+                    self.assertEqual(record['elf']['needed_in_embedded_paths']['libc.so.6'], str(libc))
+                else:
+                    self.assertIsNone(record['elf']['interpreter'])
 
     def test_arm_progress_probe_missing_binary_is_reported_without_placeholder(self):
         with tempfile.TemporaryDirectory() as directory:

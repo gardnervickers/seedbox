@@ -140,6 +140,7 @@ def collect(root, temporary, environment):
         if environment.get('RUNNER_ARCH') == 'ARM64':
             # The context case is AArch64-only. Keep its exact application and
             # public client from each fixture alongside the selected runtime.
+            probe_elf = None
             for relative in ('bin/translator_progress_context',
                              'lib/libtranslator_progress.so'):
                 source = Path(fixture) / relative
@@ -161,12 +162,41 @@ def collect(root, temporary, environment):
                               'sha256': hashlib.sha256(data).hexdigest()}
                     try:
                         record['elf'] = probe_elf_paths(source)
+                        if relative == 'bin/translator_progress_context':
+                            probe_elf = record['elf']
                     except (OSError, subprocess.CalledProcessError,
                             subprocess.TimeoutExpired) as error:
                         warning(f'cannot inspect ELF loader paths {source}: {error}')
                     manifest['files'].append(record)
                 except (OSError, ValueError) as error:
                     warning(f'cannot retain {source}: {error}')
+            if flavor == 'release' and probe_elf and probe_elf['interpreter']:
+                # The first redirect precedes main in the hosted failure. Keep
+                # exactly the probe's embedded AArch64 interpreter for PC offsets.
+                source = Path(probe_elf['interpreter'])
+                if not (source.is_absolute() and source.name == 'ld-linux-aarch64.so.1'
+                        and probe_elf['needed_in_embedded_paths'].get(source.name) == str(source)):
+                    warning(f'probe interpreter is not an embedded AArch64 dependency: {source}')
+                else:
+                    try:
+                        size = source.stat().st_size
+                        if size > min(BINARY_FILE, remaining):
+                            warning(f'omitted oversized binary {source}: {size} bytes')
+                        else:
+                            with source.open('rb') as stream:
+                                data = stream.read(min(BINARY_FILE, remaining) + 1)
+                            if len(data) != size:
+                                raise ValueError('binary changed during collection')
+                            destination = output / 'fixtures' / 'interpreter' / source.name
+                            destination.parent.mkdir(parents=True, exist_ok=True)
+                            destination.write_bytes(data)
+                            remaining -= size
+                            manifest['files'].append({
+                                'source': str(source), 'resolved_source': str(source.resolve()),
+                                'retained': str(destination.relative_to(output)),
+                                'bytes': size, 'sha256': hashlib.sha256(data).hexdigest()})
+                    except (OSError, ValueError) as error:
+                        warning(f'cannot retain probe interpreter {source}: {error}')
     # Walk only the checker's retained report directory, never Cargo/Nix trees,
     # home directories, symlinked report paths, cores or arbitrary binary files.
     remaining, count, visited = TEXT_TOTAL, 0, 0
