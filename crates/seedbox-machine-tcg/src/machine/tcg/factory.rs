@@ -169,18 +169,7 @@ impl Factory {
         definition: &MachineDefinition,
         archive: Vec<u8>,
     ) -> Result<TcgMachine, Error> {
-        let mut machine = TcgMachine::new_with_boot_archive_in(
-            &self.qemu,
-            self.firmware.clone(),
-            &self.bootstrap,
-            definition.clone(),
-            self.scratch_root.as_deref(),
-            move |_, _| Ok(archive),
-        )?;
-        if let Some(policy) = &self.policy {
-            machine.configure_policy(&definition.name, policy)?;
-        }
-        Ok(machine)
+        self.create_with(definition, move |_, _| Ok(archive))
     }
     fn create_selected(
         &mut self,
@@ -192,34 +181,28 @@ impl Factory {
                 .check_attachments(definition.disk.is_some(), self.formatter.is_some())
                 .map_err(|e| Error(e.into()))?;
         }
-        let mut machine = if environment.is_none() {
-            match self.scratch_root.as_deref() {
-                Some(root) => TcgMachine::new_with_scratch(
-                    &self.qemu,
-                    self.firmware.clone(),
-                    &self.bootstrap,
-                    definition.clone(),
-                    Some(root),
-                ),
-                None => TcgMachine::new(
-                    &self.qemu,
-                    self.firmware.clone(),
-                    &self.bootstrap,
-                    definition.clone(),
-                ),
-            }?
-        } else {
-            TcgMachine::new_with_boot_archive_in(
-                &self.qemu,
-                self.firmware.clone(),
-                &self.bootstrap,
-                definition.clone(),
-                self.scratch_root.as_deref(),
-                |application, bootstrap| {
-                    self.assemble_selected(application, bootstrap, environment)
-                },
-            )?
-        };
+        self.create_with(definition, |application, bootstrap| {
+            self.assemble_selected(application, bootstrap, environment)
+        })
+    }
+    /// Construct with this factory's QEMU, firmware, bootstrap and scratch
+    /// root, then apply its configured policy.
+    fn create_with(
+        &self,
+        definition: &MachineDefinition,
+        package: impl FnOnce(
+            &crate::definition::PreparedApplication,
+            &GuestBootstrap,
+        ) -> Result<Vec<u8>, crate::definition::DefinitionError>,
+    ) -> Result<TcgMachine, Error> {
+        let mut machine = TcgMachine::prepare(
+            &self.qemu,
+            self.firmware.clone(),
+            &self.bootstrap,
+            definition.clone(),
+            self.scratch_root.as_deref(),
+            package,
+        )?;
         if let Some(policy) = &self.policy {
             machine.configure_policy(&definition.name, policy)?;
         }

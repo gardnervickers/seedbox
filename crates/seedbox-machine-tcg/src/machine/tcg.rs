@@ -331,41 +331,34 @@ impl Snapshot {
 }
 
 impl TcgMachine {
-    /// Prepare a stopped machine using the project's patched QEMU binary.
-    /// Boot initialization occurs in the first run, consuming eight bytes from
-    /// its context RNG in little-endian order without executing instructions.
-    /// Each pending reboot consumes another eight bytes on the next run.
+    /// Prepare a stopped machine using the project's patched QEMU binary and
+    /// the default boot archive, without a factory scratch root.
+    #[cfg(test)]
     pub(crate) fn new(
         qemu: &Path,
         firmware: Vec<u8>,
         bootstrap: &crate::application::GuestBootstrap,
         definition: crate::definition::MachineDefinition,
     ) -> Result<Self, Error> {
-        Self::new_with_scratch(qemu, firmware, bootstrap, definition, None)
-    }
-
-    /// The factory supplies host scratch authority separately from guest inputs.
-    pub(crate) fn new_with_scratch(
-        qemu: &Path,
-        firmware: Vec<u8>,
-        bootstrap: &crate::application::GuestBootstrap,
-        definition: crate::definition::MachineDefinition,
-        scratch_root: Option<&Path>,
-    ) -> Result<Self, Error> {
-        Self::new_with_boot_archive_in(
+        Self::prepare(
             qemu,
             firmware,
             bootstrap,
             definition,
-            scratch_root,
+            None,
             crate::application::boot_archive,
         )
     }
 
-    /// Package once at the original preparation point, after resource/argument
-    /// checks. Factory-owned environment configuration does not alter validation
-    /// order or require duplicating construction and host scratch ownership.
-    pub(crate) fn new_with_boot_archive_in(
+    /// Prepare a stopped machine using the project's patched QEMU binary.
+    /// Boot initialization occurs in the first run, consuming eight bytes from
+    /// its context RNG in little-endian order without executing instructions.
+    /// Each pending reboot consumes another eight bytes on the next run.
+    ///
+    /// The factory supplies host scratch authority separately from guest
+    /// inputs. `package` runs once, after resource/argument checks, so
+    /// factory-owned environment configuration does not alter validation order.
+    pub(crate) fn prepare(
         qemu: &Path,
         firmware: Vec<u8>,
         bootstrap: &crate::application::GuestBootstrap,
