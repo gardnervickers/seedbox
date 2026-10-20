@@ -734,97 +734,17 @@ impl Service {
                     .map_err(|e| format!("handles: {e:?}"))?,
                 self.triggers.records(),
             ),
-            Ok(Operation::Connections { from, to, after }) => (|| {
-                let from = adapter.network_member(&from)?;
-                let to = adapter.network_member(&to)?;
-                if from == to {
-                    return Err(OperationError::invalid("connection endpoints must differ"));
-                }
-                let connections = adapter.connections(&from, &to, after)?;
-                let next = connections.last().map_or(after, |c| c.incarnation);
-                Ok(json!({"connections":connections,"next_after":next}))
-            })(),
-            Ok(Operation::Sleep { duration_ns }) => {
-                self.last_wake = self
-                    .last_wake
-                    .checked_add(1)
-                    .ok_or("sleep wake IDs exhausted")?;
-                let token = self.last_wake;
-                self.sleepers.insert(token, (call, now + duration_ns));
-                return Ok(vec![Plan::Wake {
-                    token,
-                    at: now + duration_ns,
-                }]);
+            Ok(Operation::Connections { from, to, after }) => {
+                Self::connections(adapter, &from, &to, after)
             }
+            Ok(Operation::Sleep { duration_ns }) => return self.sleep(call, now, duration_ns),
             Ok(Operation::ArmTrigger {
                 source,
                 marker,
                 match_timeout_ns,
-                fault: TriggerFault::Stop { target },
-            }) => adapter.resolve(&source).and_then(|source| {
-                adapter.resolve(&target).and_then(|target| {
-                    let id = self
-                        .triggers
-                        .arm(
-                            source.name.clone(),
-                            marker,
-                            now,
-                            match_timeout_ns,
-                            TriggerAction::Stop(target.name.clone()),
-                        )
-                        .map_err(|e| error(ErrorCode::InvalidState, e))?;
-                    let deadline = self.triggers.records()[id as usize - 1].match_deadline;
-                    self.notices.push(Notice::TriggerArmed {
-                        trigger: id,
-                        source: source.name,
-                        target: Some(target.name),
-                        at: now,
-                        deadline,
-                    });
-                    Ok(json!({"trigger_id":id}))
-                })
-            }),
-            Ok(Operation::ArmTrigger {
-                source,
-                marker,
-                match_timeout_ns,
-                fault: TriggerFault::Partition { left, right },
-            }) => adapter.resolve(&source).and_then(|source| {
-                // The same membership rules as an untriggered partition.
-                let (left, right) = Self::partition_sides(adapter, &left, &right)?;
-                let id = self
-                    .triggers
-                    .arm(
-                        source.name.clone(),
-                        marker,
-                        now,
-                        match_timeout_ns,
-                        TriggerAction::Partition { left, right },
-                    )
-                    .map_err(|e| error(ErrorCode::InvalidState, e))?;
-                let deadline = self.triggers.records()[id as usize - 1].match_deadline;
-                self.notices.push(Notice::TriggerArmed {
-                    trigger: id,
-                    source: source.name,
-                    target: None,
-                    at: now,
-                    deadline,
-                });
-                Ok(json!({"trigger_id":id}))
-            }),
-            Ok(Operation::CancelTrigger { trigger_id }) => self
-                .triggers
-                .cancel(trigger_id, now)
-                .map(|_| {
-                    self.notices.push(Notice::TriggerResolved {
-                        trigger: trigger_id,
-                        at: now,
-                        status: super::triggers::Status::Cancelled,
-                        fault: None,
-                    });
-                    json!({})
-                })
-                .map_err(|e| error(ErrorCode::InvalidState, e)),
+                fault,
+            }) => self.arm_trigger(adapter, &source, marker, match_timeout_ns, fault, now),
+            Ok(Operation::CancelTrigger { trigger_id }) => self.cancel_trigger(trigger_id, now),
             Ok(
                 op @ (Operation::Stop { .. }
                 | Operation::Restart { .. }
@@ -872,6 +792,85 @@ impl Service {
         .then_some(now);
         Ok(vec![self.reply(call, now, effect, result)?])
     }
+    /// List the connections between two network members after `after`.
+    fn connections(
+        adapter: &impl Adapter,
+        from: &Target,
+        to: &Target,
+        after: u64,
+    ) -> Result<Value, OperationError> {
+        let from = adapter.network_member(from)?;
+        let to = adapter.network_member(to)?;
+        if from == to {
+            return Err(OperationError::invalid("connection endpoints must differ"));
+        }
+        let connections = adapter.connections(&from, &to, after)?;
+        let next = connections.last().map_or(after, |c| c.incarnation);
+        Ok(json!({"connections":connections,"next_after":next}))
+    }
+    /// Park `call` until its wake token is due; the reply follows the wake.
+    fn sleep(&mut self, call: Call, now: u64, duration_ns: u64) -> Result<Vec<Plan>, Failure> {
+        self.last_wake = self
+            .last_wake
+            .checked_add(1)
+            .ok_or("sleep wake IDs exhausted")?;
+        let token = self.last_wake;
+        self.sleepers.insert(token, (call, now + duration_ns));
+        Ok(vec![Plan::Wake {
+            token,
+            at: now + duration_ns,
+        }])
+    }
+    /// Resolve a trigger's source, then its fault targets, and arm it.
+    fn arm_trigger(
+        &mut self,
+        adapter: &impl Adapter,
+        source: &Target,
+        marker: Vec<u8>,
+        match_timeout_ns: u64,
+        fault: TriggerFault,
+        now: u64,
+    ) -> Result<Value, OperationError> {
+        let source = adapter.resolve(source)?;
+        let (action, target) = match fault {
+            TriggerFault::Stop { target } => {
+                let target = adapter.resolve(&target)?;
+                (TriggerAction::Stop(target.name.clone()), Some(target.name))
+            }
+            TriggerFault::Partition { left, right } => {
+                // The same membership rules as an untriggered partition.
+                let (left, right) = Self::partition_sides(adapter, &left, &right)?;
+                (TriggerAction::Partition { left, right }, None)
+            }
+        };
+        let id = self
+            .triggers
+            .arm(source.name.clone(), marker, now, match_timeout_ns, action)
+            .map_err(|e| error(ErrorCode::InvalidState, e))?;
+        let deadline = self.triggers.records()[id as usize - 1].match_deadline;
+        self.notices.push(Notice::TriggerArmed {
+            trigger: id,
+            source: source.name,
+            target,
+            at: now,
+            deadline,
+        });
+        Ok(json!({"trigger_id":id}))
+    }
+    fn cancel_trigger(&mut self, trigger_id: u32, now: u64) -> Result<Value, OperationError> {
+        self.triggers
+            .cancel(trigger_id, now)
+            .map(|_| {
+                self.notices.push(Notice::TriggerResolved {
+                    trigger: trigger_id,
+                    at: now,
+                    status: super::triggers::Status::Cancelled,
+                    fault: None,
+                });
+                json!({})
+            })
+            .map_err(|e| error(ErrorCode::InvalidState, e))
+    }
     /// Admit a host input through the ordinary-control path at its due time.
     /// The outer result is fatal failure; the inner result is admission or
     /// policy rejection. A rejection allocates no fault ID and produces no
@@ -914,7 +913,24 @@ impl Service {
         now: u64,
         deadline_ns: u64,
     ) -> Result<(u32, Vec<Plan>), PreparationError> {
-        let (name, command) = match command {
+        let (name, command) = self.unwrap_named(command)?;
+        let deadline = now
+            .checked_add(deadline_ns)
+            .ok_or_else(|| OperationError::invalid("effect deadline overflow"))?;
+        let compiled = command.compile_targets(
+            |target| adapter.resolve(target),
+            |target| adapter.network_member(target),
+            || adapter.network_floor(),
+        )?;
+        let (subject, effect, handle, healing) =
+            self.prepare_change(adapter, mode, command, compiled, name)?;
+        self.install(
+            adapter, mode, requester, call, subject, effect, handle, healing, now, deadline,
+        )
+    }
+    /// Split a named command into its checked handle name and inner command.
+    fn unwrap_named(&self, command: Command) -> Result<(Option<String>, Command), OperationError> {
+        match command {
             Command::Named { handle, command } => {
                 self.handles.check_name(&handle).map_err(|e| {
                     error(
@@ -926,19 +942,21 @@ impl Service {
                         },
                     )
                 })?;
-                (Some(handle), *command)
+                Ok((Some(handle), *command))
             }
-            command => (None, command),
-        };
-        let deadline = now
-            .checked_add(deadline_ns)
-            .ok_or_else(|| OperationError::invalid("effect deadline overflow"))?;
-        let compiled = command.compile_targets(
-            |target| adapter.resolve(target),
-            |target| adapter.network_member(target),
-            || adapter.network_floor(),
-        )?;
-        let (subject, effect, handle, healing) = match command {
+            command => Ok((None, command)),
+        }
+    }
+    /// Resolve a command's subject and effect, and reserve its handle.
+    fn prepare_change(
+        &mut self,
+        adapter: &mut impl Adapter,
+        mode: AdmissionMode,
+        command: Command,
+        compiled: targets::CompiledTargets<Facts>,
+        name: Option<String>,
+    ) -> Result<HandleAdmission, PreparationError> {
+        Ok(match command {
             Command::Spawn { machine } => {
                 adapter.reserve_spawn(&machine)?;
                 (
@@ -985,7 +1003,7 @@ impl Service {
                         to: to.clone(),
                     },
                     Change::Shape(policy, network_faults),
-                    name.clone(),
+                    name,
                 )?;
                 (
                     Subject::Network(Scope::DirectedLinks { from, to }),
@@ -995,32 +1013,7 @@ impl Service {
                 )
             }
             Command::DropConnection { connection } => {
-                let plan = self.reserve_handle(
-                    HandleTarget::Connection(connection.clone()),
-                    Change::Select,
-                    name.clone(),
-                )?;
-                let available = adapter.selection_available(&connection);
-                if !matches!(available, Ok(true)) {
-                    self.handles
-                        .rejected(&plan)
-                        .map_err(|_| Failure::from("connection reservation rollback"))?;
-                    return Err(available
-                        .err()
-                        .unwrap_or_else(|| {
-                            error(
-                                ErrorCode::InvalidState,
-                                "connection incarnation unavailable or selector capacity exhausted",
-                            )
-                        })
-                        .into());
-                }
-                (
-                    Subject::Network(Scope::Connection { connection }),
-                    Effect::Select,
-                    Some(plan),
-                    false,
-                )
+                self.prepare_drop_connection(adapter, connection, name)?
             }
             Command::Throttle { config, .. } => {
                 let facts = compiled
@@ -1029,7 +1022,7 @@ impl Service {
                 let plan = self.reserve_handle(
                     HandleTarget::Machine(facts.name.clone()),
                     Change::Execution(config),
-                    name.clone(),
+                    name,
                 )?;
                 (
                     Subject::Machine(facts),
@@ -1042,59 +1035,13 @@ impl Service {
                 let facts = compiled
                     .machine
                     .ok_or_else(|| Failure::from("missing compiled machine target"))?;
-                Self::step_state(mode, &facts)?;
-                // Draw only after admission checks, at this barrier.
-                let offset = match nanoseconds {
-                    Amount::Exact(offset) => offset,
-                    Amount::Seeded(max) => Self::uniform(adapter, &facts.name, max)?,
-                };
-                let plan = self.reserve_handle(
-                    HandleTarget::Machine(facts.name.clone()),
-                    Change::Step(offset),
-                    name.clone(),
-                )?;
-                (
-                    Subject::Machine(facts),
-                    Effect::StepRealtime(offset),
-                    Some(plan),
-                    false,
-                )
+                self.prepare_step(adapter, mode, facts, nanoseconds, name)?
             }
             Command::Drift { ppb, .. } => {
                 let facts = compiled
                     .machine
                     .ok_or_else(|| Failure::from("missing compiled machine target"))?;
-                // A machine runs at one rate. Like a refused throttle, a
-                // refused duplicate consumes its handle number; it draws no value.
-                if self.handles.drifting(&facts.name) {
-                    if name.is_none() {
-                        self.handles.reserve().map_err(|e| {
-                            error(ErrorCode::InvalidState, format!("clock_drift: {e:?}"))
-                        })?;
-                    }
-                    return Err(error(
-                        ErrorCode::InvalidState,
-                        "target machine clock is already drifting",
-                    )
-                    .into());
-                }
-                let ppb = match ppb {
-                    Amount::Exact(rate) => rate,
-                    Amount::Seeded(max) => Self::uniform(adapter, &facts.name, max)?,
-                };
-                let rate =
-                    ClockRate::new(ppb).map_err(|e| OperationError::invalid(e.to_string()))?;
-                let plan = self.reserve_handle(
-                    HandleTarget::Machine(facts.name.clone()),
-                    Change::Drift(rate),
-                    name.clone(),
-                )?;
-                (
-                    Subject::Machine(facts),
-                    Effect::Drift(rate),
-                    Some(plan),
-                    false,
-                )
+                self.prepare_drift(adapter, facts, ppb, name)?
             }
             Command::Partition { .. } => {
                 let (left, right) = compiled
@@ -1106,7 +1053,7 @@ impl Service {
                         right: right.clone(),
                     },
                     Change::Partition,
-                    name.clone(),
+                    name,
                 )?;
                 (
                     Subject::Links { left, right },
@@ -1125,10 +1072,106 @@ impl Service {
                 None,
                 false,
             ),
+        })
+    }
+    /// Reserve a connection selection, rolled back unless the incarnation is
+    /// still available with selector capacity.
+    fn prepare_drop_connection(
+        &mut self,
+        adapter: &impl Adapter,
+        connection: Connection,
+        name: Option<String>,
+    ) -> Result<HandleAdmission, PreparationError> {
+        let plan = self.reserve_handle(
+            HandleTarget::Connection(connection.clone()),
+            Change::Select,
+            name,
+        )?;
+        let available = adapter.selection_available(&connection);
+        if !matches!(available, Ok(true)) {
+            self.handles
+                .rejected(&plan)
+                .map_err(|_| Failure::from("connection reservation rollback"))?;
+            return Err(available
+                .err()
+                .unwrap_or_else(|| {
+                    error(
+                        ErrorCode::InvalidState,
+                        "connection incarnation unavailable or selector capacity exhausted",
+                    )
+                })
+                .into());
+        }
+        Ok((
+            Subject::Network(Scope::Connection { connection }),
+            Effect::Select,
+            Some(plan),
+            false,
+        ))
+    }
+    fn prepare_step(
+        &mut self,
+        adapter: &mut impl Adapter,
+        mode: AdmissionMode,
+        facts: Facts,
+        nanoseconds: Amount,
+        name: Option<String>,
+    ) -> Result<HandleAdmission, PreparationError> {
+        Self::step_state(mode, &facts)?;
+        // Draw only after admission checks, at this barrier.
+        let offset = match nanoseconds {
+            Amount::Exact(offset) => offset,
+            Amount::Seeded(max) => Self::uniform(adapter, &facts.name, max)?,
         };
-        self.install(
-            adapter, mode, requester, call, subject, effect, handle, healing, now, deadline,
-        )
+        let plan = self.reserve_handle(
+            HandleTarget::Machine(facts.name.clone()),
+            Change::Step(offset),
+            name,
+        )?;
+        Ok((
+            Subject::Machine(facts),
+            Effect::StepRealtime(offset),
+            Some(plan),
+            false,
+        ))
+    }
+    fn prepare_drift(
+        &mut self,
+        adapter: &mut impl Adapter,
+        facts: Facts,
+        ppb: Amount,
+        name: Option<String>,
+    ) -> Result<HandleAdmission, PreparationError> {
+        // A machine runs at one rate. Like a refused throttle, a
+        // refused duplicate consumes its handle number; it draws no value.
+        if self.handles.drifting(&facts.name) {
+            if name.is_none() {
+                self.handles
+                    .reserve()
+                    .map_err(|e| error(ErrorCode::InvalidState, format!("clock_drift: {e:?}")))?;
+            }
+            return Err(error(
+                ErrorCode::InvalidState,
+                "target machine clock is already drifting",
+            )
+            .into());
+        }
+        let ppb = match ppb {
+            Amount::Exact(rate) => rate,
+            Amount::Seeded(max) => Self::uniform(adapter, &facts.name, max)?,
+        };
+        let rate = ClockRate::new(ppb).map_err(|e| OperationError::invalid(e.to_string()))?;
+        let plan = self.reserve_handle(
+            HandleTarget::Machine(facts.name.clone()),
+            Change::Drift(rate),
+            name,
+        )?;
+        Ok((
+            Subject::Machine(facts),
+            Effect::Drift(rate),
+            Some(plan),
+            false,
+        ))
     }
     fn reserve_handle(
         &mut self,
@@ -1351,6 +1394,69 @@ impl Service {
                 );
             }
         };
+        Self::check_machine_effect(mode, &requester, &facts, &effect)?;
+        let fault = self.token()?;
+        let pending = Pending {
+            network: None,
+            call,
+            requester,
+            scope,
+            effect: effect.clone(),
+            command: None,
+            dispatched: None,
+            deadline,
+            admitted: now,
+            result: Self::admission_result(&effect, handle.as_ref(), healing, &facts.name),
+            note: Self::admission_note(&effect, handle.as_ref()),
+            handle,
+            healing,
+        };
+        let unavailable =
+            pending.effect.guest_command() && (facts.vm == Vm::Down || facts.physically_ended);
+        self.admitted(fault, &pending, now);
+        // Healing a step whose kernel ended changes nothing in any state. A
+        // zero step (a seeded draw or its heal) needs no guest command, but
+        // only after the same admission and availability checks as any step.
+        let lost = pending.handle.as_ref().is_some_and(|h| h.lost);
+        let immediate = lost || (pending.effect == Effect::StepRealtime(0) && !unavailable);
+        self.pending.insert(fault, pending);
+        if immediate {
+            return Ok((fault, self.finish(fault, now, now, Ok(()))?));
+        }
+        let mut plans = vec![];
+        if !unavailable && (!self.pending[&fault].effect.guest_command() || facts.ready) {
+            match Self::dispatch(adapter, fault, self.pending.get_mut(&fault).unwrap(), now) {
+                Ok(plan) => plans.push(plan),
+                Err(e) => return Err(self.fatal(Some(fault), Some(now), now, e.message).into()),
+            }
+        }
+        if self.pending[&fault].effect.guest_command() {
+            plans.push(Plan::Deadline {
+                fault,
+                at: deadline,
+            });
+        }
+        if unavailable {
+            plans = self.finish(
+                fault,
+                now,
+                now,
+                Err(error(
+                    ErrorCode::TargetUnavailable,
+                    "target is physically unavailable",
+                )),
+            )?;
+        }
+        Ok((fault, plans))
+    }
+    /// Machine-effect admission checks, in order: the control-only
+    /// availability preflight, target state policy, then requester mode.
+    fn check_machine_effect(
+        mode: AdmissionMode,
+        requester: &Requester,
+        facts: &Facts,
+        effect: &Effect,
+    ) -> Result<(), PreparationError> {
         // The control API's physical-availability preflight precedes Faults'
         // policy validation (world_windowed::admit_control/reject_unavailable).
         // Trigger admission bypasses this control-only wrapper.
@@ -1399,77 +1505,38 @@ impl Service {
         if matches!(mode, AdmissionMode::Trigger) != matches!(requester, Requester::Trigger(_)) {
             return Err(Failure::from("admission mode does not match its requester").into());
         }
-        let fault = self.token()?;
-        let pending = Pending {
-            network: None,
-            call,
-            requester,
-            scope,
-            effect: effect.clone(),
-            command: None,
-            dispatched: None,
-            deadline,
-            admitted: now,
-            result: match &handle {
-                _ if effect == Effect::Spawn => json!({"machine":facts.name}),
-                Some(h) if !healing => match effect {
-                    Effect::StepRealtime(offset) => {
-                        json!({"handle":h.handle.to_string(),"offset_ns":offset})
-                    }
-                    Effect::Drift(rate) => {
-                        json!({"handle":h.handle.to_string(),"rate_ppb":rate.ppb()})
-                    }
-                    _ => json!({"handle":h.handle.to_string()}),
-                },
-                _ => json!({}),
+        Ok(())
+    }
+    /// The success result an admitted machine effect replies with.
+    fn admission_result(
+        effect: &Effect,
+        handle: Option<&ExecutionPlan>,
+        healing: bool,
+        machine: &str,
+    ) -> Value {
+        match handle {
+            _ if *effect == Effect::Spawn => json!({"machine":machine}),
+            Some(h) if !healing => match effect {
+                Effect::StepRealtime(offset) => {
+                    json!({"handle":h.handle.to_string(),"offset_ns":offset})
+                }
+                Effect::Drift(rate) => {
+                    json!({"handle":h.handle.to_string(),"rate_ppb":rate.ppb()})
+                }
+                _ => json!({"handle":h.handle.to_string()}),
             },
-            // These static notes form a closed wire list in persistence.rs.
-            // Update that list when adding or changing a note here.
-            note: match &handle {
-                Some(h) if h.lost => Some("realtime step ended with its machine incarnation"),
-                _ if effect == Effect::StepRealtime(0) => Some("zero realtime step"),
-                _ => None,
-            },
-            handle,
-            healing,
-        };
-        let unavailable =
-            pending.effect.guest_command() && (facts.vm == Vm::Down || facts.physically_ended);
-        self.admitted(fault, &pending, now);
-        // Healing a step whose kernel ended changes nothing in any state. A
-        // zero step (a seeded draw or its heal) needs no guest command, but
-        // only after the same admission and availability checks as any step.
-        let lost = pending.handle.as_ref().is_some_and(|h| h.lost);
-        let immediate = lost || (pending.effect == Effect::StepRealtime(0) && !unavailable);
-        self.pending.insert(fault, pending);
-        if immediate {
-            return Ok((fault, self.finish(fault, now, now, Ok(()))?));
+            _ => json!({}),
         }
-        let mut plans = vec![];
-        if !unavailable && (!self.pending[&fault].effect.guest_command() || facts.ready) {
-            match Self::dispatch(adapter, fault, self.pending.get_mut(&fault).unwrap(), now) {
-                Ok(plan) => plans.push(plan),
-                Err(e) => return Err(self.fatal(Some(fault), Some(now), now, e.message).into()),
-            }
+    }
+    /// The settlement note of an effect applied without a guest command.
+    fn admission_note(effect: &Effect, handle: Option<&ExecutionPlan>) -> Option<&'static str> {
+        // These static notes form a closed wire list in persistence.rs.
+        // Update that list when adding or changing a note here.
+        match handle {
+            Some(h) if h.lost => Some("realtime step ended with its machine incarnation"),
+            _ if *effect == Effect::StepRealtime(0) => Some("zero realtime step"),
+            _ => None,
         }
-        if self.pending[&fault].effect.guest_command() {
-            plans.push(Plan::Deadline {
-                fault,
-                at: deadline,
-            });
-        }
-        if unavailable {
-            plans = self.finish(
-                fault,
-                now,
-                now,
-                Err(error(
-                    ErrorCode::TargetUnavailable,
-                    "target is physically unavailable",
-                )),
-            )?;
-        }
-        Ok((fault, plans))
     }
     fn admitted(&mut self, fault: u32, pending: &Pending, now: u64) {
         self.notices.push(Notice::Admitted(Admitted {
