@@ -5,6 +5,7 @@ use std::{
     collections::BTreeMap,
     ffi::{c_void, CStr},
     rc::Rc,
+    sync::OnceLock,
 };
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -403,11 +404,19 @@ impl Backend for Native {
         Ok(())
     }
     fn irq(&mut self, number: u32, level: bool) -> Result<()> {
-        unsafe {
-            let set: unsafe extern "C" fn(u32, bool) -> i32 =
-                std::mem::transmute(api(c"hv_gic_set_spi")?);
-            checked("HVF SPI", set(number, level))
-        }
+        type SetSpi = unsafe extern "C" fn(u32, bool) -> i32;
+        // Hypervisor.framework stays loaded for the process lifetime. Resolve
+        // this optional API lazily, preserving its unavailable-symbol error.
+        static SET_SPI: OnceLock<Result<SetSpi>> = OnceLock::new();
+        let set = SET_SPI
+            .get_or_init(|| unsafe {
+                Ok(std::mem::transmute::<*mut c_void, SetSpi>(api(
+                    c"hv_gic_set_spi",
+                )?))
+            })
+            .as_ref()
+            .map_err(Clone::clone)?;
+        unsafe { checked("HVF SPI", set(number, level)) }
     }
     fn stopped_parts(&mut self) -> Result<Vec<(String, String)>> {
         if self.held.is_some() || self.poisoned {
@@ -519,6 +528,47 @@ impl Drop for Native {
             if code != 0 {
                 eprintln!("PV HVF VM destroy {code:#x}");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn native() -> Native {
+        Native::create(
+            Rc::new(Memory::new(2 << 20).unwrap()),
+            Rc::new(Memory::new(1 << 16).unwrap()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    #[ignore = "requires HVF and a test executable signed with the hypervisor entitlement"]
+    fn native_spi_levels_are_initially_low_idempotent_and_restored() {
+        for number in [33, 40, 42, 43, 44] {
+            let mut vm = native();
+            let initial = vm.capture().unwrap();
+            vm.irq(number, false).unwrap();
+            assert_eq!(vm.capture().unwrap(), initial, "initial SPI {number}");
+            vm.irq(number, true).unwrap();
+            let high = vm.capture().unwrap();
+            vm.irq(number, false).unwrap();
+            let low = vm.capture().unwrap();
+            assert_ne!(high, low, "SPI {number} level must be native state");
+            vm.irq(number, false).unwrap();
+            assert_eq!(vm.capture().unwrap(), low, "repeated low SPI {number}");
+            drop(vm);
+
+            let mut restored = native();
+            restored.restore(&high).unwrap();
+            assert_eq!(restored.capture().unwrap(), high);
+            restored.irq(number, false).unwrap();
+            assert_eq!(restored.capture().unwrap(), low, "restored SPI {number}");
+            restored.irq(number, false).unwrap();
+            assert_eq!(restored.capture().unwrap(), low);
+            assert!(restored.irq(0, false).is_err());
         }
     }
 }
