@@ -20,13 +20,13 @@ pub(in super::super) enum Exit {
         value: u64,
     },
     Call,
-    // Linux KVM handles WFx/system traps in-kernel; only HVF (and the
-    // architecture-neutral scripted model) forwards these rendezvous.
+    // Linux KVM handles WFx/system traps in-kernel. HVF forwards both;
+    // the scripted model also uses Wait.
     #[cfg(any(target_os = "macos", test))]
     Wait {
         event: bool,
     },
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(target_os = "macos")]
     System {
         register: u16,
         write: bool,

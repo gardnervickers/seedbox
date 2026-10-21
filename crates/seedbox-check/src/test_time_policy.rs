@@ -493,7 +493,18 @@ pub fn check(root: &Path) -> Result<Report, String> {
     let root = root.as_path();
     let mut files = BTreeMap::new();
     collect(&root.join("crates"), &mut BTreeSet::new(), &mut files)?;
+    // Only the downstream suite is test policy input, never upstream DR tests.
+    let dr_suite = root.join("vendor/dynamorio/seedbox-tests");
+    if root.join("crates/seedbox-machine/Cargo.toml").is_file()
+        && !dr_suite.join("dynamorio.rs").is_file()
+    {
+        return Err("DynamoRIO fork tests missing; run git submodule update --init --recursive vendor/dynamorio from the Seedbox checkout".into());
+    }
+    let mut dr_files = BTreeMap::new();
+    collect(&dr_suite, &mut BTreeSet::new(), &mut dr_files)?;
     let mut force: BTreeSet<_> = files.keys().filter(|path| forced(path)).cloned().collect();
+    force.extend(dr_files.keys().cloned());
+    files.extend(dr_files);
     let asts: BTreeMap<_, _> = files
         .iter()
         .map(|(path, text)| {
@@ -544,10 +555,287 @@ pub fn check(root: &Path) -> Result<Report, String> {
         )?;
         report.findings.extend(local.findings);
     }
+    dr_fixture_sources(root, &dr_suite, &mut report)?;
     report
         .findings
         .sort_by(|a, b| (&a.path, a.line, &a.detail).cmp(&(&b.path, b.line, &b.detail)));
     Ok(report)
+}
+
+// The exception is limited to the native DR syscall subject, not Rust timer
+// helpers or incidental application pacing. Keep its bound/invariant adjacent
+// to one call; a marker cannot exempt another call or an entire file/function.
+fn dr_c_subject(marker: &str, syscall: &str) -> bool {
+    let Some(marker) = marker.trim().strip_prefix("seedbox-syscall-subject:") else {
+        return false;
+    };
+    let fields: Vec<_> = marker.split(';').map(str::trim).collect();
+    fields.len() == 3
+        && fields[0] == syscall
+        && fields[1]
+            .strip_prefix("bound-ms=")
+            .is_some_and(|n| n.parse::<u64>().is_ok_and(|bound| bound > 0))
+        && fields[2]
+            .strip_prefix("invariant=")
+            .is_some_and(|s| !s.trim().is_empty())
+}
+
+fn dr_fixture_findings(path: &Path, source: &str) -> Vec<Finding> {
+    // Lex comments and quoted literals rather than treating diagnostic strings,
+    // source provenance or commented examples as executable calls.
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("c");
+    let c = matches!(extension, "c" | "h");
+    let assembly = matches!(extension, "S" | "s");
+    let bytes = source.as_bytes();
+    let mut tokens = Vec::<(String, usize)>::new();
+    let (mut i, mut line) = (0, 1);
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            line += 1;
+            i += 1;
+            continue;
+        }
+        if (extension == "py" && bytes[i] == b'#')
+            || (assembly
+                && bytes[i] == b'#'
+                && source[..i]
+                    .rsplit('\n')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty())
+        {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i..].starts_with(b"/*") || bytes[i..].starts_with(b"//") {
+            let block = bytes[i + 1] == b'*';
+            let start = i + 2;
+            let comment_line = line;
+            i = start;
+            while i < bytes.len()
+                && !(if block {
+                    bytes[i..].starts_with(b"*/")
+                } else {
+                    bytes[i] == b'\n'
+                })
+            {
+                if bytes[i] == b'\n' {
+                    line += 1;
+                }
+                i += 1;
+            }
+            let comment = source[start..i].trim();
+            if c && comment.starts_with("seedbox-syscall-subject:") {
+                tokens.push((comment.to_owned(), comment_line));
+            }
+            if block {
+                i = (i + 2).min(bytes.len());
+            }
+            continue;
+        }
+        if matches!(bytes[i], b'"' | b'\'' | b'`') {
+            let quote = bytes[i];
+            let width = if extension == "py" && bytes[i..].starts_with(&[quote; 3]) {
+                3
+            } else {
+                1
+            };
+            i += width;
+            while i < bytes.len() {
+                if bytes[i] == b'\n' {
+                    line += 1;
+                }
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                } else if bytes[i..].starts_with(&[quote; 3][..width]) {
+                    i += width;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            tokens.push((source[start..i].to_owned(), line));
+        } else {
+            if !bytes[i].is_ascii_whitespace() {
+                tokens.push(((bytes[i] as char).to_string(), line));
+            }
+            i += 1;
+        }
+    }
+    let mut marker = None;
+    let mut findings = Vec::new();
+    for (index, (token, line)) in tokens.iter().enumerate() {
+        if token.starts_with("seedbox-syscall-subject:") {
+            marker = Some(token.as_str());
+            continue;
+        }
+        if matches!(token.as_str(), ";" | "{" | "}") {
+            marker = None;
+        }
+        let previous = index.checked_sub(1).map(|i| tokens[i].0.as_str());
+        let call = tokens.get(index + 1).map(|t| t.0.as_str()) == Some("(");
+        let args = if call {
+            dr_call_args(&tokens, index + 1)
+        } else {
+            None
+        };
+        // Ordinary prototypes/definitions have a return type before the name
+        // and typed parameters. Cast arguments in an actual call must still fail.
+        let declaration = matches!(extension, "c" | "h" | "java" | "cs")
+            && matches!(
+                previous,
+                Some("void" | "int" | "unsigned" | "long" | "bool")
+            )
+            && args.as_ref().is_some_and(|args| {
+                args.iter().all(|arg| {
+                    arg.is_empty()
+                        || (!arg.iter().any(|s| s == "(")
+                            && arg.iter().any(|s| {
+                                matches!(
+                                    s.as_str(),
+                                    "void"
+                                        | "int"
+                                        | "unsigned"
+                                        | "long"
+                                        | "struct"
+                                        | "const"
+                                        | "bool"
+                                )
+                            }))
+                })
+            });
+        if declaration {
+            marker = None;
+            continue;
+        }
+        let reference = c && !call && matches!(previous, Some("=" | "&"));
+        let assembly_reference = assembly
+            && (matches!(previous, Some("call" | "callq" | "bl" | "$"))
+                || token.starts_with("SYS_")
+                || token.starts_with("__NR_"));
+        let name = if token == "syscall" && call {
+            args.as_ref().and_then(|args| args.first()).and_then(|arg| {
+                arg.iter()
+                    .find_map(|t| t.strip_prefix("SYS_").or_else(|| t.strip_prefix("__NR_")))
+            })
+        } else if assembly_reference {
+            Some(
+                token
+                    .strip_prefix("SYS_")
+                    .or_else(|| token.strip_prefix("__NR_"))
+                    .unwrap_or(token),
+            )
+        } else if call || reference {
+            Some(token.as_str())
+        } else {
+            None
+        };
+        let Some(name) = name else { continue };
+        if matches!(previous, Some("def" | "func" | "function")) {
+            marker = None;
+            continue;
+        }
+        let sleep = matches!(name, "sleep" | "usleep" | "nanosleep" | "clock_nanosleep")
+            || matches!(
+                (extension, name),
+                ("go" | "cs", "Sleep")
+                    | ("java", "sleep")
+                    | ("js", "setTimeout" | "setInterval")
+                    | ("cs", "Delay")
+            );
+        // select with descriptors waits for a positive event; the zero-descriptor
+        // form is a delay. Do not reject normal bounded readiness waits.
+        let select_sleep = c
+            && name == "select"
+            && args.as_ref().is_some_and(|args| {
+                args.len() == 5
+                    && args[..4]
+                        .iter()
+                        .all(|arg| arg.len() == 1 && matches!(arg[0].as_str(), "0" | "NULL"))
+                    && args[4] != ["NULL"]
+                    && args[4] != ["0"]
+            });
+        if !sleep && !select_sleep {
+            if call && !matches!(token.as_str(), "if" | "while" | "for" | "switch") {
+                marker = None;
+            }
+            continue;
+        }
+        // Only direct C calls can consume a subject marker. Taking a function
+        // address, a macro body or another language cannot share that exception.
+        let macro_body = source
+            .lines()
+            .nth(line - 1)
+            .is_some_and(|line| line.trim_start().starts_with("#define"));
+        let subject_marker = marker.take();
+        let subject = c
+            && call
+            && !reference
+            && !macro_body
+            && matches!(name, "nanosleep" | "clock_nanosleep")
+            && subject_marker.is_some_and(|marker| dr_c_subject(marker, name));
+        if !subject {
+            findings.push(Finding {
+                path: path.into(), line: *line,
+                detail: format!("host sleep {name} in DR fixture; use event readiness/pacing; only a documented bounded syscall subject may use nanosleep/clock_nanosleep"),
+            });
+        }
+    }
+    findings
+}
+
+// Split call arguments without losing casts or nested expressions.
+fn dr_call_args(tokens: &[(String, usize)], open: usize) -> Option<Vec<Vec<String>>> {
+    let mut args = vec![Vec::new()];
+    let mut depth = 0;
+    for (token, _) in &tokens[open + 1..] {
+        match token.as_str() {
+            ")" if depth == 0 => return Some(args),
+            "," if depth == 0 => {
+                args.push(Vec::new());
+                continue;
+            }
+            "(" | "[" | "{" => depth += 1,
+            ")" | "]" | "}" => depth -= 1,
+            _ => {}
+        }
+        args.last_mut()?.push(token.clone());
+    }
+    None
+}
+
+fn dr_fixture_sources(root: &Path, directory: &Path, report: &mut Report) -> Result<(), String> {
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(directory).map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.is_dir() {
+            dr_fixture_sources(root, &path, report)?;
+        } else if path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+            matches!(
+                e,
+                "c" | "h" | "S" | "s" | "py" | "go" | "js" | "java" | "cs"
+            )
+        }) {
+            let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            report.findings.extend(dr_fixture_findings(
+                path.strip_prefix(root).unwrap_or(&path),
+                &text,
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,82 +1,26 @@
-//! Native preparation retains immutable inputs and honors cancellation.
+//! Real native SDK composition; preparation policy cases live beside the component.
+#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
+
+// Shared synthetic package data only, not another crate's implementation.
+#[path = "../src/preparation/test_sdk.rs"]
+mod test_sdk;
 use seedbox_application::{
     config,
-    execution::{CancellationToken, WitnessMode},
+    execution::WitnessMode,
     oci::{ImageTransport, ImportedImage, RootFilesystem},
     preparation::{OciPreparer, PreparationContext},
     store::{ContentDigest, ContentStore},
-    Error,
 };
 use std::{collections::BTreeMap, fs, path::Path};
-struct FixturePreparer {
-    inner: OciPreparer,
-    runtime: seedbox_driver_execution::runtime_assets::Inputs,
-}
-impl std::ops::Deref for FixturePreparer {
-    type Target = OciPreparer;
-    fn deref(&self) -> &OciPreparer {
-        &self.inner
-    }
-}
-impl std::ops::DerefMut for FixturePreparer {
-    fn deref_mut(&mut self) -> &mut OciPreparer {
-        &mut self.inner
-    }
-}
-impl FixturePreparer {
-    fn prepare_with_transport(
-        &self,
-        simulation: &config::Simulation,
-        store: &ContentStore,
-        context: &PreparationContext,
-        transport: &dyn ImageTransport,
-    ) -> seedbox_application::Result<seedbox_application::execution::PreparedInputs> {
-        let mut inputs = self.inner.prepare_driver_with_transport(
-            simulation,
-            store,
-            context,
-            transport,
-            &self.runtime,
-        )?;
-        seedbox_driver_execution::driver_world::preparation::retain_oci_prepared(
-            &mut inputs,
-            simulation,
-            &self.runtime,
-            store,
-            &|| context.check(),
-        )?;
-        Ok(inputs)
-    }
-    fn prepare_cancellable(
-        &self,
-        simulation: &config::Simulation,
-        store: &ContentStore,
-        context: &PreparationContext,
-    ) -> seedbox_application::Result<seedbox_application::execution::PreparedInputs> {
-        self.prepare_with_transport(
-            simulation,
-            store,
-            context,
-            &seedbox_application::container_images::ContainerTransport {
-                docker: self.docker.clone(),
-                cancellation: context.cancellation.clone(),
-                progress: |_| {},
-                export_cache: None,
-            },
-        )
-    }
-    fn prepare(
-        &self,
-        simulation: &config::Simulation,
-        store: &ContentStore,
-    ) -> seedbox_application::Result<seedbox_application::execution::PreparedInputs> {
-        let temporary = tempfile::tempdir()?;
-        let context =
-            PreparationContext::new(temporary.path().join("prepare"), Default::default())?;
-        self.prepare_cancellable(simulation, store, &context)
-    }
-}
-fn fixture(root: &Path) -> (FixturePreparer, config::Simulation, ContentStore) {
+use test_sdk::sdk;
+fn fixture(
+    root: &Path,
+) -> (
+    OciPreparer,
+    config::Simulation,
+    ContentStore,
+    seedbox_driver_execution::runtime_assets::Inputs,
+) {
     use seedbox_application::execution::ExecutionBackend;
     use seedbox_driver_execution::driver_world::DriverExecutor;
     let (_, runtime, _) = sdk(root, seedbox_spec::backend::CpuBackend::Pv);
@@ -98,7 +42,7 @@ fn fixture(root: &Path) -> (FixturePreparer, config::Simulation, ContentStore) {
     let executor =
         DriverExecutor::for_preparation(&simulation, WitnessMode::Exits, Default::default())
             .unwrap();
-    let inner = OciPreparer {
+    let preparer = OciPreparer {
         kernel,
         engine,
         init: runtime.guest_assets.join("init"),
@@ -112,234 +56,7 @@ fn fixture(root: &Path) -> (FixturePreparer, config::Simulation, ContentStore) {
         )
         .unwrap(),
     };
-    (FixturePreparer { inner, runtime }, simulation, store)
-}
-
-#[test]
-fn cancelled_preparation_never_imports_images() {
-    let root = tempfile::tempdir().unwrap();
-    let (preparer, simulation, store) = fixture(root.path());
-    let token = CancellationToken::default();
-    token.cancel();
-    let context = PreparationContext::new(root.path().join("evidence"), token).unwrap();
-    assert!(matches!(
-        preparer.prepare_cancellable(&simulation, &store, &context),
-        Err(Error::PreparationCancelled)
-    ));
-    assert!(!context.directory.join("setup.json").exists());
-}
-#[test]
-fn invalid_machine_memory_fails_before_image_import() {
-    let root = tempfile::tempdir().unwrap();
-    let (preparer, mut simulation, store) = fixture(root.path());
-    simulation.machine.memory_mb = 32;
-    assert!(preparer
-        .prepare(&simulation, &store)
-        .unwrap_err()
-        .to_string()
-        .contains("memoryMiB must be 64..65536"));
-}
-#[test]
-fn preparation_retains_kernel_before_transport_changes_source() {
-    struct Transport<'a>(&'a Path);
-    impl ImageTransport for Transport<'_> {
-        fn import(
-            &self,
-            service: &config::Service,
-            directory: &Path,
-            store: &ContentStore,
-            _: Option<(&PreparationContext, &str)>,
-            _: seedbox_application::guest::Architecture,
-        ) -> seedbox_application::Result<ImportedImage> {
-            fs::create_dir_all(directory)?;
-            let config = br#"{"os":"linux","architecture":"amd64","config":{"Cmd":["/app"]}}"#;
-            let digest = ContentDigest::of(config);
-            fs::write(directory.join(digest.hex()), config)?;
-            fs::write(
-                directory.join("manifest.json"),
-                serde_json::to_vec(
-                    &serde_json::json!({"schemaVersion":2,"config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":format!("sha256:{}",digest.hex()),"size":config.len()},"layers":[]}),
-                )?,
-            )?;
-            let image = seedbox_application::oci::import_metadata(directory, service, store)?;
-            let root = directory.join("root");
-            fs::create_dir(&root)?;
-            fs::write(root.join("app"), b"application")?;
-            fs::write(self.0, b"changed")?;
-            Ok(ImportedImage {
-                image,
-                rootfs: RootFilesystem::Directory(root),
-                auxiliary: BTreeMap::new(),
-                provenance: BTreeMap::new(),
-            })
-        }
-    }
-    let root = tempfile::tempdir().unwrap();
-    let (preparer, simulation, store) = fixture(root.path());
-    let context =
-        PreparationContext::new(root.path().join("evidence"), Default::default()).unwrap();
-    let original_kernel = fs::read(&preparer.kernel).unwrap();
-    let inputs = preparer
-        .prepare_with_transport(&simulation, &store, &context, &Transport(&preparer.kernel))
-        .unwrap();
-    assert!(inputs.auxiliary.contains_key("driver-world/manifest"));
-    assert_eq!(fs::read(&preparer.kernel).unwrap(), b"changed");
-    assert_eq!(
-        store.read(&ContentDigest::of(&original_kernel)).unwrap(),
-        original_kernel
-    );
-    let receipt: serde_json::Value =
-        serde_json::from_slice(&fs::read(context.directory.join("setup.json")).unwrap()).unwrap();
-    assert_eq!(
-        receipt["kernel"],
-        serde_json::to_value(ContentDigest::of(&original_kernel)).unwrap()
-    );
-}
-
-#[test]
-fn preparation_derives_the_epoch_from_image_build_times_unless_resolved_configuration_sets_it() {
-    // Each image config records its own build time; the latest one wins.
-    struct Transport;
-    impl seedbox_application::oci::ImageTransport for Transport {
-        fn import(
-            &self,
-            service: &seedbox_application::config::Service,
-            directory: &Path,
-            store: &ContentStore,
-            _context: Option<(&PreparationContext, &str)>,
-            _architecture: seedbox_application::guest::Architecture,
-        ) -> seedbox_application::Result<seedbox_application::oci::ImportedImage> {
-            fs::create_dir_all(directory)?;
-            fs::File::open(directory)?
-                .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))?;
-            Ok(seedbox_application::oci::ImportedImage {
-                image: seedbox_application::execution::PreparedImage {
-                    manifest: store.put(b"manifest")?,
-                    config: store.put(
-                        format!(
-                            r#"{{"os":"linux","architecture":"amd64","config":{{"Cmd":["/app"]}},"created":"2026-01-01T00:00:00Z","history":[{{"created":"{}"}}]}}"#,
-                            match &service.source {
-                                config::ImageSource::Registry { reference } if reference == "example/late" => "2026-10-09T04:05:33.5Z",
-                                _ => "2026-10-01T00:00:00Z",
-                            }
-                        )
-                        .as_bytes(),
-                    )?,
-                    layers: vec![],
-                    launch: seedbox_application::image::Launch {
-                        argv: vec!["/app".into()],
-                        environment: BTreeMap::new(),
-                        working_dir: "/".into(),
-                        user: "".into(),
-                        volumes: vec![],
-                        disk_volumes: vec![],
-                    },
-                },
-                rootfs: seedbox_application::oci::RootFilesystem::Directory(directory.into()),
-                auxiliary: BTreeMap::new(),
-                provenance: BTreeMap::new(),
-            })
-        }
-    }
-    let root = tempfile::tempdir().unwrap();
-    let (preparer, mut simulation, store) = fixture(root.path());
-    let mut late = simulation.services["oracle"].clone();
-    late.source = config::ImageSource::Registry {
-        reference: "example/late".into(),
-    };
-    simulation.services.insert("other".into(), late);
-    let context =
-        PreparationContext::new(root.path().join("evidence"), CancellationToken::default())
-            .unwrap();
-    let prepared = preparer
-        .prepare_with_transport(&simulation, &store, &context, &Transport)
-        .unwrap();
-    assert_eq!(prepared.wall_clock_epoch, Some(1_791_518_733));
-    simulation.simulator.progress_budget = std::num::NonZeroU32::new(1).unwrap().into();
-    let budget_context = PreparationContext::new(
-        root.path().join("changed-budget"),
-        CancellationToken::default(),
-    )
-    .unwrap();
-    let changed_budget = preparer
-        .prepare_with_transport(&simulation, &store, &budget_context, &Transport)
-        .unwrap();
-    assert_eq!(changed_budget.wall_clock_epoch, prepared.wall_clock_epoch);
-    assert_ne!(changed_budget.guests, prepared.guests);
-    simulation.simulator = Default::default();
-    let json = serde_json::to_vec(&prepared).unwrap();
-    let retained: seedbox_application::execution::PreparedInputs =
-        serde_json::from_slice(&json).unwrap();
-    assert_eq!(retained, prepared);
-    for (requested, budget) in [None, Some(86400), Some(1_800_000_000), Some(u32::MAX)]
-        .into_iter()
-        .zip([10_000, 1, 17, u32::MAX])
-    {
-        simulation.simulator.progress_budget = std::num::NonZeroU32::new(budget).unwrap().into();
-        simulation.wall_clock_epoch = requested;
-        let label = requested.map_or("derived".into(), |epoch| epoch.to_string());
-        let context = PreparationContext::new(
-            root.path().join(format!("epoch-{label}")),
-            Default::default(),
-        )
-        .unwrap();
-        let first = preparer
-            .prepare_with_transport(&simulation, &store, &context, &Transport)
-            .unwrap();
-        let epoch = requested.unwrap_or(1_791_518_733);
-        assert_eq!(first.wall_clock_epoch, Some(epoch));
-        assert_eq!(requested.is_none(), first.guests == prepared.guests);
-        let second_context = PreparationContext::new(
-            root.path().join(format!("epoch-{label}-second")),
-            Default::default(),
-        )
-        .unwrap();
-        let second = preparer
-            .prepare_with_transport(&simulation, &store, &second_context, &Transport)
-            .unwrap();
-        assert_eq!(first, second);
-        for digest in first.guests.values() {
-            let archive = store.read(digest).unwrap();
-            let clock = archive
-                .windows(8)
-                .position(|bytes| bytes == b"SBXCLK1\0")
-                .unwrap()
-                + 8;
-            assert_eq!(
-                u32::from_le_bytes(archive[clock..clock + 4].try_into().unwrap()),
-                epoch
-            );
-            let start = archive
-                .windows(8)
-                .position(|bytes| bytes == b"SBXAPP2\0")
-                .unwrap()
-                + 8;
-            let mut cursor = start;
-            let read = |cursor: &mut usize| {
-                let count =
-                    u32::from_le_bytes(archive[*cursor..*cursor + 4].try_into().unwrap()) as usize;
-                *cursor += 4;
-                (0..count)
-                    .map(|_| {
-                        let len =
-                            u32::from_le_bytes(archive[*cursor..*cursor + 4].try_into().unwrap())
-                                as usize;
-                        *cursor += 4;
-                        let value = archive[*cursor..*cursor + len].to_vec();
-                        *cursor += len;
-                        value
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let _argv = read(&mut cursor);
-            let prefix = read(&mut cursor);
-            let position = prefix
-                .iter()
-                .position(|value| value == b"--blocks-per-progress-call")
-                .unwrap();
-            assert_eq!(prefix[position + 1], budget.to_string().as_bytes());
-        }
-    }
+    (preparer, simulation, store, runtime)
 }
 
 // Real OCI preparation composition with a cold image transport, not native or
@@ -411,7 +128,7 @@ fn cold_driver_factory(backend: seedbox_spec::backend::CpuBackend) {
         }
     }
     let root = tempfile::tempdir().unwrap();
-    let (mut preparer, mut simulation, store) = fixture(root.path());
+    let (mut preparer, mut simulation, store, _fixture_runtime) = fixture(root.path());
     let cpu_backend = backend;
     simulation
         .services
@@ -609,149 +326,4 @@ fn cold_driver_factory(backend: seedbox_spec::backend::CpuBackend) {
     for digest in inputs.digests() {
         store.verify(digest).unwrap();
     }
-}
-
-fn sdk(
-    root: &Path,
-    backend: seedbox_spec::backend::CpuBackend,
-) -> (
-    seedbox_driver_execution::runtime_assets::Runtime,
-    seedbox_driver_execution::runtime_assets::Inputs,
-    std::path::PathBuf,
-) {
-    use seedbox_driver_execution::runtime_assets;
-    let package = root.join("package.tar.gz");
-    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
-        fs::File::create(&package).unwrap(),
-        flate2::Compression::fast(),
-    ));
-    let mut append = |name: &str, bytes: &[u8]| {
-        let mut header = tar::Header::new_gnu();
-        header.set_uid(0);
-        header.set_gid(0);
-        header.set_mtime(0);
-        header.set_mode(if name.contains("/bin/") || name.contains("/libexec/") {
-            0o755
-        } else {
-            0o644
-        });
-        header.set_size(bytes.len() as u64);
-        header.set_cksum();
-        tar.append_data(&mut header, name, bytes).unwrap();
-    };
-    let system = format!(
-        "{}-{}",
-        std::env::consts::ARCH,
-        if cfg!(target_os = "macos") {
-            "darwin"
-        } else {
-            "linux"
-        }
-    );
-    append("host-system", system.as_bytes());
-    let mut kernel = seedbox_machine::test_support::assets::bzimage_header();
-    kernel[0x22c..0x230].copy_from_slice(&0x7fffffffu32.to_le_bytes());
-    let mut arm_kernel = vec![0; 65536];
-    arm_kernel[8..16].copy_from_slice(&0x80000_u64.to_le_bytes());
-    arm_kernel[16..24].copy_from_slice(&65536_u64.to_le_bytes());
-    arm_kernel[56..60].copy_from_slice(b"ARM\x64");
-    let arm_elf = seedbox_machine::test_support::assets::image(183);
-    append("pv/aarch64/kernel", &arm_kernel);
-    append("pv/aarch64/init", &arm_elf);
-    append("pv/aarch64/mke2fs", &arm_elf);
-    append("pv/aarch64/command-line", b"rdinit=/init");
-    append("pv/x86_64/kernel", &kernel);
-    let elf = seedbox_machine::test_support::assets::image(62);
-    append("pv/x86_64/init", &elf);
-    append("pv/x86_64/mke2fs", &elf);
-    append("pv/x86_64/command-line", b"rdinit=/init");
-    append("tcg/x86_64/kernel", &kernel);
-    append("tcg/x86_64/init", &elf);
-    append("tcg/x86_64/mke2fs", &elf);
-    append("tcg/x86_64/command-line", b"rdinit=/init");
-    append("tcg/x86_64/firmware", &vec![3; 64 * 1024]);
-    // Host QEMU members live under the system recorded in host-system.
-    let host = |name: &str| format!("host/{system}/{name}");
-    append(&host("bin/qemu-system-x86_64"), b"#!/bin/sh\nexit 0\n");
-    append(&host("libexec/qemu-system-x86_64"), &elf);
-    append(&host("lib/loader"), b"cold library");
-    append(&host("share/qemu/qboot.rom"), b"cold firmware");
-    let mut progress = tar::Builder::new(Vec::new());
-    for name in [
-        "bin64/drrun",
-        "libseedbox_progress.so",
-        "lib64/release/libdynamorio.so",
-        "lib64/release/libdrpreload.so",
-        "ext/lib64/release/libdrmgr.so",
-        "ext/lib64/release/libdrreg.so",
-        "lib/ld-linux-x86-64.so.2",
-        "lib/libc.so.6",
-        "lib/libm.so.6",
-        "lib/libdl.so.2",
-        "lib/libpthread.so.0",
-        "lib/librt.so.1",
-        "DynamoRIO-LICENSE.txt",
-        "DynamoRIO-ACKNOWLEDGEMENTS.txt",
-        "glibc-COPYING.LIB",
-    ] {
-        let bytes = if name.ends_with(".txt") || name.ends_with(".LIB") {
-            b"cold license".as_slice()
-        } else {
-            elf.as_slice()
-        };
-        let mut header = tar::Header::new_gnu();
-        header.set_uid(0);
-        header.set_gid(0);
-        header.set_mtime(0);
-        header.set_mode(0o755);
-        header.set_size(bytes.len() as u64);
-        header.set_cksum();
-        progress
-            .append_data(&mut header, format!("seedbox/progress/{name}"), bytes)
-            .unwrap();
-    }
-    let progress = progress.into_inner().unwrap();
-    append("pv/x86_64/progress.tar", &progress);
-    let mut arm_progress = Vec::new();
-    let mut builder = tar::Builder::new(&mut arm_progress);
-    for entry in tar::Archive::new(progress.as_slice()).entries().unwrap() {
-        let mut entry = entry.unwrap();
-        let mut name = entry.path().unwrap().into_owned();
-        // The aarch64 runtime carries its own ELF loader name.
-        if name.ends_with("lib/ld-linux-x86-64.so.2") {
-            name = "seedbox/progress/lib/ld-linux-aarch64.so.1".into();
-        }
-        let bytes = if name.to_string_lossy().ends_with(".txt")
-            || name.to_string_lossy().ends_with(".LIB")
-        {
-            b"cold license".as_slice()
-        } else {
-            arm_elf.as_slice()
-        };
-        let mut header = tar::Header::new_gnu();
-        header.set_uid(0);
-        header.set_gid(0);
-        header.set_mtime(0);
-        header.set_mode(0o755);
-        header.set_size(bytes.len() as u64);
-        header.set_cksum();
-        builder.append_data(&mut header, name, bytes).unwrap();
-        std::io::copy(&mut entry, &mut std::io::sink()).unwrap();
-    }
-    builder.finish().unwrap();
-    drop(builder);
-    append("pv/aarch64/progress.tar", &arm_progress);
-    tar.into_inner().unwrap().finish().unwrap();
-    let runtime = runtime_assets::Runtime::from_archive(&package, root).unwrap();
-    let selected = runtime
-        .select(
-            backend,
-            if backend == seedbox_spec::backend::CpuBackend::Pv && cfg!(target_arch = "aarch64") {
-                seedbox_spec::definition::Architecture::Aarch64
-            } else {
-                seedbox_spec::definition::Architecture::X86_64
-            },
-        )
-        .unwrap();
-    (runtime, selected, package)
 }

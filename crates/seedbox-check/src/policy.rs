@@ -8,6 +8,8 @@ pub type Environment = BTreeMap<String, String>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Suite {
     Portable,
+    Dynamorio,
+    DynamorioIsolated,
     MachineTcg,
     MachinePv,
     LinuxOci,
@@ -15,8 +17,10 @@ pub enum Suite {
     LinuxPause,
     MacApps,
 }
-pub const SUITES: [Suite; 7] = [
+pub const SUITES: [Suite; 9] = [
     Suite::Portable,
+    Suite::Dynamorio,
+    Suite::DynamorioIsolated,
     Suite::MachineTcg,
     Suite::MachinePv,
     Suite::LinuxOci,
@@ -28,6 +32,8 @@ impl Suite {
     pub fn name(self) -> &'static str {
         match self {
             Self::Portable => "portable",
+            Self::Dynamorio => "dynamorio",
+            Self::DynamorioIsolated => "dynamorio-isolated",
             Self::MachineTcg => "machine-tcg",
             Self::MachinePv => "machine-pv-x86",
             Self::LinuxOci => "linux-oci",
@@ -38,6 +44,8 @@ impl Suite {
     }
     pub fn description(self) -> &'static str {
         match self {
+        Self::DynamorioIsolated=>"Linux x86-64/ARM64, prepared DR fixtures, user/PID namespaces and owned cgroup-v2 pids delegation.",
+        Self::Dynamorio=>"Linux x86-64/ARM64, explicit release/debug DR fixtures; no KVM, root or engine.",
         Self::Portable=>"Any host: fmt, clippy, discovered portable tests and workload validation.",
         Self::MachineTcg=>"Linux x86-64, explicit machineTcgAssets/test fixtures and patched QEMU; no KVM.",
         Self::MachinePv=>"Linux x86-64, KVM, native PV worker and explicit machinePvAssets/test fixtures.",
@@ -265,6 +273,90 @@ pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -
             .unwrap_or("not probed")
     );
     if suite == Suite::Portable {
+        return missing;
+    }
+    if matches!(suite, Suite::Dynamorio | Suite::DynamorioIsolated) {
+        need(
+            linux && (x86 || host.arm()),
+            "requires Linux x86-64 or ARM64".into(),
+        );
+        let fixtures = env.get("SEEDBOX_DYNAMORIO_FIXTURES").map(Path::new);
+        for file in [
+            "runtime/bin64/drrun",
+            "bin/application",
+            "lib/libpreserve.so",
+        ] {
+            need(
+                fixtures.is_some_and(|p| {
+                    let file = p.join(file);
+                    if file.extension().is_some_and(|ext| ext == "so") {
+                        file.is_file()
+                    } else {
+                        executable(&file)
+                    }
+                }),
+                format!(
+                    "set SEEDBOX_DYNAMORIO_FIXTURES to dynamorioTestFixtures containing {file}"
+                ),
+            );
+        }
+        if suite == Suite::Dynamorio {
+            let debug = env.get("SEEDBOX_DYNAMORIO_DEBUG_FIXTURES").map(Path::new);
+            for file in [
+                "runtime/bin64/drrun",
+                "runtime/lib64/debug/libdynamorio.so",
+                "bin/unix-supervisor",
+                "bin/unix-signal-models-itimer",
+            ] {
+                need(
+                    debug.is_some_and(|root| {
+                        let path = root.join(file);
+                        if path.extension().is_some_and(|ext| ext == "so") {
+                            path.is_file()
+                        } else {
+                            executable(&path)
+                        }
+                    }),
+                    format!(
+                        "set SEEDBOX_DYNAMORIO_DEBUG_FIXTURES to dynamorioDebugTestFixtures containing {file}"
+                    ),
+                );
+            }
+            if host.arm() {
+                need(
+                    fixtures.is_some_and(|root| executable(&root.join("bin/unix-lifecycle_model"))),
+                    "prepared ARM bin/unix-lifecycle_model is required".into(),
+                );
+                need(
+                    debug.is_some_and(|root| executable(&root.join("bin/unix-lifecycle_model"))),
+                    "prepared ARM Debug bin/unix-lifecycle_model is required".into(),
+                );
+            }
+        }
+        if suite == Suite::DynamorioIsolated {
+            for name in ["bin/unix-pid1", "bin/unix-eagain", "bin/unix-supervisor"] {
+                need(
+                    fixtures.is_some_and(|p| executable(&p.join(name))),
+                    format!("prepared {name} is required for isolated fixtures"),
+                );
+            }
+            need(
+                fixtures.is_some_and(|p| executable(&p.join("bin/seedbox-dr-isolate"))),
+                "prepared bin/seedbox-dr-isolate is required".into(),
+            );
+            need(
+                env.get("SEEDBOX_DYNAMORIO_CGROUP_ROOT")
+                    .is_some_and(|p| Path::new(p).is_dir()),
+                "set SEEDBOX_DYNAMORIO_CGROUP_ROOT to an empty owned cgroup-v2 pids delegation"
+                    .into(),
+            );
+            for mode in ["pid1", "pids"] {
+                need(
+                    host.tools.contains(&format!("dynamorio-isolate-{mode}")),
+                    format!("isolate: {mode} capability preflight did not succeed"),
+                );
+            }
+        }
         return missing;
     }
     if matches!(suite, Suite::MachineTcg | Suite::MachinePv) {

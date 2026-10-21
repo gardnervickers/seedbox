@@ -344,3 +344,233 @@ fn controlled_timers_and_unrelated_sleep_named_functions_are_not_host_sleeps() {
         assert!(findings(code).is_empty(), "{code}");
     }
 }
+
+#[test]
+fn dr_syscall_subject_is_one_bounded_documented_call_not_a_pacing_exemption() {
+    let path = Path::new("vendor/dynamorio/seedbox-tests/dynamorio/unix/subject.c");
+    let marker = "/* seedbox-syscall-subject: nanosleep; bound-ms=200; invariant=observed blocked-entry EINTR and remainder */";
+    assert!(dr_fixture_findings(
+        path,
+        &format!("{marker}\nlong r = syscall(SYS_nanosleep, &req, &rem);")
+    )
+    .is_empty());
+    assert_eq!(
+        dr_fixture_findings(
+            path,
+            &format!("{marker} nanosleep(&req,&rem); nanosleep(&req,&rem);")
+        )
+        .len(),
+        1
+    );
+    assert!(dr_fixture_findings(
+        path,
+        &format!("{marker} syscall(__NR_nanosleep,&req,&rem);")
+    )
+    .is_empty());
+    assert_eq!(
+        dr_fixture_findings(path, "syscall(__NR_nanosleep,&req,&rem);").len(),
+        1
+    );
+    for invalid in [
+        "/* seedbox-syscall-subject: nanosleep; bound-ms=0; invariant=EINTR */",
+        "/* seedbox-syscall-subject: nanosleep; bound-ms=200; invariant= */",
+        "/* seedbox-syscall-subject: clock_nanosleep; bound-ms=200; invariant=EINTR */",
+        "/* allow-sleep: readiness */",
+    ] {
+        assert_eq!(
+            dr_fixture_findings(path, &format!("{invalid} nanosleep(&req,&rem);")).len(),
+            1
+        );
+    }
+    assert_eq!(
+        dr_fixture_findings(path, &format!("{marker} usleep(10);")).len(),
+        1
+    );
+    assert_eq!(
+        dr_fixture_findings(
+            path,
+            "sleep(1); syscall(SYS_clock_nanosleep,clock,flags,&req,&rem);"
+        )
+        .len(),
+        2
+    );
+    assert!(
+        dr_fixture_findings(path, "/* nanosleep(0,0); */ puts(\"nanosleep(0,0);\");").is_empty()
+    );
+    assert!(
+        dr_fixture_findings(path, &format!("{marker} int err = nanosleep(&req,&rem);")).is_empty()
+    );
+    // A C subject marker never exempts Rust scheduling helpers.
+    assert_eq!(
+        source(
+            Path::new("tests/a.rs"),
+            &format!("{marker} fn f(){{std::thread::sleep(delay);}}"),
+            true
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+}
+
+#[test]
+fn fork_suite_helpers_are_scanned_without_scanning_upstream_tests() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (name, code) in [
+        ("vendor/dynamorio/seedbox-tests/dynamorio.rs", "mod helper;"),
+        (
+            "vendor/dynamorio/seedbox-tests/helper.rs",
+            "fn f(){std::thread::sleep(delay);}",
+        ),
+        (
+            "vendor/dynamorio/seedbox-tests/subject.c",
+            "nanosleep(&req,&rem);",
+        ),
+        ("vendor/dynamorio/suite/tests/subject.c", "sleep(1);"),
+        (
+            "vendor/dynamorio/suite/tests/helper.rs",
+            "fn f(){std::thread::sleep(delay);}",
+        ),
+    ] {
+        let path = root.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, code).unwrap();
+    }
+    let report = check(root).unwrap();
+    assert_eq!(report.findings.len(), 2);
+    assert!(report
+        .findings
+        .iter()
+        .all(|finding| finding.path.starts_with("vendor/dynamorio/seedbox-tests")));
+}
+
+#[test]
+fn missing_fork_suite_in_a_seedbox_checkout_is_actionable() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("crates/seedbox-machine/Cargo.toml");
+    fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    fs::write(manifest, "").unwrap();
+    assert!(check(dir.path())
+        .unwrap_err()
+        .contains("git submodule update --init --recursive vendor/dynamorio"));
+}
+
+#[test]
+fn dr_sleep_spellings_and_ordinary_c_indirection_are_rejected() {
+    for (extension, code) in [
+        ("c", "#define WAIT() nanosleep(&r,0)\nvoid f(){WAIT();}"),
+        ("c", "f = nanosleep; f(&r,0);"),
+        ("c", "f = &nanosleep; f(&r,0);"),
+        ("c", "syscall((long)SYS_nanosleep, &r, 0);"),
+        ("c", "syscall((long)__NR_clock_nanosleep, clock, 0, &r, 0);"),
+        ("c", "select(0,0,0,0,&tv);"),
+        (
+            "c",
+            "nanosleep((const struct timespec *)&r, (struct timespec *)&rem);",
+        ),
+        ("h", "static void wait_ready(){usleep(100);}"),
+        ("S", "call nanosleep@PLT"),
+        ("S", "mov x8, #__NR_nanosleep\nsvc #0"),
+        ("S", "mov $SYS_nanosleep, %eax\nsyscall"),
+        ("py", "time.sleep(1)"),
+        ("go", "time.Sleep(time.Second)"),
+        (
+            "js",
+            "await new Promise(resolve => setTimeout(resolve, 100));",
+        ),
+        ("java", "Thread.sleep(100);"),
+        ("cs", "Thread.Sleep(100);"),
+        ("cs", "await Task.Delay(100);"),
+    ] {
+        let path = PathBuf::from(format!("fixture.{extension}"));
+        assert_eq!(dr_fixture_findings(&path, code).len(), 1, "{code}");
+    }
+}
+
+#[test]
+fn dr_comments_literals_declarations_and_event_waits_are_not_sleeps() {
+    for (extension, code) in [
+        (
+            "c",
+            "extern int nanosleep(const struct timespec *, struct timespec *);",
+        ),
+        (
+            "h",
+            "unsigned sleep(unsigned seconds); void usleep(unsigned usec);",
+        ),
+        ("c", "select(fd+1,&readfds,NULL,NULL,&timeout);"),
+        ("c", "select(0,0,0,0,NULL);"),
+        (
+            "py",
+            "# time.sleep(1)\ntext = \"time.sleep(1)\"\ntext = '''time.sleep(2)'''",
+        ),
+        ("py", "def sleep(value):\n    return value"),
+        ("java", "public static void sleep(long millis) {}"),
+        ("cs", "public static void Sleep(int millis) {}"),
+        ("go", "// time.Sleep(1)\ntext := `time.Sleep(1)`"),
+        (
+            "js",
+            "/* setTimeout(f, 1) */ const text = `setTimeout(f, 1)`;",
+        ),
+        ("java", "String text = \"Thread.sleep(1)\";"),
+        ("S", "# call nanosleep\n// mov x8, __NR_nanosleep"),
+    ] {
+        assert!(
+            dr_fixture_findings(Path::new(&format!("fixture.{extension}")), code).is_empty(),
+            "{code}"
+        );
+    }
+}
+
+#[test]
+fn dr_subject_markers_cannot_be_shared_with_other_calls_or_languages() {
+    let marker = "/* seedbox-syscall-subject: nanosleep; bound-ms=2; invariant=EINTR */";
+    for (extension, code) in [
+        ("c", format!("{marker} other(), nanosleep(&r,0);")),
+        ("c", format!("{marker} f = nanosleep; f(&r,0);")),
+        (
+            "c",
+            format!("{marker}\n#define WAIT() nanosleep(&r,0)\nWAIT();"),
+        ),
+        ("py", format!("{marker}\ntime.sleep(1)")),
+        ("java", format!("{marker} Thread.sleep(1);")),
+    ] {
+        assert_eq!(
+            dr_fixture_findings(Path::new(&format!("fixture.{extension}")), &code).len(),
+            1,
+            "{code}"
+        );
+    }
+}
+
+#[test]
+fn moving_fork_fixtures_between_languages_preserves_policy_coverage() {
+    let directory = tempfile::tempdir().unwrap();
+    let suite = directory
+        .path()
+        .join("vendor/dynamorio/seedbox-tests/translator/languages");
+    fs::create_dir_all(&suite).unwrap();
+    let mut previous = None;
+    for (extension, code) in [
+        ("c", "nanosleep(&r,0);"),
+        ("S", "call nanosleep"),
+        ("py", "time.sleep(1)"),
+        ("go", "time.Sleep(1)"),
+        ("js", "setTimeout(done, 1)"),
+        ("java", "Thread.sleep(1);"),
+    ] {
+        if let Some(path) = previous.take() {
+            fs::remove_file(path).unwrap();
+        }
+        let path = suite.join(format!("fixture.{extension}"));
+        fs::write(&path, code).unwrap();
+        let report = check(directory.path()).unwrap();
+        assert_eq!(report.findings.len(), 1, "{extension}");
+        assert_eq!(
+            report.findings[0].path,
+            path.strip_prefix(directory.path()).unwrap()
+        );
+        previous = Some(path);
+    }
+}

@@ -334,6 +334,9 @@ fn driver_closures_without_a_record_roundtrip_into_a_fresh_store() {
         };
         let manifest = store.put(&serde_json::to_vec(&prepared).unwrap()).unwrap();
         definition.architecture = Architecture::X86_64;
+        // Match the retained non-controller inventory; this tests closure
+        // ownership without requesting host-specific controller admission.
+        definition.simulator.oracle_control = false;
         definition.runtime.execution["backend"] = "driver-tcg".into();
         definition.runtime.execution["semantic_parameters"]["engine"] =
             serde_json::to_value(DriverExecutor::descriptor("x86_64")).unwrap();
@@ -1300,6 +1303,8 @@ fn comparison_ignores_only_provenance_and_retains_launch_assets_architecture_and
     let InputSource::Resolved { definition } = &mut snapshot.simulation.spec.inputs else {
         unreachable!()
     };
+    // Keep the baseline ISA explicit so the aarch64 edit differs on every host.
+    definition.architecture = seedbox_spec::definition::Architecture::X86_64;
     definition.oracle.image = Some(seedbox_spec::definition::Image {
         tag: Some("source:tag".into()),
         digest: "image-provenance".into(),

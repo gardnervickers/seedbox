@@ -82,7 +82,7 @@ impl<B: Backend> Machine<B> {
             Exit::Wait { .. } => self.record_native(b'H', 0, 0, 0),
             #[cfg(target_arch = "x86_64")]
             Exit::Shutdown => self.record_native(b'G', 0, 0, 0),
-            #[cfg(all(target_arch = "aarch64", any(target_os = "macos", test)))]
+            #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
             Exit::System {
                 register,
                 write,

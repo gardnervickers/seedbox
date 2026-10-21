@@ -223,7 +223,7 @@ impl<B: Backend> Machine<B> {
         {
             return Err("PV guest enabled host counter/timer".into());
         }
-        #[cfg(any(target_os = "macos", test))]
+        #[cfg(target_os = "macos")]
         if matches!(
             _exit,
             Exit::System {
@@ -286,7 +286,7 @@ impl<B: Backend> Machine<B> {
                     self.native.set_core(register, 0)?;
                 }
             }
-            #[cfg(any(target_os = "macos", test))]
+            #[cfg(target_os = "macos")]
             Exit::System { register, .. } => {
                 return Err(format!("PV unsupported system register {register:#x}"));
             }

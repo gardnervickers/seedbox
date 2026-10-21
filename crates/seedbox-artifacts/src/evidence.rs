@@ -15,15 +15,21 @@ impl StateDigestParts {
         self.0.get(name).map(String::as_str)
     }
     pub fn ram_only_difference(&self, other: &Self) -> bool {
-        self.0
-            .get("ram")
-            .zip(other.0.get("ram"))
-            .is_some_and(|(a, b)| a != b)
-            && self
-                .0
-                .iter()
-                .filter(|(k, _)| k.as_str() != "ram")
-                .eq(other.0.iter().filter(|(k, _)| k.as_str() != "ram"))
+        let ram_changed = ["ram", "ram_pages"].into_iter().any(|part| {
+            self.0
+                .get(part)
+                .zip(other.0.get(part))
+                .is_some_and(|(a, b)| a != b)
+        });
+        let non_ram = self
+            .0
+            .iter()
+            .filter(|(k, _)| !matches!(k.as_str(), "ram" | "ram_pages"));
+        let other_non_ram = other
+            .0
+            .iter()
+            .filter(|(k, _)| !matches!(k.as_str(), "ram" | "ram_pages"));
+        ram_changed && non_ram.eq(other_non_ram)
     }
 }
 
@@ -40,3 +46,25 @@ impl TryFrom<BTreeMap<String, String>> for StateDigestParts {
 
 /// Per-machine output directory relative to retained run output.
 pub const MACHINE_OUTPUT_DIR: &str = "machines";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ram_only_difference_allows_derived_page_hashes_but_no_other_state_change() {
+        let parts = |ram: &[u8], pages: &[u8], cpu: &[u8]| {
+            StateDigestParts::try_from(BTreeMap::from([
+                ("ram".into(), ContentDigest::of(ram).hex().into()),
+                ("ram_pages".into(), ContentDigest::of(pages).hex().into()),
+                ("cpu".into(), ContentDigest::of(cpu).hex().into()),
+            ]))
+            .unwrap()
+        };
+        let baseline = parts(b"ram A", b"pages A", b"cpu A");
+        assert!(baseline.ram_only_difference(&parts(b"ram B", b"pages B", b"cpu A")));
+        assert!(!baseline.ram_only_difference(&parts(b"ram B", b"pages B", b"cpu B")));
+        assert!(baseline.ram_only_difference(&parts(b"ram A", b"pages B", b"cpu A")));
+        assert!(!baseline.ram_only_difference(&parts(b"ram A", b"pages A", b"cpu A")));
+    }
+}

@@ -1,16 +1,20 @@
-{ pkgs }:
+{ pkgs, debug ? false }:
 let
   source = ../../vendor/dynamorio;
 in
 assert pkgs.lib.assertMsg (builtins.pathExists (source + "/CMakeLists.txt"))
   "DynamoRIO submodule missing; run git submodule update --init --recursive vendor/dynamorio from the Seedbox checkout.";
 pkgs.stdenv.mkDerivation {
-  pname = "seedbox-dynamorio";
+  pname = "seedbox-dynamorio${pkgs.lib.optionalString debug "-debug"}";
   version = "11.3.0-1";
-  src = pkgs.lib.cleanSource source;
-  # BUILD_EXT configures every extension, including drsyms whose bundled
-  # elfutils dependency is not used by Seedbox. We build
-  # only drreg and its drmgr/drcontainers dependencies.
+  # Downstream test edits do not change the SDK/runtime build inputs.
+  src = pkgs.lib.cleanSourceWith {
+    src = source;
+    filter = path: type:
+      path != toString (source + "/seedbox-tests") && pkgs.lib.cleanSourceFilter path type;
+  };
+  # Export the public SDK and runtime from one configuration. drsyms needs
+  # optional elfutils sources and is not used by the packaged clients.
   postPatch = ''
     substituteInPlace ext/CMakeLists.txt \
       --replace-fail 'add_subdirectory(drsyms)' '# drsyms is not packaged'
@@ -21,12 +25,12 @@ pkgs.stdenv.mkDerivation {
   '';
   nativeBuildInputs = with pkgs.buildPackages; [ cmake ninja perl python3 ];
   cmakeFlags = [
-    "-DCMAKE_BUILD_TYPE=Release"
+    "-DCMAKE_BUILD_TYPE=${if debug then "Debug" else "RelWithDebInfo"}"
     "-DREADELF_EXECUTABLE=${pkgs.stdenv.cc.bintools}/bin/${pkgs.stdenv.cc.targetPrefix}readelf"
     "-DCMAKE_ASM_COMPILER=${pkgs.stdenv.cc.bintools}/bin/${pkgs.stdenv.cc.targetPrefix}as"
     # Upstream compiles C as gnu99 but probes types before setting that flag.
     # GCC 16 defaults to C23, whose built-in bool would misconfigure the core.
-    "-DCMAKE_REQUIRED_FLAGS=-std=gnu99"
+    "-DCMAKE_C_FLAGS=-std=gnu99"
     # The AArch64 codec scripts use this spelling; find_package(Python3) sets
     # Python3_EXECUTABLE, so without it CMake would exec the scripts directly.
     "-DPYTHON3_EXECUTABLE=${pkgs.buildPackages.python3}/bin/python3"
@@ -36,15 +40,11 @@ pkgs.stdenv.mkDerivation {
     "-DBUILD_EXT=ON"
     "-DBUILD_DOCS=OFF"
   ];
-  ninjaFlags = [ "dynamorio" "drreg" "drrun" ];
+  # Install the generated SDK export alongside every library it references;
+  # consumers must never combine release archive headers with this source ABI.
   installPhase = ''
     runHook preInstall
-    mkdir -p "$out/bin64"
-    cp bin64/drrun "$out/bin64/"
-    mkdir -p "$out/lib64/release"
-    cp lib64/release/libdynamorio.so "$out/lib64/release/"
-    mkdir -p "$out/ext/lib64/release"
-    cp ext/lib64/release/libdrmgr.so ext/lib64/release/libdrreg.so "$out/ext/lib64/release/"
+    cmake --install .
     runHook postInstall
   '';
 }

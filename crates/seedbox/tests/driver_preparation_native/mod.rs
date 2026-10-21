@@ -1,6 +1,5 @@
 //! Real CLI → ordinary OCI preparation → retained Driver → native PV acceptance.
 //! Never substitutes a prepared manifest, executor, or execution report.
-#[path = "driver_interactions.rs"]
 mod interactions;
 
 use seedbox_driver_execution::process_lifetime::{reclaim_barrier, EXECUTION_LEASE_FILE};

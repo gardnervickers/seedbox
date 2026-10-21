@@ -230,6 +230,65 @@ fn test_missing_tcg_list_exits_two_without_probing_kvm_or_building() {
     assert!(c.commands.jobs.is_empty());
 }
 #[test]
+fn dynamorio_suite_is_unprivileged_native_and_requires_prepared_inputs() {
+    let temp = fixture();
+    let mut c = checks(&temp.0);
+    let options = options(strings(&["dynamorio", "--list"])).unwrap();
+    assert_eq!(options.suites, [Suite::Portable, Suite::Dynamorio]);
+    let observed = observe(&mut c, &options.suites).unwrap();
+    assert!(c.commands.jobs.is_empty(), "must not probe KVM or sudo");
+    assert_eq!(coordinate(&mut c, &observed, &options).unwrap(), 2);
+    assert!(
+        c.commands.jobs.is_empty(),
+        "missing fixtures fail before builds"
+    );
+    let mut h = host();
+    h.kvm = None;
+    h.tools.clear();
+    h.root_prefix = None;
+    let release_only = env(&[("SEEDBOX_DYNAMORIO_FIXTURES", temp.0.to_str().unwrap())]);
+    fs::create_dir_all(temp.0.join("bin")).unwrap();
+    fs::create_dir_all(temp.0.join("runtime/bin64")).unwrap();
+    fs::create_dir_all(temp.0.join("lib")).unwrap();
+    install_executable(&temp.0.join("runtime/bin64/drrun"), "fixture");
+    install_executable(&temp.0.join("bin/application"), "fixture");
+    fs::write(temp.0.join("lib/libpreserve.so"), "fixture").unwrap();
+    assert!(requirements(Suite::Dynamorio, &h, &release_only, &temp.0)
+        .iter()
+        .any(|reason| reason.contains("SEEDBOX_DYNAMORIO_DEBUG_FIXTURES")));
+    fs::create_dir_all(temp.0.join("runtime/lib64/debug")).unwrap();
+    fs::write(
+        temp.0.join("runtime/lib64/debug/libdynamorio.so"),
+        "fixture",
+    )
+    .unwrap();
+    install_executable(&temp.0.join("bin/unix-supervisor"), "fixture");
+    install_executable(&temp.0.join("bin/unix-signal-models-itimer"), "fixture");
+    assert!(
+        requirements(Suite::Dynamorio, &h, &release_only, &temp.0)
+            .iter()
+            .any(|reason| reason.contains("SEEDBOX_DYNAMORIO_DEBUG_FIXTURES")),
+        "release input never implicitly supplies debug fixtures"
+    );
+    let env = env(&[
+        ("SEEDBOX_DYNAMORIO_FIXTURES", temp.0.to_str().unwrap()),
+        ("SEEDBOX_DYNAMORIO_DEBUG_FIXTURES", temp.0.to_str().unwrap()),
+    ]);
+    h.machine = "aarch64".into();
+    assert!(requirements(Suite::Dynamorio, &h, &env, &temp.0)
+        .iter()
+        .any(|reason| reason.contains("unix-lifecycle_model")));
+    install_executable(&temp.0.join("bin/unix-lifecycle_model"), "fixture");
+    for arch in ["x86_64", "aarch64"] {
+        h.machine = arch.into();
+        assert!(requirements(Suite::Dynamorio, &h, &env, &temp.0).is_empty());
+    }
+    h.system = "Darwin".into();
+    assert!(requirements(Suite::Dynamorio, &h, &env, &temp.0)
+        .contains(&"requires Linux x86-64 or ARM64".into()));
+}
+
+#[test]
 fn test_default_is_portable_only() {
     assert_eq!(options(vec![]).unwrap().suites, [Suite::Portable]);
     assert_eq!(suites(&["portable"]), [Suite::Portable]);
@@ -280,6 +339,22 @@ fn test_workspace_suite_targets_preserve_portable_linux_mac_and_pause_selection(
             .is_empty());
     }
     for (names, expected) in [
+        (
+            vec!["dynamorio"],
+            vec![SuiteTests {
+                package: "seedbox-machine".into(),
+                features: strings(&["dynamorio-tests"]),
+                targets: strings(&["dynamorio"]),
+            }],
+        ),
+        (
+            vec!["dynamorio-isolated"],
+            vec![SuiteTests {
+                package: "seedbox-machine".into(),
+                features: strings(&["dynamorio-isolated-tests"]),
+                targets: strings(&["dynamorio_isolated"]),
+            }],
+        ),
         (
             vec!["linux"],
             vec![
@@ -1446,9 +1521,10 @@ fn oci_artifacts_follow_actual_package_feature_and_socket_permissions() {
                     "--message-format=json"
                 ])
             );
-            assert!(!c.commands.jobs[0]
-                .environment
-                .contains_key("CARGO_TARGET_DIR"));
+            assert_eq!(
+                c.commands.jobs[0].environment["CARGO_TARGET_DIR"],
+                "/workspace-cache"
+            );
             let mut expected = Vec::new();
             if !accessible {
                 expected = strings(&["sudo", "-n", "env", "PATH=/fixture/shell"]);
@@ -1593,4 +1669,444 @@ fn scan_only_stage_reports_success_findings_and_parse_failure() {
     assert!(test_time_policy_stage(&t.0)
         .unwrap_err()
         .contains("fixture.rs"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn isolated_dr_requires_positive_preflights_without_root_or_kvm_probes() {
+    let temp = fixture();
+    for name in ["bin", "lib", "runtime/bin64", "cgroup"] {
+        fs::create_dir_all(temp.0.join(name)).unwrap();
+    }
+    for name in [
+        "bin/seedbox-dr-isolate",
+        "bin/unix-pid1",
+        "bin/unix-eagain",
+        "bin/unix-supervisor",
+        "bin/application",
+        "runtime/bin64/drrun",
+    ] {
+        install_executable(&temp.0.join(name), "fixture");
+    }
+    fs::write(temp.0.join("lib/libpreserve.so"), "fixture").unwrap();
+    let mut c = checks(&temp.0);
+    c.environment = env(&[
+        ("SEEDBOX_DYNAMORIO_FIXTURES", temp.0.to_str().unwrap()),
+        (
+            "SEEDBOX_DYNAMORIO_CGROUP_ROOT",
+            temp.0.join("cgroup").to_str().unwrap(),
+        ),
+    ]);
+    c.commands.replies.push_back(Outcome {
+        code: 2,
+        ..Outcome::default()
+    });
+    c.commands.replies.push_back(Outcome::default());
+    let options = options(strings(&["dynamorio-isolated", "--list"])).unwrap();
+    let h = observe(&mut c, &options.suites).unwrap();
+    assert_eq!(coordinate(&mut c, &h, &options).unwrap(), 2);
+    assert_eq!(c.commands.jobs.len(), 2);
+    assert!(c.commands.jobs.iter().all(|j| j.args[1] == "preflight"));
+    assert!(
+        requirements(Suite::DynamorioIsolated, &h, &c.environment, &temp.0)
+            .iter()
+            .any(|s| s.contains("pid1 capability preflight"))
+    );
+    let h = observe(&mut c, &options.suites).unwrap();
+    assert_eq!(coordinate(&mut c, &h, &options).unwrap(), 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn process_tree_boundary_reaps_nested_new_groups() {
+    use std::io::{Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    const MODE: &str = "SEEDBOX_CHECK_TREE_MODE";
+    let mode = std::env::var(MODE).unwrap_or_default();
+    if mode == "fixture" {
+        use std::os::unix::process::CommandExt;
+        let depth: u32 = std::env::var("SEEDBOX_CHECK_TREE_DEPTH")
+            .unwrap_or_else(|_| "0".into())
+            .parse()
+            .unwrap();
+        let _child = if depth < 2 {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "tests::process_tree_boundary_reaps_nested_new_groups",
+                    "--nocapture",
+                ])
+                .env("SEEDBOX_CHECK_TREE_DEPTH", (depth + 1).to_string())
+                .process_group(0);
+            Some(seedbox_exec::spawn(&mut command).unwrap())
+        } else {
+            None
+        };
+        unsafe {
+            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+        }
+        println!("tree stdout preserved");
+        eprintln!("tree stderr preserved");
+        let mut ready = UnixStream::connect("ready.sock").unwrap();
+        ready.write_all(&std::process::id().to_ne_bytes()).unwrap();
+        let mut ack = [0];
+        ready.read_exact(&mut ack).unwrap();
+        if depth == 0 {
+            if let Ok(code) = std::env::var("SEEDBOX_CHECK_TREE_EXIT") {
+                std::process::exit(code.parse().unwrap());
+            }
+        }
+        // Explicitly refuse TERM in all three fixtures to exercise escalation.
+        unsafe {
+            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+            loop {
+                libc::pause();
+            }
+        }
+    }
+    if !mode.is_empty() {
+        let listener = UnixListener::bind("ready.sock").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let expired = Arc::new(AtomicBool::new(false));
+        let trigger = expired.clone();
+        let cancel = mode.starts_with("cancel");
+        let timeout = mode.starts_with("timeout");
+        let owner = std::process::id();
+        let observer = std::thread::spawn(move || {
+            let mut identities = Vec::new();
+            let mut streams = Vec::new();
+            for _ in 0..3 {
+                let (mut stream, _) =
+                    seedbox_test_time::HangGuard::new("fixture readiness", Duration::from_secs(30))
+                        .wait_for(|| match listener.accept() {
+                            Ok(pair) => Some(pair),
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
+                            Err(e) => panic!("accept fixture: {e}"),
+                        })
+                        .unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(30)))
+                    .unwrap();
+                let mut bytes = [0; 4];
+                stream.read_exact(&mut bytes).unwrap();
+                let pid = u32::from_ne_bytes(bytes);
+                let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+                assert!(fd >= 0);
+                identities.push(unsafe { OwnedFd::from_raw_fd(fd as i32) });
+                streams.push(stream);
+            }
+            for mut stream in streams {
+                stream.write_all(&[1]).unwrap();
+            }
+            if cancel {
+                unsafe {
+                    libc::kill(owner as i32, libc::SIGTERM);
+                }
+            } else if timeout {
+                trigger.store(true, Ordering::Release);
+            }
+            identities
+        });
+        let mut real = Real::install_signals().unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/dynamorio/seedbox-tests/dynamorio/unix/supervisor.c");
+        let compile = Job::new(
+            "actual fixture supervisor",
+            vec![
+                "cc".into(),
+                "-Wall".into(),
+                "-Wextra".into(),
+                "-Werror".into(),
+                source.to_string_lossy().into(),
+                "-o".into(),
+                "supervisor".into(),
+            ],
+            &std::env::vars().collect(),
+            &std::env::current_dir().unwrap(),
+        );
+        assert_eq!(real.execute(&compile).unwrap().code, 0);
+
+        let mut environment: Environment = std::env::vars().collect();
+        environment.insert(MODE.into(), "fixture".into());
+        if mode == "success" || mode == "failure" {
+            environment.insert(
+                "SEEDBOX_CHECK_TREE_EXIT".into(),
+                if mode == "success" { "0" } else { "7" }.into(),
+            );
+        }
+        let mut job = Job::new(
+            "tree",
+            vec![
+                "./supervisor".into(),
+                std::env::current_exe().unwrap().to_string_lossy().into(),
+                "--exact".into(),
+                "tests::process_tree_boundary_reaps_nested_new_groups".into(),
+                "--nocapture".into(),
+            ],
+            &environment,
+            &std::env::current_dir().unwrap(),
+        );
+        if mode.ends_with("direct") {
+            job.args.remove(0);
+        }
+        job.capture = true;
+        let result = real.execute_until(&job, |start| {
+            expired.load(Ordering::Acquire) || start.elapsed() >= Duration::from_secs(30)
+        });
+        if mode == "success" || mode == "failure" {
+            let result = result.unwrap();
+            assert_eq!(result.code, if mode == "success" { 0 } else { 7 });
+            assert!(result.stdout.contains("tree stdout preserved"));
+        } else {
+            let error = result.unwrap_err();
+            eprintln!("actual checker boundary: {mode}: {error}");
+            assert!(error.to_string().contains("tree stdout preserved"));
+            assert_eq!(
+                error.kind(),
+                if cancel {
+                    std::io::ErrorKind::Interrupted
+                } else {
+                    std::io::ErrorKind::TimedOut
+                }
+            );
+        }
+        for identity in observer.join().unwrap() {
+            let mut poll = libc::pollfd {
+                fd: identity.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            assert_eq!(unsafe { libc::poll(&mut poll, 1, 30000) }, 1);
+            // POLLHUP means the referenced task was reaped, not just exited.
+            assert_ne!(poll.revents & libc::POLLHUP, 0);
+        }
+        assert_eq!(
+            unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        return;
+    }
+    for mode in [
+        "timeout",
+        "cancel",
+        "timeout-direct",
+        "cancel-direct",
+        "success",
+        "failure",
+    ] {
+        let t = fixture();
+        let mut environment: Environment = std::env::vars().collect();
+        environment.insert(MODE.into(), mode.into());
+        let mut job = Job::new(
+            "tree boundary",
+            vec![
+                std::env::current_exe().unwrap().to_string_lossy().into(),
+                "--exact".into(),
+                "tests::process_tree_boundary_reaps_nested_new_groups".into(),
+                "--nocapture".into(),
+            ],
+            &environment,
+            &t.0,
+        );
+        job.capture = true;
+        job.timeout = Some(Duration::from_secs(60));
+        let result = Real.execute(&job).unwrap();
+        assert_eq!(result.code, 0, "{}", result.stdout);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn process_phase_output_is_bounded_and_survives_timeout() {
+    let t = fixture();
+    fs::create_dir(t.0.join("bin")).unwrap();
+    let sources = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vendor/dynamorio/seedbox-tests/dynamorio");
+    let environment = std::env::vars().collect();
+    let mut compile = Job::new(
+        "phase supervisor",
+        vec![
+            "cc".into(),
+            "-Wall".into(),
+            "-Wextra".into(),
+            "-Werror".into(),
+            sources.join("unix/supervisor.c").to_string_lossy().into(),
+            "-o".into(),
+            t.0.join("bin/unix-supervisor").to_string_lossy().into(),
+        ],
+        &environment,
+        &t.0,
+    );
+    compile.timeout = Some(Duration::from_secs(30));
+    assert_eq!(Real.execute(&compile).unwrap().code, 0);
+    let mut job = Job::new(
+        "phase output",
+        vec![
+            "python3".into(),
+            "-B".into(),
+            sources
+                .join("translator/phase_test.py")
+                .to_string_lossy()
+                .into(),
+            t.0.to_string_lossy().into(),
+        ],
+        &environment,
+        &t.0,
+    );
+    job.timeout = Some(Duration::from_secs(60));
+    assert_eq!(Real.execute(&job).unwrap().code, 0);
+}
+
+#[test]
+fn dr_failures_stream_before_a_later_target_timeout() {
+    let t = fixture();
+    let mut c = checks(&t.0);
+    c.commands.replies.push_back(Outcome {
+        code: 0,
+        stdout: [
+            "dynamorio",
+            "dynamorio_isolated",
+            "ordinary",
+            "applications",
+        ]
+        .map(|target| artifact(&std::path::Path::new("/fixture").join(target), target, true))
+        .join("\n"),
+    });
+    cargo_tests(
+        &mut c,
+        "seedbox-machine",
+        words(&["cargo", "test"]),
+        &[],
+        None,
+        false,
+    )
+    .unwrap();
+    for job in &c.commands.jobs[1..] {
+        assert!(job.args.contains(&"--test-threads=1".into()));
+        assert_eq!(
+            job.args.contains(&"--nocapture".into()),
+            !job.name.ends_with("/ordinary")
+        );
+        let expected = match job.name.as_str() {
+            "seedbox-machine/dynamorio" => Some(Duration::from_secs(5400)),
+            "seedbox-machine/applications" => None,
+            _ => Some(Duration::from_secs(1800)),
+        };
+        assert_eq!(job.timeout, expected);
+    }
+    assert_eq!(c.commands.jobs.len(), 5);
+}
+
+#[test]
+fn skip_portable_selects_native_suites_explicitly() {
+    assert_eq!(
+        options(strings(&["dynamorio", "dynamorio-isolated", "dynamorio"]))
+            .unwrap()
+            .suites,
+        [Suite::Portable, Suite::Dynamorio, Suite::DynamorioIsolated]
+    );
+    assert_eq!(
+        options(strings(&[
+            "--skip-portable",
+            "dynamorio",
+            "dynamorio-isolated"
+        ]))
+        .unwrap()
+        .suites,
+        [Suite::Dynamorio, Suite::DynamorioIsolated]
+    );
+    for args in [
+        vec!["--skip-portable"],
+        vec!["--skip-portable", "portable", "dynamorio"],
+        vec!["--skip-portable", "--test-time-policy"],
+    ] {
+        assert!(options(strings(&args)).is_err());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn skip_portable_runs_only_selected_dr_target_without_portable_jobs() {
+    for (suite, feature, target) in [
+        ("dynamorio", "dynamorio-tests", "dynamorio"),
+        (
+            "dynamorio-isolated",
+            "dynamorio-isolated-tests",
+            "dynamorio_isolated",
+        ),
+    ] {
+        let t = fixture();
+        for file in [
+            "runtime/bin64/drrun",
+            "bin/application",
+            "lib/libpreserve.so",
+            "runtime/lib64/debug/libdynamorio.so",
+            "bin/unix-supervisor",
+            "bin/unix-signal-models-itimer",
+            "bin/unix-pid1",
+            "bin/unix-eagain",
+            "bin/seedbox-dr-isolate",
+        ] {
+            let path = t.0.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            install_executable(&path, "fixture");
+        }
+        fs::create_dir(t.0.join("cgroup")).unwrap();
+        let mut c = checks(&t.0);
+        c.environment = env(&[
+            ("SEEDBOX_DYNAMORIO_FIXTURES", t.0.to_str().unwrap()),
+            ("SEEDBOX_DYNAMORIO_DEBUG_FIXTURES", t.0.to_str().unwrap()),
+            (
+                "SEEDBOX_DYNAMORIO_CGROUP_ROOT",
+                t.0.join("cgroup").to_str().unwrap(),
+            ),
+        ]);
+        let mut h = host();
+        h.tools.extend(strings(&[
+            "dynamorio-isolate-pid1",
+            "dynamorio-isolate-pids",
+        ]));
+        c.commands.replies.extend([
+            Outcome {
+                code: 0,
+                stdout: json!({"packages": [{
+                    "name": "seedbox-machine",
+                    "features": {feature: []},
+                    "metadata": {"seedbox-check": {"suites": {suite: [feature]}}},
+                    "targets": [{"name": target, "kind": ["test"], "required-features": [feature]}]
+                }]})
+                .to_string(),
+            },
+            Outcome {
+                code: 0,
+                stdout: artifact(std::path::Path::new("/fixture/test"), target, true),
+            },
+            Outcome::default(),
+        ]);
+        let o = options(strings(&["--skip-portable", suite])).unwrap();
+        assert_eq!(coordinate(&mut c, &h, &o).unwrap(), 0);
+        assert_eq!(
+            c.commands
+                .jobs
+                .iter()
+                .map(|j| j.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "test-targets",
+                "seedbox-machine-build",
+                &format!("seedbox-machine/{target}")
+            ]
+        );
+        assert!(c.commands.jobs[1].args.contains(&feature.into()));
+    }
 }

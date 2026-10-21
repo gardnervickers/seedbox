@@ -19,12 +19,14 @@ pub struct Options {
 pub fn options(args: Vec<String>) -> Result<Options, String> {
     let mut names = Vec::new();
     let mut list = false;
+    let mut skip_portable = false;
     let mut test_time_policy = false;
     let mut probe = false;
     let mut help = false;
     for arg in args {
         match arg.as_str() {
             "--list" => list = true,
+            "--skip-portable" => skip_portable = true,
             "--test-time-policy" => test_time_policy = true,
             "--probe-linux" => probe = true,
             "--help" | "-h" => help = true,
@@ -32,10 +34,16 @@ pub fn options(args: Vec<String>) -> Result<Options, String> {
             _ => names.push(arg),
         }
     }
-    if test_time_policy && (!names.is_empty() || list || probe) {
+    if test_time_policy && (!names.is_empty() || list || skip_portable || probe) {
         return Err("--test-time-policy must be used without suites or other modes".into());
     }
-    let suites = expand(&names)?;
+    let mut suites = expand(&names)?;
+    if skip_portable {
+        if names.is_empty() || names.iter().any(|name| name == "portable") {
+            return Err("--skip-portable requires native suites and cannot select portable".into());
+        }
+        suites.retain(|suite| *suite != Suite::Portable);
+    }
     Ok(Options {
         suites,
         list,
@@ -45,7 +53,7 @@ pub fn options(args: Vec<String>) -> Result<Options, String> {
     })
 }
 fn help() {
-    println!("Run explicitly named test suites; Cargo discovers tests.\n\nUsage: seedbox-check [--list] [SUITE ...]\n\n  --list             Check requirements without building or running tests.\n  --test-time-policy Scan test code for host sleeps without running other checks.\n  --help             Show this help.\n\nsuites:");
+    println!("Run explicitly named test suites; Cargo discovers tests.\n\nUsage: seedbox-check [--list] [SUITE ...]\n\n  --list             Check requirements without building or running tests.\n  --skip-portable    Run native suites after portable passed earlier in this job.\n  --test-time-policy Scan test code for host sleeps without running other checks.\n  --help             Show this help.\n\nsuites:");
     for s in SUITES {
         println!("  {:16} {}", s.name(), s.description());
     }
@@ -190,9 +198,12 @@ pub fn observe<C: Commands>(checks: &mut Checks<C>, suites: &[Suite]) -> Result<
     );
     // No root capability is needed at all by the TCG-only fixture suite.
     if host.system == "Linux"
-        && suites
-            .iter()
-            .any(|s| !matches!(s, Suite::Portable | Suite::MachineTcg))
+        && suites.iter().any(|s| {
+            !matches!(
+                s,
+                Suite::Portable | Suite::MachineTcg | Suite::Dynamorio | Suite::DynamorioIsolated
+            )
+        })
     {
         if unsafe { libc::geteuid() } == 0 {
             host.root_prefix = Some(vec![]);
@@ -227,6 +238,36 @@ pub fn observe<C: Commands>(checks: &mut Checks<C>, suites: &[Suite]) -> Result<
                 .ok_or("KVM probe has no result")?
                 .into(),
         );
+    }
+    if host.system == "Linux" && suites.contains(&Suite::DynamorioIsolated) {
+        if let Some(fixtures) = checks.environment.get("SEEDBOX_DYNAMORIO_FIXTURES") {
+            let launcher = Path::new(fixtures).join("bin/seedbox-dr-isolate");
+            if executable(&launcher) {
+                for mode in ["pid1", "pids"] {
+                    let selected = if mode == "pid1" {
+                        checks
+                            .environment
+                            .get("SEEDBOX_DYNAMORIO_PID1_LAUNCHER")
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| launcher.clone())
+                    } else {
+                        launcher.clone()
+                    };
+                    let mut job = checks.job(
+                        &format!("isolate-{mode}-preflight"),
+                        vec![
+                            selected.to_string_lossy().into(),
+                            "preflight".into(),
+                            mode.into(),
+                        ],
+                    );
+                    job.timeout = Some(Duration::from_secs(150));
+                    if checks.commands.execute(&job).is_ok_and(|o| o.code == 0) {
+                        host.tools.insert(format!("dynamorio-isolate-{mode}"));
+                    }
+                }
+            }
+        }
     }
     let mut sockets = socket_candidates(&checks.environment);
     if let Some(path) = checks
@@ -310,24 +351,26 @@ pub fn coordinate<C: Commands>(
     if options.list {
         return Ok(0);
     }
-    checks.step("fmt", words(&["cargo", "fmt", "--all", "--check"]));
-    // --all-features type-checks every feature-gated target (native service
-    // suites, worker-failure hooks) without a second full test build.
-    checks.step(
-        "clippy",
-        words(&[
-            "cargo",
+    if options.suites.contains(&Suite::Portable) {
+        checks.step("fmt", words(&["cargo", "fmt", "--all", "--check"]));
+        // --all-features type-checks every feature-gated target (native service
+        // suites, worker-failure hooks) without a second full test build.
+        checks.step(
             "clippy",
-            "--workspace",
-            "--all-targets",
-            "--all-features",
-            "--locked",
-            "--",
-            "-D",
-            "warnings",
-        ]),
-    );
-    portable(checks)?;
+            words(&[
+                "cargo",
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--all-features",
+                "--locked",
+                "--",
+                "-D",
+                "warnings",
+            ]),
+        );
+        portable(checks)?;
+    }
     if checks.failed || options.suites == [Suite::Portable] {
         return Ok(u8::from(checks.failed));
     }
@@ -538,10 +581,8 @@ pub fn cargo_tests<C: Commands>(
     prefix: Option<&[String]>,
     engine_requires_root: bool,
 ) -> Result<(), String> {
+    // Respect the caller's private target across discovered package builds too.
     let mut env = checks.environment.clone();
-    if package != "seedbox" {
-        env.remove("CARGO_TARGET_DIR");
-    }
     if !features.is_empty() {
         command.extend(["--features".into(), features.join(",")]);
     }
@@ -563,7 +604,10 @@ pub fn cargo_tests<C: Commands>(
             .map_err(|e| format!("native test scratch directory: {e}"))?;
         env.insert("TMPDIR".into(), scratch.0.to_string_lossy().into());
         let mut command = vec![binary.to_string_lossy().into(), "--test-threads=1".into()];
-        if target == "applications" {
+        if matches!(
+            target.as_str(),
+            "applications" | "dynamorio" | "dynamorio_isolated"
+        ) {
             command.push("--nocapture".into());
         }
         if (package == "seedbox"
@@ -577,10 +621,13 @@ pub fn cargo_tests<C: Commands>(
             command = privileged(prefix, command, &env);
         }
         let mut job = Job::new(&format!("{package}/{target}"), command, &env, &checks.root);
-        job.timeout = if target == "applications" {
-            None
-        } else {
-            Some(Duration::from_secs(1800))
+        job.timeout = match (package, target.as_str()) {
+            (_, "applications") => None,
+            // The complete ordinary DR corpus includes managed runtimes and
+            // many native/plain/client phases. Allow a diagnostic run to reach
+            // every case; each phase keeps its own shorter completion guard.
+            ("seedbox-machine", "dynamorio") => Some(Duration::from_secs(5400)),
+            _ => Some(Duration::from_secs(1800)),
         };
         checks.run(job);
     }

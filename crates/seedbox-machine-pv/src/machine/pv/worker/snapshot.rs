@@ -78,9 +78,12 @@ impl Header {
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-pub(in crate::machine::pv) use tests::fixture;
-#[cfg(test)]
 pub(super) use tests::fixture_architecture;
-
-#[cfg(test)]
-pub(in crate::machine::pv) use tests::backlog_without_driver_ok_fixture;
+#[cfg(all(
+    test,
+    any(
+        all(target_arch = "x86_64", target_os = "linux"),
+        all(target_arch = "aarch64", target_os = "macos")
+    )
+))]
+pub(in crate::machine::pv) use tests::{backlog_without_driver_ok_fixture, fixture};

@@ -108,6 +108,8 @@
         in {
           tcgQemu = machineTcg.qemu;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          dynamorioTestFixtures = import ./crates/seedbox-machine/dynamorio-test-fixtures.nix { inherit pkgs; };
+          dynamorioDebugTestFixtures = import ./crates/seedbox-machine/dynamorio-test-fixtures.nix { inherit pkgs; debug = true; };
           machineTcgAssets = machineTcg.assets;
           machineTcgTestFixtures = machineTcg.testFixtures;
           # These executables run INSIDE the configured Linux guest. TCG always

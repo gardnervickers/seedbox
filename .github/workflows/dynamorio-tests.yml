@@ -1,0 +1,104 @@
+name: DynamoRIO integration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dynamorio-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Native ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86-64
+            runner: ubuntu-24.04
+          - arch: ARM64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # Step budgets total 345 minutes; reserve 15 for checkout/cache/reporting.
+    # Ordinary/isolated checker guards remain 90/30 minutes respectively.
+    timeout-minutes: 360
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TARGET_DIR: '${{ github.workspace }}/target'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # Validate the exact ref selected for the manual run.
+          ref: ${{ github.sha }}
+          submodules: recursive
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare the development shell
+        timeout-minutes: 20
+        run: |
+          seedbox_flake=$(bash tools/dev-flake.sh)
+          nix develop "$seedbox_flake" --profile "$RUNNER_TEMP/dr-dev" --command true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dynamorio-${{ runner.arch }}-${{ hashFiles('flake.lock') }}
+          cmd-format: nix develop "git+file://${{ github.workspace }}?submodules=1" --command {0}
+          cache-bin: false
+      - name: Build native DR and public SDK fixtures
+        timeout-minutes: 90
+        run: |
+          seedbox_flake=$(bash tools/dev-flake.sh)
+          fixtures=$(nix build "$seedbox_flake#dynamorioTestFixtures" --out-link "$RUNNER_TEMP/dr-fixtures" --print-out-paths)
+          echo "SEEDBOX_DYNAMORIO_FIXTURES=$fixtures" >> "$GITHUB_ENV"
+          debug_fixtures=$(nix build "$seedbox_flake#dynamorioDebugTestFixtures" --out-link "$RUNNER_TEMP/dr-debug-fixtures" --print-out-paths)
+          echo "SEEDBOX_DYNAMORIO_DEBUG_FIXTURES=$debug_fixtures" >> "$GITHUB_ENV"
+      - name: Portable prerequisites
+        id: portable
+        timeout-minutes: 90
+        run: |
+          seedbox_flake=$(bash tools/dev-flake.sh)
+          uname -m
+          git rev-parse HEAD
+          git -C vendor/dynamorio rev-parse HEAD
+          python3 -m unittest discover -s tools/dynamorio-ci
+          nix develop "$seedbox_flake" --command bash harness/check.sh portable
+      - name: Ordinary native tests
+        id: ordinary
+        timeout-minutes: 105
+        run: |
+          seedbox_flake=$(bash tools/dev-flake.sh)
+          set -o pipefail
+          nix develop "$seedbox_flake" --command bash harness/check.sh --skip-portable dynamorio 2>&1 |
+            python3 tools/dynamorio-ci/artifacts.py --log "$RUNNER_TEMP/dr-logs/ordinary.log"
+      - name: Separate isolated native fixture validation
+        if: ${{ !cancelled() && steps.portable.outcome == 'success' }}
+        timeout-minutes: 40
+        run: |
+          seedbox_flake=$(bash tools/dev-flake.sh)
+          export SEEDBOX_DYNAMORIO_PID1_LAUNCHER="$SEEDBOX_DYNAMORIO_FIXTURES/bin/seedbox-dr-pid1"
+          unit="seedbox-dr-$(python3 -c 'import uuid; print(uuid.uuid4().hex)').scope"
+          # Ask systemd for a dedicated delegation, independent of the hosted
+          # runner service. The scope execs the root-only supervisor in place;
+          # builds/tests still run as runner. Signals reach its existing cleanup,
+          # and systemd collects the scope once its owned processes have exited.
+          sudo --preserve-env=PATH,SEEDBOX_DYNAMORIO_FIXTURES,SEEDBOX_DYNAMORIO_DEBUG_FIXTURES,SEEDBOX_DYNAMORIO_PID1_LAUNCHER,CARGO_TARGET_DIR,CARGO_INCREMENTAL,CARGO_PROFILE_DEV_DEBUG,CARGO_PROFILE_TEST_DEBUG \
+            systemd-run --scope --collect --expand-environment=no --unit="$unit" \
+            --property=Delegate=pids --property=RuntimeMaxSec=40min \
+            python3 tools/dynamorio-ci/cgroup.py --owned-scope "$unit" --uid "$(id -u)" --gid "$(id -g)" -- \
+            nix develop "$seedbox_flake" --command bash harness/check.sh --skip-portable dynamorio-isolated
+      - name: Retain bounded DR failure evidence
+        if: ${{ !cancelled() && failure() }}
+        run: python3 tools/dynamorio-ci/artifacts.py
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() && failure() }}
+        with:
+          name: dynamorio-failure-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dr-artifacts/
+          retention-days: 7
+          if-no-files-found: warn

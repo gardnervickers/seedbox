@@ -5,6 +5,10 @@ Start with [README.md](README.md); [design](docs/design.md) and
 
 ## Scope and review
 
+Seedbox is a testing utility for cooperative users and reasonably configured applications. Users provide supported images and dependencies, required permissions, and sufficient resources; when prerequisites are missing, normal setup or runtime errors are appropriate.
+
+We do not need to support every possible application. If someone intentionally tries to break Seedbox or exercises pathological behavior, failure is acceptable; return a clear error where practical, but do not add architecture, workarounds, compatibility infrastructure, or special detection solely to support such cases. Keep supported workloads executing correctly with deterministic replay, normal cleanup, and clear error reporting; this is not permission to silently corrupt normal results.
+
 - There is no backward-compatibility requirement: replace obsolete formats/APIs;
   do not add migration shims, qualification lists or provenance gates.
 - CLI and `seedbox.yaml` interface changes need Gardner's approval; internal APIs
@@ -51,13 +55,40 @@ Start with [README.md](README.md); [design](docs/design.md) and
 
 ## Tests and CLI
 
-- Tests never sleep or infer order from elapsed time/timed absence. Use positive
-  signals and generous wait timeouts; no test-time annotations or exemptions.
+- Tests use positive signals/events for readiness, pacing and ordering, never
+  incidental host sleeps. Generous containment timeouts bound positive completion.
+  Generic elapsed host-time assertions and ordering inferred from timed absence
+  are forbidden; the subject-timer exception below is limited to its stated oracles.
+- In native DynamoRIO regression fixtures, retained original timer-accuracy oracles
+  may compare independent real clocks during already-existing timer workloads:
+  remaining time, expiry/cadence, legitimacy of observed expiries, and the signal
+  storm's clock-derived expected total. Preserve the original populations, options,
+  tolerances and noise/slack rules; report inconclusive observations explicitly,
+  never as a pass. This permits subject-timer clock comparisons only, not added
+  fixed sleeps/blocking, generic duration assertions, timed readiness/ordering,
+  or success inferred from an event's timed absence. Sleep calls remain subject
+  to the separate bounded syscall rule below.
+- In native DynamoRIO C fixtures only, a bounded `nanosleep`/`clock_nanosleep` syscall
+  may be the regression subject after faithful event/state alternatives are considered.
+  Immediately precede each call with
+  `/* seedbox-syscall-subject: nanosleep; bound-ms=N; invariant=... */`
+  (or `clock_nanosleep`). Review must verify the actual bound and syscall-specific
+  invariant; a marker permits one call, never incidental pacing or a whole function.
+  The checker rejects Rust timer helpers and known sleep spellings in downstream
+  DR Rust, C/header, assembly, Python, Go, JavaScript, Java and C# fixtures, including
+  C function-address assignments, named sleep syscalls with casts and zero-fd
+  select delays. It ignores comments, literals and ordinary C prototypes.
+  This source lint does not resolve arbitrary wrappers, imports, generated code,
+  numeric assembly syscall IDs or every language/API; review enforces the same
+  readiness rule throughout the suite. A move into another language is no exemption.
 - Unit tests stay beside components; public-boundary tests stay in their owning
   crate's `tests/`. Give each scenario one owner; share backend-neutral scenarios.
 - Run portable checks in `nix develop`; engine changes also need relevant native
   suites. Portable compiles native cases without running them. Missing requirements
   are blockers. Suite discovery/policy lives in `crates/seedbox-check/src/`.
+- Ordinary Seedbox CI remains automatic. The expensive native DynamoRIO workflow
+  is manual-only; after updating `vendor/dynamorio`, dispatch it for both x86-64
+  and ARM64. See internals for local commands and hosted workflow details.
 - CLI conventions live in `crates/seedbox-cli/src/`: reuse clap argument groups,
   validate before preparation, and keep computed defaults in `defaults.rs`.
   Environment selects paths/state, never result-changing inputs.

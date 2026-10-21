@@ -16,9 +16,9 @@ pub struct NamedVolume {
     pub name: String,
     pub target: String,
 }
-/// Visible application limits for configured guests. Instrumented PV boot
-/// packaging reserves the private runtime's 96 descriptors in addition to nofile;
-/// uninstrumented TCG does not. Default is max_map_count=262144 and nofile=1048576.
+/// Visible application limits for configured guests. The translator reserves
+/// descriptors within this limit; it does not virtualize getrlimit.
+/// Default is max_map_count=262144 and nofile=1048576.
 /// Linux admission remains fallible in the guest.
 // Concrete bootstrap settings preserve container behavior
 // without adding execution settings or environment-dependent machine identity.
@@ -248,12 +248,10 @@ pub(super) fn recipe(
         .first()
         .is_some_and(|p| p == "/seedbox/progress/bin64/drrun");
     validate(env, runtime)?;
-    let nofile = env
-        .limits
-        .nofile
-        .get()
-        .checked_add(if runtime { 96 } else { 0 })
-        .ok_or_else(|| invalid("guest nofile plus runtime descriptor reserve overflows"))?;
+    // DynamoRIO moves its private descriptors to the top of the supplied range,
+    // but leaves getrlimit/prlimit results unchanged. Adding its reserve here
+    // would expose a different application limit on PV than on TCG.
+    let nofile = env.limits.nofile.get();
     let mut length = 4 + env.hostname.len() + 4 + env.hosts.len() + 4 + 4 + 1 + 1 + 4 + 4 + 4;
     for value in &env.anonymous_volumes {
         length = add(length, 4 + value.len())?;

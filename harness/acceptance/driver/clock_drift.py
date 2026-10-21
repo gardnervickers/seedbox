@@ -54,8 +54,11 @@ def scenario():
     def sample(name):
         before = time.monotonic_ns()
         channels[name].sendall(b"sample\n")
-        result = json.loads(readers[name].readline())
+        line = readers[name].readline()
         after = time.monotonic_ns()
+        # Decoding charges simulated CPU time and its cost need not be constant.
+        # It is not part of the network clock exchange.
+        result = json.loads(line)
         # Symmetric fixed-latency links put the target sample near the middle
         # of this exchange. Constant transport/clock-read costs cancel between
         # samples; this clock is simulated oracle time, never host wall time.

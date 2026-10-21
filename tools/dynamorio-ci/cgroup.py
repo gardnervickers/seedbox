@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Run an ordinary-user fixture command in a uniquely owned pids delegation.
+
+The caller must already have pids delegated by its parent, or run in a dedicated
+systemd scope with Delegate=pids. This supervisor never changes a shared
+controller, sysctl, or the membership of an unrelated process.
+"""
+import argparse
+import ctypes
+import os
+import pwd
+import re
+from pathlib import Path
+import select
+import signal
+import sys
+import uuid
+
+
+def write(path, value):
+    path.write_text(value)
+
+
+def prepare_owned_scope(parent, name):
+    # systemd-run --scope execs us in the new scope, preserving the caller's
+    # cwd, environment, process group and exit status. Only that scope may be
+    # rearranged: leave the hosted runner's service entirely to systemd.
+    if not re.fullmatch(r"seedbox-dr-[0-9a-f]{32}\.scope", name) or parent.name != name:
+        raise RuntimeError(f"current cgroup is not the requested owned scope: {name}")
+    if (parent / "cgroup.procs").read_text().split() != [str(os.getpid())]:
+        raise RuntimeError(f"{parent}: owned scope must contain only this supervisor")
+    if "pids" not in (parent / "cgroup.controllers").read_text().split():
+        raise RuntimeError(f"{parent}: systemd has not delegated pids to the owned scope")
+    # The cgroup-v2 no-internal-process rule requires an empty domain before
+    # enabling pids for its children. Move only ourselves, before forking.
+    supervisor = parent / "supervisor"
+    supervisor.mkdir(mode=0o700)
+    write(supervisor / "cgroup.procs", str(os.getpid()))
+    write(parent / "cgroup.subtree_control", "+pids")
+    # systemd removes this subgroup and collects the scope when we exit; the
+    # existing finally block drains/removes our separate fixture delegation.
+
+
+def wait_empty(root):
+    with (root / "cgroup.events").open() as events:
+        poll = select.poll()
+        poll.register(events.fileno(), select.POLLPRI | select.POLLERR)
+        while True:
+            events.seek(0)
+            state = dict(line.split() for line in events)
+            if state.get("populated") == "0":
+                return
+            if not poll.poll(30_000):
+                raise RuntimeError(f"owned cgroup did not drain: {root}")
+
+
+def launch(args):
+    if os.geteuid() != 0:
+        raise RuntimeError("use sudo for this scoped cgroup supervisor; command runs as --uid")
+    if args.uid <= 0 or args.gid <= 0:
+        raise RuntimeError("fixture command must run as a non-root uid/gid")
+    if not args.command or args.command[0] != "--" or len(args.command) < 2:
+        raise RuntimeError("expected -- COMMAND ARGS...")
+    mount = Path("/sys/fs/cgroup").resolve()
+    membership = next(
+        line.removeprefix("0::")
+        for line in Path("/proc/self/cgroup").read_text().splitlines()
+        if line.startswith("0::")
+    )
+    parent = (mount / membership.lstrip("/")).resolve()
+    if not parent.is_relative_to(mount):
+        raise RuntimeError("current cgroup is outside the visible cgroup-v2 mount")
+    if args.owned_scope:
+        prepare_owned_scope(parent, args.owned_scope)
+    if "pids" not in (parent / "cgroup.subtree_control").read_text().split():
+        raise RuntimeError(
+            f"{parent}: parent has not delegated pids; provision runner delegation "
+            "(this helper will not change shared controllers)"
+        )
+    root = parent / f"seedbox-dr-{uuid.uuid4().hex}"
+    if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
+    root.mkdir(mode=0o700)  # exclusive; never adopt an existing resource
+    child = None
+    reaped = False
+    gate_read = gate_write = -1
+    try:
+        write(root / "cgroup.subtree_control", "+pids")
+        for path in [root, *(root / name for name in (
+            "cgroup.procs", "cgroup.threads", "cgroup.subtree_control"
+        ))]:
+            os.chown(path, args.uid, args.gid)
+        if not (root / "cgroup.kill").exists():
+            raise RuntimeError("cgroup.kill is required for owned descendant cleanup")
+        controller = root / "controller"
+        controller.mkdir()
+        gate_read, gate_write = os.pipe2(os.O_CLOEXEC)
+        child = os.fork()
+        if child == 0:
+            try:
+                for number in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP]:
+                    signal.signal(number, signal.SIG_DFL)
+                os.close(gate_write)
+                # Only this child is moved; no command runs before the gate.
+                if os.read(gate_read, 1) != b"1":
+                    os._exit(125)
+                os.close(gate_read)
+                os.setgroups([])
+                os.setgid(args.gid)
+                os.setuid(args.uid)
+                environment = {k: v for k, v in os.environ.items() if not k.startswith("SUDO_")}
+                account = pwd.getpwuid(args.uid)
+                environment.update(HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name)
+                environment["SEEDBOX_DYNAMORIO_CGROUP_ROOT"] = str(root)
+                os.execvpe(args.command[1], args.command[1:], environment)
+            except BaseException as error:
+                print(f"isolate: exec normal-user command: {error}", file=sys.stderr)
+                os._exit(125)
+        os.close(gate_read)
+        gate_read = -1
+        write(controller / "cgroup.procs", str(child))
+        os.write(gate_write, b"1")
+        os.close(gate_write)
+        gate_write = -1
+        _, status = os.waitpid(child, 0)
+        reaped = True
+        return os.waitstatus_to_exitcode(status)
+    finally:
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT, signal.SIGHUP})
+        # Kill only this uniquely created domain, including any surviving test
+        # leaves. The supervisor itself stays outside and can always reap.
+        for descriptor in [gate_read, gate_write]:
+            if descriptor >= 0:
+                os.close(descriptor)
+        # A failure to move the still-gated child leaves it OUTSIDE the domain.
+        # It is unreaped, so its PID is reserved and safe to kill directly.
+        if child is not None and not reaped:
+            os.kill(child, signal.SIGKILL)
+        if (root / "cgroup.kill").exists():
+            write(root / "cgroup.kill", "1")
+        if child is not None and not reaped:
+            os.waitpid(child, 0)
+        wait_empty(root)
+        try:
+            while True:
+                os.waitpid(-1, 0)
+        except ChildProcessError:
+            pass
+        for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+            if path.is_dir():
+                path.rmdir()
+        root.rmdir()
+
+
+class Cancelled(BaseException):
+    def __init__(self, number):
+        self.number = number
+        super().__init__(f"controller received signal {number}")
+
+
+def interrupted(number, _frame):
+    raise Cancelled(number)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--uid", type=int, required=True)
+    parser.add_argument("--gid", type=int, required=True)
+    parser.add_argument("--owned-scope", help="Dedicated systemd-run scope created with Delegate=pids")
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    for number in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP]:
+        signal.signal(number, interrupted)
+    try:
+        result = launch(args)
+        return result if result >= 0 else 128 - result
+    except Cancelled as error:
+        print(f"isolate: cancelled: {error}", file=sys.stderr)
+        return 128 + error.number
+    except (OSError, RuntimeError, StopIteration) as error:
+        print(f"isolate: setup cgroup delegation: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

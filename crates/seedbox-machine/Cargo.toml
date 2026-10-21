@@ -5,6 +5,8 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
+dynamorio-tests = []
+dynamorio-isolated-tests = []
 test-support = ["dep:seedbox-test-time"]
 
 [dependencies]
@@ -23,3 +25,17 @@ sha2.workspace = true
 hex.workspace = true
 tempfile.workspace = true
 libc.workspace = true
+
+[package.metadata.seedbox-check.suites]
+dynamorio = ["dynamorio-tests"]
+dynamorio-isolated = ["dynamorio-isolated-tests"]
+
+[[test]]
+name = "dynamorio"
+path = "../../vendor/dynamorio/seedbox-tests/dynamorio.rs"
+required-features = ["dynamorio-tests"]
+
+[[test]]
+name = "dynamorio_isolated"
+path = "../../vendor/dynamorio/seedbox-tests/dynamorio_isolated.rs"
+required-features = ["dynamorio-isolated-tests"]

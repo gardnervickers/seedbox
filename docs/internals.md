@@ -62,8 +62,12 @@ The [translator](../vendor/dynamorio/core/arch/aarchxx/mangle.c) and kernel retu
 [Seedbox fork](https://github.com/gardnervickers/dynamorio/tree/seedbox/release_11.3.0-1-backports),
 based on upstream `release_11.3.0-1` with the four existing Seedbox backports.
 The gitlink selects its source; [the Nix recipe](../crates/seedbox-machine/dynamorio.nix)
-applies packaging adjustments and builds the launcher, core, drreg and dependencies.
-The progress client still uses the matching release SDK.
+applies packaging adjustments and builds the launcher, core, public extensions and
+SDK together. The progress client and test clients use that exact build's generated
+headers, CMake exports and libraries. Source version metadata can remain 11.3;
+the selected gitlink, rather than a release archive label, identifies the API build.
+The recipe preserves C-only compiler flags for the baseline's type probes and uses
+RelWithDebInfo to match its public SDK exports.
 
 Follow the [README setup](../README.md#build) after
 cloning or switching Seedbox revisions. `inputs.self.submodules` includes gitlinks for flake consumers, but
@@ -89,6 +93,85 @@ Commit `vendor/dynamorio` in Seedbox to record the published DR commit and push
 the Seedbox branch. Add new DR files to its index so local Nix builds include them.
 The Mac builder exports tracked submodule files with local edits, excluding Git
 metadata and ignored build output, to its Linux container.
+
+## External DynamoRIO tests
+
+The `dynamorio` named suite runs native Linux x86-64/ARM64 application fixtures
+from [the maintained DR fork](../vendor/dynamorio/seedbox-tests),
+with native controls, the packaged `drrun`, and a public drmgr/drreg client.
+The fork owns the case sources, corpora, clients and case-specific runners.
+Seedbox's existing Cargo targets compile the fork's Rust entrypoints directly,
+preserving libtest names and feature gates. The manually dispatched native
+integration workflow runs both architectures; ordinary Seedbox CI remains automatic.
+Nix packages fixtures directly from the selected submodule, using its matching
+SDK/runtime. General Seedbox test support and guest/PV integration stay here.
+The time policy scans only `seedbox-tests/` within the fork, including its Rust
+helpers and the narrowly marked native syscall subjects.
+It checks signal context/vector/mask/alternate-stack restoration, live registers
+and flags under instrumentation, and ARM load/store-exclusive application semantics.
+Source-derived clients also check public flush operations, finite concurrent
+memory queries, managed-runtime result models and JVM JIT floors. ARM-only codec,
+hardware-instruction and exclusive populations remain explicit architecture cases.
+Fixture `origins.json` records source paths, commits, hashes and adaptations;
+retained saved inputs alone are not replay coverage. Client execution is asserted
+independently. These host tests do not validate the
+Seedbox guest epoch or executable-FD handoff, nor require KVM, root or Docker.
+
+From the checkout root inside the development shell:
+
+```sh
+seedbox_flake=$(bash tools/dev-flake.sh)
+export SEEDBOX_DYNAMORIO_FIXTURES=$(nix build "$seedbox_flake#dynamorioTestFixtures" --no-link --print-out-paths)
+export SEEDBOX_DYNAMORIO_DEBUG_FIXTURES=$(nix build "$seedbox_flake#dynamorioDebugTestFixtures" --no-link --print-out-paths)
+bash harness/check.sh dynamorio
+```
+
+The checker requires prepared fixtures before building and runs portable checks
+first; portable's `--all-features --no-run` compiles the integration entrypoint.
+Cargo discovers cases in the feature-gated target. For a focused development run,
+use `cargo test -p seedbox-machine --features dynamorio-tests --test dynamorio`.
+The separate debug fixture package builds its public SDK, runtime and clients
+from the same source with `Debug`; `prof_pcs` and replay controls require that
+explicit input. Shared IR and A64 selector controls run in public decoder and
+standalone-core modes against both profiles. The original 50 saved inputs and
+full eight transform populations require public decoder mode; their full
+standalone populations remain manual supplemental diagnostics.
+Signal storm and interval-timer models retain their source populations and pure
+clock-input oracles. Live elapsed-clock timing equivalence remains incomplete.
+[The hosted workflow](../.github/workflows/dynamorio-tests.yml) is manual-only
+because the complete native suite is expensive. After updating `vendor/dynamorio`,
+open **DynamoRIO integration** in GitHub Actions, choose **Run workflow**, select
+the Seedbox ref containing the update, and require both the x86-64 and ARM64 jobs.
+GitHub accepts a manual dispatch only when the workflow file is present on the
+default branch, so a newly added workflow cannot run before that file is merged.
+
+Ordinary Linux checker jobs share one sequential subreaper owner. Cancellation
+first signals TERM so fixture supervisors can finish cleanup; after two seconds
+it kills direct children and newly adopted descendants across process groups.
+It requires the kernel's complete reaping receipt within ten seconds. Managed
+runtime phases use the native supervisor too, retain bounded stdout/stderr, and
+stream bounded phase diagnostics. DR libtest failures print immediately so a
+later target timeout does not discard earlier assertion failures.
+
+The separate `dynamorio-isolated` suite requires positive namespace and cgroup
+preflights before any build. `seedbox-dr-isolate pid1 -- COMMAND...` creates a fresh
+user/PID namespace and execs the application directly as PID1. On hosts restricting
+unprivileged namespaces, `SEEDBOX_DYNAMORIO_PID1_LAUNCHER` may select the packaged
+`seedbox-dr-pid1` wrapper: it first probes unprivileged support, then uses a scoped
+sudo namespace controller whose child drops groups/UID/GID before exec. The suite
+and builds run as the ordinary user.
+
+For failed-clone process limits, `SEEDBOX_DYNAMORIO_CGROUP_ROOT` supplies an empty,
+owned cgroup-v2 domain with `pids` delegated. The launcher creates a unique leaf,
+gates its child until membership is installed, and records the actual
+`pids.events max` delta; a missing limit hit fails. Its controller stays outside
+the limit, terminates surviving owned descendants and removes the leaf.
+[The CI supervisor](../tools/dynamorio-ci/cgroup.py) creates a unique domain and
+unlimited controller subgroup, enables `pids` only inside that domain, and runs its
+normal-user child there. It cleans that domain on completion or interruption. A
+parent that has not already delegated `pids` is a setup failure; the helper never
+changes shared controllers, global sysctls or unrelated process membership.
+Ordinary `dynamorio` remains accessible without these isolated-fixture prerequisites.
 
 ## ARM idle rendezvous
 
