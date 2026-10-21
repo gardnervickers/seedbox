@@ -128,7 +128,6 @@ fn initial() -> Snapshot {
         "lib64/release/libdynamorio.so",
         "lib64/release/libdrpreload.so",
         "ext/lib64/release/libdrmgr.so",
-        "ext/lib64/release/libdrreg.so",
         loader,
         "lib/libc.so.6",
         "lib/libm.so.6",

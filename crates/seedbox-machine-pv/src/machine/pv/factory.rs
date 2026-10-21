@@ -289,7 +289,6 @@ fn validate_runtime(bytes: &[u8]) -> io::Result<()> {
         "lib64/release/libdynamorio.so",
         "lib64/release/libdrpreload.so",
         "ext/lib64/release/libdrmgr.so",
-        "ext/lib64/release/libdrreg.so",
         guest::LOADER,
         "lib/libc.so.6",
         "lib/libm.so.6",

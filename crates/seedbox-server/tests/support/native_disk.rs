@@ -215,7 +215,7 @@ pub async fn disk_checkpoint_continuation(backend: CpuBackend) {
                 label(backend),
                 driver_blob_bytes(session, &source)
             );
-            let exported = session
+            let mut exported = session
                 .client
                 .checkpoint_definition(&source, "saved")
                 .await
@@ -229,6 +229,7 @@ pub async fn disk_checkpoint_continuation(backend: CpuBackend) {
             session.client.delete(&source).await.unwrap();
 
             session.workers.store(4, Ordering::SeqCst);
+            exported.options.machine_workers = Some(4);
             let restored = session
                 .client
                 .submit_definition(&serde_json::to_value(exported).unwrap(), true)

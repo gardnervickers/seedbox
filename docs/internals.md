@@ -7,6 +7,16 @@ A computation-only loop instead advances through DynamoRIO block-entry budgets a
 x86 kernel cpu_relax hooks also charge bounded reads with interrupts masked; arbitrary assembly loops do not.
 The [client](../crates/seedbox-machine/guest/progress/progress.c) also replaces x86 RDRAND/RDSEED with guest entropy.
 
+Progress instrumentation saves a fixed scratch register in thread-local storage,
+decrements the block budget without changing application flags, and restores the
+register before application execution. Exhaustion branches to one shared routine
+instead of emitting a context-save sequence in every block. Its clean call charges
+progress and redirects through DynamoRIO's dispatcher for pending signals and JIT
+synchronization; the resumed block's repeated charge is refunded. Intermediate
+scratch instructions have no application translation and cannot be relocation
+points. Reconstructed instruction lists also let the client restore the scratch
+value in reported contexts; stored translation tables alone do not.
+
 ## Reference TCG machine
 
 TCG budgets QEMU icount steps, not retired instructions: REP I/O costs per iteration plus a final check.

@@ -73,7 +73,6 @@ pub(super) fn sdk(
         "lib64/release/libdynamorio.so",
         "lib64/release/libdrpreload.so",
         "ext/lib64/release/libdrmgr.so",
-        "ext/lib64/release/libdrreg.so",
         "lib/ld-linux-x86-64.so.2",
         "lib/libc.so.6",
         "lib/libm.so.6",

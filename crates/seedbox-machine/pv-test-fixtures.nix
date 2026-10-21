@@ -21,6 +21,7 @@ let
     root = ./.;
     fileset = lib.fileset.unions [
       ./guest/progress/fixtures/cpu-loop.c
+      ./src/pv/guest_progress_state.c
       ./src/pv/guest_prepared_fixture.c
       ./tests/fixtures/simulation-control.c
       ./tests/fixtures/driver-simulation-control.c
@@ -40,7 +41,7 @@ let
       export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global"
       export ZIG_LOCAL_CACHE_DIR="$TMPDIR/zig-local"
       build() { zig cc -target ${triple} -O2 -static "$1" -o "$2"; }
-      build guest/progress/fixtures/cpu-loop.c cpu-loop
+      zig cc -target ${triple} -O2 -static guest/progress/fixtures/cpu-loop.c src/pv/guest_progress_state.c -o cpu-loop
       build src/pv/guest_prepared_fixture.c prepared-fixture
       build tests/fixtures/simulation-control.c simulation-control
       build tests/fixtures/driver-simulation-control.c driver-simulation-control

@@ -1,5 +1,5 @@
 #![cfg(seedbox_pv)]
-//! Public factory activation of real instrumentation, measured inside a CPU loop.
+//! Public factory activation, CPU charging and application-state preservation.
 #[path = "support/epoch.rs"]
 mod epoch;
 use seedbox_machine::{
@@ -28,9 +28,7 @@ impl RngStream for TestRng {
 fn input(name: &str) -> PathBuf {
     std::env::var_os(name).expect(name).into()
 }
-fn measured(factory: &mut Factory, iterations: u64, factor: u32) -> u64 {
-    // The existing static fixture samples CLOCK_MONOTONIC around a native
-    // countdown loop, with no syscall or polling inside the measured region.
+fn run_fixture(factory: &mut Factory, argument: String, block_bound: u64, factor: u32) -> String {
     let binary = fs::read(input("SEEDBOX_PV_PROGRESS_FIXTURE")).unwrap();
     let mut tar = tar::Builder::new(Vec::new());
     let mut header = tar::Header::new_gnu();
@@ -50,7 +48,7 @@ fn measured(factory: &mut Factory, iterations: u64, factor: u32) -> u64 {
         application: PreparedApplication {
             filesystem: FilesystemArchive::new(tar.into_inner().unwrap()).unwrap(),
             launch: Launch {
-                argv: vec!["/application".into(), iterations.to_string()],
+                argv: vec!["/application".into(), argument],
                 environment: Default::default(),
                 working_directory: "/".into(),
                 user: "0:0".into(),
@@ -65,12 +63,11 @@ fn measured(factory: &mut Factory, iterations: u64, factor: u32) -> u64 {
     let mut inbox = VecDeque::new();
     let mut outputs = Vec::new();
     let guard = HangGuard::new("public PV CPU worker transport", Duration::from_secs(300));
-    // cpu-loop.c has one two-instruction block per iteration. Bound each by
-    // one PV call (the client actually batches), plus a million calls for
+    // Bound translated blocks by one PV call each, plus a million calls for
     // loader/stdio/exit at the selected ns/call CPU factor. Linux boot/device
     // settlement gets a separate five simulated-second allowance; no app sleeps.
-    let deadline =
-        Duration::from_secs(5) + Duration::from_nanos((iterations + 1_000_000) * u64::from(factor));
+    let deadline = Duration::from_secs(5)
+        + Duration::from_nanos((block_bound + 1_000_000) * u64::from(factor));
     let mut progress =
         GuestProgress::new("factory CPU boot/work/outcome", Duration::ZERO, deadline, 0).unwrap();
     let mut last_stop = None;
@@ -119,7 +116,12 @@ fn measured(factory: &mut Factory, iterations: u64, factor: u32) -> u64 {
     };
     let stderr = stream(Stream::Stderr);
     assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
-    let stdout = String::from_utf8(stream(Stream::Stdout)).unwrap();
+    String::from_utf8(stream(Stream::Stdout)).unwrap()
+}
+fn measured(factory: &mut Factory, iterations: u64, factor: u32) -> u64 {
+    // cpu-loop.c has one two-instruction block per iteration, with observable
+    // clock samples around the CPU-only region.
+    let stdout = run_fixture(factory, iterations.to_string(), iterations, factor);
     let delta = stdout
         .split("DELTA=")
         .nth(1)
@@ -129,6 +131,24 @@ fn measured(factory: &mut Factory, iterations: u64, factor: u32) -> u64 {
         .unwrap();
     println!("iterations={iterations} factor={factor}: {stdout}");
     delta
+}
+#[test]
+#[ignore = "requires native PV worker, factory guest assets and CPU-loop state fixture"]
+fn factory_progress_preserves_live_application_and_fault_state() {
+    for budget in [1, 10_000] {
+        let mut factory = Factory::new(
+            &input("SEEDBOX_PV_WORKER"),
+            &input("SEEDBOX_PV_ASSETS"),
+            epoch::TEST_EPOCH_SECONDS,
+        )
+        .unwrap()
+        .with_progress_budget(std::num::NonZeroU32::new(budget).unwrap());
+        // 30,000 iterations through 16 unconditional branches plus state
+        // assertions exercise both exhausted and non-exhausted budget paths.
+        // The synchronous fault validates the application's signal context.
+        let stdout = run_fixture(&mut factory, "--state".into(), 2_000_000, 1000);
+        assert_eq!(stdout, "STATE=OK FAULTS=1\n", "budget={budget}");
+    }
 }
 #[test]
 #[ignore = "requires native PV worker, factory guest assets and existing CPU-loop fixture"]
