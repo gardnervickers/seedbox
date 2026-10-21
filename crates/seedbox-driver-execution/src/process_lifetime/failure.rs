@@ -16,7 +16,7 @@ struct Binding {
 }
 
 /// One-shot failure request for one original spawn-owned worker, available only
-/// with `test-support`. The real monitor retains sole process/cleanup authority.
+/// with `worker-failure`. The real monitor retains sole process/cleanup authority.
 /// Clones are weak with respect to execution ownership: keeping this handle
 /// alive cannot prevent owner EOF or cancellation. A handle cannot be rebound.
 #[derive(Clone, Default)]

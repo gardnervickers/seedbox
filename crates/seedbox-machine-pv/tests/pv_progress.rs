@@ -1,8 +1,6 @@
 #![cfg(seedbox_pv)]
 //! Public factory activation of real instrumentation, measured inside a CPU loop.
-mod support {
-    pub mod epoch;
-}
+use seedbox_machine::test_support::TEST_EPOCH_SECONDS;
 use seedbox_machine::{
     clock::Clock,
     definition::{FilesystemArchive, Launch, MachineDefinition, PreparedApplication, Resources},
@@ -14,7 +12,6 @@ use seedbox_machine::{
 use seedbox_machine_pv::machine::pv::Factory;
 use seedbox_test_time::{GuestProgress, HangGuard};
 use std::{collections::VecDeque, fs, path::PathBuf, time::Duration};
-use support::epoch;
 struct TestClock(u64);
 impl Clock for TestClock {
     fn now(&self) -> u64 {
@@ -138,7 +135,7 @@ fn factory_automatically_charges_cpu_work_and_execution_rate() {
     let mut factory = Factory::new(
         &input("SEEDBOX_PV_WORKER"),
         &input("SEEDBOX_PV_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
+        TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let short = measured(&mut factory, 200_000, 1000);

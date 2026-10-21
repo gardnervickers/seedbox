@@ -1873,7 +1873,6 @@ name = "seedbox-application"
 version = "0.1.0"
 dependencies = [
  "bollard",
- "flate2",
  "futures-util",
  "globset",
  "hex",
@@ -1903,6 +1902,7 @@ dependencies = [
  "hex",
  "libc",
  "seedbox-api",
+ "seedbox-artifacts",
  "seedbox-engine-protocol",
  "seedbox-exec",
  "seedbox-spec",
@@ -1979,6 +1979,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "rayon",
+ "seedbox-driver",
  "seedbox-engine-core",
  "seedbox-engine-protocol",
  "seedbox-machine",
@@ -2072,6 +2073,7 @@ dependencies = [
  "libc",
  "seedbox-exec",
  "seedbox-machine",
+ "seedbox-machine-pv",
  "seedbox-spec",
  "seedbox-test",
  "seedbox-test-time",
@@ -2118,6 +2120,7 @@ dependencies = [
  "seedbox-machine",
  "seedbox-machine-pv",
  "seedbox-machine-tcg",
+ "seedbox-server",
  "seedbox-spec",
  "seedbox-test-time",
  "serde",

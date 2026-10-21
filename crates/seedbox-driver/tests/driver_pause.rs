@@ -1,10 +1,4 @@
-mod support {
-    pub mod driver_definition;
-    pub mod driver_fixture;
-    pub mod input_key;
-}
-use driver_fixture::*;
-use support::driver_fixture;
+use seedbox_driver::test_support::fixture::*;
 
 #[test]
 fn paused_runnable_machine_resumes_at_current_time_without_catchup_work() {
@@ -257,7 +251,7 @@ fn pause_and_resume_follow_policy_state_and_rejected_inputs_never_consume_the_ar
         .unwrap();
     let held = driver.step(at(100)).unwrap();
     assert_eq!(
-        driver_fixture::held(&held),
+        seedbox_driver::test_support::fixture::held(&held),
         Some((at(0), FaultAction::Resume, id))
     );
     assert_eq!(rejected(&driver.drain_observations().events), ["pause-3"]);
@@ -287,7 +281,7 @@ fn pause_and_resume_follow_policy_state_and_rejected_inputs_never_consume_the_ar
         })
         .unwrap();
     assert_eq!(
-        driver_fixture::held(&driver.step(at(100)).unwrap()),
+        seedbox_driver::test_support::fixture::held(&driver.step(at(100)).unwrap()),
         Some((at(0), FaultAction::Crash, id))
     );
     assert_eq!(rejected(&driver.drain_observations().events), ["resume-4"]);

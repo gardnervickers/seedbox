@@ -1,10 +1,4 @@
-mod support {
-    pub mod driver_definition;
-    pub mod driver_fixture;
-    pub mod input_key;
-}
-use driver_fixture::*;
-use support::driver_fixture;
+use seedbox_driver::test_support::fixture::*;
 
 /// Crash, then reboot at the next barrier at the same simulation time. A
 /// Reboot input queued with the Crash would be admitted before the crash

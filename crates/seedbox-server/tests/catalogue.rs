@@ -1,9 +1,9 @@
 #![cfg(unix)]
 
-mod support;
 use seedbox_api::Phase;
 use seedbox_server::catalogue::{Catalogue, Error};
-use support::request;
+use seedbox_server::test_support;
+use test_support::request;
 
 #[test]
 fn cpu_backend_is_request_owned_and_retained_inputs_reject_conflicts() {
@@ -39,7 +39,7 @@ fn cpu_backend_is_request_owned_and_retained_inputs_reject_conflicts() {
         ("driver-pv", CpuBackend::Pv, CpuBackend::Tcg),
         ("driver-tcg", CpuBackend::Tcg, CpuBackend::Pv),
     ] {
-        let mut resolved = support::resolved_request(tag);
+        let mut resolved = test_support::resolved_request(tag);
         let InputSource::Resolved { definition } = &mut resolved.spec.inputs else {
             panic!("resolved fixture")
         };
@@ -286,7 +286,7 @@ fn captured_checkpoint_registry_is_independent_of_descendant_ownership() {
     use seedbox_engine_protocol::host_control::{CheckpointState, CheckpointStatus};
     let mut catalogue = Catalogue::in_memory();
     let (mut source, _) = catalogue
-        .submit(support::resolved_request("source"))
+        .submit(test_support::resolved_request("source"))
         .unwrap();
     source.status.phase = Phase::Preparing;
     source = catalogue.update(source).unwrap();
@@ -364,7 +364,7 @@ fn captured_checkpoint_registry_is_independent_of_descendant_ownership() {
             .position,
         position
     );
-    let mut branch = support::resolved_request("independent-descendant");
+    let mut branch = test_support::resolved_request("independent-descendant");
     branch.spec = source.spec.clone();
     branch
         .metadata
@@ -419,7 +419,7 @@ fn seed_range_waits_for_frozen_inputs_and_continues_once() {
     ));
     source.status.phase = Phase::Preparing;
     source = catalogue.update(source).unwrap();
-    source.spec = support::resolved_request("prepared").spec;
+    source.spec = test_support::resolved_request("prepared").spec;
     source.status.phase = Phase::Completed;
     source = catalogue.update(source).unwrap();
     let (second, _) = catalogue.advance_seeds().unwrap().unwrap();
@@ -499,13 +499,13 @@ fn resolved_definitions_allow_independent_edits_and_outlive_their_source() {
     use seedbox_api::InputSource;
     let mut catalogue = Catalogue::in_memory();
     let (mut original, _) = catalogue
-        .submit(support::resolved_request("original"))
+        .submit(test_support::resolved_request("original"))
         .unwrap();
     for phase in [Phase::Preparing, Phase::Running, Phase::Completed] {
         original.status.phase = phase;
         original = catalogue.update(original).unwrap();
     }
-    let mut edited = support::resolved_request("edited-timeline");
+    let mut edited = test_support::resolved_request("edited-timeline");
     edited.spec = original.spec.clone();
     edited
         .metadata

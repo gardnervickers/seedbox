@@ -1,8 +1,6 @@
 #![cfg(all(seedbox_pv, target_arch = "x86_64"))]
 //! Native instruction determinism through the public Driver boundary.
-mod support {
-    pub mod epoch;
-}
+use seedbox_machine::test_support::TEST_EPOCH_SECONDS;
 use seedbox_machine::{
     definition::{FilesystemArchive, Launch, MachineDefinition, PreparedApplication, Resources},
     machine::Timestamp,
@@ -12,7 +10,6 @@ use seedbox_machine::{
 use seedbox_machine_pv::machine::pv::Factory;
 use seedbox_test_time::{GuestProgress, HangGuard};
 use std::{fs, path::PathBuf, time::Duration};
-use support::epoch;
 fn input(name: &str) -> PathBuf {
     std::env::var_os(name).expect(name).into()
 }
@@ -94,7 +91,7 @@ fn instruction_run(
     let mut factory = Factory::new(
         &input("SEEDBOX_PV_WORKER"),
         &input("SEEDBOX_PV_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
+        TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let quantum = 5_000_000;

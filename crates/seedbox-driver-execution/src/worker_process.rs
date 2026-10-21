@@ -218,7 +218,7 @@ pub(crate) struct RunningWorker<P = OwnedProcess> {
 }
 
 impl RunningWorker<crate::process_lifetime::OwnedExecution> {
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "worker-failure")]
     pub(crate) fn with_failure_injector(
         self,
         injector: &crate::process_lifetime::WorkerFailureInjector,

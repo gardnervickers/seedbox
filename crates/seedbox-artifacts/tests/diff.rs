@@ -2,10 +2,10 @@
 mod physical_ram;
 use sb::diff::*;
 use sb::store::ContentDigest;
+use sb::test_support::*;
 use seedbox_artifacts as sb;
 use serde_json::Value;
 use std::collections::BTreeMap;
-include!("support/diff_fixture.rs");
 
 #[test]
 fn ram_pages_are_read_from_the_current_capture_page_path() {

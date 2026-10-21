@@ -1,10 +1,8 @@
 #![cfg(unix)]
-mod support {
-    pub mod native_driver;
-}
 use fixture::raw_program::{self, counting_loop, RBX, STUB};
 use native_fixture::auto_key;
 use seedbox_driver::driver::{Driver, MachineId, StepOutcome, Target};
+use seedbox_driver::test_support::native as native_fixture;
 use seedbox_machine::test_support::{SeededRng, SimulationClock};
 use seedbox_machine::{
     clock::Clock,
@@ -16,7 +14,6 @@ use seedbox_machine_tcg::machine::tcg::{
 };
 use seedbox_test_time::HangGuard;
 use std::{fs, path::Path, sync::Arc, time::Duration};
-use support::native_driver as native_fixture;
 type TcgMachine = Environment<RawMachine>;
 struct Environment<M, R = SeededRng>(
     seedbox_machine::test_support::test_environment::Environment<M, R>,

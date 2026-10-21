@@ -1,13 +1,7 @@
 #![cfg(unix)]
-mod support {
-    pub mod epoch;
-    #[allow(dead_code)]
-    pub mod native_driver;
-    pub mod prepared_application;
-}
-use support::epoch;
-use support::native_driver;
-use support::prepared_application as prepared;
+use seedbox_driver::test_support::native as native_driver;
+use seedbox_machine::test_support::prepared_application as prepared;
+use seedbox_machine::test_support::TEST_EPOCH_SECONDS;
 
 use native_driver::auto_key;
 use seedbox_driver::driver::{
@@ -62,7 +56,7 @@ fn driver(restore_initial: bool) -> Harness {
     let mut backend = seedbox_machine_tcg::machine::tcg::Factory::new(
         &input("SEEDBOX_TCG_QEMU"),
         &input("SEEDBOX_TCG_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
+        TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let driver = Driver::new(

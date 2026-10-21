@@ -8,13 +8,9 @@ use std::{
     },
     time::Duration,
 };
-// #[path] shares seedbox-server's catalogue-only request fixture across crates
-// without publishing it from seedbox-server behind a test feature.
-#[path = "../../../seedbox-server/tests/support/mod.rs"]
-mod source_request;
 
 fn resource(imported: bool) -> Vec<u8> {
-    let request = source_request::resolved_request("history-fixture");
+    let request = seedbox_server::test_support::resolved_request("history-fixture");
     let id = "k7m2p9qx".parse().unwrap();
     let metadata = seedbox_api::Metadata {
         name: "history-fixture".into(),

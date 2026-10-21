@@ -11,6 +11,8 @@ mod host;
 pub mod host_control;
 pub mod process_lifetime;
 pub mod runtime_assets;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 mod worker_process;
 use seedbox_artifacts::limits;
 use seedbox_artifacts::Context;

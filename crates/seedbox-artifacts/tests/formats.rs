@@ -6,16 +6,6 @@ use seedbox_artifacts::{
 };
 use std::fs;
 
-#[allow(dead_code)]
-mod record_fixture {
-    use seedbox_artifacts as sb;
-    include!("support/diff_fixture.rs");
-
-    pub(super) fn record() -> sb::record::RunRecord {
-        fixture()
-    }
-}
-
 fn manifest(record: &RunRecord) -> serde_json::Value {
     serde_json::json!({
         "sha256": ContentDigest::of(&serde_json::to_vec(record).unwrap()),
@@ -26,7 +16,7 @@ fn manifest(record: &RunRecord) -> serde_json::Value {
 #[test]
 fn recomputed_valid_unsupported_versions_and_unknown_fixed_fields_are_rejected() {
     let root = tempfile::tempdir().unwrap();
-    let mut original = record_fixture::record();
+    let mut original = seedbox_artifacts::test_support::fixture();
     original.run_id = ContentDigest::of(&serde_json::to_vec(&original.identity).unwrap());
     fs::write(
         root.path().join("manifest.json"),

@@ -1,10 +1,4 @@
-mod support {
-    pub mod driver_definition;
-    pub mod driver_fixture;
-    pub mod input_key;
-}
-use driver_fixture::*;
-use support::driver_fixture;
+use seedbox_driver::test_support::fixture::*;
 
 fn held_record(outcome: &StepOutcome) -> Option<seedbox_driver::driver::FaultRecord> {
     match outcome {
@@ -121,7 +115,7 @@ fn pre_crash_hold_retains_exact_current_time_cursor_and_allows_only_playback() {
         .unwrap();
     let held = driver.step(at(100)).unwrap();
     assert_eq!(
-        driver_fixture::held(&held),
+        seedbox_driver::test_support::fixture::held(&held),
         Some((at(0), FaultAction::Crash, id))
     );
     let position = status(&mut driver);

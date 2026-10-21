@@ -1,4 +1,5 @@
 use seedbox_driver::driver::{Action, Driver, EventKind, MachineId, Target};
+use seedbox_driver::test_support::auto_key;
 use seedbox_machine::{
     machine::{Machine, RunContext, StopReason, Timestamp},
     pv::{Output, Request, Response, SimulationControlId},
@@ -9,13 +10,6 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-mod support {
-    pub mod driver_definition;
-    pub mod input_key;
-}
-use input_key::auto_key;
-use support::driver_definition;
-use support::input_key;
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
 }
@@ -107,8 +101,8 @@ fn setup(workers: usize, operation: &'static str) -> (Driver<Caller>, Replies, V
         workers,
         Rng,
         || Ok(()),
-        driver_definition::definition("oracle"),
-        vec![driver_definition::definition("peer")],
+        seedbox_driver::test_support::definition("oracle"),
+        vec![seedbox_driver::test_support::definition("peer")],
         Vec::new(),
         seedbox_driver::driver::NetworkConfig::default(),
         move |_| {
@@ -225,11 +219,11 @@ fn queued_pair(
         2,
         Rng,
         || Ok(()),
-        driver_definition::definition("oracle"),
+        seedbox_driver::test_support::definition("oracle"),
         vec![
-            driver_definition::definition("caller-a"),
-            driver_definition::definition("caller-b"),
-            driver_definition::definition("peer"),
+            seedbox_driver::test_support::definition("caller-a"),
+            seedbox_driver::test_support::definition("caller-b"),
+            seedbox_driver::test_support::definition("peer"),
         ],
         Vec::new(),
         seedbox_driver::driver::NetworkConfig::default(),

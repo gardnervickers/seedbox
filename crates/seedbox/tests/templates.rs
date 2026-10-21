@@ -5,12 +5,6 @@ use seedbox_application::{
 use seedbox_test::process::Guarded;
 use std::{collections::BTreeMap, fs, process::Command};
 
-// Type-checks the redis example's standalone workload. #[path] is required:
-// that program is built from its own Docker context, not as a workspace crate.
-#[allow(dead_code)]
-#[path = "../../../examples/redis/workload/main.rs"]
-mod redis_workload;
-
 #[test]
 fn generated_templates_are_self_contained_and_preserve_the_existing_etcd_checker() {
     let directory = tempfile::tempdir().unwrap();

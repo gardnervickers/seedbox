@@ -5,6 +5,7 @@ use seedbox_driver::driver::{
     HealTarget, InputKey, InvalidInputKey, MachineId, PlaybackRate, RejectionReason,
     SettlementStatus, StepOutcome, Target,
 };
+use seedbox_driver::test_support::key;
 use seedbox_machine::{
     execution::ExecutionConfig,
     machine::{Machine, RunContext, StopReason, Timestamp},
@@ -12,13 +13,6 @@ use seedbox_machine::{
     rng::RngStream,
 };
 use std::{collections::VecDeque, io, num::NonZeroU32, time::Duration};
-mod support {
-    pub mod driver_definition;
-    pub mod input_key;
-}
-use input_key::key;
-use support::driver_definition;
-use support::input_key;
 
 /// The machine and bound boot of a single-machine fault record.
 fn machine_boot(target: &seedbox_driver::driver::FaultTarget) -> (MachineId, u64) {
@@ -137,14 +131,14 @@ fn world(
         workers,
         Rng,
         || Ok(()),
-        driver_definition::definition("oracle"),
+        seedbox_driver::test_support::definition("oracle"),
         names
             .iter()
-            .map(|&n| driver_definition::definition(n))
+            .map(|&n| seedbox_driver::test_support::definition(n))
             .collect(),
         spawn
             .iter()
-            .map(|&n| driver_definition::definition(n))
+            .map(|&n| seedbox_driver::test_support::definition(n))
             .collect(),
         seedbox_driver::driver::NetworkConfig::default(),
         move |definition| Ok(script(&definition.name)),

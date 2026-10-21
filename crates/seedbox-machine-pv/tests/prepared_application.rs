@@ -1,19 +1,15 @@
 #![cfg(seedbox_pv)]
 //! Public factory and retained image launch acceptance.
-mod support {
-    pub mod epoch;
-    pub mod prepared_image;
-}
 use image::*;
+use seedbox_machine::test_support::prepared_image as image;
+use seedbox_machine::test_support::TEST_EPOCH_SECONDS;
 use std::fs;
-use support::epoch;
-use support::prepared_image as image;
 #[cfg(seedbox_pv)]
 fn pv(script: bool) {
     let mut backend = seedbox_machine_pv::machine::pv::Factory::new(
         &input("SEEDBOX_PV_WORKER"),
         &input("SEEDBOX_PV_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
+        TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let binary = fs::read(input("SEEDBOX_PV_PREPARED_FIXTURE")).unwrap();
@@ -42,7 +38,7 @@ fn pv_native_prepared_image_readable_elf_launch() {
     let mut backend = seedbox_machine_pv::machine::pv::Factory::new(
         &input("SEEDBOX_PV_WORKER"),
         &input("SEEDBOX_PV_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
+        TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let binary = fs::read(input("SEEDBOX_PV_PREPARED_FIXTURE")).unwrap();
@@ -59,7 +55,7 @@ fn pv_native_runtime_respects_execute_traversal_and_uid_authorization() {
     let mut backend = seedbox_machine_pv::machine::pv::Factory::new(
         &input("SEEDBOX_PV_WORKER"),
         &input("SEEDBOX_PV_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
+        TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let binary = fs::read(input("SEEDBOX_PV_PREPARED_FIXTURE")).unwrap();

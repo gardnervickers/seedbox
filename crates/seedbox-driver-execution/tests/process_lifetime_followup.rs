@@ -1,6 +1,6 @@
 //! Process-only follow-ups for environment, async cancellation and restart.
 #![cfg(all(
-    feature = "test-support",
+    feature = "worker-failure",
     any(target_os = "linux", target_os = "macos")
 ))]
 use seedbox_driver_execution::process_lifetime::{self, reclaim_barrier, OwnedExecution};

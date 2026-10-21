@@ -6,10 +6,11 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
+test-support = []
 kvm-tests = []
 tcg-tests = []
 # Explicit opt-in: never activated by normal release CLI/server dependencies.
-worker-failure-tests = ["seedbox-driver-execution/test-support"]
+worker-failure-tests = ["seedbox-driver-execution/worker-failure"]
 
 [dependencies]
 seedbox-artifacts.workspace = true
@@ -29,6 +30,8 @@ futures-util.workspace = true
 seedbox-spec.workspace = true
 
 [dev-dependencies]
+# Integration tests use this crate's own request fixtures and case cleanup.
+seedbox-server = { workspace = true, features = ["test-support"] }
 seedbox-driver.workspace = true
 seedbox-test-time.workspace = true
 seedbox-client.workspace = true

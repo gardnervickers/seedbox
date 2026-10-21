@@ -6,7 +6,7 @@ pub mod pv;
 mod test_environment;
 
 #[cfg(test)]
-pub(crate) const TEST_EPOCH_SECONDS: u32 = 946_684_800;
+pub(crate) use seedbox_machine::test_support::TEST_EPOCH_SECONDS;
 
 #[cfg(test)]
 mod guest_service_snapshot_tests;

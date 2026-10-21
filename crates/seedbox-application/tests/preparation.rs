@@ -1,11 +1,6 @@
 //! Real native SDK composition; preparation policy cases live beside the component.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-// Shared synthetic package data only, not another crate's implementation.
-// #[path] lets the preparation unit tests and this integration test share it
-// without making it a public module of the library.
-#[path = "../src/preparation/test_sdk.rs"]
-mod test_sdk;
 use seedbox_application::{
     config,
     execution::WitnessMode,
@@ -13,8 +8,8 @@ use seedbox_application::{
     preparation::{OciPreparer, PreparationContext},
     store::{ContentDigest, ContentStore},
 };
+use seedbox_driver_execution::test_support::sdk;
 use std::{collections::BTreeMap, fs, path::Path};
-use test_sdk::sdk;
 fn fixture(
     root: &Path,
 ) -> (
