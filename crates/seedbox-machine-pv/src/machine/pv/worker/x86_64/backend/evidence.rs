@@ -180,55 +180,191 @@ impl Native {
     }
     fn vector_evidence(&self) -> Result<String> {
         let bytes = self.read_xsave()?;
-        if bytes.len() < 576 {
-            return Err("PV XSAVE header truncated".into());
-        }
-        let active = u64::from_le_bytes(bytes[512..520].try_into().expect("eight bytes"));
-        let compact = u64::from_le_bytes(bytes[520..528].try_into().expect("eight bytes"));
-        if compact != 0 {
-            return Err("PV evidence requires standard KVM XSAVE component layout".into());
-        }
-        let mut h = Sha256::new();
-        h.update(active.to_le_bytes());
-        if active & 1 != 0 {
-            h.update(&bytes[..24]);
-            for i in 0..8 {
-                h.update(&bytes[32 + i * 16..42 + i * 16]);
-            }
-        }
-        if active & 2 != 0 {
-            h.update(&bytes[24..32]);
-            h.update(&bytes[160..416]);
-        }
         let cpuid = checked(
             "evidence KVM_GET_CPUID2",
             self.cpu.get_cpuid2(KVM_MAX_CPUID_ENTRIES),
         )?;
-        let mut components: Vec<_> = cpuid
+        // User state components in the standard (non-compacted) layout:
+        // CPUID.(0DH, i).ECX bit 0 marks supervisor components, EBX is the offset.
+        let components: Vec<_> = cpuid
             .as_slice()
             .iter()
-            .filter(|e| {
-                e.function == 0xd && e.index >= 2 && e.index < 64 && active & (1u64 << e.index) != 0
+            .filter(|e| e.function == 0xd && e.index >= 2 && e.index < 64)
+            .filter(|e| e.ecx & 1 == 0 && e.ebx != 0)
+            .map(|e| VectorComponent {
+                index: e.index,
+                offset: e.ebx,
+                size: e.eax,
             })
             .collect();
-        components.sort_by_key(|e| e.index);
-        let mut seen = 3u64;
-        for e in components {
-            let start = e.ebx as usize;
+        canonical_vector_digest(&bytes, &components)
+    }
+}
+
+/// One user XSAVE state component from guest CPUID leaf 0DH.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct VectorComponent {
+    pub(super) index: u32,
+    pub(super) offset: u32,
+    pub(super) size: u32,
+}
+
+const X87_INIT: [u8; 24] = {
+    let mut init = [0; 24];
+    // FCW 037FH; FSW, abridged FTW (all empty), FOP, FIP and FDP are zero.
+    init[0] = 0x7f;
+    init[1] = 0x03;
+    init
+};
+const MXCSR_INIT: [u8; 4] = 0x1f80u32.to_le_bytes();
+
+/// Digest of the architectural vector state in a standard-format XSAVE buffer.
+///
+/// Host FPU save/restore may mark an initial component present or absent
+/// (XINUSE), and absent components leave ignored payload bytes. Both restore
+/// the same registers, so each component contributes its effective value: its
+/// bytes when present, its initial value when absent. The XSTATE_BV bitmap and
+/// the host-constant MXCSR_MASK are not hashed.
+pub(super) fn canonical_vector_digest(
+    bytes: &[u8],
+    components: &[VectorComponent],
+) -> Result<String> {
+    if bytes.len() < 576 {
+        return Err("PV XSAVE header truncated".into());
+    }
+    let active = u64::from_le_bytes(bytes[512..520].try_into().expect("eight bytes"));
+    let compact = u64::from_le_bytes(bytes[520..528].try_into().expect("eight bytes"));
+    if compact != 0 {
+        return Err("PV evidence requires standard KVM XSAVE component layout".into());
+    }
+    let mut h = Sha256::new();
+    h.update(b"seedbox-pv-vectors-v2\0");
+    // x87: control/status words, pointers and the eight 80-bit registers.
+    if active & 1 != 0 {
+        h.update(&bytes[..24]);
+        for i in 0..8 {
+            h.update(&bytes[32 + i * 16..42 + i * 16]);
+        }
+    } else {
+        h.update(X87_INIT);
+        h.update([0u8; 80]);
+    }
+    // MXCSR belongs to the SSE and AVX components; absent both, it is initial.
+    if active & 0b110 != 0 {
+        h.update(&bytes[24..28]);
+    } else {
+        h.update(MXCSR_INIT);
+    }
+    if active & 2 != 0 {
+        h.update(&bytes[160..416]);
+    } else {
+        h.update([0u8; 256]);
+    }
+    let mut components = components.to_vec();
+    components.sort_by_key(|c| c.index);
+    let mut seen = 3u64;
+    for c in components {
+        let bit = 1u64 << c.index;
+        seen |= bit;
+        h.update(c.index.to_le_bytes());
+        h.update(c.size.to_le_bytes());
+        if active & bit != 0 {
+            let start = c.offset as usize;
             let end = start
-                .checked_add(e.eax as usize)
+                .checked_add(c.size as usize)
                 .ok_or("PV XSAVE component overflow")?;
-            let data = bytes
-                .get(start..end)
-                .ok_or("PV XSAVE active bank exceeds returned native area")?;
-            h.update(e.index.to_le_bytes());
-            h.update(e.eax.to_le_bytes());
-            h.update(data);
-            seen |= 1u64 << e.index;
+            h.update(
+                bytes
+                    .get(start..end)
+                    .ok_or("PV XSAVE active bank exceeds returned native area")?,
+            );
+        } else {
+            // Every user component above SSE initializes to zeros.
+            h.update(vec![0u8; c.size as usize]);
         }
-        if active & !seen != 0 {
-            return Err("PV XSAVE active bank absent from guest CPUID layout".into());
+    }
+    if active & !seen != 0 {
+        return Err("PV XSAVE active bank absent from guest CPUID layout".into());
+    }
+    Ok(hex(&h.finalize()))
+}
+
+#[cfg(test)]
+mod vector_tests {
+    use super::*;
+
+    const YMM: VectorComponent = VectorComponent {
+        index: 2,
+        offset: 576,
+        size: 256,
+    };
+    const OPMASK: VectorComponent = VectorComponent {
+        index: 5,
+        offset: 1088,
+        size: 64,
+    };
+
+    fn area(active: u64) -> Vec<u8> {
+        let mut bytes = vec![0u8; 1152];
+        bytes[..2].copy_from_slice(&[0x7f, 0x03]);
+        bytes[24..28].copy_from_slice(&MXCSR_INIT);
+        // Host-constant mask; never part of the guest's state.
+        bytes[28..32].copy_from_slice(&0xffffu32.to_le_bytes());
+        bytes[512..520].copy_from_slice(&active.to_le_bytes());
+        bytes
+    }
+    fn digest(bytes: &[u8]) -> String {
+        canonical_vector_digest(bytes, &[YMM, OPMASK]).unwrap()
+    }
+
+    #[test]
+    fn initial_components_digest_alike_whether_marked_present_or_absent() {
+        let absent = area(0);
+        let mut stale = area(0);
+        // Ignored payload bytes of absent components.
+        stale[160..416].fill(0xaa);
+        stale[576..832].fill(0xbb);
+        stale[1088..1152].fill(0xcc);
+        stale[2..24].fill(0xdd);
+        let present = area(0b100111);
+        for other in [&stale, &present] {
+            assert_eq!(digest(&absent), digest(other));
         }
-        Ok(hex(&h.finalize()))
+        let mut mask = area(0b100111);
+        mask[28..32].copy_from_slice(&0xbfffu32.to_le_bytes());
+        assert_eq!(digest(&absent), digest(&mask));
+    }
+
+    #[test]
+    fn every_architectural_difference_remains_visible() {
+        let base = digest(&area(0b100111));
+        let mut changes = Vec::new();
+        for (offset, active) in [
+            (0, 0b1),     // FCW
+            (40, 0b1),    // ST0
+            (24, 0b110),  // MXCSR
+            (160, 0b10),  // XMM0
+            (700, 0b100), // YMM upper half
+            (1100, 0b100000),
+        ] {
+            let mut bytes = area(0b100111 | active);
+            bytes[offset] ^= 1;
+            changes.push(digest(&bytes));
+        }
+        for changed in &changes {
+            assert_ne!(changed, &base);
+        }
+        let mut mxcsr = area(0b100);
+        mxcsr[24] ^= 1;
+        assert_ne!(digest(&mxcsr), base, "AVX alone keeps MXCSR live");
+    }
+
+    #[test]
+    fn rejects_compacted_truncated_and_unknown_active_components() {
+        assert!(canonical_vector_digest(&[0; 100], &[]).is_err());
+        let mut compact = area(0);
+        compact[527] = 0x80;
+        assert!(canonical_vector_digest(&compact, &[]).is_err());
+        assert!(canonical_vector_digest(&area(1 << 9), &[YMM]).is_err());
     }
 }
