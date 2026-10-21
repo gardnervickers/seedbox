@@ -186,6 +186,8 @@ XSAVE buffers can restore identical zero YMM state while differing in presence b
 Host interruptions can expose those differences in full-RAM comparison despite equivalent architectural state.
 Kernel task-state saves canonicalize zero/absent YMM; direct application XSAVE and some signal paths remain outside it.
 The [patch](../crates/seedbox-machine/guest/kernel/x86_64/apply.py) changes guest bytes, not the comparison's coverage.
+Live vCPU vector evidence hashes each advertised component's effective value, substituting init state when absent.
+The [digest](../crates/seedbox-machine-pv/src/machine/pv/worker/x86_64/backend/evidence.rs) omits XSTATE_BV, so host FPU save/restore cannot change it.
 
 ## Checkpoint capture
 
