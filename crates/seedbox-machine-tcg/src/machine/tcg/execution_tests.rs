@@ -131,6 +131,68 @@ fn execution_cost_fractional_and_maximum_rates_match_segmented_cpu_work() {
 }
 
 #[test]
+#[ignore = "requires native QEMU"]
+fn default_rate_preserves_a_prior_fractional_or_large_partial_charge() {
+    for (initial_factor, paid, completes) in [(1001, 1, 2), (1_000_000, 500, 1000)] {
+        let mut machine = entered();
+        drive(&mut machine, 0, STUB + paid, initial_factor, vec![]);
+        assert_eq!(registers(&mut machine)[RBX], 0);
+        let mut restored = branch(&machine.snapshot().unwrap());
+        for candidate in [&mut machine, &mut restored] {
+            drive(candidate, 0, STUB + completes - 1, 1000, vec![]);
+            assert_eq!(registers(candidate)[RBX], 0);
+            drive(candidate, 0, STUB + completes, 1000, vec![]);
+            assert_eq!(registers(candidate)[RBX], 1);
+            if initial_factor == 1001 {
+                // Observe the sub-nanosecond old-rate carry before continuing
+                // this branch: losing it would start a fresh 1000 ns jump.
+                let mut carry = branch(&candidate.snapshot().unwrap());
+                drive(&mut carry, 0, STUB + 3, 1_000_000, vec![]);
+                assert_eq!(registers(&mut carry)[RIP], INCREMENT);
+            }
+            drive(candidate, 0, STUB + completes + 2, 1000, vec![]);
+            assert_eq!(registers(candidate)[RBX], 2);
+        }
+        assert_eq!(registers(&mut machine), registers(&mut restored));
+    }
+}
+
+#[test]
+#[ignore = "requires native QEMU"]
+fn default_rate_executes_exactly_at_the_signed_time_horizon() {
+    let program = Asm::default()
+        .untimed()
+        .label("count")
+        .inc(Reg::Ebx)
+        .jmp("count")
+        .image();
+    let mut machine = start(program);
+    drive(
+        &mut machine,
+        0,
+        STUB + super::raw_program_data::UNTIMED,
+        1000,
+        vec![],
+    );
+    assert_eq!(registers(&mut machine)[RBX], 0);
+    let adopted = i64::MAX as u64 - 31;
+    let before = registers(&mut machine);
+    drive(&mut machine, adopted, adopted, 1000, vec![]);
+    assert_eq!(registers(&mut machine), before);
+    let mut restored = branch(&machine.snapshot().unwrap());
+    drive(&mut machine, adopted, i64::MAX as u64, 1000, vec![]);
+    for step in 1..=31 {
+        drive(&mut restored, adopted, adopted + step, 1000, vec![]);
+        let observed = registers(&mut restored);
+        assert_eq!(observed[RBX], step.div_ceil(2));
+        assert_eq!(observed[RIP], before[RIP] + step % 2);
+    }
+    assert_eq!(registers(&mut machine)[RBX], 16);
+    assert_eq!(registers(&mut machine)[RIP], before[RIP] + 1);
+    assert_eq!(registers(&mut machine), registers(&mut restored));
+}
+
+#[test]
 fn execution_cost_snapshot_and_rate_change_keep_old_partial_charge() {
     let s = STUB;
     let mut machine = entered();

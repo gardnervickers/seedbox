@@ -110,12 +110,18 @@ fn driver(
     native: Option<ExecutionEvidence>,
     fail: bool,
 ) -> (Driver<Model>, BTreeMap<MachineId, String>, Arc<AtomicUsize>) {
+    driver_components(vec![(native.clone(), fail), (native, fail)])
+}
+fn driver_components(
+    components: Vec<(Option<ExecutionEvidence>, bool)>,
+) -> (Driver<Model>, BTreeMap<MachineId, String>, Arc<AtomicUsize>) {
     let reads = Arc::new(AtomicUsize::new(0));
     let shared = reads.clone();
     let mut oracle = factory_definition::definition(0);
     oracle.name = "z".into();
     let mut worker = factory_definition::definition(1);
     worker.name = "a".into();
+    let mut components = components.into_iter();
     let mut driver = Driver::new_seeded(
         Timestamp::from_nanos(0),
         std::time::Duration::from_nanos(10),
@@ -127,8 +133,9 @@ fn driver(
         vec![],
         seedbox_driver::driver::NetworkConfig::default(),
         move |_| {
+            let (native, fail) = components.next().unwrap();
             Ok(Model {
-                native: native.clone(),
+                native,
                 fail,
                 ram_reads: shared.clone(),
             })
@@ -231,6 +238,25 @@ fn none_backend_errors_and_bad_identity_fail_without_ram_or_policy_only_success(
     let (mut driver, mut names, _) = driver(Some(component()), false);
     names.pop_first();
     assert!(collect(&mut driver, &names, &policy, None).is_err());
+}
+
+#[test]
+fn ordered_validation_precedes_later_backend_errors_after_bulk_collection() {
+    let policy = ContentDigest::of(b"driver policy");
+    let mut malformed = component();
+    malformed.witness = "invalid".into();
+    for first in [None, Some(malformed)] {
+        let expected_none = first.is_none();
+        let (mut driver, names, reads) =
+            driver_components(vec![(first, false), (Some(component()), true)]);
+        let error = collect(&mut driver, &names, &policy, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("for z:"), "{error}");
+        assert!(!error.contains("actual getter failure"), "{error}");
+        assert_eq!(error.contains("no physical boot"), expected_none, "{error}");
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+    }
 }
 
 mod network_checkpoint_tests;
