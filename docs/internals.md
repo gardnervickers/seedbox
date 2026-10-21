@@ -7,6 +7,10 @@ A computation-only loop instead advances through DynamoRIO block-entry budgets a
 x86 kernel cpu_relax hooks also charge bounded reads with interrupts masked; arbitrary assembly loops do not.
 The [client](../crates/seedbox-machine/guest/progress/progress.c) also replaces x86 RDRAND/RDSEED with guest entropy.
 
+Syscall charges sample their price once. Each segment keeps its first clock read
+and interrupt unmask, then charges the remaining ticks together up to the published
+bound. A stopped continuation retains the unpaid charge in guest state.
+
 Progress instrumentation saves a fixed scratch register in thread-local storage,
 decrements the block budget without changing application flags, and restores the
 register before application execution. Exhaustion branches to one shared routine
