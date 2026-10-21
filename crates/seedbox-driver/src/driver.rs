@@ -31,6 +31,7 @@ mod evidence;
 mod execution_evidence;
 pub use crate::persistence::{CodecError, DecodeLimits, SnapshotReference};
 pub use checkpoint::{Checkpoint, CheckpointMapError};
+pub use execution_evidence::ExecutionEvidenceRead;
 mod control;
 mod controller;
 mod due;

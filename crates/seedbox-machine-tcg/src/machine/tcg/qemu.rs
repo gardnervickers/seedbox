@@ -18,7 +18,7 @@ pub(super) use state::TimerSetup;
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// Test builds only: the longest host time one bounded run may take before
 /// the adapter kills QEMU and fails the run. Production waits without a host
-/// limit (see [`Process::execute`]). A run normally takes well under a second;
+/// limit (see [`Process::execute_collect`]). A run normally takes well under a second;
 /// the slowest legitimate one known, a 10 ms quantum executed entirely from
 /// outside RAM, takes about 30 s, so 600 s only catches a QEMU that never
 /// stops, for example a livelock in its run loop.
@@ -97,6 +97,36 @@ fn option_path(path: &Path) -> Result<String, Error> {
     Ok(path_text(path, "device option path")?.replace(',', ",,"))
 }
 
+fn guest_writes(value: Value) -> Result<Vec<seedbox_machine::pv::transport::GuestWrite>, Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    enum Kind {
+        Console,
+        Lifecycle,
+    }
+    #[derive(serde::Deserialize)]
+    struct Write {
+        kind: Kind,
+        time: u64,
+        bytes: Vec<u8>,
+    }
+    let writes: Vec<Write> = serde_json::from_value(value)?;
+    use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
+    Ok(writes
+        .into_iter()
+        .map(|write| {
+            let payload = LifecycleWrite {
+                time: write.time,
+                bytes: write.bytes,
+            };
+            match write.kind {
+                Kind::Console => GuestWrite::Console(payload),
+                Kind::Lifecycle => GuestWrite::Lifecycle(payload),
+            }
+        })
+        .collect())
+}
+
 pub(super) struct Process {
     child: Child,
     directory: TempDir,
@@ -109,7 +139,52 @@ pub(super) struct Process {
     watchdog: Duration,
 }
 
+pub(super) struct RunOutput {
+    pub(super) result: Value,
+    pub(super) writes: Vec<seedbox_machine::pv::transport::GuestWrite>,
+    pub(super) frames: Vec<seedbox_machine::pv::transport::LifecycleWrite>,
+}
+
+enum Completion {
+    #[cfg(test)]
+    Query,
+    Drain {
+        network: bool,
+    },
+}
+
 impl Process {
+    #[cfg(test)]
+    pub(super) fn execute(
+        &mut self,
+        start: Timestamp,
+        upto: Timestamp,
+        execution: seedbox_machine::execution::ExecutionConfig,
+    ) -> Result<Value, Error> {
+        self.execute_result(start, upto, execution, Completion::Query)
+    }
+
+    /// Collect stopped output in the result query, then finish any deferred
+    /// journal or NIC chunks without resuming the guest.
+    pub(super) fn execute_collect(
+        &mut self,
+        start: Timestamp,
+        upto: Timestamp,
+        execution: seedbox_machine::execution::ExecutionConfig,
+        network: bool,
+    ) -> Result<RunOutput, Error> {
+        let reply = self.execute_result(start, upto, execution, Completion::Drain { network })?;
+        self.qmp.collect_run(reply, network)
+    }
+
+    #[cfg(test)]
+    pub(super) fn collect_stopped(&mut self, network: bool) -> Result<RunOutput, Error> {
+        let reply = self
+            .qmp
+            .command("seedbox-drain-run", json!({"network":network}))?;
+        self.qmp.collect_run(reply, network)
+    }
+
     /// Execute one bounded run and return its stopped result.
     ///
     /// The run ends after its simulated budget however long that takes on the
@@ -119,17 +194,18 @@ impl Process {
     /// host speed. A dead QEMU still ends the wait: its socket reads as EOF.
     /// Test builds kill QEMU after [`TEST_RUN_WATCHDOG`] instead of waiting
     /// forever, so a livelocked run fails its test rather than hanging it.
-    pub(super) fn execute(
+    fn execute_result(
         &mut self,
         start: Timestamp,
         upto: Timestamp,
         execution: seedbox_machine::execution::ExecutionConfig,
+        completion: Completion,
     ) -> Result<Value, Error> {
         #[cfg(any(test, feature = "test-support"))]
         {
             let limit = self.watchdog;
             let watchdog = Watchdog::arm(self.qmp.stream.get_ref(), limit)?;
-            let result = self.execute_unwatched(start, upto, execution);
+            let result = self.execute_unwatched(start, upto, execution, completion);
             if watchdog.disarm() {
                 let _ = self.terminate();
                 return Err(Error(format!(
@@ -139,7 +215,7 @@ impl Process {
             result
         }
         #[cfg(not(any(test, feature = "test-support")))]
-        self.execute_unwatched(start, upto, execution)
+        self.execute_unwatched(start, upto, execution, completion)
     }
 
     fn execute_unwatched(
@@ -147,8 +223,9 @@ impl Process {
         start: Timestamp,
         upto: Timestamp,
         execution: seedbox_machine::execution::ExecutionConfig,
+        completion: Completion,
     ) -> Result<Value, Error> {
-        self.qmp.execute_bounded(start, upto, execution)
+        self.qmp.execute_bounded(start, upto, execution, completion)
     }
 
     /// Replace the test watchdog bound of later bounded runs.
@@ -163,37 +240,11 @@ impl Process {
         self.child.id()
     }
 
+    #[cfg(test)]
     pub(super) fn drain_guest(
         &mut self,
     ) -> Result<Vec<seedbox_machine::pv::transport::GuestWrite>, Error> {
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "lowercase")]
-        enum Kind {
-            Console,
-            Lifecycle,
-        }
-        #[derive(serde::Deserialize)]
-        struct Write {
-            kind: Kind,
-            time: u64,
-            bytes: Vec<u8>,
-        }
-        let writes: Vec<Write> =
-            serde_json::from_value(self.qmp.command("seedbox-drain-lifecycle", json!({}))?)?;
-        use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
-        Ok(writes
-            .into_iter()
-            .map(|write| {
-                let payload = LifecycleWrite {
-                    time: write.time,
-                    bytes: write.bytes,
-                };
-                match write.kind {
-                    Kind::Console => GuestWrite::Console(payload),
-                    Kind::Lifecycle => GuestWrite::Lifecycle(payload),
-                }
-            })
-            .collect())
+        guest_writes(self.qmp.command("seedbox-drain-lifecycle", json!({}))?)
     }
 
     // Existing device-focused tests intentionally inspect lifecycle bytes only.
@@ -254,21 +305,6 @@ impl Process {
                 .ok_or_else(|| Error("invalid seedbox-net-receive response".into()))?;
         }
         Ok(runnable)
-    }
-
-    /// Drain every frame the stopped NIC transmitted, oldest first, in as
-    /// many QMP chunks as it takes; there is no overall count limit.
-    pub(super) fn net_drain(
-        &mut self,
-    ) -> Result<Vec<seedbox_machine::pv::transport::LifecycleWrite>, Error> {
-        let mut frames = Vec::new();
-        loop {
-            let chunk = self.qmp.command("seedbox-net-drain", json!({}))?;
-            let more = drain_chunk(&chunk, &mut frames)?;
-            if !more {
-                return Ok(frames);
-            }
-        }
     }
 
     pub(super) fn console(&self) -> Result<Vec<u8>, Error> {
@@ -398,6 +434,7 @@ impl Process {
             let mut qmp = Qmp {
                 stream: BufReader::new(qmp_stream),
                 stopped: false,
+                request: Vec::new(),
             };
             if qmp.read()?.get("QMP").is_none() {
                 return Err(Error("missing QMP greeting".into()));
@@ -709,8 +746,46 @@ fn migration_file(path: &Path) -> Result<Value, Error> {
 struct Qmp {
     stream: BufReader<UnixStream>,
     stopped: bool,
+    request: Vec<u8>,
 }
 impl Qmp {
+    fn collect_run(&mut self, mut reply: Value, network: bool) -> Result<RunOutput, Error> {
+        let result = reply
+            .get_mut("run")
+            .ok_or_else(|| Error("missing stopped run result".into()))?
+            .take();
+        let writes = match reply.get_mut("writes") {
+            Some(writes) => guest_writes(writes.take())?,
+            None => guest_writes(self.command("seedbox-drain-lifecycle", json!({}))?)?,
+        };
+        let frames = match (network, reply.get_mut("network")) {
+            (true, Some(first)) => self.net_drain(first.take())?,
+            (false, None) => Vec::new(),
+            _ => return Err(Error("invalid stopped run NIC drain".into())),
+        };
+        Ok(RunOutput {
+            result,
+            writes,
+            frames,
+        })
+    }
+
+    /// Finish the existing bounded NIC drain from its already-collected first
+    /// chunk. There is no overall count limit and no extra empty drain.
+    fn net_drain(
+        &mut self,
+        mut chunk: Value,
+    ) -> Result<Vec<seedbox_machine::pv::transport::LifecycleWrite>, Error> {
+        let mut frames = Vec::new();
+        loop {
+            let more = drain_chunk(&chunk, &mut frames)?;
+            if !more {
+                return Ok(frames);
+            }
+            chunk = self.command("seedbox-net-drain", json!({}))?;
+        }
+    }
+
     // The actual execution transport, shared with controlled-peer host tests.
     // Guest execution waits without a host read deadline; ordinary queries keep it.
     fn execute_bounded(
@@ -718,6 +793,7 @@ impl Qmp {
         start: Timestamp,
         upto: Timestamp,
         execution: seedbox_machine::execution::ExecutionConfig,
+        completion: Completion,
     ) -> Result<Value, Error> {
         self.stopped = false;
         self.without_read_timeout(|qmp| {
@@ -735,7 +811,13 @@ impl Qmp {
             }
             Ok(())
         })?;
-        self.command("query-seedbox-run", json!({}))
+        match completion {
+            #[cfg(test)]
+            Completion::Query => self.command("query-seedbox-run", json!({})),
+            Completion::Drain { network } => {
+                self.command("seedbox-drain-run", json!({"network": network}))
+            }
+        }
     }
 
     fn read(&mut self) -> Result<Value, Error> {
@@ -772,11 +854,13 @@ impl Qmp {
         Ok(value)
     }
     fn command(&mut self, name: &str, arguments: Value) -> Result<Value, Error> {
-        writeln!(
-            self.stream.get_mut(),
-            "{}",
-            json!({"execute": name, "arguments": arguments})
+        self.request.clear();
+        serde_json::to_writer(
+            &mut self.request,
+            &json!({"execute": name, "arguments": arguments}),
         )?;
+        self.request.push(b'\n');
+        self.stream.get_mut().write_all(&self.request)?;
         loop {
             let response = self.read()?;
             if response.get("event").is_some() {
