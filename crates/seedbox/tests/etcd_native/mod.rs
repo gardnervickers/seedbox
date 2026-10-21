@@ -504,12 +504,41 @@ impl Cli {
             }
             _ => eprintln!("etcd baseline/{other} definition diff unavailable"),
         }
-        if let Some(bytes) = read(self.directory.join("failure/compare-state.json")) {
-            for line in String::from_utf8_lossy(&bytes).lines().take(SUMMARY_LINES) {
-                eprintln!("etcd compare-state: {line}");
+        // Matching machines carry no signal; log every other part of the report.
+        let report = read(self.directory.join("failure/compare-state.json"))
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        if let Some(serde_json::Value::Object(mut report)) = report {
+            let machines = report.remove("machines");
+            for machine in machines
+                .iter()
+                .flat_map(|m| m.as_array().into_iter().flatten())
+            {
+                if machine["full_state"]["matches"] != serde_json::Value::Bool(true) {
+                    eprintln!("etcd compare-state machine: {}", bounded_json(machine));
+                }
             }
+            eprintln!("etcd compare-state: {}", bounded_json(&report.into()));
+        }
+        if let Some(bytes) = read(self.directory.join("failure/compare-ram-pages.json")) {
+            eprintln!(
+                "etcd compare-ram-pages: {}",
+                String::from_utf8_lossy(&bytes[..bytes.len().min(SUMMARY_BYTES)])
+            );
         }
     }
+}
+
+fn bounded_json(value: &serde_json::Value) -> String {
+    let mut text = value.to_string();
+    if text.len() > SUMMARY_BYTES {
+        let mut end = SUMMARY_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str("...");
+    }
+    text
 }
 
 const SUMMARY_BYTES: usize = 4096;
