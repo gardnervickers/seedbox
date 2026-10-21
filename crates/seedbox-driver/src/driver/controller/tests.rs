@@ -18,7 +18,7 @@ pub(super) fn configured(
     }
     let definitions: Vec<_> = (1..specs.len()).map(driver::fixture::definition).collect();
     let specs: BTreeMap<_, _> = specs.into_iter().map(|s| (s.name.clone(), s)).collect();
-    Driver::new_seeded_with_network(
+    Driver::new_seeded(
         at(0),
         Duration::from_nanos(10),
         workers,
@@ -273,7 +273,7 @@ fn low_latency_overflow_and_wrong_identity_refuse_before_execution() {
     let setup = NetworkSetup::from(config)
         .with_controller(Some(MachineId(1)), Duration::from_nanos(5))
         .unwrap();
-    let result = Driver::<Mock>::new_seeded_with_network(
+    let result = Driver::<Mock>::new_seeded(
         at(0),
         Duration::from_nanos(10),
         1,
@@ -320,7 +320,7 @@ fn guest_cannot_heal_host_network_handle_targeting_controller() {
         NetworkSetup::from(NetworkConfig::new(Duration::from_nanos(2), Duration::ZERO, 0).unwrap())
             .with_controller(Some(MachineId::ORACLE), Duration::from_nanos(5))
             .unwrap();
-    let mut d = Driver::new_seeded_with_network(
+    let mut d = Driver::new_seeded(
         at(0),
         Duration::from_nanos(10),
         1,

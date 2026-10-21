@@ -113,7 +113,7 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
         request.prepared.network.latency_ns,
     )?
     .configure(network)?;
-    let mut driver = Driver::new_seeded_with_network(
+    let mut driver = Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(request.prepared.quantum_ns),
         request.machine_workers,

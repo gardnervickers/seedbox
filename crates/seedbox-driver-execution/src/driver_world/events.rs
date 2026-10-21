@@ -337,7 +337,7 @@ impl Publisher {
                     .clone(),
             ))
         } else {
-            legacy_action(names, record)?.map(Box::new)
+            control_action(names, record)?.map(Box::new)
         };
         self.emit(
             state,
@@ -403,7 +403,7 @@ pub(super) fn action_name(action: FaultAction) -> Result<&'static str> {
         _ => return Err(invalid("unknown Driver fault action")),
     })
 }
-fn legacy_action(
+fn control_action(
     names: &BTreeMap<MachineId, String>,
     record: &FaultRecord,
 ) -> Result<Option<seedbox_engine_protocol::control::Action>> {

@@ -88,7 +88,7 @@ fn checked_admission_and_reply_overflow_poison_without_wrapping() {
         )
         .with_controller(Some(MachineId::ORACLE), Duration::from_nanos(5))
         .unwrap();
-        let mut d = Driver::new_seeded_with_network(
+        let mut d = Driver::new_seeded(
             at(u64::MAX - 10),
             Duration::from_nanos(1),
             1,

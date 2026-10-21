@@ -111,7 +111,7 @@ fn bounded_clock_prepare_is_pure_and_commit_matches_the_single_projected_draw() 
                     _ => None,
                 })
                 .collect();
-            assert_eq!(admitted, [expected]);
+            assert_eq!(admitted, [*expected]);
         }
     }
 }

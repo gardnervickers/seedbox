@@ -36,7 +36,7 @@ pub(in crate::driver) fn net(
         .collect();
     let oracle = defs.remove(0);
     let all: BTreeMap<_, _> = specs.into_iter().map(|s| (s.name.clone(), s)).collect();
-    Driver::new_seeded_with_network(
+    Driver::new_seeded(
         at(0),
         Duration::from_nanos(10),
         workers,

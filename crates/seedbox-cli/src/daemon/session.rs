@@ -79,9 +79,7 @@ fn barriers(
     let remaining = || timeout.saturating_sub(started.elapsed());
     let session = probe(&root.join(SESSION_LEASE_FILE), remaining()).map_err(|error| {
         let reason = match error.kind() {
-            std::io::ErrorKind::NotFound => {
-                "legacy session has no ownership lease; its users are unknown"
-            }
+            std::io::ErrorKind::NotFound => "session has no ownership lease; its users are unknown",
             std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
                 "session lease is held by an owner or cleanup monitor; cleanup may finish later"
             }
@@ -236,15 +234,15 @@ mod tests {
         third.close().unwrap();
     }
     #[test]
-    fn legacy_session_without_lease_is_preserved_and_diagnosed_without_blocking_startup() {
+    fn session_without_lease_is_preserved_and_diagnosed_without_blocking_startup() {
         let _scope = test_scope();
         let root = tempfile::tempdir().unwrap();
         prepare_directory(&root.path().join("sessions")).unwrap();
-        let old = root.path().join("sessions/session-legacy");
+        let old = root.path().join("sessions/session-unleased");
         fs::create_dir(&old).unwrap();
         fs::write(old.join("execution-data"), b"unknown ownership").unwrap();
         let (session, messages) = fresh(root.path());
-        diagnosed(&messages, &old, "legacy session has no ownership lease");
+        diagnosed(&messages, &old, "session has no ownership lease");
         assert_eq!(
             fs::read(old.join("execution-data")).unwrap(),
             b"unknown ownership"
@@ -290,7 +288,7 @@ mod tests {
         next.close().unwrap();
     }
     #[test]
-    fn retained_legacy_session_diagnostic_is_written_to_stderr() {
+    fn retained_unleased_session_diagnostic_is_written_to_stderr() {
         let _scope = test_scope();
         const ROOT: &str = "SEEDBOX_SESSION_DIAGNOSTIC_TEST_ROOT";
         if let Some(root) = std::env::var_os(ROOT) {
@@ -307,11 +305,11 @@ mod tests {
         }
         let root = tempfile::tempdir().unwrap();
         prepare_directory(&root.path().join("sessions")).unwrap();
-        let old = root.path().join("sessions/session-legacy");
+        let old = root.path().join("sessions/session-unleased");
         fs::create_dir(&old).unwrap();
         fs::write(old.join("execution-data"), b"unknown owner").unwrap();
         let (_, module) = module_path!().split_once("::").unwrap();
-        let name = format!("{module}::retained_legacy_session_diagnostic_is_written_to_stderr");
+        let name = format!("{module}::retained_unleased_session_diagnostic_is_written_to_stderr");
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &name, "--nocapture"])
             .env_clear()
@@ -326,7 +324,7 @@ mod tests {
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stderr.contains(&old.display().to_string()), "{stderr}");
         assert!(
-            stderr.contains("legacy session has no ownership lease"),
+            stderr.contains("session has no ownership lease"),
             "{stderr}"
         );
         assert!(

@@ -602,7 +602,7 @@ fn pause_before_next_fault_holds_trigger_guest_and_input_effects_alike() {
             assert_eq!(driver.step(*at).unwrap(), outcome);
             driver
                 .with_barrier(|b| {
-                    assert_eq!(b.playback().before_fault.as_ref(), Some(fault));
+                    assert_eq!(b.playback().before_fault.as_ref(), Some(&**fault));
                     assert!(matches!(
                         b.schedule(*at, key("held"), Action::Pause(Target::Machine(target))),
                         Err(Error::BeforeFault)

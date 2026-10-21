@@ -21,7 +21,7 @@ fn codec5_service_envelope_preserves_controller_and_disabled_authority() {
         let config = NetworkConfig::default();
         let latency = u64::try_from(config.latency().as_nanos()).unwrap();
         let authority = controller::resolve(&inventory, "oracle", latency).unwrap();
-        let mut source = Driver::new_seeded_with_network(
+        let mut source = Driver::new_seeded(
             Timestamp::from_nanos(0),
             Duration::from_nanos(10),
             1,

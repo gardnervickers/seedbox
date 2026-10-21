@@ -80,7 +80,7 @@ pub(super) fn assert_saved_pending(saved: &wire::Checkpoint, fault_id: u32) {
         panic!("saved authority no longer stops before its admitted effect")
     };
     assert_eq!(at, status.position.at);
-    assert_eq!(fault, held);
+    assert_eq!(*fault, held);
     // A real before-effect probe changes no authority byte, including pending
     // ownership and the held record. It must neither settle nor release it.
     let mut roundtrip = Vec::new();

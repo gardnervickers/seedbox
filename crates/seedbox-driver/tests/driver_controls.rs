@@ -4,7 +4,7 @@ use driver_fixture::*;
 
 fn held_record(outcome: &StepOutcome) -> Option<seedbox_driver::driver::FaultRecord> {
     match outcome {
-        StepOutcome::BeforeFault { fault, .. } => Some(fault.clone()),
+        StepOutcome::BeforeFault { fault, .. } => Some((**fault).clone()),
         _ => None,
     }
 }

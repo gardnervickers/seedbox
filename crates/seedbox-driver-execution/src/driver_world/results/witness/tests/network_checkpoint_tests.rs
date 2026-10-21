@@ -96,7 +96,7 @@ fn make(workers: usize, capacity: usize) -> Driver<NetworkModel> {
             .unwrap(),
         );
     }
-    Driver::new_seeded_with_network(
+    Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
         workers,
