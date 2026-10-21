@@ -1,9 +1,12 @@
 //! Network fault families through the real retained Driver service on TCG.
 #![cfg(all(feature = "tcg-tests", target_os = "linux", target_arch = "x86_64"))]
 
-#[path = "support/native_service.rs"]
-pub mod native_service;
+pub mod support {
+    pub mod case_cleanup;
+    pub mod native_service;
+}
 use native_service::CpuBackend;
+use support::native_service;
 
 #[tokio::test]
 async fn public_tcg_partition_heal_recovers_and_replays() {

@@ -4,9 +4,12 @@
 
 // Shared test-support API also exposes PV-only scenario helpers; exporting the
 // module avoids dead-code suppressions in this TCG integration-test binary.
-#[path = "support/native_service.rs"]
-pub mod native_service;
+pub mod support {
+    pub mod case_cleanup;
+    pub mod native_service;
+}
 use native_service::{native_session, CpuBackend};
+use support::native_service;
 
 #[tokio::test]
 async fn retained_driver_tcg_guest_completes_and_cancellation_reaps_owned_inputs() {

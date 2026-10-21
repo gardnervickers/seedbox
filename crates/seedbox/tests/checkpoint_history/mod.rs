@@ -8,6 +8,8 @@ use std::{
     },
     time::Duration,
 };
+// #[path] shares seedbox-server's catalogue-only request fixture across crates
+// without publishing it from seedbox-server behind a test feature.
 #[path = "../../../seedbox-server/tests/support/mod.rs"]
 mod source_request;
 

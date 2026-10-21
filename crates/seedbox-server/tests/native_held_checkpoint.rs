@@ -4,8 +4,11 @@
     target_os = "linux",
     target_arch = "x86_64"
 ))]
-#[path = "support/native_service.rs"]
-pub mod native_service;
+pub mod support {
+    pub mod case_cleanup;
+    pub mod native_service;
+}
+use support::native_service;
 
 #[cfg(feature = "kvm-tests")]
 #[tokio::test]

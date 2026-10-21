@@ -1,7 +1,8 @@
 #![cfg(all(seedbox_pv, target_arch = "x86_64"))]
 //! Native instruction determinism through the public Driver boundary.
-#[path = "support/epoch.rs"]
-mod epoch;
+mod support {
+    pub mod epoch;
+}
 use seedbox_machine::{
     definition::{FilesystemArchive, Launch, MachineDefinition, PreparedApplication, Resources},
     machine::Timestamp,
@@ -11,6 +12,7 @@ use seedbox_machine::{
 use seedbox_machine_pv::machine::pv::Factory;
 use seedbox_test_time::{GuestProgress, HangGuard};
 use std::{fs, path::PathBuf, time::Duration};
+use support::epoch;
 fn input(name: &str) -> PathBuf {
     std::env::var_os(name).expect(name).into()
 }

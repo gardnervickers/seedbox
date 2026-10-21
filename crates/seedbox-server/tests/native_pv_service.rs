@@ -2,9 +2,12 @@
 //! Uses the normal release CLI/runtime package and existing finite CPU fixture.
 #![cfg(all(feature = "kvm-tests", target_os = "linux", target_arch = "x86_64"))]
 
-#[path = "support/native_service.rs"]
-pub mod native_service;
+pub mod support {
+    pub mod case_cleanup;
+    pub mod native_service;
+}
 use native_service::{native_session, CpuBackend};
+use support::native_service;
 
 #[tokio::test]
 async fn retained_driver_pv_guest_completes_and_cancellation_reaps_owned_inputs() {

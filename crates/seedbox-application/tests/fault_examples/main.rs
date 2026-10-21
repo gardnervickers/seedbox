@@ -84,7 +84,6 @@ fn python_projects_share_client_and_use_a_dedicated_runtime_controller() {
     }
 }
 
-#[path = "fault_examples/portable.rs"]
 mod portable;
 
 #[test]

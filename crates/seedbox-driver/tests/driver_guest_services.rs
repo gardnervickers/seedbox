@@ -1,15 +1,17 @@
 #![cfg(unix)]
 //! Native public Driver acceptance with ordinary targets and a required oracle.
 //! Guest inputs are shared with isolated Machine checks through explicit fixture paths.
-#[path = "support/epoch.rs"]
-mod epoch;
-use seedbox_machine as machine_crate;
-#[allow(dead_code)]
-#[path = "support/native_driver.rs"]
-mod native_driver;
-#[path = "support/prepared_application.rs"]
-mod prepared;
+mod support {
+    pub mod epoch;
+    #[allow(dead_code)]
+    pub mod native_driver;
+    pub mod prepared_application;
+}
 use native_driver::auto_key;
+use seedbox_machine as machine_crate;
+use support::epoch;
+use support::native_driver;
+use support::prepared_application as prepared;
 fn key(text: &str) -> seedbox_driver::driver::InputKey {
     seedbox_driver::driver::InputKey::new(text).unwrap()
 }

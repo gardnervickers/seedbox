@@ -1,11 +1,13 @@
 //! Portable request-matrix tests only; these do not execute or prove faults.
-#[path = "support/fault_scenarios.rs"]
-mod scenarios;
+mod support {
+    pub mod fault_scenarios;
+}
 use scenarios::{assert_catalogue_covered, family, recovery_scenarios};
 use seedbox_api::{
     ControlCommand, ControlRequest, FaultAction, FaultCatalogue, FaultCategory, FaultDescriptor,
 };
 use std::collections::BTreeSet;
+use support::fault_scenarios as scenarios;
 
 fn observed_connection_fixture() -> seedbox_engine_protocol::control::Connection {
     seedbox_engine_protocol::control::Connection {

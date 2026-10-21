@@ -10,11 +10,13 @@ use seedbox_machine::{
     rng::RngStream,
 };
 use std::{collections::VecDeque, io, num::NonZeroU32, time::Duration};
-#[path = "support/driver_definition.rs"]
-mod driver_definition;
-#[path = "support/input_key.rs"]
-mod input_key;
+mod support {
+    pub mod driver_definition;
+    pub mod input_key;
+}
 use input_key::{auto_key, key};
+use support::driver_definition;
+use support::input_key;
 
 /// The machine and bound boot of a single-machine fault record.
 fn machine_boot(target: &seedbox_driver::driver::FaultTarget) -> (MachineId, u64) {

@@ -3,7 +3,6 @@ use crate::{store::ContentDigest, Result};
 use std::path::Path;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[path = "doctor/mac.rs"]
 mod mac;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

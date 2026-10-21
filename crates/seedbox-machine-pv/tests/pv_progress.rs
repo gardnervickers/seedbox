@@ -1,7 +1,8 @@
 #![cfg(seedbox_pv)]
 //! Public factory activation of real instrumentation, measured inside a CPU loop.
-#[path = "support/epoch.rs"]
-mod epoch;
+mod support {
+    pub mod epoch;
+}
 use seedbox_machine::{
     clock::Clock,
     definition::{FilesystemArchive, Launch, MachineDefinition, PreparedApplication, Resources},
@@ -13,6 +14,7 @@ use seedbox_machine::{
 use seedbox_machine_pv::machine::pv::Factory;
 use seedbox_test_time::{GuestProgress, HangGuard};
 use std::{collections::VecDeque, fs, path::PathBuf, time::Duration};
+use support::epoch;
 struct TestClock(u64);
 impl Clock for TestClock {
     fn now(&self) -> u64 {

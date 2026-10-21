@@ -1,7 +1,15 @@
 #![cfg(unix)]
-#[path = "support/epoch.rs"]
-mod epoch;
+mod support {
+    pub mod epoch;
+    #[allow(dead_code)]
+    pub mod native_driver;
+    pub mod prepared_application;
+}
+use support::epoch;
+use support::native_driver;
+use support::prepared_application as prepared;
 
+use native_driver::auto_key;
 use seedbox_driver::driver::{
     Action, Driver, EventKind, MachineId, MachineResponse, StepOutcome, Target,
 };
@@ -11,12 +19,6 @@ use seedbox_machine::{
 };
 use seedbox_machine_tcg::machine::tcg::TcgMachine;
 use seedbox_test_time::{GuestProgress, HangGuard};
-#[allow(dead_code)]
-#[path = "support/native_driver.rs"]
-mod native_driver;
-#[path = "support/prepared_application.rs"]
-mod prepared;
-use native_driver::auto_key;
 
 struct Harness {
     driver: Driver<TestMachine>,

@@ -10,11 +10,13 @@ use seedbox_machine::{
     rng::RngStream,
 };
 use std::{collections::VecDeque, num::NonZeroU32, time::Duration};
-#[path = "support/driver_definition.rs"]
-mod driver_definition;
-#[path = "support/input_key.rs"]
-mod input_key;
+mod support {
+    pub mod driver_definition;
+    pub mod input_key;
+}
 use input_key::auto_key;
+use support::driver_definition;
+use support::input_key;
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
 }

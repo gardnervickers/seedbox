@@ -1,5 +1,4 @@
 //! Public held-throttle checkpoint continuation on the normal retained worker.
-#[path = "native_held_checkpoint/authority.rs"]
 mod authority;
 use super::*;
 use seedbox_api::{

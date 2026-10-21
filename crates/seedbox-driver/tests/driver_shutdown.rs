@@ -1,6 +1,10 @@
-#[path = "support/driver_fixture.rs"]
-mod driver_fixture;
+mod support {
+    pub mod driver_definition;
+    pub mod driver_fixture;
+    pub mod input_key;
+}
 use driver_fixture::*;
+use support::driver_fixture;
 
 /// Schedule one input and admit it at the next barrier at the same time.
 fn apply(driver: &mut Driver<TestMachine>, time: u64, action: Action) -> StepOutcome {

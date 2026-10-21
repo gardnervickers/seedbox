@@ -7,5 +7,7 @@
 // The store's machine-side operations have no caller in this library.
 #![allow(dead_code)]
 
+// #[path] is required: this root is compiled by plain rustc, not Cargo, so it
+// cannot depend on seedbox-machine and must include the disk sources directly.
 #[path = "../../seedbox-machine/src/machine/disk.rs"]
 mod disk;

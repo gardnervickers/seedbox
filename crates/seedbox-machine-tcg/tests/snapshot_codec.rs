@@ -1,10 +1,10 @@
 //! Public-API, host-only structural persistence tests. Linux header/firmware
 //! data and opaque migration strings are never booted, translated or executed.
 #![cfg(unix)]
-#[path = "support/policy_tests.rs"]
-mod policy_tests;
-#[path = "support/scratch_tests.rs"]
-mod scratch_tests;
+mod support {
+    pub mod policy_tests;
+    pub mod scratch_tests;
+}
 use seedbox_machine::{
     definition::*,
     machine::{disk::Store, Machine},

@@ -1,6 +1,10 @@
-#[path = "support/driver_fixture.rs"]
-mod driver_fixture;
+mod support {
+    pub mod driver_definition;
+    pub mod driver_fixture;
+    pub mod input_key;
+}
 use driver_fixture::*;
+use support::driver_fixture;
 
 fn held_record(outcome: &StepOutcome) -> Option<seedbox_driver::driver::FaultRecord> {
     match outcome {

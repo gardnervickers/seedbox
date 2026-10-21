@@ -2,10 +2,12 @@
 //! Supply the backend guest asset directory and patched QEMU.
 
 #[cfg(unix)]
-mod support;
+mod support {
+    pub mod shared;
+    pub mod tcg_program;
+}
 #[cfg(unix)]
-#[path = "support/tcg_program.rs"]
-mod tcg_program;
+use support::{shared, tcg_program};
 
 #[cfg(unix)]
 /// Realtime epoch of the example machines: 2000-01-01T00:00:00Z.
@@ -38,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &input("SEEDBOX_TCG_ASSETS")?,
         EXAMPLE_EPOCH_SECONDS,
     )?;
-    let guests = support::sleeping_guests();
+    let guests = shared::sleeping_guests();
     fn definition(
         name: String,
         seconds: u32,
@@ -81,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Timestamp::from_nanos(0),
         std::time::Duration::from_millis(1),
         2,
-        support::driver_rng(),
+        shared::driver_rng(),
         || Ok(()),
         oracle,
         machines,
@@ -91,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let ids: Vec<_> = driver
         .with_barrier(|barrier| Ok(barrier.machines().skip(1).map(|(id, _)| id).collect()))?;
-    println!("[seed={}, sleep range=1..=4 seconds]", support::SEED);
+    println!("[seed={}, sleep range=1..=4 seconds]", shared::SEED);
     for (name, sleep) in &guests {
         println!("[{name} sleeping for {sleep} seconds]");
     }

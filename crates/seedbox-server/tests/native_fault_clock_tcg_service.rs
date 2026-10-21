@@ -1,8 +1,11 @@
 //! Public clock faults use real retained guests, timers and replay comparison.
 #![cfg(all(feature = "tcg-tests", target_os = "linux", target_arch = "x86_64"))]
 
-#[path = "support/native_service.rs"]
-pub mod native_service;
+pub mod support {
+    pub mod case_cleanup;
+    pub mod native_service;
+}
+use support::native_service;
 
 #[tokio::test]
 async fn public_tcg_clock_skew_heal_replays_native_timers_and_clocks() {

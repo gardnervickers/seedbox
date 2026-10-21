@@ -1,7 +1,8 @@
 //! Portable control-flow proof for the shared native case boundary. These are
 //! gated cleanup callbacks, not native-process or witness acceptance tests.
-#[path = "support/case_cleanup.rs"]
-mod case_cleanup;
+mod support {
+    pub mod case_cleanup;
+}
 use case_cleanup::finish_before_rethrow;
 use futures_util::FutureExt;
 use std::{
@@ -10,6 +11,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use support::case_cleanup;
 use tokio::sync::oneshot;
 
 type Events = Arc<Mutex<Vec<&'static str>>>;

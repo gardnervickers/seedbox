@@ -4,10 +4,12 @@
 //! worker; macOS also requires its Hypervisor entitlement.
 
 #[cfg(seedbox_pv)]
-#[path = "support/pv_init.rs"]
-mod pv_init;
+mod support {
+    pub mod pv_init;
+    pub mod shared;
+}
 #[cfg(seedbox_pv)]
-mod support;
+use support::{pv_init, shared};
 
 #[cfg(seedbox_pv)]
 /// Realtime epoch of the example machines: 2000-01-01T00:00:00Z.
@@ -40,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &input("SEEDBOX_PV_ASSETS")?,
         EXAMPLE_EPOCH_SECONDS,
     )?;
-    let guests = support::sleeping_guests();
+    let guests = shared::sleeping_guests();
     fn definition(
         name: String,
         seconds: u32,
@@ -83,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Timestamp::from_nanos(0),
         std::time::Duration::from_millis(1),
         2,
-        support::driver_rng(),
+        shared::driver_rng(),
         || Ok(()),
         oracle,
         machines,
@@ -93,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let ids: Vec<_> = driver
         .with_barrier(|barrier| Ok(barrier.machines().skip(1).map(|(id, _)| id).collect()))?;
-    println!("[seed={}, sleep range=1..=4 seconds]", support::SEED);
+    println!("[seed={}, sleep range=1..=4 seconds]", shared::SEED);
     for (name, sleep) in &guests {
         println!("[{name} sleeping for {sleep} seconds]");
     }

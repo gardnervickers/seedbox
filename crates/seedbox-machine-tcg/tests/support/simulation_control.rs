@@ -1,4 +1,4 @@
-use super::prepared;
+use super::prepared_application as prepared;
 pub use seedbox_machine::test_support::simulation_control::*;
 use std::fs;
 mod epoch {

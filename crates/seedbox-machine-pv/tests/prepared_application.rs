@@ -1,11 +1,13 @@
 #![cfg(seedbox_pv)]
 //! Public factory and retained image launch acceptance.
-#[path = "support/epoch.rs"]
-mod epoch;
-#[path = "support/prepared_image.rs"]
-mod image;
+mod support {
+    pub mod epoch;
+    pub mod prepared_image;
+}
 use image::*;
 use std::fs;
+use support::epoch;
+use support::prepared_image as image;
 #[cfg(seedbox_pv)]
 fn pv(script: bool) {
     let mut backend = seedbox_machine_pv::machine::pv::Factory::new(

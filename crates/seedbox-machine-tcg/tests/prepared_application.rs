@@ -1,11 +1,13 @@
 #![cfg(unix)]
 //! Public factory and retained image launch acceptance.
-#[path = "support/epoch.rs"]
-mod epoch;
-#[path = "support/prepared_image.rs"]
-mod image;
+mod support {
+    pub mod epoch;
+    pub mod prepared_image;
+}
 use image::*;
 use std::fs;
+use support::epoch;
+use support::prepared_image as image;
 fn tcg(script: bool) {
     let mut backend = seedbox_machine_tcg::machine::tcg::Factory::new(
         &input("SEEDBOX_TCG_QEMU"),

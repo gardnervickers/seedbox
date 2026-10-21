@@ -2,20 +2,16 @@
 use super::*;
 use seedbox_api::{ControlCommand, FaultAction, InputSource, PlaybackRate};
 #[cfg(feature = "worker-failure-tests")]
-#[path = "native_fault_worker_failure.rs"]
 mod worker_failure;
 #[cfg(feature = "worker-failure-tests")]
 pub use worker_failure::pv_fault_worker_failure;
 
-#[path = "native_fault_cancel.rs"]
 mod cancellation;
 pub use cancellation::pv_fault_cancel;
 
-#[path = "native_fault_lifecycle.rs"]
 mod lifecycle;
 pub use lifecycle::{pv_lifecycle_replay, LifecyclePair};
 
-#[path = "native_fault_disk.rs"]
 mod disk_faults;
 pub use disk_faults::pv_disk_crash_reboot_replay;
 

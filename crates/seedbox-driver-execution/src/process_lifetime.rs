@@ -17,7 +17,6 @@ use std::{
 };
 
 #[cfg(feature = "test-support")]
-#[path = "process_lifetime_failure.rs"]
 mod failure;
 #[cfg(feature = "test-support")]
 use failure::OwnerEndpoint;

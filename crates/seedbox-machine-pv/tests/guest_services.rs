@@ -1,11 +1,13 @@
 #![cfg(seedbox_pv)]
 //! Native guest service acceptance through this backend's public Machine factory.
-#[path = "support/epoch.rs"]
-mod epoch;
-#[path = "support/prepared_application.rs"]
-mod prepared;
+mod support {
+    pub mod epoch;
+    pub mod prepared_application;
+}
 use seedbox_machine::test_support::guest_services::{applications, shutdown};
 use std::{fs, path::PathBuf};
+use support::epoch;
+use support::prepared_application as prepared;
 fn input(name: &str) -> PathBuf {
     std::env::var_os(name)
         .unwrap_or_else(|| panic!("set {name}"))

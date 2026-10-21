@@ -6,8 +6,10 @@
     ),
     all(target_os = "macos", target_arch = "aarch64")
 ))]
-#[path = "support/worker_entry.rs"]
-mod cases;
+mod support {
+    pub mod worker_entry;
+}
+use support::worker_entry as cases;
 
 #[test]
 fn private_worker_eof_and_trailing_args_do_not_enter_cli() {

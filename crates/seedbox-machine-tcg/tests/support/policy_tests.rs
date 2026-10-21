@@ -1,6 +1,6 @@
 //! Public closed-codec and real Rust adapter tests. Child replies are explicitly
 //! synthetic host QMP; these tests never start QEMU or execute guest code.
-use super::*;
+use crate::*;
 fn configured(policy: BackendPolicy) -> Fixture {
     let mut f = Fixture::default();
     f.command.push_str(&format!(

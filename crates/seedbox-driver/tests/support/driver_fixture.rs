@@ -1,12 +1,8 @@
 #![allow(dead_code, unused_imports)]
 //! Test machines implemented solely through seedbox-machine's public contracts.
 
-#[path = "driver_definition.rs"]
-mod driver_definition;
-pub use driver_definition::definition;
-#[path = "input_key.rs"]
-mod input_key;
-pub use input_key::{auto_key, key};
+pub use super::driver_definition::definition;
+pub use super::input_key::{auto_key, key};
 
 pub use seedbox_driver::driver::{
     Action, Driver, Error, EventKind, FaultAction, FaultOrigin, InputKey, MachineId, PlaybackRate,

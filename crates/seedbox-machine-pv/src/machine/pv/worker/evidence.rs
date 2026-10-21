@@ -16,7 +16,6 @@ static PRIVATE_ORACLE_CAPTURE_COUNT: AtomicUsize = AtomicUsize::new(0);
 // Compile the pure ARM projection on the host for golden/model tests as well.
 // Native ARM adapters are still target-gated and never executed by these tests.
 #[cfg(any(target_arch = "aarch64", test))]
-#[path = "aarch64/backend/evidence.rs"]
 pub(super) mod arm;
 pub(super) fn part(name: &str, value: &impl Serialize) -> Result<(String, String)> {
     let b = serde_json::to_vec(value).map_err(|e| format!("PV evidence {name}: {e}"))?;

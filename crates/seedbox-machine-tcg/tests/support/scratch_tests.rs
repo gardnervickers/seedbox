@@ -1,8 +1,7 @@
 //! Host-only scratch placement over public Snapshot/TcgMachine boundaries.
 //! Opaque boot and migration bytes are never sent to QEMU in these cold tests.
-use super::*;
+use crate::*;
 #[cfg(feature = "test-support")]
-#[path = "scratch_process_tests.rs"]
 mod scratch_process_tests;
 use std::{fs, path::PathBuf};
 

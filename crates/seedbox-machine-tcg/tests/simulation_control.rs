@@ -1,10 +1,11 @@
 #![cfg(unix)]
 //! Actual ordinary-machine control transport, with a deliberately manual host
 //! responder. These tests do not provide a simulation service or fault dispatcher.
-#[path = "support/simulation_control.rs"]
-mod control;
-#[path = "support/prepared_application.rs"]
-mod prepared;
+mod support {
+    pub mod prepared_application;
+    pub mod simulation_control;
+}
+use support::simulation_control as control;
 
 #[test]
 #[ignore = "requires patched QEMU, Linux inputs and SEEDBOX_TCG_CONTROL_INITRD"]

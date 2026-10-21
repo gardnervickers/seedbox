@@ -1,10 +1,11 @@
 //! Rust-owned contract cases against the unmodified production Python SDK.
 //! Peer messages and expectations are literal values, not SDK-generated schemas.
 #![cfg(unix)]
-#[path = "support/python_sdk.rs"]
-mod support;
+mod support {
+    pub mod python_sdk;
+}
 use serde_json::{json, Value};
-use support::*;
+use support::python_sdk::*;
 
 const LIFECYCLE: [&str; 4] = ["pause", "resume", "crash", "reboot"];
 fn targets() -> [(Value, Value); 2] {

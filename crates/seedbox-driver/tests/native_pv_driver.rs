@@ -1,6 +1,7 @@
 #![cfg(seedbox_pv)]
-#[path = "support/native_driver.rs"]
-mod native_fixture;
+mod support {
+    pub mod native_driver;
+}
 use native_fixture::auto_key;
 use seedbox_driver::driver::{Action, StepOutcome, Target};
 use seedbox_machine::test_support::{SeededRng, SimulationClock};
@@ -11,6 +12,7 @@ use seedbox_machine::{
 };
 use seedbox_machine_pv::machine::pv::{test_support as fixture, PVMachine as RawMachine, Snapshot};
 use std::{fs, path::Path, sync::Arc};
+use support::native_driver as native_fixture;
 type PVMachine = Environment<RawMachine>;
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)

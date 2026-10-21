@@ -1,13 +1,8 @@
 use super::*;
-#[path = "codec_tests.rs"]
 mod codec_tests;
-#[path = "controller_tests.rs"]
 mod controller_tests;
-#[path = "lazy_restore_tests.rs"]
 mod lazy_restore_tests;
-#[path = "metadata_roundtrip_tests.rs"]
 mod metadata_roundtrip_tests;
-#[path = "publication_tests.rs"]
 mod publication_tests;
 use seedbox_driver::driver::NetworkConfig;
 use seedbox_machine::{

@@ -1,6 +1,10 @@
-#[path = "support/driver_fixture.rs"]
-mod driver_fixture;
+mod support {
+    pub mod driver_definition;
+    pub mod driver_fixture;
+    pub mod input_key;
+}
 use driver_fixture::*;
+use support::driver_fixture;
 
 #[test]
 fn paused_runnable_machine_resumes_at_current_time_without_catchup_work() {
