@@ -117,8 +117,30 @@ void seedbox_syscall_progress(void)
 	u64 remaining = p ? READ_ONCE(p->syscall_ns) : 1000;
 
 	while (remaining) {
+		unsigned long flags;
+		u64 last, bound, count;
+
+		/* Retain each segment's first read and unmask point for pending IRQs.
+		 * New time or IRQs arrive only at a stopped rendezvous; the remaining
+		 * reads before the published bound can then be charged together. */
 		(void)seedbox_read();
-		--remaining;
+		if (!--remaining)
+			break;
+		flags = arch_local_irq_save();
+		p = READ_ONCE(page);
+		if (p && (arch_irqs_disabled_flags(flags) ||
+			  !READ_ONCE(p->deferred_irq_pending))) {
+			last = READ_ONCE(p->last);
+			bound = READ_ONCE(p->bound);
+			if (last < bound) {
+				count = bound - last;
+				if (count > remaining)
+					count = remaining;
+				WRITE_ONCE(p->last, last + count);
+				remaining -= count;
+			}
+		}
+		arch_local_irq_restore(flags);
 	}
 }
 

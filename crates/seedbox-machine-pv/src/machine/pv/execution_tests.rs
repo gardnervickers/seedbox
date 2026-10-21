@@ -298,44 +298,54 @@ __attribute__((noreturn)) void _start(void)
     );
     let mut deltas = Vec::new();
     for factor in [1000, 1001] {
-        let mut machine = PVMachine::from_boot_inputs(
-            &input("SEEDBOX_PV_WORKER"),
-            fs::read(input("SEEDBOX_PV_KERNEL")).unwrap(),
-            initrd.clone(),
-        )
-        .unwrap();
-        let clock = SimulationClock::new(0);
-        let mut rng = SeededRng::new(7);
-        let guard = seedbox_test_time::HangGuard::new(
-            "native CPU rate measurement must return",
-            std::time::Duration::from_secs(60),
-        );
-        for tick in 1..=10_000 {
-            guard
-                .remaining()
-                .expect("native CPU rate infrastructure hang");
-            if matches!(
-                run(&mut machine, &clock, &mut rng, factor, tick * 1_000_000, []),
-                StopReason::Exited { .. }
-            ) {
-                break;
+        let mut measurements = Vec::new();
+        // The narrow bound repeatedly splits actual Linux syscall charges;
+        // the prime interval also moves the split through successive charges.
+        for quantum in [1_000_000, 997] {
+            let mut machine = PVMachine::from_boot_inputs(
+                &input("SEEDBOX_PV_WORKER"),
+                fs::read(input("SEEDBOX_PV_KERNEL")).unwrap(),
+                initrd.clone(),
+            )
+            .unwrap();
+            let clock = SimulationClock::new(0);
+            let mut rng = SeededRng::new(7);
+            let guard = seedbox_test_time::HangGuard::new(
+                "native CPU rate measurement must return",
+                std::time::Duration::from_secs(60),
+            );
+            for tick in 1..=10_000_000_000 / quantum {
+                guard
+                    .remaining()
+                    .expect("native CPU rate infrastructure hang");
+                if matches!(
+                    run(&mut machine, &clock, &mut rng, factor, tick * quantum, []),
+                    StopReason::Exited { .. }
+                ) {
+                    break;
+                }
+                clock.set(tick * quantum);
             }
-            clock.set(tick * 1_000_000);
+            let offset = machine
+                .console
+                .windows(8)
+                .position(|bytes| bytes == b"PV_RATE:")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no work measurement: {}",
+                        String::from_utf8_lossy(&machine.console)
+                    )
+                })
+                + 8;
+            measurements.push(u64::from_le_bytes(
+                machine.console[offset..offset + 8].try_into().unwrap(),
+            ));
         }
-        let offset = machine
-            .console
-            .windows(8)
-            .position(|bytes| bytes == b"PV_RATE:")
-            .unwrap_or_else(|| {
-                panic!(
-                    "no work measurement: {}",
-                    String::from_utf8_lossy(&machine.console)
-                )
-            })
-            + 8;
-        deltas.push(u64::from_le_bytes(
-            machine.console[offset..offset + 8].try_into().unwrap(),
-        ));
+        assert_eq!(
+            measurements[0], measurements[1],
+            "price {factor}: splitting syscall charges changed measured guest time"
+        );
+        deltas.push(measurements[0]);
     }
     // This measured Linux region contains 1000 getpid calls and the concluding
     // clock syscall, plus unscaled kernel clock reads. It proves a sub-percent
