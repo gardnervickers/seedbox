@@ -4,9 +4,11 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+int state_fixture(void);
 static uint64_t observed_time(void) {
     struct timespec time;
     if (syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &time)) _exit(81);
@@ -14,6 +16,7 @@ static uint64_t observed_time(void) {
 }
 int main(int argc, char **argv) {
     if (argc != 2) return 82;
+    if (!strcmp(argv[1], "--state")) return state_fixture();
     char *end;
     unsigned long count = strtoul(argv[1], &end, 10);
     if (*end || !count) return 83;

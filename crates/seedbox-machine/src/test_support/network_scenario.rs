@@ -308,15 +308,9 @@ where
         self.guard
             .remaining()
             .expect("network exchange infrastructure hang");
-        assert!(
-            !self
-                .peers
-                .iter()
-                .any(|p| p.output.contains("NETPROBE fail")),
-            "probe failed: {:?} {:?}",
-            self.peers[0].output,
-            self.peers[1].output
-        );
+        // Diagnostics can arrive before the application outcome in a later
+        // run. Validate that typed outcome below, including its exit code;
+        // negative disk cases require both the diagnostic and exit 70.
         // Offer due frames in arrival, then emission, order.
         self.in_flight.sort_by_key(|(arrival, ..)| *arrival);
         let due = self
