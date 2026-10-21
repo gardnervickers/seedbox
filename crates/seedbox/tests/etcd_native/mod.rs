@@ -530,6 +530,11 @@ impl Cli {
                 .map(|bytes| final_oracle_pages(&String::from_utf8_lossy(&bytes)))
         };
         if let (Some(baseline), Some(compared)) = (pages("baseline"), pages(other)) {
+            if baseline.is_empty() || compared.is_empty() {
+                eprintln!(
+                    "etcd oracle page capture unavailable; build the test CLI with --features etcd-prep-tests"
+                );
+            }
             for (gpa, a) in &baseline {
                 let Some(b) = compared.get(gpa) else { continue };
                 let rows = (0..a.len().min(b.len()))
