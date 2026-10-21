@@ -40,12 +40,16 @@ where
             "native witness machine inventory differs from stopped Driver".into(),
         ));
     }
+    let reads = driver
+        .with_barrier(|barrier| barrier.execution_evidence_all())
+        .map_err(|error| Error::Execution(format!("native witness barrier: {error}")))?;
     let mut frame = Frame::new(policy);
-    for id in ids {
+    for read in reads {
+        let id = read.machine;
         let name = names.get(&id).ok_or_else(|| {
             Error::Integrity("native witness has an unnamed Driver machine".into())
         })?;
-        let native=driver.with_barrier(|barrier|barrier.execution_evidence(id))
+        let native=read.result
             .map_err(|error|Error::Execution(format!("native execution witness for {name}: {error}")))?
             .ok_or_else(||Error::Execution(format!("native execution witness for {name}: no physical boot has supplied evidence, or backend witness capture is not implemented; no witness is fabricated")))?;
         native.validate().map_err(|error| {

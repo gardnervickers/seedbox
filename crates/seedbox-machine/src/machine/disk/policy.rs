@@ -1,5 +1,5 @@
 //! Seeded boot-end loss and stopped disk evidence, shared by both backends.
-use super::{Error, Store, SECTOR};
+use super::{Base, Error, Store, SECTOR};
 use sha2::{Digest, Sha256};
 
 impl Store {
@@ -9,24 +9,49 @@ impl Store {
     pub fn state_digest(&self, torn: bool) -> Result<String, Error> {
         let mut volatile = Sha256::new();
         let mut count = 0u64;
-        let (stable, _) = self.crashed_keeping(|sector, bytes| {
+        for (&sector, bytes) in &self.unflushed {
             volatile.update(sector.to_le_bytes());
-            volatile.update(bytes);
+            volatile.update(&bytes[..]);
             count += 1;
-            false
-        });
+        }
         let mut all = Sha256::new();
         all.update(b"seedbox-disk-state-v1");
         all.update(self.capacity().to_le_bytes());
         all.update([u8::from(torn)]);
-        let mut sector = [0u8; SECTOR];
-        for index in 0..stable.capacity() {
-            stable.read(index, &mut sector)?;
-            all.update(sector);
+        // Hash the same stable sector stream without looking up and copying
+        // every sector. Unflushed writes belong only to the separate stream
+        // below; a durable zero overwrite still replaces its base sector.
+        let mut next = 0;
+        for (&index, bytes) in &self.durable {
+            self.digest_base(&mut all, next, index);
+            all.update(&bytes[..]);
+            next = index + 1;
         }
+        self.digest_base(&mut all, next, self.capacity());
         all.update(count.to_le_bytes());
         all.update(volatile.finalize());
         Ok(crate::machine::hex(&all.finalize()))
+    }
+
+    fn digest_base(&self, digest: &mut Sha256, start: u64, end: u64) {
+        match &self.base {
+            Base::Image(image) => {
+                // Image capacity is derived from its addressable byte length.
+                digest.update(&image[start as usize * SECTOR..end as usize * SECTOR]);
+            }
+            Base::Zero => {
+                // Count sectors rather than bytes: a zero store may have a
+                // capacity whose byte length does not fit in u64 or usize.
+                static ZERO: [u8; 64 * 1024] = [0; 64 * 1024];
+                const SECTORS: u64 = (ZERO.len() / SECTOR) as u64;
+                let mut remaining = end - start;
+                while remaining >= SECTORS {
+                    digest.update(&ZERO[..]);
+                    remaining -= SECTORS;
+                }
+                digest.update(&ZERO[..remaining as usize * SECTOR]);
+            }
+        }
     }
 
     /// Crash at the end of `boot`. Without `torn` (the policy seed and machine
@@ -65,3 +90,6 @@ impl Store {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+mod tests;

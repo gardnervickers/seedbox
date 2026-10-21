@@ -8,7 +8,7 @@
  #include "qemu/error-report.h"
  #include "system/cpus.h"
  #include "system/qtest.h"
-@@ -53,10 +54,361 @@
+@@ -53,10 +54,379 @@
  /* Do not count executed instructions */
  ICountMode use_icount = ICOUNT_DISABLED;
 
@@ -138,8 +138,19 @@
 +    return time;
 +}
 +
++/* Whole default-rate charges are already integer nanoseconds. Keep the full
++ * fixed-point path for old partial work, other rates and checked overflow. */
 +static int64_t seedbox_time(int64_t count)
 +{
++    if (qatomic_read(&seedbox_cost.factor) == 1000 &&
++        qatomic_read(&seedbox_cost.first) == 0) {
++        int64_t time = qatomic_read(&seedbox_cost.time);
++        int64_t delta = count - qatomic_read(&seedbox_cost.count);
++        int64_t result;
++        if (!__builtin_add_overflow(time, MAX(delta, 0), &result)) {
++            return result;
++        }
++    }
 +    return (seedbox_completion(count) + 999) / 1000;
 +}
 +
@@ -172,6 +183,13 @@
 +
 +static int64_t seedbox_count_until(int64_t time)
 +{
++    if (seedbox_cost.factor == 1000 && seedbox_cost.first == 0) {
++        int64_t delta = MAX(time - seedbox_cost.time, 0);
++        int64_t result;
++        if (!__builtin_add_overflow(seedbox_cost.count, delta, &result)) {
++            return result;
++        }
++    }
 +    __int128 available = (__int128)(time - seedbox_cost.time) * 1000;
 +    uint32_t first = seedbox_cost.first ? seedbox_cost.first : seedbox_cost.factor;
 +    if (available < first) {
@@ -446,7 +464,7 @@
  system_ss.add(when: 'CONFIG_DIVA_GSP', if_true: files('diva-gsp.c'))
 --- /dev/null
 +++ b/hw/char/seedbox-lifecycle.c
-@@ -0,0 +1,261 @@
+@@ -0,0 +1,301 @@
 +/* Deterministic stopped ingress for Seedbox's machine lifecycle port. */
 +#include "qemu/osdep.h"
 +#include "exec/icount.h"
@@ -454,6 +472,7 @@
 +#include "migration/vmstate.h"
 +#include "qapi/error.h"
 +#include "qapi/qapi-commands-run-state.h"
++#include "qapi/qapi-commands-net.h"
 +#include "qemu/bswap.h"
 +#include "system/runstate.h"
 +#include "qemu/module.h"
@@ -628,6 +647,45 @@
 +    return result;
 +}
 +
++/* Count the entire journal, including every record's 13-byte framing. This
++ * bounds even empty writes before combining it with one bounded NIC chunk.
++ * Larger journals retain the existing separate-drain packet behavior. */
++#define INLINE_OUTPUT_LIMIT (64 * 1024)
++
++SeedboxRunDrain *qmp_seedbox_drain_run(bool network, Error **errp)
++{
++    SeedboxRunDrain *result = g_new0(SeedboxRunDrain, 1);
++    Error *local_err = NULL;
++
++    result->run = qmp_query_seedbox_run(&local_err);
++    if (local_err) {
++        goto fail;
++    }
++    if (!lifecycle) {
++        error_setg(&local_err, "run drain requires a stopped lifecycle port");
++        goto fail;
++    }
++    if (lifecycle->output_size <= INLINE_OUTPUT_LIMIT) {
++        result->has_writes = true;
++        result->writes = qmp_seedbox_drain_lifecycle(&local_err);
++        if (local_err) {
++            goto fail;
++        }
++    }
++    if (network) {
++        result->network = qmp_seedbox_net_drain(&local_err);
++        if (local_err) {
++            goto fail;
++        }
++    }
++    return result;
++
++fail:
++    error_propagate(errp, local_err);
++    qapi_free_SeedboxRunDrain(result);
++    return NULL;
++}
++
 +static void lifecycle_realize(DeviceState *dev, Error **errp)
 +{
 +    if (lifecycle) {
@@ -727,7 +785,10 @@
  #endif /* EXEC_ICOUNT_H */
 --- a/qapi/run-state.json
 +++ b/qapi/run-state.json
-@@ -749,3 +749,169 @@
+@@ -10,0 +11,2 @@
++{ 'include': 'net.json' }
++
+@@ -749,3 +751,203 @@
  ##
  { 'enum': 'NotifyVmexitOption',
    'data': [ 'run', 'internal-error', 'disable' ] }
@@ -884,6 +945,40 @@
 +  'returns': ['SeedboxLifecycleWrite'], 'if': 'CONFIG_TCG' }
 +
 +##
++# @SeedboxRunDrain:
++#
++# Stopped execution result and pending output, without CPU execution.
++#
++# @run: The unchanged bounded-run result.
++# @writes: Ordered console/lifecycle writes when the complete raw
++#     journal, including record framing, fits 64 KiB.  Absent journals
++#     remain pending for seedbox-drain-lifecycle; present empty lists
++#     have already drained.
++# @network: First bounded NIC chunk, when requested.  Its more flag
++#     requires subsequent seedbox-net-drain commands.
++#
++# Since: 11.1
++##
++{ 'struct': 'SeedboxRunDrain',
++  'data': { 'run': 'SeedboxRunResult', '*writes': ['SeedboxLifecycleWrite'],
++            '*network': 'SeedboxNetDrain' }, 'if': 'CONFIG_TCG' }
++
++##
++# @seedbox-drain-run:
++#
++# Query a positively stopped run and transfer its pending output.
++# No CPU work, virtual time advance, input delivery or device flush.
++#
++# @network: Include the first pending NIC chunk.
++#
++# Returns: Stopped result and bounded output in device order.
++#
++# Since: 11.1
++##
++{ 'command': 'seedbox-drain-run', 'data': { 'network': 'bool' },
++  'returns': 'SeedboxRunDrain', 'if': 'CONFIG_TCG' }
++
++##
 +# @seedbox-input-lifecycle:
 +#
 +# Append private management bytes to a stopped lifecycle port.
@@ -962,3 +1057,21 @@
 
      /* Time when the last byte was successfully sent out of the tsr */
      uint64_t last_xmit_ts;
+--- a/monitor/qmp.c
++++ b/monitor/qmp.c
+@@ -542,0 +543,9 @@
++}
++
++/* Seedbox's private QMP peer sends one request and waits for its reply before
++ * sending the next. Read bounded chunks of that request instead of one socket
++ * byte per main-loop iteration. Keep the monitor's suspend/resume backpressure;
++ * HMP retains its byte-oriented callback. */
++static int monitor_qmp_can_read(void *opaque)
++{
++    return monitor_can_read(opaque) ? 4096 : 0;
+@@ -683 +692 @@
+-    qemu_chr_fe_set_handlers(&mon->parent_obj.chr, monitor_can_read,
++    qemu_chr_fe_set_handlers(&mon->parent_obj.chr, monitor_qmp_can_read,
+@@ -740 +749 @@
+-        qemu_chr_fe_set_handlers(&mon->parent_obj.chr, monitor_can_read,
++        qemu_chr_fe_set_handlers(&mon->parent_obj.chr, monitor_qmp_can_read,

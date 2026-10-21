@@ -577,7 +577,9 @@ fn linux_lifecycle_tx_retains_fragments_and_snapshot_drain_position() {
     assert!(console(first..last).contains("console-B"));
     assert!(console(last..writes.len()).contains("console-C"));
     let mut restored = Process::start(&qemu, &manifest, Some(&pending), 3, None).unwrap();
-    assert_eq!(restored.drain_guest().unwrap(), writes);
+    let collected = restored.collect_stopped(false).unwrap();
+    assert_eq!(collected.writes, writes);
+    assert!(collected.frames.is_empty());
     assert!(restored.drain_guest().unwrap().is_empty());
     let drained = restored.snapshot().unwrap();
     let mut restored = Process::start(&qemu, &manifest, Some(&drained), 3, None).unwrap();

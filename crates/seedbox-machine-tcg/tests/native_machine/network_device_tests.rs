@@ -417,10 +417,14 @@ impl Qmp {
     }
     /// Drain every pending transmission, returning the chunk sizes too.
     fn drain(&mut self) -> (Vec<(u64, Vec<u8>)>, Vec<usize>) {
+        let first = self.command("seedbox-net-drain", json!({})).unwrap();
+        self.drain_from(first)
+    }
+
+    fn drain_from(&mut self, mut result: Value) -> (Vec<(u64, Vec<u8>)>, Vec<usize>) {
         let mut frames = Vec::new();
         let mut chunks = Vec::new();
         loop {
-            let result = self.command("seedbox-net-drain", json!({})).unwrap();
             let chunk = result["frames"].as_array().unwrap();
             chunks.push(chunk.len());
             for item in chunk {
@@ -432,6 +436,7 @@ impl Qmp {
             if !result["more"].as_bool().unwrap() {
                 return (frames, chunks);
             }
+            result = self.command("seedbox-net-drain", json!({})).unwrap();
         }
     }
     fn memory(&mut self, directory: &Path, address: u64, size: usize) -> Vec<u8> {
@@ -496,6 +501,17 @@ impl Qemu {
         memory: &[u8],
         incoming: Option<&Path>,
     ) -> Self {
+        Self::start_with_lifecycle(directory, name, commands, memory, incoming, false)
+    }
+
+    fn start_with_lifecycle(
+        directory: &Path,
+        name: &str,
+        commands: &[u8],
+        memory: &[u8],
+        incoming: Option<&Path>,
+        lifecycle: bool,
+    ) -> Self {
         let qemu = PathBuf::from(std::env::var_os("SEEDBOX_TCG_QEMU").expect("SEEDBOX_TCG_QEMU"));
         let file = |suffix: &str, bytes: &[u8]| {
             let path = directory.join(format!("{name}-{suffix}"));
@@ -539,6 +555,14 @@ impl Qemu {
             "-device",
             "seedbox-net-device,mac=52:54:00:00:00:01",
         ]);
+        if lifecycle {
+            command.args([
+                "-device",
+                "virtio-serial-device,id=lifecycle-bus",
+                "-device",
+                "seedbox-lifecycle-port,bus=lifecycle-bus.0,name=seedbox-lifecycle",
+            ]);
+        }
         command.arg("-bios").arg(&program);
         for (path, address) in [(&commands, COMMANDS), (&memory, REGION)] {
             command
@@ -982,4 +1006,57 @@ fn tcg_network_device_migrates_undrained_transmissions_in_chunks() {
     let kicks: std::collections::BTreeSet<u64> = frames.iter().map(|(t, _)| *t).collect();
     assert_eq!(kicks.len(), 3, "one stamp per kick");
     assert_eq!(qemu.qmp.drain(), (frames, chunks), "source keeps its own");
+}
+
+#[test]
+#[ignore = "requires patched QEMU (SEEDBOX_TCG_QEMU)"]
+fn tcg_fused_run_drain_preserves_first_nic_chunk_and_all_continuations() {
+    let directory = tempfile::tempdir().unwrap();
+    let directory = directory.path();
+    let mut memory = Memory::new();
+    memory.bytes.resize(2 * REGION_SIZE, 0);
+    for index in 0..QUEUE {
+        let mut chain = header(0, 0);
+        chain.extend(frame(index, 1514));
+        memory.transmit(&[Part::Read(chain)]);
+    }
+    let commands = Commands::default()
+        .setup(true)
+        .publish(1, 200)
+        .publish(1, 400)
+        .publish(1, 600)
+        .end();
+    let mut source =
+        Qemu::start_with_lifecycle(directory, "source", &commands, &memory.bytes, None, true);
+    let stopped = source.run_until(0, BUDGET, "blocked");
+    let image = directory.join("migration");
+    source.qmp.migrate(&image);
+    let mut restored = Qemu::start_with_lifecycle(
+        directory,
+        "restored",
+        &commands,
+        &memory.bytes,
+        Some(&image),
+        true,
+    );
+    let reply = source
+        .qmp
+        .command("seedbox-drain-run", json!({"network":true}))
+        .unwrap();
+    assert_eq!(reply["run"], stopped);
+    assert_eq!(reply["writes"], json!([]));
+    assert_eq!(reply["network"]["frames"].as_array().unwrap().len(), 256);
+    assert_eq!(reply["network"]["more"], true);
+    let (frames, chunks) = source.qmp.drain_from(reply["network"].clone());
+    assert_eq!(chunks, [256, 256, 88]);
+    assert_eq!(frames.len(), 600);
+    for (index, (_, bytes)) in frames.iter().enumerate() {
+        assert_eq!(*bytes, frame((index % QUEUE as usize) as u16, 1514));
+    }
+    assert_eq!(restored.qmp.drain(), (frames, chunks));
+    let empty = source
+        .qmp
+        .command("seedbox-drain-run", json!({"network":true}))
+        .unwrap();
+    assert_eq!(empty["network"], json!({"frames":[],"more":false}));
 }

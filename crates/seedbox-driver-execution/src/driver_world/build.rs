@@ -1,4 +1,5 @@
 //! Construct stopped native Drivers from explicit retained service inputs.
+mod conversion;
 #[cfg(test)]
 mod policy_tests;
 use super::{
@@ -59,19 +60,8 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
         &request.output.join(super::NATIVE_SCRATCH),
     )
     .map_err(bad)?;
-    let oracle = definition(&request.prepared.oracle)?;
-    let machines = request
-        .prepared
-        .machines
-        .iter()
-        .map(definition)
-        .collect::<Result<Vec<_>>>()?;
-    let spawnable = request
-        .prepared
-        .spawnable
-        .iter()
-        .map(definition)
-        .collect::<Result<Vec<_>>>()?;
+    let (oracle, machines, spawnable) =
+        conversion::definitions(&request.prepared, request.machine_workers)?;
     let mut initial: Vec<_> = std::iter::once(oracle.name.clone())
         .chain(machines.iter().map(|machine| machine.name.clone()))
         .collect();

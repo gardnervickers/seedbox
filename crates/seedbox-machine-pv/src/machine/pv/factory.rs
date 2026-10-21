@@ -249,7 +249,7 @@ mod guest {
     /// ARM exclusives become compare-and-swap with software reservations.
     pub(super) const TRANSLATOR_OPTIONS: &[&str] = &["-ldstex2cas"];
     pub(super) fn kernel(bytes: &[u8]) -> std::io::Result<()> {
-        super::seedbox_machine::machine::assets::kernel(bytes)
+        seedbox_machine::machine::assets::kernel(bytes)
     }
 }
 #[cfg(target_arch = "x86_64")]

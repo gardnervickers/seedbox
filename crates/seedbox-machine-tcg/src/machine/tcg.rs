@@ -946,7 +946,14 @@ impl TcgMachine {
         execution: seedbox_machine::execution::ExecutionConfig,
     ) -> Result<(), Error> {
         let start = self.reached;
-        let result = self.process()?.execute(start, upto, execution)?;
+        let network = self.manifest.network.is_some();
+        let qemu::RunOutput {
+            result,
+            writes,
+            frames,
+        } = self
+            .process()?
+            .execute_collect(start, upto, execution, network)?;
         let reached = timestamp(&result, "time")?;
         if reached < start || reached > upto {
             return Err(Error(format!(
@@ -972,11 +979,6 @@ impl TcgMachine {
             // The Driver owns reboots, so this boot ends as a crash.
             Some("reset") => State::Exited(ExitReason::Crashed),
             _ => return Err(Error(format!("unexpected QEMU stop: {result}"))),
-        };
-        let writes = self.process()?.drain_guest()?;
-        let frames = match self.manifest.network {
-            Some(_) => self.process()?.net_drain()?,
-            None => Vec::new(),
         };
         if frames
             .iter()
