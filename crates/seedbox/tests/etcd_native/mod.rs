@@ -525,7 +525,59 @@ impl Cli {
                 String::from_utf8_lossy(&bytes[..bytes.len().min(SUMMARY_BYTES)])
             );
         }
+        let pages = |label: &str| {
+            read(self.directory.join(format!("failure/{label}-vmm.stderr")))
+                .map(|bytes| final_oracle_pages(&String::from_utf8_lossy(&bytes)))
+        };
+        if let (Some(baseline), Some(compared)) = (pages("baseline"), pages(other)) {
+            for (gpa, a) in &baseline {
+                let Some(b) = compared.get(gpa) else { continue };
+                let rows = (0..a.len().min(b.len()))
+                    .step_by(16)
+                    .filter(|&row| a[row..row + 16] != b[row..row + 16])
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "etcd oracle page {gpa}: {} differing 16-byte rows",
+                    rows.len()
+                );
+                for row in rows.into_iter().take(SUMMARY_LINES) {
+                    eprintln!("  +{row:#05x} {} | {}", row_hex(a, row), row_hex(b, row));
+                }
+            }
+        }
     }
+}
+
+/// The last captured bytes of each private oracle page, keyed by its GPA.
+fn final_oracle_pages(stderr: &str) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut pages = std::collections::BTreeMap::new();
+    for line in stderr.lines() {
+        let Some(fields) = line.strip_prefix("SEEDBOX_PRIVATE_PV_ORACLE_PAGE ") else {
+            continue;
+        };
+        let field = |name: &str| {
+            fields
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix(name))
+        };
+        let (Some(gpa), Some(encoded)) = (field("gpa="), field("bytes=")) else {
+            continue;
+        };
+        let bytes = (0..encoded.len() / 2)
+            .filter_map(|i| u8::from_str_radix(encoded.get(i * 2..i * 2 + 2)?, 16).ok())
+            .collect::<Vec<_>>();
+        if bytes.len() == 4096 {
+            pages.insert(gpa.to_string(), bytes);
+        }
+    }
+    pages
+}
+
+fn row_hex(page: &[u8], row: usize) -> String {
+    page[row..row + 16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn bounded_json(value: &serde_json::Value) -> String {
