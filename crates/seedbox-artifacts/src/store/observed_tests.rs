@@ -51,7 +51,8 @@ fn cache_hits_still_observe_cancellation_and_existing_corruption_is_rejected() {
     assert!(store
         .put_file_observed(&source, &mut |_| Err(io::Error::other("cancelled")))
         .is_err());
-    fs::write(store.path(&digest), b"corrupt!").unwrap();
+    // A changed length invalidates the stamp even on coarse-timestamp filesystems.
+    fs::write(store.path(&digest), b"corrupt").unwrap();
     let mut processed = 0;
     assert!(matches!(
         store.put_file_observed(&source, &mut |n| {

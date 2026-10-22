@@ -1042,6 +1042,7 @@ fn only_the_backend_runtime_inputs_are_copied_into_an_attempt() {
 #[test]
 fn put_file_of_a_retained_object_reads_it_without_rewriting_it() {
     use std::os::unix::fs::MetadataExt;
+    use std::time::{Duration, UNIX_EPOCH};
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("engine");
     fs::write(&source, b"retained engine bytes").unwrap();
@@ -1059,6 +1060,22 @@ fn put_file_of_a_retained_object_reads_it_without_rewriting_it() {
     );
     // A corrupted existing object is never repaired or accepted.
     fs::write(&object, b"retained engine byteX").unwrap();
+    // Make invalidation observable even if the writes share a timestamp tick.
+    let modified = if after.modified().unwrap() == UNIX_EPOCH {
+        UNIX_EPOCH + Duration::from_secs(86_400)
+    } else {
+        UNIX_EPOCH
+    };
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&object)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert_ne!(
+        fs::metadata(&object).unwrap().modified().unwrap(),
+        after.modified().unwrap()
+    );
     assert!(fresh.put_file(&source).is_err());
     assert!(ContentStore::new(directory.path().join("store"))
         .put_file(&source)
