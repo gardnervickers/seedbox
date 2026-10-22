@@ -161,8 +161,12 @@ fn release_build_script_never_invokes_guest_builders() {
 
 #[test]
 fn prepared_checkout_assets_are_embedded() {
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
     let assets = fixture.prepared("aarch64");
+    fixture.environment.insert(
+        "SEEDBOX_BUILD_DRIVER_RUNTIME".into(),
+        assets.join("driver-runtime.tar.gz").into(),
+    );
     let output = fixture.run();
     assert!(output.status.success(), "{}", diagnostic(&output));
     fixture.embeds(&assets.join("driver-runtime.tar.gz"));
@@ -184,7 +188,11 @@ fn explicit_assets_override_prepared_checkout_assets() {
 #[test]
 fn prepared_assets_for_another_architecture_are_rejected() {
     let mut fixture = Fixture::new();
-    fixture.prepared("aarch64");
+    let assets = fixture.prepared("aarch64");
+    fixture.environment.insert(
+        "SEEDBOX_BUILD_DRIVER_RUNTIME".into(),
+        assets.join("driver-runtime.tar.gz").into(),
+    );
     fixture
         .environment
         .insert("CARGO_CFG_TARGET_OS".into(), "linux".into());

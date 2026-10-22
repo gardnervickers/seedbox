@@ -2,7 +2,7 @@
 //! fixtures; they do not build or run Linux guests, a hypervisor, or QEMU.
 mod support;
 use std::{fs, path::PathBuf, process::Command};
-use support::{diagnostic, root, run, success};
+use support::{root, run, success};
 
 struct Fixture {
     directory: tempfile::TempDir,
@@ -79,7 +79,13 @@ fn complete_build_embeds_the_full_package_and_no_longer_needs_source_asset_paths
         b"complete offline runtime fixture",
     )
     .unwrap();
-    success(&mut fixture.command(), 10);
+    success(
+        fixture.command().env(
+            "SEEDBOX_BUILD_DRIVER_RUNTIME",
+            assets.join("driver-runtime.tar.gz"),
+        ),
+        10,
+    );
     let generated = fixture.output.join("driver-runtime.rs");
     let declaration = fs::read_to_string(&generated).unwrap();
     assert!(declaration.contains(&assets.join("driver-runtime.tar.gz").display().to_string()));
@@ -97,14 +103,22 @@ fn complete_build_embeds_the_full_package_and_no_longer_needs_source_asset_paths
     success(&mut Command::new(&executable), 10);
 }
 #[test]
-fn partial_legacy_assets_do_not_silently_produce_an_incomplete_driver_build() {
+fn unrequested_assets_neither_embed_nor_invalidate_portable_builds() {
     let fixture = Fixture::new();
-    fixture.assets();
-    let output = run(&mut fixture.command(), 10);
-    assert!(!output.status.success(), "{}", diagnostic(&output));
-    let error = String::from_utf8_lossy(&output.stderr);
-    assert!(error.contains("driver-runtime.tar.gz"));
-    assert!(error.contains("cargo xtask build-assets"));
+    let assets = fixture.assets();
+    // Even an incomplete or foreign-architecture publication is irrelevant.
+    fs::write(assets.join("architecture"), "wrong-architecture").unwrap();
+    for complete in [false, true] {
+        if complete {
+            fs::write(assets.join("driver-runtime.tar.gz"), b"runtime").unwrap();
+        }
+        let output = success(&mut fixture.command(), 10);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("build/assets"));
+        assert_eq!(
+            fs::read_to_string(fixture.output.join("driver-runtime.rs")).unwrap(),
+            "pub static EMBEDDED: Option<&[u8]> = None;\n"
+        );
+    }
 }
 #[test]
 fn explicit_package_override_wins_and_missing_override_is_actionable() {
@@ -138,7 +152,13 @@ fn target_architecture_mismatch_fails_without_invoking_a_builder() {
     let assets = fixture.assets();
     fs::write(assets.join("driver-runtime.tar.gz"), b"package").unwrap();
     fs::write(assets.join("architecture"), "wrong-architecture").unwrap();
-    let output = run(&mut fixture.command(), 10);
+    let output = run(
+        fixture.command().env(
+            "SEEDBOX_BUILD_DRIVER_RUNTIME",
+            assets.join("driver-runtime.tar.gz"),
+        ),
+        10,
+    );
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr)
         .contains("guest assets target a different architecture"));

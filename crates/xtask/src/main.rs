@@ -250,8 +250,11 @@ fn build_cli(
     args: &[std::ffi::OsString],
     prepare: impl FnOnce() -> Result<PathBuf>,
 ) -> Result<()> {
-    prepare()?;
-    run(command("cargo", root).arg("build").args(args))
+    let assets = prepare()?;
+    run(command("cargo", root).arg("build").args(args).env(
+        "SEEDBOX_BUILD_DRIVER_RUNTIME",
+        assets.join("driver-runtime.tar.gz"),
+    ))
 }
 
 fn main() -> Result<()> {
@@ -436,6 +439,7 @@ mod tests {
                 fs::write(root.path().join("Cargo.toml"), "[package]\nname = 'asset-build-fixture'\nversion = '0.0.0'\nedition = '2024'\n")?;
                 fs::create_dir(root.path().join("src"))?;
                 fs::write(root.path().join("src/main.rs"), "fn main() {}")?;
+                fs::write(root.path().join("build.rs"), "fn main() { let path = std::env::var_os(\"SEEDBOX_BUILD_DRIVER_RUNTIME\").expect(\"explicit runtime request\"); assert!(std::path::Path::new(&path).ends_with(\"driver-runtime.tar.gz\")); }")?;
                 Ok(root.path().to_owned())
             },
         ).unwrap();

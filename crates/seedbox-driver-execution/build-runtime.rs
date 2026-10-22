@@ -23,29 +23,24 @@ fn main() {
                 .display()
         );
     }
-    // Consume only already-built checkout assets. Never invoke a builder here.
-    let assets = root.join("build/assets");
-    println!("cargo::rerun-if-changed={}", assets.display());
-    if assets.exists() {
-        let architecture =
-            std::fs::read_to_string(assets.join("architecture")).expect("asset architecture");
-        assert_eq!(architecture.trim(), env::var("CARGO_CFG_TARGET_ARCH").expect("target architecture"), "guest assets target a different architecture; run cargo xtask build-assets on the target build host");
-    }
+    // Only complete executable builds request embedding. Portable Cargo builds
+    // must not depend on an existing (or subsequently published) asset bundle.
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo build output directory"));
     println!("cargo::rerun-if-env-changed=SEEDBOX_BUILD_DRIVER_RUNTIME");
-    let driver = env::var_os("SEEDBOX_BUILD_DRIVER_RUNTIME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            assets
-                .exists()
-                .then(|| assets.join("driver-runtime.tar.gz"))
-        });
+    let driver = env::var_os("SEEDBOX_BUILD_DRIVER_RUNTIME").map(PathBuf::from);
     let declaration = match driver {
         Some(path) => {
             println!("cargo::rerun-if-changed={}", path.display());
             let path = std::fs::canonicalize(&path).unwrap_or_else(|error| {
                 panic!("driver runtime {}: {error}; run cargo xtask build-assets to prepare complete runtime inputs", path.display())
             });
+            let architecture = path.parent().expect("runtime parent").join("architecture");
+            if architecture.is_file() {
+                println!("cargo::rerun-if-changed={}", architecture.display());
+                let architecture =
+                    std::fs::read_to_string(architecture).expect("asset architecture");
+                assert_eq!(architecture.trim(), env::var("CARGO_CFG_TARGET_ARCH").expect("target architecture"), "guest assets target a different architecture; run cargo xtask build-assets on the target build host");
+            }
             format!("pub static EMBEDDED: Option<&[u8]> = Some(include_bytes!({path:?}));\n")
         }
         None => "pub static EMBEDDED: Option<&[u8]> = None;\n".to_owned(),
