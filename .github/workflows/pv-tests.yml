@@ -65,8 +65,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          # Nix's submodule source accessor also traverses DR's nested gitlinks.
-          submodules: recursive
+          submodules: true
       - name: Identify Nix cache inputs
         id: sources
         env:
@@ -137,7 +136,8 @@ jobs:
           cache-bin: false
       - name: Build and root guest assets from the checkout
         run: |
-          nix build .#machinePvAssets .#machineTcgAssets .#machineGuestFormatter .#machineGuestFormatterX86 .#machineTcgTestFixtures .#machinePvTestFixtures --out-link "$RUNNER_TEMP/pv-assets"
+          seedbox_flake="$(bash tools/dev-flake.sh)?submodules=1"
+          nix build "$seedbox_flake#machinePvAssets" "$seedbox_flake#machineTcgAssets" "$seedbox_flake#machineGuestFormatter" "$seedbox_flake#machineGuestFormatterX86" "$seedbox_flake#machineTcgTestFixtures" "$seedbox_flake#machinePvTestFixtures" --out-link "$RUNNER_TEMP/pv-assets"
       # Save expensive dependencies before tests, so a test failure does not
       # force the next run to rebuild the kernel or download the toolchain.
       - uses: nix-community/cache-nix-action/save@v7

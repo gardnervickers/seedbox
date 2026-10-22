@@ -1,8 +1,5 @@
 {
   description = "Seedbox simulator: deterministic multi-VM world on KVM";
-  # Include translator gitlinks for consumers. Local editing entrypoints also
-  # request submodules=1 on the initial fetch; see docs/internals.md.
-  inputs.self.submodules = true;
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   outputs = { nixpkgs, ... }:
     let
