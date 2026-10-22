@@ -1,6 +1,7 @@
 //! Content-store recovery, integrity and bounded streaming.
 use seedbox_artifacts::store::{ContentDigest, ContentStore};
-use std::fs;
+use seedbox_test_time::HangGuard;
+use std::{fs, os::unix::fs::MetadataExt, time::Duration};
 
 #[test]
 fn unsynced_put_replaces_an_object_a_host_crash_truncated() {
@@ -128,18 +129,27 @@ fn cached_verification_rejects_same_length_edits_and_replaced_objects() {
     let store = ContentStore::new(directory.path());
     let digest = store.put(b"original").unwrap();
     let object = directory.path().join("sha256").join(digest.hex());
-    let original_modified = fs::metadata(&object).unwrap().modified().unwrap();
+    let original = fs::metadata(&object).unwrap();
+    let original_modified = original.modified().unwrap();
+    let original_changed = (original.ctime(), original.ctime_nsec());
     store.clone().verify(&digest).unwrap();
 
-    // Restoring mtime and keeping the length cannot conceal a write: ctime
-    // changes too. This exercises the shared cache populated by put().
+    // Exercise ctime invalidation with mtime and length unchanged. Some
+    // filesystems update ctime on coarse ticks, so observe the change before
+    // checking the shared cache populated by put().
     fs::write(&object, b"modified").unwrap();
-    fs::File::options()
-        .write(true)
-        .open(&object)
-        .unwrap()
-        .set_times(fs::FileTimes::new().set_modified(original_modified))
-        .unwrap();
+    let file = fs::File::options().write(true).open(&object).unwrap();
+    HangGuard::new(
+        "content-store corruption changes ctime",
+        Duration::from_secs(30),
+    )
+    .wait_for(|| {
+        file.set_times(fs::FileTimes::new().set_modified(original_modified))
+            .unwrap();
+        let changed = file.metadata().unwrap();
+        ((changed.ctime(), changed.ctime_nsec()) != original_changed).then_some(())
+    })
+    .unwrap();
     assert!(store.verify(&digest).is_err());
 
     fs::write(&object, b"original").unwrap();

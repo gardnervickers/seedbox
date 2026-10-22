@@ -59,7 +59,7 @@ pub struct ContentStore {
     verified: Arc<Mutex<HashMap<ContentDigest, Stamp>>>,
 }
 
-/// What any write, truncate, rename over or chmod of an object changes.
+/// File identity and metadata used to invalidate cached verification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Stamp {
     dev: u64,
@@ -309,7 +309,7 @@ impl ContentStore {
     }
 
     /// Reuse a verification only while the retained file's identity and metadata
-    /// match the bytes this process hashed. Replacement or mutation rehashes it.
+    /// match the bytes this process hashed. A changed stamp forces a fresh hash.
     pub fn verify(&self, digest: &ContentDigest) -> Result<()> {
         self.verify_observed(digest, &mut |_| Ok(()))
     }

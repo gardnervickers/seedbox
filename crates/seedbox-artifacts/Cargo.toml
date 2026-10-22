@@ -18,3 +18,6 @@ serde_yaml_ng.workspace = true
 tempfile.workspace = true
 libc.workspace = true
 tar.workspace = true
+
+[dev-dependencies]
+seedbox-test-time.workspace = true
