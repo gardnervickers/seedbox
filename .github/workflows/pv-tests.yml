@@ -66,12 +66,20 @@ jobs:
           persist-credentials: false
           # Nix's submodule source accessor also traverses DR's nested gitlinks.
           submodules: recursive
-      - name: Identify the translator cache input
+      - name: Identify Nix cache inputs
         id: sources
-        run: echo "dynamorio=$(git rev-parse HEAD:vendor/dynamorio)" >> "$GITHUB_OUTPUT"
+        env:
+          NIX_INPUTS: ${{ hashFiles('flake.lock', 'flake.nix', '.gitmodules', 'nix/**', 'Cargo.toml', 'Cargo.lock', 'crates/seedbox-check/**', 'crates/seedbox-exec/**', 'crates/seedbox-test-time/**', 'crates/seedbox-machine/**/*.nix', 'crates/seedbox-machine/guest/**', 'crates/seedbox-machine/src/pv/*.c', 'crates/seedbox-machine/tests/fixtures/**', 'crates/seedbox-machine/src/machine/disk.rs', 'crates/seedbox-machine/src/machine/disk/**', 'crates/seedbox-machine-tcg/qemu/**', 'examples/minio/inputs.lock.json') }}
+        run: |
+          echo "dynamorio=$(git rev-parse HEAD:vendor/dynamorio)" >> "$GITHUB_OUTPUT"
+          echo "nix-inputs=$NIX_INPUTS" >> "$GITHUB_OUTPUT"
       - name: Reclaim unused hosted SDK space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift
+          # Leave the hosted SDKs alone when the filesystem has enough headroom.
+          available=$(df --output=avail -B1 / | tail -n 1)
+          if (( available < 40 * 1024 * 1024 * 1024 )); then
+            sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift
+          fi
           df -h /
       - name: Verify usable KVM before building
         run: |
@@ -103,8 +111,12 @@ jobs:
       - uses: nix-community/cache-nix-action/restore@v7
         id: nix-cache
         with:
-          primary-key: pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.sources.outputs.dynamorio }}-${{ hashFiles('flake.lock', 'flake.nix', '.gitmodules', 'nix/**', 'crates/seedbox-machine/**/*.nix', 'crates/seedbox-machine/guest/**', 'crates/xtask/**') }}
+          primary-key: pv-nix-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.sources.outputs.dynamorio }}-${{ steps.sources.outputs.nix-inputs }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Each run saves newly realized derivations, including after an exact
+          # input match. The immutable cache can only be written once per key.
           restore-prefixes-first-match: |
+            pv-nix-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.sources.outputs.dynamorio }}-${{ steps.sources.outputs.nix-inputs }}-
+            pv-nix-v3-${{ runner.os }}-${{ runner.arch }}-
             pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-
             pv-nix-${{ runner.os }}-${{ runner.arch }}-
       - name: Prepare and root the Nix development environment
