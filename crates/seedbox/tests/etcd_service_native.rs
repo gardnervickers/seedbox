@@ -14,7 +14,12 @@ use support::etcd_project;
 
 #[test]
 fn pv_etcd_preparation_smoke_through_normal_cli_service() {
-    etcd_native::run(Backend::Pv);
+    // Temporary PR348 reproduction: a single match does not exclude #304.
+    // Each round owns a fresh server and checks independent fresh/replay runs.
+    for round in 1..=5 {
+        eprintln!("PR348 PV reproduction round {round}/5");
+        etcd_native::run(Backend::Pv);
+    }
 }
 
 // Exercise the same preparation smoke through the real software backend.
