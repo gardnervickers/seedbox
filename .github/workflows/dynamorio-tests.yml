@@ -48,7 +48,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: dynamorio-${{ runner.arch }}-${{ hashFiles('flake.lock') }}
-          cmd-format: nix develop "$(bash tools/dev-flake.sh)" --command {0}
+          cmd-format: nix develop --command {0}
           cache-bin: false
       - name: Build native DR and public SDK fixtures
         timeout-minutes: 90
