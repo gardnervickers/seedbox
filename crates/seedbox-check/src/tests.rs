@@ -1883,8 +1883,25 @@ fn process_tree_boundary_reaps_nested_new_groups() {
                 revents: 0,
             };
             assert_eq!(unsafe { libc::poll(&mut poll, 1, 30000) }, 1);
-            // POLLHUP means the referenced task was reaped, not just exited.
-            assert_ne!(poll.revents & libc::POLLHUP, 0);
+            assert_ne!(poll.revents & libc::POLLIN, 0);
+            // Signal zero still succeeds for a zombie. ESRCH proves this
+            // pidfd's task was reaped, independently of PID reuse.
+            assert_eq!(
+                unsafe {
+                    libc::syscall(
+                        libc::SYS_pidfd_send_signal,
+                        identity.as_raw_fd(),
+                        0,
+                        std::ptr::null::<libc::siginfo_t>(),
+                        0,
+                    )
+                },
+                -1
+            );
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
         }
         assert_eq!(
             unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) },
