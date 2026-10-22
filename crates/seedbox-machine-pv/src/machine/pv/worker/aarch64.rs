@@ -241,7 +241,7 @@ impl<B: Backend> Machine<B> {
     pub(super) fn event_register(&mut self, _offset: u64, _value: u64) -> Result<bool> {
         Err("PV unknown clockevent register".into())
     }
-    pub(super) fn platform(&mut self, exit: Exit) -> Result<Effect> {
+    pub(super) fn platform(&mut self, exit: Exit, _upto: u64) -> Result<Effect> {
         let mut effect = Effect::default();
         match exit {
             Exit::Mmio {

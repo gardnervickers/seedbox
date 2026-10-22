@@ -196,9 +196,10 @@ The [kernel hook](../crates/seedbox-machine/guest/kernel/arm64/seedbox.c) lets t
 
 ## Canonical saved vector state
 
-XSAVE buffers can restore identical zero YMM state while differing in presence bits or ignored payload bytes.
+XSAVE buffers can restore identical initial SSE or zero YMM state while differing in presence bits or ignored payload bytes.
 Host interruptions can expose those differences in full-RAM comparison despite equivalent architectural state.
-Kernel task-state saves canonicalize zero/absent YMM; direct application XSAVE and some signal paths remain outside it.
+Kernel task-state saves canonicalize zero/absent YMM; compacted saves also canonicalize initial/absent SSE, preserving noninitial XMM and MXCSR values.
+Standard-format SSE remains unchanged because its MXCSR restore rules differ; direct application XSAVE and some signal paths remain outside the task-save hook.
 The [patch](../crates/seedbox-machine/guest/kernel/x86_64/apply.py) changes guest bytes, not the comparison's coverage.
 Live vCPU vector evidence hashes each advertised component's effective value, substituting init state when absent.
 The [digest](../crates/seedbox-machine-pv/src/machine/pv/worker/x86_64/backend/evidence.rs) omits XSTATE_BV, so host FPU save/restore cannot change it.

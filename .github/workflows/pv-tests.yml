@@ -54,6 +54,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 100
     env:
+      # Use the Docker engine checked below, even when Podman's socket exists.
+      DOCKER_HOST: unix:///var/run/docker.sock
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
