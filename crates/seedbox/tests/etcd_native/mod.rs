@@ -244,7 +244,7 @@ impl Cli {
     }
 }
 
-// Failure evidence stays small and belongs only to this test's private session.
+// Private diagnostic evidence stays small and belongs only to this test's session.
 const DIAGNOSTIC_LIMIT: u64 = 8 * 1024 * 1024;
 
 fn diagnostic_bytes(path: &Path) -> Result<Vec<u8>> {
@@ -354,7 +354,67 @@ fn copy_worker_stderr(
     fs::write(destination, bytes).map_err(|e| e.to_string())
 }
 
+fn copy_attempt_files(
+    attempt: &Path,
+    directory: &Path,
+    label: &str,
+    require_worker_stderr: bool,
+) -> Result<()> {
+    let manifest = diagnostic_bytes(&attempt.join("manifest.json"))?;
+    let record =
+        seedbox_application::record::inspect_bytes(&manifest).map_err(|e| e.to_string())?;
+    fs::write(directory.join(format!("{label}-manifest.json")), manifest)
+        .map_err(|e| e.to_string())?;
+    let state = copy_state_report(
+        attempt,
+        &directory.join(format!(
+            "{label}-{}",
+            seedbox_application::evidence::STATE_REPORT
+        )),
+        &record.logs,
+    )?;
+    copy_oracle_page_hashes(
+        attempt,
+        &directory.join(format!("{label}-oracle-pages.out")),
+        &record.logs,
+        &state,
+    )?;
+    if require_worker_stderr || record.logs.contains_key("vmm.stderr") {
+        copy_worker_stderr(
+            attempt,
+            &directory.join(format!("{label}-vmm.stderr")),
+            &record.logs,
+        )?;
+    }
+    Ok(())
+}
+
 impl Cli {
+    fn capture_baseline_sample(&self, backend: Backend, baseline: &str) -> Result<()> {
+        if backend != Backend::Pv {
+            return Ok(());
+        }
+        let directory = self.directory.join("pv-baseline-sample");
+        let capture = || -> Result<()> {
+            let attempt = attempt_directory(&self.state, baseline)?;
+            fs::create_dir(&directory).map_err(|e| e.to_string())?;
+            copy_attempt_files(&attempt, &directory, "baseline", true)?;
+            let stderr = diagnostic_bytes(&directory.join("baseline-vmm.stderr"))?;
+            if final_oracle_pages(&String::from_utf8_lossy(&stderr)).is_empty() {
+                return Err(
+                    "private oracle page capture unavailable; build the test CLI with --features etcd-prep-tests"
+                        .into(),
+                );
+            }
+            Ok(())
+        };
+        capture().map_err(|error| {
+            format!("infrastructure error retaining PV baseline sample: {error}")
+        })?;
+        eprintln!("etcd PV baseline sample retained: {}", directory.display());
+        Ok(())
+    }
+
     async fn capture_comparison_failure(
         &self,
         scenario: &HangGuard,
@@ -397,36 +457,7 @@ impl Cli {
             let left = attempt_directory(&self.state, baseline)?;
             let right = attempt_directory(&self.state, repeated)?;
             for (label, attempt) in [("baseline", &left), (other, &right)] {
-                let copy = || -> Result<()> {
-                    let manifest = diagnostic_bytes(&attempt.join("manifest.json"))?;
-                    let record = seedbox_application::record::inspect_bytes(&manifest)
-                        .map_err(|e| e.to_string())?;
-                    fs::write(directory.join(format!("{label}-manifest.json")), manifest)
-                        .map_err(|e| e.to_string())?;
-                    let state = copy_state_report(
-                        attempt,
-                        &directory.join(format!(
-                            "{label}-{}",
-                            seedbox_application::evidence::STATE_REPORT
-                        )),
-                        &record.logs,
-                    )?;
-                    copy_oracle_page_hashes(
-                        attempt,
-                        &directory.join(format!("{label}-oracle-pages.out")),
-                        &record.logs,
-                        &state,
-                    )?;
-                    if record.logs.contains_key("vmm.stderr") {
-                        copy_worker_stderr(
-                            attempt,
-                            &directory.join(format!("{label}-vmm.stderr")),
-                            &record.logs,
-                        )?;
-                    }
-                    Ok(())
-                };
-                if let Err(error) = copy() {
+                if let Err(error) = copy_attempt_files(attempt, &directory, label, false) {
                     failure_capture::note(
                         &directory,
                         &format!("etcd {label} diagnostic capture failed: {error}"),
@@ -780,6 +811,9 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
         &words(&["delete", replay.simulation.as_str()]),
     )
     .await?;
+    // Temporary PR348 diagnostic: keep one successful PV baseline per round
+    // only after every guest/comparison check has passed, before deleting it.
+    cli.capture_baseline_sample(backend, &baseline_id)?;
     cli.invoke(guard, "delete-baseline", &words(&["delete", &baseline_id]))
         .await?;
     // Diagnostics only; never assert a host speed or compare timings as evidence.
@@ -1097,6 +1131,128 @@ mod tests {
             assert_eq!(
                 &vector[index * 8..(index + 1) * 8],
                 &u64::from_str_radix(&hash[..16], 16).unwrap().to_be_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn successful_pv_baseline_sample_preserves_verified_bytes_after_cleanup() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state = temporary.path().join("state");
+        fs::create_dir_all(&state).unwrap();
+        retained_attempt(&state, "awqwjt9m", b"baseline");
+        let attempt = attempt_directory(&state, "awqwjt9m").unwrap();
+        let expected = [
+            ("manifest.json", "baseline-manifest.json"),
+            (
+                "output/machines/driver-state.json",
+                "baseline-driver-state.json",
+            ),
+            ("output/machines/oracle.pages", "baseline-oracle-pages.out"),
+            ("output/vmm.stderr", "baseline-vmm.stderr"),
+        ]
+        .map(|(source, destination)| (destination, fs::read(attempt.join(source)).unwrap()));
+        let cli = Cli {
+            executable: PathBuf::new(),
+            directory: temporary.path().to_owned(),
+            state: state.clone(),
+        };
+        let sample = temporary.path().join("pv-baseline-sample");
+        cli.capture_baseline_sample(Backend::Tcg, "awqwjt9m")
+            .unwrap();
+        assert!(!sample.exists());
+        cli.capture_baseline_sample(Backend::Pv, "awqwjt9m")
+            .unwrap();
+        fs::remove_dir_all(state).unwrap();
+        assert_eq!(fs::read_dir(&sample).unwrap().count(), expected.len());
+        for (name, bytes) in expected {
+            assert_eq!(fs::read(sample.join(name)).unwrap(), bytes, "{name}");
+        }
+        assert_captured_pages(&sample, "baseline", *b"base");
+    }
+
+    #[test]
+    fn successful_baseline_sample_reports_unverified_inputs_as_infrastructure_errors() {
+        for (name, expected) in [
+            (
+                Some("output/machines/driver-state.json"),
+                "stopped-state report log digest mismatch",
+            ),
+            (
+                Some("output/machines/oracle.pages"),
+                "oracle page hash log digest mismatch",
+            ),
+            (
+                Some("output/vmm.stderr"),
+                "retained worker stderr digest mismatch",
+            ),
+            (None, "retained worker stderr is unavailable"),
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            let state = temporary.path().join("state");
+            fs::create_dir_all(&state).unwrap();
+            retained_attempt(&state, "awqwjt9m", b"baseline");
+            let attempt = attempt_directory(&state, "awqwjt9m").unwrap();
+            if let Some(name) = name {
+                let path = attempt.join(name);
+                let mut bytes = fs::read(&path).unwrap();
+                bytes[0] ^= 1;
+                fs::write(path, bytes).unwrap();
+            } else {
+                let mut record = seedbox_application::record::inspect_bytes(
+                    &fs::read(attempt.join("manifest.json")).unwrap(),
+                )
+                .unwrap();
+                record.logs.remove("vmm.stderr");
+                seedbox_application::record::write_record(&attempt, &record).unwrap();
+            }
+            let cli = Cli {
+                executable: PathBuf::new(),
+                directory: temporary.path().to_owned(),
+                state,
+            };
+            let error = cli
+                .capture_baseline_sample(Backend::Pv, "awqwjt9m")
+                .unwrap_err();
+            assert!(
+                error.starts_with("infrastructure error retaining PV baseline sample:"),
+                "{error}"
+            );
+            assert!(error.contains(expected), "{name:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn successful_baseline_sample_requires_raw_oracle_page_markers() {
+        use seedbox_application::{record::*, store::ContentDigest};
+        for stderr in [b"".as_slice(), b"ordinary worker stderr\n".as_slice()] {
+            let temporary = tempfile::tempdir().unwrap();
+            let state = temporary.path().join("state");
+            fs::create_dir_all(&state).unwrap();
+            retained_attempt(&state, "awqwjt9m", b"baseline");
+            let attempt = attempt_directory(&state, "awqwjt9m").unwrap();
+            fs::write(attempt.join("output/vmm.stderr"), stderr).unwrap();
+            let mut record =
+                inspect_bytes(&fs::read(attempt.join("manifest.json")).unwrap()).unwrap();
+            record
+                .logs
+                .insert("vmm.stderr".into(), ContentDigest::of(stderr));
+            write_record(&attempt, &record).unwrap();
+            let cli = Cli {
+                executable: PathBuf::new(),
+                directory: temporary.path().to_owned(),
+                state,
+            };
+            let error = cli
+                .capture_baseline_sample(Backend::Pv, "awqwjt9m")
+                .unwrap_err();
+            assert!(
+                error.starts_with("infrastructure error retaining PV baseline sample:"),
+                "{error}"
+            );
+            assert!(
+                error.contains("private oracle page capture unavailable"),
+                "{error}"
             );
         }
     }
