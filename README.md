@@ -18,7 +18,9 @@ alias seedbox="$PWD/target/release/seedbox"
 ```
 
 Inside `nix develop`, `bash harness/check.sh` runs the portable checks; `--help`
-lists the native suites.
+lists the native suites. On Linux x86-64, `bash harness/check-machine-tcg.sh`
+prepares the native TCG fixtures and retained runtime, then runs portable and
+native machine/public-service checks without KVM or an image engine.
 
 ## Run the etcd example
 
