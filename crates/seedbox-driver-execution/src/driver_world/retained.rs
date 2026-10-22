@@ -79,9 +79,8 @@ pub fn retain_prepared(
     let mut objects = BTreeSet::new();
     visit(&mut prepared, |artifact| {
         artifact.validate().map_err(bad)?;
-        // `put_file` hashes the source (once per unchanged file in this
-        // process) and only reads, never rewrites or syncs, an object the
-        // store already holds; the result is the digest of the stored bytes.
+        // `put_file` hashes the source and only reads, never rewrites or syncs,
+        // an object the store already holds; the result is the stored digest.
         let path = Path::new(&artifact.artifact);
         if fs::metadata(path)?.len() != artifact.length {
             return Err(bad("Driver artifact encoded length differs"));

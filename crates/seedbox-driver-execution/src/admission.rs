@@ -39,21 +39,19 @@ fn digest(path: &Path, limit: Option<u64>) -> Result<ContentDigest> {
     };
     let mut file = std::fs::File::open(path).context(Error::Setup, input())?;
     check_size(file.metadata().context(Error::Setup, input())?.len())?;
-    crate::store::file_digest_with(&mut file, |file| {
-        let mut hash = Sha256::new();
-        let mut data = [0; 65536];
-        let mut total = 0;
-        loop {
-            let n = file.read(&mut data).context(Error::Setup, input())?;
-            if n == 0 {
-                break;
-            }
-            total += n as u64;
-            check_size(total)?;
-            hash.update(&data[..n]);
+    let mut hash = Sha256::new();
+    let mut data = [0; 65536];
+    let mut total = 0;
+    loop {
+        let n = file.read(&mut data).context(Error::Setup, input())?;
+        if n == 0 {
+            break;
         }
-        Ok(ContentDigest::finish(hash))
-    })
+        total += n as u64;
+        check_size(total)?;
+        hash.update(&data[..n]);
+    }
+    Ok(ContentDigest::finish(hash))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

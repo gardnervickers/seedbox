@@ -1094,10 +1094,10 @@ fn a_runtime_input_is_hashed_again_after_it_changes() {
     );
     let store = ContentStore::new(directory.path().join("store"));
     assert_eq!(store.put_file(&source).unwrap(), first);
-    // Rewritten in place, and replaced by a new file under the same name.
-    fs::write(&source, b"second engine bytes").unwrap();
+    // Rewritten in place at the same length, then replaced under the same name.
+    fs::write(&source, b"other engine").unwrap();
     let second = seedbox_driver_execution::admission::file_digest(&source).unwrap();
-    assert_eq!(second, ContentDigest::of(b"second engine bytes"));
+    assert_eq!(second, ContentDigest::of(b"other engine"));
     assert_eq!(store.put_file(&source).unwrap(), second);
     let replacement = directory.path().join("replacement");
     fs::write(&replacement, b"third").unwrap();

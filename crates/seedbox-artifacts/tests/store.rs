@@ -161,3 +161,19 @@ fn cached_verification_rejects_same_length_edits_and_replaced_objects() {
     fs::remove_file(object).unwrap();
     assert!(store.verify(&digest).is_err());
 }
+
+#[test]
+fn put_file_hashes_same_length_source_rewrites() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let store = ContentStore::new(directory.path().join("store"));
+    fs::write(&source, b"original").unwrap();
+    let first = store.put_file(&source).unwrap();
+
+    fs::write(&source, b"modified").unwrap();
+    let second = store.put_file(&source).unwrap();
+    assert_eq!(second, ContentDigest::of(b"modified"));
+    assert_ne!(first, second);
+    assert_eq!(store.read(&first).unwrap(), b"original");
+    assert_eq!(store.read(&second).unwrap(), b"modified");
+}

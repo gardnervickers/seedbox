@@ -4,7 +4,7 @@ use crate::{limits::read_bounded, Context, Error, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     fs,
     io::{self, Read, Seek, Write},
     os::unix::fs::MetadataExt,
@@ -80,34 +80,6 @@ impl Stamp {
             ctime: (m.ctime(), m.ctime_nsec()),
         })
     }
-}
-
-/// Digests of files outside the store that this process hashed, by inode,
-/// with the stamp each had then. Profile construction, admission and
-/// preparation each hash the same engine and kernel; this reads them once.
-static HASHED_FILES: Mutex<BTreeMap<(u64, u64), (Stamp, ContentDigest)>> =
-    Mutex::new(BTreeMap::new());
-
-/// The digest of `file`, hashed with `hash` unless this process already
-/// hashed the same inode and its stamp is unchanged since. A file that
-/// changes while it is hashed is not remembered.
-pub fn file_digest_with(
-    file: &mut fs::File,
-    hash: impl FnOnce(&mut fs::File) -> Result<ContentDigest>,
-) -> Result<ContentDigest> {
-    let before = Stamp::of(file)?;
-    let key = (before.dev, before.ino);
-    let lock = || HASHED_FILES.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((stamp, digest)) = lock().get(&key) {
-        if *stamp == before {
-            return Ok(digest.clone());
-        }
-    }
-    let digest = hash(file)?;
-    if Stamp::of(file)? == before {
-        lock().insert(key, (before, digest.clone()));
-    }
-    Ok(digest)
 }
 
 impl ContentStore {
@@ -239,9 +211,9 @@ impl ContentStore {
     ) -> Result<ContentDigest> {
         progress(0)?;
         let mut file = fs::File::open(path)?;
-        let digest = file_digest_with(&mut file, |file| {
-            transfer_observed(file, &mut io::sink(), progress)
-        })?;
+        // External files can be rewritten or have their inode reused without
+        // changing a coarse filesystem timestamp. Read their bytes each time.
+        let digest = transfer_observed(&mut file, &mut io::sink(), progress)?;
         progress(0)?;
         if let Ok(existing) = fs::File::open(self.path(&digest)) {
             // Verify the existing entry; never repair corruption implicitly.
@@ -394,10 +366,7 @@ impl ContentStore {
             }
             None => self.copy_to(digest, &mut temp)?,
         }
-        let mut copy = temp.persist_noclobber(&path).map_err(|e| e.error)?;
-        // The copy holds exactly the object's bytes, so a later put_file or
-        // file_digest of it needs no second read.
-        file_digest_with(&mut copy, |_| Ok(digest.clone()))?;
+        temp.persist_noclobber(&path).map_err(|e| e.error)?;
         Ok(path)
     }
 
