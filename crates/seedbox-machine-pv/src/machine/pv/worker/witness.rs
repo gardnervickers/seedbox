@@ -9,7 +9,7 @@
 //! S: PV boot entropy-generation installation (arch::load wrote the boot seed);
 //! generation is physical boot ordinal. No runtime page-reseed API exists.
 //! C: fresh Boot after predecessor successor() fold, for forced marks1/2 only.
-//! Y: actual EVENT_MMIO+24 soft-bound write. Console bytes are O or PL011 w.
+//! Y: semantic soft-bound yield after its actual MMIO or port write. Console bytes are O or PL011 w.
 //! X/E: this Linux PV board maps no 0xf4/0xf5 debug-exit/init-error devices:
 //! those ports float/ignore, and are ordinary O/i, not terminal requests.
 //! Native outcomes use PV power-off MMIO, PSCI or architectural reset.

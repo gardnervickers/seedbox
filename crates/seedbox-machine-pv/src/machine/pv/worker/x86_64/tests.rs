@@ -231,7 +231,7 @@ fn timer_waits_for_an_interrupt_window_and_is_injected_once() {
         // Linux's mask_and_ack: mask, specific EOI; handler acks the timer.
         port(0x21, true, 0xcf),
         port(0x20, true, 0x60),
-        event(8, 1),
+        port(ACK_PORT, true, 1),
         port(0x21, true, 0xce),
         halt(),
     ]);
@@ -244,6 +244,65 @@ fn timer_waits_for_an_interrupt_window_and_is_injected_once() {
     assert_eq!(vm.state.devices.pic.isr, 0);
     assert_eq!(vm.state.devices.lines, 0);
     assert!(!vm.native.window);
+}
+#[test]
+fn port_yield_advances_to_the_deadline_or_run_horizon() {
+    for deadline in [None, Some(5), Some(20)] {
+        let mut vm = machine();
+        vm.native.exits.push_back(event(32, 3));
+        if let Some(deadline) = deadline {
+            vm.native.exits.push_back(event(0, deadline));
+        }
+        vm.native
+            .exits
+            .extend([port(YIELD_PORT, true, 1), event(40, 1)]);
+        let stop = vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap();
+        assert_eq!(vm.state.now, deadline.unwrap_or(10).min(10));
+        assert_eq!(vm.state.timer, deadline == Some(5));
+        assert_eq!(vm.state.devices.lines & 1 != 0, deadline == Some(5));
+        assert_eq!(
+            stop,
+            if deadline == Some(5) {
+                Stop::PoweredOff
+            } else {
+                Stop::Horizon
+            }
+        );
+        assert!(vm.native.responses.iter().all(Option::is_none));
+        if deadline.is_none() {
+            use seedbox_machine::machine::execution_evidence::chain;
+            let h = chain::record(
+                &chain::initial(),
+                b'w',
+                8,
+                0,
+                super::super::EVENT_MMIO + 32,
+                3,
+            );
+            let h = chain::record(&h, b'O', 1, 0, YIELD_PORT.into(), 1);
+            assert_eq!(vm.state.witness, chain::record(&h, b'Y', 0, 0, 10, 0));
+        }
+    }
+}
+#[test]
+fn clock_signal_ports_reject_invalid_accesses() {
+    for port in [ACK_PORT, YIELD_PORT] {
+        for (width, write, value) in [(2, true, 1), (1, false, 0), (1, true, 0), (1, true, 2)] {
+            let mut vm = machine();
+            vm.native.exits.extend([
+                event(32, 3),
+                Exit::Port {
+                    port,
+                    width,
+                    write,
+                    value,
+                },
+            ]);
+            let error = vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap_err();
+            assert_eq!(error, "PV clockevent port access");
+            assert_eq!(vm.native.responses.len(), 1);
+        }
+    }
 }
 #[test]
 fn in_service_line_blocks_reinjection_until_eoi() {
