@@ -69,7 +69,7 @@ jobs:
       - name: Identify Nix cache inputs
         id: sources
         env:
-          NIX_INPUTS: ${{ hashFiles('flake.lock', 'flake.nix', '.gitmodules', 'nix/**', 'Cargo.toml', 'Cargo.lock', 'crates/seedbox-check/**', 'crates/seedbox-exec/**', 'crates/seedbox-test-time/**', 'crates/seedbox-machine/**/*.nix', 'crates/seedbox-machine/guest/**', 'crates/seedbox-machine/src/pv/**', 'crates/seedbox-machine/tests/fixtures/**', 'crates/seedbox-machine/src/machine/disk.rs', 'crates/seedbox-machine/src/machine/disk/**', 'crates/seedbox-machine-tcg/qemu/**', 'examples/minio/inputs.lock.json') }}
+          NIX_INPUTS: ${{ hashFiles('flake.lock', 'flake.nix', '.gitmodules', 'nix/**', 'Cargo.toml', 'Cargo.lock', 'crates/seedbox-check/**', 'crates/seedbox-exec/**', 'crates/seedbox-test-time/**', 'crates/seedbox-driver/examples/tcg-init', 'crates/seedbox-machine/**/*.nix', 'crates/seedbox-machine/guest-assets.py', 'crates/seedbox-machine/guest-initramfs.py', 'crates/seedbox-machine/guest-static-elf.sh', 'crates/seedbox-machine/guest/**', 'crates/seedbox-machine/src/pv/**', 'crates/seedbox-machine/tests/fixtures/**', 'crates/seedbox-machine/src/machine/disk.rs', 'crates/seedbox-machine/src/machine/disk/**', 'crates/seedbox-machine-tcg/qemu/**', 'examples/minio/inputs.lock.json') }}
         run: |
           echo "dynamorio=$(git rev-parse HEAD:vendor/dynamorio)" >> "$GITHUB_OUTPUT"
           echo "nix-inputs=$NIX_INPUTS" >> "$GITHUB_OUTPUT"
