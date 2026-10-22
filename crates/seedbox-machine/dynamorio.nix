@@ -3,7 +3,7 @@ let
   source = ../../vendor/dynamorio;
 in
 assert pkgs.lib.assertMsg (builtins.pathExists (source + "/CMakeLists.txt"))
-  "DynamoRIO submodule missing; run git submodule update --init --recursive vendor/dynamorio from the Seedbox checkout.";
+  "DynamoRIO submodule missing; run bash tools/bootstrap-submodules.sh, then build with a git+file reference containing ?submodules=1.";
 pkgs.stdenv.mkDerivation {
   pname = "seedbox-dynamorio${pkgs.lib.optionalString debug "-debug"}";
   version = "11.3.0-1";
