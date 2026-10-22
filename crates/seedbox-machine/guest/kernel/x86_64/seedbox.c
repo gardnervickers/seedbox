@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Single-CPU PV ABI 3 for x86-64. Matches the seedbox-machine stopped worker:
- * the same shared time page and event registers as the arm64 kernel, with
+ * the shared time page and deadline registers, byte OUT for ACK/YIELD, and
  * the 8259 PIC as the only interrupt controller. No LAPIC, HPET, PIT or RTC is
  * used. Kernel TSC reads return PV time; application RDTSC/RDTSCP trap through
  * CR4.TSD and are emulated here.
@@ -32,8 +32,6 @@ struct seedbox_page {
 
 enum {
 	EVENT_DEADLINE = 0,
-	EVENT_ACK = 8,
-	EVENT_YIELD = 24,
 	EVENT_READY = 32,
 	EVENT_POWER_OFF = 40,
 };
@@ -47,6 +45,12 @@ static __always_inline void event_write(unsigned int offset, u64 value)
 {
 	/* Uncached fixmap: every store is a stopped worker rendezvous. */
 	WRITE_ONCE(event[offset / 8], value);
+}
+
+static __always_inline void event_signal(u16 port)
+{
+	/* Order time-page accesses around the stopped worker rendezvous. */
+	asm volatile("outb %b0, %w1" : : "a"((u8)1), "Nd"(port) : "memory");
 }
 
 u64 noinstr seedbox_read(void)
@@ -80,10 +84,10 @@ again:
 		 */
 		if (!arch_irqs_disabled_flags(flags)) {
 			arch_local_irq_restore(flags);
-			event_write(EVENT_YIELD, 1);
+			event_signal(SEEDBOX_YIELD_PORT);
 			arch_local_irq_disable();
 		} else {
-			event_write(EVENT_YIELD, 1);
+			event_signal(SEEDBOX_YIELD_PORT);
 		}
 		goto again;
 	}
@@ -248,7 +252,7 @@ static int next_event(unsigned long delta, struct clock_event_device *dev)
 static int shutdown_event(struct clock_event_device *dev)
 {
 	event_write(EVENT_DEADLINE, 0);
-	event_write(EVENT_ACK, 1);
+	event_signal(SEEDBOX_ACK_PORT);
 	return 0;
 }
 
@@ -260,7 +264,7 @@ static int oneshot_event(struct clock_event_device *dev)
 static irqreturn_t timer_irq(int irq, void *dev)
 {
 	/* Deassert before invoking the clock core; it may arm another deadline. */
-	event_write(EVENT_ACK, 1);
+	event_signal(SEEDBOX_ACK_PORT);
 	ce.event_handler(&ce);
 	return IRQ_HANDLED;
 }

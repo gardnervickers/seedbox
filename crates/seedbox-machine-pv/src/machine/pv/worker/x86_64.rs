@@ -23,6 +23,9 @@
 //! with interrupts disabled can never resume (there is no NMI source) and is
 //! reported like power-off. Before the handshake both are setup errors.
 mod backend;
+const ACK_PORT: u16 = 0x500;
+const YIELD_PORT: u16 = 0x501;
+
 use super::{
     boot,
     memory::{self, Memory},
@@ -406,9 +409,20 @@ impl<B: Backend> Machine<B> {
             _ => uart.scr,
         }
     }
-    pub(super) fn platform(&mut self, exit: Exit) -> Result<Effect> {
+    pub(super) fn platform(&mut self, exit: Exit, upto: u64) -> Result<Effect> {
         let mut effect = Effect::default();
         match exit {
+            Exit::Port {
+                port,
+                width,
+                write,
+                value,
+            } if matches!(port, ACK_PORT | YIELD_PORT) => {
+                if width != 1 || !write || value != 1 {
+                    return Err("PV clockevent port access".into());
+                }
+                return self.clock_event(if port == ACK_PORT { 8 } else { 24 }, value, upto);
+            }
             Exit::Port {
                 port,
                 width,
