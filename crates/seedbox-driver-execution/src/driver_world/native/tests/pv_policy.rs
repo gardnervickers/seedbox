@@ -141,7 +141,7 @@ fn codec3_policy_binding_refuses_before_native_restore_and_driver_hosts_restore_
             restored
                 .err()
                 .expect("unsupported Driver host must refuse cold PV restore"),
-            "Driver PV execution requires Linux x86-64 (KVM) or macOS aarch64 (HVF); keep the existing legacy service path on this host"
+            "Driver PV execution requires Linux x86-64 (KVM) or macOS aarch64 (HVF); run this simulation with the TCG backend on this host"
         );
     }
     assert!(!missing.exists());
