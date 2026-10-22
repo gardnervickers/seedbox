@@ -35,13 +35,6 @@ Inputs round down into machine time; outputs/deadlines map to the earliest simul
 Rate changes preserve accrued drift and remap pending timers; control payload times remain simulation time.
 The [projection](../crates/seedbox-driver/src/clock/projection.rs) belongs to the Driver, outside Machine snapshots.
 
-## Wall time across reboots
-
-Fresh execution derives its epoch from image creation times, not the host clock, with an 86400-second floor.
-Every boot adds the machine counter to that epoch; kernel monotonic time alone would restart at reboot.
-Realtime steps change kernel state and expire with the boot, whereas Driver-owned drift survives it.
-The [supervisor](../crates/seedbox-machine/src/pv/guest_service_init.c) initializes realtime before announcing Ready.
-
 ## Guest out-of-memory reports
 
 The supervisor retains `/dev/kmsg` before entering the application image and
@@ -52,6 +45,13 @@ an ordinary SIGKILL remains `137`. Boot identity comes from the Driver; each out
 report, so restarted applications cannot reuse an earlier kill. The world retains
 the newest 64 reports, including their boots; diagnostics suggests raising `memoryMiB`.
 Lost kernel records fail supervision with an I/O error rather than guessing a victim.
+
+## Wall time across reboots
+
+Fresh execution derives its epoch from image creation times, not the host clock, with an 86400-second floor.
+Every boot adds the machine counter to that epoch; kernel monotonic time alone would restart at reboot.
+Realtime steps change kernel state and expire with the boot, whereas Driver-owned drift survives it.
+The [supervisor](../crates/seedbox-machine/src/pv/guest_service_init.c) initializes realtime before announcing Ready.
 
 ## Same-time controls
 
