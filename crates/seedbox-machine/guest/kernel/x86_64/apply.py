@@ -84,6 +84,18 @@ def changes(root):
             "\t.calibrate_cpu\t\t\t= seedbox_tsc_khz,\n\t.calibrate_tsc\t\t\t= seedbox_tsc_khz,\n")
     edit("arch/x86/kernel/x86_init.c", x86_init)
 
+    # All three fixed PV virtio windows share the same status/ACK page ABI.
+    # Queue/configuration accesses and the PIC's unmask rendezvous stay intact.
+    def virtio_mmio(s):
+        s = replace(s, "#include <uapi/linux/virtio_mmio.h>\n",
+                    "#include <uapi/linux/virtio_mmio.h>\n#include <asm/seedbox.h>\n")
+        return replace(s,
+            "\tstatus = readl(vm_dev->base + VIRTIO_MMIO_INTERRUPT_STATUS);\n"
+            "\twritel(status, vm_dev->base + VIRTIO_MMIO_INTERRUPT_ACK);\n",
+            "\tstatus = seedbox_virtio_interrupt(platform_get_resource(\n"
+            "\t\tvm_dev->pdev, IORESOURCE_MEM, 0)->start);\n")
+    edit("drivers/virtio/virtio_mmio.c", virtio_mmio)
+
     # The master PIC's hot mask/EOI operations publish one shared update.
     # Unmask always exits before IRQ restore. Boot/probe and slave operations
     # retain their port protocol; all supported device lines are on the master.

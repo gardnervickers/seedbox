@@ -24,6 +24,7 @@ unsigned long long seedbox_rdtsc(void);
 void seedbox_cpu_relax(void);
 void seedbox_pic_update(u8 mask, u8 ack);
 void seedbox_pic_unmask(u8 mask);
+u32 seedbox_virtio_interrupt(unsigned long phys);
 void seedbox_syscall_progress(void);
 bool seedbox_emulate_user_tsc(struct pt_regs *regs);
 unsigned long seedbox_tsc_khz(void);

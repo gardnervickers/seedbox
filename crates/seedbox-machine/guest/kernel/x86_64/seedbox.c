@@ -29,6 +29,7 @@ struct seedbox_page {
 	u64 now, last, bound, abi, deferred_irq_pending, exclusive_epoch;
 	u64 syscall_ns;
 	u64 pic_update;
+	u64 virtio_irq[3];
 };
 
 enum {
@@ -72,6 +73,24 @@ void seedbox_pic_unmask(u8 mask)
 	seedbox_pic_update(mask, 0);
 	/* Always rendezvous before the caller can enable CPU interrupts. */
 	event_signal(SEEDBOX_PIC_UNMASK_PORT);
+}
+
+/* The fixed console/disk/NIC MMIO windows have corresponding page words.
+ * Called only from the IRQ-disabled virtio handler. READ/WRITE_ONCE and the
+ * compiler barrier publish ACK before queue callbacks (which can rendezvous).
+ * The worker consumes it before new input/notify, and republishes device status
+ * before entry. Host-only interruptions do neither. The PIC unmask OUT remains
+ * unconditional, so no ACK can wait beyond the handler's return. */
+u32 seedbox_virtio_interrupt(unsigned long phys)
+{
+	unsigned int slot = (phys - SEEDBOX_LIFECYCLE_PHYS) / 0x10000;
+	u64 *word = &READ_ONCE(page)->virtio_irq[slot];
+	u64 value = READ_ONCE(*word);
+	u32 status = (u32)value & ~(u32)(value >> 32);
+
+	WRITE_ONCE(*word, value | ((u64)status << 32));
+	barrier();
+	return status;
 }
 
 u64 noinstr seedbox_read(void)
@@ -228,6 +247,7 @@ void __init seedbox_time_init(void)
 
 	BUILD_BUG_ON(offsetof(struct seedbox_page, syscall_ns) != 6 * sizeof(u64));
 	BUILD_BUG_ON(offsetof(struct seedbox_page, pic_update) != 7 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_page, virtio_irq) != 8 * sizeof(u64));
 	/*
 	 * setup_arch calls us before tsc_early_init selects TSC delays. Permanent
 	 * fixmaps need no allocator and survive the boot page-table switch.

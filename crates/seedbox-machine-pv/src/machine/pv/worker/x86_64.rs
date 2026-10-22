@@ -31,6 +31,10 @@ const PIC_UNMASK_PORT: u16 = 0x502;
 // The stopped worker clears it after applying it to the authoritative PIC.
 const PIC_UPDATE: usize = 56;
 const PIC_UPDATE_VALID: u64 = 1 << 16;
+// Fixed x86 virtio slots: lifecycle console, disk, NIC. Low 32 bits publish
+// host device status; high 32 bits accumulate guest ACKs. Devices remain the
+// authority. No guest rendezvous occurs inside the handler's load/store pair.
+const VIRTIO_IRQ: usize = 64;
 
 use super::{
     boot,
@@ -318,18 +322,56 @@ impl<B: Backend> Machine<B> {
     /// Snapshot RAM retains an interrupted publication exactly until consumption.
     pub(super) fn consume_irq_update(&mut self) -> Result<()> {
         let update = self.page.word(PIC_UPDATE);
-        if update == 0 {
-            return Ok(());
+        if update != 0 {
+            if update & PIC_UPDATE_VALID == 0 || update >> 17 != 0 {
+                return Err("PV invalid shared PIC update".into());
+            }
+            self.state.devices.pic.imr = update as u8;
+            self.state.devices.pic.isr &= !((update >> 8) as u8);
+            self.page.set_word(PIC_UPDATE, 0);
+            // Record the actual observed transaction, never synthetic port exits.
+            self.record_native(b'q', 8, PIC_UPDATE as u64, update);
         }
-        if update & PIC_UPDATE_VALID == 0 || update >> 17 != 0 {
-            return Err("PV invalid shared PIC update".into());
+        // Before *any* new device work, including zero-budget input admission
+        // and TX/disk notify dispatch. An old ACK cannot clear a new assertion.
+        for slot in 0..3 {
+            let offset = VIRTIO_IRQ + slot * 8;
+            let word = self.page.word(offset);
+            let ack = (word >> 32) as u32;
+            if ack == 0 {
+                continue;
+            }
+            match slot {
+                0 => self.state.console.acknowledge_interrupt(ack),
+                1 => self
+                    .block
+                    .as_mut()
+                    .ok_or("PV disk ACK without disk")?
+                    .acknowledge_interrupt(ack),
+                2 => self
+                    .state
+                    .net
+                    .as_mut()
+                    .ok_or("PV NIC ACK without NIC")?
+                    .acknowledge_interrupt(ack),
+                _ => unreachable!(),
+            }
+            self.page.set_word(offset, word & 0xffff_ffff);
+            self.record_native(b'q', 8, offset as u64, word);
         }
-        self.state.devices.pic.imr = update as u8;
-        self.state.devices.pic.isr &= !((update >> 8) as u8);
-        self.page.set_word(PIC_UPDATE, 0);
-        // Record the actual observed transaction, never synthetic port exits.
-        self.record_native(b'q', 8, PIC_UPDATE as u64, update);
         Ok(())
+    }
+    pub(super) fn publish_virtio_irq(&self) {
+        for (slot, status) in [
+            self.state.console.interrupt_status(),
+            self.block.as_ref().map_or(0, |b| b.interrupt_status()),
+            self.state.net.as_ref().map_or(0, |n| n.interrupt_status()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.page.set_word(VIRTIO_IRQ + slot * 8, status as u64);
+        }
     }
     /// x86 has no software reservation epoch: rendezvous change no page word.
     pub(super) fn boundary(&mut self) -> Result<()> {

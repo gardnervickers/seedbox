@@ -58,8 +58,14 @@ impl Block {
     pub(super) fn store(&self) -> &Store {
         &self.store
     }
+    pub(super) fn interrupt_status(&self) -> u32 {
+        self.transport.interrupt
+    }
+    pub(super) fn acknowledge_interrupt(&mut self, bits: u32) {
+        self.transport.interrupt &= !bits;
+    }
     pub(super) fn irq(&self) -> bool {
-        self.transport.interrupt != 0
+        self.interrupt_status() != 0
     }
     pub(super) fn read(&self, offset: u64) -> Result<u32> {
         let selected = self.transport.selector == 0;
@@ -118,7 +124,7 @@ impl Block {
                 }
                 return self.process(ram, &mut completed);
             }
-            INTERRUPT_ACK => self.transport.interrupt &= !value,
+            INTERRUPT_ACK => self.acknowledge_interrupt(value),
             STATUS if value == 0 => self.transport = Transport::default(),
             STATUS => {
                 if value & STATUS_FEATURES_OK != 0
