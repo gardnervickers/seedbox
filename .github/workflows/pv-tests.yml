@@ -140,7 +140,15 @@ jobs:
             du -sh /nix/store
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Portable prerequisites and PV application acceptance
-        run: nix develop --command bash harness/check.sh linux-apps
+        # Temporary PR348 reproduction: share one host CPU across workers.
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          cpu = min(os.sched_getaffinity(0))
+          print(f'PR348 host CPU affinity: {cpu}', flush=True)
+          os.sched_setaffinity(0, {cpu})
+          os.execvp('nix', ['nix', 'develop', '--command', 'bash', 'harness/check.sh', 'linux-apps'])
+          PYTHON
       - name: Bound diagnostic artifact storage
         if: always()
         # Privileged KVM tests leave root-owned manifests and logs.
