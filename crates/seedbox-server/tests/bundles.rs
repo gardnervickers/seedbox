@@ -75,7 +75,6 @@ fn fixture(store: &ContentStore, checkpoint: bool) -> Snapshot {
         configuration: simulation.spec.configuration.clone(),
         inputs,
         program: Vec::new(),
-        interventions: None,
     };
     let diagnostic = store
         .put_unsynced(b"raw worker diagnostic\x00\xff")
@@ -587,11 +586,7 @@ async fn import_roundtrip_is_independent_preserves_evidence_gaps_and_branches_wi
         b"retained checkpoint RAM"
     );
     let mut branch = support::resolved_request("branch");
-    branch.spec = imported.spec.clone();
-    branch.spec.inputs = InputSource::Checkpoint {
-        simulation: imported.metadata.id.clone(),
-        checkpoint: "capture".into(),
-    };
+    branch.spec = capture.spec;
     let branch = manager.submit(branch).unwrap().0;
     assert!(
         matches!(&branch.spec.inputs, InputSource::Resolved { definition } if matches!(definition.start, seedbox_spec::definition::Start::Checkpoint { .. }))
@@ -994,11 +989,7 @@ fn export_captures_owned_native_checkpoint_files_and_preserves_consumed_override
     write_record(&attempt, record).unwrap();
     seedbox_artifacts::interventions::Journal::initialize(&attempt.join("interventions.json"))
         .unwrap();
-    seedbox_artifacts::interventions::Journal::initialize(
-        &attempt.join("checkpoint-capture-interventions.json"),
-    )
-    .unwrap();
-    std::fs::write(source.path().join("inputs").join(format!("{id}.json")), serde_json::to_vec(&serde_json::json!({"checkpoint":null,"prepared":record.identity.inputs,"interventions":null,"attempt":std::path::absolute(&attempt).unwrap()})).unwrap()).unwrap();
+    std::fs::write(source.path().join("inputs").join(format!("{id}.json")), serde_json::to_vec(&serde_json::json!({"checkpoint":null,"prepared":record.identity.inputs,"attempt":std::path::absolute(&attempt).unwrap()})).unwrap()).unwrap();
     // The live API's authoritative program may be newer than the stored
     // resolved definition. A standalone checkpoint must carry that suffix.
     let mut checkpoint_bytes = Vec::new();
@@ -1427,9 +1418,6 @@ fn prepared_reference_to_imported_checkpoint_starts_fresh_before_override_valida
         .unwrap();
     let mut retained = support::resolved_request("checkpoint-retained");
     retained.spec = imported.spec.clone();
-    retained.spec.inputs = InputSource::Retained {
-        simulation: imported.metadata.id.clone(),
-    };
     let retained = manager.submit(retained).unwrap().0;
     assert!(
         matches!(retained.spec.inputs, InputSource::Resolved { definition } if matches!(definition.start, seedbox_spec::definition::Start::Checkpoint { .. }))

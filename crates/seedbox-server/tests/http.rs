@@ -298,7 +298,7 @@ async fn status_refreshes_elapsed_time_and_preserves_failed_preparation_timing()
 }
 
 #[tokio::test]
-async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
+async fn timeline_reads_live_journal_in_admission_order_without_mutating_definition() {
     use seedbox_application::{
         execution::{
             CancellationToken, ExecutionBackend, ExecutionProfile, PreparedInputs,
@@ -393,7 +393,6 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
              "plan":{"id":4,"at_ns":200,"deadline_ns":200,"action":"restart","machine":"oracle"}}
         ]
     })).unwrap();
-    let digest = store.put(&history.encode().unwrap()).unwrap();
     let inputs = PreparedInputs {
         machine_memory_mb: std::collections::BTreeMap::from([("oracle".into(), 512)]),
         wall_clock_epoch: None,
@@ -412,16 +411,13 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
     std::fs::write(
         &descriptor,
         serde_json::to_vec(&serde_json::json!({
-            "checkpoint": null, "prepared": inputs, "interventions": digest, "attempt": null,
+            "checkpoint": null, "prepared": inputs, "attempt": null,
         }))
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(client.timeline(&id).await.unwrap().entries.len(), 3);
-    assert_eq!(
-        client.timeline(&id).await.unwrap().entries[0].id,
-        "program:z-first"
-    );
+    // Until an attempt is published, only authored inputs exist.
+    assert_eq!(client.timeline(&id).await.unwrap().entries.len(), 1);
     let attempt = root.join("attempt");
     std::fs::create_dir(&attempt).unwrap();
     let journal = attempt.join("interventions.json");
@@ -430,7 +426,7 @@ async fn timeline_reads_owned_journal_in_admission_order_and_retained_inputs() {
     std::fs::write(
         &descriptor,
         serde_json::to_vec(&serde_json::json!({
-            "checkpoint": null, "prepared": inputs, "interventions": digest, "attempt": attempt,
+            "checkpoint": null, "prepared": inputs, "attempt": attempt,
         }))
         .unwrap(),
     )

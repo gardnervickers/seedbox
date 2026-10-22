@@ -788,7 +788,6 @@ mod tests {
             start_paused: true,
             resume_checkpoint: None,
             intervention_history: None,
-            replay_interventions: None,
             observations: None,
             seed: 42,
             program: &[],

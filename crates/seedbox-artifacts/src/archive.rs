@@ -91,7 +91,6 @@ impl Snapshot {
             }
             assets.extend(record.identity.inputs.digests().cloned());
             assets.extend(record.logs.values().cloned());
-            assets.extend(record.identity.interventions.iter().cloned());
         }
         assets.extend(self.observations.values().cloned());
         if assets.len() > MAX_OBJECTS {

@@ -44,7 +44,6 @@ fn bundle(path: &Path) {
         configuration: simulation.spec.configuration.clone(),
         inputs: definition::prepared(def, &store).unwrap(),
         program: Vec::new(),
-        interventions: None,
     };
     let digest = store.put_unsynced(RAW).unwrap();
     let record = RunRecord {

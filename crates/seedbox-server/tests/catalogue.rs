@@ -23,7 +23,7 @@ fn cpu_backend_is_request_owned_and_retained_inputs_reject_conflicts() {
     let mut retained = request();
     retained.request_id = "retained-backend".into();
     retained.spec = source.spec.clone();
-    retained.spec.inputs = InputSource::Retained {
+    retained.spec.inputs = InputSource::Prepared {
         simulation: source.metadata.id,
     };
     retained.options.backend = Some(CpuBackend::Pv);
@@ -62,44 +62,24 @@ fn cpu_backend_is_request_owned_and_retained_inputs_reject_conflicts() {
 fn unknown_input_sources_return_not_found_without_creating_resources() {
     use seedbox_api::{InputSource, SeedRangeRequest, SimulationId};
     let missing: SimulationId = "k7m2p9qx".parse().unwrap();
-    for inputs in [
-        InputSource::Retained {
-            simulation: missing.clone(),
-        },
-        InputSource::Prepared {
-            simulation: missing.clone(),
-        },
-        InputSource::Checkpoint {
-            simulation: missing.clone(),
-            checkpoint: "capture".into(),
-        },
-    ] {
-        let mut catalogue = Catalogue::in_memory();
-        let mut submission = request();
-        submission.spec.inputs = inputs.clone();
-        assert!(
-            matches!(catalogue.submit(submission.clone()), Err(Error::NotFound(id)) if id == missing)
-        );
-        assert_eq!(catalogue.list().count(), 0);
-        let range = SeedRangeRequest {
-            metadata: submission.metadata,
-            options: submission.options,
-            request_id: submission.request_id,
-            spec: submission.spec,
-            count: 2,
-        };
-        if matches!(inputs, InputSource::Checkpoint { .. }) {
-            // Seed exploration rejects checkpoints before resolving any source.
-            assert!(
-                matches!(catalogue.submit_seeds(range), Err(Error::Invalid(message)) if message.contains("seed exploration requires"))
-            );
-        } else {
-            assert!(
-                matches!(catalogue.submit_seeds(range), Err(Error::NotFound(id)) if id == missing)
-            );
-        }
-        assert_eq!(catalogue.list().count(), 0);
-    }
+    let mut catalogue = Catalogue::in_memory();
+    let mut submission = request();
+    submission.spec.inputs = InputSource::Prepared {
+        simulation: missing.clone(),
+    };
+    assert!(
+        matches!(catalogue.submit(submission.clone()), Err(Error::NotFound(id)) if id == missing)
+    );
+    assert_eq!(catalogue.list().count(), 0);
+    let range = SeedRangeRequest {
+        metadata: submission.metadata,
+        options: submission.options,
+        request_id: submission.request_id,
+        spec: submission.spec,
+        count: 2,
+    };
+    assert!(matches!(catalogue.submit_seeds(range), Err(Error::NotFound(id)) if id == missing));
+    assert_eq!(catalogue.list().count(), 0);
 }
 
 #[test]

@@ -2,7 +2,7 @@
 //! Host paths appear only at this private launch boundary. Factories never
 //! discover assets through environment variables or invoke builders.
 use super::{Artifact, Inventory};
-use crate::{input_program::TimedInput, intervention::History};
+use crate::input_program::TimedInput;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -112,6 +112,5 @@ pub struct Request {
     pub full_state: bool,
     pub host_control: PathBuf,
     pub observations: Option<PathBuf>,
-    pub replay_interventions: Option<History>,
     pub resume_checkpoint: Option<PathBuf>,
 }

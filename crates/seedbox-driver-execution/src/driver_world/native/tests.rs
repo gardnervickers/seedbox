@@ -170,7 +170,6 @@ fn tcg_codec_three_policy_and_name_refuse_before_native_reconstruction() {
         full_state: false,
         host_control: missing,
         observations: None,
-        replay_interventions: None,
         resume_checkpoint: None,
     };
     let error = crate::driver_world::build::open(&request)

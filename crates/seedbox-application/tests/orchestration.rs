@@ -226,7 +226,6 @@ fn replay_retained(
     let fresh = orchestrator
         .clone()
         .with_program(identity.program.clone())
-        .with_interventions(identity.interventions.clone())
         .run_prepared(
             &identity.configuration,
             RunOptions {
@@ -1164,12 +1163,15 @@ fn interactive_history_is_sealed_as_portable_overrides_and_replays_without_journ
     };
     let backend = fixture.executing(|request| {
         let path = request.intervention_history.unwrap();
-        if let Some(retained) = request.replay_interventions {
-            assert_eq!(retained, &history);
-            assert_eq!(seedbox_artifacts::interventions::read(path)?, history);
-        } else {
+        assert!(seedbox_artifacts::interventions::read(path)?
+            .entries
+            .is_empty());
+        if request.program.is_empty() {
             let mut journal = seedbox_artifacts::interventions::Journal::open(path)?;
             journal.append(history.entries[0].clone())?;
+        } else {
+            assert_eq!(request.program.len(), 1);
+            assert_eq!(request.program[0].key, "stop-workload");
         }
         fixture.backend.execute(request)
     });
@@ -1182,7 +1184,6 @@ fn interactive_history_is_sealed_as_portable_overrides_and_replays_without_journ
             &backend,
         )
         .unwrap();
-    assert_eq!(first.record.identity.interventions, None);
     assert_eq!(first.record.identity.program.len(), 1);
     assert_eq!(first.record.identity.program[0].key, "stop-workload");
     assert_eq!(first.record.identity.program[0].at_ns, 100);

@@ -290,7 +290,6 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
             configuration: request.spec.configuration.clone(),
             inputs: prepared.clone(),
             program: Vec::new(),
-            interventions: None,
         };
         let record = RunRecord {
             run_id: ContentDigest::of(&serde_json::to_vec(&identity).unwrap()),
@@ -489,6 +488,109 @@ async fn public_dispatch_retains_oracle_and_missing_witness_errors_without_compa
     })
     .await
     .expect("host service dispatch did not finish before the infrastructure hang guard expired");
+}
+
+// These are synthetic witnesses for comparison composition, not proof of native determinism.
+#[tokio::test]
+async fn interactive_fault_replays_via_resolved_definition() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let host = HostService::start(Behavior::WithWitness).await;
+        let source = host
+            .client
+            .submit(&support::resolved_request("interactive-host-fixture"))
+            .await
+            .unwrap();
+        host.completed(&source.metadata.id).await;
+        let recorded = host.client.describe(&source.metadata.id).await.unwrap();
+        assert!(matches!(
+            recorded.spec.inputs,
+            seedbox_api::InputSource::Resolved { .. }
+        ));
+        assert_eq!(
+            recorded.spec.program,
+            vec![seedbox_spec::definition::Override {
+                id: "external".into(),
+                at_ns: 10,
+                timeout_ns: 500,
+                action: serde_json::to_value(seedbox_api::FaultAction::ClockSkew {
+                    handle: "clock-effect".into(),
+                    machine: "oracle".into(),
+                    offset_ns: Some(5),
+                    max_offset_ns: None,
+                })
+                .unwrap(),
+            }]
+        );
+        let source_runs = host
+            ._directory
+            .path()
+            .join("execution/runs")
+            .join(source.metadata.id.as_str());
+        let attempt = std::fs::read_dir(source_runs.join("attempts"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let sealed = seedbox_application::orchestration::inspect(&attempt).unwrap();
+        let portable: Vec<_> = sealed
+            .identity
+            .program
+            .iter()
+            .map(|input| seedbox_spec::definition::Override {
+                id: input.key.clone(),
+                at_ns: input.at_ns,
+                timeout_ns: input.timeout_ns,
+                action: serde_json::to_value(&input.action).unwrap(),
+            })
+            .collect();
+        assert_eq!(
+            portable, recorded.spec.program,
+            "journal sealing and definition export must produce the same program"
+        );
+        // Replay needs only the resolved definition and its binary closure.
+        std::fs::remove_dir_all(source_runs).unwrap();
+        let replay = host
+            .client
+            .submit_definition(&serde_json::to_value(&recorded).unwrap(), false)
+            .await
+            .unwrap();
+        host.completed(&replay.metadata.id).await;
+        let replayed = host.client.describe(&replay.metadata.id).await.unwrap();
+        assert_eq!(replayed.spec, recorded.spec);
+        let comparison = host
+            .client
+            .compare(&source.metadata.id, &replay.metadata.id)
+            .await
+            .unwrap();
+        assert_eq!(comparison.status, ComparisonStatus::Match);
+        assert_eq!(comparison.witness_matches, Some(true));
+        assert_eq!(host.calls.load(Ordering::SeqCst), 2);
+        // Seed exploration can still reuse preparation for an independent program,
+        // even when the source's live journal and attempt no longer exist.
+        let mut prepared = support::resolved_request("prepared-host-fixture");
+        prepared.spec = recorded.spec.clone();
+        prepared.spec.inputs = seedbox_api::InputSource::Prepared {
+            simulation: source.metadata.id.clone(),
+        };
+        prepared.spec.program[0].id = "independent-program".into();
+        let expected = prepared.spec.program.clone();
+        let fresh = host.client.submit(&prepared).await.unwrap();
+        host.completed(&fresh.metadata.id).await;
+        assert_eq!(
+            host.client
+                .describe(&fresh.metadata.id)
+                .await
+                .unwrap()
+                .spec
+                .program,
+            expected
+        );
+        assert_eq!(host.calls.load(Ordering::SeqCst), 3);
+        host.shutdown().await;
+    })
+    .await
+    .expect("interactive host fixture exceeded its hang guard");
 }
 
 // These are synthetic witnesses for comparison composition, not proof of native determinism.

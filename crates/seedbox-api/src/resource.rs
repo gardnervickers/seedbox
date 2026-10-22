@@ -60,16 +60,9 @@ pub enum InputSource {
     Resolved {
         definition: Box<seedbox_spec::definition::Definition>,
     },
-    Retained {
-        simulation: SimulationId,
-    },
     /// Reuse preparation inputs for a fresh timeline without interactive history.
     Prepared {
         simulation: SimulationId,
-    },
-    Checkpoint {
-        simulation: SimulationId,
-        checkpoint: String,
     },
 }
 

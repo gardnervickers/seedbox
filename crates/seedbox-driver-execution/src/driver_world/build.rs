@@ -327,14 +327,12 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
 fn program(
     request: &wire::Request,
 ) -> Result<Vec<seedbox_engine_protocol::input_program::TimedInput>> {
-    let mut inputs = request.program.clone();
-    if let Some(history) = &request.replay_interventions {
-        seedbox_engine_protocol::input_program::merge_interventions(&mut inputs, history)
-            .map_err(bad)?;
-    }
-    seedbox_engine_protocol::input_program::validate_program(&inputs, request.simulated_time_ns)
-        .map_err(bad)?;
-    Ok(inputs)
+    seedbox_engine_protocol::input_program::validate_program(
+        &request.program,
+        request.simulated_time_ns,
+    )
+    .map_err(bad)?;
+    Ok(request.program.clone())
 }
 fn encode(snapshot: Snapshot, writer: &mut BufWriter<fs::File>) -> Result<()> {
     snapshot.write_to(writer).map_err(bad)
