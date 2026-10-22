@@ -9,7 +9,9 @@ use crate::{
     store::{ContentDigest, ContentStore},
     Error, Result,
 };
-use seedbox_driver_execution::driver_world::preparation::{BootArchive, OciBoot, OciBootFactory};
+use seedbox_driver_execution::driver_world::preparation::{
+    BootArchive, OciBoot, OciBootFactory, PreparedBootCache,
+};
 use std::{
     collections::BTreeMap,
     fs,
@@ -128,28 +130,34 @@ impl OciPreparer {
             None => latest_image_epoch(store, &launches)?,
         };
         let driver_factory = factory(wall_clock_epoch, simulation.simulator.progress_budget)?;
+        let boot_cache = PreparedBootCache::new(
+            &engine,
+            driver_runtime,
+            wall_clock_epoch,
+            simulation.simulator.progress_budget,
+            store,
+        )?;
         for launch in launches {
             let Launch { name, service, .. } = launch;
             context.progress(name, PreparationStage::Guest);
             context.check()?;
 
-            let archive = temporary.path().join(format!("{name}.cpio"));
-            let boot = launch.boot(&driver_factory, simulation, store, &hosts)?;
+            let (archive, filesystem) =
+                launch.boot(&driver_factory, &boot_cache, simulation, store, &hosts)?;
             let imported = launch.imported;
             auxiliary.insert(
                 format!(
                     "{}{name}",
                     seedbox_driver_execution::driver_world::preparation::FILESYSTEM
                 ),
-                boot.filesystem,
+                filesystem,
             );
-            fs::write(&archive, boot.bytes)?;
             let memory_mb = service.memory_mb.unwrap_or(simulation.machine.memory_mb);
-            validate_archive_memory(name, memory_mb, &archive)?;
+            validate_archive_memory(name, memory_mb, store.size(&archive)?)?;
 
             context.check()?;
 
-            guests.insert(name.clone(), store.put_file(&archive)?);
+            guests.insert(name.clone(), archive);
             images.insert(name.clone(), imported.image);
             auxiliary.extend(
                 imported
@@ -266,11 +274,12 @@ impl Launch<'_> {
     fn boot(
         &self,
         factory: &impl BootFactory,
+        cache: &PreparedBootCache,
         simulation: &Simulation,
         store: &ContentStore,
         hosts: &str,
-    ) -> Result<BootArchive> {
-        factory.boot(
+    ) -> Result<(ContentDigest, ContentDigest)> {
+        cache.prepare(
             OciBoot {
                 name: self.name,
                 filesystem: crate::driver_preparation::filesystem(&self.imported.rootfs)?,
@@ -280,6 +289,7 @@ impl Launch<'_> {
                 hosts,
             },
             store,
+            |request, store| factory.boot(request, store),
         )
     }
 }
@@ -400,8 +410,8 @@ fn latest_image_epoch(store: &ContentStore, launches: &[Launch<'_>]) -> Result<u
     })
 }
 
-fn validate_archive_memory(name: &str, memory_mb: u32, archive: &Path) -> Result<()> {
-    let minimum = minimum_memory_mb(fs::metadata(archive)?.len())?;
+fn validate_archive_memory(name: &str, memory_mb: u32, archive_bytes: u64) -> Result<()> {
+    let minimum = minimum_memory_mb(archive_bytes)?;
     if memory_mb < minimum {
         return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase memoryMiB for this machine (application memory may require more)")));
     }

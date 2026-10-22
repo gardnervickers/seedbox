@@ -11,6 +11,9 @@ use crate::{
 use seedbox_engine_protocol::driver_world as wire;
 use std::{collections::BTreeMap, fs, path::Path};
 
+mod cache;
+pub use cache::PreparedBootCache;
+
 fn artifact(path: &Path) -> Result<wire::Artifact> {
     let bytes = fs::read(path)?;
     Ok(wire::Artifact {
