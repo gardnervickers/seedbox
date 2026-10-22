@@ -35,6 +35,9 @@ _start:
     nop
 idle:
     hlt
+    /* First instruction at the saved return RIP. The repeated IRQ must
+     * interrupt before this store, even if a later HLT has the same RIP. */
+    movq $1, resumed(%rip)
     jmp idle
 handler:
     incq count(%rip)
@@ -53,13 +56,17 @@ handler:
     out %al, %dx
     iretq
 second:
+    cmpq $0, resumed(%rip)
+    jne late_delivery
     mov $0x500, %dx
     mov $1, %al
     out %al, %dx
     movq $1, 40(%rbx)
+late_delivery:
     ud2
 .balign 8
 count: .quad 0
+resumed: .quad 0
 idtr: .word 0x30 * 16 + 15
       .quad 0
 .balign 16

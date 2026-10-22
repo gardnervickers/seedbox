@@ -118,6 +118,8 @@ fn native_shared_pic_handler_snapshot_preserves_mask_ack_and_exact_redelivery() 
     // Adopt beyond the new deadline before the stopped handler arms it.
     // Its old ACK clears only the old timer. Arming the overdue timer then
     // unmasking must deliver another IRQ at IRET, without another clock read.
+    // The first return instruction sets a sentinel; the second handler traps
+    // if it ran, so a later HLT rendezvous cannot satisfy this assertion.
     for machine in [&mut vm, &mut restored] {
         assert_eq!(
             machine.run(20, 21, 1000, false, &[], vec![]).unwrap(),
