@@ -244,7 +244,7 @@ impl Cli {
     }
 }
 
-// Private diagnostic evidence stays small and belongs only to this test's session.
+// Failure evidence stays small and belongs only to this test's private session.
 const DIAGNOSTIC_LIMIT: u64 = 8 * 1024 * 1024;
 
 fn diagnostic_bytes(path: &Path) -> Result<Vec<u8>> {
@@ -354,67 +354,7 @@ fn copy_worker_stderr(
     fs::write(destination, bytes).map_err(|e| e.to_string())
 }
 
-fn copy_attempt_files(
-    attempt: &Path,
-    directory: &Path,
-    label: &str,
-    require_worker_stderr: bool,
-) -> Result<()> {
-    let manifest = diagnostic_bytes(&attempt.join("manifest.json"))?;
-    let record =
-        seedbox_application::record::inspect_bytes(&manifest).map_err(|e| e.to_string())?;
-    fs::write(directory.join(format!("{label}-manifest.json")), manifest)
-        .map_err(|e| e.to_string())?;
-    let state = copy_state_report(
-        attempt,
-        &directory.join(format!(
-            "{label}-{}",
-            seedbox_application::evidence::STATE_REPORT
-        )),
-        &record.logs,
-    )?;
-    copy_oracle_page_hashes(
-        attempt,
-        &directory.join(format!("{label}-oracle-pages.out")),
-        &record.logs,
-        &state,
-    )?;
-    if require_worker_stderr || record.logs.contains_key("vmm.stderr") {
-        copy_worker_stderr(
-            attempt,
-            &directory.join(format!("{label}-vmm.stderr")),
-            &record.logs,
-        )?;
-    }
-    Ok(())
-}
-
 impl Cli {
-    fn capture_baseline_sample(&self, backend: Backend, baseline: &str) -> Result<()> {
-        if backend != Backend::Pv {
-            return Ok(());
-        }
-        let directory = self.directory.join("pv-baseline-sample");
-        let capture = || -> Result<()> {
-            let attempt = attempt_directory(&self.state, baseline)?;
-            fs::create_dir(&directory).map_err(|e| e.to_string())?;
-            copy_attempt_files(&attempt, &directory, "baseline", true)?;
-            let stderr = diagnostic_bytes(&directory.join("baseline-vmm.stderr"))?;
-            if final_oracle_pages(&String::from_utf8_lossy(&stderr)).is_empty() {
-                return Err(
-                    "private oracle page capture unavailable; build the test CLI with --features etcd-prep-tests"
-                        .into(),
-                );
-            }
-            Ok(())
-        };
-        capture().map_err(|error| {
-            format!("infrastructure error retaining PV baseline sample: {error}")
-        })?;
-        eprintln!("etcd PV baseline sample retained: {}", directory.display());
-        Ok(())
-    }
-
     async fn capture_comparison_failure(
         &self,
         scenario: &HangGuard,
@@ -457,7 +397,36 @@ impl Cli {
             let left = attempt_directory(&self.state, baseline)?;
             let right = attempt_directory(&self.state, repeated)?;
             for (label, attempt) in [("baseline", &left), (other, &right)] {
-                if let Err(error) = copy_attempt_files(attempt, &directory, label, false) {
+                let copy = || -> Result<()> {
+                    let manifest = diagnostic_bytes(&attempt.join("manifest.json"))?;
+                    let record = seedbox_application::record::inspect_bytes(&manifest)
+                        .map_err(|e| e.to_string())?;
+                    fs::write(directory.join(format!("{label}-manifest.json")), manifest)
+                        .map_err(|e| e.to_string())?;
+                    let state = copy_state_report(
+                        attempt,
+                        &directory.join(format!(
+                            "{label}-{}",
+                            seedbox_application::evidence::STATE_REPORT
+                        )),
+                        &record.logs,
+                    )?;
+                    copy_oracle_page_hashes(
+                        attempt,
+                        &directory.join(format!("{label}-oracle-pages.out")),
+                        &record.logs,
+                        &state,
+                    )?;
+                    if record.logs.contains_key("vmm.stderr") {
+                        copy_worker_stderr(
+                            attempt,
+                            &directory.join(format!("{label}-vmm.stderr")),
+                            &record.logs,
+                        )?;
+                    }
+                    Ok(())
+                };
+                if let Err(error) = copy() {
                     failure_capture::note(
                         &directory,
                         &format!("etcd {label} diagnostic capture failed: {error}"),
@@ -535,98 +504,12 @@ impl Cli {
             }
             _ => eprintln!("etcd baseline/{other} definition diff unavailable"),
         }
-        // Matching machines carry no signal; log every other part of the report.
-        let report = read(self.directory.join("failure/compare-state.json"))
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
-        if let Some(serde_json::Value::Object(mut report)) = report {
-            let machines = report.remove("machines");
-            for machine in machines
-                .iter()
-                .flat_map(|m| m.as_array().into_iter().flatten())
-            {
-                if machine["full_state"]["matches"] != serde_json::Value::Bool(true) {
-                    eprintln!("etcd compare-state machine: {}", bounded_json(machine));
-                }
-            }
-            eprintln!("etcd compare-state: {}", bounded_json(&report.into()));
-        }
-        if let Some(bytes) = read(self.directory.join("failure/compare-ram-pages.json")) {
-            eprintln!(
-                "etcd compare-ram-pages: {}",
-                String::from_utf8_lossy(&bytes[..bytes.len().min(SUMMARY_BYTES)])
-            );
-        }
-        let pages = |label: &str| {
-            read(self.directory.join(format!("failure/{label}-vmm.stderr")))
-                .map(|bytes| final_oracle_pages(&String::from_utf8_lossy(&bytes)))
-        };
-        if let (Some(baseline), Some(compared)) = (pages("baseline"), pages(other)) {
-            if baseline.is_empty() || compared.is_empty() {
-                eprintln!(
-                    "etcd oracle page capture unavailable; build the test CLI with --features etcd-prep-tests"
-                );
-            }
-            for (gpa, a) in &baseline {
-                let Some(b) = compared.get(gpa) else { continue };
-                let rows = (0..a.len().min(b.len()))
-                    .step_by(16)
-                    .filter(|&row| a[row..row + 16] != b[row..row + 16])
-                    .collect::<Vec<_>>();
-                eprintln!(
-                    "etcd oracle page {gpa}: {} differing 16-byte rows",
-                    rows.len()
-                );
-                for row in rows.into_iter().take(SUMMARY_LINES) {
-                    eprintln!("  +{row:#05x} {} | {}", row_hex(a, row), row_hex(b, row));
-                }
+        if let Some(bytes) = read(self.directory.join("failure/compare-state.json")) {
+            for line in String::from_utf8_lossy(&bytes).lines().take(SUMMARY_LINES) {
+                eprintln!("etcd compare-state: {line}");
             }
         }
     }
-}
-
-/// The last captured bytes of each private oracle page, keyed by its GPA.
-fn final_oracle_pages(stderr: &str) -> std::collections::BTreeMap<String, Vec<u8>> {
-    let mut pages = std::collections::BTreeMap::new();
-    for line in stderr.lines() {
-        let Some(fields) = line.strip_prefix("SEEDBOX_PRIVATE_PV_ORACLE_PAGE ") else {
-            continue;
-        };
-        let field = |name: &str| {
-            fields
-                .split_whitespace()
-                .find_map(|word| word.strip_prefix(name))
-        };
-        let (Some(gpa), Some(encoded)) = (field("gpa="), field("bytes=")) else {
-            continue;
-        };
-        let bytes = (0..encoded.len() / 2)
-            .filter_map(|i| u8::from_str_radix(encoded.get(i * 2..i * 2 + 2)?, 16).ok())
-            .collect::<Vec<_>>();
-        if bytes.len() == 4096 {
-            pages.insert(gpa.to_string(), bytes);
-        }
-    }
-    pages
-}
-
-fn row_hex(page: &[u8], row: usize) -> String {
-    page[row..row + 16]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn bounded_json(value: &serde_json::Value) -> String {
-    let mut text = value.to_string();
-    if text.len() > SUMMARY_BYTES {
-        let mut end = SUMMARY_BYTES;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-        text.push_str("...");
-    }
-    text
 }
 
 const SUMMARY_BYTES: usize = 4096;
@@ -811,9 +694,6 @@ async fn scenario(cli: &Cli, backend: Backend, guard: &HangGuard, project: &Path
         &words(&["delete", replay.simulation.as_str()]),
     )
     .await?;
-    // Temporary PR348 diagnostic: keep one successful PV baseline per round
-    // only after every guest/comparison check has passed, before deleting it.
-    cli.capture_baseline_sample(backend, &baseline_id)?;
     cli.invoke(guard, "delete-baseline", &words(&["delete", &baseline_id]))
         .await?;
     // Diagnostics only; never assert a host speed or compare timings as evidence.
@@ -927,7 +807,8 @@ mod tests {
     use super::*;
     use std::{collections::BTreeMap, ffi::OsStr};
 
-    const CAPTURED_PAGE_GPAS: [u64; 4] = [0x0440_c000, 0x0459_1000, 0x0459_2000, 0x0459_8000];
+    const RAM_REGIONS: [(u64, u64); 3] = [(0x1000, 4096), (0x4000, 8192), (0x8000, 4096)];
+    const WORKER_STDERR: &[u8] = b"fixture worker diagnostic\0\xff\n";
 
     fn retained_attempt(state: &Path, id: &str, content: &[u8]) {
         use seedbox_application::{evidence::*, execution::*, record::*, store::ContentDigest};
@@ -938,15 +819,10 @@ mod tests {
         let output = attempt.join("output/machines");
         fs::create_dir_all(&output).unwrap();
         let digest = ContentDigest::of(content);
-        let layout = [
-            0x0440_c000u64.to_le_bytes().as_slice(),
-            4096u64.to_le_bytes().as_slice(),
-            0x0459_1000u64.to_le_bytes().as_slice(),
-            (2 * 4096u64).to_le_bytes().as_slice(),
-            0x0459_8000u64.to_le_bytes().as_slice(),
-            4096u64.to_le_bytes().as_slice(),
-        ]
-        .concat();
+        let layout = RAM_REGIONS
+            .into_iter()
+            .flat_map(|(base, length)| base.to_le_bytes().into_iter().chain(length.to_le_bytes()))
+            .collect::<Vec<_>>();
         let raw_pages = [
             [content[0]; 4096],
             [content[1]; 4096],
@@ -970,20 +846,10 @@ mod tests {
                         ("ram".into(), ContentDigest::of(&ram)),
                         ("ram_regions".into(), ContentDigest::of(&layout)),
                     ]),
-                    regions: vec![
-                        RamRegion {
-                            base: 0x0440_c000,
-                            length: 4096,
-                        },
-                        RamRegion {
-                            base: 0x0459_1000,
-                            length: 2 * 4096,
-                        },
-                        RamRegion {
-                            base: 0x0459_8000,
-                            length: 4096,
-                        },
-                    ],
+                    regions: RAM_REGIONS
+                        .into_iter()
+                        .map(|(base, length)| RamRegion { base, length })
+                        .collect(),
                     page_log: "oracle.pages".into(),
                 },
             )]),
@@ -1006,19 +872,7 @@ mod tests {
         .concat();
         fs::write(output.join("oracle.witness-log"), &samples).unwrap();
         fs::write(output.join("oracle.pages"), &pages).unwrap();
-        let worker_stderr = CAPTURED_PAGE_GPAS
-            .into_iter()
-            .zip(raw_pages.iter())
-            .zip(page_digests.iter())
-            .map(|((gpa, page), digest)| {
-            format!(
-                "SEEDBOX_PRIVATE_PV_ORACLE_PAGE pid=7 sequence=0 seed=123 boot=1 time_ns=100 gpa={gpa:#010x} sha256={} bytes={}\n",
-                digest.hex(),
-                page.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
-            )
-        })
-        .collect::<String>();
-        fs::write(attempt.join("output/vmm.stderr"), &worker_stderr).unwrap();
+        fs::write(attempt.join("output/vmm.stderr"), WORKER_STDERR).unwrap();
         let identity = RunIdentity {
             version: FORMAT_VERSION,
             seed: 123,
@@ -1077,16 +931,13 @@ mod tests {
                     "machines/oracle.witness-log".into(),
                     ContentDigest::of(&samples),
                 ),
-                (
-                    "vmm.stderr".into(),
-                    ContentDigest::of(worker_stderr.as_bytes()),
-                ),
+                ("vmm.stderr".into(), ContentDigest::of(WORKER_STDERR)),
             ]),
         };
         write_record(&attempt, &record).unwrap();
     }
 
-    fn assert_captured_pages(directory: &Path, label: &str, fills: [u8; 4]) {
+    fn assert_captured_state(directory: &Path, label: &str, fills: [u8; 4]) {
         use seedbox_application::{record::inspect_bytes, store::ContentDigest};
         let manifest = fs::read(directory.join(format!("{label}-manifest.json"))).unwrap();
         let record = inspect_bytes(&manifest).unwrap();
@@ -1096,163 +947,18 @@ mod tests {
             record.logs.get("machines/oracle.pages"),
             Some(&ContentDigest::of(&vector))
         );
-        let stderr = fs::read_to_string(directory.join(format!("{label}-vmm.stderr"))).unwrap();
-        let markers = stderr
-            .lines()
-            .filter(|line| line.starts_with("SEEDBOX_PRIVATE_PV_ORACLE_PAGE "))
-            .collect::<Vec<_>>();
-        assert_eq!(markers.len(), 4);
-        for (index, (line, gpa, fill)) in markers
-            .into_iter()
-            .zip(CAPTURED_PAGE_GPAS)
-            .zip(fills)
-            .map(|((line, gpa), fill)| (line, gpa, fill))
-            .enumerate()
-        {
-            assert!(line.contains(&format!("gpa={gpa:#010x}")), "{line}");
-            let hash = line
-                .split_whitespace()
-                .find_map(|word| word.strip_prefix("sha256="))
-                .unwrap();
-            let encoded = line
-                .split_whitespace()
-                .find_map(|word| word.strip_prefix("bytes="))
-                .unwrap();
-            assert_eq!(encoded.len(), 8192);
-            let (pairs, remainder) = encoded.as_bytes().as_chunks::<2>();
-            assert!(remainder.is_empty());
-            let page = pairs
-                .iter()
-                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
-                .collect::<Vec<_>>();
-            assert_eq!(page, vec![fill; 4096]);
-            let digest = ContentDigest::of(&page);
-            assert_eq!(hash, digest.hex());
+        let stderr = fs::read(directory.join(format!("{label}-vmm.stderr"))).unwrap();
+        assert_eq!(stderr, WORKER_STDERR);
+        assert_eq!(
+            record.logs.get("vmm.stderr"),
+            Some(&ContentDigest::of(&stderr))
+        );
+        for (index, fill) in fills.into_iter().enumerate() {
+            let digest = ContentDigest::of(&[fill; 4096]);
+            let hash = digest.hex();
             assert_eq!(
                 &vector[index * 8..(index + 1) * 8],
                 &u64::from_str_radix(&hash[..16], 16).unwrap().to_be_bytes()
-            );
-        }
-    }
-
-    #[test]
-    fn successful_pv_baseline_sample_preserves_verified_bytes_after_cleanup() {
-        let temporary = tempfile::tempdir().unwrap();
-        let state = temporary.path().join("state");
-        fs::create_dir_all(&state).unwrap();
-        retained_attempt(&state, "awqwjt9m", b"baseline");
-        let attempt = attempt_directory(&state, "awqwjt9m").unwrap();
-        let expected = [
-            ("manifest.json", "baseline-manifest.json"),
-            (
-                "output/machines/driver-state.json",
-                "baseline-driver-state.json",
-            ),
-            ("output/machines/oracle.pages", "baseline-oracle-pages.out"),
-            ("output/vmm.stderr", "baseline-vmm.stderr"),
-        ]
-        .map(|(source, destination)| (destination, fs::read(attempt.join(source)).unwrap()));
-        let cli = Cli {
-            executable: PathBuf::new(),
-            directory: temporary.path().to_owned(),
-            state: state.clone(),
-        };
-        let sample = temporary.path().join("pv-baseline-sample");
-        cli.capture_baseline_sample(Backend::Tcg, "awqwjt9m")
-            .unwrap();
-        assert!(!sample.exists());
-        cli.capture_baseline_sample(Backend::Pv, "awqwjt9m")
-            .unwrap();
-        fs::remove_dir_all(state).unwrap();
-        assert_eq!(fs::read_dir(&sample).unwrap().count(), expected.len());
-        for (name, bytes) in expected {
-            assert_eq!(fs::read(sample.join(name)).unwrap(), bytes, "{name}");
-        }
-        assert_captured_pages(&sample, "baseline", *b"base");
-    }
-
-    #[test]
-    fn successful_baseline_sample_reports_unverified_inputs_as_infrastructure_errors() {
-        for (name, expected) in [
-            (
-                Some("output/machines/driver-state.json"),
-                "stopped-state report log digest mismatch",
-            ),
-            (
-                Some("output/machines/oracle.pages"),
-                "oracle page hash log digest mismatch",
-            ),
-            (
-                Some("output/vmm.stderr"),
-                "retained worker stderr digest mismatch",
-            ),
-            (None, "retained worker stderr is unavailable"),
-        ] {
-            let temporary = tempfile::tempdir().unwrap();
-            let state = temporary.path().join("state");
-            fs::create_dir_all(&state).unwrap();
-            retained_attempt(&state, "awqwjt9m", b"baseline");
-            let attempt = attempt_directory(&state, "awqwjt9m").unwrap();
-            if let Some(name) = name {
-                let path = attempt.join(name);
-                let mut bytes = fs::read(&path).unwrap();
-                bytes[0] ^= 1;
-                fs::write(path, bytes).unwrap();
-            } else {
-                let mut record = seedbox_application::record::inspect_bytes(
-                    &fs::read(attempt.join("manifest.json")).unwrap(),
-                )
-                .unwrap();
-                record.logs.remove("vmm.stderr");
-                seedbox_application::record::write_record(&attempt, &record).unwrap();
-            }
-            let cli = Cli {
-                executable: PathBuf::new(),
-                directory: temporary.path().to_owned(),
-                state,
-            };
-            let error = cli
-                .capture_baseline_sample(Backend::Pv, "awqwjt9m")
-                .unwrap_err();
-            assert!(
-                error.starts_with("infrastructure error retaining PV baseline sample:"),
-                "{error}"
-            );
-            assert!(error.contains(expected), "{name:?}: {error}");
-        }
-    }
-
-    #[test]
-    fn successful_baseline_sample_requires_raw_oracle_page_markers() {
-        use seedbox_application::{record::*, store::ContentDigest};
-        for stderr in [b"".as_slice(), b"ordinary worker stderr\n".as_slice()] {
-            let temporary = tempfile::tempdir().unwrap();
-            let state = temporary.path().join("state");
-            fs::create_dir_all(&state).unwrap();
-            retained_attempt(&state, "awqwjt9m", b"baseline");
-            let attempt = attempt_directory(&state, "awqwjt9m").unwrap();
-            fs::write(attempt.join("output/vmm.stderr"), stderr).unwrap();
-            let mut record =
-                inspect_bytes(&fs::read(attempt.join("manifest.json")).unwrap()).unwrap();
-            record
-                .logs
-                .insert("vmm.stderr".into(), ContentDigest::of(stderr));
-            write_record(&attempt, &record).unwrap();
-            let cli = Cli {
-                executable: PathBuf::new(),
-                directory: temporary.path().to_owned(),
-                state,
-            };
-            let error = cli
-                .capture_baseline_sample(Backend::Pv, "awqwjt9m")
-                .unwrap_err();
-            assert!(
-                error.starts_with("infrastructure error retaining PV baseline sample:"),
-                "{error}"
-            );
-            assert!(
-                error.contains("private oracle page capture unavailable"),
-                "{error}"
             );
         }
     }
@@ -1316,8 +1022,8 @@ esac
             let bytes = fs::read(failure.join(name)).unwrap();
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
         }
-        assert_captured_pages(&failure, "baseline", *b"base");
-        assert_captured_pages(&failure, "replay", *b"repl");
+        assert_captured_state(&failure, "baseline", *b"base");
+        assert_captured_state(&failure, "replay", *b"repl");
         assert!(fs::read_to_string(failure.join("replay-oracle-log.stdout"))
             .unwrap()
             .contains("RESULT pass"));

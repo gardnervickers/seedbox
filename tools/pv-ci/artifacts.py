@@ -8,13 +8,12 @@ FILES = 128
 
 
 def priority(path):
-    # Failures precede private PV baseline samples, then routine successful logs.
+    # Test-owned failure observations must precede routine successful run output.
     # Within failures, retain primary errors and guest assertion logs first.
     failure = "failure" in path.parts
-    category = 0 if failure else (1 if "pv-baseline-sample" in path.parts else 2)
     rank = 0 if path.name == "summary.txt" else (
         1 if "log" in path.name or path.name in ("replay.stdout", "replay.stderr") else 2)
-    return (category, rank if failure else 0, path)
+    return (not failure, rank if failure else 0, path)
 
 
 def collect(root):
@@ -55,7 +54,7 @@ def collect(root):
     # there are too many priority diagnostics to retain them all.
     summary = (
         "Diagnostics limited to 64 MiB total, 8 MiB/file, 128 diagnostic files; VM disks are omitted.\n"
-        "Test failure directories precede PV baseline samples, then routine output.\n"
+        "Test failure directories take priority over routine output.\n"
         f"Retained files: {count}; omitted eligible files: {omitted}; truncated files: {truncated}.\n"
         "Omission paths (first 12, names bounded to 200 characters):\n" + "\n".join(details) + "\n")
     if len(summary.encode()) > 4096:

@@ -51,9 +51,7 @@ jobs:
     # A skipped job satisfies the required check; a skipped workflow never does.
     # Run conservatively if change detection fails rather than skipping tests.
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.run_tests == 'true')
-    # Temporary PR348 reproduction: exercise the older hosted KVM kernel with
-    # raw oracle-page capture enabled. Keep the full acceptance checks intact.
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 100
     env:
       # Use the Docker engine checked below, even when Podman's socket exists.
@@ -140,15 +138,7 @@ jobs:
             du -sh /nix/store
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Portable prerequisites and PV application acceptance
-        # Temporary PR348 reproduction: share one host CPU across workers.
-        run: |
-          python3 - <<'PYTHON'
-          import os
-          cpu = min(os.sched_getaffinity(0))
-          print(f'PR348 host CPU affinity: {cpu}', flush=True)
-          os.sched_setaffinity(0, {cpu})
-          os.execvp('nix', ['nix', 'develop', '--command', 'bash', 'harness/check.sh', 'linux-apps'])
-          PYTHON
+        run: nix develop --command bash harness/check.sh linux-apps
       - name: Bound diagnostic artifact storage
         if: always()
         # Privileged KVM tests leave root-owned manifests and logs.
