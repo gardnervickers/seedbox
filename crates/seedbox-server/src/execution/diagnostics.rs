@@ -36,8 +36,36 @@ impl ExecutionService {
             .evidence
             .lock()
             .map_err(|_| catalogue::Error::StorageFailed)?;
+        let resource = self.manager.describe(id)?;
+        let out_of_memory_kills = self
+            .manager
+            .world(id)?
+            .machines
+            .into_iter()
+            .flat_map(|machine| {
+                let memory_mib =
+                    resource
+                        .spec
+                        .configuration
+                        .services
+                        .get(&machine.name)
+                        .map(|service| {
+                            service
+                                .memory_mb
+                                .unwrap_or(resource.spec.configuration.machine.memory_mb)
+                        });
+                machine.out_of_memory_kills.into_iter().map(move |report| {
+                    seedbox_api::OutOfMemoryDiagnostic {
+                        machine: machine.name.clone(),
+                        report,
+                        memory_mib,
+                    }
+                })
+            })
+            .collect();
         let Some(record) = self.diagnostic_record(id)? else {
             return Ok(seedbox_api::DiagnosticFiles {
+                out_of_memory_kills,
                 files: Vec::new(),
                 omissions: BTreeMap::from([(
                     "record".into(),
@@ -54,6 +82,7 @@ impl ExecutionService {
             });
         }
         Ok(seedbox_api::DiagnosticFiles {
+            out_of_memory_kills,
             files,
             omissions: record.omitted_logs,
         })

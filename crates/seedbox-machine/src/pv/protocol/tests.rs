@@ -354,3 +354,50 @@ fn realtime_steps_share_command_ids_and_acknowledge_as_step() {
         }]
     );
 }
+
+#[test]
+fn oom_is_explicit_ordered_and_preserved_in_partial_snapshot() {
+    let mut codec = Codec::default();
+    assert!(codec
+        .receive(&write(1, b"SBX_OOM1 31 300948 "))
+        .unwrap()
+        .is_empty());
+    // Codec persistence retains the frame cursor rather than regenerating reports.
+    use crate::snapshot::{DecodeLimits, Reader, Record, Writer};
+    let mut saved = Vec::new();
+    codec.encode(&mut Writer::new(&mut saved)).unwrap();
+    let limits = DecodeLimits {
+        encoded_bytes: 4096,
+        allocation_bytes: 4096,
+        collection_items: 64,
+        total_items: 64,
+        string_bytes: 256,
+        blob_bytes: 256,
+    };
+    let mut bytes = saved.as_slice();
+    let mut reader = Reader::new(&mut bytes, saved.len() as u64, 0, &limits).unwrap();
+    let mut codec = Codec::decode(&mut reader).unwrap();
+    reader.finish().unwrap();
+    let events = codec
+        .receive(&write(2, b"1 707974686f6e\nSBX_EXIT1 status=137\n"))
+        .unwrap();
+    assert!(
+        matches!(&events[0], Event::Response { time: 2, response: Response::OutOfMemoryKill { kill } } if kill.pid == 31 && kill.application && kill.anon_rss_kib == 300948)
+    );
+    assert_eq!(
+        events[1],
+        response(2, Response::ApplicationOutcome { code: 137 })
+    );
+    let mut plain = Codec::default();
+    assert_eq!(
+        plain.receive(&write(1, b"SBX_EXIT1 status=137\n")).unwrap(),
+        vec![response(1, Response::ApplicationOutcome { code: 137 })]
+    );
+    let mut reboot = Codec::default();
+    assert_eq!(
+        reboot
+            .receive(&write(3, b"SBX_EXIT1 status=137\n"))
+            .unwrap(),
+        vec![response(3, Response::ApplicationOutcome { code: 137 })]
+    );
+}

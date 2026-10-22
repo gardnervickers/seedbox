@@ -42,6 +42,17 @@ Every boot adds the machine counter to that epoch; kernel monotonic time alone w
 Realtime steps change kernel state and expire with the boot, whereas Driver-owned drift survives it.
 The [supervisor](../crates/seedbox-machine/src/pv/guest_service_init.c) initializes realtime before announcing Ready.
 
+## Guest out-of-memory reports
+
+The supervisor retains `/dev/kmsg` before entering the application image and
+relays the supported Linux kernel's OOM victim records on the management channel.
+Reports carry the victim PID, task name and anonymous RSS, before the application
+outcome. Only a report naming the supervised leader explains `137 (out of memory)`;
+an ordinary SIGKILL remains `137`. Boot identity comes from the Driver; each outcome consumes its own pending
+report, so restarted applications cannot reuse an earlier kill. The world retains
+the newest 64 reports, including their boots; diagnostics suggests raising `memoryMiB`.
+Lost kernel records fail supervision with an I/O error rather than guessing a victim.
+
 ## Same-time controls
 
 Committed outputs precede due timeline items, then frames, then timer wakeups; same-time items are FIFO.

@@ -146,6 +146,14 @@ impl Receiver {
                                         incarnation: observation.incarnation,
                                     },
                                 ),
+                                Kind::OutOfMemoryKill { kill } => event(
+                                    last_time,
+                                    EventKind::OutOfMemoryKill {
+                                        machine: observation.machine,
+                                        incarnation: observation.incarnation,
+                                        kill,
+                                    },
+                                ),
                                 Kind::MachineExited { code } => event(
                                     last_time,
                                     EventKind::MachineExited {
@@ -264,9 +272,21 @@ mod tests {
                     transition: seedbox_engine_protocol::observation::MachineTransition::Paused,
                 },
             ),
-            (4, 20, Kind::MachineExited { code: 7 }),
             (
-                5,
+                4,
+                20,
+                Kind::OutOfMemoryKill {
+                    kill: seedbox_engine_protocol::out_of_memory::Kill {
+                        pid: 31,
+                        command: "allocator".into(),
+                        anon_rss_kib: 300948,
+                        application: true,
+                    },
+                },
+            ),
+            (5, 21, Kind::MachineExited { code: 137 }),
+            (
+                6,
                 30,
                 Kind::FaultChanged {
                     id: 1,
@@ -279,7 +299,7 @@ mod tests {
                 },
             ),
             (
-                6,
+                7,
                 30,
                 Kind::Frames {
                     frames: vec![frame.clone()],
@@ -321,10 +341,23 @@ mod tests {
                 (20, EventKind::SourceGap { first: 3, last: 3 }),
                 (
                     20,
+                    EventKind::OutOfMemoryKill {
+                        machine: "oracle".into(),
+                        incarnation: 2,
+                        kill: seedbox_engine_protocol::out_of_memory::Kill {
+                            pid: 31,
+                            command: "allocator".into(),
+                            anon_rss_kib: 300948,
+                            application: true,
+                        },
+                    }
+                ),
+                (
+                    21,
                     EventKind::MachineExited {
                         machine: "oracle".into(),
                         incarnation: 2,
-                        code: 7
+                        code: 137
                     }
                 ),
                 (

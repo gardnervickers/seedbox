@@ -604,3 +604,56 @@ fn event_chain_ignores_absent_observation_socket_and_worker_count() {
     assert!(!results[0].is_empty());
     assert_eq!(results[0], results[1]);
 }
+
+#[test]
+fn oom_publication_keeps_the_emitting_boot_and_kernel_victim() {
+    use seedbox_driver::driver::{Event, EventKind, MachineId, MachineResponse};
+    use seedbox_engine_protocol::{
+        observation::{Kind, Observation},
+        out_of_memory::Kill,
+    };
+    use std::os::unix::net::UnixDatagram;
+    let (root, mut worker, _) = worker(1);
+    let path = root.path().join("oom-observation.sock");
+    let receiver = UnixDatagram::bind(&path).unwrap();
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let mut publisher = Publisher::connect(Some(&path)).unwrap();
+    let kill = Kill {
+        pid: 31,
+        command: "allocator".into(),
+        anon_rss_kib: 300948,
+        application: true,
+    };
+    let sequence = worker.state.world.publication.session.next_driver_sequence;
+    let position = seedbox_driver::driver::Position {
+        boundary_index: 0,
+        completed_quanta: 0,
+        at: Timestamp::from_nanos(10),
+    };
+    publisher
+        .publish(
+            &mut worker.state,
+            &worker.names,
+            Event {
+                sequence,
+                position,
+                at: Timestamp::from_nanos(10),
+                kind: EventKind::Output(MachineResponse {
+                    machine: MachineId::ORACLE,
+                    boot: 7,
+                    at: Timestamp::from_nanos(10),
+                    payload: Response::OutOfMemoryKill { kill: kill.clone() },
+                }),
+            },
+        )
+        .unwrap();
+    let mut bytes = [0; 4096];
+    let size = receiver.recv(&mut bytes).unwrap();
+    let record: Observation = serde_json::from_slice(&bytes[..size]).unwrap();
+    assert_eq!(record.machine, "oracle");
+    assert_eq!(record.incarnation, 7);
+    assert_eq!(record.simulated_time_ns, 10);
+    assert_eq!(record.kind, Kind::OutOfMemoryKill { kill });
+}

@@ -217,6 +217,13 @@ impl Publisher {
                             )?;
                         }
                     }
+                    Response::OutOfMemoryKill { kill } => self.emit(
+                        state,
+                        machine,
+                        output.boot,
+                        at,
+                        Kind::OutOfMemoryKill { kill: kill.clone() },
+                    )?,
                     Response::ApplicationOutcome { code } => self.emit(
                         state,
                         machine,

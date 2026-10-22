@@ -138,9 +138,11 @@ int sbx_service_feed(struct sbx_service *s, const void *opaque, size_t length) {
 }
 int sbx_service_collect(struct sbx_service *s, int *exit_code) {
     if (s->poisoned) { errno = EPIPE; return -1; }
+    pid_t application = s->supervisor.child;
     int result = sbx_supervisor_collect(&s->supervisor, exit_code, sbx_service_log, s);
     if (result < 0) s->poisoned = 1;
     if (result <= 0) return result;
+    if (s->before_outcome && s->before_outcome(application)) { s->poisoned = 1; return -1; }
     char frame[64];
     int size = snprintf(frame, sizeof(frame), "SBX_EXIT1 status=%d\n", *exit_code);
     if (size < 0 || (size_t)size >= sizeof(frame)) { errno = EOVERFLOW; return -1; }

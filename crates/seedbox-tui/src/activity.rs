@@ -628,6 +628,8 @@ mod tests {
             incarnation: 0,
             condition: seedbox_api::MachineCondition::Ready,
             exit_code: None,
+            out_of_memory_kills: Vec::new(),
+            application_oom_killed: false,
             throttle_permille: None,
             oracle: false,
             last_transition: None,

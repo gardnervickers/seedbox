@@ -295,8 +295,7 @@ pub(super) fn world(server: &ServerArgs, id: &SimulationId, json: bool) -> Resul
                     m.name.clone(),
                     output::word(&m.condition).to_lowercase(),
                     m.incarnation.to_string(),
-                    m.exit_code
-                        .map_or_else(|| "-".into(), |code| code.to_string()),
+                    m.exit_description(),
                     if m.oracle { "yes".into() } else { "-".into() },
                 ]
             })
