@@ -8,7 +8,25 @@ use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(all(target_arch = "x86_64", feature = "test-support"))]
-const PRIVATE_ORACLE_PAGE_GPAS: [u64; 4] = [0x0440_c000, 0x0459_1000, 0x0459_2000, 0x0459_8000];
+const PRIVATE_ORACLE_PAGE_GPAS: [u64; 17] = [
+    0x0440_c000,
+    0x0459_0000,
+    0x0459_1000,
+    0x0459_2000,
+    0x0459_3000,
+    0x0459_4000,
+    0x0459_5000,
+    0x0459_6000,
+    0x0459_7000,
+    0x0459_8000,
+    0x0459_9000,
+    0x0459_a000,
+    0x0459_b000,
+    0x0459_c000,
+    0x0459_d000,
+    0x0459_e000,
+    0x0459_f000,
+];
 #[cfg(all(target_arch = "x86_64", feature = "test-support"))]
 const PRIVATE_ORACLE_CAPTURE_LIMIT: usize = 32;
 #[cfg(all(target_arch = "x86_64", feature = "test-support"))]
@@ -57,9 +75,8 @@ impl<B: Backend> Machine<B> {
         )?);
         parts.push(part("timer_policy", &self.state.policy)?);
         let layout = self.ram.layout()?;
-        // Private PR329 test diagnostic: copy only the four specific oracle
-        // pages seen in retained CI mismatches. This is not future coverage;
-        // default builds compile it out.
+        // Private test diagnostic: copy the observed oracle mismatch pages
+        // and their bounded neighboring window. Default builds compile it out.
         #[cfg(all(target_arch = "x86_64", feature = "test-support"))]
         let private_pages = self
             .state
@@ -126,8 +143,9 @@ impl<B: Backend> Machine<B> {
         #[cfg(all(target_arch = "x86_64", feature = "test-support"))]
         if let Some((seed, boot, private_pages)) = private_pages {
             // Boot-end evidence may precede the final service state. Retain up
-            // to 32 stopped captures (128 raw pages, 512 KiB) per worker; the
-            // final markers must match the retained final page vector.
+            // to 32 stopped captures (544 raw pages, 2176 KiB) per worker;
+            // hex plus bounded headers stay below 8 MiB. The final markers
+            // must match the retained final page vector.
             let sequence = PRIVATE_ORACLE_CAPTURE_COUNT.fetch_add(1, Ordering::Relaxed);
             if sequence < PRIVATE_ORACLE_CAPTURE_LIMIT {
                 for (gpa, page) in private_pages {
