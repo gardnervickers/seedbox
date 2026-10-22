@@ -704,11 +704,6 @@ fn native<C: Commands>(
                 "--message-format=json",
             ]),
         );
-        if suites.contains(&Suite::LinuxApps) {
-            // The smoke test launches this CLI as its worker too. Enable its
-            // private page capture here, not only in the libtest executable.
-            build.args.extend(words(&["--features", "etcd-prep-tests"]));
-        }
         build.environment.insert(
             "SEEDBOX_BUILD_DRIVER_RUNTIME".into(),
             assets
