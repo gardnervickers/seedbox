@@ -9,8 +9,8 @@ use std::{
 };
 
 pub(super) fn nix_output(root: &Path, name: &str) -> Result<PathBuf> {
-    // Request submodules on the initial fetch: self.submodules alone can lock
-    // a clean parent before Nix notices edits confined to a child worktree.
+    // Asset builds include live submodule edits on the initial fetch. The
+    // development shell deliberately uses a reference without submodules.
     let mut path = String::new();
     for &byte in root.as_os_str().as_encoded_bytes() {
         if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {

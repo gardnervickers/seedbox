@@ -74,11 +74,13 @@ impl Fixture {
         let parent = directory.path().join("upstream seedbox");
         repo(&parent);
         fs::create_dir(parent.join("tools")).unwrap();
-        fs::copy(
-            root().join("tools/dev-flake.sh"),
-            parent.join("tools/dev-flake.sh"),
-        )
-        .unwrap();
+        for tool in ["dev-flake.sh", "bootstrap-submodules.sh"] {
+            fs::copy(
+                root().join("tools").join(tool),
+                parent.join("tools").join(tool),
+            )
+            .unwrap();
+        }
         fs::copy(root().join(".envrc"), parent.join(".envrc")).unwrap();
         git(
             &parent,
@@ -119,6 +121,16 @@ impl Fixture {
                     "-c",
                     &format!(
                         r#"{prelude}
+git() {{
+  local argument
+  for argument in "$@"; do
+    case "$argument" in
+      submodule|fetch|clone) printf 'unexpected Git mutation: %s\n' "$*" >&2; return 77 ;;
+    esac
+  done
+  command git "$@"
+}}
+export -f git
 watch_file() {{ :; }}
 use() {{ printf '%s\n' "$@" > "$BOOTSTRAP_FLAKE"; }}
 source .envrc
@@ -135,19 +147,33 @@ source .envrc
         assert!(output.status.success(), "{}", diagnostic(&output));
         let args = fs::read_to_string(self.directory.path().join("flake-args")).unwrap();
         assert!(args.starts_with("flake\ngit+file:///"), "{args}");
-        assert!(args.ends_with("?submodules=1\n"), "{args}");
+        assert!(!args.contains("?"), "{args}");
         args
+    }
+
+    fn bootstrap(&self, checkout: &Path) -> Output {
+        run(
+            command("bash", checkout).arg("tools/bootstrap-submodules.sh"),
+            30,
+        )
+    }
+
+    fn bootstrap_successfully(&self, checkout: &Path) {
+        let output = self.bootstrap(checkout);
+        assert!(output.status.success(), "{}", diagnostic(&output));
     }
 }
 
 #[test]
-fn fresh_clone_initializes_nested_gitlinks_and_encodes_direnv_reference() {
+fn fresh_shell_entry_excludes_missing_submodules_and_encodes_direnv_reference() {
     let fixture = Fixture::new();
     let dr = fixture.checkout.join("vendor/dynamorio");
     assert!(dr.is_dir());
     assert!(!dr.join(".git").exists());
     let args = fixture.load_successfully(&fixture.checkout);
-    assert!(args.contains("checkout%20%23%3F%25%20space?"), "{args}");
+    assert!(args.contains("checkout%20%23%3F%25%20space\n"), "{args}");
+    assert!(!dr.join(".git").exists());
+    fixture.bootstrap_successfully(&fixture.checkout);
     assert!(git(&fixture.checkout, &["diff", "--exit-code"]).is_empty());
     assert!(git(&dr, &["diff", "--exit-code"]).is_empty());
     for name in ["elfutils", "libipt space #?%", "zlib"] {
@@ -182,7 +208,7 @@ fn local_work(repo: &Path) {
 #[test]
 fn missing_nested_dependency_preserves_existing_heads_branches_and_index_bytes() {
     let fixture = Fixture::new();
-    fixture.load_successfully(&fixture.checkout);
+    fixture.bootstrap_successfully(&fixture.checkout);
     let dr = fixture.checkout.join("vendor/dynamorio");
     let existing = dr.join("third_party/zlib");
     local_work(&dr);
@@ -191,7 +217,7 @@ fn missing_nested_dependency_preserves_existing_heads_branches_and_index_bytes()
     fs::remove_dir_all(&missing).unwrap();
     let expected_dr = snapshot(&dr);
     let expected_existing = snapshot(&existing);
-    fixture.load_successfully(&fixture.checkout);
+    fixture.bootstrap_successfully(&fixture.checkout);
     assert!(missing.join(".git").is_file());
     assert_eq!(snapshot(&dr), expected_dr);
     assert_eq!(snapshot(&existing), expected_existing);
@@ -203,19 +229,20 @@ fn missing_nested_dependency_preserves_existing_heads_branches_and_index_bytes()
 }
 
 #[test]
-fn repeated_load_does_not_update_or_fetch_initialized_checkouts() {
+fn repeated_bootstrap_does_not_update_or_fetch_initialized_checkouts() {
     let fixture = Fixture::new();
-    fixture.load_successfully(&fixture.checkout);
+    fixture.bootstrap_successfully(&fixture.checkout);
     let dr = fixture.checkout.join("vendor/dynamorio");
-    // Fetching any source now fails: a second load must need none of them.
+    // Fetching any source now fails: repeated bootstrap must need none of them.
     fs::remove_dir_all(fixture.directory.path().join("upstream dr")).unwrap();
     for name in ["elfutils", "libipt space #?%", "zlib"] {
         fs::remove_dir_all(fixture.directory.path().join(format!("upstream {name}"))).unwrap();
     }
     let before = snapshot(&dr);
-    let output = fixture.load_script(
-        &fixture.checkout,
-        r#"
+    let output = run(
+        command("bash", &fixture.checkout).args([
+            "-c",
+            r#"
 git() {
   local argument
   for argument in "$@"; do
@@ -226,14 +253,17 @@ git() {
   command git "$@"
 }
 export -f git
+bash tools/bootstrap-submodules.sh
 "#,
+        ]),
+        30,
     );
     assert!(output.status.success(), "{}", diagnostic(&output));
     assert_eq!(snapshot(&dr), before);
 }
 
 #[test]
-fn linked_worktree_initializes_missing_sources_and_loads_its_own_reference() {
+fn linked_worktree_loads_its_own_reference_then_explicitly_initializes_sources() {
     let fixture = Fixture::new();
     let worktree = fixture.directory.path().join("linked #?% worktree");
     git(
@@ -249,14 +279,16 @@ fn linked_worktree_initializes_missing_sources_and_loads_its_own_reference() {
     );
     assert!(worktree.join(".git").is_file());
     let args = fixture.load_successfully(&worktree);
-    assert!(args.contains("linked%20%23%3F%25%20worktree?"), "{args}");
+    assert!(args.contains("linked%20%23%3F%25%20worktree\n"), "{args}");
+    assert!(!worktree.join("vendor/dynamorio/.git").exists());
+    fixture.bootstrap_successfully(&worktree);
     assert!(worktree
         .join("vendor/dynamorio/third_party/elfutils/.git")
         .is_file());
 }
 
 #[test]
-fn initialization_failure_stops_before_nix_with_recovery_guidance() {
+fn shell_entry_needs_no_remote_but_bootstrap_failure_has_recovery_guidance() {
     let fixture = Fixture::new();
     git(
         &fixture.checkout,
@@ -271,22 +303,25 @@ fn initialization_failure_stops_before_nix_with_recovery_guidance() {
                 .unwrap(),
         ],
     );
-    let output = fixture.load(&fixture.checkout);
+    fixture.load_successfully(&fixture.checkout);
+    let output = fixture.bootstrap(&fixture.checkout);
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("cannot initialize submodule"), "{stderr}");
-    assert!(stderr.contains("rerun bash tools/dev-flake.sh"), "{stderr}");
-    assert!(!fixture.directory.path().join("flake-args").exists());
+    assert!(
+        stderr.contains("rerun bash tools/bootstrap-submodules.sh"),
+        "{stderr}"
+    );
 }
 
 #[test]
 fn broken_existing_git_pointer_is_not_reinitialized() {
     let fixture = Fixture::new();
-    fixture.load_successfully(&fixture.checkout);
+    fixture.bootstrap_successfully(&fixture.checkout);
     let pointer = fixture.checkout.join("vendor/dynamorio/.git");
     fs::write(&pointer, b"gitdir: /nonexistent-fixture-gitdir\n").unwrap();
-    fs::remove_file(fixture.directory.path().join("flake-args")).unwrap();
-    let output = fixture.load(&fixture.checkout);
+    fixture.load_successfully(&fixture.checkout);
+    let output = fixture.bootstrap(&fixture.checkout);
     assert!(!output.status.success());
     assert!(String::from_utf8(output.stderr)
         .unwrap()
@@ -295,5 +330,4 @@ fn broken_existing_git_pointer_is_not_reinitialized() {
         fs::read(pointer).unwrap(),
         b"gitdir: /nonexistent-fixture-gitdir\n"
     );
-    assert!(!fixture.directory.path().join("flake-args").exists());
 }

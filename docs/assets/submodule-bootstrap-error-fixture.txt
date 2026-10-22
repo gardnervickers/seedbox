@@ -1,0 +1,11 @@
+FIXTURE — unavailable submodule remote
+Captured stderr; temporary checkout path shown as <fixture-checkout>.
+$ bash tools/bootstrap-submodules.sh <fixture-checkout>
+Submodule 'vendor/dynamorio' (/fixture/missing-source) registered for path 'vendor/dynamorio'
+fatal: repository '/fixture/missing-source' does not exist
+fatal: clone of '/fixture/missing-source' into submodule path '<fixture-checkout>/vendor/dynamorio' failed
+Failed to clone 'vendor/dynamorio'. Retry scheduled
+fatal: repository '/fixture/missing-source' does not exist
+fatal: clone of '/fixture/missing-source' into submodule path '<fixture-checkout>/vendor/dynamorio' failed
+Failed to clone 'vendor/dynamorio' a second time, aborting
+error: cannot initialize submodule <fixture-checkout>/vendor/dynamorio; check its .gitmodules URL and access, then rerun bash tools/bootstrap-submodules.sh from the Seedbox checkout

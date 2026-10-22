@@ -155,9 +155,7 @@ sandbox = false"
     result.and(cleanup)
 }
 fn build(root: &Path) -> Result<PathBuf> {
-    if !root.join("vendor/dynamorio/CMakeLists.txt").is_file() {
-        return Err("DynamoRIO submodule missing; run git submodule update --init --recursive vendor/dynamorio from the Seedbox checkout".into());
-    }
+    run(command("bash", root).arg(root.join("tools/bootstrap-submodules.sh")))?;
     publish(root, |output| {
         match (env::consts::OS, env::consts::ARCH) {
             ("linux", "x86_64" | "aarch64") => {
@@ -339,10 +337,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_submodule_fails_before_asset_building() {
+    fn failed_bootstrap_stops_before_asset_building() {
         let root = tempfile::tempdir().unwrap();
         let error = build(root.path()).unwrap_err().to_string();
-        assert!(error.contains("git submodule update --init --recursive vendor/dynamorio"));
+        assert!(error.contains("bootstrap-submodules.sh"));
         assert!(!root.path().join("build").exists());
     }
 

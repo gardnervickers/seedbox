@@ -17,6 +17,9 @@ cargo xtask build --release
 alias seedbox="$PWD/target/release/seedbox"
 ```
 
+Shell entry does not fetch DynamoRIO. The asset build initializes missing
+submodules while preserving existing checkouts and local edits.
+
 Inside `nix develop`, `bash harness/check.sh` runs the portable checks; `--help`
 lists the native suites.
 
