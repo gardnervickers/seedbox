@@ -84,6 +84,11 @@ def changes(root):
             "\t.calibrate_cpu\t\t\t= seedbox_tsc_khz,\n\t.calibrate_tsc\t\t\t= seedbox_tsc_khz,\n")
     edit("arch/x86/kernel/x86_init.c", x86_init)
 
+    # The emulated PIC mask read has no side effects or hardware timing role.
+    # Its unused read during IRQ acknowledgment only adds a VM exit.
+    edit("arch/x86/kernel/i8259.c", lambda s: replace(
+        s, "\t\tinb(PIC_MASTER_IMR);\t/* DUMMY - (do we need this?) */\n", ""))
+
     edit("arch/x86/include/asm/fixmap.h", lambda s: replace(
         s, "\tFIX_EARLYCON_MEM_BASE,\n",
         "\tFIX_EARLYCON_MEM_BASE,\n\tFIX_SEEDBOX_TIME,\n\tFIX_SEEDBOX_EVENT,\n"))
