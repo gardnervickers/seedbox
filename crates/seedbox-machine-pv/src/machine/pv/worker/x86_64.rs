@@ -25,6 +25,12 @@
 mod backend;
 const ACK_PORT: u16 = 0x500;
 const YIELD_PORT: u16 = 0x501;
+const PIC_UNMASK_PORT: u16 = 0x502;
+// Guest-owned pending transaction, not another interrupt controller. Low byte
+// replaces IMR, next byte acknowledges ISR bits, bit 16 marks a publication.
+// The stopped worker clears it after applying it to the authoritative PIC.
+const PIC_UPDATE: usize = 56;
+const PIC_UPDATE_VALID: u64 = 1 << 16;
 
 use super::{
     boot,
@@ -306,6 +312,25 @@ pub(super) fn reset<B: Backend>(native: &mut B, entry: &Entry) -> Result<()> {
     })
 }
 impl<B: Backend> Machine<B> {
+    /// Consume a single-CPU guest publication before new input, time adoption
+    /// or injection. Guest IRQs stay disabled across publication and the
+    /// unconditional unmask OUT; other semantic exits may consume it earlier.
+    /// Snapshot RAM retains an interrupted publication exactly until consumption.
+    pub(super) fn consume_irq_update(&mut self) -> Result<()> {
+        let update = self.page.word(PIC_UPDATE);
+        if update == 0 {
+            return Ok(());
+        }
+        if update & PIC_UPDATE_VALID == 0 || update >> 17 != 0 {
+            return Err("PV invalid shared PIC update".into());
+        }
+        self.state.devices.pic.imr = update as u8;
+        self.state.devices.pic.isr &= !((update >> 8) as u8);
+        self.page.set_word(PIC_UPDATE, 0);
+        // Record the actual observed transaction, never synthetic port exits.
+        self.record_native(b'q', 8, PIC_UPDATE as u64, update);
+        Ok(())
+    }
     /// x86 has no software reservation epoch: rendezvous change no page word.
     pub(super) fn boundary(&mut self) -> Result<()> {
         Ok(())
@@ -417,11 +442,14 @@ impl<B: Backend> Machine<B> {
                 width,
                 write,
                 value,
-            } if matches!(port, ACK_PORT | YIELD_PORT) => {
+            } if matches!(port, ACK_PORT | YIELD_PORT | PIC_UNMASK_PORT) => {
                 if width != 1 || !write || value != 1 {
                     return Err("PV clockevent port access".into());
                 }
-                return self.clock_event(if port == ACK_PORT { 8 } else { 24 }, value, upto);
+                if port != PIC_UNMASK_PORT {
+                    return self.clock_event(if port == ACK_PORT { 8 } else { 24 }, value, upto);
+                }
+                // The run loop already consumed the shared PIC update.
             }
             Exit::Port {
                 port,

@@ -63,3 +63,74 @@ fn loader_e820_excludes_apertures_and_retains_default_boot_geometry() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires native KVM and SEEDBOX_PV_CLANG/SEEDBOX_PV_LD"]
+fn native_shared_pic_handler_snapshot_preserves_mask_ack_and_exact_redelivery() {
+    use super::super::{read_snapshot, restore_machine, BootInputs};
+    let kernel = super::super::super::test_image::assemble(include_str!(
+        "../../../../../../seedbox-machine/src/pv/guest_irq_shared.S"
+    ));
+    let inputs = BootInputs {
+        witness: super::super::protocol::BootWitness {
+            mark: None,
+            boot: 0,
+            initial: seedbox_machine::machine::execution_evidence::chain::initial(),
+        },
+        memory_bytes: boot::RAM_BYTES as u64,
+        kernel,
+        initrd: b"initrd".to_vec(),
+        seed: 7,
+        command_line: "console=ttyS0".into(),
+        disk: None,
+        network: None,
+        policy: None,
+    };
+    let mut vm = Machine::<Native>::boot(
+        &inputs.kernel,
+        &inputs.initrd,
+        7,
+        &inputs.command_line,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        vm.run(0, 5, 1000, false, &[], vec![]).unwrap(),
+        Stop::Blocked(Some(5))
+    );
+    assert_eq!(
+        vm.run(5, 10, 1000, false, &[], vec![]).unwrap(),
+        Stop::Horizon
+    );
+    assert!(vm.state.timer, "handler has not acknowledged the device");
+    assert_eq!(vm.state.devices.pic.imr, 0xff);
+    assert_eq!(vm.state.devices.pic.isr, 0);
+    assert!(
+        !vm.native.interruptible(),
+        "snapshot inside handler retains IF=0"
+    );
+    assert_eq!(vm.page.word(PIC_UPDATE), 0);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("handler");
+    vm.capture(&path).unwrap();
+    let mut restored = restore_machine(&inputs, read_snapshot(&path, &inputs).unwrap()).unwrap();
+    // Adopt beyond the new deadline before the stopped handler arms it.
+    // Its old ACK clears only the old timer. Arming the overdue timer then
+    // unmasking must deliver another IRQ at IRET, without another clock read.
+    for machine in [&mut vm, &mut restored] {
+        assert_eq!(
+            machine.run(20, 21, 1000, false, &[], vec![]).unwrap(),
+            Stop::PoweredOff
+        );
+        assert_eq!(machine.state.now, 20);
+        assert!(!machine.state.timer);
+        assert_eq!(machine.state.devices.pic.isr, 0);
+    }
+    assert_eq!(vm.state.witness, restored.state.witness);
+    assert_eq!(
+        vm.native.capture().unwrap(),
+        restored.native.capture().unwrap()
+    );
+    assert_eq!(unsafe { vm.page.bytes() }, unsafe { restored.page.bytes() });
+}

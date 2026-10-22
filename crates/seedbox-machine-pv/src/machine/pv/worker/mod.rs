@@ -41,7 +41,7 @@ type Result<T> = std::result::Result<T, String>;
 // Seedbox PV v3 shared-page ABI. Guest advances LAST while executing; a stopped
 // forward adoption aligns it to canonical time without consuming pending work.
 // Guest may also advance the exclusive epoch on exception return; all other
-// publication words are host-owned.
+// publication words are host-owned. x86 word 56 is a pending PIC transaction.
 const ABI: u64 = 3;
 const PAGE_BYTES: usize = 16384;
 const NOW: usize = 0;
@@ -279,6 +279,8 @@ impl<B: Backend> Machine<B> {
             None => syscall_cost_ns,
         };
         self.page.set_word(SYSCALL_COST, cost);
+        // Apply old guest ACKs before time/input can raise a new interrupt.
+        self.consume_irq_update()?;
         self.adopt(now)?;
         if !input.is_empty() {
             self.boundary()?;
@@ -329,6 +331,7 @@ impl<B: Backend> Machine<B> {
                 return Err("PV guest crossed accepted horizon".into());
             }
             self.state.now = self.state.now.max(last);
+            self.consume_irq_update()?;
             self.record_exit(&exit)?;
             let mut effect = Effect::default();
             match exit {

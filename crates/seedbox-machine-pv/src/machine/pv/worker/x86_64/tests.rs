@@ -9,16 +9,24 @@ struct Scripted {
     injected: Vec<u8>,
     window: bool,
     responses: Vec<Option<u64>>,
+    page: Option<Rc<Memory>>,
+    publications: std::collections::BTreeMap<usize, u64>,
 }
 impl Backend for Scripted {
-    fn create(_: Rc<Memory>, _: Rc<Memory>) -> Result<Self> {
-        Ok(Self::default())
+    fn create(_: Rc<Memory>, page: Rc<Memory>) -> Result<Self> {
+        Ok(Self {
+            page: Some(page),
+            ..Self::default()
+        })
     }
     fn boot(&mut self, _: backend::Boot) -> Result<()> {
         Ok(())
     }
     fn enter(&mut self) -> Result<Exit> {
         self.entries += 1;
+        if let Some(update) = self.publications.remove(&self.entries) {
+            self.page.as_ref().unwrap().set_word(PIC_UPDATE, update);
+        }
         self.exits
             .pop_front()
             .ok_or("unexpected scripted entry".into())
@@ -286,7 +294,7 @@ fn port_yield_advances_to_the_deadline_or_run_horizon() {
 }
 #[test]
 fn clock_signal_ports_reject_invalid_accesses() {
-    for port in [ACK_PORT, YIELD_PORT] {
+    for port in [ACK_PORT, YIELD_PORT, PIC_UNMASK_PORT] {
         for (width, write, value) in [(2, true, 1), (1, false, 0), (1, true, 0), (1, true, 2)] {
             let mut vm = machine();
             vm.native.exits.extend([
@@ -735,4 +743,81 @@ fn canonical_pending_native_writes_preserve_channel_order_and_opaque_json_bytes(
     let rewritten = vm.native_execution().unwrap();
     assert_ne!(first.pending, rewritten.pending);
     assert_eq!(vm.native.entries, 0);
+}
+
+#[test]
+fn shared_pic_mask_ack_waits_for_unmask_and_repeated_level_injects_once() {
+    let mut vm = machine();
+    vm.state.ready = true;
+    vm.state.timer = true;
+    vm.state.devices.pic.imr = 0xfe;
+    vm.native.interruptible.extend([true, false, true]);
+    vm.native.publications.insert(1, PIC_UPDATE_VALID | 0x1ff);
+    vm.native.publications.insert(2, PIC_UPDATE_VALID | 0xfe);
+    vm.native.publications.insert(4, PIC_UPDATE_VALID | 0x1ff);
+    vm.native.exits.extend([
+        // Mask+EOI becomes visible at the handler's device access. The timer
+        // remains asserted: no new injection until the explicit unmask.
+        port(0x3fd, false, 0),
+        port(PIC_UNMASK_PORT, true, 1),
+        Exit::Window,
+        port(ACK_PORT, true, 1),
+        halt(),
+    ]);
+    assert_eq!(
+        vm.run(5, 100, 1000, false, &[], vec![]).unwrap(),
+        Stop::Blocked(None)
+    );
+    assert_eq!(vm.native.injected, [0x30, 0x30]);
+    assert_eq!(vm.state.devices.pic.isr, 0);
+    assert_eq!(vm.page.word(PIC_UPDATE), 0);
+    assert_eq!(vm.state.now, 5);
+}
+
+#[test]
+fn shared_pic_old_ack_is_consumed_before_due_time_and_new_receive() {
+    let mut vm = machine_full(None, Some(MAC));
+    vm.state.ready = true;
+    vm.native.exits.extend(nic_setup());
+    vm.native.exits.push_back(event(24, 0));
+    vm.run(0, 1, 1000, false, &[], vec![]).unwrap();
+    offer(&vm, 0, 0x400_9000, &[], true);
+    vm.state.devices.pic.isr = 0x81;
+    vm.state.deadline = Some(5);
+    vm.page.set_word(PIC_UPDATE, PIC_UPDATE_VALID | 0x817e);
+    // Old PIC EOI may clear old in-service bits, never the newly admitted
+    // timer or NIC level. Zero-budget adoption must consume it without entry.
+    let entries = vm.native.entries;
+    vm.run(5, 5, 1000, false, &[], vec![vec![42; 60]]).unwrap();
+    assert_eq!(vm.native.entries, entries);
+    assert_eq!(vm.state.devices.lines & 0x81, 0x81);
+    assert_eq!(vm.state.devices.pic.isr, 0);
+    assert_eq!(vm.page.word(PIC_UPDATE), 0);
+    vm.native.interruptible.push_back(true);
+    vm.prepare().unwrap();
+    assert_eq!(vm.native.injected, [0x30]);
+    vm.consume_irq_update().unwrap();
+    assert_eq!(
+        vm.state.devices.pic.isr, 1,
+        "consumed ACK cannot clear a new injection"
+    );
+}
+
+#[test]
+fn shared_pic_pending_transaction_survives_stopped_state_roundtrip() {
+    let mut vm = machine();
+    vm.state.devices.pic.isr = 1;
+    vm.page.set_word(PIC_UPDATE, PIC_UPDATE_VALID | 0x1ff);
+    let mut restored = machine();
+    // Snapshot stores State and the complete shared page separately. Retain
+    // both, including an unconsumed transaction; never republish a cached mask.
+    restored.state = serde_json::from_slice(&serde_json::to_vec(&vm.state).unwrap()).unwrap();
+    unsafe { restored.page.modify(|p| p.copy_from_slice(vm.page.bytes())) };
+    restored.consume_irq_update().unwrap();
+    assert_eq!(restored.state.devices.pic.imr, 0xff);
+    assert_eq!(restored.state.devices.pic.isr, 0);
+    assert_eq!(restored.page.word(PIC_UPDATE), 0);
+    let witness = restored.state.witness;
+    restored.consume_irq_update().unwrap();
+    assert_eq!(restored.state.witness, witness);
 }

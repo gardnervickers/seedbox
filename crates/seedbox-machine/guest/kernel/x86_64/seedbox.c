@@ -28,6 +28,7 @@
 struct seedbox_page {
 	u64 now, last, bound, abi, deferred_irq_pending, exclusive_epoch;
 	u64 syscall_ns;
+	u64 pic_update;
 };
 
 enum {
@@ -51,6 +52,26 @@ static __always_inline void event_signal(u16 port)
 {
 	/* Order time-page accesses around the stopped worker rendezvous. */
 	asm volatile("outb %b0, %w1" : : "a"((u8)1), "Nd"(port) : "memory");
+}
+
+/* IRQs are disabled by i8259A_lock on this single CPU. One aligned store
+ * publishes the complete mask and accumulated specific EOIs. The stopped
+ * worker consumes and clears this word before admitting input or injecting.
+ * No device interrupt status is acknowledged here. */
+void seedbox_pic_update(u8 mask, u8 ack)
+{
+	struct seedbox_page *p = READ_ONCE(page);
+	u64 pending = READ_ONCE(p->pic_update);
+
+	WRITE_ONCE(p->pic_update, (1ULL << 16) | mask |
+		   (pending & 0xff00) | ((u64)ack << 8));
+}
+
+void seedbox_pic_unmask(u8 mask)
+{
+	seedbox_pic_update(mask, 0);
+	/* Always rendezvous before the caller can enable CPU interrupts. */
+	event_signal(SEEDBOX_PIC_UNMASK_PORT);
 }
 
 u64 noinstr seedbox_read(void)
@@ -206,6 +227,7 @@ void __init seedbox_time_init(void)
 	struct seedbox_page *p;
 
 	BUILD_BUG_ON(offsetof(struct seedbox_page, syscall_ns) != 6 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_page, pic_update) != 7 * sizeof(u64));
 	/*
 	 * setup_arch calls us before tsc_early_init selects TSC delays. Permanent
 	 * fixmaps need no allocator and survive the boot page-table switch.
