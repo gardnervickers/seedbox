@@ -35,17 +35,6 @@ Inputs round down into machine time; outputs/deadlines map to the earliest simul
 Rate changes preserve accrued drift and remap pending timers; control payload times remain simulation time.
 The [projection](../crates/seedbox-driver/src/clock/projection.rs) belongs to the Driver, outside Machine snapshots.
 
-## Guest out-of-memory reports
-
-The supervisor retains `/dev/kmsg` before entering the application image and
-relays the supported Linux kernel's OOM victim records on the management channel.
-Reports carry the victim PID, task name and anonymous RSS, before the application
-outcome. Only a report naming the supervised leader explains `137 (out of memory)`;
-an ordinary SIGKILL remains `137`. Boot identity comes from the Driver; each outcome consumes its own pending
-report, so restarted applications cannot reuse an earlier kill. The world retains
-the newest 64 reports, including their boots; diagnostics suggests raising `memoryMiB`.
-Lost kernel records fail supervision with an I/O error rather than guessing a victim.
-
 ## Wall time across reboots
 
 Fresh execution derives its epoch from image creation times, not the host clock, with an 86400-second floor.
@@ -73,6 +62,17 @@ Device reset preserves durable and volatile overlays; boot end discards the vola
 Shutdown merely requests guest cleanup: only guest FLUSH promotes writes, and background writeback may precede it.
 Live snapshots retain both layers without promotion; terminal snapshots contain boot-end policy already applied.
 The shared [store](../crates/seedbox-machine/src/machine/disk.rs) completes requests synchronously and retains completed prefixes on error.
+
+## Guest out-of-memory reports
+
+The supervisor retains `/dev/kmsg` before entering the application image and
+relays the supported Linux kernel's OOM victim records on the management channel.
+Reports carry the victim PID, task name and anonymous RSS, before the application
+outcome. Only a report naming the supervised leader explains `137 (out of memory)`;
+an ordinary SIGKILL remains `137`. Boot identity comes from the Driver; each outcome consumes its own pending
+report, so restarted applications cannot reuse an earlier kill. The world retains
+the newest 64 reports, including their boots; diagnostics suggests raising `memoryMiB`.
+Lost kernel records fail supervision with an I/O error rather than guessing a victim.
 
 ## ARM exclusive reservations
 
