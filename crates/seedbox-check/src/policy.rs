@@ -230,6 +230,7 @@ pub fn machine_inputs(suite: Suite) -> Vec<String> {
     suffixes.extend(if suite == Suite::MachineTcg {
         vec![
             "QEMU",
+            "LINUX",
             "FIRMWARE",
             "KERNEL",
             "INIT",
@@ -249,11 +250,20 @@ pub fn machine_inputs(suite: Suite) -> Vec<String> {
             "DISK_IMAGE",
         ]
     });
-    suffixes
+    let mut inputs: Vec<_> = suffixes
         .into_iter()
         .map(|s| format!("SEEDBOX_{backend}_{s}"))
         .chain([CPU_LOOP_FIXTURE.to_string()])
-        .collect()
+        .collect();
+    if suite == Suite::MachineTcg {
+        // Shared x86 service worlds use the fixture package's PV-named
+        // clock/network binaries independently of the execution backend.
+        inputs.extend([
+            "SEEDBOX_PV_CLOCK_APPLICATION".into(),
+            "SEEDBOX_PV_NETWORK_APPLICATION".into(),
+        ]);
+    }
+    inputs
 }
 pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -> Vec<String> {
     let mut missing = Vec::new();
@@ -366,7 +376,7 @@ pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -
         }
         for key in machine_inputs(suite) {
             let path = env.get(&key).map(Path::new);
-            let dir = key.ends_with("_ASSETS");
+            let dir = key.ends_with("_ASSETS") || key == "SEEDBOX_TCG_LINUX";
             let valid = path.is_some_and(|p| if dir { p.is_dir() } else { p.is_file() });
             need(
                 valid,

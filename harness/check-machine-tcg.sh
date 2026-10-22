@@ -25,7 +25,11 @@ export SEEDBOX_TCG_TERMINAL_APPLICATION=$fixtures/bin/kernel-terminal
 export SEEDBOX_TCG_NETWORK_APPLICATION=$fixtures/bin/network-probe
 export SEEDBOX_TCG_DISK_PROBE=$fixtures/bin/disk-probe
 export SEEDBOX_TCG_DISK_IMAGE=$fixtures/disk/ext4.img
+# Shared x86 service scenarios retain the fixture package's PV-named inputs
+# even when the selected execution backend is TCG.
 export SEEDBOX_CPU_LOOP_FIXTURE=$inputs/machinePvTestFixtures/bin/cpu-loop
+export SEEDBOX_PV_CLOCK_APPLICATION=$inputs/machinePvTestFixtures/bin/clock-faults
+export SEEDBOX_PV_NETWORK_APPLICATION=$inputs/machinePvTestFixtures/bin/network-probe
 # Public-service scenarios consume the same complete retained runtime package.
 cargo xtask build-assets >/dev/null
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
