@@ -51,7 +51,9 @@ jobs:
     # A skipped job satisfies the required check; a skipped workflow never does.
     # Run conservatively if change detection fails rather than skipping tests.
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.run_tests == 'true')
-    runs-on: ubuntu-24.04
+    # Temporary PR348 reproduction: exercise the older hosted KVM kernel with
+    # raw oracle-page capture enabled. Keep the full acceptance checks intact.
+    runs-on: ubuntu-22.04
     timeout-minutes: 100
     env:
       CARGO_INCREMENTAL: '0'
