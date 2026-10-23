@@ -106,6 +106,11 @@ pub(super) fn reset<B: Backend>(native: &mut B, entry: &Entry) -> Result<()> {
     Ok(())
 }
 impl<B: Backend> Machine<B> {
+    /// Shared PIC publications are x86-only; ARM reservation boundaries stay separate.
+    pub(super) fn consume_irq_update(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// A semantic guest rendezvous invalidates software exclusive reservations.
     pub(super) fn boundary(&mut self) -> Result<()> {
         let epoch = self

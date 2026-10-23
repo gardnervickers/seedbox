@@ -117,8 +117,14 @@ impl Net {
     pub(super) fn mac(&self) -> [u8; 6] {
         self.mac
     }
+    pub(super) fn interrupt_status(&self) -> u32 {
+        self.interrupt
+    }
+    pub(super) fn acknowledge_interrupt(&mut self, bits: u32) {
+        self.interrupt &= !bits;
+    }
     pub(super) fn irq(&self) -> bool {
-        self.interrupt != 0
+        self.interrupt_status() != 0
     }
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn stats(&self) -> &Stats {
@@ -204,7 +210,7 @@ impl Net {
                 TX => self.transmit(ram, now)?,
                 _ => return Err("virtio net notify invalid queue".into()),
             },
-            INTERRUPT_ACK => self.interrupt &= !value,
+            INTERRUPT_ACK => self.acknowledge_interrupt(value),
             STATUS if value == 0 => {
                 // Transport reset. Untaken TX frames were already emitted.
                 let transmitted = std::mem::take(&mut self.transmitted);

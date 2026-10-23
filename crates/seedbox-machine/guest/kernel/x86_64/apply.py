@@ -84,10 +84,38 @@ def changes(root):
             "\t.calibrate_cpu\t\t\t= seedbox_tsc_khz,\n\t.calibrate_tsc\t\t\t= seedbox_tsc_khz,\n")
     edit("arch/x86/kernel/x86_init.c", x86_init)
 
-    # The emulated PIC mask read has no side effects or hardware timing role.
-    # Its unused read during IRQ acknowledgment only adds a VM exit.
-    edit("arch/x86/kernel/i8259.c", lambda s: replace(
-        s, "\t\tinb(PIC_MASTER_IMR);\t/* DUMMY - (do we need this?) */\n", ""))
+    # All three fixed PV virtio windows share the same status/ACK page ABI.
+    # Queue/configuration accesses and the PIC's unmask rendezvous stay intact.
+    def virtio_mmio(s):
+        s = replace(s, "#include <uapi/linux/virtio_mmio.h>\n",
+                    "#include <uapi/linux/virtio_mmio.h>\n#include <asm/seedbox.h>\n")
+        return replace(s,
+            "\tstatus = readl(vm_dev->base + VIRTIO_MMIO_INTERRUPT_STATUS);\n"
+            "\twritel(status, vm_dev->base + VIRTIO_MMIO_INTERRUPT_ACK);\n",
+            "\tstatus = seedbox_virtio_interrupt(platform_get_resource(\n"
+            "\t\tvm_dev->pdev, IORESOURCE_MEM, 0)->start);\n")
+    edit("drivers/virtio/virtio_mmio.c", virtio_mmio)
+
+    # The master PIC's hot mask/EOI operations publish one shared update.
+    # Unmask always exits before IRQ restore. Boot/probe and slave operations
+    # retain their port protocol; all supported device lines are on the master.
+    def pic(s):
+        s = replace(s, "#include <asm/i8259.h>\n",
+                    "#include <asm/i8259.h>\n#include <asm/seedbox.h>\n")
+        mask = "\t\toutb(cached_master_mask, PIC_MASTER_IMR);\n"
+        s = replace(s, mask, "\t\tseedbox_pic_update(cached_master_mask, 0);\n", 3)
+        start = s.index("static void unmask_8259A_irq(")
+        end = s.index("static void enable_8259A_irq(", start)
+        s = s[:start] + replace(s[start:end],
+            "seedbox_pic_update(cached_master_mask, 0)",
+            "seedbox_pic_unmask(cached_master_mask)") + s[end:]
+        s = replace(s,
+            "\t\tinb(PIC_MASTER_IMR);\t/* DUMMY - (do we need this?) */\n"
+            "\t\tseedbox_pic_update(cached_master_mask, 0);\n"
+            "\t\toutb(0x60+irq, PIC_MASTER_CMD);\t/* 'Specific EOI to master */\n",
+            "\t\tseedbox_pic_update(cached_master_mask, irqmask);\n")
+        return s
+    edit("arch/x86/kernel/i8259.c", pic)
 
     edit("arch/x86/include/asm/fixmap.h", lambda s: replace(
         s, "\tFIX_EARLYCON_MEM_BASE,\n",

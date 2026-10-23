@@ -6,6 +6,7 @@
 #define SEEDBOX_EVENT_PHYS	0x0a010000UL
 #define SEEDBOX_ACK_PORT	0x500
 #define SEEDBOX_YIELD_PORT	0x501
+#define SEEDBOX_PIC_UNMASK_PORT	0x502
 #define SEEDBOX_LIFECYCLE_PHYS	0x0b010000UL
 #define SEEDBOX_LIFECYCLE_BYTES	0x4000UL
 #define SEEDBOX_LIFECYCLE_IRQ	5
@@ -21,6 +22,9 @@ struct pt_regs;
 u64 seedbox_read(void);
 unsigned long long seedbox_rdtsc(void);
 void seedbox_cpu_relax(void);
+void seedbox_pic_update(u8 mask, u8 ack);
+void seedbox_pic_unmask(u8 mask);
+u32 seedbox_virtio_interrupt(unsigned long phys);
 void seedbox_syscall_progress(void);
 bool seedbox_emulate_user_tsc(struct pt_regs *regs);
 unsigned long seedbox_tsc_khz(void);

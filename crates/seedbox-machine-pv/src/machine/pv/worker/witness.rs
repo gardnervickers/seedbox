@@ -25,6 +25,7 @@
 //! k hypercall (size0,a=function in x0,b0); j actual IRQ deassert(size0,a=vector,b0).
 //! d completion packs full kind:u32 in b low32 and status:u8 in bits32..39;
 //! a=sector,size0, ordering is actual used-ring completion order.
+//! q: consumed x86 shared PIC or virtio ACK publication (size8,a=page offset,b=observed word).
 //! Native interaction records only; host landings and inspection are invisible.
 use super::*;
 use seedbox_machine::machine::execution_evidence::chain;
