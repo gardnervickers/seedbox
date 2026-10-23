@@ -69,10 +69,12 @@ fn output(events: &[MachineResponse], machine: MachineId, stream: Stream) -> Vec
 /// Bound on reply admission to the application's complete read, as observed
 /// by the stdout write that immediately follows it. The program waits idle in a
 /// blocking read, so this covers interrupt delivery, the init relay and the
-/// fixture's one-byte reads of a ~170-byte reply. Both backends measured about
-/// 0.22-0.25 ms at the default execution rate; a missed wake waits for an
-/// unrelated guest timer instead (about 400 ms here before the TCG fix).
-const REPLY_READ_BOUND_NS: u64 = 1_000_000;
+/// fixture's one-byte reads of a ~170-byte reply. Require completion within one
+/// Driver quantum, including translator work: each shared progress checkpoint
+/// redirects through the dispatcher, adding two charged TLS-switch syscalls on
+/// x86. A missed wake waits for an unrelated guest timer instead (about 400 ms
+/// here before the TCG fix). Exact 20 ms Sleep effects are checked separately.
+const REPLY_READ_BOUND_NS: u64 = QUANTUM;
 /// Occurrence time of the output fragment holding each `RPC_REPLY ` marker. The
 /// fixture writes that marker only after reading its whole reply, so these
 /// times bound the read completion from above.

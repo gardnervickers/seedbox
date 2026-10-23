@@ -1,4 +1,4 @@
-//! Discover native workloads; the public CLI and guest checks own each verdict.
+//! Each native workload is independently selectable; CLI/guest checks own its verdict.
 #![cfg(any(
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
@@ -216,38 +216,54 @@ fn log_definition_differences(failure: &Path, name: &str) {
     }
 }
 
+macro_rules! applications {
+    ($($case:ident => $workload:literal),+ $(,)?) => {
+        const WORKLOADS: &[&str] = &[$($workload),+];
+        $(#[test] fn $case() { application($workload); })+
+    };
+}
+applications! {
+    bandwidth => "bandwidth",
+    clock_drift => "clock-drift",
+    clock_reboot => "clock-reboot",
+    clock_skew => "clock-skew",
+    connections => "connections",
+    exclusives => "exclusives",
+    key_value => "key-value",
+    mac_capabilities => "mac-capabilities",
+    network_faults => "network-faults",
+    race => "race",
+    runtime => "runtime",
+    slow_machine => "slow-machine",
+    triggers => "triggers",
+    volume_crash => "volume-crash",
+}
+
 #[test]
-fn every_application_passes_and_representatives_repeat_through_the_server() {
+fn every_discovered_workload_has_an_individually_selectable_case() {
+    let directory =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../harness/acceptance/workloads");
+    let discovered: HashSet<_> = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "yaml"))
+        .map(|path| path.file_stem().unwrap().to_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        discovered,
+        WORKLOADS.iter().map(|name| (*name).to_owned()).collect()
+    );
+    assert!(REPEAT_WORKLOADS.iter().all(|name| WORKLOADS.contains(name)));
+}
+
+fn application(name: &str) {
     let cli = std::env::var_os("SEEDBOX_TEST_CLI")
         .expect("harness/check.sh supplies the current release CLI");
     let reports =
         std::env::var_os("SEEDBOX_TEST_REPORT_DIR").expect("set a fresh SEEDBOX_TEST_REPORT_DIR");
-    let workloads =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../harness/acceptance/workloads");
-    let mut workloads: Vec<_> = fs::read_dir(workloads)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "yaml")
-        })
-        .collect();
-    workloads.sort();
-    assert!(!workloads.is_empty());
-    let discovered: HashSet<_> = workloads
-        .iter()
-        .filter_map(|path| path.file_stem().and_then(|stem| stem.to_str()))
-        .collect();
-    let missing: Vec<_> = REPEAT_WORKLOADS
-        .iter()
-        .copied()
-        .filter(|name| !discovered.contains(name))
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "required repeat workloads missing or renamed: {}",
-        missing.join(", ")
-    );
+    let workload = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../harness/acceptance/workloads")
+        .join(format!("{name}.yaml"));
     // macOS limits Unix socket paths to 104 bytes. The checkout/report path
     // can exceed that before appending the socket name.
     let state_directory = tempfile::Builder::new()
@@ -264,84 +280,77 @@ fn every_application_passes_and_representatives_repeat_through_the_server() {
             panic!("{error}; retained server state: {}", retained.display());
         }
     };
-    let mut failures = Vec::new();
-    for workload in workloads {
-        let representative = workload
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .is_some_and(|name| REPEAT_WORKLOADS.contains(&name));
-        let directory = Path::new(&reports)
-            .join("applications")
-            .join(workload.file_stem().unwrap());
-        fs::create_dir_all(&directory).unwrap();
-        let check = || -> Result<(), String> {
-            let first_output = first_run(
-                Path::new(&cli),
-                &directory,
-                state,
-                &["run", workload.to_str().unwrap(), "--wall-time", "30m"],
-            )?;
-            let first = simulation_id(&first_output)?;
-            if !representative {
-                return Ok(());
-            }
-            let described = invoke(
-                Path::new(&cli),
-                &directory,
-                state,
-                "describe-first",
-                &["show", "--view", "definition", first, "--json"],
-            )?;
-            let resource: seedbox_api::Simulation = serde_json::from_str(&described)
-                .map_err(|error| format!("describe first: {error}"))?;
-            let seed = resource
-                .spec
-                .seed
-                .ok_or("first simulation has no seed")?
-                .to_string();
-            let second_output = invoke(
-                Path::new(&cli),
-                &directory,
-                state,
-                "second",
-                &[
-                    "run",
-                    workload.to_str().unwrap(),
-                    "--seed",
-                    &seed,
-                    "--wall-time",
-                    "30m",
-                ],
-            )?;
-            let second = simulation_id(&second_output)?;
-            compare(Path::new(&cli), &directory, state, "compare", first, second)?;
-            let repeated = invoke(
-                Path::new(&cli),
-                &directory,
-                state,
-                "rerun",
-                &["run", "--from", first, "--wall-time", "30m"],
-            )?;
-            compare(
-                Path::new(&cli),
-                &directory,
-                state,
-                "compare-rerun",
-                first,
-                simulation_id(&repeated)?,
-            )?;
-            Ok(())
-        };
-        if let Err(error) = check() {
-            failures.push(format!("{}: {error}", workload.display()));
+    // Every case owns its server/catalogue and report directory. Two cases can
+    // execute independently without sharing simulation IDs or mutable state.
+    let representative = REPEAT_WORKLOADS.contains(&name);
+    let directory = Path::new(&reports)
+        .join("applications")
+        .join(workload.file_stem().unwrap());
+    fs::create_dir_all(&directory).unwrap();
+    let check = || -> Result<(), String> {
+        let first_output = first_run(
+            Path::new(&cli),
+            &directory,
+            state,
+            &["run", workload.to_str().unwrap(), "--wall-time", "30m"],
+        )?;
+        let first = simulation_id(&first_output)?;
+        if !representative {
+            return Ok(());
         }
-    }
+        let described = invoke(
+            Path::new(&cli),
+            &directory,
+            state,
+            "describe-first",
+            &["show", "--view", "definition", first, "--json"],
+        )?;
+        let resource: seedbox_api::Simulation =
+            serde_json::from_str(&described).map_err(|error| format!("describe first: {error}"))?;
+        let seed = resource
+            .spec
+            .seed
+            .ok_or("first simulation has no seed")?
+            .to_string();
+        let second_output = invoke(
+            Path::new(&cli),
+            &directory,
+            state,
+            "second",
+            &[
+                "run",
+                workload.to_str().unwrap(),
+                "--seed",
+                &seed,
+                "--wall-time",
+                "30m",
+            ],
+        )?;
+        let second = simulation_id(&second_output)?;
+        compare(Path::new(&cli), &directory, state, "compare", first, second)?;
+        let repeated = invoke(
+            Path::new(&cli),
+            &directory,
+            state,
+            "rerun",
+            &["run", "--from", first, "--wall-time", "30m"],
+        )?;
+        compare(
+            Path::new(&cli),
+            &directory,
+            state,
+            "compare-rerun",
+            first,
+            simulation_id(&repeated)?,
+        )?;
+        Ok(())
+    };
+    let result = check();
     drop(server);
-    if !failures.is_empty() {
+    if let Err(error) = result {
         let retained = state_directory.keep();
         panic!(
-            "{}\nretained server state: {}",
-            failures.join("\n"),
+            "{name}: {error}\nretained server state: {}",
             retained.display()
         );
     }

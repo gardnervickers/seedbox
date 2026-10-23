@@ -202,7 +202,7 @@ pub async fn controller_checkpoint(backend: CpuBackend) {
         };
         assert!(position.completed_rounds > 0);
         assert!(position.simulated_time_ns >= target && position.simulated_time_ns < wake);
-        let exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
+        let mut exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
         let InputSource::Resolved { definition } = &exported.spec.inputs else { panic!("resolved export required") };
         assert!(definition.simulator.oracle_control);
         let seedbox_spec::definition::Start::Checkpoint { assets, .. } = &definition.start else { panic!("checkpoint export required") };
@@ -212,6 +212,7 @@ pub async fn controller_checkpoint(backend: CpuBackend) {
         session.client.delete(&source).await.unwrap();
         assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
         session.workers.store(4, Ordering::SeqCst);
+        exported.options.machine_workers = Some(4);
         let restored = session.client.submit_definition(&serde_json::to_value(exported).unwrap(), true).await.unwrap().metadata.id;
         session.submitted += 1;
         assert_ne!(restored, source);

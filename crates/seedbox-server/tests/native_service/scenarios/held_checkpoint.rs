@@ -139,7 +139,7 @@ pub async fn native_held_checkpoint(backend: CpuBackend) {
         assert_eq!(position, held.position);
         assert_unapplied(session, &source).await;
 
-        let exported = session.client.checkpoint_definition(&source, "held").await.unwrap();
+        let mut exported = session.client.checkpoint_definition(&source, "held").await.unwrap();
 
         session.client.stop(&source).await.unwrap();
         session.complete(&source, true, 1, 123).await;
@@ -147,6 +147,7 @@ pub async fn native_held_checkpoint(backend: CpuBackend) {
         assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
 
         session.workers.store(4, Ordering::SeqCst);
+        exported.options.machine_workers = Some(4);
         let restored = session.client.submit_definition(&serde_json::to_value(exported).unwrap(), true).await.unwrap().metadata.id;
         session.submitted += 1;
         assert_ne!(source, restored);

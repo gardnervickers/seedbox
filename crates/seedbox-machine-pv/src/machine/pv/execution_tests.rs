@@ -15,6 +15,162 @@ fn input(name: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("set {name}"))
         .into()
 }
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+#[ignore = "requires a native PV worker, current PV Linux kernel and fixture clang/linker"]
+fn native_linux_task_sse_initial_encoding_preserves_live_fp_components() {
+    use std::io::Read as _;
+
+    let mut machine = PVMachine::from_boot_inputs(
+        &input("SEEDBOX_PV_WORKER"),
+        fs::read(input("SEEDBOX_PV_KERNEL")).unwrap(),
+        linux::initrd_source(
+            include_str!("../../../../seedbox-machine/src/pv/guest_x86_sse_task_fixture.c").into(),
+        ),
+    )
+    .unwrap();
+    let clock = SimulationClock::new(0);
+    let mut rng = SeededRng::new(7);
+    let guard = seedbox_test_time::HangGuard::new(
+        "positive task FP handoffs and stopped bank capture",
+        std::time::Duration::from_secs(60),
+    );
+    let ready = b"XSAVE_TASK_BANKS_READY";
+    let mut handed_off = false;
+    for tick in 1..=10_000 {
+        guard
+            .remaining()
+            .expect("task FP handoff infrastructure hang");
+        let stopped = run(&mut machine, &clock, &mut rng, 1000, tick * 1_000_000, []);
+        clock.set(tick * 1_000_000);
+        let console = String::from_utf8_lossy(&machine.console);
+        assert!(
+            !console.contains("XSAVE_TASK_ERROR:"),
+            "task FP fixture prerequisites or handoff failed: {console}"
+        );
+        assert!(
+            !matches!(stopped, StopReason::Exited { .. }),
+            "task FP fixture exited before parking: {console}"
+        );
+        // Each receipt has already handed the single guest CPU away from its
+        // worker. The controller need not have reached its own parking read:
+        // these five saved task banks are already stable at this rendezvous.
+        if machine.console.windows(ready.len()).any(|w| w == ready) {
+            handed_off = true;
+            break;
+        }
+    }
+    assert!(
+        handed_off,
+        "missing positive task handoffs: {}",
+        String::from_utf8_lossy(&machine.console)
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("task-banks");
+    assert!(matches!(
+        machine
+            .worker()
+            .unwrap()
+            .call(Request::Capture(image.clone()))
+            .unwrap(),
+        Response::Captured
+    ));
+    let mut file = fs::File::open(image).unwrap();
+    let header: serde_json::Value = protocol::receive(&mut file).unwrap().unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    let page = usize::try_from(header["page_bytes"].as_u64().unwrap()).unwrap();
+    let ram = &bytes[page..];
+    assert_eq!(ram.len() as u64, header["memory_bytes"].as_u64().unwrap());
+
+    fn word(bytes: &[u8]) -> u64 {
+        u64::from_le_bytes(bytes.try_into().unwrap())
+    }
+    // Locate live kernel fpstate allocations, not the fixture's user XRSTOR
+    // images: size/user_size/xfeatures metadata precedes aligned XSAVE regs.
+    // Each task owns a distinct noninitial 80-bit x87 value, independent of
+    // whether the SSE canonicalizer removes that task's stale XMM bytes.
+    let mut banks: [Vec<&[u8]>; 5] = std::array::from_fn(|_| Vec::new());
+    for base in (64..ram.len().saturating_sub(832)).step_by(64) {
+        let metadata = &ram[base - 64..base];
+        let size = u32::from_le_bytes(metadata[..4].try_into().unwrap()) as usize;
+        let user_size = u32::from_le_bytes(metadata[4..8].try_into().unwrap()) as usize;
+        let features = word(&metadata[8..16]);
+        let bank = &ram[base..base + 832];
+        let present = word(&bank[512..520]);
+        let compacted = word(&bank[520..528]);
+        if !(832..=65536).contains(&size)
+            || !(832..=65536).contains(&user_size)
+            || features & 7 != 7
+            || compacted != ((1 << 63) | features)
+            || present & !features != 0
+            || present & 1 == 0
+            || bank[528..576].iter().any(|byte| *byte != 0)
+        {
+            continue;
+        }
+        for (number, matches) in banks.iter_mut().enumerate() {
+            let marker = [
+                0x31 + number as u8,
+                0x71,
+                0x52,
+                0x93,
+                0xb4,
+                0xd5,
+                0xe6,
+                0x80,
+                0x00,
+                0x40,
+            ];
+            if bank[32..42] == marker {
+                eprintln!(
+                    "task FP bank {number}: RAM offset={base:#x} size={size} present={present:#x} compacted={compacted:#x} MXCSR={:#x}",
+                    u32::from_le_bytes(bank[24..28].try_into().unwrap())
+                );
+                matches.push(bank);
+            }
+        }
+    }
+    let banks = banks.map(|matches| {
+        assert_eq!(
+            matches.len(),
+            1,
+            "expected one positively identified compacted kernel FP bank per live worker"
+        );
+        matches[0]
+    });
+    let mxcsr = |bank: &[u8]| u32::from_le_bytes(bank[24..28].try_into().unwrap());
+    for &number in &[0, 1, 4] {
+        let bank = banks[number];
+        assert_eq!(
+            word(&bank[512..520]) & 2,
+            0,
+            "bank {number}: initial SSE bit"
+        );
+        assert_eq!(mxcsr(bank), 0x1f80, "bank {number}: initial MXCSR");
+        assert!(
+            bank[160..416].iter().all(|byte| *byte == 0),
+            "bank {number}: initial SSE retains ignored XMM storage"
+        );
+    }
+    assert_eq!(banks[0][24..28], banks[1][24..28]);
+    assert_eq!(banks[0][160..416], banks[1][160..416]);
+
+    let xmm: Vec<_> = (0..256).map(|i| i as u8 ^ 0xa5).collect();
+    let ymm: Vec<_> = (0..256).map(|i| i as u8 ^ 0x3c).collect();
+    assert_eq!(word(&banks[2][512..520]) & 6, 6);
+    assert_eq!(mxcsr(banks[2]), 0x5f80, "live SSE rounding mode changed");
+    assert_eq!(banks[2][160..416], xmm, "live XMM payload changed");
+    assert_eq!(banks[2][576..832], ymm, "live YMM payload changed");
+    assert_eq!(word(&banks[3][512..520]) & 2, 2);
+    assert_eq!(mxcsr(banks[3]), 0x1fa0, "live SSE precision flag changed");
+    assert!(banks[3][160..416].iter().all(|byte| *byte == 0));
+    assert_eq!(word(&banks[4][512..520]) & 4, 4);
+    assert_eq!(banks[4][576..832], ymm, "SSE clearing damaged live YMM");
+}
+
 /// Charge two syscall-priced work units through bounded clock reads, writing
 /// one console byte after each, then arm a timer 5000 ns after the last read,
 /// idle, and power off.
@@ -298,44 +454,54 @@ __attribute__((noreturn)) void _start(void)
     );
     let mut deltas = Vec::new();
     for factor in [1000, 1001] {
-        let mut machine = PVMachine::from_boot_inputs(
-            &input("SEEDBOX_PV_WORKER"),
-            fs::read(input("SEEDBOX_PV_KERNEL")).unwrap(),
-            initrd.clone(),
-        )
-        .unwrap();
-        let clock = SimulationClock::new(0);
-        let mut rng = SeededRng::new(7);
-        let guard = seedbox_test_time::HangGuard::new(
-            "native CPU rate measurement must return",
-            std::time::Duration::from_secs(60),
-        );
-        for tick in 1..=10_000 {
-            guard
-                .remaining()
-                .expect("native CPU rate infrastructure hang");
-            if matches!(
-                run(&mut machine, &clock, &mut rng, factor, tick * 1_000_000, []),
-                StopReason::Exited { .. }
-            ) {
-                break;
+        let mut measurements = Vec::new();
+        // The narrow bound repeatedly splits actual Linux syscall charges;
+        // the prime interval also moves the split through successive charges.
+        for quantum in [1_000_000, 997] {
+            let mut machine = PVMachine::from_boot_inputs(
+                &input("SEEDBOX_PV_WORKER"),
+                fs::read(input("SEEDBOX_PV_KERNEL")).unwrap(),
+                initrd.clone(),
+            )
+            .unwrap();
+            let clock = SimulationClock::new(0);
+            let mut rng = SeededRng::new(7);
+            let guard = seedbox_test_time::HangGuard::new(
+                "native CPU rate measurement must return",
+                std::time::Duration::from_secs(60),
+            );
+            for tick in 1..=10_000_000_000 / quantum {
+                guard
+                    .remaining()
+                    .expect("native CPU rate infrastructure hang");
+                if matches!(
+                    run(&mut machine, &clock, &mut rng, factor, tick * quantum, []),
+                    StopReason::Exited { .. }
+                ) {
+                    break;
+                }
+                clock.set(tick * quantum);
             }
-            clock.set(tick * 1_000_000);
+            let offset = machine
+                .console
+                .windows(8)
+                .position(|bytes| bytes == b"PV_RATE:")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no work measurement: {}",
+                        String::from_utf8_lossy(&machine.console)
+                    )
+                })
+                + 8;
+            measurements.push(u64::from_le_bytes(
+                machine.console[offset..offset + 8].try_into().unwrap(),
+            ));
         }
-        let offset = machine
-            .console
-            .windows(8)
-            .position(|bytes| bytes == b"PV_RATE:")
-            .unwrap_or_else(|| {
-                panic!(
-                    "no work measurement: {}",
-                    String::from_utf8_lossy(&machine.console)
-                )
-            })
-            + 8;
-        deltas.push(u64::from_le_bytes(
-            machine.console[offset..offset + 8].try_into().unwrap(),
-        ));
+        assert_eq!(
+            measurements[0], measurements[1],
+            "price {factor}: splitting syscall charges changed measured guest time"
+        );
+        deltas.push(measurements[0]);
     }
     // This measured Linux region contains 1000 getpid calls and the concluding
     // clock syscall, plus unscaled kernel clock reads. It proves a sub-percent

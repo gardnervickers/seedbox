@@ -21,8 +21,6 @@ pub struct ExecutionRequest<'a> {
     pub resume_checkpoint: Option<&'a Path>,
     /// Optional durable semantic-input journal, read after the worker stops.
     pub intervention_history: Option<&'a Path>,
-    /// Verified retained inputs to reapply, distinct from the live output journal.
-    pub replay_interventions: Option<&'a seedbox_engine_protocol::intervention::History>,
     /// Explicit server-owned observation socket, outside retained experiment identity.
     pub observations: Option<&'a Path>,
     pub seed: u64,

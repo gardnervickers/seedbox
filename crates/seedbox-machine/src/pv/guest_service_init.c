@@ -6,6 +6,7 @@
 #include "guest_network.h"
 #include "guest_environment.h"
 #include "guest_policy.h"
+#include "guest_oom.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -23,6 +24,7 @@
 
 static int management = -1;
 static int diagnostic = -1;
+static int kernel_log = -1;
 static const char *failure_phase = "initialize";
 static const char *failure_path = "init";
 static struct sbx_oracle oracle;
@@ -47,6 +49,20 @@ static int write_all(void *sink, const void *opaque, size_t length) {
         bytes += count; length -= (size_t)count;
     }
     return 0;
+}
+/* The descriptor is opened before entering the image root. No guest timer or
+ * host monitor is needed: kmsg wakes ppoll, and collect drains it after reaping.
+ * Fail clearly on lost records rather than attributing an unobserved kill. */
+static int report_oom_kills(pid_t application) {
+    char record[OOM_REPORT_RECORD_BYTES], frame[OOM_REPORT_FRAME_BYTES];
+    for (;;) {
+        ssize_t count = read(kernel_log, record, sizeof(record));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+        if (count <= 0) { if (!count) errno = EIO; return -1; }
+        size_t length = oom_report_frame(record, (size_t)count, application, frame);
+        if (length && write_all(&management, frame, length)) return -1;
+    }
 }
 __attribute__((noreturn)) static void poweroff(void) {
     sync();
@@ -117,6 +133,7 @@ static int launch(void *opaque, int error_fd) {
         return error;
     }
     if (management >= 0) close(management);
+    if (kernel_log >= 0) close(kernel_log);
     sbx_oracle_close(&oracle);
     if (sbx_env_application_limits(&environment)) {
         int error=errno;
@@ -210,6 +227,9 @@ int main(void) {
     if (console > 2) close(console);
     diagnostic = fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 3);
     if (diagnostic < 0) failed();
+    failure_phase = "open kernel OOM log"; failure_path = "/dev/kmsg";
+    kernel_log = open(failure_path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (kernel_log < 0 || lseek(kernel_log, 0, SEEK_END) < 0) failed();
     module("virtio_mmio"); module("virtio_console");
     while ((management = port()) < 0) usleep(1000);
     failure_phase = "configure supervision signals"; failure_path = "SIGCHLD/SIGPIPE";
@@ -277,11 +297,14 @@ int main(void) {
         if (sbx_oracle_open(&oracle, "/run/seedbox/control.sock")) failed();
     }
     service.oracle = &oracle;
+    service.before_outcome = report_oom_kills;
     failure_phase = "launch prepared application"; failure_path = application.arguments[0];
     if (sbx_service_start(&service)) failed();
     int terminating = 0;
     for (;;) {
         int exit_code, result;
+        failure_phase = "read kernel OOM log"; failure_path = "/dev/kmsg";
+        if (report_oom_kills(service.supervisor.child)) failed();
         failure_phase = "shutdown application"; failure_path = application.arguments[0];
         if (service.shutdown_requested && !terminating) {
             terminating = 1;
@@ -298,17 +321,20 @@ int main(void) {
         /* Natural application exit is an observation, not guest shutdown.
          * The retained recipe remains available for a later Start. */
         if (terminating && service.supervisor.child <= 0) poweroff();
-        struct pollfd fds[5] = {
+        struct pollfd fds[6] = {
             {.fd = terminating ? -1 : management, .events = POLLIN},
             {.fd = service.supervisor.output[0], .events = POLLIN},
             {.fd = service.supervisor.output[1], .events = POLLIN},
             {.fd = terminating || oracle.client >= 0 ? -1 : oracle.listener, .events = POLLIN},
             {.fd = terminating ? -1 : oracle.client,
-             .events = POLLIN | (oracle.reply_used ? POLLOUT : 0)}
+             .events = POLLIN | (oracle.reply_used ? POLLOUT : 0)},
+            {.fd = kernel_log, .events = POLLIN}
         };
         failure_phase = "poll services"; failure_path = "management/output/control";
-        result = ppoll(fds, 5, NULL, &application_mask);
+        result = ppoll(fds, 6, NULL, &application_mask);
         if (result < 0) { if (errno == EINTR) continue; failed(); }
+        failure_phase = "read kernel OOM log"; failure_path = "/dev/kmsg";
+        if (report_oom_kills(service.supervisor.child)) failed();
         failure_phase = "accept control connection"; failure_path = "/run/seedbox/control.sock";
         if (fds[3].revents & (POLLERR | POLLHUP | POLLNVAL)) failed();
         if (fds[3].revents & POLLIN) if (sbx_oracle_accept(&oracle)) failed();

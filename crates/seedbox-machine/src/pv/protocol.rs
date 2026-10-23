@@ -151,6 +151,10 @@ impl Codec {
             }
             self.ready = true;
             Response::Ready
+        } else if let Some(kill) =
+            seedbox_engine_protocol::out_of_memory::decode(line).map_err(|_| Error::Frame)?
+        {
+            Response::OutOfMemoryKill { kill }
         } else if let Some(log) = line.strip_prefix(b"SBX_LOG1 ") {
             if log.len() < 4 || log[1] != b' ' {
                 return Err(Error::Frame);

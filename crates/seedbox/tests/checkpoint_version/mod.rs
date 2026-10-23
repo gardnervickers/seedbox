@@ -29,7 +29,7 @@ fn older_checkpoint_refusal_is_actionable_cli_output_before_native_restore() {
         "output":root.path().join("output"),"machine_workers":1,
         "start_paused":false,"full_state":false,
         "host_control":root.path().join("must-not-bind-control.sock"),
-        "observations":null,"replay_interventions":null,"resume_checkpoint":checkpoint,
+        "observations":null,"resume_checkpoint":checkpoint,
     });
     let path = root.path().join("request.json");
     fs::write(&path, serde_json::to_vec(&request).unwrap()).unwrap();

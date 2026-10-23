@@ -226,7 +226,6 @@ fn replay_retained(
     let fresh = orchestrator
         .clone()
         .with_program(identity.program.clone())
-        .with_interventions(identity.interventions.clone())
         .run_prepared(
             &identity.configuration,
             RunOptions {
@@ -1042,6 +1041,7 @@ fn only_the_backend_runtime_inputs_are_copied_into_an_attempt() {
 #[test]
 fn put_file_of_a_retained_object_reads_it_without_rewriting_it() {
     use std::os::unix::fs::MetadataExt;
+    use std::time::{Duration, UNIX_EPOCH};
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("engine");
     fs::write(&source, b"retained engine bytes").unwrap();
@@ -1059,6 +1059,22 @@ fn put_file_of_a_retained_object_reads_it_without_rewriting_it() {
     );
     // A corrupted existing object is never repaired or accepted.
     fs::write(&object, b"retained engine byteX").unwrap();
+    // Make invalidation observable even if the writes share a timestamp tick.
+    let modified = if after.modified().unwrap() == UNIX_EPOCH {
+        UNIX_EPOCH + Duration::from_secs(86_400)
+    } else {
+        UNIX_EPOCH
+    };
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&object)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert_ne!(
+        fs::metadata(&object).unwrap().modified().unwrap(),
+        after.modified().unwrap()
+    );
     assert!(fresh.put_file(&source).is_err());
     assert!(ContentStore::new(directory.path().join("store"))
         .put_file(&source)
@@ -1077,10 +1093,10 @@ fn a_runtime_input_is_hashed_again_after_it_changes() {
     );
     let store = ContentStore::new(directory.path().join("store"));
     assert_eq!(store.put_file(&source).unwrap(), first);
-    // Rewritten in place, and replaced by a new file under the same name.
-    fs::write(&source, b"second engine bytes").unwrap();
+    // Rewritten in place at the same length, then replaced under the same name.
+    fs::write(&source, b"other engine").unwrap();
     let second = seedbox_driver_execution::admission::file_digest(&source).unwrap();
-    assert_eq!(second, ContentDigest::of(b"second engine bytes"));
+    assert_eq!(second, ContentDigest::of(b"other engine"));
     assert_eq!(store.put_file(&source).unwrap(), second);
     let replacement = directory.path().join("replacement");
     fs::write(&replacement, b"third").unwrap();
@@ -1147,12 +1163,15 @@ fn interactive_history_is_sealed_as_portable_overrides_and_replays_without_journ
     };
     let backend = fixture.executing(|request| {
         let path = request.intervention_history.unwrap();
-        if let Some(retained) = request.replay_interventions {
-            assert_eq!(retained, &history);
-            assert_eq!(seedbox_artifacts::interventions::read(path)?, history);
-        } else {
+        assert!(seedbox_artifacts::interventions::read(path)?
+            .entries
+            .is_empty());
+        if request.program.is_empty() {
             let mut journal = seedbox_artifacts::interventions::Journal::open(path)?;
             journal.append(history.entries[0].clone())?;
+        } else {
+            assert_eq!(request.program.len(), 1);
+            assert_eq!(request.program[0].key, "stop-workload");
         }
         fixture.backend.execute(request)
     });
@@ -1165,7 +1184,6 @@ fn interactive_history_is_sealed_as_portable_overrides_and_replays_without_journ
             &backend,
         )
         .unwrap();
-    assert_eq!(first.record.identity.interventions, None);
     assert_eq!(first.record.identity.program.len(), 1);
     assert_eq!(first.record.identity.program[0].key, "stop-workload");
     assert_eq!(first.record.identity.program[0].at_ns, 100);

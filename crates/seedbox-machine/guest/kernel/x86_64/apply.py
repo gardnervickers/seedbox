@@ -84,6 +84,39 @@ def changes(root):
             "\t.calibrate_cpu\t\t\t= seedbox_tsc_khz,\n\t.calibrate_tsc\t\t\t= seedbox_tsc_khz,\n")
     edit("arch/x86/kernel/x86_init.c", x86_init)
 
+    # All three fixed PV virtio windows share the same status/ACK page ABI.
+    # Queue/configuration accesses and the PIC's unmask rendezvous stay intact.
+    def virtio_mmio(s):
+        s = replace(s, "#include <uapi/linux/virtio_mmio.h>\n",
+                    "#include <uapi/linux/virtio_mmio.h>\n#include <asm/seedbox.h>\n")
+        return replace(s,
+            "\tstatus = readl(vm_dev->base + VIRTIO_MMIO_INTERRUPT_STATUS);\n"
+            "\twritel(status, vm_dev->base + VIRTIO_MMIO_INTERRUPT_ACK);\n",
+            "\tstatus = seedbox_virtio_interrupt(platform_get_resource(\n"
+            "\t\tvm_dev->pdev, IORESOURCE_MEM, 0)->start);\n")
+    edit("drivers/virtio/virtio_mmio.c", virtio_mmio)
+
+    # The master PIC's hot mask/EOI operations publish one shared update.
+    # Unmask always exits before IRQ restore. Boot/probe and slave operations
+    # retain their port protocol; all supported device lines are on the master.
+    def pic(s):
+        s = replace(s, "#include <asm/i8259.h>\n",
+                    "#include <asm/i8259.h>\n#include <asm/seedbox.h>\n")
+        mask = "\t\toutb(cached_master_mask, PIC_MASTER_IMR);\n"
+        s = replace(s, mask, "\t\tseedbox_pic_update(cached_master_mask, 0);\n", 3)
+        start = s.index("static void unmask_8259A_irq(")
+        end = s.index("static void enable_8259A_irq(", start)
+        s = s[:start] + replace(s[start:end],
+            "seedbox_pic_update(cached_master_mask, 0)",
+            "seedbox_pic_unmask(cached_master_mask)") + s[end:]
+        s = replace(s,
+            "\t\tinb(PIC_MASTER_IMR);\t/* DUMMY - (do we need this?) */\n"
+            "\t\tseedbox_pic_update(cached_master_mask, 0);\n"
+            "\t\toutb(0x60+irq, PIC_MASTER_CMD);\t/* 'Specific EOI to master */\n",
+            "\t\tseedbox_pic_update(cached_master_mask, irqmask);\n")
+        return s
+    edit("arch/x86/kernel/i8259.c", pic)
+
     edit("arch/x86/include/asm/fixmap.h", lambda s: replace(
         s, "\tFIX_EARLYCON_MEM_BASE,\n",
         "\tFIX_EARLYCON_MEM_BASE,\n\tFIX_SEEDBOX_TIME,\n\tFIX_SEEDBOX_EVENT,\n"))
@@ -107,12 +140,12 @@ def changes(root):
         s, "int set_tsc_mode(unsigned int val)\n{\n",
         "int set_tsc_mode(unsigned int val)\n{\n\treturn -EINVAL;\n"))
 
-    # Canonicalize only the YMM component after a successful task-state save:
-    # absent and present-all-zero YMM have one representation in guest RAM.
+    # Initial SSE/YMM state needs one saved representation in guest RAM.
+    # SSE's MXCSR rules depend on the XSAVE format; standard saves stay intact.
     edit("arch/x86/kernel/fpu/xstate.h", lambda s: replace(replace(
         s,
         "static inline void os_xsave(struct fpstate *fpstate)",
-        "void seedbox_canonicalize_ymm(struct fpstate *fpstate);\n\n"
+        "void seedbox_canonicalize_task_xstate(struct fpstate *fpstate);\n\n"
         "static inline void os_xsave(struct fpstate *fpstate)"),
         "\tXSTATE_XSAVE(&fpstate->regs.xsave, lmask, hmask, err);\n\n"
         "\t/* We should never fault when copying to a kernel buffer: */\n"
@@ -120,17 +153,31 @@ def changes(root):
         "\tXSTATE_XSAVE(&fpstate->regs.xsave, lmask, hmask, err);\n\n"
         "\t/* We should never fault when copying to a kernel buffer: */\n"
         "\tWARN_ON_FPU(err);\n"
-        "\tif (!err)\n\t\tseedbox_canonicalize_ymm(fpstate);\n"))
+        "\tif (!err)\n\t\tseedbox_canonicalize_task_xstate(fpstate);\n"))
     anchor = "\treturn (void *)xsave + xfeature_get_offset(xcomp_bv, xfeature_nr);\n}\n"
     edit("arch/x86/kernel/fpu/xstate.c", lambda s: replace(s, anchor, anchor + """
-/* Seedbox: XINUSE may describe zero YMM state as either present or absent.
+/* Seedbox: XINUSE may describe initial state as either present or absent.
  * Canonicalize the saved representation without changing register values.
+ * Compacted XRSTOR(S) initializes MXCSR when SSE is absent; standard XRSTOR
+ * loads MXCSR independently, so leave standard-format SSE state untouched.
  * This task-save hook does not cover signal frames or application XSAVE.
  */
-void seedbox_canonicalize_ymm(struct fpstate *fpstate)
+void seedbox_canonicalize_task_xstate(struct fpstate *fpstate)
 {
 	struct xregs_state *xsave = &fpstate->regs.xsave;
+	struct fxregs_state *sse = &xsave->i387;
 	void *ymm;
+
+	if ((fpstate->xfeatures & XFEATURE_MASK_SSE) &&
+	    (xsave->header.xcomp_bv & XCOMP_BV_COMPACTED_FORMAT)) {
+		if (!(xsave->header.xfeatures & XFEATURE_MASK_SSE)) {
+			memset(sse->xmm_space, 0, sizeof(sse->xmm_space));
+			sse->mxcsr = MXCSR_DEFAULT;
+		} else if (sse->mxcsr == MXCSR_DEFAULT &&
+			   !memchr_inv(sse->xmm_space, 0, sizeof(sse->xmm_space))) {
+			xsave->header.xfeatures &= ~XFEATURE_MASK_SSE;
+		}
+	}
 
 	if (!(fpstate->xfeatures & XFEATURE_MASK_YMM))
 		return;

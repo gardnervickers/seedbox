@@ -53,7 +53,6 @@ fn request(inventory: Inventory, output: PathBuf) -> wire::Request {
         start_paused: false,
         full_state: false,
         observations: None,
-        replay_interventions: None,
         resume_checkpoint: None,
     }
 }

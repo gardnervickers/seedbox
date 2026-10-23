@@ -33,7 +33,7 @@ pub(super) async fn step(session: &NativeSession, id: &seedbox_api::SimulationId
         if !state.stepping && state.position.completed_rounds > before {
             return;
         }
-        tokio::task::yield_now().await;
+        playback_changed(session, id, state).await;
     }
 }
 pub(super) async fn until_output(

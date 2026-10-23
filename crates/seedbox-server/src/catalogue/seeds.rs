@@ -11,20 +11,10 @@ pub(super) struct Range {
 }
 
 impl Catalogue {
-    pub fn submit_seeds(&mut self, mut request: SeedRangeRequest) -> Result<(Simulation, bool)> {
+    pub fn submit_seeds(&mut self, request: SeedRangeRequest) -> Result<(Simulation, bool)> {
         validate_submission_request_id(&request.request_id)?;
         if !(1..=4096).contains(&request.count) {
             return Err(Error::Invalid("seed count must be in 1..=4096".into()));
-        }
-        if matches!(request.spec.inputs, InputSource::Checkpoint { .. }) {
-            return Err(Error::Invalid(
-                "seed exploration requires fresh or retained preparation inputs".into(),
-            ));
-        }
-        if let InputSource::Retained { simulation } = &request.spec.inputs {
-            request.spec.inputs = InputSource::Prepared {
-                simulation: simulation.clone(),
-            };
         }
         if let Some(seed) = request.spec.seed.or(request.spec.configuration.seed) {
             seed.checked_add(u64::from(request.count - 1))
@@ -152,7 +142,7 @@ impl Catalogue {
         let range = entry.range.as_mut().ok_or(Error::StorageFailed)?;
         if !matches!(
             entry.resource.spec.inputs,
-            InputSource::Resolved { .. } | InputSource::Retained { .. }
+            InputSource::Resolved { .. } | InputSource::Prepared { .. }
         ) {
             range.error = Some("source simulation did not retain prepared inputs".into());
             self.entries.insert(id, entry);
@@ -162,11 +152,6 @@ impl Catalogue {
         let mut spec = entry.resource.spec.clone();
         spec.seed = Some(spec.seed.ok_or(Error::StorageFailed)? + u64::from(index));
 
-        if let InputSource::Retained { simulation } = &spec.inputs {
-            spec.inputs = InputSource::Prepared {
-                simulation: simulation.clone(),
-            };
-        }
         let member = match self.submit_inner(
             SubmitRequest {
                 request_id: member_request_id(&id, index),
@@ -225,7 +210,7 @@ mod tests {
     fn complete(catalogue: &mut Catalogue, mut source: Simulation) -> Simulation {
         source.status.phase = Phase::Preparing;
         source = catalogue.update(source).unwrap();
-        source.spec.inputs = InputSource::Retained {
+        source.spec.inputs = InputSource::Prepared {
             simulation: source.metadata.id.clone(),
         };
         source.status.phase = Phase::Completed;
@@ -285,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_execution_keeps_seed_while_prepared_inputs_allow_exploration() {
+    fn prepared_inputs_allow_seed_and_program_exploration() {
         let mut catalogue = Catalogue::in_memory();
         let base = request("source");
         let source = catalogue
@@ -305,13 +290,12 @@ mod tests {
             spec: source.spec.clone(),
         };
         rerun.spec.seed = Some(124);
-        assert!(matches!(
-            catalogue.submit(rerun.clone()),
-            Err(Error::Invalid(_))
-        ));
-        rerun.spec.inputs = InputSource::Prepared {
-            simulation: source.metadata.id.clone(),
-        };
+        rerun.spec.program.push(seedbox_spec::definition::Override {
+            id: "new-input".into(),
+            at_ns: 10,
+            timeout_ns: 500,
+            action: serde_json::json!({"action":"pause_process", "machine":"oracle"}),
+        });
         assert_eq!(catalogue.submit(rerun).unwrap().0.spec.seed, Some(124));
         assert!(catalogue
             .submit(SubmitRequest {

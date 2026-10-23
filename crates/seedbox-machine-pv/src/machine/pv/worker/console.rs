@@ -41,8 +41,14 @@ pub(super) struct Console {
     pub(super) output: LifecycleOutput,
 }
 impl Console {
+    pub(super) fn interrupt_status(&self) -> u32 {
+        self.interrupt
+    }
+    pub(super) fn acknowledge_interrupt(&mut self, bits: u32) {
+        self.interrupt &= !bits;
+    }
     pub(super) fn irq(&self) -> bool {
-        self.interrupt != 0
+        self.interrupt_status() != 0
     }
     pub(super) fn input(&mut self, bytes: &[u8]) {
         self.data.extend(bytes);
@@ -110,7 +116,7 @@ impl Console {
                     return Err("virtio notify invalid queue".into());
                 }
             }
-            INTERRUPT_ACK => self.interrupt &= !value,
+            INTERRUPT_ACK => self.acknowledge_interrupt(value),
             STATUS => {
                 if value == 0 {
                     let data = std::mem::take(&mut self.data);

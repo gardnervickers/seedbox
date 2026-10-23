@@ -7,6 +7,20 @@ A computation-only loop instead advances through DynamoRIO block-entry budgets a
 x86 kernel cpu_relax hooks also charge bounded reads with interrupts masked; arbitrary assembly loops do not.
 The [client](../crates/seedbox-machine/guest/progress/progress.c) also replaces x86 RDRAND/RDSEED with guest entropy.
 
+Syscall charges sample their price once. Each segment keeps its first clock read
+and interrupt unmask, then charges the remaining ticks together up to the published
+bound. A stopped continuation retains the unpaid charge in guest state.
+
+Progress instrumentation saves a fixed scratch register in thread-local storage,
+decrements the block budget without changing application flags, and restores the
+register before application execution. Exhaustion branches to one shared routine
+instead of emitting a context-save sequence in every block. Its clean call charges
+progress and redirects through DynamoRIO's dispatcher for pending signals and JIT
+synchronization; the resumed block's repeated charge is refunded. Intermediate
+scratch instructions have no application translation and cannot be relocation
+points. Reconstructed instruction lists also let the client restore the scratch
+value in reported contexts; stored translation tables alone do not.
+
 ## Reference TCG machine
 
 TCG budgets QEMU icount steps, not retired instructions: REP I/O costs per iteration plus a final check.
@@ -28,6 +42,15 @@ Every boot adds the machine counter to that epoch; kernel monotonic time alone w
 Realtime steps change kernel state and expire with the boot, whereas Driver-owned drift survives it.
 The [supervisor](../crates/seedbox-machine/src/pv/guest_service_init.c) initializes realtime before announcing Ready.
 
+## Prepared boot inputs
+
+Repeated OCI preparation reuses finished boot archives and logical filesystem views
+through content-store records. The [key](../crates/seedbox-driver-execution/src/driver_world/preparation/cache.rs)
+covers runtime/engine bytes, the logical rootfs, resolved launch and mounted configs,
+generated machine setup, epoch, progress budget and memory. Hits verify both retained
+objects; missing objects render again. Image resolution, runtime validation, boot
+memory checks and retention of the complete replay closure still run on every preparation.
+
 ## Same-time controls
 
 Committed outputs precede due timeline items, then frames, then timer wakeups; same-time items are FIFO.
@@ -48,6 +71,17 @@ Device reset preserves durable and volatile overlays; boot end discards the vola
 Shutdown merely requests guest cleanup: only guest FLUSH promotes writes, and background writeback may precede it.
 Live snapshots retain both layers without promotion; terminal snapshots contain boot-end policy already applied.
 The shared [store](../crates/seedbox-machine/src/machine/disk.rs) completes requests synchronously and retains completed prefixes on error.
+
+## Guest out-of-memory reports
+
+The supervisor retains `/dev/kmsg` before entering the application image and
+relays the supported Linux kernel's OOM victim records on the management channel.
+Reports carry the victim PID, task name and anonymous RSS, before the application
+outcome. Only a report naming the supervised leader explains `137 (out of memory)`;
+an ordinary SIGKILL remains `137`. Boot identity comes from the Driver; each outcome consumes its own pending
+report, so restarted applications cannot reuse an earlier kill. The world retains
+the newest 64 reports, including their boots; diagnostics suggests raising `memoryMiB`.
+Lost kernel records fail supervision with an I/O error rather than guessing a victim.
 
 ## ARM exclusive reservations
 
@@ -182,9 +216,10 @@ The [kernel hook](../crates/seedbox-machine/guest/kernel/arm64/seedbox.c) lets t
 
 ## Canonical saved vector state
 
-XSAVE buffers can restore identical zero YMM state while differing in presence bits or ignored payload bytes.
+XSAVE buffers can restore identical initial SSE or zero YMM state while differing in presence bits or ignored payload bytes.
 Host interruptions can expose those differences in full-RAM comparison despite equivalent architectural state.
-Kernel task-state saves canonicalize zero/absent YMM; direct application XSAVE and some signal paths remain outside it.
+Kernel task-state saves canonicalize zero/absent YMM; compacted saves also canonicalize initial/absent SSE, preserving noninitial XMM and MXCSR values.
+Standard-format SSE remains unchanged because its MXCSR restore rules differ; direct application XSAVE and some signal paths remain outside the task-save hook.
 The [patch](../crates/seedbox-machine/guest/kernel/x86_64/apply.py) changes guest bytes, not the comparison's coverage.
 Live vCPU vector evidence hashes each advertised component's effective value, substituting init state when absent.
 The [digest](../crates/seedbox-machine-pv/src/machine/pv/worker/x86_64/backend/evidence.rs) omits XSTATE_BV, so host FPU save/restore cannot change it.

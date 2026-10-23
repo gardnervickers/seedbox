@@ -1874,6 +1874,9 @@ fn condition(focus: &Focus, m: &MachineState) -> (String, Color) {
         MachineCondition::Ready => ("● ready".to_string(), GREEN),
         MachineCondition::Paused => ("❚❚ paused".to_string(), AMBER),
         MachineCondition::Crashed => ("✕ crashed".to_string(), RED),
+        MachineCondition::Exited if m.exit_code == Some(137) && m.application_oom_killed => {
+            ("✕ 137 (OOM)".into(), RED)
+        }
         MachineCondition::Exited => (
             format!("✕ exited {}", m.exit_code.unwrap_or(0)),
             if m.exit_code == Some(0) { DIM } else { RED },
@@ -3327,6 +3330,14 @@ fn event_text(kind: &EventKind) -> (String, String, Color) {
             format!("{machine} i{incarnation} ready"),
             GREEN,
         ),
+        EventKind::OutOfMemoryKill { machine, kill, .. } => (
+            "memory".into(),
+            format!(
+                "{machine}: OOM killed {:?} (pid {}, anon-rss {} KiB); raise memoryMiB",
+                kill.command, kill.pid, kill.anon_rss_kib
+            ),
+            RED,
+        ),
         EventKind::MachineExited { machine, code, .. } => (
             "machine".into(),
             format!("{machine} exited {code}"),
@@ -3984,6 +3995,49 @@ mod tests {
         );
         assert!(text.contains("passed"), "{text}");
         println!("BEGIN FIXTURE completed-normal-exits (TestBackend, NOT LIVE)\n{text}END FIXTURE completed-normal-exits");
+    }
+
+    #[test]
+    fn fixture_kernel_oom_and_user_sigkill_are_distinct() {
+        let mut app = completed_normal_exits_fixture();
+        let resource = app.focus.as_mut().unwrap().resource.as_mut().unwrap();
+        resource.metadata.name = "fixture-oom-sigkill".into();
+        resource.status.oracle_exit_code = Some(137);
+        let mut w = world(&["app", "oracle"]);
+        w.simulated_time_ns = 100_000_000_000;
+        for machine in &mut w.machines {
+            machine.condition = MachineCondition::Exited;
+            machine.exit_code = Some(137);
+            machine.application_oom_killed = machine.name == "app";
+        }
+        app.apply(Update::World(w));
+        app.apply(Update::Event(EventDelivery::Event {
+            sequence: 3,
+            observation: SimulationEvent {
+                simulation: "k7m2p9qx".parse().unwrap(),
+                revision: 1,
+                simulated_time_ns: Some(100_000_000_000),
+                position: None,
+                event: EventKind::OutOfMemoryKill {
+                    machine: "app".into(),
+                    incarnation: 0,
+                    kill: seedbox_api::OutOfMemoryVictim {
+                        pid: 31,
+                        command: "allocator".into(),
+                        anon_rss_kib: 300948,
+                        application: true,
+                    },
+                },
+            },
+        }));
+        let text = render(&app);
+        assert!(text.contains("137 (OOM)"), "{text}");
+        println!("BEGIN FIXTURE kernel-oom-vs-sigkill (TestBackend, NOT LIVE)\n{text}END FIXTURE kernel-oom-vs-sigkill");
+        let event = &app.focus.as_ref().unwrap().events.back().unwrap().event;
+        let (_, detail, color) = event_text(event);
+        assert!(detail.contains("pid 31, anon-rss 300948 KiB"));
+        assert!(detail.contains("raise memoryMiB"));
+        assert_eq!(color, RED);
     }
 
     #[test]

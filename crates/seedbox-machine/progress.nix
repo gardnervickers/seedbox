@@ -18,7 +18,7 @@ in pkgs.runCommand "seedbox-progress.tar" {
   mkdir -p bundle/bin64 bundle/lib64/release bundle/ext/lib64/release bundle/lib
   cp ${runtime}/bin64/drrun bundle/bin64/
   cp ${runtime}/lib64/release/*.so bundle/lib64/release/
-  cp ${runtime}/ext/lib64/release/libdrmgr.so ${runtime}/ext/lib64/release/libdrreg.so bundle/ext/lib64/release/
+  cp ${runtime}/ext/lib64/release/libdrmgr.so bundle/ext/lib64/release/
   cp build/libseedbox_progress.so bundle/
   # Only the launcher needs libc. Its private loader/search path must never
   # override the application's libc, including musl and static images.

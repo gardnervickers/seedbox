@@ -79,6 +79,7 @@ impl Payload for SimulationEvent {
                         serde_json::to_vec(plan).map_or(usize::MAX, |bytes| bytes.len())
                     })
             }
+            EventKind::OutOfMemoryKill { machine, kill, .. } => machine.len() + kill.command.len(),
             EventKind::PreparationProgress { machine, .. }
             | EventKind::MachineReady { machine, .. }
             | EventKind::MachineLifecycle { machine, .. }
@@ -1013,6 +1014,7 @@ impl Manager {
                 ..
             }
             | EventKind::MachineReady { machine, .. }
+            | EventKind::OutOfMemoryKill { machine, .. }
             | EventKind::MachineLifecycle { machine, .. }
             | EventKind::MachineExited { machine, .. }
                 if !live.logs.contains_key(machine) =>

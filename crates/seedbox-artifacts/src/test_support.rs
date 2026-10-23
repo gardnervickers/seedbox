@@ -54,7 +54,6 @@ pub fn fixture() -> sb::record::RunRecord {
     };
     let identity = RunIdentity {
         program: Vec::new(),
-        interventions: None,
         version: 2,
         seed: 0,
         configuration,

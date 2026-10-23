@@ -39,10 +39,12 @@ pub use status::{ExecutionTermination, Phase, Stage, StageTiming, TestVerdict};
 mod seeds;
 pub use seeds::{SeedRangeRequest, SeedRangeStatus};
 
+pub use seedbox_engine_protocol::out_of_memory::Kill as OutOfMemoryVictim;
 mod world;
 pub use world::{
     ApplicationCondition, ApplicationState, FaultState, Frame, FrameDelivery, FrameFate,
-    LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState, WorldState,
+    LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState, OutOfMemoryKill,
+    WorldState,
 };
 
 mod timeline;
@@ -57,4 +59,6 @@ pub use capacity::{ExecutionCapacity, ExecutionOccupant, QueueReason, QueuedSimu
 mod bundles;
 mod diagnostics;
 pub use bundles::*;
-pub use diagnostics::{DiagnosticDocument, DiagnosticFile, DiagnosticFileQuery, DiagnosticFiles};
+pub use diagnostics::{
+    DiagnosticDocument, DiagnosticFile, DiagnosticFileQuery, DiagnosticFiles, OutOfMemoryDiagnostic,
+};

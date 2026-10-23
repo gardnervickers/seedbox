@@ -25,3 +25,4 @@ tar.workspace = true
 [dev-dependencies]
 # Integration tests use this crate's own run-record fixtures.
 seedbox-artifacts = { workspace = true, features = ["test-support"] }
+seedbox-test-time.workspace = true

@@ -73,6 +73,11 @@ fn clock_request(session: &NativeSession) -> SubmitRequest {
         panic!("resolved real clock fixture")
     };
     let mut definition = definition.as_ref().clone();
+    // Paused Step acknowledgements pass through the service control poll.
+    // These NIC-free machines can advance in 100 ms windows while guest timer
+    // deadlines still shorten runs and output keeps its actual occurrence time.
+    // Keep the workload and 1 ms clock-accuracy assertions unchanged.
+    definition.simulator.quantum_ns = std::num::NonZeroU64::new(100_000_000).unwrap();
     definition.machines.get_mut(TARGET).unwrap().process.argv =
         vec!["/application".into(), "clock".into()];
     request.spec = SimulationSpec::resolved(definition).unwrap();

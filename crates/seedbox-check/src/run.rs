@@ -573,6 +573,32 @@ pub fn run_machine<C: Commands>(checks: &mut Checks<C>, job: Job) -> Result<(), 
     }
     Ok(())
 }
+/// Only application cases have separate server/catalogue lifetimes per case.
+/// Keep two active workloads on the hosted 4-CPU/16-GB runner; smaller hosts
+/// and targets with process-global fixture ownership remain sequential.
+fn application_threads(cpus: usize, memory_bytes: u64) -> usize {
+    if cpus >= 4 && memory_bytes >= 12 * 1024 * 1024 * 1024 {
+        2
+    } else {
+        1
+    }
+}
+
+fn native_test_threads(package: &str, target: &str) -> usize {
+    if cfg!(target_os = "linux") && package == "seedbox" && target == "applications" {
+        let cpus = std::thread::available_parallelism().map_or(1, usize::from);
+        // SAFETY: sysconf queries have no pointer arguments or mutable state.
+        let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let memory = u64::try_from(pages)
+            .unwrap_or(0)
+            .saturating_mul(u64::try_from(page_size).unwrap_or(0));
+        application_threads(cpus, memory)
+    } else {
+        1
+    }
+}
+
 pub fn cargo_tests<C: Commands>(
     checks: &mut Checks<C>,
     package: &str,
@@ -603,7 +629,10 @@ pub fn cargo_tests<C: Commands>(
         let scratch = Temporary::in_directory(Path::new("/tmp"), "sb-check-")
             .map_err(|e| format!("native test scratch directory: {e}"))?;
         env.insert("TMPDIR".into(), scratch.0.to_string_lossy().into());
-        let mut command = vec![binary.to_string_lossy().into(), "--test-threads=1".into()];
+        let mut command = vec![
+            binary.to_string_lossy().into(),
+            format!("--test-threads={}", native_test_threads(package, &target)),
+        ];
         if matches!(
             target.as_str(),
             "applications" | "dynamorio" | "dynamorio_isolated"
@@ -760,4 +789,21 @@ fn native<C: Commands>(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+
+    #[test]
+    fn application_concurrency_is_bounded_by_runner_resources() {
+        let gib = 1024 * 1024 * 1024;
+        assert_eq!(application_threads(4, 16 * gib), 2);
+        assert_eq!(application_threads(128, 512 * gib), 2);
+        assert_eq!(application_threads(2, 16 * gib), 1);
+        assert_eq!(application_threads(4, 8 * gib), 1);
+        assert_eq!(application_threads(4, 0), 1);
+        assert_eq!(native_test_threads("seedbox-machine", "dynamorio"), 1);
+        assert_eq!(native_test_threads("seedbox", "etcd_service_native"), 1);
+    }
 }

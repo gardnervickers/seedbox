@@ -80,6 +80,9 @@ pub(super) fn diagnostics(
                 })
                 .collect(),
         )?;
+        for kill in &report.out_of_memory_kills {
+            output::field("out of memory", kill.message());
+        }
         for (name, reason) in report.omissions {
             output::field("omission", serde_json::to_string(&(name, reason))?);
         }

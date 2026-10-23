@@ -107,7 +107,10 @@ async fn active_throttle(session: &mut NativeSession) -> (seedbox_api::Simulatio
 pub async fn pv_throttle_heal_replay() {
     native_case(|owner| Box::pin(async move {
         let session = owner.session(CpuBackend::Pv);
-        let request = cpu_request(session);
+        let mut request = cpu_request(session);
+        let InputSource::Resolved { definition } = &mut request.spec.inputs else { unreachable!() };
+        definition.runtime.execution["witness_mode"] = serde_json::to_value(WitnessMode::FullState).unwrap();
+        request.spec = SimulationSpec::resolved(definition.as_ref().clone()).unwrap();
         let baseline = session.submit(request.clone(), 1).await;
         session.worker(&baseline).await;
         session.complete(&baseline, false, 1, SEED).await.unwrap();
@@ -136,15 +139,18 @@ pub async fn pv_throttle_heal_replay() {
         // Consume the service-frozen spec, not fresh duplicate host injections.
         let resource = session.client.describe(&source).await.unwrap();
         assert_eq!(resource.spec.program.len(), 2);
-        let replay = session.submit(SubmitRequest { metadata: Default::default(), options: Default::default(), request_id: "fault-replay".into(), spec: resource.spec }, 1).await;
+        assert!(matches!(&resource.spec.inputs, InputSource::Resolved { definition }
+            if definition.overrides == resource.spec.program));
+        let replay = session.submit(SubmitRequest { metadata: Default::default(), options: Default::default(), request_id: "fault-replay".into(), spec: resource.spec }, 4).await;
         session.worker(&replay).await;
-        let replay_witness = session.complete(&replay, false, 1, SEED).await.unwrap();
+        let replay_witness = session.complete(&replay, false, 4, SEED).await.unwrap();
         assert_eq!(source_witness, replay_witness);
         assert_eq!(target_output, session.stdout(&replay, TARGET, false).await);
         applied_once(session, &replay, &[fault, heal]).await;
         let comparison = session.client.compare(&source, &replay).await.unwrap();
         assert_eq!(comparison.status, ComparisonStatus::Match);
         assert_eq!(comparison.witness_matches, Some(true));
+        assert_eq!(comparison.full_state_matches, Some(true));
         eprintln!("public throttle/heal native replay MATCH source={source} replay={replay} witness={source_witness} guest_delta={} baseline_delta={}", delta(&target_output), delta(&baseline_output));
     })).await;
 }

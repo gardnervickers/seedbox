@@ -41,7 +41,8 @@ type Result<T> = std::result::Result<T, String>;
 // Seedbox PV v3 shared-page ABI. Guest advances LAST while executing; a stopped
 // forward adoption aligns it to canonical time without consuming pending work.
 // Guest may also advance the exclusive epoch on exception return; all other
-// publication words are host-owned.
+// publication words are host-owned. x86 word 56 is a pending PIC transaction;
+// words 64/72/80 publish virtio status (low u32) and guest ACKs (high u32).
 const ABI: u64 = 3;
 const PAGE_BYTES: usize = 16384;
 const NOW: usize = 0;
@@ -179,6 +180,8 @@ impl<B: Backend> Machine<B> {
         })
     }
     fn publish(&self, upto: u64) {
+        #[cfg(target_arch = "x86_64")]
+        self.publish_virtio_irq();
         self.page.set_word(NOW, self.state.now);
         self.page
             .set_word(BOUND, self.state.deadline.map_or(upto, |d| d.min(upto)));
@@ -279,6 +282,8 @@ impl<B: Backend> Machine<B> {
             None => syscall_cost_ns,
         };
         self.page.set_word(SYSCALL_COST, cost);
+        // Apply old guest ACKs before time/input can raise a new interrupt.
+        self.consume_irq_update()?;
         self.adopt(now)?;
         if !input.is_empty() {
             self.boundary()?;
@@ -329,6 +334,7 @@ impl<B: Backend> Machine<B> {
                 return Err("PV guest crossed accepted horizon".into());
             }
             self.state.now = self.state.now.max(last);
+            self.consume_irq_update()?;
             self.record_exit(&exit)?;
             let mut effect = Effect::default();
             match exit {
@@ -341,51 +347,7 @@ impl<B: Backend> Machine<B> {
                     if width != 8 || !write {
                         return Err("PV clockevent access".into());
                     }
-                    match address - EVENT_MMIO {
-                        0 => {
-                            self.state.deadline = match &mut self.state.policy {
-                                Some(policy) => policy.arm(value)?,
-                                None => {
-                                    if value == 0 {
-                                        None
-                                    } else {
-                                        Some(value)
-                                    }
-                                }
-                            }
-                        }
-                        8 => {
-                            self.state.timer = false;
-                            self.lower(arch::TIMER)?;
-                        }
-                        16 => {
-                            if !self.state.ready {
-                                return Err("PV idle before handshake".into());
-                            }
-                            effect.idle = true;
-                        }
-                        24 => {
-                            self.record_native(b'Y', 0, upto, 0);
-                            if !self.state.devices.deferred() {
-                                self.state.now = self
-                                    .state
-                                    .deadline
-                                    .map_or(upto, |d| d.min(upto))
-                                    .max(self.state.now);
-                            }
-                        }
-                        32 => {
-                            if value != ABI || self.state.ready {
-                                return Err("PV invalid ready handshake".into());
-                            }
-                            self.state.ready = true;
-                        }
-                        offset => {
-                            if self.event_register(offset, value)? {
-                                effect.terminal = Some(Stop::PoweredOff);
-                            }
-                        }
-                    }
+                    effect = self.clock_event(address - EVENT_MMIO, value, upto)?;
                 }
                 Exit::Mmio {
                     address,
@@ -452,7 +414,7 @@ impl<B: Backend> Machine<B> {
                         effect.response = Some(net.read(offset, width)? as u64);
                     }
                 }
-                exit => effect = self.platform(exit)?,
+                exit => effect = self.platform(exit, upto)?,
             }
             self.interrupts()?;
             self.native.complete(effect.response)?;
@@ -480,6 +442,55 @@ impl<B: Backend> Machine<B> {
             // Host interruptions re-enter above without preparing anything new.
             self.prepare()?;
         }
+    }
+    fn clock_event(&mut self, offset: u64, value: u64, upto: u64) -> Result<Effect> {
+        let mut effect = Effect::default();
+        match offset {
+            0 => {
+                self.state.deadline = match &mut self.state.policy {
+                    Some(policy) => policy.arm(value)?,
+                    None => {
+                        if value == 0 {
+                            None
+                        } else {
+                            Some(value)
+                        }
+                    }
+                }
+            }
+            8 => {
+                self.state.timer = false;
+                self.lower(arch::TIMER)?;
+            }
+            16 => {
+                if !self.state.ready {
+                    return Err("PV idle before handshake".into());
+                }
+                effect.idle = true;
+            }
+            24 => {
+                self.record_native(b'Y', 0, upto, 0);
+                if !self.state.devices.deferred() {
+                    self.state.now = self
+                        .state
+                        .deadline
+                        .map_or(upto, |d| d.min(upto))
+                        .max(self.state.now);
+                }
+            }
+            32 => {
+                if value != ABI || self.state.ready {
+                    return Err("PV invalid ready handshake".into());
+                }
+                self.state.ready = true;
+            }
+            offset => {
+                if self.event_register(offset, value)? {
+                    effect.terminal = Some(Stop::PoweredOff);
+                }
+            }
+        }
+        Ok(effect)
     }
     fn capture(&mut self, path: &Path) -> Result<()> {
         // The client owns an ended boot's exit state without a live worker.

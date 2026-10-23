@@ -54,6 +54,15 @@ static int write_wire(void *opaque, const void *bytes, size_t length) {
     wire->used += length; wire->bytes[wire->used] = 0;
     return 0;
 }
+static struct wire *outcome_wire;
+static int outcome_evidence(pid_t application) {
+    assert(application == owned_group && application > 0);
+    assert(!strstr(outcome_wire->bytes, "SBX_EXIT1"));
+    /* Fixture callback proves the production collect boundary is after reaping
+     * and before publishing EXIT. Kernel parsing has its own record fixtures. */
+    assert(kill(application, 0) == -1 && errno == ESRCH);
+    return write_wire(outcome_wire, "OOM evidence collected\n", 23);
+}
 static void start(struct sbx_supervisor *s, struct recipe *recipe) {
     assert(sbx_supervisor_start(s, launch, recipe) == 0);
     owned_group = s->child;
@@ -256,10 +265,11 @@ int main(int argc, char **argv) {
     assert(sbx_service_feed(&service, "start 21\n", 9) == 0);
     owned_group = service.supervisor.child;
     int result;
+    outcome_wire = &wire; service.before_outcome = outcome_evidence;
     while (!(result = sbx_service_collect(&service, &code))) usleep(1000);
     assert(result == 1 && code == 23);
     owned_group = -1;
-    assert(strstr(wire.bytes, "SBX_EXIT1 status=23\n"));
+    assert(strstr(wire.bytes, "OOM evidence collected\nSBX_EXIT1 status=23\n"));
     assert(sbx_service_feed(&service, "shut", 4) == 0 && !service.shutdown_requested);
     assert(sbx_service_feed(&service, "down\n", 5) == 0 && service.shutdown_requested);
     assert(sbx_service_feed(&service, "start 0\n", 8) == -1 && errno == EINVAL);

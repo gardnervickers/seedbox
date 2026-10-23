@@ -63,3 +63,193 @@ fn loader_e820_excludes_apertures_and_retains_default_boot_geometry() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires native KVM and SEEDBOX_PV_CLANG/SEEDBOX_PV_LD"]
+fn native_shared_pic_handler_snapshot_preserves_mask_ack_and_exact_redelivery() {
+    use super::super::{read_snapshot, restore_machine, BootInputs};
+    let kernel = super::super::super::test_image::assemble(include_str!(
+        "../../../../../../seedbox-machine/src/pv/guest_irq_shared.S"
+    ));
+    let inputs = BootInputs {
+        witness: super::super::protocol::BootWitness {
+            mark: None,
+            boot: 0,
+            initial: seedbox_machine::machine::execution_evidence::chain::initial(),
+        },
+        memory_bytes: boot::RAM_BYTES as u64,
+        kernel,
+        initrd: b"initrd".to_vec(),
+        seed: 7,
+        command_line: "console=ttyS0".into(),
+        disk: None,
+        network: None,
+        policy: None,
+    };
+    let mut vm = Machine::<Native>::boot(
+        &inputs.kernel,
+        &inputs.initrd,
+        7,
+        &inputs.command_line,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        vm.run(0, 5, 1000, false, &[], vec![]).unwrap(),
+        Stop::Blocked(Some(5))
+    );
+    assert_eq!(
+        vm.run(5, 10, 1000, false, &[], vec![]).unwrap(),
+        Stop::Horizon
+    );
+    assert!(vm.state.timer, "handler has not acknowledged the device");
+    assert_eq!(vm.state.devices.pic.imr, 0xff);
+    assert_eq!(vm.state.devices.pic.isr, 0);
+    assert!(
+        !vm.native.interruptible(),
+        "snapshot inside handler retains IF=0"
+    );
+    assert_eq!(vm.page.word(PIC_UPDATE), 0);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("handler");
+    vm.capture(&path).unwrap();
+    let mut restored = restore_machine(&inputs, read_snapshot(&path, &inputs).unwrap()).unwrap();
+    // Adopt beyond the new deadline before the stopped handler arms it.
+    // Its old ACK clears only the old timer. Arming the overdue timer then
+    // unmasking must deliver another IRQ at IRET, without another clock read.
+    // The first return instruction sets a sentinel; the second handler traps
+    // if it ran, so a later HLT rendezvous cannot satisfy this assertion.
+    for machine in [&mut vm, &mut restored] {
+        assert_eq!(
+            machine.run(20, 21, 1000, false, &[], vec![]).unwrap(),
+            Stop::PoweredOff
+        );
+        assert_eq!(machine.state.now, 20);
+        assert!(!machine.state.timer);
+        assert_eq!(machine.state.devices.pic.isr, 0);
+    }
+    assert_eq!(vm.state.witness, restored.state.witness);
+    assert_eq!(
+        vm.native.capture().unwrap(),
+        restored.native.capture().unwrap()
+    );
+    assert_eq!(unsafe { vm.page.bytes() }, unsafe { restored.page.bytes() });
+}
+
+#[test]
+#[ignore = "requires native KVM and SEEDBOX_PV_CLANG/SEEDBOX_PV_LD"]
+fn native_shared_virtio_handler_snapshot_preserves_ack_and_exact_redelivery() {
+    use super::super::{read_snapshot, restore_machine, BootInputs};
+    let kernel = super::super::super::test_image::assemble(include_str!(
+        "../../../../../../seedbox-machine/src/pv/guest_virtio_irq_shared.S"
+    ));
+    let inputs = BootInputs {
+        witness: super::super::protocol::BootWitness {
+            mark: None,
+            boot: 0,
+            initial: seedbox_machine::machine::execution_evidence::chain::initial(),
+        },
+        memory_bytes: boot::RAM_BYTES as u64,
+        kernel,
+        initrd: b"initrd".to_vec(),
+        seed: 7,
+        command_line: "console=ttyS0".into(),
+        disk: None,
+        network: Some([2, 0, 0, 0, 0, 7]),
+        policy: None,
+    };
+    let mut vm = Machine::<Native>::boot(
+        &inputs.kernel,
+        &inputs.initrd,
+        7,
+        &inputs.command_line,
+        None,
+        inputs.network,
+    )
+    .unwrap();
+    // Fixture setup: negotiate one RX ring and offer three distinct buffers.
+    // Actual frames, DMA, device assertions, guest ACKs and PIC delivery below
+    // all use the production paths. No synthesized device interrupt status.
+    unsafe {
+        vm.ram.modify(|ram| {
+            let net = vm.state.net.as_mut().unwrap();
+            for (offset, value) in [
+                (0x70, 3),
+                (0x24, 1),
+                (0x20, 1),
+                (0x70, 11),
+                (0x30, 0),
+                (0x38, 16),
+                (0x80, 0x4000000),
+                (0x90, 0x4001000),
+                (0xa0, 0x4002000),
+                (0x44, 1),
+                (0x70, 15),
+            ] {
+                net.write(ram, offset, 4, value, 0).unwrap();
+            }
+            for i in 0..3usize {
+                let at = 0x4000000 + i * 16;
+                ram[at..at + 8].copy_from_slice(&(0x4008000u64 + i as u64 * 2048).to_le_bytes());
+                ram[at + 8..at + 12].copy_from_slice(&1526u32.to_le_bytes());
+                ram[at + 12..at + 14].copy_from_slice(&2u16.to_le_bytes());
+                ram[0x4001004 + i * 2..0x4001006 + i * 2]
+                    .copy_from_slice(&(i as u16).to_le_bytes());
+            }
+            ram[0x4001002..0x4001004].copy_from_slice(&3u16.to_le_bytes());
+        })
+    };
+    assert_eq!(
+        vm.run(0, 5, 1000, false, &[], vec![]).unwrap(),
+        Stop::Blocked(None)
+    );
+    assert_eq!(
+        vm.run(5, 10, 1000, false, &[], vec![vec![41; 60]]).unwrap(),
+        Stop::Horizon
+    );
+    assert!(!vm.state.net.as_ref().unwrap().irq());
+    assert_eq!(vm.state.devices.pic.imr, 0xff);
+    assert_eq!(vm.state.devices.pic.isr, 0);
+    assert!(!vm.native.interruptible());
+    assert_eq!(vm.page.word(VIRTIO_IRQ + 16), 0);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("virtio-handler");
+    vm.capture(&path).unwrap();
+    let mut restored = restore_machine(&inputs, read_snapshot(&path, &inputs).unwrap()).unwrap();
+    for machine in [&mut vm, &mut restored] {
+        // New arrivals cross the stopped masked handler, first with no budget.
+        assert_eq!(
+            machine
+                .run(20, 20, 1000, false, &[], vec![vec![42; 60], vec![43; 60]])
+                .unwrap(),
+            Stop::Horizon
+        );
+        assert_eq!(machine.page.word(VIRTIO_IRQ + 16), 1);
+        assert_eq!(machine.state.devices.lines & 0x80, 0x80);
+        assert_eq!(
+            machine.run(20, 21, 1000, false, &[], vec![]).unwrap(),
+            Stop::PoweredOff
+        );
+        assert_eq!(machine.state.now, 20);
+        assert!(!machine.state.net.as_ref().unwrap().irq());
+        assert_eq!(machine.state.devices.pic.isr, 0);
+        let ram = unsafe { machine.ram.bytes() };
+        assert_eq!(
+            u16::from_le_bytes(ram[0x4002002..0x4002004].try_into().unwrap()),
+            3
+        );
+        for i in 0..3 {
+            assert_eq!(
+                &ram[0x400800c + i * 2048..0x4008048 + i * 2048],
+                &[41 + i as u8; 60]
+            );
+        }
+    }
+    assert_eq!(vm.state.witness, restored.state.witness);
+    assert_eq!(
+        vm.native.capture().unwrap(),
+        restored.native.capture().unwrap()
+    );
+    assert_eq!(unsafe { vm.page.bytes() }, unsafe { restored.page.bytes() });
+}

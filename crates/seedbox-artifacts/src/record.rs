@@ -46,9 +46,6 @@ pub struct RunIdentity {
     /// Authored inputs; fault IDs are assigned only when admitted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub program: Vec<seedbox_engine_protocol::input_program::TimedInput>,
-    /// Content-addressed semantic history, sealed after interactive execution.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interventions: Option<ContentDigest>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

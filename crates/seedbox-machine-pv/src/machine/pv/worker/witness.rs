@@ -9,7 +9,7 @@
 //! S: PV boot entropy-generation installation (arch::load wrote the boot seed);
 //! generation is physical boot ordinal. No runtime page-reseed API exists.
 //! C: fresh Boot after predecessor successor() fold, for forced marks1/2 only.
-//! Y: actual EVENT_MMIO+24 soft-bound write. Console bytes are O or PL011 w.
+//! Y: semantic soft-bound yield after its actual MMIO or port write. Console bytes are O or PL011 w.
 //! X/E: this Linux PV board maps no 0xf4/0xf5 debug-exit/init-error devices:
 //! those ports float/ignore, and are ordinary O/i, not terminal requests.
 //! Native outcomes use PV power-off MMIO, PSCI or architectural reset.
@@ -25,6 +25,7 @@
 //! k hypercall (size0,a=function in x0,b0); j actual IRQ deassert(size0,a=vector,b0).
 //! d completion packs full kind:u32 in b low32 and status:u8 in bits32..39;
 //! a=sector,size0, ordering is actual used-ring completion order.
+//! q: consumed x86 shared PIC or virtio ACK publication (size8,a=page offset,b=observed word).
 //! Native interaction records only; host landings and inspection are invisible.
 use super::*;
 use seedbox_machine::machine::execution_evidence::chain;

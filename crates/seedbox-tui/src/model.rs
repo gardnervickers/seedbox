@@ -1634,6 +1634,7 @@ impl App {
                             | EventKind::MachineLifecycle { .. }
                             | EventKind::MachineReady { .. }
                             | EventKind::MachineExited { .. }
+                            | EventKind::OutOfMemoryKill { .. }
                             | EventKind::ControlChanged { .. }
                     );
                     if refresh {
@@ -2747,6 +2748,8 @@ pub(crate) mod tests {
                 incarnation: 0,
                 condition: MachineCondition::Ready,
                 exit_code: None,
+                out_of_memory_kills: Vec::new(),
+                application_oom_killed: false,
                 throttle_permille: None,
                 oracle: *n == "oracle",
                 last_transition: None,

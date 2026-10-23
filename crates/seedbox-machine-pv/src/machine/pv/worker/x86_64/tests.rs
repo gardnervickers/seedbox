@@ -9,16 +9,34 @@ struct Scripted {
     injected: Vec<u8>,
     window: bool,
     responses: Vec<Option<u64>>,
+    page: Option<Rc<Memory>>,
+    publications: std::collections::BTreeMap<usize, u64>,
+    virtio_publications: std::collections::BTreeMap<usize, (usize, u64)>,
+    nic_words_at_entry: Vec<u64>,
 }
 impl Backend for Scripted {
-    fn create(_: Rc<Memory>, _: Rc<Memory>) -> Result<Self> {
-        Ok(Self::default())
+    fn create(_: Rc<Memory>, page: Rc<Memory>) -> Result<Self> {
+        Ok(Self {
+            page: Some(page),
+            ..Self::default()
+        })
     }
     fn boot(&mut self, _: backend::Boot) -> Result<()> {
         Ok(())
     }
     fn enter(&mut self) -> Result<Exit> {
         self.entries += 1;
+        if let Some(update) = self.publications.remove(&self.entries) {
+            self.page.as_ref().unwrap().set_word(PIC_UPDATE, update);
+        }
+        if let Some((slot, word)) = self.virtio_publications.remove(&self.entries) {
+            self.page
+                .as_ref()
+                .unwrap()
+                .set_word(VIRTIO_IRQ + slot * 8, word);
+        }
+        self.nic_words_at_entry
+            .push(self.page.as_ref().unwrap().word(VIRTIO_IRQ + 16));
         self.exits
             .pop_front()
             .ok_or("unexpected scripted entry".into())
@@ -231,7 +249,7 @@ fn timer_waits_for_an_interrupt_window_and_is_injected_once() {
         // Linux's mask_and_ack: mask, specific EOI; handler acks the timer.
         port(0x21, true, 0xcf),
         port(0x20, true, 0x60),
-        event(8, 1),
+        port(ACK_PORT, true, 1),
         port(0x21, true, 0xce),
         halt(),
     ]);
@@ -244,6 +262,65 @@ fn timer_waits_for_an_interrupt_window_and_is_injected_once() {
     assert_eq!(vm.state.devices.pic.isr, 0);
     assert_eq!(vm.state.devices.lines, 0);
     assert!(!vm.native.window);
+}
+#[test]
+fn port_yield_advances_to_the_deadline_or_run_horizon() {
+    for deadline in [None, Some(5), Some(20)] {
+        let mut vm = machine();
+        vm.native.exits.push_back(event(32, 3));
+        if let Some(deadline) = deadline {
+            vm.native.exits.push_back(event(0, deadline));
+        }
+        vm.native
+            .exits
+            .extend([port(YIELD_PORT, true, 1), event(40, 1)]);
+        let stop = vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap();
+        assert_eq!(vm.state.now, deadline.unwrap_or(10).min(10));
+        assert_eq!(vm.state.timer, deadline == Some(5));
+        assert_eq!(vm.state.devices.lines & 1 != 0, deadline == Some(5));
+        assert_eq!(
+            stop,
+            if deadline == Some(5) {
+                Stop::PoweredOff
+            } else {
+                Stop::Horizon
+            }
+        );
+        assert!(vm.native.responses.iter().all(Option::is_none));
+        if deadline.is_none() {
+            use seedbox_machine::machine::execution_evidence::chain;
+            let h = chain::record(
+                &chain::initial(),
+                b'w',
+                8,
+                0,
+                super::super::EVENT_MMIO + 32,
+                3,
+            );
+            let h = chain::record(&h, b'O', 1, 0, YIELD_PORT.into(), 1);
+            assert_eq!(vm.state.witness, chain::record(&h, b'Y', 0, 0, 10, 0));
+        }
+    }
+}
+#[test]
+fn clock_signal_ports_reject_invalid_accesses() {
+    for port in [ACK_PORT, YIELD_PORT, PIC_UNMASK_PORT] {
+        for (width, write, value) in [(2, true, 1), (1, false, 0), (1, true, 0), (1, true, 2)] {
+            let mut vm = machine();
+            vm.native.exits.extend([
+                event(32, 3),
+                Exit::Port {
+                    port,
+                    width,
+                    write,
+                    value,
+                },
+            ]);
+            let error = vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap_err();
+            assert_eq!(error, "PV clockevent port access");
+            assert_eq!(vm.native.responses.len(), 1);
+        }
+    }
 }
 #[test]
 fn in_service_line_blocks_reinjection_until_eoi() {
@@ -676,4 +753,187 @@ fn canonical_pending_native_writes_preserve_channel_order_and_opaque_json_bytes(
     let rewritten = vm.native_execution().unwrap();
     assert_ne!(first.pending, rewritten.pending);
     assert_eq!(vm.native.entries, 0);
+}
+
+#[test]
+fn shared_pic_mask_ack_waits_for_unmask_and_repeated_level_injects_once() {
+    let mut vm = machine();
+    vm.state.ready = true;
+    vm.state.timer = true;
+    vm.state.devices.pic.imr = 0xfe;
+    vm.native.interruptible.extend([true, false, true]);
+    vm.native.publications.insert(1, PIC_UPDATE_VALID | 0x1ff);
+    vm.native.publications.insert(2, PIC_UPDATE_VALID | 0xfe);
+    vm.native.publications.insert(4, PIC_UPDATE_VALID | 0x1ff);
+    vm.native.exits.extend([
+        // Mask+EOI becomes visible at the handler's device access. The timer
+        // remains asserted: no new injection until the explicit unmask.
+        port(0x3fd, false, 0),
+        port(PIC_UNMASK_PORT, true, 1),
+        Exit::Window,
+        port(ACK_PORT, true, 1),
+        halt(),
+    ]);
+    assert_eq!(
+        vm.run(5, 100, 1000, false, &[], vec![]).unwrap(),
+        Stop::Blocked(None)
+    );
+    assert_eq!(vm.native.injected, [0x30, 0x30]);
+    assert_eq!(vm.state.devices.pic.isr, 0);
+    assert_eq!(vm.page.word(PIC_UPDATE), 0);
+    assert_eq!(vm.state.now, 5);
+}
+
+#[test]
+fn shared_pic_old_ack_is_consumed_before_due_time_and_new_receive() {
+    let mut vm = machine_full(None, Some(MAC));
+    vm.state.ready = true;
+    vm.native.exits.extend(nic_setup());
+    vm.native.exits.push_back(event(24, 0));
+    vm.run(0, 1, 1000, false, &[], vec![]).unwrap();
+    offer(&vm, 0, 0x400_9000, &[], true);
+    vm.state.devices.pic.isr = 0x81;
+    vm.state.deadline = Some(5);
+    vm.page.set_word(PIC_UPDATE, PIC_UPDATE_VALID | 0x817e);
+    // Old PIC EOI may clear old in-service bits, never the newly admitted
+    // timer or NIC level. Zero-budget adoption must consume it without entry.
+    let entries = vm.native.entries;
+    vm.run(5, 5, 1000, false, &[], vec![vec![42; 60]]).unwrap();
+    assert_eq!(vm.native.entries, entries);
+    assert_eq!(vm.state.devices.lines & 0x81, 0x81);
+    assert_eq!(vm.state.devices.pic.isr, 0);
+    assert_eq!(vm.page.word(PIC_UPDATE), 0);
+    vm.native.interruptible.push_back(true);
+    vm.prepare().unwrap();
+    assert_eq!(vm.native.injected, [0x30]);
+    vm.consume_irq_update().unwrap();
+    assert_eq!(
+        vm.state.devices.pic.isr, 1,
+        "consumed ACK cannot clear a new injection"
+    );
+}
+
+#[test]
+fn shared_pic_pending_transaction_survives_stopped_state_roundtrip() {
+    let mut vm = machine();
+    vm.state.devices.pic.isr = 1;
+    vm.page.set_word(PIC_UPDATE, PIC_UPDATE_VALID | 0x1ff);
+    let mut restored = machine();
+    // Snapshot stores State and the complete shared page separately. Retain
+    // both, including an unconsumed transaction; never republish a cached mask.
+    restored.state = serde_json::from_slice(&serde_json::to_vec(&vm.state).unwrap()).unwrap();
+    unsafe { restored.page.modify(|p| p.copy_from_slice(vm.page.bytes())) };
+    restored.consume_irq_update().unwrap();
+    assert_eq!(restored.state.devices.pic.imr, 0xff);
+    assert_eq!(restored.state.devices.pic.isr, 0);
+    assert_eq!(restored.page.word(PIC_UPDATE), 0);
+    let witness = restored.state.witness;
+    restored.consume_irq_update().unwrap();
+    assert_eq!(restored.state.witness, witness);
+}
+
+#[test]
+fn shared_virtio_old_ack_precedes_zero_budget_receive_and_notify() {
+    let mut vm = machine_full(None, Some(MAC));
+    vm.state.ready = true;
+    vm.native.exits.extend(nic_setup());
+    vm.native.exits.push_back(event(24, 0));
+    vm.run(0, 1, 1000, false, &[], vec![]).unwrap();
+    offer(&vm, 0, 0x400_9000, &[], true);
+    vm.run(5, 5, 1000, false, &[], vec![vec![42; 60]]).unwrap();
+    assert_eq!(vm.page.word(VIRTIO_IRQ + 16), 1);
+    // Reoffer descriptor 0 in the next available slot, as a guest refill does.
+    unsafe {
+        vm.ram.modify(|ram| {
+            ram[RINGS[0][1] as usize + 2..RINGS[0][1] as usize + 4]
+                .copy_from_slice(&2u16.to_le_bytes());
+        })
+    };
+    vm.page.set_word(VIRTIO_IRQ + 16, 1 | (1 << 32));
+    vm.page.set_word(PIC_UPDATE, PIC_UPDATE_VALID | 0x807f);
+    vm.state.devices.pic.isr = 0x80;
+    let entries = vm.native.entries;
+    vm.run(5, 5, 1000, false, &[], vec![vec![43; 60]]).unwrap();
+    assert_eq!(vm.native.entries, entries);
+    assert_eq!(vm.page.word(VIRTIO_IRQ + 16), 1);
+    assert_eq!(vm.state.devices.lines & 0x80, 0x80);
+    assert_eq!(vm.state.devices.pic.isr, 0);
+    assert_eq!(unsafe { vm.ram.bytes()[0x400_9000 + 12] }, 43);
+    // A repeated admission with no available buffer is backlogged; no old ACK
+    // remains to clear the current completion. Host observation changes nothing.
+    let before = vm.native_execution().unwrap();
+    let after = vm.native_execution().unwrap();
+    assert_eq!(before.chain, after.chain);
+    assert_eq!(before.pending, after.pending);
+    vm.run(5, 5, 1000, false, &[], vec![vec![44; 60]]).unwrap();
+    assert_eq!(vm.page.word(VIRTIO_IRQ + 16), 1);
+    let mut packet = vec![0; 12];
+    packet.extend([45; 60]);
+    offer(&vm, 1, 0x400_8000, &packet, false);
+    vm.native
+        .virtio_publications
+        .insert(entries + 1, (2, 1 | (1 << 32)));
+    vm.native
+        .exits
+        .extend([nic(0x50, 4, true, 1), event(24, 0)]);
+    vm.run(5, 6, 1000, false, &[], vec![]).unwrap();
+    // The old RX ACK was consumed before TX notify reasserted the same bit.
+    assert_eq!(vm.page.word(VIRTIO_IRQ + 16), 1);
+    let frames: Vec<_> = vm
+        .state
+        .writes
+        .iter()
+        .filter_map(|w| match w {
+            seedbox_machine::pv::transport::GuestWrite::Frame(f) => Some(f),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].time, 5);
+    assert_eq!(frames[0].bytes, [45; 60]);
+}
+
+#[test]
+fn shared_virtio_ack_bits_roundtrip_and_host_interrupts_are_invisible() {
+    let mut vm = machine_full(None, Some(MAC));
+    vm.state.ready = true;
+    // Exercise bitwise accumulation independently of the current devices,
+    // which only generate used-ring interrupts (configuration is static).
+    let mut net = serde_json::to_value(vm.state.net.as_ref().unwrap()).unwrap();
+    net["interrupt"] = 3.into();
+    vm.state.net = Some(serde_json::from_value(net).unwrap());
+    vm.publish(10);
+    vm.page.set_word(VIRTIO_IRQ + 16, 3 | (1 << 32));
+    let first = vm.native_execution().unwrap();
+    let second = vm.native_execution().unwrap();
+    assert_eq!(first.chain, second.chain);
+    assert_eq!(first.pending, second.pending);
+    assert_eq!(vm.page.word(VIRTIO_IRQ + 16), 3 | (1 << 32));
+    assert_eq!(vm.state.net.as_ref().unwrap().interrupt_status(), 3);
+    let mut restored = machine_full(None, Some(MAC));
+    restored.state = serde_json::from_slice(&serde_json::to_vec(&vm.state).unwrap()).unwrap();
+    unsafe { restored.page.modify(|p| p.copy_from_slice(vm.page.bytes())) };
+    for machine in [&mut vm, &mut restored] {
+        machine.consume_irq_update().unwrap();
+        machine.publish(10);
+        assert_eq!(machine.page.word(VIRTIO_IRQ + 16), 2);
+        // Guest accumulates both bits. A host interruption after publication
+        // must not consume it; the next semantic exit records the actual word.
+        machine
+            .native
+            .virtio_publications
+            .insert(1, (2, 2 | (3 << 32)));
+        machine
+            .native
+            .exits
+            .extend([Exit::Interrupted, event(24, 0)]);
+        machine.run(0, 10, 1000, false, &[], vec![]).unwrap();
+        assert_eq!(machine.page.word(VIRTIO_IRQ + 16), 0);
+        assert_eq!(machine.native.nic_words_at_entry, [2 | (3 << 32); 2]);
+        let witness = machine.state.witness;
+        machine.consume_irq_update().unwrap();
+        assert_eq!(machine.state.witness, witness);
+    }
+    assert_eq!(vm.state.witness, restored.state.witness);
+    assert_eq!(unsafe { vm.page.bytes() }, unsafe { restored.page.bytes() });
 }

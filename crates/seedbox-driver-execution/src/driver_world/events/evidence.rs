@@ -81,6 +81,9 @@ pub(in crate::driver_world) fn encode(
                 Response::ApplicationOutput { stream, bytes } => {
                     json!({"type":"application_output","stream":match stream{Stream::Stdout=>"stdout",Stream::Stderr=>"stderr"},"bytes":hex::encode(bytes)})
                 }
+                Response::OutOfMemoryKill { kill } => {
+                    json!({"type":"out_of_memory_kill", "kill":kill})
+                }
                 Response::ApplicationOutcome { code } => {
                     json!({"type":"application_outcome","code":code})
                 }

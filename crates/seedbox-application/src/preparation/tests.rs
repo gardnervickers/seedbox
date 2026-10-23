@@ -11,6 +11,8 @@ use crate::{
 use seedbox_driver_execution::test_support::sdk;
 use std::path::Path;
 
+mod cache;
+
 struct FixturePreparer {
     inner: OciPreparer,
     runtime: seedbox_driver_execution::runtime_assets::Inputs,

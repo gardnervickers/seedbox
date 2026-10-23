@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Single-CPU PV ABI 3 for x86-64. Matches the seedbox-machine stopped worker:
- * the same shared time page and event registers as the arm64 kernel, with
+ * the shared time page and deadline registers, byte OUT for ACK/YIELD, and
  * the 8259 PIC as the only interrupt controller. No LAPIC, HPET, PIT or RTC is
  * used. Kernel TSC reads return PV time; application RDTSC/RDTSCP trap through
  * CR4.TSD and are emulated here.
@@ -28,12 +28,12 @@
 struct seedbox_page {
 	u64 now, last, bound, abi, deferred_irq_pending, exclusive_epoch;
 	u64 syscall_ns;
+	u64 pic_update;
+	u64 virtio_irq[3];
 };
 
 enum {
 	EVENT_DEADLINE = 0,
-	EVENT_ACK = 8,
-	EVENT_YIELD = 24,
 	EVENT_READY = 32,
 	EVENT_POWER_OFF = 40,
 };
@@ -47,6 +47,50 @@ static __always_inline void event_write(unsigned int offset, u64 value)
 {
 	/* Uncached fixmap: every store is a stopped worker rendezvous. */
 	WRITE_ONCE(event[offset / 8], value);
+}
+
+static __always_inline void event_signal(u16 port)
+{
+	/* Order time-page accesses around the stopped worker rendezvous. */
+	asm volatile("outb %b0, %w1" : : "a"((u8)1), "Nd"(port) : "memory");
+}
+
+/* IRQs are disabled by i8259A_lock on this single CPU. One aligned store
+ * publishes the complete mask and accumulated specific EOIs. The stopped
+ * worker consumes and clears this word before admitting input or injecting.
+ * No device interrupt status is acknowledged here. */
+void seedbox_pic_update(u8 mask, u8 ack)
+{
+	struct seedbox_page *p = READ_ONCE(page);
+	u64 pending = READ_ONCE(p->pic_update);
+
+	WRITE_ONCE(p->pic_update, (1ULL << 16) | mask |
+		   (pending & 0xff00) | ((u64)ack << 8));
+}
+
+void seedbox_pic_unmask(u8 mask)
+{
+	seedbox_pic_update(mask, 0);
+	/* Always rendezvous before the caller can enable CPU interrupts. */
+	event_signal(SEEDBOX_PIC_UNMASK_PORT);
+}
+
+/* The fixed console/disk/NIC MMIO windows have corresponding page words.
+ * Called only from the IRQ-disabled virtio handler. READ/WRITE_ONCE and the
+ * compiler barrier publish ACK before queue callbacks (which can rendezvous).
+ * The worker consumes it before new input/notify, and republishes device status
+ * before entry. Host-only interruptions do neither. The PIC unmask OUT remains
+ * unconditional, so no ACK can wait beyond the handler's return. */
+u32 seedbox_virtio_interrupt(unsigned long phys)
+{
+	unsigned int slot = (phys - SEEDBOX_LIFECYCLE_PHYS) / 0x10000;
+	u64 *word = &READ_ONCE(page)->virtio_irq[slot];
+	u64 value = READ_ONCE(*word);
+	u32 status = (u32)value & ~(u32)(value >> 32);
+
+	WRITE_ONCE(*word, value | ((u64)status << 32));
+	barrier();
+	return status;
 }
 
 u64 noinstr seedbox_read(void)
@@ -80,10 +124,10 @@ again:
 		 */
 		if (!arch_irqs_disabled_flags(flags)) {
 			arch_local_irq_restore(flags);
-			event_write(EVENT_YIELD, 1);
+			event_signal(SEEDBOX_YIELD_PORT);
 			arch_local_irq_disable();
 		} else {
-			event_write(EVENT_YIELD, 1);
+			event_signal(SEEDBOX_YIELD_PORT);
 		}
 		goto again;
 	}
@@ -117,8 +161,30 @@ void seedbox_syscall_progress(void)
 	u64 remaining = p ? READ_ONCE(p->syscall_ns) : 1000;
 
 	while (remaining) {
+		unsigned long flags;
+		u64 last, bound, count;
+
+		/* Retain each segment's first read and unmask point for pending IRQs.
+		 * New time or IRQs arrive only at a stopped rendezvous; the remaining
+		 * reads before the published bound can then be charged together. */
 		(void)seedbox_read();
-		--remaining;
+		if (!--remaining)
+			break;
+		flags = arch_local_irq_save();
+		p = READ_ONCE(page);
+		if (p && (arch_irqs_disabled_flags(flags) ||
+			  !READ_ONCE(p->deferred_irq_pending))) {
+			last = READ_ONCE(p->last);
+			bound = READ_ONCE(p->bound);
+			if (last < bound) {
+				count = bound - last;
+				if (count > remaining)
+					count = remaining;
+				WRITE_ONCE(p->last, last + count);
+				remaining -= count;
+			}
+		}
+		arch_local_irq_restore(flags);
 	}
 }
 
@@ -180,6 +246,8 @@ void __init seedbox_time_init(void)
 	struct seedbox_page *p;
 
 	BUILD_BUG_ON(offsetof(struct seedbox_page, syscall_ns) != 6 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_page, pic_update) != 7 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_page, virtio_irq) != 8 * sizeof(u64));
 	/*
 	 * setup_arch calls us before tsc_early_init selects TSC delays. Permanent
 	 * fixmaps need no allocator and survive the boot page-table switch.
@@ -226,7 +294,7 @@ static int next_event(unsigned long delta, struct clock_event_device *dev)
 static int shutdown_event(struct clock_event_device *dev)
 {
 	event_write(EVENT_DEADLINE, 0);
-	event_write(EVENT_ACK, 1);
+	event_signal(SEEDBOX_ACK_PORT);
 	return 0;
 }
 
@@ -238,7 +306,7 @@ static int oneshot_event(struct clock_event_device *dev)
 static irqreturn_t timer_irq(int irq, void *dev)
 {
 	/* Deassert before invoking the clock core; it may arm another deadline. */
-	event_write(EVENT_ACK, 1);
+	event_signal(SEEDBOX_ACK_PORT);
 	ce.event_handler(&ce);
 	return IRQ_HANDLED;
 }

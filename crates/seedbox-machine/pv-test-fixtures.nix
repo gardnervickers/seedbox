@@ -10,6 +10,7 @@
 #   bin/network-probe                SEEDBOX_PV_NETWORK_APPLICATION
 #   bin/disk-probe                   SEEDBOX_PV_DISK_PROBE
 #   disk/ext4.img                    SEEDBOX_PV_DISK_IMAGE
+#   oom-initrd                       SEEDBOX_PV_OOM_INITRD
 #   service-initrd                   SEEDBOX_PV_SERVICE_INITRD
 #   control-initrd                   SEEDBOX_PV_CONTROL_INITRD
 { pkgs, guest }:
@@ -21,7 +22,9 @@ let
     root = ./.;
     fileset = lib.fileset.unions [
       ./guest/progress/fixtures/cpu-loop.c
+      ./src/pv/guest_progress_state.c
       ./src/pv/guest_prepared_fixture.c
+      ./src/pv/guest_oom_fixture.c
       ./tests/fixtures/simulation-control.c
       ./tests/fixtures/driver-simulation-control.c
       ./tests/fixtures/clock-faults.c
@@ -40,8 +43,9 @@ let
       export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global"
       export ZIG_LOCAL_CACHE_DIR="$TMPDIR/zig-local"
       build() { zig cc -target ${triple} -O2 -static "$1" -o "$2"; }
-      build guest/progress/fixtures/cpu-loop.c cpu-loop
+      zig cc -target ${triple} -O2 -static guest/progress/fixtures/cpu-loop.c src/pv/guest_progress_state.c -o cpu-loop
       build src/pv/guest_prepared_fixture.c prepared-fixture
+      build src/pv/guest_oom_fixture.c oom-fixture
       build tests/fixtures/simulation-control.c simulation-control
       build tests/fixtures/driver-simulation-control.c driver-simulation-control
       build tests/fixtures/clock-faults.c clock-faults
@@ -50,16 +54,18 @@ let
     '';
     installPhase = ''
       mkdir -p "$out/bin"
-      cp cpu-loop prepared-fixture simulation-control driver-simulation-control clock-faults kernel-terminal network-probe "$out/bin/"
+      cp cpu-loop oom-fixture prepared-fixture simulation-control driver-simulation-control clock-faults kernel-terminal network-probe "$out/bin/"
     '';
   };
   disk = import ./disk-test-fixtures.nix { inherit pkgs triple; };
   service = guest.mkInitramfs { application = "${guest}/bin/application"; };
+  oom = guest.mkInitramfs { application = "${programs}/bin/oom-fixture"; };
   control = guest.mkInitramfs { application = "${programs}/bin/simulation-control"; };
 in pkgs.runCommand "seedbox-machine-pv-test-fixtures" { } ''
   mkdir -p "$out/bin"
   ln -s ${programs}/bin/* ${disk}/bin/* "$out/bin/"
   ln -s ${disk}/disk "$out/disk"
+  ln -s ${oom} "$out/oom-initrd"
   ln -s ${service} "$out/service-initrd"
   ln -s ${control} "$out/control-initrd"
 ''

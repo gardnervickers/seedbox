@@ -63,6 +63,12 @@ pub struct MachineState {
     pub condition: MachineCondition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<u8>,
+    /// Kernel reports retained across boots, newest 64 observations only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub out_of_memory_kills: Vec<OutOfMemoryKill>,
+    /// Kernel evidence explaining the last application outcome. Cleared at reboot.
+    #[serde(default)]
+    pub application_oom_killed: bool,
     /// CPU cost scale while a throttle is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub throttle_permille: Option<u64>,
@@ -75,6 +81,24 @@ pub struct MachineState {
     pub condition_since_ns: Option<u64>,
     #[serde(default)]
     pub application: ApplicationState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OutOfMemoryKill {
+    pub incarnation: u32,
+    pub simulated_time_ns: u64,
+    pub kill: seedbox_engine_protocol::out_of_memory::Kill,
+}
+
+impl MachineState {
+    pub fn exit_description(&self) -> String {
+        match self.exit_code {
+            Some(137) if self.application_oom_killed => "137 (out of memory)".into(),
+            Some(code) => code.to_string(),
+            None => "-".into(),
+        }
+    }
 }
 
 /// One direction of a machine pair.
