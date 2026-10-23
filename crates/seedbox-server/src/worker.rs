@@ -169,24 +169,6 @@ impl Worker {
             {
                 return Err(Error::Pending);
             }
-            // No later mutation can overtake this request before its receipt.
-            // Freeze the prefix now: the source may accept another fault at
-            // this same paused boundary after capture has been acknowledged.
-            let mut history =
-                seedbox_artifacts::interventions::read(&self.run.join("interventions.json"))
-                    .map_err(|e| Error::Fatal(e.to_string()))?;
-            history.entries.retain(|entry| {
-                entry.position.boundary_index <= checkpoint.position.boundary_index
-            });
-            let bytes = history.encode().map_err(Error::Fatal)?;
-            std::fs::write(
-                self.run.join(format!(
-                    "checkpoint-{}-interventions.json",
-                    request.request_id
-                )),
-                bytes,
-            )
-            .map_err(|e| Error::Fatal(format!("checkpoint intervention history: {e}")))?;
         }
         Ok(receipt(reply))
     }
@@ -347,10 +329,8 @@ fn receipt(reply: Reply) -> ControlState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seedbox_engine_protocol::host_control::{
-        BoundaryPosition, PlaybackRate, Request, MAX_DATAGRAM,
-    };
-    use std::{fs, os::unix::net::UnixDatagram, path::Path};
+    use seedbox_engine_protocol::host_control::{BoundaryPosition, PlaybackRate, Request};
+    use std::{fs, os::unix::net::UnixDatagram};
 
     fn fixture() -> (tempfile::TempDir, UnixDatagram, Worker) {
         let directory = tempfile::tempdir().unwrap();
@@ -378,15 +358,6 @@ mod tests {
                 },
             },
         }
-    }
-
-    fn receive(socket: &UnixDatagram) -> (Request, PathBuf) {
-        let mut bytes = [0; MAX_DATAGRAM + 1];
-        let (length, peer) = socket.recv_from(&mut bytes).unwrap();
-        (
-            serde_json::from_slice(&bytes[..length]).unwrap(),
-            peer.as_pathname().unwrap().to_owned(),
-        )
     }
 
     fn proposal(id: u64) -> Reply {
@@ -420,63 +391,6 @@ mod tests {
                 },
             }),
         }
-    }
-
-    fn send(socket: &UnixDatagram, peer: &Path, reply: &Reply) {
-        socket
-            .send_to(&serde_json::to_vec(reply).unwrap(), peer)
-            .unwrap();
-    }
-
-    #[test]
-    fn checkpoint_freezes_history_before_later_faults_at_the_same_boundary() {
-        let (directory, socket, mut worker) = fixture();
-        let path = directory.path().join("interventions.json");
-        let mut journal = Journal::initialize(&path).unwrap();
-        let first = proposal(1).intervention.unwrap();
-        journal.append(first.clone()).unwrap();
-        std::thread::scope(|scope| {
-            let engine = scope.spawn(move || {
-                let (request, peer) = receive(&socket);
-                assert_eq!(
-                    request.command,
-                    Command::Checkpoint {
-                        request_id: "saved".into()
-                    }
-                );
-                let mut reply = proposal(request.id);
-                reply.intervention = None;
-                reply.checkpoint = Some(seedbox_engine_protocol::host_control::CheckpointStatus {
-                    request_id: "saved".into(),
-                    position: reply.position,
-                    state: seedbox_engine_protocol::host_control::CheckpointState::Captured,
-                });
-                send(&socket, &peer, &reply);
-            });
-            worker
-                .apply(&ControlRequest {
-                    request_id: "saved".into(),
-                    command: ControlCommand::Checkpoint,
-                })
-                .unwrap();
-            engine.join().unwrap();
-        });
-        let mut later = first.clone();
-        later.request_id = "later".into();
-        later.plan.id += 1;
-        journal.append(later).unwrap();
-        let saved = seedbox_artifacts::interventions::read(
-            &directory.path().join("checkpoint-saved-interventions.json"),
-        )
-        .unwrap();
-        assert_eq!(saved.entries, vec![first]);
-        assert_eq!(
-            seedbox_artifacts::interventions::read(&path)
-                .unwrap()
-                .entries
-                .len(),
-            2
-        );
     }
 
     fn transaction(

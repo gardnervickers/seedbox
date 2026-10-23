@@ -897,7 +897,6 @@ mod tests {
                 provenance: BTreeMap::new(),
             },
             program: vec![],
-            interventions: None,
         };
         let record = RunRecord {
             run_id: ContentDigest::of(&serde_json::to_vec(&identity).unwrap()),

@@ -420,7 +420,6 @@ pub(crate) fn request(
             == crate::execution::WitnessMode::FullState,
         host_control: host_control.into(),
         observations: request.observations.map(Path::to_path_buf),
-        replay_interventions: request.replay_interventions.cloned(),
         resume_checkpoint: request.resume_checkpoint.map(Path::to_path_buf),
     })
 }

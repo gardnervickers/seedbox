@@ -303,10 +303,7 @@ impl Catalogue {
                 created_at_unix_ms,
                 deletion_requested_at_unix_ms: None,
                 parent,
-                checkpoint: match &spec.inputs {
-                    InputSource::Checkpoint { checkpoint, .. } => Some(checkpoint.clone()),
-                    _ => None,
-                },
+                checkpoint: None,
             },
             spec,
         );
@@ -364,41 +361,14 @@ impl Catalogue {
                     .map_err(|error| Error::Invalid(error.to_string()))?;
                 Ok(None)
             }
-            InputSource::Checkpoint {
-                simulation,
-                checkpoint,
-            } => {
-                validate_request_id(checkpoint)?;
-                let original = self.get(simulation)?;
-                if original.spec.configuration != spec.configuration
-                    || original.spec.seed != spec.seed
-                    || original.spec.program != spec.program
-                {
-                    return Err(Error::Invalid(
-                        "checkpoint requires its source configuration and seed".into(),
-                    ));
-                }
-                self.captured_checkpoint(simulation, checkpoint)?;
-                Ok(None)
-            }
-            InputSource::Retained { simulation } | InputSource::Prepared { simulation } => {
+            InputSource::Prepared { simulation } => {
                 let original = self.get(simulation)?;
                 if original.status.phase != Phase::Completed {
                     return Err(Error::Invalid(
                         "rerun requires a completed simulation".into(),
                     ));
                 }
-                if matches!(spec.inputs, InputSource::Retained { .. })
-                    && original.spec.seed != spec.seed
-                {
-                    return Err(Error::Invalid(
-                        "retained execution requires its source seed; use prepared inputs to vary the seed".into(),
-                    ));
-                }
-                if original.spec.configuration != spec.configuration
-                    || (matches!(spec.inputs, InputSource::Retained { .. })
-                        && original.spec.program != spec.program)
-                {
+                if original.spec.configuration != spec.configuration {
                     return Err(Error::Invalid(
                         "retained input configuration differs from its source".into(),
                     ));
@@ -415,22 +385,14 @@ impl Catalogue {
             return Ok(());
         };
         let entry = &self.entries[source];
-        let Some(checkpoints) = &entry.imported_checkpoints else {
+        if entry.imported_checkpoints.is_none() {
             return Ok(());
-        };
-        let mut definition = match &spec.inputs {
-            InputSource::Checkpoint { checkpoint, .. } => checkpoints
-                .get(checkpoint)
-                .ok_or_else(|| Error::Invalid("imported checkpoint unavailable".into()))?
-                .clone(),
-            _ => match &entry.resource.spec.inputs {
-                InputSource::Resolved { definition } => definition.as_ref().clone(),
-                _ => return Err(Error::Invalid("imported definition unavailable".into())),
-            },
-        };
-        if matches!(spec.inputs, InputSource::Prepared { .. }) {
-            definition.start = seedbox_spec::definition::Start::Fresh;
         }
+        let mut definition = match &entry.resource.spec.inputs {
+            InputSource::Resolved { definition } => definition.as_ref().clone(),
+            _ => return Err(Error::Invalid("imported definition unavailable".into())),
+        };
+        definition.start = seedbox_spec::definition::Start::Fresh;
         definition.seed = spec.seed.expect("resolved above");
         definition.overrides = spec.program.clone();
         definition
@@ -718,9 +680,7 @@ fn seeded_spec(
 fn source_reference(spec: &seedbox_api::SimulationSpec) -> Option<&SimulationId> {
     match &spec.inputs {
         InputSource::Project | InputSource::Resolved { .. } => None,
-        InputSource::Retained { simulation }
-        | InputSource::Prepared { simulation }
-        | InputSource::Checkpoint { simulation, .. } => Some(simulation),
+        InputSource::Prepared { simulation } => Some(simulation),
     }
 }
 

@@ -33,7 +33,6 @@ pub struct Orchestrator {
     pub(crate) start_paused: bool,
     pub(crate) resume_checkpoint: Option<PathBuf>,
     pub(crate) observations: Option<PathBuf>,
-    pub(crate) replay_history: Option<crate::store::ContentDigest>,
     pub(crate) program: Vec<seedbox_engine_protocol::input_program::TimedInput>,
     pub(crate) store: ContentStore,
     pub(crate) runs: PathBuf,
@@ -63,18 +62,11 @@ impl Orchestrator {
             start_paused: false,
             resume_checkpoint: None,
             observations: None,
-            replay_history: None,
             program: Vec::new(),
             store,
             runs: runs.into(),
             log_policy: LogPolicy::default(),
         }
-    }
-
-    /// Reapply a verified retained history along with prepared machine inputs.
-    pub fn with_interventions(mut self, history: Option<crate::store::ContentDigest>) -> Self {
-        self.replay_history = history;
-        self
     }
 
     pub fn with_log_policy(mut self, policy: LogPolicy) -> Self {
@@ -164,7 +156,6 @@ impl Orchestrator {
         // Worker placement changes host throughput, never experiment identity.
         configuration.simulator.machine_workers = Default::default();
         let identity = RunIdentity {
-            interventions: self.replay_history.clone(),
             program: self.program.clone(),
             version: FORMAT_VERSION,
             seed,
@@ -212,27 +203,11 @@ impl Orchestrator {
                 self.resume_checkpoint.as_deref(),
                 record.identity.configuration.control.as_ref(),
             )?;
-            let replay_interventions = record
-                .identity
-                .interventions
-                .as_ref()
-                .map(|digest| {
-                    let path = self.store.materialize(digest, &directory.join("inputs"))?;
-                    seedbox_artifacts::interventions::read(&path)
-                })
-                .transpose()?;
-            {
-                // Publish an explicit empty history too: interrupted attempts
-                // must not confuse missing input with no interventions.
-                let mut journal = seedbox_artifacts::interventions::Journal::initialize(
-                    &directory.join("interventions.json"),
-                )?;
-                if let Some(history) = &replay_interventions {
-                    for entry in &history.entries {
-                        journal.append(entry.clone())?;
-                    }
-                }
-            }
+            // Publish an explicit empty live journal before exposing this attempt.
+            // Interactive admissions append here; replay inputs come from the program.
+            seedbox_artifacts::interventions::Journal::initialize(
+                &directory.join("interventions.json"),
+            )?;
             executor.validate_retained(&record.identity.inputs)?;
             validate_inputs(&record.identity, executor)?;
             fs::create_dir(&output)?;
@@ -281,7 +256,6 @@ impl Orchestrator {
                 start_paused: self.start_paused,
                 resume_checkpoint: self.resume_checkpoint.as_deref(),
                 intervention_history: Some(&directory.join("interventions.json")),
-                replay_interventions: replay_interventions.as_ref(),
                 observations: self.observations.as_deref(),
                 seed: record.identity.seed,
                 program: &record.identity.program,
@@ -340,25 +314,11 @@ impl Orchestrator {
             seedbox_artifacts::interventions::read_optional(&directory.join("interventions.json"))?
         {
             if !history.entries.is_empty() {
-                let digest = self
-                    .store
-                    .put_unsynced(&history.encode().map_err(Error::Integrity)?)?;
-                if record
-                    .identity
-                    .interventions
-                    .as_ref()
-                    .is_some_and(|expected| expected != &digest)
-                {
-                    return Err(Error::Integrity(
-                        "replayed intervention history changed during execution".into(),
-                    ));
-                }
                 seedbox_engine_protocol::input_program::merge_interventions(
                     &mut record.identity.program,
                     &history,
                 )
                 .map_err(Error::Integrity)?;
-                record.identity.interventions = None;
                 record.run_id = self
                     .store
                     .put_unsynced(&serde_json::to_vec(&record.identity)?)?;

@@ -37,14 +37,12 @@ struct RetainedInputs {
     #[serde(default)]
     checkpoint: Option<PathBuf>,
     prepared: PreparedInputs,
-    interventions: Option<ContentDigest>,
     attempt: Option<PathBuf>,
 }
 
 /// What one input source contributes to an execution before its definition is canonicalized.
 struct SourceInputs {
     inputs: PreparedInputs,
-    interventions: Option<ContentDigest>,
     checkpoint: Option<PathBuf>,
     executor: Box<dyn ExecutionBackend>,
 }
@@ -223,11 +221,6 @@ impl ExecutionService {
                     // Published attempts always have an explicit journal; missing
                     // input here is an error, never an empty timeline.
                     seedbox_artifacts::interventions::read(&attempt.join("interventions.json"))?
-                } else if let Some(digest) = retained.interventions {
-                    seedbox_engine_protocol::intervention::History::decode(
-                        &self.store.read(&digest)?,
-                    )
-                    .map_err(seedbox_application::Error::Integrity)?
                 } else {
                     seedbox_engine_protocol::intervention::History::default()
                 }
@@ -571,7 +564,6 @@ impl ExecutionService {
         fs::create_dir(&directory)?;
         let SourceInputs {
             inputs,
-            interventions,
             checkpoint,
             executor,
         } = self.source_inputs(id, spec, &options, &budget.cancellation, &directory)?;
@@ -590,7 +582,6 @@ impl ExecutionService {
         let mut retained = RetainedInputs {
             checkpoint: checkpoint.clone(),
             prepared: inputs.clone(),
-            interventions: interventions.clone(),
             attempt: None,
         };
         save_inputs(&self.root.join("inputs"), id, &retained, false)?;
@@ -613,7 +604,6 @@ impl ExecutionService {
         orchestrator
             .with_start_paused(options.start_paused)
             .with_observations(observations.path())
-            .with_interventions(interventions)
             .with_program(program)
             .run_prepared_observed(
                 &configuration,
@@ -629,7 +619,7 @@ impl ExecutionService {
             )
     }
 
-    /// Prepared inputs, intervention history, start checkpoint and executor for
+    /// Prepared inputs, start checkpoint and executor for
     /// the submission's input source. `cancellation` is the preparation budget's token.
     fn source_inputs(
         &self,
@@ -650,7 +640,6 @@ impl ExecutionService {
                 )?;
                 Ok(SourceInputs {
                     inputs,
-                    interventions: None,
                     checkpoint,
                     executor,
                 })
@@ -658,9 +647,23 @@ impl ExecutionService {
             InputSource::Project => {
                 self.prepare_project(id, spec, options, cancellation, directory)
             }
-            InputSource::Retained { simulation }
-            | InputSource::Prepared { simulation }
-            | InputSource::Checkpoint { simulation, .. } => self.retained_source(spec, simulation),
+            InputSource::Prepared { simulation } => {
+                let path = self.root.join("inputs").join(format!("{simulation}.json"));
+                let file = fs::File::open(&path).map_err(|error| {
+                    seedbox_application::Error::Setup(format!(
+                        "retained inputs {}: {error}",
+                        path.display()
+                    ))
+                })?;
+                let retained: RetainedInputs = serde_json::from_reader(file)?;
+                let inputs = retained.prepared;
+                let executor = self.backends.retained(&inputs, &self.store)?;
+                Ok(SourceInputs {
+                    inputs,
+                    checkpoint: None,
+                    executor,
+                })
+            }
         }
     }
 
@@ -706,78 +709,9 @@ impl ExecutionService {
                 .prepare_cancellable(&spec.configuration, &self.store, &context)?;
         Ok(SourceInputs {
             inputs,
-            interventions: None,
             checkpoint: None,
             executor: backends.execution,
         })
-    }
-
-    /// Reuse another simulation's retained inputs, with the history and
-    /// checkpoint its source kind selects.
-    fn retained_source(
-        &self,
-        spec: &seedbox_api::SimulationSpec,
-        simulation: &SimulationId,
-    ) -> seedbox_application::Result<SourceInputs> {
-        let path = self.root.join("inputs").join(format!("{simulation}.json"));
-        let file = fs::File::open(&path).map_err(|e| {
-            seedbox_application::Error::Setup(format!("retained inputs {}: {e}", path.display()))
-        })?;
-        let retained: RetainedInputs = serde_json::from_reader(file)?;
-        let (interventions, checkpoint) =
-            if let InputSource::Checkpoint { checkpoint, .. } = &spec.inputs {
-                self.checkpoint_start(simulation, checkpoint, &retained)?
-            } else if matches!(spec.inputs, InputSource::Prepared { .. }) {
-                (None, None)
-            } else {
-                (
-                    self.retained_history(&retained)?,
-                    retained.checkpoint.clone(),
-                )
-            };
-        let inputs = retained.prepared;
-        let executor = self.backends.retained(&inputs, &self.store)?;
-        Ok(SourceInputs {
-            inputs,
-            interventions,
-            checkpoint,
-            executor,
-        })
-    }
-
-    /// The intervention history and machine checkpoint captured at a source checkpoint.
-    fn checkpoint_start(
-        &self,
-        simulation: &SimulationId,
-        checkpoint: &str,
-        retained: &RetainedInputs,
-    ) -> seedbox_application::Result<(Option<ContentDigest>, Option<PathBuf>)> {
-        let _captured = self
-            .manager
-            .captured_checkpoint(simulation, checkpoint)
-            .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?;
-        let attempt = retained.attempt.as_ref().ok_or_else(|| {
-            seedbox_application::Error::Setup("checkpoint source has no execution attempt".into())
-        })?;
-        let path = attempt
-            .join("output")
-            .join(seedbox_application::execution::MACHINE_OUTPUT_DIR)
-            .join(format!("checkpoint-{checkpoint}.json"));
-        if !path.is_file() {
-            return Err(seedbox_application::Error::Setup(format!(
-                "checkpoint {}: not found",
-                path.display()
-            )));
-        }
-        let history = seedbox_artifacts::interventions::read(
-            &attempt.join(format!("checkpoint-{checkpoint}-interventions.json")),
-        )?;
-        let digest = self.store.put_unsynced(
-            &history
-                .encode()
-                .map_err(seedbox_application::Error::Integrity)?,
-        )?;
-        Ok((Some(digest), Some(path)))
     }
 
     /// Resolve the submission's canonical definition and the prepared inputs it names.
@@ -840,35 +774,6 @@ impl ExecutionService {
             })
             .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
         Ok(())
-    }
-}
-
-impl ExecutionService {
-    fn retained_history(
-        &self,
-        retained: &RetainedInputs,
-    ) -> seedbox_application::Result<Option<ContentDigest>> {
-        let Some(attempt) = &retained.attempt else {
-            return Ok(retained.interventions.clone());
-        };
-        let record = seedbox_application::orchestration::inspect(attempt)?;
-        if let Some(digest) = record.identity.interventions {
-            return Ok(Some(digest));
-        }
-        // An interrupted run may not have sealed its history yet. Every
-        // published attempt has an explicit journal, including the empty case.
-        let history = seedbox_artifacts::interventions::read(&attempt.join("interventions.json"))?;
-        if history.entries.is_empty() {
-            Ok(None)
-        } else {
-            self.store
-                .put_unsynced(
-                    &history
-                        .encode()
-                        .map_err(seedbox_application::Error::Integrity)?,
-                )
-                .map(Some)
-        }
     }
 }
 
