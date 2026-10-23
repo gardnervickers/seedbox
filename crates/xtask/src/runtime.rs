@@ -8,9 +8,8 @@ use std::{
     process::Command,
 };
 
-pub(super) fn nix_output(root: &Path, name: &str) -> Result<PathBuf> {
-    // Request submodules on the initial fetch: self.submodules alone can lock
-    // a clean parent before Nix notices edits confined to a child worktree.
+pub(super) fn nix_outputs(root: &Path, names: &[&str]) -> Result<BTreeMap<String, PathBuf>> {
+    // Request submodules on the initial fetch, including live child edits.
     let mut path = String::new();
     for &byte in root.as_os_str().as_encoded_bytes() {
         if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
@@ -20,17 +19,38 @@ pub(super) fn nix_output(root: &Path, name: &str) -> Result<PathBuf> {
             write!(path, "%{byte:02X}")?;
         }
     }
+    // A named link farm avoids positional output parsing: aliases and
+    // multi-output packages can print the same store path more than once.
+    let names_expression = format!(
+        "[ {} ]",
+        names
+            .iter()
+            .map(|name| format!("\"{name}\""))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     let output = capture(command("nix", root).args([
         "build",
+        "--impure",
         "--no-link",
         "--print-out-paths",
-        &format!("git+file://{path}?submodules=1#{name}"),
+        "--file",
+        "nix/build-inputs.nix",
+        "--argstr",
+        "flake",
+        &format!("git+file://{path}?submodules=1"),
+        "--arg",
+        "names",
+        &names_expression,
     ]))?;
     let paths: Vec<_> = output.lines().collect();
     if paths.len() != 1 || !Path::new(paths[0]).is_absolute() {
-        return Err(format!("{name}: expected one absolute Nix output, got {output:?}").into());
+        return Err(format!("expected one absolute Nix input bundle, got {output:?}").into());
     }
-    Ok(paths[0].into())
+    Ok(names
+        .iter()
+        .map(|name| ((*name).to_owned(), Path::new(paths[0]).join(name)))
+        .collect())
 }
 
 fn copy(source: &Path, destination: &Path) -> Result<()> {
@@ -51,12 +71,12 @@ fn copy(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn guest(root: &Path, output: &Path, arch: &str) -> Result<()> {
+pub(super) fn guest(inputs: &BTreeMap<String, PathBuf>, output: &Path, arch: &str) -> Result<()> {
     for (backend, attribute, required) in [
         ("pv", "machinePvAssets", "progress.tar"),
         ("tcg", "machineTcgAssets", "firmware"),
     ] {
-        let input = nix_output(root, attribute)?;
+        let input = &inputs[attribute];
         let guest_arch = if backend == "tcg" { "x86_64" } else { arch };
         let destination = output.join(backend).join(guest_arch);
         for name in ["kernel", "init", "command-line", required] {
@@ -67,7 +87,7 @@ pub(super) fn guest(root: &Path, output: &Path, arch: &str) -> Result<()> {
         ("machineGuestFormatter", arch),
         ("machineGuestFormatterX86", "x86_64"),
     ] {
-        let input = nix_output(root, attribute)?.join("bin/mke2fs");
+        let input = inputs[attribute].join("bin/mke2fs");
         for backend in if guest_arch == arch {
             vec!["pv", "tcg"]
         } else {
@@ -95,8 +115,7 @@ pub(super) fn guest(root: &Path, output: &Path, arch: &str) -> Result<()> {
 // runtime-loadable QEMU modules (dlopen'd from its module directory) would be
 // silently missing from the relocated closure. Before enabling modules in the
 // tcgQemu build, extend discovery to copy them and their dependencies.
-pub(super) fn host(root: &Path, output: &Path) -> Result<()> {
-    let input = nix_output(root, "tcgQemu")?;
+pub(super) fn host(input: &Path, output: &Path) -> Result<()> {
     let system = format!(
         "{}-{}",
         std::env::consts::ARCH,

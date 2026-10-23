@@ -66,12 +66,20 @@ jobs:
           persist-credentials: false
           # Nix's submodule source accessor also traverses DR's nested gitlinks.
           submodules: recursive
-      - name: Identify the translator cache input
+      - name: Identify Nix cache inputs
         id: sources
-        run: echo "dynamorio=$(git rev-parse HEAD:vendor/dynamorio)" >> "$GITHUB_OUTPUT"
+        env:
+          NIX_INPUTS: ${{ hashFiles('flake.lock', 'flake.nix', '.gitmodules', 'nix/**', 'Cargo.toml', 'Cargo.lock', 'crates/seedbox-check/**', 'crates/seedbox-exec/**', 'crates/seedbox-test-time/**', 'crates/seedbox-driver/examples/tcg-init', 'crates/seedbox-machine/**/*.nix', 'crates/seedbox-machine/guest-assets.py', 'crates/seedbox-machine/guest-initramfs.py', 'crates/seedbox-machine/guest-static-elf.sh', 'crates/seedbox-machine/guest/**', 'crates/seedbox-machine/src/pv/**', 'crates/seedbox-machine/tests/fixtures/**', 'crates/seedbox-machine/src/machine/disk.rs', 'crates/seedbox-machine/src/machine/disk/**', 'crates/seedbox-machine-tcg/qemu/**', 'examples/minio/inputs.lock.json') }}
+        run: |
+          echo "dynamorio=$(git rev-parse HEAD:vendor/dynamorio)" >> "$GITHUB_OUTPUT"
+          echo "nix-inputs=$NIX_INPUTS" >> "$GITHUB_OUTPUT"
       - name: Reclaim unused hosted SDK space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift
+          # Leave the hosted SDKs alone when the filesystem has enough headroom.
+          available=$(df --output=avail -B1 / | tail -n 1)
+          if (( available < 40 * 1024 * 1024 * 1024 )); then
+            sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift
+          fi
           df -h /
       - name: Verify usable KVM before building
         run: |
@@ -103,8 +111,12 @@ jobs:
       - uses: nix-community/cache-nix-action/restore@v7
         id: nix-cache
         with:
-          primary-key: pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.sources.outputs.dynamorio }}-${{ hashFiles('flake.lock', 'flake.nix', '.gitmodules', 'nix/**', 'crates/seedbox-machine/**/*.nix', 'crates/seedbox-machine/guest/**', 'crates/xtask/**') }}
+          primary-key: pv-nix-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.sources.outputs.dynamorio }}-${{ steps.sources.outputs.nix-inputs }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Each run saves newly realized derivations, including after an exact
+          # input match. The immutable cache can only be written once per key.
           restore-prefixes-first-match: |
+            pv-nix-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.sources.outputs.dynamorio }}-${{ steps.sources.outputs.nix-inputs }}-
+            pv-nix-v3-${{ runner.os }}-${{ runner.arch }}-
             pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-
             pv-nix-${{ runner.os }}-${{ runner.arch }}-
       - name: Prepare and root the Nix development environment
@@ -120,7 +132,7 @@ jobs:
           cache-bin: false
       - name: Build and root guest assets from the checkout
         run: |
-          nix build .#machinePvAssets .#machineTcgAssets .#machineGuestFormatter .#machineGuestFormatterX86 --out-link "$RUNNER_TEMP/pv-assets"
+          nix build .#machinePvAssets .#machineTcgAssets .#machineGuestFormatter .#machineGuestFormatterX86 .#machineTcgTestFixtures .#machinePvTestFixtures --out-link "$RUNNER_TEMP/pv-assets"
       # Save expensive dependencies before tests, so a test failure does not
       # force the next run to rebuild the kernel or download the toolchain.
       - uses: nix-community/cache-nix-action/save@v7
@@ -139,6 +151,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Portable prerequisites and PV application acceptance
         run: nix develop --command bash harness/check.sh linux-apps
+      - name: Native TCG machine and public-service acceptance
+        run: nix develop --command bash harness/check-machine-tcg.sh --skip-portable
       - name: Bound diagnostic artifact storage
         if: always()
         # Privileged KVM tests leave root-owned manifests and logs.

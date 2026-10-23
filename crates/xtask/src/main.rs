@@ -117,10 +117,11 @@ fn mac(root: &Path, output: &Path) -> Result<()> {
  cd /source
  export NIX_CONFIG="experimental-features = nix-command flakes
 sandbox = false"
- pv=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#machinePvAssets)
- tcg=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#machineTcgAssets)
- formatter=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#machineGuestFormatter)
- formatter_x86=$(nix build --cores 2 --max-jobs 1 --no-link --print-out-paths .#machineGuestFormatterX86)
+ inputs=$(nix build --cores 2 --max-jobs 1 --impure --no-link --print-out-paths --file nix/build-inputs.nix --argstr flake path:/source --arg names '[ "machinePvAssets" "machineTcgAssets" "machineGuestFormatter" "machineGuestFormatterX86" ]')
+ pv=$inputs/machinePvAssets
+ tcg=$inputs/machineTcgAssets
+ formatter=$inputs/machineGuestFormatter
+ formatter_x86=$inputs/machineGuestFormatterX86
  mkdir -p /output/driver/pv/aarch64 /output/driver/tcg/x86_64
  cp "$pv/kernel" "$pv/init" "$pv/command-line" "$pv/progress.tar" /output/driver/pv/aarch64/
  cp "$tcg/kernel" "$tcg/init" "$tcg/command-line" "$tcg/firmware" /output/driver/tcg/x86_64/
@@ -159,15 +160,25 @@ fn build(root: &Path) -> Result<PathBuf> {
         return Err("DynamoRIO submodule missing; run git submodule update --init --recursive vendor/dynamorio from the Seedbox checkout".into());
     }
     publish(root, |output| {
+        let mut names = vec!["tcgQemu"];
+        if cfg!(target_os = "linux") {
+            names.extend([
+                "machinePvAssets",
+                "machineTcgAssets",
+                "machineGuestFormatter",
+                "machineGuestFormatterX86",
+            ]);
+        }
+        let inputs = runtime::nix_outputs(root, &names)?;
         match (env::consts::OS, env::consts::ARCH) {
             ("linux", "x86_64" | "aarch64") => {
-                runtime::guest(root, &output.join("driver"), env::consts::ARCH)?
+                runtime::guest(&inputs, &output.join("driver"), env::consts::ARCH)?
             }
             ("macos", "aarch64") => mac(root, output)?,
             _ => return Err("requires Linux x86-64/AArch64 or Apple Silicon macOS".into()),
         }
         let driver = output.join("driver");
-        runtime::host(root, &driver)?;
+        runtime::host(&inputs["tcgQemu"], &driver)?;
         fs::write(
             driver.join("host-system"),
             format!(

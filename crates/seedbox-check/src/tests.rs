@@ -130,9 +130,13 @@ fn test_machine_suites_are_explicit_and_require_inputs() {
     install_executable(&executable, "fixture");
     let mut inputs = Environment::new();
     for key in machine_inputs(Suite::MachineTcg) {
-        inputs.insert(key, executable.to_string_lossy().into());
+        let path = if key.ends_with("_ASSETS") || key == "SEEDBOX_TCG_LINUX" {
+            root
+        } else {
+            &executable
+        };
+        inputs.insert(key, path.to_string_lossy().into());
     }
-    inputs.insert("SEEDBOX_TCG_ASSETS".into(), root.to_string_lossy().into());
     // The public-service tests need the normal runtime package as well.
     assert_eq!(
         requirements(Suite::MachineTcg, &denied, &inputs, root),
@@ -143,6 +147,19 @@ fn test_machine_suites_are_explicit_and_require_inputs() {
     fs::create_dir_all(root.join("build/assets")).unwrap();
     fs::write(root.join(SERVICE_RUNTIME), "runtime").unwrap();
     assert!(requirements(Suite::MachineTcg, &denied, &inputs, root).is_empty());
+    for key in ["SEEDBOX_TCG_ASSETS", "SEEDBOX_TCG_LINUX"] {
+        let value = inputs.remove(key).unwrap();
+        assert_eq!(
+            requirements(Suite::MachineTcg, &denied, &inputs, root),
+            [format!("set {key} to an existing directory")]
+        );
+        inputs.insert(key.into(), executable.to_string_lossy().into());
+        assert_eq!(
+            requirements(Suite::MachineTcg, &denied, &inputs, root),
+            [format!("set {key} to an existing directory")]
+        );
+        inputs.insert(key.into(), value);
+    }
     // Both suites need the explicit backend-neutral cpu-loop input; TCG
     // still needs no KVM to use it.
     assert!(machine_inputs(Suite::MachinePv).contains(&CPU_LOOP_FIXTURE.to_string()));
@@ -156,6 +173,8 @@ fn test_machine_suites_are_explicit_and_require_inputs() {
         "SEEDBOX_TCG_CLOCK_APPLICATION",
         "SEEDBOX_TCG_NETWORK_APPLICATION",
         "SEEDBOX_TCG_TERMINAL_APPLICATION",
+        "SEEDBOX_PV_CLOCK_APPLICATION",
+        "SEEDBOX_PV_NETWORK_APPLICATION",
     ] {
         let value = inputs.remove(key).unwrap();
         assert_eq!(
@@ -186,7 +205,7 @@ fn test_raw_machine_requirements_do_not_acquire_etcd_oci_or_cli_inputs() {
             .into_iter()
             .map(|key| {
                 assert_ne!(key, "SEEDBOX_ETCD_CLI");
-                let path = if key.ends_with("_ASSETS") {
+                let path = if key.ends_with("_ASSETS") || key == "SEEDBOX_TCG_LINUX" {
                     &temp.0
                 } else {
                     &binary
