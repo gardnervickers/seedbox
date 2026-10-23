@@ -16,6 +16,8 @@ struct sbx_service {
     size_t used;
     int shutdown_requested;
     int poisoned;
+    /* Drain kernel evidence after reaping, before publishing the outcome. */
+    int (*before_outcome)(pid_t application);
     /* Realtime step mechanism; sbx_service_init installs sbx_step_realtime.
      * Host tests replace it because stepping the host clock needs privilege. */
     int (*step_realtime)(int64_t ns);

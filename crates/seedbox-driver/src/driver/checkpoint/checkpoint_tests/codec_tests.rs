@@ -885,3 +885,35 @@ fn closed_codec_version_and_orphaned_network_ownership_fail_before_restore() {
         ));
     }
 }
+
+#[test]
+fn oom_victim_output_survives_persisted_continuation_and_worker_counts() {
+    let kill = Response::OutOfMemoryKill {
+        kill: seedbox_engine_protocol::out_of_memory::Kill {
+            pid: 31,
+            command: "allocator".into(),
+            anon_rss_kib: 300948,
+            application: true,
+        },
+    };
+    let mut d = build(
+        vec![
+            spec(0, true, vec![]),
+            spec(
+                1,
+                true,
+                vec![
+                    (0, Response::Ready),
+                    (5, kill),
+                    (6, Response::ApplicationOutcome { code: 137 }),
+                ],
+            ),
+        ],
+        vec![],
+        true,
+    );
+    advance(&mut d, 3);
+    // exercise destroys the source and compares publications and machine state
+    // after binary decode/restoration with both one and four workers.
+    exercise(d);
+}

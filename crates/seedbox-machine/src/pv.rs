@@ -221,6 +221,10 @@ pub enum Response {
         /// Exact bytes, without decoration or an added newline.
         bytes: Vec<u8>,
     },
+    /// Actual kernel victim report; emitted before the outcome it explains.
+    OutOfMemoryKill {
+        kill: seedbox_engine_protocol::out_of_memory::Kill,
+    },
     /// Natural application termination, after draining already queued output.
     /// Commanded Stop produces only its acknowledgment. This observation does
     /// not itself assert machine exit or a test verdict. Verdicts belong to

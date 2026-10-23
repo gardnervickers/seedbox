@@ -297,3 +297,105 @@ where
     });
     session.accept_zero();
 }
+
+/// Kernel OOM and SIGKILL subjects share this native oracle. Completion is the
+/// explicit application outcome, never timed absence of a kernel event.
+/// Call with full-state capture configured to compare independent fresh runs.
+fn oom_run<M>(
+    machine: M,
+    expect_oom: bool,
+) -> (
+    Vec<pv::Output>,
+    crate::machine::ExecutionEvidence,
+    crate::machine::StateEvidence,
+)
+where
+    M: Machine<Context = ()>,
+    M::Error: Debug,
+{
+    let mut session = Session::new(machine);
+    session.until(|r| matches!(r, pv::Response::ApplicationOutcome { .. }));
+    let outcome = session
+        .events
+        .iter()
+        .position(|o| matches!(o.payload, pv::Response::ApplicationOutcome { code: 137 }))
+        .expect("SIGKILL outcome 137");
+    let kills: Vec<_> = session
+        .events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, o)| match &o.payload {
+            pv::Response::OutOfMemoryKill { kill } => Some((i, kill)),
+            _ => None,
+        })
+        .collect();
+    if expect_oom {
+        assert_eq!(kills.len(), 1, "one real kernel victim");
+        let (index, kill) = kills[0];
+        assert!(index < outcome, "kernel report precedes outcome");
+        assert!(kill.application);
+        assert_eq!(kill.command, "oom-fixture");
+        assert!(kill.anon_rss_kib > 0);
+        let stdout: Vec<_> = session
+            .events
+            .iter()
+            .filter_map(|o| match &o.payload {
+                pv::Response::ApplicationOutput {
+                    stream: pv::Stream::Stdout,
+                    bytes,
+                } => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(stdout, format!("victim pid={}\n", kill.pid).as_bytes());
+    } else {
+        assert!(kills.is_empty(), "user SIGKILL is not OOM");
+    }
+    let execution = session
+        .machine
+        .execution_evidence()
+        .unwrap()
+        .expect("native witness");
+    let state = session
+        .machine
+        .state_evidence()
+        .unwrap()
+        .expect("configured full state");
+    // Verify normal cleanup, rather than ending by dropping a live native VM.
+    session.inbox.push_back(pv::Input {
+        at: Timestamp::from_nanos(session.clock.now()),
+        payload: pv::Request::Shutdown,
+    });
+    while !session.exited {
+        session.pump();
+    }
+    (session.events, execution, state)
+}
+
+/// Replay from a retained cold snapshot also compares the complete witness and
+/// full state; fresh execution is checked separately by the backend entrypoint.
+pub fn oom_outcome<M, F>(
+    mut machine: M,
+    expect_oom: bool,
+    restore: F,
+) -> (
+    Vec<pv::Output>,
+    crate::machine::ExecutionEvidence,
+    crate::machine::StateEvidence,
+)
+where
+    M: Machine<Context = ()>,
+    M::Error: Debug,
+    F: Fn(&M::Snapshot) -> M,
+{
+    let snapshot = machine.snapshot().unwrap();
+    let original = oom_run(machine, expect_oom);
+    let replay = oom_run(restore(&snapshot), expect_oom);
+    assert_eq!(
+        original, replay,
+        "retained-input replay MATCH: outputs, native witness and full state"
+    );
+    original
+}

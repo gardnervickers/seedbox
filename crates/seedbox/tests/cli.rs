@@ -1059,6 +1059,8 @@ fn show_world_prints_machine_and_link_tables() {
         incarnation: 0,
         condition: MachineCondition::Ready,
         exit_code: None,
+        out_of_memory_kills: Vec::new(),
+        application_oom_killed: false,
         throttle_permille: None,
         oracle,
         last_transition: None,
@@ -1418,4 +1420,63 @@ fn every_auto_start_command_exposes_the_explicit_server_configuration() {
             assert!(help.contains(flag), "{command:?} omits {flag}: {help}");
         }
     }
+}
+
+#[test]
+fn fixture_show_world_distinguishes_kernel_oom_from_user_sigkill() {
+    let directory = tempfile::tempdir().unwrap();
+    let body = serde_json::json!({
+        "simulation":"k7m2p9qx", "revision":1,"simulatedTimeNs":1000000000,
+        "machines":[
+            {"name":"allocator","incarnation":0,"condition":"exited","exitCode":137,"oracle":false,"lastTransition":null,"applicationOomKilled":true},
+            {"name":"sigkill","incarnation":0,"condition":"exited","exitCode":137,"oracle":true,"lastTransition":null,"applicationOomKilled":false}
+        ], "links":[],"faults":[]
+    });
+    let server = stand_in_server(
+        directory.path(),
+        "GET /v1/simulations/k7m2p9qx/world ",
+        body.to_string(),
+    );
+    let output = seedbox(&["show", "--view", "world", "k7m2p9qx"], directory.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("137 (out of memory)"), "{text}");
+    let control = text
+        .lines()
+        .find(|line| line.starts_with("sigkill "))
+        .unwrap();
+    assert!(control.contains("137") && !control.contains("out of memory"));
+    println!("BEGIN FIXTURE show-world-oom-vs-sigkill (HTTP FIXTURE, NOT LIVE)\n{text}END FIXTURE show-world-oom-vs-sigkill");
+    server.join().unwrap();
+}
+
+#[test]
+fn fixture_diagnostics_explains_kernel_victim_and_memory_setting() {
+    let directory = tempfile::tempdir().unwrap();
+    let body = serde_json::json!({"files":[],"omissions":{},"outOfMemoryKills":[{
+        "machine":"allocator","memoryMiB":384,"report":{
+            "incarnation":2,"simulatedTimeNs":1000000000,
+            "kill":{"pid":31,"command":"python3.13","anonRssKib":300948,"application":true}
+        }
+    }]});
+    let server = stand_in_server(
+        directory.path(),
+        "GET /v1/simulations/k7m2p9qx/diagnostics ",
+        body.to_string(),
+    );
+    let output = seedbox(
+        &["show", "--view", "diagnostics", "k7m2p9qx"],
+        directory.path(),
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.contains("pid 31, anon-rss 300948 KiB, boot 2"),
+        "{text}"
+    );
+    assert!(text.contains("raise memoryMiB (now 384)"), "{text}");
+    println!(
+        "BEGIN FIXTURE diagnostics-oom (HTTP FIXTURE, NOT LIVE)\n{text}END FIXTURE diagnostics-oom"
+    );
+    server.join().unwrap();
 }

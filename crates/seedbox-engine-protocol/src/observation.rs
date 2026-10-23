@@ -53,6 +53,9 @@ pub enum Kind {
     Log(Chunk),
     MalformedLog,
     MachineReady,
+    OutOfMemoryKill {
+        kill: crate::out_of_memory::Kill,
+    },
     FaultChanged {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_key: Option<String>,

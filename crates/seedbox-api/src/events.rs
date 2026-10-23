@@ -82,6 +82,11 @@ pub enum EventKind {
         machine: String,
         incarnation: u32,
     },
+    OutOfMemoryKill {
+        machine: String,
+        incarnation: u32,
+        kill: seedbox_engine_protocol::out_of_memory::Kill,
+    },
     MachineExited {
         machine: String,
         incarnation: u32,

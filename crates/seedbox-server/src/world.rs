@@ -18,6 +18,8 @@ pub(crate) struct Tracker {
     base: LinkPolicy,
     configured: BTreeMap<Pair, LinkPolicy>,
     machines: BTreeMap<String, MachineState>,
+    /// One kernel leader kill can explain one natural outcome of that boot.
+    oom_pending: BTreeSet<(String, u32)>,
     faults: BTreeMap<u32, FaultState>,
     override_rejections: BTreeMap<String, String>,
     counters: BTreeMap<Pair, LinkCounters>,
@@ -67,6 +69,7 @@ impl Tracker {
                 })
                 .collect(),
             machines: BTreeMap::new(),
+            oom_pending: BTreeSet::new(),
             faults: BTreeMap::new(),
             override_rejections: BTreeMap::new(),
             counters: BTreeMap::new(),
@@ -94,6 +97,8 @@ impl Tracker {
                     incarnation: 0,
                     condition: MachineCondition::Starting,
                     exit_code: None,
+                    out_of_memory_kills: Vec::new(),
+                    application_oom_killed: false,
                     throttle_permille: None,
                     oracle: name == self.oracle,
                     last_transition: None,
@@ -110,11 +115,37 @@ impl Tracker {
     pub fn event(&mut self, time: u64, event: &EventKind) {
         self.time = self.time.max(time);
         match event {
+            EventKind::SourceGap { .. } | EventKind::SourceUnavailable => {
+                self.oom_pending.clear();
+            }
             EventKind::OverrideRejected {
                 input_key, reason, ..
             } => {
                 self.override_rejections
                     .insert(input_key.clone(), reason.clone());
+            }
+            EventKind::OutOfMemoryKill {
+                machine,
+                incarnation,
+                kill,
+            } => {
+                let m = self.machine(machine);
+                if *incarnation > m.incarnation {
+                    m.incarnation = *incarnation;
+                    m.application_oom_killed = false;
+                }
+                let pending = *incarnation == m.incarnation && kill.application;
+                if m.out_of_memory_kills.len() == 64 {
+                    m.out_of_memory_kills.remove(0);
+                }
+                m.out_of_memory_kills.push(seedbox_api::OutOfMemoryKill {
+                    incarnation: *incarnation,
+                    simulated_time_ns: time,
+                    kill: kill.clone(),
+                });
+                if pending {
+                    self.oom_pending.insert((machine.clone(), *incarnation));
+                }
             }
             EventKind::MachineReady {
                 machine,
@@ -123,6 +154,7 @@ impl Tracker {
                 let m = self.machine(machine);
                 m.incarnation = *incarnation;
                 m.condition = MachineCondition::Ready;
+                m.application_oom_killed = false;
                 m.condition_since_ns = Some(time);
                 m.application = ApplicationState {
                     condition: ApplicationCondition::Running,
@@ -135,7 +167,9 @@ impl Tracker {
                 incarnation,
                 code,
             } => {
+                let oom = self.oom_pending.remove(&(machine.clone(), *incarnation));
                 let m = self.machine(machine);
+                m.application_oom_killed = oom && *code == 137;
                 m.incarnation = *incarnation;
                 m.condition = MachineCondition::Exited;
                 m.exit_code = Some(*code);
@@ -192,6 +226,7 @@ impl Tracker {
                     MachineTransition::Rebooted => {
                         m.condition = MachineCondition::Starting;
                         m.exit_code = None;
+                        m.application_oom_killed = false;
                         m.application = ApplicationState {
                             condition: ApplicationCondition::Starting,
                             changed_at_ns: Some(time),
@@ -207,6 +242,7 @@ impl Tracker {
                     transition,
                     MachineTransition::Crashed | MachineTransition::Rebooted
                 ) {
+                    self.oom_pending.retain(|(name, _)| name != machine);
                     self.process_effects.remove(machine);
                     self.machine_pauses.remove(machine);
                 } else if matches!(transition, MachineTransition::Resumed) {
@@ -269,6 +305,9 @@ impl Tracker {
                     FaultAction::PauseProcess { .. } => ApplicationCondition::Paused,
                     _ => ApplicationCondition::Running,
                 };
+                if matches!(plan, FaultAction::Stop { .. }) {
+                    self.oom_pending.retain(|(name, _)| name != machine);
+                }
                 self.machine(machine).application = ApplicationState {
                     condition,
                     changed_at_ns: Some(at),
@@ -454,6 +493,106 @@ impl Tracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oom_attribution_requires_leader_current_boot_and_current_application() {
+        let mut t = tracker();
+        let kill = |application| seedbox_engine_protocol::out_of_memory::Kill {
+            pid: 31,
+            command: "allocator".into(),
+            anon_rss_kib: 300948,
+            application,
+        };
+        let exit = |incarnation| EventKind::MachineExited {
+            machine: "a".into(),
+            incarnation,
+            code: 137,
+        };
+        t.event(1, &exit(0));
+        assert_eq!(t.machine("a").exit_description(), "137");
+        t.event(
+            2,
+            &EventKind::OutOfMemoryKill {
+                machine: "a".into(),
+                incarnation: 0,
+                kill: kill(false),
+            },
+        );
+        assert_eq!(t.machine("a").exit_description(), "137");
+        t.event(
+            3,
+            &EventKind::OutOfMemoryKill {
+                machine: "a".into(),
+                incarnation: 0,
+                kill: kill(true),
+            },
+        );
+        t.event(4, &exit(0));
+        assert_eq!(t.machine("a").exit_description(), "137 (out of memory)");
+        t.apply(
+            1,
+            5,
+            &FaultAction::Restart {
+                machine: "a".into(),
+            },
+        );
+        t.event(6, &exit(0));
+        assert_eq!(t.machine("a").exit_description(), "137");
+        t.event(
+            7,
+            &EventKind::MachineLifecycle {
+                machine: "a".into(),
+                incarnation: 1,
+                transition: MachineTransition::Rebooted,
+            },
+        );
+        t.event(
+            8,
+            &EventKind::OutOfMemoryKill {
+                machine: "a".into(),
+                incarnation: 0,
+                kill: kill(true),
+            },
+        );
+        t.event(9, &exit(1));
+        assert_eq!(t.machine("a").exit_description(), "137");
+        assert_eq!(t.machine("a").out_of_memory_kills[2].incarnation, 0);
+        t.event(
+            10,
+            &EventKind::OutOfMemoryKill {
+                machine: "a".into(),
+                incarnation: 1,
+                kill: kill(true),
+            },
+        );
+        t.event(11, &exit(1));
+        t.apply(
+            2,
+            9,
+            &FaultAction::Restart {
+                machine: "a".into(),
+            },
+        );
+        assert_eq!(t.machine("a").exit_description(), "137 (out of memory)");
+        t.event(12, &exit(1));
+        assert_eq!(
+            t.machine("a").exit_description(),
+            "137",
+            "a kernel report explains exactly one outcome"
+        );
+        // Even a missing reboot observation cannot attach boot one's victim to
+        // boot two's unrelated exit.
+        t.event(
+            10,
+            &EventKind::OutOfMemoryKill {
+                machine: "a".into(),
+                incarnation: 1,
+                kill: kill(true),
+            },
+        );
+        t.event(11, &exit(2));
+        assert_eq!(t.machine("a").exit_description(), "137");
+    }
 
     fn tracker() -> Tracker {
         tracker_with_bandwidth(None)

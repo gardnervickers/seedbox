@@ -239,6 +239,7 @@ pub fn machine_inputs(suite: Suite) -> Vec<String> {
         ]
     } else {
         vec![
+            "OOM_INITRD",
             "WORKER",
             "KERNEL",
             "INIT",
