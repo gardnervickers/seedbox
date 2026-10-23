@@ -42,6 +42,15 @@ Every boot adds the machine counter to that epoch; kernel monotonic time alone w
 Realtime steps change kernel state and expire with the boot, whereas Driver-owned drift survives it.
 The [supervisor](../crates/seedbox-machine/src/pv/guest_service_init.c) initializes realtime before announcing Ready.
 
+## Prepared boot inputs
+
+Repeated OCI preparation reuses finished boot archives and logical filesystem views
+through content-store records. The [key](../crates/seedbox-driver-execution/src/driver_world/preparation/cache.rs)
+covers runtime/engine bytes, the logical rootfs, resolved launch and mounted configs,
+generated machine setup, epoch, progress budget and memory. Hits verify both retained
+objects; missing objects render again. Image resolution, runtime validation, boot
+memory checks and retention of the complete replay closure still run on every preparation.
+
 ## Same-time controls
 
 Committed outputs precede due timeline items, then frames, then timer wakeups; same-time items are FIFO.
