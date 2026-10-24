@@ -1,7 +1,9 @@
 #![cfg(unix)]
-#[path = "support/epoch.rs"]
-mod epoch;
+use seedbox_driver::test_support::native as native_driver;
+use seedbox_machine::test_support::prepared_application as prepared;
+use seedbox_machine::test_support::TEST_EPOCH_SECONDS;
 
+use native_driver::auto_key;
 use seedbox_driver::driver::{
     Action, Driver, EventKind, MachineId, MachineResponse, StepOutcome, Target,
 };
@@ -11,12 +13,6 @@ use seedbox_machine::{
 };
 use seedbox_machine_tcg::machine::tcg::TcgMachine;
 use seedbox_test_time::{GuestProgress, HangGuard};
-#[allow(dead_code)]
-#[path = "support/native_driver.rs"]
-mod native_driver;
-#[path = "support/prepared_application.rs"]
-mod prepared;
-use native_driver::auto_key;
 
 struct Harness {
     driver: Driver<TestMachine>,
@@ -60,7 +56,7 @@ fn driver(restore_initial: bool) -> Harness {
     let mut backend = seedbox_machine_tcg::machine::tcg::Factory::new(
         &input("SEEDBOX_TCG_QEMU"),
         &input("SEEDBOX_TCG_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
+        TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let driver = Driver::new(

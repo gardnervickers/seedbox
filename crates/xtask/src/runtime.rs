@@ -111,11 +111,21 @@ pub(super) fn guest(inputs: &BTreeMap<String, PathBuf>, output: &Path, arch: &st
 /// The generated launcher preserves inherited fd0/fd1 as bidirectional QMP/GDB
 /// sockets: it neither reads nor writes either transport before exec. Its root
 /// calculation captures stdout privately; diagnostics use only stderr.
-// TODO: closure discovery follows only the QEMU binary's linked libraries, so
-// runtime-loadable QEMU modules (dlopen'd from its module directory) would be
-// silently missing from the relocated closure. Before enabling modules in the
-// tcgQemu build, extend discovery to copy them and their dependencies.
+// Closure discovery follows only the QEMU binary's linked libraries; modules
+// dlopen'd from its module directory would be silently missing, so refuse them.
 pub(super) fn host(input: &Path, output: &Path) -> Result<()> {
+    let modules = input.join("lib/qemu");
+    if modules.is_dir()
+        && fs::read_dir(&modules)?
+            .any(|entry| entry.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "so")))
+    {
+        return Err(format!(
+            "{}: tcgQemu installs loadable modules, which the relocated closure does not copy; \
+             disable modules in nix/tcg.nix or extend closure discovery",
+            modules.display()
+        )
+        .into());
+    }
     let system = format!(
         "{}-{}",
         std::env::consts::ARCH,

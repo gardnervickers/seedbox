@@ -2,7 +2,7 @@
 //! backend. The inert executor supplies no native witness; channels establish
 //! paused/entered and return boundaries, never host sleeps or speed thresholds.
 #![cfg(unix)]
-mod support;
+use seedbox_server::test_support;
 
 use seedbox_api::{ExecutionTermination, Phase};
 use seedbox_application::{
@@ -135,7 +135,7 @@ async fn owner_abort(serve: bool) {
         release: release.clone(),
     };
     let shutdown = CancellationToken::default();
-    let mut request = support::resolved_request("abort-paused-owner");
+    let mut request = test_support::resolved_request("abort-paused-owner");
     request.options.start_paused = true;
     let (owner, id, client, _sender) = if serve {
         let socket = root.join("api.sock");

@@ -1,5 +1,4 @@
 #![cfg(unix)]
-mod support;
 use seedbox_api::*;
 use seedbox_application::{definition, store::ContentStore};
 use seedbox_artifacts::{
@@ -7,6 +6,7 @@ use seedbox_artifacts::{
     execution::*,
     record::*,
 };
+use seedbox_server::test_support;
 use seedbox_server::{
     catalogue::Catalogue,
     execution::{BackendProvider, Backends, ExecutionService},
@@ -52,7 +52,7 @@ fn fixture(store: &ContentStore, checkpoint: bool) -> Snapshot {
     store.put(b"catalogue-only-binary").unwrap();
     let manager = Manager::new(Catalogue::in_memory());
     let resource = manager
-        .submit(support::resolved_request("archive-source"))
+        .submit(test_support::resolved_request("archive-source"))
         .unwrap()
         .0;
     let id = resource.metadata.id;
@@ -265,7 +265,7 @@ fn standalone_checkpoint_restores_inputs_on_empty_server_without_source_resource
         .try_into()
         .unwrap();
     assert_eq!(store.read(&digest).unwrap(), b"retained checkpoint RAM");
-    let mut request = support::resolved_request("new-from-file");
+    let mut request = test_support::resolved_request("new-from-file");
     request.spec = SimulationSpec::resolved(definition).unwrap();
     let new_run = manager.submit(request).unwrap().0;
     assert_ne!(new_run.metadata.id, imported.metadata.id);
@@ -585,7 +585,7 @@ async fn import_roundtrip_is_independent_preserves_evidence_gaps_and_branches_wi
         std::fs::read(manifest["ram"]["path"].as_str().unwrap()).unwrap(),
         b"retained checkpoint RAM"
     );
-    let mut branch = support::resolved_request("branch");
+    let mut branch = test_support::resolved_request("branch");
     branch.spec = capture.spec;
     let branch = manager.submit(branch).unwrap().0;
     assert!(
@@ -799,7 +799,7 @@ fn malformed_import_never_publishes_catalogue_resources_and_active_export_is_rej
         0
     );
     let queued = manager
-        .submit(support::resolved_request("active"))
+        .submit(test_support::resolved_request("active"))
         .unwrap()
         .0;
     assert!(execution
@@ -933,7 +933,7 @@ fn export_captures_owned_native_checkpoint_files_and_preserves_consumed_override
     );
     let fixture = fixture(&store, true);
     let mut catalogue = Catalogue::in_memory();
-    let mut request = support::resolved_request("native-source");
+    let mut request = test_support::resolved_request("native-source");
     request.spec = fixture.simulation.spec.clone();
     let pending = seedbox_spec::definition::Override {
         id: "pending-after-capture".into(),
@@ -1416,13 +1416,13 @@ fn prepared_reference_to_imported_checkpoint_starts_fresh_before_override_valida
     let imported = execution
         .import_bundle(encode(&snapshot, &store).as_slice(), &Options::default())
         .unwrap();
-    let mut retained = support::resolved_request("checkpoint-retained");
+    let mut retained = test_support::resolved_request("checkpoint-retained");
     retained.spec = imported.spec.clone();
     let retained = manager.submit(retained).unwrap().0;
     assert!(
         matches!(retained.spec.inputs, InputSource::Resolved { definition } if matches!(definition.start, seedbox_spec::definition::Start::Checkpoint { .. }))
     );
-    let mut prepared = support::resolved_request("checkpoint-prepared-fresh");
+    let mut prepared = test_support::resolved_request("checkpoint-prepared-fresh");
     prepared.spec = imported.spec.clone();
     prepared.spec.inputs = InputSource::Prepared {
         simulation: imported.metadata.id.clone(),

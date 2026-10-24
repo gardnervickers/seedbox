@@ -83,6 +83,12 @@ We do not need to support every possible application. If someone intentionally t
   readiness rule throughout the suite. A move into another language is no exemption.
 - Unit tests stay beside components; public-boundary tests stay in their owning
   crate's `tests/`. Give each scenario one owner; share backend-neutral scenarios.
+- Do not use `#[path]` or `include!` of Rust sources; move files to the default
+  module location. Test helpers shared by several binaries go in the owning
+  crate's `test_support` module behind `test-support` (enabled by a self
+  dev-dependency); a helper for one binary is a child of a `tests/<name>/main.rs`
+  target. Keep `#[path]` only where no layout works (e.g. a plain-rustc root),
+  with a comment saying why.
 - Run portable checks in `nix develop`; engine changes also need relevant native
   suites. Portable compiles native cases without running them. Missing requirements
   are blockers. Suite discovery/policy lives in `crates/seedbox-check/src/`.

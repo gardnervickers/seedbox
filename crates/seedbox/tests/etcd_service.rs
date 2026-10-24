@@ -1,9 +1,7 @@
 //! Host checks for preparation smoke inputs and strict comparison helpers.
 //! The 4-write/1-worker/180-second variant is ONLY a prep/fast test.
 //! bd-207 acceptance must run canonical examples/etcd unchanged.
-mod support {
-    pub mod etcd_project;
-}
+pub mod support;
 use support::etcd_project;
 
 use etcd_project::*;

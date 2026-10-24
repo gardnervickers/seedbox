@@ -1,9 +1,8 @@
 //! Portable control-flow proof for the shared native case boundary. These are
 //! gated cleanup callbacks, not native-process or witness acceptance tests.
-#[path = "support/case_cleanup.rs"]
-mod case_cleanup;
 use case_cleanup::finish_before_rethrow;
 use futures_util::FutureExt;
+use seedbox_server::test_support::case_cleanup;
 use std::{
     future::pending,
     panic::AssertUnwindSafe,

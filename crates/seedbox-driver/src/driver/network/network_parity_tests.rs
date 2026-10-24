@@ -797,7 +797,7 @@ fn named_prepare_exact_commit_authored_and_held_paths_preserve_alias_and_identit
         d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
             .unwrap();
         d.step(d.now()).unwrap();
-        assert_eq!(settled(&d.drain_events(), "shape").0, prepared);
+        assert_eq!(settled(&d.drain_events(), "shape").0, *prepared);
         assert_eq!(handles(d), ["net"]);
         schedule(
             d,
@@ -1006,7 +1006,7 @@ fn baseline_unknown_and_unattached_members_fail_before_factory_or_context_work()
         let contexts = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
         let cx = contexts.clone();
-        let result = Driver::<Mock>::new_seeded_with_network(
+        let result = Driver::<Mock>::new_seeded(
             at(0),
             Duration::from_nanos(10),
             1,

@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+test-support = ["seedbox-machine/test-support", "dep:tar"]
+
 [dependencies]
 # Engine-core supplies only the canonical pure connection/link policy shared
 # with standalone engines; scheduling and RNG stay in this crate.
@@ -16,8 +19,11 @@ rayon.workspace = true
 sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tar = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Integration tests and examples use this crate's own test-support fixtures.
+seedbox-driver = { workspace = true, features = ["test-support"] }
 seedbox-test.workspace = true
 tempfile.workspace = true
 seedbox-test-time.workspace = true

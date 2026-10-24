@@ -5,7 +5,7 @@
 //! native backend qualification, or checkpoint restoration.
 #![cfg(unix)]
 
-mod support;
+use seedbox_server::test_support;
 
 use futures_util::StreamExt;
 use seedbox_api::{ComparisonStatus, ErrorCode, ExecutionTermination, Phase, TestVerdict};
@@ -184,7 +184,7 @@ impl HostService {
     async fn start(behavior: Behavior) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let store = ContentStore::new(directory.path().join("store"));
-        // Match support::resolved_request's complete catalogue fixture closure.
+        // Match test_support::resolved_request's complete catalogue fixture closure.
         // These inert bytes are materialized for the host executor, never booted.
         store.put(b"catalogue-only-binary").unwrap();
         let manager = Arc::new(Manager::new(Catalogue::in_memory()));
@@ -265,7 +265,7 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
         ("old", b"old-engine".as_slice(), b"old-policy".as_slice()),
         ("new", b"new-engine".as_slice(), b"new-policy".as_slice()),
     ] {
-        let mut request = support::resolved_request(name);
+        let mut request = test_support::resolved_request(name);
         let seedbox_api::InputSource::Resolved { definition } = &mut request.spec.inputs else {
             panic!("expected complete retained inputs");
         };
@@ -373,7 +373,7 @@ async fn public_dispatch_retains_oracle_and_missing_witness_errors_without_compa
             ),
         ] {
             let host = HostService::start(behavior).await;
-            let request = support::resolved_request("host-execution");
+            let request = test_support::resolved_request("host-execution");
             let accepted = host.client.submit(&request).await.unwrap();
             let id = &accepted.metadata.id;
             let completed = host.completed(id).await;
@@ -497,7 +497,7 @@ async fn interactive_fault_replays_via_resolved_definition() {
         let host = HostService::start(Behavior::WithWitness).await;
         let source = host
             .client
-            .submit(&support::resolved_request("interactive-host-fixture"))
+            .submit(&test_support::resolved_request("interactive-host-fixture"))
             .await
             .unwrap();
         host.completed(&source.metadata.id).await;
@@ -568,7 +568,7 @@ async fn interactive_fault_replays_via_resolved_definition() {
         assert_eq!(host.calls.load(Ordering::SeqCst), 2);
         // Seed exploration can still reuse preparation for an independent program,
         // even when the source's live journal and attempt no longer exist.
-        let mut prepared = support::resolved_request("prepared-host-fixture");
+        let mut prepared = test_support::resolved_request("prepared-host-fixture");
         prepared.spec = recorded.spec.clone();
         prepared.spec.inputs = seedbox_api::InputSource::Prepared {
             simulation: source.metadata.id.clone(),
@@ -601,7 +601,7 @@ async fn completed_comparison_uses_owned_evidence_not_attempt_files() {
             let host = HostService::start(behavior).await;
             let accepted = host
                 .client
-                .submit(&support::resolved_request("compare-host"))
+                .submit(&test_support::resolved_request("compare-host"))
                 .await
                 .unwrap();
             host.completed(&accepted.metadata.id).await;
@@ -615,7 +615,7 @@ async fn completed_comparison_uses_owned_evidence_not_attempt_files() {
                 .await
                 .unwrap();
             host.completed(&replay.metadata.id).await;
-            let mut changed = support::resolved_request("changed-input");
+            let mut changed = test_support::resolved_request("changed-input");
             let seedbox_api::InputSource::Resolved { definition } = &mut changed.spec.inputs else {
                 unreachable!()
             };
@@ -660,7 +660,7 @@ async fn completed_comparison_uses_owned_evidence_not_attempt_files() {
 async fn missing_final_journal_completes_with_explicit_error_and_no_comparable_evidence() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let host = HostService::start(Behavior::MissingJournal).await;
-        let accepted = host.client.submit(&support::resolved_request("missing-journal")).await.unwrap();
+        let accepted = host.client.submit(&test_support::resolved_request("missing-journal")).await.unwrap();
         let completed = host.completed(&accepted.metadata.id).await;
         assert!(matches!(completed.status.termination, Some(ExecutionTermination::Error { ref message }) if message.contains("intervention history not found")), "{:?}", completed.status.termination);
         assert_eq!(host.client.compare(&accepted.metadata.id, &accepted.metadata.id).await.unwrap().status, ComparisonStatus::NotComparable);
@@ -675,7 +675,7 @@ async fn public_stop_and_service_shutdown_cancel_dispatched_host_execution() {
             let host = HostService::start(Behavior::UntilCancelled).await;
             let accepted = host
                 .client
-                .submit(&support::resolved_request("cancel-host"))
+                .submit(&test_support::resolved_request("cancel-host"))
                 .await
                 .unwrap();
             host.entered.notified().await;

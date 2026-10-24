@@ -1,16 +1,14 @@
 #![cfg(unix)]
 //! Public factory and retained image launch acceptance.
-#[path = "support/epoch.rs"]
-mod epoch;
-#[path = "support/prepared_image.rs"]
-mod image;
 use image::*;
+use seedbox_machine::test_support::prepared_image as image;
+use seedbox_machine::test_support::TEST_EPOCH_SECONDS;
 use std::fs;
 fn tcg(script: bool) {
     let mut backend = seedbox_machine_tcg::machine::tcg::Factory::new(
         &input("SEEDBOX_TCG_QEMU"),
         &input("SEEDBOX_TCG_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
+        TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let binary = fs::read(input("SEEDBOX_TCG_PREPARED_FIXTURE")).unwrap();
@@ -37,7 +35,7 @@ fn tcg_native_runtime_respects_execute_traversal_and_uid_authorization() {
     let mut backend = seedbox_machine_tcg::machine::tcg::Factory::new(
         &input("SEEDBOX_TCG_QEMU"),
         &input("SEEDBOX_TCG_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
+        TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let binary = fs::read(input("SEEDBOX_TCG_PREPARED_FIXTURE")).unwrap();

@@ -176,7 +176,7 @@ fn paused_commit_holds_without_touching_anchor_or_quantum_and_releases_once() {
             commit(&mut d, &p),
             DueOutcome::BeforeFault {
                 at: at(3),
-                fault: record(&p).clone()
+                fault: Box::new(record(&p).clone())
             }
         );
         let mut held = before;
@@ -302,7 +302,7 @@ fn limited_waiting_bypassed_without_reanchor_but_armed_hold_uses_existing_semant
                 result,
                 DueOutcome::BeforeFault {
                     at: now,
-                    fault: record(&p).clone()
+                    fault: Box::new(record(&p).clone())
                 }
             );
             assert_eq!(d.playback.rate, PlaybackRate::Paused);

@@ -955,7 +955,7 @@ where
                 return Ok(match self.playback.held.clone() {
                     Some(fault) => StepOutcome::BeforeFault {
                         at: self.now(),
-                        fault,
+                        fault: Box::new(fault),
                     },
                     None => StepOutcome::Waiting {
                         at: self.now(),
@@ -1290,7 +1290,7 @@ where
         if let Some(fault) = self.apply_due(host_now)? {
             return Ok(StepOutcome::BeforeFault {
                 at: self.now(),
-                fault,
+                fault: Box::new(fault),
             });
         }
         if self.execution.finished.is_some()
@@ -1379,7 +1379,10 @@ where
             self.commit_boundary()?;
         }
         if let Some(fault) = self.apply_due(host_now)? {
-            return Ok(StepOutcome::BeforeFault { at, fault });
+            return Ok(StepOutcome::BeforeFault {
+                at,
+                fault: Box::new(fault),
+            });
         }
         Ok(self.outcome())
     }
@@ -2333,10 +2336,6 @@ impl<E: std::error::Error + 'static> std::error::Error for Error<E> {
 
 /// Why a driver returned control at a simulation-wide barrier.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "network records retain the existing public by-value playback API"
-)]
 pub enum StepOutcome {
     /// Playback withholds execution because it is paused or a limited rate is
     /// waiting for host time. `Barrier::playback` distinguishes those states.
@@ -2345,7 +2344,10 @@ pub enum StepOutcome {
     /// This admitted fault's effect is held and has not been applied: either
     /// the arm was consumed, or due-only admission held an unarmed paused effect.
     /// Repeated calls while paused return the same position and fault.
-    BeforeFault { at: Timestamp, fault: FaultRecord },
+    BeforeFault {
+        at: Timestamp,
+        fault: Box<FaultRecord>,
+    },
     /// A permanent stop was requested at a barrier. No machine has been crashed.
     Stopped { at: Timestamp },
     /// Further work is runnable or has a known future scheduling time.

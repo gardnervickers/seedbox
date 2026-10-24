@@ -16,14 +16,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(feature = "test-support")]
-#[path = "process_lifetime_failure.rs"]
+#[cfg(feature = "worker-failure")]
 mod failure;
-#[cfg(feature = "test-support")]
+#[cfg(feature = "worker-failure")]
 use failure::OwnerEndpoint;
-#[cfg(feature = "test-support")]
+#[cfg(feature = "worker-failure")]
 pub use failure::WorkerFailureInjector;
-#[cfg(not(feature = "test-support"))]
+#[cfg(not(feature = "worker-failure"))]
 type OwnerEndpoint = UnixStream;
 
 pub const MONITOR_ENTRY: &str = "--seedbox-execution-monitor-v1";
@@ -219,7 +218,7 @@ impl OwnedExecution {
         owner.set_write_timeout(Some(COMPLETION_TIMEOUT))?;
         owner.write_all(&(environment.len() as u64).to_le_bytes())?;
         owner.write_all(&environment)?;
-        #[cfg(feature = "test-support")]
+        #[cfg(feature = "worker-failure")]
         let owner = std::sync::Arc::new(std::sync::Mutex::new(owner));
         execution.owner = Some(owner);
         Ok(execution)
@@ -240,7 +239,7 @@ impl OwnedExecution {
 
     /// Bind a feature-only one-shot request to this original spawn, without
     /// transferring process ownership or keeping the owner's endpoint alive.
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "worker-failure")]
     pub fn bind_failure_injector(&self, injector: &WorkerFailureInjector) -> io::Result<()> {
         let owner = self.owner.as_ref().ok_or_else(|| {
             io::Error::new(
@@ -456,7 +455,7 @@ pub fn serve_monitor(mut arguments: Vec<std::ffi::OsString>) -> io::Result<()> {
         match owner.read(&mut byte) {
             Ok(0) => break None,
             Ok(_) => {
-                #[cfg(feature = "test-support")]
+                #[cfg(feature = "worker-failure")]
                 if byte[0] == failure::FAIL_WORKER {
                     // This is the monitor's ORIGINAL unreaped Child. It never
                     // signals a discovered/saved PID or the anchor/monitor.

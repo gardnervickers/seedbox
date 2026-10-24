@@ -468,6 +468,4 @@ fn validate_config_target(path: &str) -> Result<()> {
 pub use crate::driver_preparation::validate_oci_runtime;
 
 #[cfg(test)]
-mod test_sdk;
-#[cfg(test)]
 mod tests;

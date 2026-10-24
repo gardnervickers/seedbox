@@ -1,19 +1,15 @@
 use seedbox_driver::driver::{
     Action, Driver, Error, EventKind, FaultOrigin, MachineId, SettlementStatus, StepOutcome, Target,
 };
+use seedbox_driver::test_support::{auto_key, key};
+use seedbox_machine::pv::{ApplicationCommand, CommandResult, Output};
 use seedbox_machine::{
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
     pv::{Request, Response},
     rng::RngStream,
 };
-use std::{num::NonZeroU32, sync::Arc, time::Duration};
-#[path = "support/driver_definition.rs"]
-mod driver_definition;
-#[path = "support/input_key.rs"]
-mod input_key;
-use input_key::{auto_key, key};
-use seedbox_machine::pv::{ApplicationCommand, CommandResult, Output};
 use std::sync::Mutex;
+use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
 type Calls = Arc<Mutex<Vec<(bool, Timestamp)>>>;
 
@@ -114,8 +110,8 @@ fn build(
         workers,
         FixtureRng,
         || Ok(()),
-        driver_definition::definition("fixture-0"),
-        vec![driver_definition::definition("fixture-1")],
+        seedbox_driver::test_support::definition("fixture-0"),
+        vec![seedbox_driver::test_support::definition("fixture-1")],
         Vec::new(),
         seedbox_driver::driver::NetworkConfig::default(),
         move |definition| {
@@ -331,7 +327,7 @@ fn only_a_consumed_stop_with_its_successful_acknowledgment_finishes() {
         1,
         FixtureRng,
         || Ok(()),
-        driver_definition::definition("oracle"),
+        seedbox_driver::test_support::definition("oracle"),
         Vec::new(),
         Vec::new(),
         seedbox_driver::driver::NetworkConfig::default(),

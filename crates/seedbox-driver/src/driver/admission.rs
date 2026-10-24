@@ -14,20 +14,17 @@ mod admission_value_tests;
 /// Admission/dispatch is not completion of a command awaiting future guest ACKs.
 // Service receipts distinguish an admitted held effect from oracle completion
 // without pacing's Waiting or positive-budget steps.
-// TODO: `clippy::large_enum_variant` is suppressed here and on PreparedOutcome
-// only to keep FaultRecord by value, but there is no backward-compatibility
-// requirement on this API. Measure the variant size and either box the record
-// (updating the service worker's matches) or document why by-value is needed.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "network records retain the existing public by-value outcome API"
-)]
+// FaultRecord is boxed here, in PreparedOutcome and in StepOutcome: it is
+// about 250 bytes, against at most 32 for every other variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DueOutcome {
     /// No dispatch work remains due now. Guest acknowledgments may still be pending.
     Applied { at: Timestamp },
     /// This admitted effective fault remains at the FIFO front, unapplied.
-    BeforeFault { at: Timestamp, fault: FaultRecord },
+    BeforeFault {
+        at: Timestamp,
+        fault: Box<FaultRecord>,
+    },
     /// Zero-time work committed oracle completion; later work was not dispatched.
     /// Unconsumed step and arm state is preserved. The host may call `step(at)`
     /// at this returned time to perform ordinary finished-state cancellation;
@@ -39,13 +36,9 @@ pub enum DueOutcome {
 // The caller's journal records the exact admitted record before commit. A
 // closed plain value separates outer preflight errors from policy rejection
 // without tokens, serde identity, a handle registry or a second scheduler.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "network records retain the existing public by-value proposal API"
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreparedOutcome {
-    Admitted(FaultRecord),
+    Admitted(Box<FaultRecord>),
     Rejected(InputRejection),
 }
 
@@ -205,6 +198,7 @@ where
                                 &admitted.handle,
                                 admitted.requested_at,
                             )
+                            .map(Box::new)
                             .map_err(Error::Control)?,
                     ),
                     admitted.record_id,
@@ -274,7 +268,7 @@ where
                 .any(|event| {
                     matches!((&event.kind, &prepared.outcome),
                     (EventKind::FaultAdmitted(fault), PreparedOutcome::Admitted(expected))
-                    if fault == expected)
+                    if fault == &**expected)
                 })
             {
                 // Preflight was exact; divergence here is an implementation bug
@@ -325,7 +319,7 @@ where
             if let Some(fault) = self.apply_due_mode(host_now, true)? {
                 return Ok(DueOutcome::BeforeFault {
                     at: self.now(),
-                    fault,
+                    fault: Box::new(fault),
                 });
             }
             if let Some((at, reason)) = self.execution.finished {

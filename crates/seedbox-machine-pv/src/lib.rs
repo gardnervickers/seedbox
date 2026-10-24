@@ -1,5 +1,7 @@
 //! PV machine implementation.
 pub mod machine;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 /// Serve the private PV worker protocol on process stdin/stdout until EOF.
 /// Call only after recognizing the private worker launch marker, before public

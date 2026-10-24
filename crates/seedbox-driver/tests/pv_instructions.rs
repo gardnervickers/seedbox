@@ -1,7 +1,6 @@
 #![cfg(all(seedbox_pv, target_arch = "x86_64"))]
 //! Native instruction determinism through the public Driver boundary.
-#[path = "support/epoch.rs"]
-mod epoch;
+use seedbox_machine::test_support::TEST_EPOCH_SECONDS;
 use seedbox_machine::{
     definition::{FilesystemArchive, Launch, MachineDefinition, PreparedApplication, Resources},
     machine::Timestamp,
@@ -92,7 +91,7 @@ fn instruction_run(
     let mut factory = Factory::new(
         &input("SEEDBOX_PV_WORKER"),
         &input("SEEDBOX_PV_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
+        TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let quantum = 5_000_000;

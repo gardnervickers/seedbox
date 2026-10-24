@@ -31,11 +31,14 @@ seedbox-test-time.workspace = true
 seedbox-machine = { workspace = true, features = ["test-support"] }
 
 [features]
-test-support = []
+# Original-worker failure injection hooks for process-lifetime tests.
+worker-failure = []
+# Opt-in fixtures, such as a synthetic runtime package, for dependents' tests.
+test-support = ["seedbox-machine/test-support"]
 
 [[bin]]
 name = "seedbox-lifetime-fixture"
 path = "tests/support/lifetime_fixture.rs"
-required-features = ["test-support"]
+required-features = ["worker-failure"]
 test = false
 bench = false

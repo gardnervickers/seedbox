@@ -6,6 +6,9 @@ pub use crate::machine::{ExitReason, Machine, RunContext, StopReason, Timestamp}
 mod rng;
 pub use crate::clock::{FixedClock, SimulationClock};
 pub use rng::SeededRng;
+/// Documented nonzero realtime epoch of the native machine and Driver tests:
+/// 2000-01-01T00:00:00Z. A test choice, not a library default.
+pub const TEST_EPOCH_SECONDS: u32 = 946_684_800;
 pub mod assets;
 pub mod disk_scenario;
 pub mod factory_definition;

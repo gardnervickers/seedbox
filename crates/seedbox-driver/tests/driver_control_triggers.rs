@@ -2,6 +2,7 @@
 use seedbox_driver::driver::{
     Action, Driver, EventKind, MachineId, MachineResponse, StepOutcome, Target,
 };
+use seedbox_driver::test_support::auto_key;
 use seedbox_machine::{
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
     pv::{
@@ -10,11 +11,6 @@ use seedbox_machine::{
     rng::RngStream,
 };
 use std::{collections::VecDeque, num::NonZeroU32, time::Duration};
-#[path = "support/driver_definition.rs"]
-mod driver_definition;
-#[path = "support/input_key.rs"]
-mod input_key;
-use input_key::auto_key;
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
 }
@@ -179,9 +175,9 @@ impl World {
             workers,
             Rng,
             || Ok(()),
-            driver_definition::definition("oracle"),
+            seedbox_driver::test_support::definition("oracle"),
             ["caller", "source", "peer"]
-                .map(driver_definition::definition)
+                .map(seedbox_driver::test_support::definition)
                 .into(),
             Vec::new(),
             seedbox_driver::driver::NetworkConfig::default(),

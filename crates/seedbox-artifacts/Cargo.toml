@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 hex.workspace = true
 seedbox-spec.workspace = true
@@ -20,4 +23,6 @@ libc.workspace = true
 tar.workspace = true
 
 [dev-dependencies]
+# Integration tests use this crate's own run-record fixtures.
+seedbox-artifacts = { workspace = true, features = ["test-support"] }
 seedbox-test-time.workspace = true

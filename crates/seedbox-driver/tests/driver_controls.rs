@@ -1,10 +1,8 @@
-#[path = "support/driver_fixture.rs"]
-mod driver_fixture;
-use driver_fixture::*;
+use seedbox_driver::test_support::fixture::*;
 
 fn held_record(outcome: &StepOutcome) -> Option<seedbox_driver::driver::FaultRecord> {
     match outcome {
-        StepOutcome::BeforeFault { fault, .. } => Some(fault.clone()),
+        StepOutcome::BeforeFault { fault, .. } => Some((**fault).clone()),
         _ => None,
     }
 }
@@ -117,7 +115,7 @@ fn pre_crash_hold_retains_exact_current_time_cursor_and_allows_only_playback() {
         .unwrap();
     let held = driver.step(at(100)).unwrap();
     assert_eq!(
-        driver_fixture::held(&held),
+        seedbox_driver::test_support::fixture::held(&held),
         Some((at(0), FaultAction::Crash, id))
     );
     let position = status(&mut driver);

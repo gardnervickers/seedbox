@@ -319,7 +319,7 @@ where
                         Ok(())
                     })
                     .unwrap();
-                held.push(fault);
+                held.push(*fault);
             }
             other => panic!("{backend}: unexpected {other:?}"),
         };

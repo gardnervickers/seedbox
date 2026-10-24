@@ -109,5 +109,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "network_counters_sampling_tests.rs"]
 mod sampling_tests;

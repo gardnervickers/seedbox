@@ -1,7 +1,7 @@
 //! Explicit session ownership supplied at the public process boundary.
 //! These are OS-process tests, not QEMU/native-machine acceptance.
 #![cfg(all(
-    feature = "test-support",
+    feature = "worker-failure",
     any(target_os = "linux", target_os = "macos")
 ))]
 use seedbox_driver_execution::process_lifetime::{

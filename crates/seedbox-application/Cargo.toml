@@ -26,7 +26,8 @@ ocirender = "0.2.2"
 
 
 [dev-dependencies]
-flate2.workspace = true
+# Preparation tests use Driver execution's synthetic runtime package.
+seedbox-driver-execution = { workspace = true, features = ["test-support"] }
 libc.workspace = true
 seedbox-test.workspace = true
 seedbox-test-time.workspace = true
@@ -42,3 +43,10 @@ oci-tests = []
 [[test]]
 name = "oci_engine"
 required-features = ["oci-tests"]
+
+# The Redis template embeds this standalone workload and its Dockerfile builds it
+# with plain rustc; this target type-checks and unit-tests it in the workspace.
+[[example]]
+name = "redis-workload"
+path = "../../examples/redis/workload/main.rs"
+test = true

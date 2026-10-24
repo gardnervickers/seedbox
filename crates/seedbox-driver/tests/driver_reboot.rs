@@ -1,6 +1,4 @@
-#[path = "support/driver_fixture.rs"]
-mod driver_fixture;
-use driver_fixture::*;
+use seedbox_driver::test_support::fixture::*;
 
 /// Crash, then reboot at the next barrier at the same simulation time. A
 /// Reboot input queued with the Crash would be admitted before the crash

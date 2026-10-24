@@ -133,7 +133,7 @@ fn optional_frame_capture_capacity_and_draining_never_change_policy_evidence() {
         )
         .unwrap()
         .with_frame_capacity(capacity);
-        Driver::new_seeded_with_network(
+        Driver::new_seeded(
             at(0),
             Duration::from_nanos(10),
             1,

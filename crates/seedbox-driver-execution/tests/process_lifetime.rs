@@ -1,7 +1,7 @@
 //! Real OS processes exercise ownership and file-deletion barriers. These are
 //! protocol/cleanup tests, not native VM or real-QEMU acceptance.
 #![cfg(all(
-    feature = "test-support",
+    feature = "worker-failure",
     any(target_os = "linux", target_os = "macos")
 ))]
 use seedbox_driver_execution::process_lifetime::{
