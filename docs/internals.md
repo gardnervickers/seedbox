@@ -20,6 +20,13 @@ in x7, which arm64 syscalls leave unused, and the kernel charges a marked syscal
 tenth of a syscall. A JVM makes millions of these while it starts, and at full
 price they dominated simulated startup time. x86 charges every syscall in full.
 
+Guest time advances only inside the kernel, so every timer tick interrupts kernel
+mode and tick accounting would charge all translated compute as system time
+(`utime` zero, `ITIMER_VIRTUAL` never firing). The progress client passes a fixed
+first argument to its `getpid`, and on both architectures a tick that interrupts
+that call's charge directly counts as user time. RCU and the scheduler still see
+kernel mode, and the charge itself is unchanged.
+
 Progress instrumentation saves a fixed scratch register in thread-local storage,
 decrements the block budget without changing application flags, and restores the
 register before application execution. Exhaustion branches to one shared routine

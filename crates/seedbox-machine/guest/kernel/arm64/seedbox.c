@@ -8,6 +8,8 @@
 #include <linux/irq.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
+#include <linux/preempt.h>
+#include <linux/sched.h>
 #include <linux/sched_clock.h>
 #include <linux/sizes.h>
 #include <asm/ptrace.h>
@@ -16,6 +18,9 @@
 
 #define TIME_IPA 0x0a000000UL
 #define EVENT_IPA 0x0a010000UL
+/* A progress call: getpid with this first argument (guest/progress/progress.c). */
+#define SEEDBOX_PROGRESS_NR 172
+#define SEEDBOX_PROGRESS_MARK 0x5eedb0c5UL
 /* Time syscalls (clock_gettime, clock_getres, gettimeofday). */
 #define SEEDBOX_CLOCK_GETTIME_NR 113
 #define SEEDBOX_CLOCK_GETRES_NR 114
@@ -115,6 +120,19 @@ static void seedbox_charge(u64 remaining)
 	}
 }
 
+/* The task whose progress call is charging its translated compute, if any.
+ * The clock advances only in the kernel, so every tick lands at EL1; a tick
+ * that interrupts this charge samples user work. One guest CPU, and no
+ * preemption inside the charge. */
+static struct task_struct *user_charge;
+
+/* Account the current tick as user time (kernel/time/timer.c): it interrupted
+ * a progress charge directly, not a softirq or a nested interrupt. */
+bool seedbox_user_tick(void)
+{
+	return READ_ONCE(user_charge) == current && irq_count() == HARDIRQ_OFFSET;
+}
+
 /* Charge one syscall. Load its price once: throttle/heal changes at a
  * rendezvous affect the next syscall. Some syscalls are not application work
  * at full price. The PV clock disables the vDSO, so time syscalls stand in for
@@ -130,6 +148,14 @@ void seedbox_syscall_progress(struct pt_regs *regs, unsigned int scno)
 	    scno == SEEDBOX_GETTIMEOFDAY_NR)
 		return;
 	ns = page ? READ_ONCE(page->syscall_ns) : 1000;
+	/* A progress call stands for the application's own compute: ticks during
+	 * its charge are user time. The charge itself is unchanged. */
+	if (scno == SEEDBOX_PROGRESS_NR && regs->regs[0] == SEEDBOX_PROGRESS_MARK) {
+		WRITE_ONCE(user_charge, current);
+		seedbox_charge(ns);
+		WRITE_ONCE(user_charge, NULL);
+		return;
+	}
 	if (regs->regs[7] == SEEDBOX_TRANSLATOR_MARK)
 		ns = max(ns / SEEDBOX_TRANSLATOR_DIVISOR, 1ULL);
 	seedbox_charge(ns);

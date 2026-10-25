@@ -14,6 +14,13 @@ typedef uint64_t u64;
 #define max(a, b) ((a) > (b) ? (a) : (b))
 struct pt_regs { unsigned long regs[31]; };
 struct clock_event_device { int unused; };
+struct task_struct { int pid; };
+static struct task_struct tasks[2], *current = &tasks[0];
+#define HARDIRQ_OFFSET (1UL << 16)
+#define SOFTIRQ_OFFSET (1UL << 8)
+static unsigned long preempt, nesting;
+#define irq_count() preempt
+static unsigned int user_ticks, system_ticks;
 
 static unsigned long irq_flags;
 static unsigned int writes;
@@ -42,6 +49,13 @@ static void writeq(unsigned long value, volatile void *address)
 	++writes;
 	storage.now = storage.last;
 	storage.bound += window;
+	/* Each rendezvous takes a tick in hard IRQ context on top of `nesting`. */
+	preempt = nesting + HARDIRQ_OFFSET;
+	if (seedbox_user_tick())
+		++user_ticks;
+	else
+		++system_ticks;
+	preempt = 0;
 }
 
 static struct pt_regs regs;
@@ -52,7 +66,9 @@ static void reset(u64 cost, u64 bound, u64 next_window)
 	page = &storage;
 	event = registers;
 	window = next_window;
-	writes = 0;
+	writes = user_ticks = system_ticks = 0;
+	nesting = 0;
+	current = &tasks[0];
 	regs = (struct pt_regs){ { 0 } };
 }
 
@@ -94,5 +110,27 @@ int main(void)
 	reset(1000, 300, 300);
 	seedbox_syscall_progress(&regs, 63);
 	assert(storage.last == 1000 && writes == 3);
+	/* Ticks during an ordinary syscall's charge are system time. */
+	assert(user_ticks == 0 && system_ticks == 3);
+
+	/* A progress call charges the same, but its ticks are user time. */
+	reset(1000, 300, 300);
+	regs.regs[0] = SEEDBOX_PROGRESS_MARK;
+	seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+	assert(storage.last == 1000 && user_ticks == 3 && system_ticks == 0);
+	/* Only while the charge runs: a later read's tick is system time. */
+	storage.last = storage.bound;
+	(void)seedbox_read();
+	assert(user_ticks == 3 && system_ticks == 1);
+	/* getpid without the mark, and the mark on another syscall, are ordinary. */
+	seedbox_syscall_progress(&(struct pt_regs){ { 0 } }, SEEDBOX_PROGRESS_NR);
+	seedbox_syscall_progress(&regs, 63);
+	assert(user_ticks == 3);
+	/* A tick nested in a softirq is not user time. */
+	reset(1000, 300, 300);
+	regs.regs[0] = SEEDBOX_PROGRESS_MARK;
+	nesting = SOFTIRQ_OFFSET;
+	seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+	assert(user_ticks == 0 && system_ticks == 3);
 	return 0;
 }
