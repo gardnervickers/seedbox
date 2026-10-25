@@ -1,0 +1,15 @@
+[package]
+name = "seedbox-sdk"
+description = "Guest-side property SDK for applications and oracles under Seedbox"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# Guest programs link this crate, so it keeps to the socket and JSON.
+[dependencies]
+libc.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+seedbox-engine-protocol.workspace = true
+tempfile.workspace = true

@@ -2104,6 +2104,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-sdk"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "seedbox-engine-protocol",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "seedbox-server"
 version = "0.1.0"
 dependencies = [
