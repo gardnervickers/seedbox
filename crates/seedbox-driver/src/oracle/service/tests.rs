@@ -204,6 +204,20 @@ fn now_sleep_use_commit_and_survive_source_loss() {
     assert_eq!(reply(&[p])["result"], json!({}));
 }
 #[test]
+fn quiet_is_refused_until_faults_are_generated() {
+    let (mut s, mut o) = (Service::default(), Owner::default());
+    let r = reply(&call(
+        &mut s,
+        &mut o,
+        1,
+        10,
+        json!({"op":"quiet","duration_ns":20}),
+    ));
+    assert_eq!(r["ok"], false);
+    assert_eq!(r["error"]["code"], "unsupported");
+    assert_eq!(r["error"]["message"], "quiet is not implemented yet");
+}
+#[test]
 fn process_waits_ready_and_exact_correlated_completion() {
     let (mut s, mut o) = (Service::default(), Owner::default());
     o.facts.ready = false;

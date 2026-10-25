@@ -33,6 +33,14 @@ fn full_scoped_wire_vocabulary_preserves_targets_and_binary_marker() {
         operation(json!({"op":"sleep","duration_ns":0})),
         Operation::Sleep { duration_ns: 0 }
     );
+    assert_eq!(
+        operation(json!({"op":"quiet","duration_ns":5})),
+        Operation::Quiet { duration_ns: 5 }
+    );
+    assert_eq!(
+        invalid(json!({"op":"quiet","duration_ns":0})).message,
+        "quiet duration_ns must be positive"
+    );
     for op in [
         "stop",
         "restart",

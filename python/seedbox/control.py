@@ -203,6 +203,15 @@ class World:
         """Wait at least this many simulated seconds, plus RPC delivery latency."""
         return self._call("sleep", duration_ns=_nanoseconds(seconds))[1]
 
+    def quiet(self, seconds):
+        """Start no generated fault for this many simulated seconds from admission.
+
+        Teardowns of generated faults already active still run, so the system
+        can recover. No engine implements it yet: the call raises FaultError
+        with code "unsupported".
+        """
+        return self._call("quiet", duration_ns=_nanoseconds(seconds))[1]
+
     def stop(self, target):
         """Return only after the application process group has been stopped."""
         return self._call("stop", target=_target(target))[1]

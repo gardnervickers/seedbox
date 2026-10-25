@@ -63,6 +63,12 @@ pub(crate) enum Operation {
     Sleep {
         duration_ns: u64,
     },
+    /// Start no generated fault for `duration_ns` from admission; teardowns
+    /// of generated faults already active still run. Defined but refused:
+    /// nothing generates faults yet.
+    Quiet {
+        duration_ns: u64,
+    },
     Stop {
         target: Target,
     },
@@ -168,6 +174,14 @@ impl OperationError {
         Self {
             code: ErrorCode::InvalidRequest,
             message: message.into(),
+            handle: None,
+        }
+    }
+    /// An operation the schema defines but no engine carries out yet.
+    pub(crate) fn not_implemented(name: &str) -> Self {
+        Self {
+            code: ErrorCode::Unsupported,
+            message: seedbox_engine_protocol::not_implemented(name),
             handle: None,
         }
     }
@@ -298,6 +312,11 @@ impl Operation {
                     "factor_permille must be in [1000, 1000000]",
                 ));
             }
+            Self::Quiet { duration_ns: 0 } => {
+                return Err(OperationError::invalid(
+                    "quiet duration_ns must be positive",
+                ))
+            }
             Self::Heal { handle } if handle.is_empty() => {
                 return Err(OperationError::invalid("handle must be nonempty string"));
             }
@@ -328,6 +347,9 @@ impl Operation {
         let checked = match self {
             Self::Sleep { duration_ns } => {
                 admitted.checked_add(*duration_ns).ok_or("sleep overflow")
+            }
+            Self::Quiet { duration_ns } => {
+                admitted.checked_add(*duration_ns).ok_or("quiet overflow")
             }
             Self::ArmTrigger {
                 match_timeout_ns, ..

@@ -136,6 +136,46 @@ impl ArmReceipt {
         Ok(())
     }
 }
+/// Keys of inputs sampled from a [fault profile](crate::fault_profile): fault
+/// `n` starts at `gen-<n>` and is torn down at `gen-<n>-end`. The key alone
+/// marks an input as generated, so a resubmitted definition keeps its gates.
+/// A generated start is skipped, with a rejection naming why, before every
+/// initial application has reported ready and while a quiet period is in
+/// force; a skipped start's teardown is skipped with it. Teardowns of starts
+/// that ran are never skipped, so the system can recover. No engine applies
+/// the gates yet, since nothing generates such inputs.
+pub const GENERATED_PREFIX: &str = "gen-";
+/// The suffix of a generated fault's teardown key.
+pub const GENERATED_END_SUFFIX: &str = "-end";
+/// Rejection reasons of skipped generated inputs.
+pub const SKIPPED_BEFORE_READY: &str = "skipped: generated before the applications were ready";
+pub const SKIPPED_QUIET: &str = "skipped: generated during a quiet period";
+pub const SKIPPED_WITH_START: &str = "skipped: its generated start was skipped";
+
+/// What a generated key names: the start or teardown of one generated fault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Generated<'a> {
+    Start { fault: &'a str },
+    Teardown { fault: &'a str },
+}
+impl<'a> Generated<'a> {
+    /// `None` for an authored key.
+    pub fn of(key: &'a str) -> Option<Self> {
+        let rest = key.strip_prefix(GENERATED_PREFIX)?;
+        let parsed = match rest.strip_suffix(GENERATED_END_SUFFIX) {
+            Some(fault) => Self::Teardown { fault },
+            None => Self::Start { fault: rest },
+        };
+        let (Self::Start { fault } | Self::Teardown { fault }) = parsed;
+        (!fault.is_empty()).then_some(parsed)
+    }
+    /// The key of this fault's start.
+    pub fn start_key(&self) -> String {
+        let (Self::Start { fault } | Self::Teardown { fault }) = self;
+        format!("{GENERATED_PREFIX}{fault}")
+    }
+}
+
 pub const fn default_timeout_ns() -> u64 {
     PROCESS_EFFECT_TIMEOUT_NS
 }
@@ -290,6 +330,19 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("unknown field"), "{error}");
+    }
+    #[test]
+    fn generated_keys_name_a_start_or_its_teardown() {
+        assert_eq!(
+            Generated::of("gen-7"),
+            Some(Generated::Start { fault: "7" })
+        );
+        let teardown = Generated::of("gen-7-end").unwrap();
+        assert_eq!(teardown, Generated::Teardown { fault: "7" });
+        assert_eq!(teardown.start_key(), "gen-7");
+        for authored in ["crash-db", "gen-", "gen--end", "general-7"] {
+            assert_eq!(Generated::of(authored), None, "{authored}");
+        }
     }
     #[test]
     fn retained_host_inputs_merge_by_explicit_identity_ignoring_scheduler_observations() {

@@ -88,6 +88,49 @@ impl NetworkFaults {
     }
 }
 
+/// A positive bandwidth, and a queue bound only with a bandwidth.
+pub fn validate_bandwidth(
+    bandwidth_bps: Option<u64>,
+    queue_bound_ns: Option<u64>,
+) -> Result<(), String> {
+    if bandwidth_bps == Some(0) {
+        return Err("bandwidth_bps must be positive".into());
+    }
+    if queue_bound_ns.is_some() && bandwidth_bps.is_none() {
+        return Err("queue_bound_ns requires bandwidth_bps".into());
+    }
+    Ok(())
+}
+/// The values every link policy and shape layer must have: latency at least
+/// the network's global `floor_ns`, jitter below latency, their sum within
+/// [`MAX_LINK_DELAY_NS`], loss within [`MAX_PPM`], and a valid bandwidth.
+/// The Driver's link policies and fault profiles check links with this.
+pub fn validate_link(
+    latency_ns: u64,
+    jitter_ns: u64,
+    loss_ppm: u64,
+    bandwidth_bps: Option<u64>,
+    queue_bound_ns: Option<u64>,
+    floor_ns: u64,
+) -> Result<(), String> {
+    if latency_ns < floor_ns {
+        return Err("latency_ns below global latency".into());
+    }
+    if jitter_ns >= latency_ns {
+        return Err("jitter_ns must be less than latency_ns".into());
+    }
+    if latency_ns
+        .checked_add(jitter_ns)
+        .is_none_or(|n| n > MAX_LINK_DELAY_NS)
+    {
+        return Err("latency_ns + jitter_ns exceeds one hour".into());
+    }
+    if loss_ppm > MAX_PPM {
+        return Err(format!("loss_ppm exceeds {MAX_PPM}"));
+    }
+    validate_bandwidth(bandwidth_bps, queue_bound_ns)
+}
+
 /// One direction of an observed IPv4 TCP incarnation. Names are prepared machines.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

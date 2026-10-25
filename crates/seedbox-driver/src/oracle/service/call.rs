@@ -79,6 +79,7 @@ impl Service {
                 Self::connections(adapter, &from, &to, after)
             }
             Ok(Operation::Sleep { duration_ns }) => return self.sleep(call, now, duration_ns),
+            Ok(Operation::Quiet { .. }) => Err(OperationError::not_implemented("quiet")),
             Ok(Operation::ArmTrigger {
                 source,
                 marker,

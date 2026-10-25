@@ -3,6 +3,7 @@ pub mod application_log;
 pub mod control;
 pub mod crash;
 pub mod driver_world;
+pub mod fault_profile;
 pub mod fault_status;
 #[cfg(unix)]
 pub mod host_clock;

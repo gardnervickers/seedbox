@@ -243,6 +243,21 @@ fn sequential_calls_use_public_rpc_and_confirmed_effects() {
     assert_eq!(closed["closed"], true);
 }
 #[test]
+fn quiet_sends_its_duration_and_reports_the_engine_refusal() {
+    let mut sdk = Sdk::open(replies(&[(
+        1,
+        json!({}),
+        json!({"ok":false,"effect_at_ns":null,"error":{"code":"unsupported","message":"quiet is not implemented yet"}}),
+    )]));
+    let failure = call(&mut sdk, "quiet", json!([1.5]));
+    error(&failure, "FaultError");
+    assert_eq!(failure["error"]["code"], "unsupported");
+    assert_eq!(
+        sdk.close()["requests"],
+        json!([request(1, "quiet", json!({"duration_ns":1_500_000_000u64}))])
+    );
+}
+#[test]
 fn shape_sends_absolute_nanosecond_policy_and_returns_healable_handle() {
     let mut sdk = Sdk::open(replies(&[
         (1, json!({"handle":"p1"}), json!({})),
