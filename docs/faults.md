@@ -4,6 +4,44 @@ These are interfaces only. Every engine refuses `disk_error`, `disk_latency`,
 `preempt` and program `trigger` inputs as not implemented yet. A later
 change implements them along the contracts below.
 
+## Actions
+
+Each is a healable [control `Action`](../crates/seedbox-engine-protocol/src/control.rs)
+on one machine, drawn on its own seeded stream. It survives a guest device
+reset and applies to every incarnation until healed.
+
+| Action | Arguments | While active | Heal |
+| --- | --- | --- | --- |
+| `disk_error` | `op` (`read`, `write`, `flush`, `any`); `ppm`; `effect` (`eio` default, or `corrupt`); `scope` (`all` default, or `data`) | Selected requests fail with EIO before any disk effect, or succeed with one sector of seeded bytes. `data` spares the metadata ext4 lays out at format time, not metadata it allocates later; neither `corrupt` nor `data` selects flushes | Stops selecting; settles with `matched` and `affected` counts |
+| `disk_latency` | `op`; `latency_ns` 1 µs–1 s; `jitter_ns` up to 1 s | Requests complete late, in submission order, with their disk effect at completion; a crash loses the pending ones | Stops delaying; queued requests still complete at their times |
+| `preempt` | `ppm` | The guest kernel yields at that rate of syscalls and progress charges | Restores ordinary scheduling |
+
+## Typed triggers
+
+The oracle's `arm_trigger` call already arms console-marker triggers that stop
+an application or partition machines. A program `trigger` input states the
+same rule in general and arms when due:
+
+| Field | Meaning |
+| --- | --- |
+| `when` | A selector tagged `kind`: `output` (a marker, as a string or `{hex: ...}`, in a machine's committed output, as `arm_trigger` matches), `lifecycle` (`ready`, `exited`, `crashed`, `rebooted`, `paused`, `resumed`), `connection_open`, `frame`, or `block_request` |
+| `nth` | The occurrence that matches, from 1 |
+| `delay_ns` | Added to the matching barrier before the effect is admitted |
+| `within_ns` | Occurrences at or after this never match and the trigger expires; without it the run's end cuts it off |
+| `then` | Any action, admitted as an ordinary fault with its own ID and the same checks as a timed input |
+
+A `block_request` trigger holds the matching disk request at the device, so
+its only effect is an undelayed `crash` of that machine. Selectors on SDK
+evidence (`event`, `assertion`, `setup_complete`) are reserved for a later
+change.
+Oracle-armed and program triggers share one lifecycle and 64 IDs per run, so
+a program alone may arm at most 64. The lifecycle is armed, matched, then
+fired, rejected, cancelled, expired or cut off. Each change is a `triggerChanged` event, and the world view keeps every trigger's
+latest state; a fired trigger names its fault, whose own status says whether
+the effect applied. A consumed trigger input leaves an arm receipt in the
+program cursor, beside a slot for that trigger's matching progress (its
+count and partial marker match), so a checkpoint continues the same match.
+
 ## In the timeline
 
 `seedbox.yaml` declares no faults, so neither it nor the CLI's flags change.
