@@ -16,39 +16,54 @@ fn regions(memory: u64) -> Result<Vec<(u64, u64)>, String> {
     list.sort_by_key(|r| r.0);
     Ok(list)
 }
+/// Stopped CPU parts each architecture's worker reports first, in its order:
+/// `worker/x86_64/backend/evidence.rs` and `worker/aarch64/backend/evidence.rs`.
+#[cfg(any(target_arch = "x86_64", test))]
+const X86_64_CPU: &[&str] = &[
+    "regs",
+    "sregs",
+    "vectors",
+    "xcrs",
+    "msrs",
+    "debugregs",
+    "events",
+    "vcpu",
+    "cpuid",
+];
+#[cfg(any(target_arch = "aarch64", test))]
+const AARCH64_CPU: &[&str] = &["cpu", "gic"];
+#[cfg(target_arch = "x86_64")]
+const CPU: &[&str] = X86_64_CPU;
+#[cfg(target_arch = "aarch64")]
+const CPU: &[&str] = AARCH64_CPU;
+/// Parts the shared worker and this client append on every architecture.
+const MACHINE: [&str; 11] = [
+    "clock",
+    "devices",
+    "console",
+    "network",
+    "pending_writes",
+    "block_transport",
+    "timer_policy",
+    "ram",
+    "ram_regions",
+    "ram_pages",
+    "pending_io",
+];
 pub(super) fn validate(e: &StateEvidence, memory: u64) -> Result<(), String> {
+    validate_parts(e, memory, CPU)
+}
+fn validate_parts(e: &StateEvidence, memory: u64, cpu: &[&str]) -> Result<(), String> {
     e.validate().map_err(str::to_owned)?;
-    #[cfg(target_arch = "x86_64")]
-    {
-        let mut names = vec![
-            "regs",
-            "sregs",
-            "vectors",
-            "xcrs",
-            "msrs",
-            "debugregs",
-            "events",
-            "vcpu",
-            "cpuid",
-            "clock",
-            "devices",
-            "console",
-            "network",
-            "pending_writes",
-            "block_transport",
-            "timer_policy",
-            "ram",
-            "ram_regions",
-            "ram_pages",
-            "pending_io",
-        ];
-        if e.parts.iter().any(|(n, _)| n == "disk") {
-            names.push("disk");
-        }
-        names.push("policy");
-        if e.parts.iter().map(|(n, _)| n.as_str()).ne(names) {
-            return Err("PV evidence part set/order".into());
-        }
+    let disk = e.parts.iter().any(|(n, _)| n == "disk").then_some("disk");
+    let names = cpu
+        .iter()
+        .copied()
+        .chain(MACHINE)
+        .chain(disk)
+        .chain(["policy"]);
+    if e.parts.iter().map(|(n, _)| n.as_str()).ne(names) {
+        return Err("PV evidence part set/order".into());
     }
     let expected = regions(memory)?;
     if e.regions.iter().map(|r| (r.base, r.length)).ne(expected) {
@@ -68,24 +83,6 @@ pub(super) fn validate(e: &StateEvidence, memory: u64) -> Result<(), String> {
     ] {
         if e.parts.iter().find(|(n, _)| n == name).map(|(_, v)| v) != Some(&digest) {
             return Err(format!("PV evidence {name} digest"));
-        }
-    }
-    for name in [
-        "regs",
-        "vectors",
-        "clock",
-        "devices",
-        "console",
-        "network",
-        "pending_writes",
-        "block_transport",
-        "timer_policy",
-        "ram",
-        "pending_io",
-        "policy",
-    ] {
-        if !e.parts.iter().any(|(n, _)| n == name) {
-            return Err(format!("PV evidence missing {name}"));
         }
     }
     Ok(())
@@ -264,5 +261,91 @@ impl PVMachine {
         };
         validate(&e, self.memory_bytes)?;
         Ok(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// Evidence shaped like a stopped worker's on this host's RAM layout.
+    fn evidence(cpu: &[&str], disk: bool) -> StateEvidence {
+        let regions: Vec<_> = regions(64 << 20)
+            .unwrap()
+            .into_iter()
+            .map(|(base, length)| RamRegion { base, length })
+            .collect();
+        let pages: u64 = regions.iter().map(|r| r.length.div_ceil(4096)).sum();
+        let page_hashes = vec![7; pages as usize * 8];
+        let mut layout = Sha256::new();
+        for r in &regions {
+            layout.update(r.base.to_le_bytes());
+            layout.update(r.length.to_le_bytes());
+        }
+        let layout = hex(&layout.finalize());
+        let page_digest = hex(&Sha256::digest(&page_hashes));
+        let names = cpu
+            .iter()
+            .copied()
+            .chain(MACHINE)
+            .chain(disk.then_some("disk"))
+            .chain(["policy"]);
+        let parts: Vec<(String, String)> = names
+            .map(|n| {
+                let v = match n {
+                    "ram_regions" => layout.clone(),
+                    "ram_pages" => page_digest.clone(),
+                    _ => hex(&Sha256::digest(n)),
+                };
+                (n.to_owned(), v)
+            })
+            .collect();
+        StateEvidence {
+            boot: 1,
+            disposition: EvidenceDisposition::Live,
+            digest: combined_digest(&parts),
+            parts,
+            regions,
+            page_hashes,
+        }
+    }
+    fn check(cpu: &[&str], e: &StateEvidence) -> Result<(), String> {
+        validate_parts(e, 64 << 20, cpu)
+    }
+    #[test]
+    fn each_architecture_accepts_its_own_cpu_parts() {
+        for cpu in [X86_64_CPU, AARCH64_CPU] {
+            for disk in [false, true] {
+                assert_eq!(check(cpu, &evidence(cpu, disk)), Ok(()));
+            }
+        }
+        assert_eq!(
+            validate(&evidence(CPU, false), 64 << 20),
+            Ok(()),
+            "the host architecture validates its own worker parts"
+        );
+    }
+    #[test]
+    fn neither_architecture_accepts_the_other_cpu_parts() {
+        for (cpu, other) in [(X86_64_CPU, AARCH64_CPU), (AARCH64_CPU, X86_64_CPU)] {
+            assert_eq!(
+                check(cpu, &evidence(other, false)),
+                Err("PV evidence part set/order".into())
+            );
+        }
+    }
+    #[test]
+    fn missing_or_reordered_parts_are_rejected() {
+        for cpu in [X86_64_CPU, AARCH64_CPU] {
+            for missing in [cpu[cpu.len() - 1], "clock"] {
+                let mut e = evidence(cpu, true);
+                e.parts.retain(|(n, _)| n != missing);
+                e.digest = combined_digest(&e.parts);
+                assert_eq!(check(cpu, &e), Err("PV evidence part set/order".into()));
+            }
+            let mut e = evidence(cpu, false);
+            e.parts.swap(0, 1);
+            e.digest = combined_digest(&e.parts);
+            assert_eq!(check(cpu, &e), Err("PV evidence part set/order".into()));
+        }
     }
 }
