@@ -92,14 +92,16 @@ fn records_have_one_json_shape() {
                 count: 2,
             },
         ),
+        (
+            json!({"closed": {"session": 3}}),
+            Record::Closed { session: 3 },
+        ),
     ] {
         assert_eq!(parse(wire.clone()), Ok(record.clone()), "{wire}");
         assert_eq!(serde_json::to_value(&record).unwrap(), wire);
-        assert!(record.allowed_from(1));
-        assert_eq!(
-            record.allowed_from(SUPERVISOR_SESSION),
-            wire.get("lost").is_some()
-        );
+        let supervisor = wire.get("lost").is_some() || wire.get("closed").is_some();
+        assert_eq!(record.allowed_from(1), wire.get("closed").is_none());
+        assert_eq!(record.allowed_from(SUPERVISOR_SESSION), supervisor);
     }
 }
 

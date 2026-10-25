@@ -3,10 +3,15 @@
 //! assessment reported beside the oracle verdict, and a violated property
 //! fails the run even when the oracle passes.
 //!
-//! Each call sends one record to the machine's supervisor over [`SOCKET`].
-//! Outside Seedbox the socket is absent and every call does nothing, so
-//! instrumented code runs unchanged elsewhere. The engine does not serve the
-//! socket yet, so for now every call does nothing under Seedbox too.
+//! Each call sends one record to the machine's supervisor over [`SOCKET`],
+//! whose path the supervisor also exports as [`SOCKET_ENV`]. Outside Seedbox
+//! the variable is unset, the socket absent and every call does nothing, so
+//! instrumented code runs unchanged elsewhere. Under Seedbox a socket the
+//! program cannot reach (a directory mounted over `/run`, say) is not taken for
+//! absence: the SDK connects through the supervisor's abstract socket
+//! instead, and if that fails too it reports its records as lost through
+//! `/dev/kmsg`, which the supervisor relays, so the run's evidence is
+//! incomplete rather than silently empty.
 //!
 //! Assertions are nonfatal and always arrive whole: details that would not
 //! fit a record are dropped and marked truncated. A successful send means the
@@ -33,6 +38,14 @@ use std::time::{Duration, Instant};
 
 /// The supervisor's socket inside every Seedbox machine.
 pub const SOCKET: &str = "/run/seedbox/sdk.sock";
+/// Set by the supervisor to the socket's path in every application it starts.
+pub const SOCKET_ENV: &str = "SEEDBOX_SDK_SOCKET";
+/// The supervisor's fallback listener in the abstract socket namespace.
+const ABSTRACT_SOCKET: &str = "seedbox-sdk";
+/// Where the SDK reports records it could not deliver at all.
+const KMSG: &str = "/dev/kmsg";
+/// The kernel log line the supervisor relays as lost records.
+const KMSG_LOST: &str = "seedbox-sdk: lost ";
 /// Largest record the supervisor relays.
 pub const MAX_RECORD_BYTES: usize = 4096;
 /// Longest property ID or event name.
@@ -89,9 +102,23 @@ impl Kind {
 /// [`SOCKET`]; a thread that must not wait behind another's flush can use a
 /// client of its own.
 pub struct Client {
-    /// `None` is [`SOCKET`].
+    /// `None` is the machine's socket: [`SOCKET_ENV`]'s path, or [`SOCKET`].
     path: Option<PathBuf>,
+    /// For a client of its own path: where it falls back, as under Seedbox.
+    fallback: Option<Fallback>,
     inner: Mutex<Inner>,
+}
+
+/// Where a session connects. With a fallback (under Seedbox), an unreachable
+/// path is a failure, never absence.
+struct Target {
+    path: PathBuf,
+    fallback: Option<Fallback>,
+}
+
+struct Fallback {
+    abstract_name: String,
+    kmsg: PathBuf,
 }
 
 struct Inner {
@@ -101,6 +128,8 @@ struct Inner {
     lost: u64,
     lost_reason: String,
     reply_timeout: Duration,
+    /// The loss was already reported through the kernel log.
+    logged: bool,
 }
 
 enum State {
@@ -123,6 +152,7 @@ impl Client {
     pub const fn machine() -> Self {
         Self {
             path: None,
+            fallback: None,
             inner: Mutex::new(Inner::new()),
         }
     }
@@ -130,6 +160,21 @@ impl Client {
     pub fn new(path: impl AsRef<Path>) -> Self {
         Self {
             path: Some(path.as_ref().to_owned()),
+            fallback: None,
+            inner: Mutex::new(Inner::new()),
+        }
+    }
+
+    /// A client of `path` that behaves as under Seedbox: an unreachable path
+    /// falls back to the abstract `name`, then reports to `kmsg`.
+    #[cfg(test)]
+    fn with_fallback(path: &Path, name: &str, kmsg: &Path) -> Self {
+        Self {
+            path: Some(path.to_owned()),
+            fallback: Some(Fallback {
+                abstract_name: name.into(),
+                kmsg: kmsg.to_owned(),
+            }),
             inner: Mutex::new(Inner::new()),
         }
     }
@@ -138,16 +183,37 @@ impl Client {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn path(&self) -> &Path {
-        self.path.as_deref().unwrap_or(Path::new(SOCKET))
+    fn target(&self) -> Target {
+        match &self.path {
+            Some(path) => Target {
+                path: path.clone(),
+                fallback: self.fallback.as_ref().map(|f| Fallback {
+                    abstract_name: f.abstract_name.clone(),
+                    kmsg: f.kmsg.clone(),
+                }),
+            },
+            None => match std::env::var_os(SOCKET_ENV) {
+                Some(path) => Target {
+                    path: PathBuf::from(path),
+                    fallback: Some(Fallback {
+                        abstract_name: ABSTRACT_SOCKET.into(),
+                        kmsg: KMSG.into(),
+                    }),
+                },
+                None => Target {
+                    path: SOCKET.into(),
+                    fallback: None,
+                },
+            },
+        }
     }
 
     /// Send one record, which [`fit`] always brings within the limit.
     fn send(&self, record: Value) -> io::Result<()> {
         let bytes = fit(record);
-        let path = self.path().to_owned();
+        let target = self.target();
         let mut inner = self.lock();
-        inner.send(&path, &bytes).map(drop)
+        inner.send(&target, &bytes).map(drop)
     }
 
     /// Send `request`, then wait for the reply that confirms it: `{key:
@@ -155,9 +221,9 @@ impl Client {
     /// missing, late or mismatched reply is an error and closes the
     /// session, so a late reply is never mistaken for a later one's.
     fn request(&self, request: &[u8], key: &str) -> io::Result<Option<Value>> {
-        let path = self.path().to_owned();
+        let target = self.target();
         let mut inner = self.lock();
-        let Some(seq) = inner.send(&path, request)? else {
+        let Some(seq) = inner.send(&target, request)? else {
             return Ok(None);
         };
         let State::Connected { socket, .. } = &inner.state else {
@@ -253,6 +319,7 @@ impl Inner {
             lost: 0,
             lost_reason: String::new(),
             reply_timeout: REPLY_TIMEOUT,
+            logged: false,
         }
     }
 
@@ -260,27 +327,44 @@ impl Inner {
     /// earlier losses before it. Returns its sequence number, or `None`
     /// outside Seedbox. A failure counts the message as lost and closes the
     /// session.
-    fn send(&mut self, path: &Path, bytes: &[u8]) -> io::Result<Option<u64>> {
-        let result = self.try_send(path, bytes);
+    fn send(&mut self, target: &Target, bytes: &[u8]) -> io::Result<Option<u64>> {
+        let result = self.try_send(target, bytes);
         if let Err(error) = &result {
             self.lost += 1;
             self.lost_reason = error.to_string();
             self.state = State::Unopened;
+            if let (Some(fallback), false) = (&target.fallback, self.logged) {
+                // Nothing reaches the supervisor's sockets: say so once on
+                // the kernel log, which the supervisor reads regardless.
+                self.logged = log_lost(&fallback.kmsg, self.lost, &self.lost_reason);
+            }
         }
         result
     }
 
-    fn try_send(&mut self, path: &Path, bytes: &[u8]) -> io::Result<Option<u64>> {
+    fn try_send(&mut self, target: &Target, bytes: &[u8]) -> io::Result<Option<u64>> {
         if let State::Unopened = self.state {
-            self.state = match connect(path) {
-                Ok(socket) => {
+            let socket = match (connect(&target.path), &target.fallback) {
+                (Ok(socket), _) => Some(socket),
+                (Err(e), None)
+                    if matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR)) =>
+                {
+                    None
+                }
+                (Err(e), None) => return Err(e),
+                // Under Seedbox the socket exists; this program cannot reach
+                // its path, so try the supervisor's abstract listener.
+                (Err(e), Some(fallback)) => match connect_abstract(&fallback.abstract_name) {
+                    Ok(socket) => Some(socket),
+                    Err(_) => return Err(e),
+                },
+            };
+            self.state = match socket {
+                Some(socket) => {
                     socket.set_read_timeout(Some(self.reply_timeout))?;
                     State::Connected { socket, sent: 0 }
                 }
-                Err(e) if matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR)) => {
-                    State::Absent
-                }
-                Err(e) => return Err(e),
+                None => State::Absent,
             };
         }
         let State::Connected { socket, sent } = &mut self.state else {
@@ -408,29 +492,69 @@ fn with_details(mut body: Value, details: Value) -> Value {
     body
 }
 
+/// Report `count` undeliverable records on the kernel log, as
+/// `seedbox-sdk: lost COUNT property records: REASON`. Returns whether the
+/// line was written.
+fn log_lost(kmsg: &Path, count: u64, reason: &str) -> bool {
+    use std::io::Write;
+    let reason: String = reason
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_ID_BYTES)
+        .collect();
+    let line = format!("{KMSG_LOST}{count} property records: {reason}\n");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(kmsg)
+        .and_then(|mut file| file.write_all(line.as_bytes()))
+        .is_ok()
+}
+
 /// The supervisor socket exists only in Linux guests.
 #[cfg(not(target_os = "linux"))]
 fn connect(_: &Path) -> io::Result<UnixDatagram> {
     Err(io::Error::from_raw_os_error(libc::ENOENT))
 }
 
+#[cfg(not(target_os = "linux"))]
+fn connect_abstract(_: &str) -> io::Result<UnixDatagram> {
+    Err(io::Error::from_raw_os_error(libc::ENOENT))
+}
+
 #[cfg(target_os = "linux")]
 fn connect(path: &Path) -> io::Result<UnixDatagram> {
-    use std::os::fd::{FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
-    let bytes = path.as_os_str().as_bytes();
+    connect_address(path.as_os_str().as_bytes(), false)
+}
+
+/// The abstract namespace has no files or permissions to get in the way.
+#[cfg(target_os = "linux")]
+fn connect_abstract(name: &str) -> io::Result<UnixDatagram> {
+    connect_address(name.as_bytes(), true)
+}
+
+#[cfg(target_os = "linux")]
+fn connect_address(bytes: &[u8], abstract_name: bool) -> io::Result<UnixDatagram> {
+    use std::os::fd::{FromRawFd, OwnedFd};
     // SAFETY: an all-zero sockaddr_un is a valid initial value.
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-    if bytes.len() >= address.sun_path.len() {
+    let offset = usize::from(abstract_name);
+    if bytes.len() + offset >= address.sun_path.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "SDK socket path too long",
         ));
     }
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    for (target, byte) in address.sun_path.iter_mut().zip(bytes) {
+    for (target, byte) in address.sun_path[offset..].iter_mut().zip(bytes) {
         *target = *byte as libc::c_char;
     }
+    // An abstract name is exactly its bytes after the leading NUL.
+    let size = if abstract_name {
+        std::mem::offset_of!(libc::sockaddr_un, sun_path) + 1 + bytes.len()
+    } else {
+        std::mem::size_of::<libc::sockaddr_un>()
+    };
     // SAFETY: plain socket creation; the descriptor is owned immediately.
     let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
@@ -443,7 +567,7 @@ fn connect(path: &Path) -> io::Result<UnixDatagram> {
         libc::connect(
             fd,
             (&address as *const libc::sockaddr_un).cast(),
-            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+            size as libc::socklen_t,
         )
     };
     if result != 0 {

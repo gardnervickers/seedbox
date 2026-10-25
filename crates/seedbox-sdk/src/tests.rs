@@ -40,6 +40,34 @@ impl OwnedListener {
         assert_eq!(unsafe { libc::listen(fd, 4) }, 0);
         Self(owned)
     }
+    /// Listen in the abstract namespace, as the supervisor's fallback does.
+    fn bind_abstract(name: &str) -> Self {
+        use std::os::fd::FromRawFd;
+        // SAFETY: plain socket creation; the descriptor is owned immediately.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+        assert!(fd >= 0);
+        // SAFETY: `fd` is a fresh descriptor owned here.
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        // SAFETY: an all-zero sockaddr_un is a valid initial value.
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (target, byte) in address.sun_path[1..].iter_mut().zip(name.bytes()) {
+            *target = byte as libc::c_char;
+        }
+        let size = std::mem::offset_of!(libc::sockaddr_un, sun_path) + 1 + name.len();
+        // SAFETY: the address is initialized and its size is passed exactly.
+        let bound = unsafe {
+            libc::bind(
+                fd,
+                (&address as *const libc::sockaddr_un).cast(),
+                size as libc::socklen_t,
+            )
+        };
+        assert_eq!(bound, 0);
+        // SAFETY: `fd` is a bound socket.
+        assert_eq!(unsafe { libc::listen(fd, 4) }, 0);
+        Self(owned)
+    }
     fn accept(&self) -> UnixDatagram {
         use std::os::fd::{AsRawFd, FromRawFd};
         // SAFETY: the listener is live; no peer address is requested.
@@ -65,7 +93,11 @@ fn parse(record: Value) -> Record {
 /// protocol crate encodes.
 #[test]
 fn sdk_encoding_decodes_with_the_protocol_crate() {
+    use seedbox_engine_protocol::property as protocol;
     assert_eq!(SOCKET, PROTOCOL_SOCKET);
+    assert_eq!(SOCKET_ENV, protocol::SOCKET_ENV);
+    assert_eq!(ABSTRACT_SOCKET, protocol::ABSTRACT_SOCKET);
+    assert_eq!(KMSG_LOST, protocol::KMSG_LOST);
     assert_eq!(
         MAX_RECORD_BYTES,
         seedbox_engine_protocol::property::MAX_RECORD_BYTES
@@ -164,6 +196,49 @@ fn absent_socket_makes_every_call_a_no_op() {
     client.assert("p", Kind::Always, false, Value::Null);
     client.flush().unwrap();
     assert_eq!(client.summary().unwrap(), Summary::default());
+}
+
+/// Under Seedbox an unreachable socket is lost evidence, reported once on
+/// the kernel log in the form the supervisor relays, never absence.
+#[test]
+fn an_unreachable_socket_under_seedbox_is_reported_as_lost() {
+    let directory = tempfile::tempdir().unwrap();
+    let kmsg = directory.path().join("kmsg");
+    std::fs::write(&kmsg, "").unwrap();
+    let client = Client::with_fallback(
+        &directory.path().join("missing.sock"),
+        "seedbox-sdk-test-nobody-listens",
+        &kmsg,
+    );
+    client.assert("p", Kind::Always, false, Value::Null);
+    client.event("e", Value::Null);
+    assert!(client.flush().is_err());
+    let logged = std::fs::read_to_string(&kmsg).unwrap();
+    assert_eq!(logged.lines().count(), 1, "{logged}");
+    let count = logged
+        .strip_prefix(KMSG_LOST)
+        .and_then(|rest| rest.split_once(" property records: "))
+        .map(|(count, _)| count);
+    assert_eq!(count, Some("1"), "{logged}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unreachable_path_falls_back_to_the_abstract_listener() {
+    let directory = tempfile::tempdir().unwrap();
+    let name = format!("seedbox-sdk-test-{}", std::process::id());
+    let listener = OwnedListener::bind_abstract(&name);
+    let kmsg = directory.path().join("kmsg");
+    let client = Client::with_fallback(&directory.path().join("missing.sock"), &name, &kmsg);
+    client.declare("p", Kind::Always);
+    let server = listener.accept();
+    let mut buffer = [0u8; MAX_RECORD_BYTES];
+    let n = server.recv(&mut buffer).unwrap();
+    assert!(matches!(
+        Record::parse(&buffer[..n]).unwrap(),
+        Record::Declare { .. }
+    ));
+    assert!(!kmsg.exists());
 }
 
 /// A failing evaluation must arrive however large its details: the

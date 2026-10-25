@@ -29,8 +29,8 @@ pub trait FinalRead {
     }
 }
 
-/// A test of one system: the runner calls [`Scenario::setup`], declares one
-/// guest `always` property per checker and marks setup complete, runs the
+/// A test of one system: the runner declares one guest `always` property
+/// per checker, calls [`Scenario::setup`] and marks setup complete, runs the
 /// clients on their own threads while the nemesis runs on the oracle's,
 /// stops the clients once the nemesis returns, heals, runs the final reads,
 /// then reports each checker's verdict as its property and flushes.

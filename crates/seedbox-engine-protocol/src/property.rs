@@ -24,6 +24,19 @@ use std::collections::BTreeMap;
 
 /// The SDK socket inside every machine. Outside Seedbox it is absent.
 pub const SOCKET: &str = "/run/seedbox/sdk.sock";
+/// The supervisor sets this to [`SOCKET`] in every application it starts,
+/// so an SDK can tell an unreachable socket (lost evidence) from running
+/// outside Seedbox.
+pub const SOCKET_ENV: &str = "SEEDBOX_SDK_SOCKET";
+/// The supervisor's fallback listener in the Linux abstract socket namespace,
+/// for programs that cannot reach [`SOCKET`]'s path (a mount over `/run`).
+pub const ABSTRACT_SOCKET: &str = "seedbox-sdk";
+/// A program that reaches neither socket writes one kernel log line,
+/// `seedbox-sdk: lost COUNT property records: REASON`, which the supervisor
+/// relays as a [`Record::Lost`] on [`SUPERVISOR_SESSION`].
+pub const KMSG_LOST: &str = "seedbox-sdk: lost ";
+/// Concurrent SDK sessions a supervisor serves; it refuses more as lost.
+pub const MAX_SESSIONS: usize = 64;
 pub const PREFIX: &[u8] = b"SBX_PROP1 ";
 pub const REPLY_PREFIX: &[u8] = b"SBX_SDK1 ";
 /// Largest SDK message the supervisor relays, before hex encoding.
@@ -226,6 +239,9 @@ pub enum Record {
     /// [`SUPERVISOR_SESSION`], the ones the supervisor failed to relay.
     /// Either is an evidence error.
     Lost { reason: String, count: u64 },
+    /// From [`SUPERVISOR_SESSION`] only: SDK `session` ended, so its
+    /// sequence will not continue.
+    Closed { session: u32 },
 }
 
 impl Record {
@@ -251,10 +267,14 @@ impl Record {
         Ok(record)
     }
 
-    /// [`SUPERVISOR_SESSION`] sends only [`Record::Lost`]; SDK sessions
-    /// send anything.
+    /// [`SUPERVISOR_SESSION`] sends only [`Record::Lost`] and
+    /// [`Record::Closed`]; SDK sessions send anything else.
     pub fn allowed_from(&self, session: u32) -> bool {
-        session != SUPERVISOR_SESSION || matches!(self, Record::Lost { .. })
+        match self {
+            Record::Lost { .. } => true,
+            Record::Closed { .. } => session == SUPERVISOR_SESSION,
+            _ => session != SUPERVISOR_SESSION,
+        }
     }
 }
 
