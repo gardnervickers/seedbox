@@ -1121,3 +1121,177 @@ fn unfinished_quantum_and_pending_step_target_survive_restore() {
         ));
     }
 }
+
+/// Capturing at any boundary of a busy world must not perturb it, and the
+/// capture must restore the remaining effects: a pending command
+/// acknowledgment and sleep reply, frames in flight, a console trigger matched
+/// only in part, and future pause/resume/crash/reboot faults.
+#[test]
+fn capture_at_every_boundary_is_transparent_and_restores_the_remaining_run() {
+    const END: u64 = 40;
+    let make = || {
+        let mut d = build_network(
+            vec![
+                spec(
+                    0,
+                    true,
+                    vec![
+                        (0, Response::Ready),
+                        (2, call(1, r#""op":"sleep","duration_ns":13"#)),
+                        (
+                            3,
+                            call(
+                                2,
+                                r#""op":"arm_trigger","source":{"machine":"fixture-1"},"marker":[120,121],"match_timeout_ns":20,"fault":{"action":"stop","target":{"machine":"fixture-1"}}"#,
+                            ),
+                        ),
+                        (6, frame(mac(1), 1)),
+                        (17, frame([255; 6], 2)),
+                    ],
+                ),
+                spec(
+                    1,
+                    false,
+                    vec![
+                        (0, Response::Ready),
+                        (5, output(b"x")),
+                        (9, frame(mac(0), 3)),
+                        (12, output(b"y")),
+                    ],
+                ),
+                spec(2, true, vec![(0, Response::Ready)]),
+            ],
+            vec![],
+            true,
+            true,
+        );
+        let target = |id| Target::Machine(MachineId(id));
+        for (when, name, action) in [
+            (
+                4,
+                "pause-process",
+                Action::PauseProcess {
+                    target: target(1),
+                    deadline: Duration::from_nanos(20),
+                },
+            ),
+            (4, "pause", Action::Pause(target(2))),
+            (8, "resume", Action::Resume(target(2))),
+            (11, "crash", Action::Crash(target(2))),
+            (14, "reboot", Action::Reboot(target(2))),
+        ] {
+            d.schedule(at(when), key(name), action).unwrap();
+        }
+        d
+    };
+    let policy = |d: &mut Driver<Mock>| {
+        let mut bytes = Vec::new();
+        d.with_barrier(|b| {
+            b.write_policy_evidence(&mut bytes).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        bytes
+    };
+    // Observer sequence numbers belong to the session, not the continuation.
+    let facts = |events: &[Event]| -> Vec<_> {
+        events
+            .iter()
+            .map(|e| (e.position, e.at, e.kind.clone()))
+            .collect()
+    };
+    let step = |d: &mut Driver<Mock>, events: &mut Vec<Event>| {
+        let outcome = d.step(at(END)).unwrap();
+        events.extend(d.drain_events());
+        assert!(!matches!(
+            outcome,
+            StepOutcome::Waiting { .. }
+                | StepOutcome::BeforeFault { .. }
+                | StepOutcome::Stopped { .. }
+        ));
+    };
+    let done = |d: &Driver<Mock>| d.now() >= at(END) || d.execution.finished.is_some();
+
+    let mut reference = make();
+    let mut expected = reference.drain_events();
+    let mut boundaries = 0;
+    while !done(&reference) {
+        step(&mut reference, &mut expected);
+        boundaries += 1;
+        assert!(boundaries < 1000, "mock run did not finish");
+    }
+    assert!(expected.iter().any(|e| matches!(
+        e.kind,
+        EventKind::TriggerResolved {
+            result: TriggerResult::Fired,
+            ..
+        }
+    )));
+    let expected_states = states(&reference);
+    let expected_position = reference.position();
+    let expected_policy = policy(&mut reference);
+    drop(reference);
+
+    // Which owed effects each capture held, so the sweep provably covers them.
+    let mut seen = [false; 4];
+    for target in 0..=boundaries {
+        let mut d = make();
+        let mut events = d.drain_events();
+        for _ in 0..target {
+            step(&mut d, &mut events);
+        }
+        let label = format!("capture after {target} of {boundaries} steps");
+        for (seen, held) in seen.iter_mut().zip([
+            !d.execution.network.is_idle(),
+            d.execution.trigger_marker.is_some(),
+            d.execution.events.keys().any(|t| *t > d.now()),
+            states(&d)[0]
+                .sends
+                .iter()
+                .any(|(_, r)| matches!(r, Response::CommandAcknowledged { .. }))
+                || states(&d)[1]
+                    .sends
+                    .iter()
+                    .any(|(_, r)| matches!(r, Response::CommandAcknowledged { .. })),
+        ]) {
+            *seen |= held;
+        }
+        let position = d.position();
+        let (encoded, store) = artifact(d.checkpoint().unwrap());
+        let captured = decode(&encoded, &store);
+        let prefix = events.len();
+        while !done(&d) {
+            step(&mut d, &mut events);
+        }
+        assert_eq!(events, expected, "{label}: capture changed the run");
+        assert_eq!(states(&d), expected_states, "{label}");
+        assert_eq!(d.position(), expected_position, "{label}");
+        assert_eq!(policy(&mut d), expected_policy, "{label}");
+        let continuation = facts(&events[prefix..]);
+        for workers in [1, 4] {
+            let mut b = restore(&captured, workers);
+            assert_eq!(b.position(), position, "{label}");
+            let mut restored = b.drain_events();
+            while !done(&b) {
+                step(&mut b, &mut restored);
+            }
+            assert_eq!(facts(&restored), continuation, "{label}, {workers} workers");
+            assert_eq!(states(&b), expected_states, "{label}, {workers} workers");
+            assert_eq!(
+                b.position(),
+                expected_position,
+                "{label}, {workers} workers"
+            );
+            assert_eq!(
+                policy(&mut b),
+                expected_policy,
+                "{label}, {workers} workers"
+            );
+        }
+    }
+    assert!(boundaries >= 5, "{boundaries} boundaries");
+    assert_eq!(
+        seen, [true; 4],
+        "in-flight frame, partial trigger, future input, owed acknowledgment"
+    );
+}
