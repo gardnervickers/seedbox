@@ -228,6 +228,9 @@ pub struct SimulationStatus {
     pub oracle_exit_code: Option<u8>,
     pub termination: Option<ExecutionTermination>,
     pub stop_requested: bool,
+    /// Guest property results. Absent until the final report carries them,
+    /// and absent for runs whose guests reported no property evidence.
+    pub properties: Option<crate::PropertyAssessment>,
 }
 
 // Keep the derived verdict at the wire boundary, never in mutable status.
@@ -244,6 +247,8 @@ struct StatusDocument {
     oracle_exit_code: Option<u8>,
     termination: Option<ExecutionTermination>,
     stop_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    properties: Option<crate::PropertyAssessment>,
     verdict: TestVerdict,
 }
 
@@ -258,6 +263,7 @@ impl Serialize for SimulationStatus {
             oracle_exit_code: self.oracle_exit_code,
             termination: self.termination.clone(),
             stop_requested: self.stop_requested,
+            properties: self.properties.clone(),
             verdict: self.verdict(),
         }
         .serialize(serializer)
@@ -276,6 +282,7 @@ impl<'de> Deserialize<'de> for SimulationStatus {
             oracle_exit_code: document.oracle_exit_code,
             termination: document.termination,
             stop_requested: document.stop_requested,
+            properties: document.properties,
         })
     }
 }
@@ -291,13 +298,15 @@ impl Default for SimulationStatus {
             oracle_exit_code: None,
             termination: None,
             stop_requested: false,
+            properties: None,
         }
     }
 }
 
 impl SimulationStatus {
     /// Derived rather than independently writable, so diagnostics cannot
-    /// accidentally replace an observed oracle verdict.
+    /// accidentally replace an observed oracle verdict. Property results do
+    /// not qualify it yet; see [`TestVerdict::with_properties`].
     pub fn verdict(&self) -> TestVerdict {
         TestVerdict::from_oracle(self.oracle_exit_code, self.phase)
     }
@@ -539,5 +548,33 @@ mod tests {
         assert_eq!(serde_json::to_value(decoded).unwrap()["verdict"], "failed");
         document["unknown"] = serde_json::json!(true);
         assert!(serde_json::from_value::<SimulationStatus>(document).is_err());
+    }
+
+    #[test]
+    fn property_results_round_trip_without_changing_the_verdict_yet() {
+        use crate::PropertyAssessmentStatus as AssessmentStatus;
+        let status = SimulationStatus {
+            phase: Phase::Completed,
+            oracle_exit_code: Some(0),
+            properties: Some(crate::PropertyAssessment {
+                status: AssessmentStatus::Violated,
+                violated: 1,
+                unmet: 0,
+                evidence_complete: true,
+                error_count: 0,
+                errors: vec![],
+                properties: vec![],
+            }),
+            ..Default::default()
+        };
+        let document = serde_json::to_value(&status).unwrap();
+        assert_eq!(document["verdict"], "passed");
+        assert_eq!(document["properties"]["status"], "violated");
+        assert_eq!(
+            serde_json::from_value::<SimulationStatus>(document).unwrap(),
+            status
+        );
+        let plain = serde_json::to_value(SimulationStatus::default()).unwrap();
+        assert!(plain.get("properties").is_none());
     }
 }

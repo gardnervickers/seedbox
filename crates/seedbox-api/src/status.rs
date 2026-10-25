@@ -64,6 +64,36 @@ impl TestVerdict {
             None => Self::Pending,
         }
     }
+
+    /// The verdict policy once guest property results exist. Not applied
+    /// yet: [`crate::SimulationStatus::verdict`] stays oracle-only until the
+    /// engine reports property results, and this function moves beside the
+    /// property reducer in `seedbox-engine-core` when it does.
+    ///
+    /// A violated safety property fails a completed run whatever the oracle
+    /// said. Lost or invalid property evidence makes a passing oracle's run
+    /// incomplete. Results arrive with the final report, so a passing oracle
+    /// stays pending until completion rather than passing first and failing
+    /// later. Unmet goals never change a verdict.
+    pub fn with_properties(
+        oracle: Self,
+        phase: Phase,
+        properties: Option<crate::PropertyAssessmentStatus>,
+    ) -> Self {
+        use crate::PropertyAssessmentStatus as AssessmentStatus;
+        if phase != Phase::Completed {
+            return if oracle == Self::Passed {
+                Self::Pending
+            } else {
+                oracle
+            };
+        }
+        match (oracle, properties) {
+            (_, Some(AssessmentStatus::Violated)) => Self::Failed,
+            (Self::Passed, Some(AssessmentStatus::Incomplete)) => Self::Incomplete,
+            (oracle, _) => oracle,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -98,5 +128,32 @@ mod tests {
             TestVerdict::from_oracle(None, Phase::Completed),
             TestVerdict::Incomplete
         );
+    }
+
+    #[test]
+    fn properties_qualify_only_a_passing_oracle_after_completion() {
+        use crate::PropertyAssessmentStatus::*;
+        use Phase::{Completed, Finalizing, Running};
+        use TestVerdict as V;
+        for (code, phase, properties, expected) in [
+            (Some(0), Completed, None, V::Passed),
+            (Some(0), Completed, Some(Passed), V::Passed),
+            (Some(0), Completed, Some(Violated), V::Failed),
+            (Some(0), Completed, Some(Incomplete), V::Incomplete),
+            (Some(0), Finalizing, Some(Passed), V::Pending),
+            (Some(0), Running, None, V::Pending),
+            (Some(3), Completed, Some(Passed), V::Failed),
+            (Some(3), Running, None, V::Failed),
+            (None, Completed, Some(Violated), V::Failed),
+            (None, Completed, Some(Incomplete), V::Incomplete),
+            (None, Running, Some(Violated), V::Pending),
+        ] {
+            let oracle = V::from_oracle(code, phase);
+            assert_eq!(
+                V::with_properties(oracle, phase, properties),
+                expected,
+                "{code:?} {phase:?} {properties:?}"
+            );
+        }
     }
 }
