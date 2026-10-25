@@ -11,14 +11,15 @@ Syscall charges sample their price once. Each segment keeps its first clock read
 and interrupt unmask, then charges the remaining ticks together up to the published
 bound. A stopped continuation retains the unpaid charge in guest state.
 
-Some ARM syscalls are not application work at full price. The PV clock disables
-the vDSO, so `clock_gettime`, `clock_getres` and `gettimeofday` cost only the clock
-read they make, as x86 vDSO reads do through RDTSC emulation. The translator also
-makes syscalls for itself: suspending threads to flush rewritten code, returning
-from its signal handler and waiting on futexes. Its syscall stubs put a fixed mark
-in x7, which arm64 syscalls leave unused, and the kernel charges a marked syscall a
-tenth of a syscall. A JVM makes millions of these while it starts, and at full
-price they dominated simulated startup time. x86 charges every syscall in full.
+Some syscalls are not application work at full price. The PV clock leaves the vDSO
+without a clock on both architectures, so time syscalls (`clock_gettime`,
+`clock_getres`, `gettimeofday`, and x86 `time`) cost only the clock read they make.
+The translator also makes syscalls for itself: suspending threads to flush rewritten
+code, returning from its signal handler and waiting on futexes. On ARM its syscall
+stubs put a fixed mark in x7, which arm64 syscalls leave unused, and the kernel
+charges a marked syscall a tenth of a syscall. A JVM makes millions of these while
+it starts, and at full price they dominated simulated startup time. x86 has no such
+mark yet and charges translator syscalls in full, as system time.
 
 Guest time advances only inside the kernel, so every timer tick interrupts kernel
 mode and tick accounting would charge all translated compute as system time

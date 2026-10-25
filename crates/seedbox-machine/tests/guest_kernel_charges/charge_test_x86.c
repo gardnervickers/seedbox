@@ -86,6 +86,13 @@ int main(void)
 	seedbox_syscall_progress(&(struct pt_regs){ 0 }, SEEDBOX_PROGRESS_NR);
 	seedbox_syscall_progress(&regs, 0);
 	assert(user_ticks == 3);
+	/* Time syscalls charge nothing: only their own clock read costs. */
+	reset(1000, 300, 300);
+	seedbox_syscall_progress(&regs, SEEDBOX_GETTIMEOFDAY_NR);
+	seedbox_syscall_progress(&regs, SEEDBOX_TIME_NR);
+	seedbox_syscall_progress(&regs, SEEDBOX_CLOCK_GETTIME_NR);
+	seedbox_syscall_progress(&regs, SEEDBOX_CLOCK_GETRES_NR);
+	assert(storage.last == 0 && yields == 0);
 	/* A tick nested in a softirq is not user time. */
 	reset(1000, 300, 300);
 	regs.di = SEEDBOX_PROGRESS_MARK;

@@ -54,7 +54,7 @@ fn arm_syscall_charges_and_their_tick_accounting_follow_the_syscall_kind() {
 }
 
 #[test]
-fn x86_progress_charges_count_their_ticks_as_user_time() {
+fn x86_charges_follow_the_syscall_kind_and_progress_ticks_are_user_time() {
     let source = kernel_source("x86_64");
     let slice = [
         between(

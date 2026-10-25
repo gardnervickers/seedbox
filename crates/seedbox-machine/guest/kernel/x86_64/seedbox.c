@@ -158,6 +158,11 @@ void noinstr seedbox_cpu_relax(void)
 /* A progress call: getpid with this first argument (guest/progress/progress.c). */
 #define SEEDBOX_PROGRESS_NR 39
 #define SEEDBOX_PROGRESS_MARK 0x5eedb0c5UL
+/* Time syscalls (gettimeofday, time, clock_gettime, clock_getres). */
+#define SEEDBOX_GETTIMEOFDAY_NR 96
+#define SEEDBOX_TIME_NR 201
+#define SEEDBOX_CLOCK_GETTIME_NR 228
+#define SEEDBOX_CLOCK_GETRES_NR 229
 
 /* Charge work through the bounded clock rendezvous. The remaining charge
  * survives a rendezvous in guest registers or stack. */
@@ -208,12 +213,18 @@ bool seedbox_user_tick(void)
 
 /* Charge one syscall. Load its price once; a price change at a rendezvous
  * affects the next syscall only. A progress call stands for the application's
- * own compute: ticks during its charge are user time, at the same charge. */
+ * own compute: ticks during its charge are user time, at the same charge.
+ * Translator syscalls carry no mark on x86 and cost a whole syscall. */
 void seedbox_syscall_progress(struct pt_regs *regs, int nr)
 {
 	struct seedbox_page *p = READ_ONCE(page);
 	u64 ns = p ? READ_ONCE(p->syscall_ns) : 1000;
 
+	/* The PV clocksource leaves the vDSO without a clock, so time syscalls
+	 * stand in for vDSO reads and cost only the clock read they make. */
+	if (nr == SEEDBOX_GETTIMEOFDAY_NR || nr == SEEDBOX_TIME_NR ||
+	    nr == SEEDBOX_CLOCK_GETTIME_NR || nr == SEEDBOX_CLOCK_GETRES_NR)
+		return;
 	if (nr == SEEDBOX_PROGRESS_NR && regs->di == SEEDBOX_PROGRESS_MARK) {
 		WRITE_ONCE(user_charge, current);
 		seedbox_charge(ns);
