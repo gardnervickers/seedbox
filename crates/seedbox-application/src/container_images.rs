@@ -26,6 +26,9 @@ pub struct ContainerTransport {
     /// image yields the same bytes. `None` exports every time.
     pub export_cache: Option<ContentDigest>,
 }
+/// Keys cached image exports. Change it whenever export or layer merging
+/// changes the bytes produced for the same image.
+const EXPORT_FORMAT: &str = "image-export-v2";
 fn setup(error: impl std::fmt::Display) -> Error {
     Error::Setup(format!("container image preparation: {error}"))
 }
@@ -306,7 +309,7 @@ impl ImageTransport for ContainerTransport {
         let (docker, image) = runtime.block_on(self.resolve(service, directory, architecture))?;
         let record = self.export_cache.as_ref().map(|engine| {
             ContentDigest::of(
-                serde_json::json!(["image-export", engine, architecture.platform(), image])
+                serde_json::json!([EXPORT_FORMAT, engine, architecture.platform(), image])
                     .to_string()
                     .as_bytes(),
             )
