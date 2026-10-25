@@ -27,6 +27,8 @@ mode and tick accounting would charge all translated compute as system time
 first argument to its `getpid`, and on both architectures a tick that interrupts
 that call's charge directly counts as user time. RCU and the scheduler still see
 kernel mode, and the charge itself is unchanged.
+The exclusives workload's [CPU-time check](../harness/acceptance/images/exclusives/cputime.c)
+requires compute to accrue user time and fire `ITIMER_VIRTUAL`, and syscalls to stay system time.
 
 Progress instrumentation saves a fixed scratch register in thread-local storage,
 decrements the block budget without changing application flags, and restores the

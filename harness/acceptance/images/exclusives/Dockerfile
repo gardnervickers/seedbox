@@ -1,8 +1,9 @@
 FROM alpine:3.22 AS build
 RUN apk add --no-cache build-base
 WORKDIR /src
-COPY check.c wait.c jit-pages.c exclusive-*.S ./
+COPY check.c cputime.c wait.c jit-pages.c exclusive-*.S ./
 RUN mkdir /out && cc -O2 -std=c11 -static check.c -o /out/check && \
+    cc -O2 -std=c11 -static -Wall -Wextra -Werror cputime.c -o /out/cputime && \
     if cc -dM -E - </dev/null | grep -q '__aarch64__'; then \
       for fixture in epoch overlap consume discard fault; do \
         cc -nostdlib -static -Wl,--build-id=none \

@@ -57,7 +57,7 @@ fn help() {
     for s in SUITES {
         println!("  {:16} {}", s.name(), s.description());
     }
-    println!("groups:\n  linux             linux-oci linux-apps\n  mac               mac-apps\n\nUse inside the pinned nix develop environment. Cold shell realization provisions\ntools; checker invocation never builds its own executable.");
+    println!("groups:\n  linux             linux-oci linux-apps\n  mac               mac-apps\n\nlinux-apps-long and mac-apps-long are in no group; name them explicitly.\n\nUse inside the pinned nix develop environment. Cold shell realization provisions\ntools; checker invocation never builds its own executable.");
 }
 pub fn arguments(args: Vec<std::ffi::OsString>) -> Result<Vec<String>, String> {
     args.into_iter()
@@ -277,7 +277,7 @@ pub fn observe<C: Commands>(checks: &mut Checks<C>, suites: &[Suite]) -> Result<
     {
         sockets.push(path.into());
     }
-    if host.system == "Darwin" && suites.contains(&Suite::MacApps) {
+    if host.system == "Darwin" && suites.iter().any(|s| s.host_suite() == Suite::MacApps) {
         host.mac_major = observation(
             checks,
             "mac-version",
@@ -293,7 +293,7 @@ pub fn observe<C: Commands>(checks: &mut Checks<C>, suites: &[Suite]) -> Result<
         .as_deref()
             == Some("1");
     }
-    if host.system == "Darwin" && suites.contains(&Suite::MacApps) {
+    if host.system == "Darwin" && suites.iter().any(|s| s.host_suite() == Suite::MacApps) {
         if let Some(dir) = observation(
             checks,
             "mac-temporary",
@@ -635,14 +635,21 @@ pub fn cargo_tests<C: Commands>(
         ];
         if matches!(
             target.as_str(),
-            "applications" | "dynamorio" | "dynamorio_isolated"
+            "applications"
+                | "long_applications"
+                | "determinism"
+                | "dynamorio"
+                | "dynamorio_isolated"
         ) {
             command.push("--nocapture".into());
         }
         if (package == "seedbox"
-            && features
-                .iter()
-                .any(|f| matches!(f.as_str(), "application-tests" | "retained-run-tests")))
+            && features.iter().any(|f| {
+                matches!(
+                    f.as_str(),
+                    "application-tests" | "retained-run-tests" | "long-application-tests"
+                )
+            }))
             || (package == "seedbox-application"
                 && features.iter().any(|f| f == "oci-tests")
                 && engine_requires_root)
@@ -652,6 +659,8 @@ pub fn cargo_tests<C: Commands>(
         let mut job = Job::new(&format!("{package}/{target}"), command, &env, &checks.root);
         job.timeout = match (package, target.as_str()) {
             (_, "applications") => None,
+            // Long workloads bound each run with their own wall-time limits.
+            ("seedbox", "long_applications" | "determinism") => None,
             // The complete ordinary DR corpus includes managed runtimes and
             // many native/plain/client phases. Allow a diagnostic run to reach
             // every case; each phase keeps its own shorter completion guard.
@@ -705,10 +714,7 @@ fn native<C: Commands>(
         "SEEDBOX_TEST_REPORT_DIR".into(),
         report_path.to_string_lossy().into(),
     );
-    if suites
-        .iter()
-        .any(|s| matches!(s, Suite::LinuxApps | Suite::LinuxPause | Suite::MacApps))
-    {
+    if suites.iter().any(|s| s.applications()) {
         let mut job = checks.job(
             "application-assets",
             words(&["cargo", "xtask", "build-assets"]),
