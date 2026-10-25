@@ -10,11 +10,21 @@
 #include <linux/of_irq.h>
 #include <linux/sched_clock.h>
 #include <linux/sizes.h>
+#include <asm/ptrace.h>
 #include <asm/seedbox.h>
 #include <asm/sysreg.h>
 
 #define TIME_IPA 0x0a000000UL
 #define EVENT_IPA 0x0a010000UL
+/* Time syscalls (clock_gettime, clock_getres, gettimeofday). */
+#define SEEDBOX_CLOCK_GETTIME_NR 113
+#define SEEDBOX_CLOCK_GETRES_NR 114
+#define SEEDBOX_GETTIMEOFDAY_NR 169
+/* x7 of a syscall the translator makes for itself (the vendor/dynamorio
+ * "Seedbox: translator-syscalls" change); arm64 syscalls leave x7 unused. */
+#define SEEDBOX_TRANSLATOR_MARK 0x5eedd1a900000000UL
+/* Translator syscalls cost this fraction of an application syscall. */
+#define SEEDBOX_TRANSLATOR_DIVISOR 10
 struct seedbox_page {
 	u64 now, last, bound, abi, deferred_irq_pending, exclusive_epoch;
 	u64 syscall_ns;
@@ -69,15 +79,13 @@ out:
 	return value;
 }
 
-/* Charge syscall work through the existing bounded clock rendezvous. Keeping
- * each read bounded also preserves pending IRQ delivery at an exact deadline.
- * Load the charge once: throttle/heal changes at a rendezvous affect the next
- * syscall, while the remaining charge survives in guest registers or stack.
+/* Charge work through the existing bounded clock rendezvous. Keeping each
+ * read bounded also preserves pending IRQ delivery at an exact deadline. The
+ * remaining charge survives a rendezvous in guest registers or stack.
  */
-void seedbox_syscall_progress(void)
+static void seedbox_charge(u64 remaining)
 {
 	struct seedbox_page *p;
-	u64 remaining = page ? READ_ONCE(page->syscall_ns) : 1000;
 
 	while (remaining) {
 		unsigned long flags;
@@ -105,6 +113,26 @@ void seedbox_syscall_progress(void)
 		}
 		local_irq_restore(flags);
 	}
+}
+
+/* Charge one syscall. Load its price once: throttle/heal changes at a
+ * rendezvous affect the next syscall. Some syscalls are not application work
+ * at full price. The PV clock disables the vDSO, so time syscalls stand in for
+ * vDSO reads and cost only the clock read they make. The translator's own
+ * syscalls (thread suspension, signal returns, futex waits) are bookkeeping
+ * and cost a tenth of a syscall, still at least one bounded read.
+ */
+void seedbox_syscall_progress(struct pt_regs *regs, unsigned int scno)
+{
+	u64 ns;
+
+	if (scno == SEEDBOX_CLOCK_GETTIME_NR || scno == SEEDBOX_CLOCK_GETRES_NR ||
+	    scno == SEEDBOX_GETTIMEOFDAY_NR)
+		return;
+	ns = page ? READ_ONCE(page->syscall_ns) : 1000;
+	if (regs->regs[7] == SEEDBOX_TRANSLATOR_MARK)
+		ns = max(ns / SEEDBOX_TRANSLATOR_DIVISOR, 1ULL);
+	seedbox_charge(ns);
 }
 
 static u64 cs_read(struct clocksource *cs) { return seedbox_read(); }
