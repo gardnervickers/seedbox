@@ -2050,6 +2050,15 @@ name = "seedbox-exec"
 version = "0.1.0"
 
 [[package]]
+name = "seedbox-explore"
+version = "0.1.0"
+dependencies = [
+ "seedbox-api",
+ "seedbox-engine-protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "seedbox-machine"
 version = "0.1.0"
 dependencies = [
