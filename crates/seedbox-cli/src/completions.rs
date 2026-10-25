@@ -87,6 +87,9 @@ pub(super) fn complete(words: &[String]) -> Result<u8> {
     let mut candidates = Vec::new();
     if let Some(arg) = value_arg {
         values(arg, &mut candidates);
+        if path == ["campaign"] && arg.get_long() == Some("baseline") {
+            candidates.extend(dynamic_resource(Resource::Simulations, state.clone()));
+        }
     } else if options && prefix.starts_with('-') {
         for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
             if let Some(long) = arg.get_long() {
@@ -140,7 +143,7 @@ fn resource<'a>(path: &[&str], positionals: &[&'a str]) -> Option<Resource<'a>> 
         (["compare"], [] | [_]) => Some(Resource::Simulations),
         (
             ["replay" | "stop" | "delete" | "show" | "logs" | "events" | "wait" | "checkpoint"
-            | "tui"],
+            | "tui" | "analyze" | "explain"],
             [],
         )
         | (["control", "pause" | "resume" | "step" | "rate" | "inject" | "heal" | "receipt"], []) => {
@@ -243,6 +246,9 @@ mod tests {
     fn resource_positions_distinguish_ids_machines_and_paths() {
         assert_eq!(resource(&["logs"], &[]), Some(Resource::Simulations));
         assert_eq!(resource(&["tui"], &[]), Some(Resource::Simulations));
+        assert_eq!(resource(&["analyze"], &[]), Some(Resource::Simulations));
+        assert_eq!(resource(&["explain"], &[]), Some(Resource::Simulations));
+        assert_eq!(resource(&["campaign"], &[]), None);
         assert_eq!(
             resource(&["logs"], &["abc"]),
             Some(Resource::Machines("abc"))

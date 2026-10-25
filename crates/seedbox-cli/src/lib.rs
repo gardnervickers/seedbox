@@ -6,6 +6,7 @@ mod completions;
 mod daemon;
 mod defaults;
 mod diagnostics;
+mod exploration;
 mod faults;
 mod observe;
 mod output;
@@ -31,7 +32,10 @@ use std::{
     process::ExitCode,
 };
 
-const EXIT_CODES: &str = "\
+/// The exit statuses, as a literal so command help can append them.
+macro_rules! exit_codes {
+    () => {
+        "\
 Exit status:
   0    PASS, or a replay/compare MATCH
   1    FAIL, replay MISMATCH, or compare MISMATCH
@@ -39,7 +43,17 @@ Exit status:
   3    INCOMPLETE (cancelled or otherwise incomplete)
        A cancelled or incomplete replay reports 2 (NOT_COMPARABLE)
        A detached replay reports 0 once submitted; compare it later
-  124  TIMEOUT";
+  124  TIMEOUT"
+    };
+}
+/// Commands defined before any server carries them out.
+macro_rules! unimplemented_help {
+    () => {
+        "This command is not implemented yet: it checks its arguments, then exits
+with status 2."
+    };
+}
+const EXIT_CODES: &str = exit_codes!();
 
 #[derive(Parser)]
 #[command(
@@ -97,6 +111,9 @@ enum Command {
         /// Print one simulation document, or a seed-range document with --count.
         #[arg(long)]
         json: bool,
+        /// Generate faults into the program from this YAML profile with the seed (each seed's own with --count); not implemented yet.
+        #[arg(long, value_name = "FILE")]
+        fault_profile: Option<PathBuf>,
         #[command(flatten)]
         execution: ExecutionArgs,
     },
@@ -127,6 +144,93 @@ enum Command {
         /// Simulation ID to compare with the baseline.
         simulation: seedbox_api::SimulationId,
         /// Print the comparison as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Search seeds and branches of a project for failures (not implemented yet).
+    #[command(after_help = CAMPAIGN_HELP)]
+    Campaign {
+        #[command(flatten)]
+        project: ProjectArg,
+        /// First root's seed; later roots take the next seeds [default: the project's seed, otherwise allocated by the server].
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Seed of the planner's own choices [default: the first root's seed].
+        #[arg(long)]
+        planner_seed: Option<u64>,
+        /// Members to run in total.
+        #[arg(long, default_value_t = defaults::CAMPAIGN_BUDGET, value_parser = clap::value_parser!(u32).range(1..=i64::from(seedbox_api::campaign::MAX_CAMPAIGN_MEMBERS)))]
+        budget: u32,
+        /// Members per generation; each generation is planned from every earlier result.
+        #[arg(long, default_value_t = defaults::CAMPAIGN_BATCH, value_parser = clap::value_parser!(u32).range(1..=i64::from(seedbox_api::campaign::MAX_BATCH)))]
+        batch: u32,
+        /// Share of each later generation spent on fresh roots, per mille.
+        #[arg(long, value_name = "PERMILLE", default_value_t = defaults::CAMPAIGN_FRESH_PERMILLE, value_parser = clap::value_parser!(u32).range(0..=1000))]
+        fresh_share: u32,
+        /// Members kept as branch sources, each with its anchor captures.
+        #[arg(long, default_value_t = defaults::CAMPAIGN_CORPUS, value_parser = clap::value_parser!(u32).range(1..=i64::from(seedbox_api::campaign::MAX_CORPUS)))]
+        corpus: u32,
+        /// Simulated time at which every root declares an anchor to branch from, such as 2s; repeatable [default: none, so every member is a root].
+        #[arg(long = "anchor", value_name = "TIME", value_parser = sim_time)]
+        anchors: Vec<u64>,
+        /// Generate faults into each root from this YAML profile with the root's seed.
+        #[arg(long, value_name = "FILE")]
+        fault_profile: Option<PathBuf>,
+        /// Split a property's findings by this detail field; repeatable.
+        #[arg(long, value_name = "FIELD")]
+        group_by: Vec<String>,
+        /// Label findings new or observed again against an earlier campaign, by its first root.
+        #[arg(long, value_name = "SIMULATION")]
+        baseline: Option<seedbox_api::SimulationId>,
+        #[command(flatten)]
+        backend: BackendArgs,
+        /// Return after the server accepts the campaign.
+        #[arg(long)]
+        detach: bool,
+        /// Print one campaign document as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        execution: ExecutionArgs,
+    },
+    /// Narrow what a failed simulation's failure depends on (not implemented yet).
+    #[command(after_help = ANALYZE_HELP)]
+    Analyze {
+        /// Completed, failed simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Runs per arm, each under its own derived seeds.
+        #[arg(long, default_value_t = defaults::ANALYSIS_SAMPLES, value_parser = clap::value_parser!(u32).range(1..=i64::from(seedbox_api::analysis::MAX_ANALYSIS_SAMPLES)))]
+        samples: u32,
+        /// Times, evenly spaced before the simulation ended, from which every later draw varies.
+        #[arg(long, default_value_t = defaults::ANALYSIS_TIMES, value_parser = clap::value_parser!(u32).range(0..=i64::from(seedbox_api::analysis::MAX_ANALYSIS_TIMES)))]
+        times: u32,
+        /// Also rerun without each external fault, one at a time.
+        #[arg(long)]
+        faults: bool,
+        /// Property whose violation counts [default: the oracle failure, otherwise the first violated property].
+        #[arg(long)]
+        property: Option<String>,
+        /// Return after the server accepts the analysis.
+        #[arg(long)]
+        detach: bool,
+        /// Print one analysis document as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        execution: ExecutionArgs,
+    },
+    /// Show a completed simulation's failure timeline (not implemented yet).
+    #[command(after_help = UNIMPLEMENTED_HELP)]
+    Explain {
+        /// Completed simulation ID.
+        id: seedbox_api::SimulationId,
+        /// Show only these kinds of entry; repeatable [default: all].
+        #[arg(long, value_enum)]
+        kind: Vec<exploration::ExplainKind>,
+        /// Show only entries on this machine, and those on none.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Print the explanation document as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -236,6 +340,9 @@ enum Command {
         /// Checkpoint file to create without overwriting [default: SIMULATION.seedbox].
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
+        /// Save the inputs to rerun from the start instead of captured state: the whole program, a branch's consumed prefix included, over its root's preparation; not implemented yet.
+        #[arg(long)]
+        cold: bool,
         /// Print one checkpoint receipt as JSON.
         #[arg(long)]
         json: bool,
@@ -457,6 +564,35 @@ fn sim_time(value: &str) -> std::result::Result<u64, String> {
     config::duration_ns(value).map_err(|error| error.to_string())
 }
 
+const UNIMPLEMENTED_HELP: &str = concat!(unimplemented_help!(), "\n\n", exit_codes!());
+
+const CAMPAIGN_HELP: &str = concat!(
+    "Generation 0 runs roots: consecutive seeds, each with the --anchor inputs and
+faults sampled from --fault-profile. Later generations branch from members that
+showed new behaviour, continuing one from an anchor capture with a new seed. A
+generation is planned only once the previous one has finished, so the plan never
+depends on how many members ran at once or which finished first. Seedbox
+generates faults only from a profile you write.
+
+",
+    unimplemented_help!(),
+    "\n\n",
+    exit_codes!()
+);
+
+const ANALYZE_HELP: &str = concat!(
+    "Each arm reruns the simulation's own program under derived seeds: with every
+draw varied, with the engine's draws varied after a time (guest memory, and so
+its own random state, carries over), or (--faults) without one fault. It
+reports how often each fails the same way. Rates describe these runs, not a
+proven cause; nothing is shrunk.
+
+",
+    unimplemented_help!(),
+    "\n\n",
+    exit_codes!()
+);
+
 const WAIT_HELP: &str = "Conditions:
   completed                    the simulation has completed, for any reason
   executing                    guest execution has started
@@ -615,8 +751,13 @@ fn run(cli: Cli) -> Result<u8> {
             paused,
             detach,
             json,
+            fault_profile,
             execution,
         } => {
+            if let Some(path) = fault_profile {
+                faults::profile(&path)?;
+                return Err(exploration::not_implemented("--fault-profile"));
+            }
             let selection = backend.selection(execution);
             let input = input.unwrap_or_else(|| PathBuf::from("."));
             if bundles::is_checkpoint(&input)? {
@@ -657,6 +798,59 @@ fn run(cli: Cli) -> Result<u8> {
             simulation,
             json,
         } => simulations::compare(server, &baseline, &simulation, json),
+        Command::Campaign {
+            project: _,
+            seed: _,
+            planner_seed,
+            budget,
+            batch,
+            fresh_share,
+            corpus,
+            mut anchors,
+            fault_profile,
+            group_by: _,
+            baseline: _,
+            backend: _,
+            detach: _,
+            json: _,
+            execution: _,
+        } => {
+            anchors.sort_unstable();
+            anchors.dedup();
+            exploration::campaign(
+                seedbox_api::CampaignPlan {
+                    planner_seed,
+                    budget,
+                    batch,
+                    fresh_permille: fresh_share,
+                    corpus_limit: corpus,
+                    anchors_ns: anchors,
+                },
+                fault_profile.as_deref(),
+            )
+        }
+        Command::Analyze {
+            id: _,
+            samples,
+            times,
+            faults,
+            property,
+            detach: _,
+            json: _,
+            execution,
+        } => exploration::analyze(seedbox_api::AnalysisRequest {
+            request_id: String::new(),
+            options: seedbox_api::ExecutionOptions {
+                wall_time_ns: execution.wall_time,
+                machine_workers: execution.machine_workers,
+                ..Default::default()
+            },
+            samples,
+            times,
+            faults,
+            property,
+        }),
+        Command::Explain { .. } => Err(exploration::not_implemented("seedbox explain")),
         Command::Show {
             id,
             view,
@@ -707,7 +901,12 @@ fn run(cli: Cli) -> Result<u8> {
         }
         Command::Delete { id } => simulations::delete(server, &id),
         Command::Control { command } => control(server, command),
-        Command::Checkpoint { id, output, json } => bundles::checkpoint(
+        Command::Checkpoint { cold: true, .. } => {
+            Err(exploration::not_implemented("seedbox checkpoint --cold"))
+        }
+        Command::Checkpoint {
+            id, output, json, ..
+        } => bundles::checkpoint(
             server,
             &id,
             output.unwrap_or_else(|| PathBuf::from(format!("{id}.seedbox"))),

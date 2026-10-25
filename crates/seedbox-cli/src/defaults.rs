@@ -7,6 +7,16 @@ use std::{
 };
 const PROJECT_FILES: [&str; 2] = ["seedbox.yaml", "seedbox.yml"];
 
+/// Campaign plan defaults: 32 members in generations of 8, a quarter of each
+/// later generation fresh roots, and 8 members kept as branch sources.
+pub const CAMPAIGN_BUDGET: u32 = 32;
+pub const CAMPAIGN_BATCH: u32 = 8;
+pub const CAMPAIGN_FRESH_PERMILLE: u32 = 250;
+pub const CAMPAIGN_CORPUS: u32 = 8;
+/// Analysis defaults: 8 runs per arm and 4 time arms.
+pub const ANALYSIS_SAMPLES: u32 = 8;
+pub const ANALYSIS_TIMES: u32 = 4;
+
 /// Resolve an explicit native project file or search the project directory.
 pub fn project_file(path: &Path) -> Result<PathBuf> {
     if !path.is_dir() {

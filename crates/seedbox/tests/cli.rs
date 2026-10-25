@@ -921,6 +921,95 @@ fn fault_input_errors_are_reported_before_connecting() {
 }
 
 #[test]
+fn exploration_commands_check_their_arguments_then_refuse_before_connecting() {
+    let directory = tempfile::tempdir().unwrap();
+    let cwd = directory.path();
+    let refused = |args: &[&str], expected: &str| {
+        let output = seedbox(args, cwd);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert_eq!(stderr(&output), format!("error: {expected}\n"), "{args:?}");
+    };
+    fs::write(
+        cwd.join("profile.yaml"),
+        "end_ns: 40000000000\ninterval_ns: 3000000000\nfaults:\n  - {kind: crash, downtime_ns: {min: 500000000, max: 3000000000}}\n",
+    )
+    .unwrap();
+    fs::write(
+        cwd.join("bad-profile.yaml"),
+        "end_ns: 4\ninterval_ns: 0\nfaults: [{kind: pause, duration_ns: {min: 1, max: 1}}]\n",
+    )
+    .unwrap();
+    refused(
+        &[
+            "campaign", "--anchor", "8s", "--anchor", "2s", "--anchor", "2s",
+        ],
+        "seedbox campaign is not implemented yet",
+    );
+    refused(
+        &["campaign", "--fault-profile", "profile.yaml"],
+        "seedbox campaign is not implemented yet",
+    );
+    refused(
+        &["campaign", "--fault-profile", "missing.yaml"],
+        "fault profile missing.yaml: No such file or directory (os error 2)",
+    );
+    refused(
+        &["campaign", "--fault-profile", "bad-profile.yaml"],
+        "fault profile bad-profile.yaml: interval_ns must be positive",
+    );
+    refused(
+        &["run", "--fault-profile", "profile.yaml"],
+        "--fault-profile is not implemented yet",
+    );
+    refused(
+        &["run", "--count", "4", "--fault-profile", "bad-profile.yaml"],
+        "fault profile bad-profile.yaml: interval_ns must be positive",
+    );
+    refused(
+        &["analyze", "k7m2p9qx", "--faults"],
+        "seedbox analyze is not implemented yet",
+    );
+    refused(
+        &["analyze", "k7m2p9qx", "--samples", "64", "--times", "8"],
+        "an analysis runs at most 512 simulations",
+    );
+    refused(
+        &[
+            "explain", "k7m2p9qx", "--kind", "fault", "--kind", "property",
+        ],
+        "seedbox explain is not implemented yet",
+    );
+    refused(
+        &["checkpoint", "k7m2p9qx", "--cold"],
+        "seedbox checkpoint --cold is not implemented yet",
+    );
+    for usage in [
+        vec!["campaign", "--batch", "0"],
+        vec!["campaign", "--fresh-share", "1001"],
+        vec!["campaign", "--anchor", "soon"],
+        vec!["campaign", "--baseline", "not an id"],
+        vec!["replay", "k7m2p9qx", "--fault-profile", "profile.yaml"],
+        vec!["analyze", "k7m2p9qx", "--samples", "0"],
+        vec!["explain", "k7m2p9qx", "--kind", "nope"],
+    ] {
+        let output = seedbox(&usage, cwd);
+        assert_eq!(output.status.code(), Some(2), "{usage:?}");
+        let message = stderr(&output);
+        assert!(
+            message.starts_with("error: ") && !message.contains("not implemented"),
+            "{usage:?}: {message}"
+        );
+    }
+    let help = seedbox(&["campaign", "--help"], cwd);
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("only from a profile you write"), "{help}");
+    assert!(help.contains("not implemented yet"), "{help}");
+    assert!(help.contains("Exit status:"), "{help}");
+    assert!(!cwd.join(".local/state/seedbox").exists());
+}
+
+#[test]
 fn completion_is_silent_without_a_server_and_never_starts_one() {
     let root = tempfile::tempdir().unwrap();
     let result = seedbox(&["__complete", "--", "logs", ""], root.path());
@@ -1321,6 +1410,8 @@ fn root_commands_are_the_supported_workflow_without_legacy_aliases() {
     assert_eq!(
         commands,
         [
+            "analyze",
+            "campaign",
             "check",
             "checkpoint",
             "compare",
@@ -1328,6 +1419,7 @@ fn root_commands_are_the_supported_workflow_without_legacy_aliases() {
             "control",
             "delete",
             "events",
+            "explain",
             "help",
             "init",
             "logs",
@@ -1429,6 +1521,9 @@ fn server_location_is_global_and_full_state_is_a_server_start_flag() {
         vec!["stop"],
         vec!["delete"],
         vec!["checkpoint"],
+        vec!["campaign"],
+        vec!["analyze"],
+        vec!["explain"],
         vec!["control", "pause"],
         vec!["control", "resume"],
         vec!["control", "step"],

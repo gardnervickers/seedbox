@@ -23,8 +23,8 @@ bollard.workspace = true
 futures-util.workspace = true
 tokio.workspace = true
 libc.workspace = true
+seedbox-engine-protocol.workspace = true
 signal-hook = "0.3"
 
 [dev-dependencies]
 seedbox-test.workspace = true
-seedbox-engine-protocol.workspace = true

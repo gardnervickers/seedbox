@@ -10,6 +10,26 @@ pub(super) fn inject(
     mutation: super::playback_args::Mutation,
     path: &Path,
 ) -> Result<u8> {
+    let action: seedbox_api::FaultAction = read_document("fault", path)?;
+    super::simulations::mutate_control(
+        server,
+        mutation,
+        seedbox_api::ControlCommand::InjectFault { action },
+    )
+}
+
+/// A fault profile file, parsed and checked before anything is prepared.
+pub(super) fn profile(path: &Path) -> Result<seedbox_api::FaultProfile> {
+    let profile: seedbox_api::FaultProfile = read_document("fault profile", path)?;
+    profile.validate().map_err(|error| {
+        let error = error.strip_prefix("fault profile ").unwrap_or(&error);
+        Error::Setup(format!("fault profile {}: {error}", path.display()))
+    })?;
+    Ok(profile)
+}
+
+/// One bounded YAML or JSON document from a file, or `-` for standard input.
+fn read_document<T: serde::de::DeserializeOwned>(what: &str, path: &Path) -> Result<T> {
     let mut bytes = Vec::new();
     let read = if path == Path::new("-") {
         std::io::stdin()
@@ -20,18 +40,13 @@ pub(super) fn inject(
         std::fs::File::open(path)
             .and_then(|file| file.take(MAX_ACTION_BYTES + 1).read_to_end(&mut bytes))
     };
-    read.map_err(|error| Error::Setup(format!("fault {}: {error}", path.display())))?;
+    read.map_err(|error| Error::Setup(format!("{what} {}: {error}", path.display())))?;
     if bytes.len() as u64 > MAX_ACTION_BYTES {
         return Err(Error::Setup(format!(
-            "fault {}: exceeds {MAX_ACTION_BYTES} bytes",
+            "{what} {}: exceeds {MAX_ACTION_BYTES} bytes",
             path.display()
         )));
     }
-    let action: seedbox_api::FaultAction = serde_yaml_ng::from_slice(&bytes)
-        .map_err(|error| Error::Setup(format!("fault {}: {error}", path.display())))?;
-    super::simulations::mutate_control(
-        server,
-        mutation,
-        seedbox_api::ControlCommand::InjectFault { action },
-    )
+    serde_yaml_ng::from_slice(&bytes)
+        .map_err(|error| Error::Setup(format!("{what} {}: {error}", path.display())))
 }
