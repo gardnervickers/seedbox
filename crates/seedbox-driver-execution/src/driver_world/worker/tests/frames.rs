@@ -168,7 +168,7 @@ fn frame_worker(
         .collect();
     let constructed: Constructed = Arc::default();
     let ledger = constructed.clone();
-    let driver = Driver::new_seeded_with_network(
+    let driver = Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
         workers,

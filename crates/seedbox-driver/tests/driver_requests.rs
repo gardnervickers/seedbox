@@ -4,17 +4,13 @@ use seedbox_driver::driver::{
     Action, Driver, Error, Event, EventKind, FaultAction, FaultOrigin, MachineId, MachineResponse,
     PlaybackRate, RejectionReason, SettlementStatus, StepOutcome, Target,
 };
+use seedbox_driver::test_support::{auto_key, key};
 use seedbox_machine::{
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
     pv::{ApplicationCommand, CommandResult, Request, Response},
     rng::RngStream,
 };
 use std::{io, time::Duration};
-#[path = "support/driver_definition.rs"]
-mod driver_definition;
-#[path = "support/input_key.rs"]
-mod input_key;
-use input_key::{auto_key, key};
 
 /// Announces readiness once per boot and acknowledges every command.
 #[derive(Clone, Default)]
@@ -135,8 +131,8 @@ fn make_with(target: Fixture) -> (Driver<Fixture>, MachineId) {
         2,
         Rng,
         || Ok(()),
-        driver_definition::definition("oracle"),
-        vec![driver_definition::definition("target")],
+        seedbox_driver::test_support::definition("oracle"),
+        vec![seedbox_driver::test_support::definition("target")],
         Vec::new(),
         seedbox_driver::driver::NetworkConfig::default(),
         move |definition| {
@@ -395,7 +391,7 @@ fn failed_admission_run_poisons_before_any_response_can_be_observed() {
         2,
         Rng,
         || Ok(()),
-        driver_definition::definition("oracle"),
+        seedbox_driver::test_support::definition("oracle"),
         Vec::new(),
         Vec::new(),
         seedbox_driver::driver::NetworkConfig::default(),

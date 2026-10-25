@@ -49,7 +49,6 @@ fn validate_inventory(
 }
 
 #[cfg(test)]
-#[path = "retained_authority_tests.rs"]
 mod authority_tests;
 
 const OBJECT: &str = "driver-world/object/";

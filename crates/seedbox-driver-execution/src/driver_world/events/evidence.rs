@@ -1,7 +1,7 @@
 //! Test-only structural encoding of committed Driver events. Unit tests compare
 //! these values across worker counts and observation settings; production keeps
 //! no per-event evidence.
-use super::{action_name, invalid, legacy_action, members, name};
+use super::{action_name, control_action, invalid, members, name};
 use crate::Result;
 use seedbox_driver::driver::{
     self as driver, Event, EventKind, FaultOrigin, FaultRecord, FaultTarget, MachineId,
@@ -34,7 +34,7 @@ fn record(names: &BTreeMap<MachineId, String>, record: &FaultRecord) -> Result<V
         _ => return Err(invalid("unknown Driver fault target")),
     };
     Ok(
-        json!({"id":record.fault.get(),"origin":origin,"target":target,"action":action_name(record.action)?,"plan":legacy_action(names,record)?,"handle":record.handle.as_ref().map(|h|h.to_string()),"requested_at":record.requested_at.as_nanos()}),
+        json!({"id":record.fault.get(),"origin":origin,"target":target,"action":action_name(record.action)?,"plan":control_action(names,record)?,"handle":record.handle.as_ref().map(|h|h.to_string()),"requested_at":record.requested_at.as_nanos()}),
     )
 }
 fn cause(cause: driver::Cause) -> Result<Value> {

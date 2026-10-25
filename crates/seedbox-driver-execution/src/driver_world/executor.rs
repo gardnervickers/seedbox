@@ -24,14 +24,14 @@ pub struct DriverExecutor {
     runtime: Option<super::binding::Binding>,
     environment: Vec<(OsString, OsString)>,
     session_lease: Option<PathBuf>,
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "worker-failure")]
     failure_test: Option<(PathBuf, crate::process_lifetime::WorkerFailureInjector)>,
 }
 impl DriverExecutor {
     /// Test-only monitor override and original-worker injection. `monitor` must
-    /// dispatch the real process_lifetime monitor/anchor compiled with test-support
+    /// dispatch the real process_lifetime monitor/anchor compiled with worker-failure
     /// (the lifetime fixture does this); the retained Driver worker is unchanged.
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "worker-failure")]
     pub fn with_worker_failure_test(
         mut self,
         monitor: PathBuf,
@@ -60,7 +60,7 @@ impl DriverExecutor {
             runtime: None,
             environment: vec![],
             session_lease: None,
-            #[cfg(feature = "test-support")]
+            #[cfg(feature = "worker-failure")]
             failure_test: None,
         })
     }
@@ -240,13 +240,13 @@ impl ExecutionBackend for DriverExecutor {
             .artifacts
             .get(request.prepared.executable()?)
             .ok_or_else(|| Error::Integrity("missing retained Driver monitor executable".into()))?;
-        #[cfg(feature = "test-support")]
+        #[cfg(feature = "worker-failure")]
         let monitor = self.failure_test.as_ref().map_or(monitor, |(path, _)| path);
         let mut worker = launch.spawn_with_monitor(monitor, self.session_lease.as_deref())?;
         if let Some(runtime) = &self.runtime {
             worker = worker.retain_until_join(runtime.retained_inputs());
         }
-        #[cfg(feature = "test-support")]
+        #[cfg(feature = "worker-failure")]
         if let Some((_, injector)) = &self.failure_test {
             worker = worker.with_failure_injector(injector)?;
         }

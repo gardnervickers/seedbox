@@ -795,12 +795,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
         "cargo test -p seedbox-machine-tcg --locked --test guest_services -- --ignored tcg",
         "cargo test -p seedbox-machine-tcg --locked --test prepared_application -- --ignored tcg",
         "cargo test -p seedbox-machine-tcg --locked --test simulation_control -- --ignored tcg",
-        "cargo test -p seedbox-server --locked --features tcg-tests --test native_tcg_service --",
-        "cargo test -p seedbox-server --locked --features tcg-tests --test native_controller_service --",
-        "cargo test -p seedbox-server --locked --features tcg-tests --test native_held_checkpoint --",
-        "cargo test -p seedbox-server --locked --features tcg-tests --test native_disk_tcg_service --",
-        "cargo test -p seedbox-server --locked --features tcg-tests --test native_fault_clock_tcg_service --",
-        "cargo test -p seedbox-server --locked --features tcg-tests --test native_fault_network_tcg_service --",
+        "cargo test -p seedbox-server --locked --features tcg-tests --test native_service --",
         "cargo test -p seedbox-machine-pv --locked --lib -- --ignored",
         "cargo test -p seedbox-machine-pv --locked --test native_machine -- --ignored",
         "cargo test -p seedbox-driver --locked --test native_driver -- --ignored pv",
@@ -811,15 +806,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
         "cargo test -p seedbox-machine-pv --locked --test guest_services -- --ignored pv",
         "cargo test -p seedbox-machine-pv --locked --test prepared_application -- --ignored pv",
         "cargo test -p seedbox-machine-pv --locked --test simulation_control -- --ignored pv",
-        "cargo test -p seedbox-server --locked --features kvm-tests --test native_pv_service --",
-        "cargo test -p seedbox-server --locked --features kvm-tests --test native_controller_service --",
-        "cargo test -p seedbox-server --locked --features kvm-tests --test native_held_checkpoint --",
-        "cargo test -p seedbox-server --locked --features kvm-tests --test native_disk_pv_service --",
-        "cargo test -p seedbox-server --locked --features kvm-tests --test native_fault_clock_pv_service --",
-        "cargo test -p seedbox-server --locked --features kvm-tests --test native_fault_network_pv_service --",
-        "cargo test -p seedbox-server --locked --features kvm-tests --test native_fault_disk_pv_service --",
-        "cargo test -p seedbox-server --locked --features kvm-tests --test native_fault_lifecycle_pv_service --",
-        "cargo test -p seedbox-server --locked --features kvm-tests,worker-failure-tests --test native_faults_pv_service --",
+        "cargo test -p seedbox-server --locked --features kvm-tests,worker-failure-tests --test native_service --",
     ]
     .map(|line| {
         line.split_whitespace()
@@ -835,7 +822,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
             .map(|job| job.args.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        33
+        20
     );
     assert_eq!(
         runs.iter().map(|job| job.name.as_str()).collect::<Vec<_>>(),
@@ -848,12 +835,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
             "machine-tcg/seedbox-machine-tcg/--test/guest_services",
             "machine-tcg/seedbox-machine-tcg/--test/prepared_application",
             "machine-tcg/seedbox-machine-tcg/--test/simulation_control",
-            "machine-tcg/seedbox-server/--test/native_tcg_service",
-            "machine-tcg/seedbox-server/--test/native_controller_service",
-            "machine-tcg/seedbox-server/--test/native_held_checkpoint",
-            "machine-tcg/seedbox-server/--test/native_disk_tcg_service",
-            "machine-tcg/seedbox-server/--test/native_fault_clock_tcg_service",
-            "machine-tcg/seedbox-server/--test/native_fault_network_tcg_service",
+            "machine-tcg/seedbox-server/--test/native_service",
             "machine-pv-x86/seedbox-machine-pv/--lib/",
             "machine-pv-x86/seedbox-machine-pv/--test/native_machine",
             "machine-pv-x86/seedbox-driver/--test/native_driver",
@@ -864,15 +846,7 @@ fn test_machine_suites_do_not_force_serial_execution() {
             "machine-pv-x86/seedbox-machine-pv/--test/guest_services",
             "machine-pv-x86/seedbox-machine-pv/--test/prepared_application",
             "machine-pv-x86/seedbox-machine-pv/--test/simulation_control",
-            "machine-pv-x86/seedbox-server/--test/native_pv_service",
-            "machine-pv-x86/seedbox-server/--test/native_controller_service",
-            "machine-pv-x86/seedbox-server/--test/native_held_checkpoint",
-            "machine-pv-x86/seedbox-server/--test/native_disk_pv_service",
-            "machine-pv-x86/seedbox-server/--test/native_fault_clock_pv_service",
-            "machine-pv-x86/seedbox-server/--test/native_fault_network_pv_service",
-            "machine-pv-x86/seedbox-server/--test/native_fault_disk_pv_service",
-            "machine-pv-x86/seedbox-server/--test/native_fault_lifecycle_pv_service",
-            "machine-pv-x86/seedbox-server/--test/native_faults_pv_service"
+            "machine-pv-x86/seedbox-server/--test/native_service"
         ]
     );
     for job in runs {
@@ -927,12 +901,16 @@ fn test_machine_suites_schedule_every_native_server_target() {
     let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../seedbox-server/tests");
     let mut present = std::collections::BTreeSet::new();
     for entry in fs::read_dir(tests).unwrap() {
-        let name = entry.unwrap().file_name().into_string().unwrap();
-        if let Some(target) = name
-            .strip_prefix("native_")
-            .and_then(|n| n.strip_suffix(".rs"))
-        {
-            present.insert(format!("native_{target}"));
+        let entry = entry.unwrap();
+        let name = entry.file_name().into_string().unwrap();
+        // A target is a file `native_x.rs` or a directory `native_x/main.rs`.
+        let target = if entry.path().join("main.rs").is_file() {
+            Some(name.as_str())
+        } else {
+            name.strip_suffix(".rs")
+        };
+        if let Some(target) = target.filter(|t| t.starts_with("native_")) {
+            present.insert(target.to_owned());
         }
     }
     let scheduled: std::collections::BTreeSet<_> = [Suite::MachineTcg, Suite::MachinePv]

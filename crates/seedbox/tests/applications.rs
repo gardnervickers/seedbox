@@ -12,10 +12,7 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
-mod support {
-    pub mod failure_capture;
-    pub mod json_diff;
-}
+pub mod support;
 use support::{failure_capture, json_diff};
 
 // Every discovered workload proves a PASS. These four retain the expensive

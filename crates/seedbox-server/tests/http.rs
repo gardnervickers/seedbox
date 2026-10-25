@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
-mod support;
 use futures_util::StreamExt;
+use seedbox_server::test_support;
 
 use seedbox_api::{ApiVersion, ErrorCode};
 use seedbox_client::{Client, Error};
@@ -30,7 +30,7 @@ async fn unix_client_submits_describes_and_retries_without_duplicate_work() {
     });
     let client = Client::connect_to(&socket).unwrap();
     assert_eq!(client.info().await.unwrap().api_version, ApiVersion::V1);
-    let request = support::request();
+    let request = test_support::request();
     let simulation = client.submit(&request).await.unwrap();
     assert_eq!(pending.recv().await.unwrap(), simulation.metadata.id);
     assert_eq!(
@@ -241,7 +241,7 @@ async fn status_refreshes_elapsed_time_and_preserves_failed_preparation_timing()
             .unwrap();
     });
     let client = Client::connect_to(&socket).unwrap();
-    let accepted = client.submit(&support::request()).await.unwrap();
+    let accepted = client.submit(&test_support::request()).await.unwrap();
     let id = pending.recv().await.unwrap();
     assert_eq!(id, accepted.metadata.id);
     let (preparing, _) = manager.begin(&id).unwrap().unwrap();
@@ -328,7 +328,7 @@ async fn timeline_reads_live_journal_in_admission_order_without_mutating_definit
     }
     let temp = tempfile::tempdir().unwrap();
     let manager = Arc::new(seedbox_server::manager::Manager::new(Catalogue::in_memory()));
-    let mut request = support::resolved_request("timeline-source");
+    let mut request = test_support::resolved_request("timeline-source");
     request.spec.program = vec![seedbox_spec::definition::Override {
         timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
         id: "authored-1".into(),
@@ -563,7 +563,7 @@ async fn native_acceptance_submissions_round_trip_over_unix_http() {
             .join(format!("../../harness/acceptance/workloads/{name}.yaml"))
             .canonicalize()
             .unwrap();
-        let mut request = support::request();
+        let mut request = test_support::request();
         request.request_id = format!("native-{name}");
         request.spec.inputs = seedbox_api::InputSource::Project;
         request.spec.configuration = seedbox_application::config::load_for_architecture(

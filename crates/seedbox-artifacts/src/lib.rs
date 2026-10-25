@@ -14,6 +14,8 @@ pub mod limits;
 pub mod record;
 mod retained;
 pub mod store;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

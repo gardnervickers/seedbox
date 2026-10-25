@@ -1,7 +1,6 @@
 #![cfg(seedbox_pv)]
 //! Public factory activation, CPU charging and application-state preservation.
-#[path = "support/epoch.rs"]
-mod epoch;
+use seedbox_machine::test_support::TEST_EPOCH_SECONDS;
 use seedbox_machine::{
     clock::Clock,
     definition::{FilesystemArchive, Launch, MachineDefinition, PreparedApplication, Resources},
@@ -139,7 +138,7 @@ fn factory_progress_preserves_live_application_and_fault_state() {
         let mut factory = Factory::new(
             &input("SEEDBOX_PV_WORKER"),
             &input("SEEDBOX_PV_ASSETS"),
-            epoch::TEST_EPOCH_SECONDS,
+            TEST_EPOCH_SECONDS,
         )
         .unwrap()
         .with_progress_budget(std::num::NonZeroU32::new(budget).unwrap());
@@ -156,7 +155,7 @@ fn factory_automatically_charges_cpu_work_and_execution_rate() {
     let mut factory = Factory::new(
         &input("SEEDBOX_PV_WORKER"),
         &input("SEEDBOX_PV_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
+        TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let short = measured(&mut factory, 200_000, 1000);

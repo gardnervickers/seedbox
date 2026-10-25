@@ -1,6 +1,6 @@
 //! Process-only tests of the REAL monitor/anchor path. Not native guest proof.
 #![cfg(all(
-    feature = "test-support",
+    feature = "worker-failure",
     any(target_os = "linux", target_os = "macos")
 ))]
 use seedbox_driver_execution::process_lifetime::{

@@ -1,6 +1,4 @@
-#[path = "support/driver_fixture.rs"]
-mod driver_fixture;
-use driver_fixture::*;
+use seedbox_driver::test_support::fixture::*;
 
 /// Schedule one input and admit it at the next barrier at the same time.
 fn apply(driver: &mut Driver<TestMachine>, time: u64, action: Action) -> StepOutcome {

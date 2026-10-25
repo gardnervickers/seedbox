@@ -4,7 +4,7 @@
 //! no witness is synthesized. Native checkpoint codecs remain backend-owned.
 #![cfg(unix)]
 
-mod support;
+use seedbox_server::test_support;
 
 use futures_util::StreamExt;
 use seedbox_api::{ControlCommand, ControlRequest, ControlState, ExecutionTermination, Phase};
@@ -255,7 +255,7 @@ async fn checkpoint_roundtrip() {
     ));
     let client = Client::connect_to(&socket).unwrap();
     let source = client
-        .submit(&support::resolved_request("checkpoint-host"))
+        .submit(&test_support::resolved_request("checkpoint-host"))
         .await
         .unwrap();
     let id = &source.metadata.id;

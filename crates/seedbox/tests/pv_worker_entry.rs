@@ -6,8 +6,7 @@
     ),
     all(target_os = "macos", target_arch = "aarch64")
 ))]
-mod support;
-use support::worker_entry as cases;
+use seedbox_machine_pv::test_support::worker_entry as cases;
 
 #[test]
 fn private_worker_eof_and_trailing_args_do_not_enter_cli() {

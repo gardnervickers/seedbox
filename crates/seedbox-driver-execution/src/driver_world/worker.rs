@@ -569,7 +569,7 @@ where
             }
         };
         let expected = match scope.input.outcome() {
-            PreparedOutcome::Admitted(record) => record,
+            PreparedOutcome::Admitted(record) => &**record,
             PreparedOutcome::Rejected(_) => {
                 return Err(fail("cannot commit a rejected Driver proposal"))
             }

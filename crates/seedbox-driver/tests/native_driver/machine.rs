@@ -1,6 +1,6 @@
 use seedbox_driver::driver;
 pub use seedbox_machine::machine::*;
-pub(crate) const TEST_EPOCH_SECONDS: u32 = 946_684_800;
+pub(crate) use seedbox_machine::test_support::TEST_EPOCH_SECONDS;
 #[cfg(unix)]
 pub(crate) use seedbox_machine::test_support::{disk_scenario, network_scenario};
 #[cfg(seedbox_pv)]

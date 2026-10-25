@@ -181,33 +181,15 @@ pub const CPU_LOOP_FIXTURE: &str = "SEEDBOX_CPU_LOOP_FIXTURE";
 /// The normal runtime package the public-service tests submit through, from
 /// `cargo xtask build-assets`.
 pub const SERVICE_RUNTIME: &str = "build/assets/driver-runtime.tar.gz";
-/// The `seedbox-server` integration targets of a machine suite's public-service
-/// acceptance, each with the Cargo features it is built with. These tests are
-/// feature-gated, not ignored. The controller and held-checkpoint targets run
-/// on either backend. `native_faults_pv_service` also opts into
-/// `worker-failure-tests` for its injected worker-failure case.
-/// Other suites have none.
+/// The `seedbox-server` integration target of a machine suite's public-service
+/// acceptance, with the Cargo features it is built with. These tests are
+/// feature-gated, not ignored: the backend feature selects that backend's cases,
+/// and the PV suite also opts into `worker-failure-tests` for its injected
+/// worker-failure case. Other suites have none.
 pub fn service_targets(suite: Suite) -> &'static [(&'static str, &'static str)] {
     match suite {
-        Suite::MachineTcg => &[
-            ("native_tcg_service", "tcg-tests"),
-            ("native_controller_service", "tcg-tests"),
-            ("native_held_checkpoint", "tcg-tests"),
-            ("native_disk_tcg_service", "tcg-tests"),
-            ("native_fault_clock_tcg_service", "tcg-tests"),
-            ("native_fault_network_tcg_service", "tcg-tests"),
-        ],
-        Suite::MachinePv => &[
-            ("native_pv_service", "kvm-tests"),
-            ("native_controller_service", "kvm-tests"),
-            ("native_held_checkpoint", "kvm-tests"),
-            ("native_disk_pv_service", "kvm-tests"),
-            ("native_fault_clock_pv_service", "kvm-tests"),
-            ("native_fault_network_pv_service", "kvm-tests"),
-            ("native_fault_disk_pv_service", "kvm-tests"),
-            ("native_fault_lifecycle_pv_service", "kvm-tests"),
-            ("native_faults_pv_service", "kvm-tests,worker-failure-tests"),
-        ],
+        Suite::MachineTcg => &[("native_service", "tcg-tests")],
+        Suite::MachinePv => &[("native_service", "kvm-tests,worker-failure-tests")],
         _ => &[],
     }
 }

@@ -1,6 +1,5 @@
 //! Preparation policy and production archive wiring with synthetic guest assets.
 //! No hypervisor, kernel boot or application execution occurs.
-use super::test_sdk::sdk;
 use super::*;
 use crate as seedbox_application;
 use crate::{
@@ -9,6 +8,7 @@ use crate::{
     oci::{ImageTransport, ImportedImage, RootFilesystem},
     store::ContentDigest,
 };
+use seedbox_driver_execution::test_support::sdk;
 use std::path::Path;
 
 mod cache;

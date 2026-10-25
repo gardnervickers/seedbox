@@ -1,10 +1,8 @@
 #![cfg(unix)]
 //! Native guest service acceptance through this backend's public Machine factory.
-#[path = "support/epoch.rs"]
-mod epoch;
-#[path = "support/prepared_application.rs"]
-mod prepared;
 use seedbox_machine::test_support::guest_services::{applications, shutdown};
+use seedbox_machine::test_support::prepared_application as prepared;
+use seedbox_machine::test_support::TEST_EPOCH_SECONDS;
 use std::{fs, path::PathBuf};
 fn input(name: &str) -> PathBuf {
     std::env::var_os(name)
@@ -19,7 +17,7 @@ fn tcg() -> seedbox_machine_tcg::machine::tcg::TcgMachine {
     let mut backend = seedbox_machine_tcg::machine::tcg::Factory::new(
         &input("SEEDBOX_TCG_QEMU"),
         &input("SEEDBOX_TCG_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
+        TEST_EPOCH_SECONDS,
     )
     .unwrap();
     backend.create(&definition).unwrap()

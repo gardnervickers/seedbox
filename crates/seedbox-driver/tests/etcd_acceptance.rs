@@ -21,9 +21,8 @@
 //! Both backends use the same x86-64 etcd executable and complete machine
 //! definitions. No architecture opt-in or application-specific runtime override
 //! is supplied.
-#[path = "support/epoch.rs"]
-mod epoch;
 use seedbox_driver::driver::{Driver, Event, EventKind, MachineId, NetworkConfig, StepOutcome};
+use seedbox_machine::test_support::TEST_EPOCH_SECONDS;
 use seedbox_machine::{
     definition::{
         DiskImage, FilesystemArchive, Launch, MacAddress, MachineDefinition, NetworkInterface,
@@ -371,7 +370,7 @@ where
 /// Run `stage` on the backend `SEEDBOX_ETCD_BACKEND` selects.
 fn on_backend(stage: &str, workers: usize) -> Run {
     let backend = std::env::var("SEEDBOX_ETCD_BACKEND").expect("set SEEDBOX_ETCD_BACKEND");
-    let epoch = epoch::TEST_EPOCH_SECONDS;
+    let epoch = TEST_EPOCH_SECONDS;
     match backend.as_str() {
         "tcg" => {
             let mut factory = seedbox_machine_tcg::machine::tcg::Factory::new(

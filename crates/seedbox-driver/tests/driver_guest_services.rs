@@ -1,15 +1,11 @@
 #![cfg(unix)]
 //! Native public Driver acceptance with ordinary targets and a required oracle.
 //! Guest inputs are shared with isolated Machine checks through explicit fixture paths.
-#[path = "support/epoch.rs"]
-mod epoch;
-use seedbox_machine as machine_crate;
-#[allow(dead_code)]
-#[path = "support/native_driver.rs"]
-mod native_driver;
-#[path = "support/prepared_application.rs"]
-mod prepared;
 use native_driver::auto_key;
+use seedbox_driver::test_support::native as native_driver;
+use seedbox_machine as machine_crate;
+use seedbox_machine::test_support::prepared_application as prepared;
+use seedbox_machine::test_support::TEST_EPOCH_SECONDS;
 fn key(text: &str) -> seedbox_driver::driver::InputKey {
     seedbox_driver::driver::InputKey::new(text).unwrap()
 }
@@ -599,7 +595,7 @@ fn tcg(workers: usize) -> Vec<Event> {
     let mut backend = seedbox_machine_tcg::machine::tcg::Factory::new(
         &input("SEEDBOX_TCG_QEMU"),
         &input("SEEDBOX_TCG_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
+        TEST_EPOCH_SECONDS,
     )
     .unwrap();
     scenario(workers, definition, move |definition| {
@@ -622,7 +618,7 @@ fn pv(workers: usize) -> Vec<Event> {
     let mut backend = seedbox_machine_pv::machine::pv::Factory::new(
         &input("SEEDBOX_PV_WORKER"),
         &input("SEEDBOX_PV_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
+        TEST_EPOCH_SECONDS,
     )
     .unwrap();
     scenario(workers, definition, move |definition| {
@@ -910,7 +906,7 @@ fn tcg_driver_guest_receives_automatic_replies_and_real_peer_effects() {
         let mut backend = seedbox_machine_tcg::machine::tcg::Factory::new(
             &input("SEEDBOX_TCG_QEMU"),
             &input("SEEDBOX_TCG_ASSETS"),
-            epoch::TEST_EPOCH_SECONDS,
+            TEST_EPOCH_SECONDS,
         )
         .unwrap();
         automatic_rpc_scenario(
@@ -937,7 +933,7 @@ fn pv_driver_guest_receives_automatic_replies_and_real_peer_effects() {
         let mut backend = seedbox_machine_pv::machine::pv::Factory::new(
             &input("SEEDBOX_PV_WORKER"),
             &input("SEEDBOX_PV_ASSETS"),
-            epoch::TEST_EPOCH_SECONDS,
+            TEST_EPOCH_SECONDS,
         )
         .unwrap();
         automatic_rpc_scenario(
@@ -1091,7 +1087,7 @@ fn tcg_driver_oracle_spawns_declared_peer_workers_match() {
         let mut backend = seedbox_machine_tcg::machine::tcg::Factory::new(
             &input("SEEDBOX_TCG_QEMU"),
             &input("SEEDBOX_TCG_ASSETS"),
-            epoch::TEST_EPOCH_SECONDS,
+            TEST_EPOCH_SECONDS,
         )
         .unwrap();
         spawn_scenario(
@@ -1115,7 +1111,7 @@ fn pv_driver_oracle_spawns_declared_peer_workers_match() {
         let mut backend = seedbox_machine_pv::machine::pv::Factory::new(
             &input("SEEDBOX_PV_WORKER"),
             &input("SEEDBOX_PV_ASSETS"),
-            epoch::TEST_EPOCH_SECONDS,
+            TEST_EPOCH_SECONDS,
         )
         .unwrap();
         spawn_scenario(
@@ -1141,7 +1137,7 @@ fn boot_epoch(workers: usize) -> Vec<MachineResponse> {
     let mut backend = seedbox_machine_tcg::machine::tcg::Factory::new(
         &input("SEEDBOX_TCG_QEMU"),
         &input("SEEDBOX_TCG_ASSETS"),
-        epoch::TEST_EPOCH_SECONDS,
+        TEST_EPOCH_SECONDS,
     )
     .unwrap();
     let driver = Driver::new(
@@ -1234,7 +1230,7 @@ fn check_boot_epoch_clocks(clocks: &[u64]) {
     let lower = (i128::from(raw0) - i128::from(m2)).max(i128::from(raw1) - i128::from(m4));
     let upper = (i128::from(raw0) - i128::from(m1)).min(i128::from(raw1) - i128::from(m3));
     assert!(lower <= upper, "RAW/MONO offset changed across the probe");
-    let epoch = u64::from(epoch::TEST_EPOCH_SECONDS) * 1_000_000_000;
+    let epoch = u64::from(TEST_EPOCH_SECONDS) * 1_000_000_000;
     for (realtime, before) in [(rt0, m0), (rt1, m2)] {
         let since_epoch = realtime - epoch;
         assert!(since_epoch > before && since_epoch - before < 1_000_000_000);
@@ -1246,7 +1242,7 @@ fn check_boot_epoch_clocks(clocks: &[u64]) {
 
 #[test]
 fn epoch_probe_checks_each_clock_domain_and_stable_offset() {
-    let epoch = u64::from(epoch::TEST_EPOCH_SECONDS) * 1_000_000_000;
+    let epoch = u64::from(TEST_EPOCH_SECONDS) * 1_000_000_000;
     // Real x86 origins: RAW starts about55ms after MONOTONIC. Non-/100ns
     // readings are valid; the old cross-domain ordering rejected this case.
     let probe = [

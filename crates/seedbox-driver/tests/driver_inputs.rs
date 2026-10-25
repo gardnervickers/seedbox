@@ -5,6 +5,7 @@ use seedbox_driver::driver::{
     HealTarget, InputKey, InvalidInputKey, MachineId, PlaybackRate, RejectionReason,
     SettlementStatus, StepOutcome, Target,
 };
+use seedbox_driver::test_support::key;
 use seedbox_machine::{
     execution::ExecutionConfig,
     machine::{Machine, RunContext, StopReason, Timestamp},
@@ -12,11 +13,6 @@ use seedbox_machine::{
     rng::RngStream,
 };
 use std::{collections::VecDeque, io, num::NonZeroU32, time::Duration};
-#[path = "support/driver_definition.rs"]
-mod driver_definition;
-#[path = "support/input_key.rs"]
-mod input_key;
-use input_key::key;
 
 /// The machine and bound boot of a single-machine fault record.
 fn machine_boot(target: &seedbox_driver::driver::FaultTarget) -> (MachineId, u64) {
@@ -135,14 +131,14 @@ fn world(
         workers,
         Rng,
         || Ok(()),
-        driver_definition::definition("oracle"),
+        seedbox_driver::test_support::definition("oracle"),
         names
             .iter()
-            .map(|&n| driver_definition::definition(n))
+            .map(|&n| seedbox_driver::test_support::definition(n))
             .collect(),
         spawn
             .iter()
-            .map(|&n| driver_definition::definition(n))
+            .map(|&n| seedbox_driver::test_support::definition(n))
             .collect(),
         seedbox_driver::driver::NetworkConfig::default(),
         move |definition| Ok(script(&definition.name)),
@@ -602,7 +598,7 @@ fn pause_before_next_fault_holds_trigger_guest_and_input_effects_alike() {
             assert_eq!(driver.step(*at).unwrap(), outcome);
             driver
                 .with_barrier(|b| {
-                    assert_eq!(b.playback().before_fault.as_ref(), Some(fault));
+                    assert_eq!(b.playback().before_fault.as_ref(), Some(&**fault));
                     assert!(matches!(
                         b.schedule(*at, key("held"), Action::Pause(Target::Machine(target))),
                         Err(Error::BeforeFault)

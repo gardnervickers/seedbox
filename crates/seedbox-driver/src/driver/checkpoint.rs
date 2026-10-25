@@ -169,15 +169,15 @@ where
     /// All construction, seed-assignment and execution semantics are those of
     /// [`Self::new`]; the simulation RNG is owned concretely so its exact byte
     /// cursor can be captured. The same seed and subsequent inputs produce the
-    /// same results as new supplied with the same SeededRng algorithm.
+    /// same results as new supplied with the same SeededRng algorithm. A plain
+    /// [`NetworkConfig`] uses default queue policies without frame observation;
+    /// a [`NetworkSetup`] supplies validated baseline/queue policies and opt-in
+    /// bounded frame observation, and invalid prepared endpoint membership fails
+    /// before context/factory work.
     // An arbitrary RngStream has no capture contract; owning the seeded stream
     // enables exact continuation without changing RngStream, guessing its
-    // algorithm, or recording/replaying random requests.
-    // TODO: Only `new_seeded_with_network` is used outside examples and test
-    // fixtures, while a Driver built by `new` with an arbitrary RngStream can
-    // neither checkpoint nor write policy evidence. Decide whether `new`'s
-    // RngStream generality is still needed; if not, fold the three constructors
-    // into one seeded constructor.
+    // algorithm, or recording/replaying random requests. `new` keeps that
+    // generality for scripted test and example streams only.
     #[allow(clippy::too_many_arguments)]
     pub fn new_seeded(
         start: Timestamp,
@@ -188,7 +188,7 @@ where
         oracle: MachineDefinition,
         machines: Vec<MachineDefinition>,
         spawnable: Vec<MachineDefinition>,
-        network: NetworkConfig,
+        network: impl Into<NetworkSetup>,
         factory: impl FnMut(&MachineDefinition) -> Result<M, M::Error> + Send + 'static,
     ) -> Result<Self, Error<M::Error>> {
         Self::construct(
@@ -201,36 +201,6 @@ where
             machines,
             spawnable,
             network.into(),
-            factory,
-        )
-    }
-
-    /// Construct with validated baseline/queue policies and opt-in bounded
-    /// frame observation. Other construction and RNG semantics match new_seeded;
-    /// invalid prepared endpoint membership fails before context/factory work.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_seeded_with_network(
-        start: Timestamp,
-        quantum: Duration,
-        workers: usize,
-        seed: u64,
-        context: impl Fn() -> Result<M::Context, M::Error> + Send + Sync + 'static,
-        oracle: MachineDefinition,
-        machines: Vec<MachineDefinition>,
-        spawnable: Vec<MachineDefinition>,
-        network: NetworkSetup,
-        factory: impl FnMut(&MachineDefinition) -> Result<M, M::Error> + Send + 'static,
-    ) -> Result<Self, Error<M::Error>> {
-        Self::construct(
-            start,
-            quantum,
-            workers,
-            SimulationRng::Seeded(SeededRng::new(seed)),
-            context,
-            oracle,
-            machines,
-            spawnable,
-            network,
             factory,
         )
     }

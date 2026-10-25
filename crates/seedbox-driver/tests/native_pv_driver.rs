@@ -1,8 +1,7 @@
 #![cfg(seedbox_pv)]
-#[path = "support/native_driver.rs"]
-mod native_fixture;
 use native_fixture::auto_key;
 use seedbox_driver::driver::{Action, StepOutcome, Target};
+use seedbox_driver::test_support::native as native_fixture;
 use seedbox_machine::test_support::{SeededRng, SimulationClock};
 use seedbox_machine::{
     clock::Clock,
