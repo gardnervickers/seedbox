@@ -94,4 +94,34 @@ mod program_tests {
         });
         assert!(validate_input_program(&config, &[heal]).is_ok());
     }
+
+    #[test]
+    fn defined_only_faults_are_refused_before_preparation() {
+        let config = crate::config::parse(
+            "name: test\nmachines:\n  db: {image: example:v1}\noracle: {image: example/oracle}\n",
+            std::path::Path::new("/fixture/seedbox.yaml"),
+            &Default::default(),
+        )
+        .unwrap();
+        let input = TimedInput {
+            timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+            key: "eio".into(),
+            at_ns: 10,
+            action: Action::DiskError {
+                handle: "eio".into(),
+                machine: "db".into(),
+                op: seedbox_engine_protocol::control::DiskOp::Write,
+                ppm: 1_000_000,
+                effect: Default::default(),
+                scope: Default::default(),
+            },
+        };
+        let error = validate_input_program(&config, &[input]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&seedbox_engine_protocol::not_implemented("disk_error")),
+            "{error}"
+        );
+    }
 }

@@ -157,6 +157,9 @@ pub fn family(action: &Action) -> &'static str {
             "network"
         }
         Action::Heal { .. } => "recovery",
+        // Refused until a later change adds them with their native scenarios.
+        Action::DiskError { .. } | Action::DiskLatency { .. } => "disk",
+        Action::Preempt { .. } => "machine",
     }
 }
 

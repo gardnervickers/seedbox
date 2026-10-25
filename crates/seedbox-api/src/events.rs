@@ -2,6 +2,7 @@
 //! participate in the simulation's verdict or deterministic inputs.
 
 use crate::{Phase, Stage};
+pub use seedbox_engine_protocol::control::FaultCounts;
 pub use seedbox_engine_protocol::fault_status::FaultStatus;
 pub use seedbox_engine_protocol::observation::MachineTransition;
 use serde::{Deserialize, Serialize};
@@ -72,6 +73,9 @@ pub enum EventKind {
         /// The admitted action, so clients can tell what it affects.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan: Option<Box<serde_json::Value>>,
+        /// What the fault matched and did, once its engine reports it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counts: Option<crate::FaultCounts>,
     },
     MachineLifecycle {
         machine: String,
@@ -129,6 +133,19 @@ mod tests {
         let fault = serde_json::json!({"type":"faultChanged","id":1,"inputKey":"future-input","action":"future_action","machine":null,"status":"applied","appliedTimeNs":42,"plan":{"action":"future_action","novel":true}});
         let event: EventKind = serde_json::from_value(fault.clone()).unwrap();
         assert_eq!(serde_json::to_value(event).unwrap(), fault);
+        let counted = serde_json::json!({"type":"faultChanged","id":2,"action":"disk_error","machine":"db","status":"applied","appliedTimeNs":42,"counts":{"matched":3,"affected":1}});
+        let event: EventKind = serde_json::from_value(counted.clone()).unwrap();
+        assert!(matches!(
+            event,
+            EventKind::FaultChanged {
+                counts: Some(FaultCounts {
+                    matched: 3,
+                    affected: 1
+                }),
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(event).unwrap(), counted);
         let control = serde_json::json!({"type":"controlChanged","control":{"request":{"command":{"type":"injectFault","action":{"action":"future_action"}}},"state":{"type":"futureStatus","extra":true}}});
         let event: EventKind = serde_json::from_value(control.clone()).unwrap();
         assert_eq!(serde_json::to_value(event).unwrap(), control);

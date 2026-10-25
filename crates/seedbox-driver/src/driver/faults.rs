@@ -152,6 +152,12 @@ pub fn translate(
             };
             (action, Some(handle(alias)?))
         }
+        // Defined in the protocol; no Driver action carries them out yet.
+        // Invalid arguments are reported as such before the missing engine.
+        Public::DiskError { .. } | Public::DiskLatency { .. } | Public::Preempt { .. } => {
+            action.validate()?;
+            return Err(seedbox_engine_protocol::not_implemented(action.name()));
+        }
     };
     Ok((action, alias))
 }

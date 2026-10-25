@@ -257,6 +257,7 @@ impl Tracker {
                 applied_time_ns,
                 plan,
                 input_key,
+                counts,
             } => {
                 if let Some(machine) = machine {
                     self.machine(machine);
@@ -270,7 +271,11 @@ impl Tracker {
                     plan: None,
                     active: false,
                     input_key: input_key.clone(),
+                    counts: None,
                 });
+                if counts.is_some() {
+                    fault.counts = *counts;
+                }
                 if input_key.is_some() {
                     fault.input_key = input_key.clone();
                 }
@@ -369,6 +374,9 @@ impl Tracker {
             FaultAction::ClockSkew { handle, .. }
             | FaultAction::ClockDrift { handle, .. }
             | FaultAction::Throttle { handle, .. }
+            | FaultAction::DiskError { handle, .. }
+            | FaultAction::DiskLatency { handle, .. }
+            | FaultAction::Preempt { handle, .. }
             | FaultAction::DropConnection { handle, .. } => {
                 self.healable.insert(handle.clone(), id);
             }
@@ -677,7 +685,33 @@ mod tests {
             applied_time_ns: (status == FaultStatus::Applied).then_some(10),
             plan: Some(Box::new(serde_json::to_value(plan).unwrap())),
             input_key: None,
+            counts: None,
         }
+    }
+
+    #[test]
+    fn fault_counts_are_kept_once_reported() {
+        let mut t = tracker();
+        let plan = FaultAction::Throttle {
+            handle: "slow".into(),
+            machine: "a".into(),
+            factor_permille: 2000,
+        };
+        t.event(10, &fault(1, FaultStatus::Applied, plan.clone()));
+        assert_eq!(t.snapshot().faults[0].counts, None);
+        let counts = seedbox_api::FaultCounts {
+            matched: 3,
+            affected: 1,
+        };
+        let mut counted = fault(1, FaultStatus::Applied, plan.clone());
+        if let EventKind::FaultChanged { counts: field, .. } = &mut counted {
+            *field = Some(counts);
+        }
+        t.event(11, &counted);
+        assert_eq!(t.snapshot().faults[0].counts, Some(counts));
+        // A later change that carries no counts keeps the reported ones.
+        t.event(12, &fault(1, FaultStatus::Applied, plan));
+        assert_eq!(t.snapshot().faults[0].counts, Some(counts));
     }
 
     #[test]
@@ -950,6 +984,7 @@ mod tests {
                     plan: Some(serde_json::to_value(plan).unwrap()),
                     input_key: None,
                     active: false,
+                    counts: None,
                 },
             );
         }

@@ -14,3 +14,9 @@ pub mod observation;
 pub mod out_of_memory;
 pub mod policy_config;
 pub mod property;
+
+/// The refusal for an action or input this protocol defines but no engine
+/// carries out yet.
+pub fn not_implemented(name: &str) -> String {
+    format!("{name} is not implemented yet")
+}

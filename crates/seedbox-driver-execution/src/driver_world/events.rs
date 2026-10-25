@@ -359,6 +359,8 @@ impl Publisher {
                 status,
                 applied_time_ns,
                 plan,
+                // No Driver fault counts its effects yet; disk faults will.
+                counts: None,
             },
         )
     }

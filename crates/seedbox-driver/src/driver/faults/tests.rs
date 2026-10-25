@@ -362,3 +362,34 @@ fn validation_and_admission_reject_the_same_invalid_target_shapes() {
         );
     }
 }
+
+#[test]
+fn defined_only_faults_are_refused_naming_their_follow_up_after_argument_checks() {
+    for (wire, name) in [
+        (
+            json!({"action":"disk_error","handle":"eio","machine":"node","op":"write","ppm":10}),
+            "disk_error",
+        ),
+        (
+            json!({"action":"disk_latency","handle":"slow","machine":"node","op":"any","latency_ns":1000}),
+            "disk_latency",
+        ),
+        (
+            json!({"action":"preempt","handle":"race","machine":"node","ppm":10}),
+            "preempt",
+        ),
+    ] {
+        let public: Public = serde_json::from_value(wire).unwrap();
+        let error = translate(&public, 19).unwrap_err();
+        assert_eq!(error, seedbox_engine_protocol::not_implemented(name));
+        let names = ["node".to_owned()];
+        assert_eq!(action_targets(&public, &names, 1).unwrap_err(), error);
+    }
+    let invalid: Public = serde_json::from_value(
+        json!({"action":"disk_latency","handle":"slow","machine":"node","op":"any","latency_ns":1}),
+    )
+    .unwrap();
+    assert!(translate(&invalid, 19)
+        .unwrap_err()
+        .contains("disk_latency latency_ns"));
+}

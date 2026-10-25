@@ -199,6 +199,12 @@ pub(crate) fn preview(
                 .push("The machine must not already be throttled.".into());
             format!("Scale the machine's seeded CPU cost to {factor_permille} thousandths until healed.")
         }
+        // Target compilation refuses these until an engine implements them.
+        Action::DiskError { .. } | Action::DiskLatency { .. } | Action::Preempt { .. } => {
+            return Err(Error::Invalid(seedbox_engine_protocol::not_implemented(
+                action.name(),
+            )))
+        }
     };
     if action.is_process() || action.is_lifecycle() {
         for name in &result.machines {
@@ -251,6 +257,9 @@ fn healable_handle(action: &Action) -> Option<&str> {
         | Action::ClockSkew { handle, .. }
         | Action::ClockDrift { handle, .. }
         | Action::Throttle { handle, .. }
+        | Action::DiskError { handle, .. }
+        | Action::DiskLatency { handle, .. }
+        | Action::Preempt { handle, .. }
         | Action::DropConnection { handle, .. } => Some(handle),
         _ => None,
     }
@@ -329,6 +338,7 @@ mod tests {
             plan: Some(
                 json!({"action":"partition", "handle":"old", "left":["n1"], "right":["n2"]}),
             ),
+            counts: None,
         });
         for link in &mut world.links {
             link.partitioned_by = Some("newer".into());
@@ -387,6 +397,7 @@ mod tests {
             applied_time_ns: Some(10),
             plan: Some(serde_json::to_value(action).unwrap()),
             active: true,
+            counts: None,
         });
         let heal = preview(
             &world,
