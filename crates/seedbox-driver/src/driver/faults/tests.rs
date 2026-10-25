@@ -395,7 +395,7 @@ fn defined_only_faults_are_refused_naming_their_follow_up_after_argument_checks(
 }
 
 #[test]
-fn new_faults_need_capabilities_every_pv_engine_has_and_tcg_lacks() {
+fn new_faults_need_capabilities_pv_has_except_the_x86_yield_and_tcg_lacks() {
     let engines = [
         (CpuBackend::Pv, Architecture::Aarch64),
         (CpuBackend::Pv, Architecture::X86_64),
@@ -425,10 +425,24 @@ fn new_faults_need_capabilities_every_pv_engine_has_and_tcg_lacks() {
         for input in &portable {
             check_input_engine(input, engine).unwrap();
         }
-        for input in &limited {
-            assert_eq!(check_input_engine(input, engine).is_ok(), pv, "{input:?}");
+        for (index, input) in limited.iter().enumerate() {
+            // Inputs 2 and 4 need the guest yield hook.
+            let yields = matches!(index, 2 | 4);
+            let provided = pv && !(yields && engine.architecture == Architecture::X86_64);
+            assert_eq!(
+                check_input_engine(input, engine).is_ok(),
+                provided,
+                "{input:?}"
+            );
         }
     }
+    let InputAction::Fault(preempt) = &limited[2] else {
+        unreachable!()
+    };
+    assert_eq!(
+        check_engine(preempt, engines[1]).unwrap_err(),
+        "preempt needs the guest yield hook, which x86_64 PV does not provide"
+    );
     let InputAction::Fault(disk_error) = &limited[0] else {
         unreachable!()
     };

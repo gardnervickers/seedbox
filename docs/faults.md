@@ -13,9 +13,11 @@ reset and applies to every incarnation until healed.
 | Action | Arguments | While active | Heal |
 | --- | --- | --- | --- |
 | `disk_error` | `op` (`read`, `write`, `flush`, `any`); `ppm`; `effect` (`eio` default, or `corrupt`); `scope` (`all` default, or `data`) | Selected requests fail with EIO before any disk effect, or succeed with one sector of seeded bytes. `data` spares the metadata ext4 lays out at format time, not metadata it allocates later; neither `corrupt` nor `data` selects flushes | Stops selecting; settles with `matched` and `affected` counts |
-| `disk_latency` | `op`; `latency_ns` 1 µs–1 s; `jitter_ns` up to 1 s | Requests complete late, in submission order, with their disk effect at completion; a crash loses the pending ones | Stops delaying; queued requests still complete at their times |
+| `disk_latency` | `op`; `latency_ns` 1 µs–1 s; `jitter_ns` up to 1 s | Requests complete late, in submission order, with their disk effect at completion; a crash loses the pending ones | Stops delaying; queued requests still complete at their times; settles with counts |
 | `preempt` | `ppm` | The guest kernel yields at that rate of syscalls and progress charges | Restores ordinary scheduling |
 
+A disk fault's counts cover every boot it applied to and arrive on its heal's
+settlement; a preempt heal has none.
 ## Typed triggers
 
 The oracle's `arm_trigger` call already arms console-marker triggers that stop
@@ -34,13 +36,15 @@ A `block_request` trigger holds the matching disk request at the device, so
 its only effect is an undelayed `crash` of that machine. Selectors on SDK
 evidence (`event`, `assertion`, `setup_complete`) are reserved for a later
 change.
-Oracle-armed and program triggers share one lifecycle and 64 IDs per run, so
-a program alone may arm at most 64. The lifecycle is armed, matched, then
-fired, rejected, cancelled, expired or cut off. Each change is a `triggerChanged` event, and the world view keeps every trigger's
-latest state; a fired trigger names its fault, whose own status says whether
-the effect applied. A consumed trigger input leaves an arm receipt in the
-program cursor, beside a slot for that trigger's matching progress (its
-count and partial marker match), so a checkpoint continues the same match.
+Oracle-armed and program triggers share one lifecycle and 64 IDs per run, so a
+program alone may arm at most 64. The lifecycle is armed, matched, then fired,
+rejected, cancelled, expired or cut off. Each change of a program trigger is a
+`triggerChanged` event, and the world view keeps every program trigger's
+latest state (oracle-armed triggers keep their arm and resolution events); a
+fired trigger names its fault, whose own status says whether the effect
+applied. A consumed trigger input leaves an arm receipt in the program cursor,
+beside a slot for that trigger's matching progress (its count and partial
+marker match), so a checkpoint continues the same match.
 
 ## In the timeline
 
@@ -71,7 +75,7 @@ fault is refused the same way, before it is journaled.
 | --- | --- | --- | --- | --- |
 | `disk_error` | disk request selection | not yet | not yet | refused |
 | `disk_latency` | delayed block completion | not yet | not yet | refused |
-| `preempt` | the guest yield hook | 3B | 3B | refused |
+| `preempt` | the guest yield hook | not yet | refused | refused |
 | `trigger` on `block_request` | held block requests | not yet | not yet | refused |
 | any other `trigger` | its effect's needs | not yet | not yet | not yet |
 | every other action | nothing | yes | yes | yes |
@@ -91,19 +95,19 @@ Both backends execute a virtio-blk request through the shared
 [request](../crates/seedbox-machine/src/machine/disk/request.rs) code, so
 selection belongs beside it, once. Each admitted request is offered to the
 active disk faults before `request::execute`. A fault matches by `op`, then by
-`scope`. `data` uses only the static ext4 layout, read once from the disk
-after it is formatted: superblocks and their backups, group descriptors and
-reserved GDT blocks, bitmaps, inode tables and the journal. The host keeps no
-live filesystem model, so metadata allocated later (directory, extent-tree and
-xattr blocks) counts as data and can be selected. A match draws once on
-`disk-error/<machine>/<incarnation>/<fault>`, keyed by the policy seed like
-the boot-end `disk-loss` stream. A hit with `eio` completes with IOERR
-without touching the store or the data buffers. A hit with `corrupt` picks a
-sector of the request on the same stream and replaces its bytes: in the data
-returned for a read, in the bytes stored for a write. Heal settles with
-`FaultCounts` (matched, affected). The policy and draw counters belong to the
-device snapshot, survive a guest device reset, and apply again to a rebooted
-incarnation on a fresh stream.
+`scope`. `data` uses only the static ext4 layout, a pure function of the
+disk's current bytes read when a request needs it: superblocks and their
+backups, group descriptors and reserved GDT blocks, bitmaps, inode tables and
+the journal. The host keeps no live filesystem model, so metadata allocated
+later (directory, extent-tree and xattr blocks) counts as data and can be
+selected. A match draws once on `disk-error/<boot>`, keyed by the fault's
+seed, which the Driver derives from the machine's seed and the fault ID. A hit
+with `eio` completes with IOERR without touching the store or the data
+buffers. A hit with `corrupt` picks a sector of the request on the same stream
+and replaces its bytes: in the data returned for a read, in the bytes stored
+for a write. Heal settles with `FaultCounts` (matched, affected). The policy
+and draw counters belong to the device snapshot, survive a guest device reset,
+and apply again to a rebooted incarnation on a fresh stream.
 
 A `block_request` trigger installs a hold that counts matching requests the
 same way. On the `nth`, earlier requests in that notification complete; the
@@ -121,7 +125,7 @@ Today a notification completes every available request before it returns
 the notification instead consumes each request from the avail ring and queues
 it with a due time: the machine time of the notifying write, plus the fault's
 latency and a draw up to its jitter on
-`disk-latency/<machine>/<incarnation>/<fault>`, and never before the request
+`disk-latency/<boot>` under the fault's seed, and never before the request
 ahead of it, so completion order is submission order. A request the fault does
 not select still queues behind a delayed one.
 
@@ -143,25 +147,27 @@ keep their bytes.
 `preempt` uses two host-owned words of PV ABI 3's shared page: word 88 holds
 the rate in parts per million and word 96 the seed; zero means off. Both
 kernels already call `seedbox_syscall_progress` at syscall entry, in process
-context, and DynamoRIO's progress client charges through syscalls too. With a
-nonzero rate the hook draws one step of a splitmix64 stream kept in kernel
-memory, reseeded when the seed word changes, and calls `yield()` on a hit after
-charging the syscall. The draw and the yield charge no time. The stream is
-guest memory, so checkpoints continue it. The Driver derives the seed from
-`preempt/<machine>/<incarnation>/<fault>`, writes both words at a stopped
-rendezvous, writes them again for a rebooted incarnation, and clears them on
-heal.
+context, and DynamoRIO's progress client charges through syscalls too. Only
+the ARM kernel's hook yields: the x86 kernel has no yield yet, so x86_64 PV
+refuses `preempt`. With a nonzero rate the hook draws one step of a splitmix64
+stream kept in kernel memory, reseeded when the seed word changes, and calls
+`yield()` on a hit after charging the syscall. The draw and the yield charge
+no time. The stream is guest memory, so checkpoints continue it. The machine
+derives each boot's seed from the fault's seed and `preempt/<boot>`, writes
+both words at a stopped rendezvous, writes them again for a rebooted
+incarnation, and clears them on heal.
 
 ### Where each backend changes
 
-PV runs both architectures through the same block device and worker, and both
-kernels have the syscall hook, so 3B implements every contract for PV on
-aarch64 and x86_64. TCG, the reference machine, needs QEMU changes and keeps
-refusing these inputs until a later change makes them.
+PV runs both architectures through the same block device and worker, so one
+change implements the disk contracts for PV on aarch64 and x86_64; only the ARM
+kernel's syscall hook yields, so the yield hook is aarch64 only. TCG, the
+reference machine, needs QEMU changes and keeps refusing these inputs until a
+later change makes them.
 
 | Contract | PV | TCG (later) |
 | --- | --- | --- |
 | Request selection and counts | `process` in [block.rs](../crates/seedbox-machine-pv/src/machine/pv/worker/block.rs), policy from a machine request | `seedbox_blk_handle` in [seedbox-disk.patch](../crates/seedbox-machine-tcg/qemu/seedbox-disk.patch), policy by a QMP command and a new `abi.rs` entry |
 | Held request | the same loop, plus a held stop in the worker | the same handler, stopping the vCPU as a device error does |
 | Asynchronous completion | the queue in block.rs; the earliest due time folded into `BOUND` and `Stop::Blocked` in [the worker](../crates/seedbox-machine-pv/src/machine/pv/worker/mod.rs); the queue in its snapshot | a `QEMU_CLOCK_VIRTUAL` timer for the earliest due time, which icount and idle already honour; the queue in the device's vmstate |
-| Yield hook | page words 88 and 96; `seedbox_syscall_progress` in the [ARM](../crates/seedbox-machine/guest/kernel/arm64/seedbox.c) and [x86](../crates/seedbox-machine/guest/kernel/x86_64/seedbox.c) kernels | no PV page: it would need a register in a Seedbox QEMU device and a kernel hook that reads it |
+| Yield hook | page words 88 and 96; `seedbox_syscall_progress` in the [ARM](../crates/seedbox-machine/guest/kernel/arm64/seedbox.c) kernel; the [x86](../crates/seedbox-machine/guest/kernel/x86_64/seedbox.c) kernel's has no yield yet | no PV page: it would need a register in a Seedbox QEMU device and a kernel hook that reads it |

@@ -208,11 +208,14 @@ impl Capability {
         }
     }
     /// Whether `engine` provides this capability. PV runs both architectures
-    /// through one block device and worker, and both PV kernels have the
-    /// syscall hook. TCG's QEMU devices and guest have none of them yet.
+    /// through one block device and worker, so both select, delay and hold
+    /// requests. Only the ARM PV kernel's syscall hook yields yet; the x86
+    /// kernel has the same hook point but no yield. TCG's QEMU devices and
+    /// guest have none of them yet.
     pub fn provided_by(self, engine: Engine) -> bool {
         use {Architecture::*, CpuBackend::*};
         match (self, engine.backend, engine.architecture) {
+            (Self::GuestYield, Pv, X86_64) => false,
             (_, Pv, Aarch64 | X86_64) => true,
             (_, Tcg, Aarch64 | X86_64) => false,
         }
