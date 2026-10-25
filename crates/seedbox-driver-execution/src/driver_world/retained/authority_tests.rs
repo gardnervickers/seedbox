@@ -85,6 +85,8 @@ fn fixture_bytes(
             },
             disk: None,
             interface: None,
+            expected_crashes: Vec::new(),
+            expected_out_of_memory_kills: false,
         },
         machines: vec![],
         spawnable: vec![],

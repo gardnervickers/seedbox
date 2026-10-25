@@ -30,6 +30,8 @@ fn prepared(root: &std::path::Path) -> wire::Prepared {
         },
         disk: None,
         interface: None,
+        expected_crashes: Vec::new(),
+        expected_out_of_memory_kills: false,
     };
     wire::Prepared {
         inventory: wire::Inventory::Tcg {

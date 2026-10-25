@@ -123,6 +123,8 @@ fn retained_driver_acquires_only_recorded_runtime_once_per_session() {
             },
             disk: None,
             interface: None,
+            expected_crashes: Vec::new(),
+            expected_out_of_memory_kills: false,
         },
         machines: vec![],
         spawnable: vec![],

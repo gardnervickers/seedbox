@@ -600,6 +600,8 @@ mod tests {
                 },
                 volumes: BTreeMap::new(),
                 anonymous_volumes: Vec::new(),
+                expected_crashes: Vec::new(),
+                expected_out_of_memory_kills: false,
             },
             network: seedbox_spec::Network {
                 name: "network".into(),

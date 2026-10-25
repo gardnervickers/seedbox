@@ -154,6 +154,8 @@ fn tcg_codec_three_policy_and_name_refuse_before_native_reconstruction() {
                 },
                 disk: None,
                 interface: None,
+                expected_crashes: Vec::new(),
+                expected_out_of_memory_kills: false,
             },
             machines: vec![],
             spawnable: vec![],

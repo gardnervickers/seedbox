@@ -199,3 +199,19 @@ fn native_projects_resolve_memory_per_machine_and_validate_the_architecture_rang
         .values()
         .all(|service| service.memory_mb.is_none()));
 }
+
+#[test]
+fn expected_crashes_and_oom_kills_reach_the_submitted_configuration() {
+    let document = BASE.replace(
+        "    image: example/workload:v1\n",
+        "    image: example/workload:v1\n    expectedCrashes:\n    - {signal: SIGABRT, command: watchdog}\n    expectedOutOfMemoryKills: true\n",
+    );
+    let sim = parse(&document).unwrap();
+    let expected = &sim.services["workload"].expected_crashes;
+    assert_eq!(expected.len(), 1);
+    assert_eq!(expected[0].signal.number(), 6);
+    assert_eq!(expected[0].command, "watchdog");
+    assert!(sim.services["oracle"].expected_crashes.is_empty());
+    assert!(sim.services["workload"].expected_out_of_memory_kills);
+    assert!(!sim.services["oracle"].expected_out_of_memory_kills);
+}

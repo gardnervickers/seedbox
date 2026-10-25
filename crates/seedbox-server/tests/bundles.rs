@@ -325,6 +325,8 @@ fn driver_closures_without_a_record_roundtrip_into_a_fresh_store() {
                 },
                 disk: None,
                 interface: None,
+                expected_crashes: Vec::new(),
+                expected_out_of_memory_kills: false,
             },
             machines: Vec::new(),
             spawnable: Vec::new(),
