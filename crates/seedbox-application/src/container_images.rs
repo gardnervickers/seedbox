@@ -39,6 +39,64 @@ fn immutable_reference(info: bollard::models::ImageInspect) -> Result<String> {
         .or(info.id)
         .ok_or_else(|| setup("image has no immutable reference"))
 }
+/// What an engine build's event stream has said so far.
+#[derive(Default)]
+struct BuildProgress {
+    id: Option<String>,
+    step_error: Option<String>,
+}
+impl BuildProgress {
+    fn observe(&mut self, event: bollard::models::BuildInfo, progress: fn(&str)) -> Result<()> {
+        if let Some(error) = event.error_detail {
+            return Err(setup(
+                error.message.unwrap_or_else(|| "image build failed".into()),
+            ));
+        }
+        match event.aux {
+            Some(BuildInfoAux::Default(aux)) => self.id = aux.id,
+            Some(BuildInfoAux::BuildKit(status)) => {
+                for vertex in status.vertexes {
+                    if !vertex.name.is_empty() {
+                        progress(&format!(
+                            "{}{}",
+                            if vertex.cached { "cached: " } else { "" },
+                            vertex.name
+                        ));
+                    }
+                    // A step's error is progress, not the build's result:
+                    // BuildKit shares a step among concurrent identical builds
+                    // and reports it cancelled to all but the one that runs it.
+                    // A failed build ends with error_detail.
+                    if !vertex.error.is_empty() {
+                        progress(&format!("{}: {}", vertex.name, vertex.error));
+                        self.step_error = Some(vertex.error);
+                    }
+                }
+                for log in status.logs {
+                    for line in String::from_utf8_lossy(&log.msg).lines() {
+                        progress(line);
+                    }
+                }
+            }
+            None => (),
+        }
+        if let Some(stream) = event.stream {
+            for line in stream.lines().filter(|line| !line.is_empty()) {
+                progress(line);
+            }
+        }
+        Ok(())
+    }
+    /// The built image's ID, once the stream has ended.
+    fn image(self) -> Result<String> {
+        self.id.ok_or_else(|| {
+            setup(
+                self.step_error
+                    .unwrap_or_else(|| "engine build completed without an image ID".into()),
+            )
+        })
+    }
+}
 impl ContainerTransport {
     fn check(&self) -> Result<()> {
         if self.cancellation.is_cancelled() {
@@ -180,44 +238,11 @@ impl ContainerTransport {
                         file,
                     ))),
                 );
-                let mut id = None;
+                let mut outcome = BuildProgress::default();
                 while let Some(event) = self.next(&mut build).await? {
-                    let event = event.map_err(setup)?;
-                    if let Some(error) = event.error_detail {
-                        return Err(setup(
-                            error.message.unwrap_or_else(|| "image build failed".into()),
-                        ));
-                    }
-                    match event.aux {
-                        Some(BuildInfoAux::Default(aux)) => id = aux.id,
-                        Some(BuildInfoAux::BuildKit(status)) => {
-                            for vertex in status.vertexes {
-                                if !vertex.name.is_empty() {
-                                    (self.progress)(&format!(
-                                        "{}{}",
-                                        if vertex.cached { "cached: " } else { "" },
-                                        vertex.name
-                                    ));
-                                }
-                                if !vertex.error.is_empty() {
-                                    return Err(setup(vertex.error));
-                                }
-                            }
-                            for log in status.logs {
-                                for line in String::from_utf8_lossy(&log.msg).lines() {
-                                    (self.progress)(line);
-                                }
-                            }
-                        }
-                        None => (),
-                    }
-                    if let Some(stream) = event.stream {
-                        for line in stream.lines().filter(|line| !line.is_empty()) {
-                            (self.progress)(line);
-                        }
-                    }
+                    outcome.observe(event.map_err(setup)?, self.progress)?;
                 }
-                id.ok_or_else(|| setup("engine build completed without an image ID"))?
+                outcome.image()?
             }
         };
         self.check()?;
@@ -478,7 +503,71 @@ pub(crate) fn export_header<R: std::io::Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bollard::{
+        moby::buildkit::v1::{StatusResponse, Vertex},
+        models::{BuildInfo, ErrorDetail, ImageId},
+    };
     use std::io::{BufRead, Read, Write};
+    fn step(name: &str, error: &str) -> BuildInfo {
+        BuildInfo {
+            aux: Some(BuildInfoAux::BuildKit(StatusResponse {
+                vertexes: vec![Vertex {
+                    name: name.into(),
+                    error: error.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+    fn built(id: &str) -> BuildInfo {
+        BuildInfo {
+            aux: Some(BuildInfoAux::Default(ImageId {
+                id: Some(id.into()),
+            })),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn a_cancelled_shared_step_does_not_fail_a_build_that_completes() {
+        let mut outcome = BuildProgress::default();
+        for event in [
+            step(
+                "[2/2] COPY bin/blob /blob",
+                "context canceled: context canceled",
+            ),
+            step("[2/2] COPY bin/blob /blob", ""),
+            built("sha256:built"),
+        ] {
+            outcome.observe(event, |_| ()).unwrap();
+        }
+        assert_eq!(outcome.image().unwrap(), "sha256:built");
+    }
+    #[test]
+    fn a_build_without_an_image_reports_its_step_error() {
+        let mut outcome = BuildProgress::default();
+        outcome
+            .observe(step("[2/2] RUN exit 7", "process did not complete"), |_| ())
+            .unwrap();
+        let error = outcome.image().unwrap_err().to_string();
+        assert!(error.contains("process did not complete"), "{error}");
+    }
+    #[test]
+    fn an_error_detail_fails_the_build() {
+        let event = BuildInfo {
+            error_detail: Some(ErrorDetail {
+                message: Some("RUN exit 7: exit code 7".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let error = BuildProgress::default()
+            .observe(event, |_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exit code 7"), "{error}");
+    }
     #[test]
     fn overlay_bookkeeping_xattrs_are_ignored_and_content_xattrs_refused() {
         let export = |key: &str| {
