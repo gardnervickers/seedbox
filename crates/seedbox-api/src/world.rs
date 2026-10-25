@@ -24,6 +24,20 @@ pub struct WorldState {
     /// Oracle-armed and program-armed triggers, in ID order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<TriggerState>,
+    /// Due choice inputs by input key, and what each selected.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub choice_inputs: std::collections::BTreeMap<String, ChoiceInputState>,
+}
+
+/// A due choice input: pending until it answers a request, then the
+/// alternative it selected and when.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChoiceInputState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_at_ns: Option<u64>,
 }
 
 /// A trigger's latest receipt. A fired trigger names the fault it admitted;

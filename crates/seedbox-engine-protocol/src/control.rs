@@ -13,8 +13,6 @@ pub const MAX_CLOCK_RATE_PPB: u64 = 100_000_000;
 use serde::{Deserialize, Serialize};
 
 mod trigger;
-#[cfg(test)]
-use trigger::RESERVED_SELECTORS;
 pub use trigger::{
     EventSelector, Marker, Transition, TriggerReceipt, TriggerSpec, TriggerStatus, MAX_TRIGGERS,
     MAX_TRIGGER_MARKER,

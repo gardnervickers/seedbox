@@ -52,6 +52,8 @@ pub const MAX_RECORD_BYTES: usize = 4096;
 const MAX_ID_BYTES: usize = 256;
 /// Largest flush or summary reply.
 const MAX_REPLY_BYTES: usize = 16 * 1024;
+/// A choice offers at most this many alternatives.
+pub const MAX_CHOICE_ALTERNATIVES: usize = 256;
 const FLUSH: &[u8] = br#"{"flush":{}}"#;
 const SUMMARY: &[u8] = br#"{"summary":{}}"#;
 
@@ -107,6 +109,7 @@ pub struct Client {
     /// For a client of its own path: where it falls back, as under Seedbox.
     fallback: Option<Fallback>,
     inner: Mutex<Inner>,
+    choice_timeout: Duration,
 }
 
 /// Where a session connects. With a fallback (under Seedbox), an unreachable
@@ -132,6 +135,12 @@ struct Inner {
     logged: bool,
 }
 
+/// How long [`Client::choose`] waits for the engine's answer, in the guest's
+/// own (simulated) time.
+pub const CHOICE_TIMEOUT: Duration = Duration::from_secs(10);
+/// The event recorded when a choice went unanswered.
+pub const CHOICE_UNANSWERED_EVENT: &str = "seedbox.choice_unanswered";
+
 enum State {
     Unopened,
     /// `sent` counts this session's messages, the supervisor's `seq`.
@@ -154,6 +163,7 @@ impl Client {
             path: None,
             fallback: None,
             inner: Mutex::new(Inner::new()),
+            choice_timeout: CHOICE_TIMEOUT,
         }
     }
 
@@ -162,6 +172,7 @@ impl Client {
             path: Some(path.as_ref().to_owned()),
             fallback: None,
             inner: Mutex::new(Inner::new()),
+            choice_timeout: CHOICE_TIMEOUT,
         }
     }
 
@@ -176,7 +187,14 @@ impl Client {
                 kmsg: kmsg.to_owned(),
             }),
             inner: Mutex::new(Inner::new()),
+            choice_timeout: CHOICE_TIMEOUT,
         }
+    }
+
+    /// Wait at most `timeout` for each choice's answer.
+    pub fn with_choice_timeout(mut self, timeout: Duration) -> Self {
+        self.choice_timeout = timeout;
+        self
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -221,16 +239,35 @@ impl Client {
     /// missing, late or mismatched reply is an error and closes the
     /// session, so a late reply is never mistaken for a later one's.
     fn request(&self, request: &[u8], key: &str) -> io::Result<Option<Value>> {
+        self.request_within(request, key, None)
+    }
+
+    /// As [`Client::request`], waiting `timeout` rather than the session's
+    /// [`REPLY_TIMEOUT`]. A missing reply closes the session either way.
+    fn request_within(
+        &self,
+        request: &[u8],
+        key: &str,
+        timeout: Option<Duration>,
+    ) -> io::Result<Option<Value>> {
         let target = self.target();
         let mut inner = self.lock();
         let Some(seq) = inner.send(&target, request)? else {
             return Ok(None);
         };
+        let reply_timeout = inner.reply_timeout;
         let State::Connected { socket, .. } = &inner.state else {
             unreachable!("a sent request has a session");
         };
         let mut reply = vec![0u8; MAX_REPLY_BYTES];
-        let received = socket.recv(&mut reply);
+        let received = match timeout {
+            Some(timeout) => socket.set_read_timeout(Some(timeout)).and_then(|()| {
+                let received = socket.recv(&mut reply);
+                socket.set_read_timeout(Some(reply_timeout))?;
+                received
+            }),
+            None => socket.recv(&mut reply),
+        };
         let invalid = || {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -278,6 +315,54 @@ impl Client {
         }
     }
 
+    /// Ask the engine to choose one of `alternatives` at `site`, and wait
+    /// for its answer: an index into `alternatives`. The engine draws it from
+    /// the run's seed, or a choice input selects it, so a run's choices
+    /// replay exactly and a branch can vary them. Outside Seedbox the first
+    /// alternative is chosen; so it is under Seedbox until the engine
+    /// answers choices.
+    ///
+    /// With no answer within the choice timeout ([`CHOICE_TIMEOUT`] by
+    /// default) this returns [`io::ErrorKind::TimedOut`]. The client then
+    /// closes its session, as for any missing reply, so a late answer can
+    /// never be read as another request's, and records a
+    /// [`CHOICE_UNANSWERED_EVENT`] event naming the site on a new one.
+    /// [`choose`] takes the first alternative then.
+    pub fn choose(&self, site: &str, alternatives: &[&str]) -> io::Result<usize> {
+        if alternatives.is_empty() || alternatives.len() > MAX_CHOICE_ALTERNATIVES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a choice offers 1 to 256 alternatives",
+            ));
+        }
+        let record =
+            serde_json::to_vec(&choice_record(site, alternatives)).map_err(io::Error::other)?;
+        if record.len() > MAX_RECORD_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "choice record exceeds 4096 bytes",
+            ));
+        }
+        let body = match self.request_within(&record, "choice", Some(self.choice_timeout)) {
+            Ok(Some(body)) => body,
+            Ok(None) => return Ok(0),
+            Err(error) => {
+                if error.kind() == io::ErrorKind::TimedOut {
+                    self.emit(event_record(
+                        CHOICE_UNANSWERED_EVENT,
+                        json!({"site": site, "timeout_ms": self.choice_timeout.as_millis() as u64}),
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        body["index"]
+            .as_u64()
+            .and_then(|index| usize::try_from(index).ok())
+            .filter(|index| body["site"] == site && *index < alternatives.len())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unexpected choice reply"))
+    }
+
     /// Declare a property so it is reported even if never evaluated.
     pub fn declare(&self, id: &str, kind: Kind) {
         self.emit(declare_record(id, kind));
@@ -292,6 +377,15 @@ impl Client {
     /// Record a named workload event.
     pub fn event(&self, name: &str, details: Value) {
         self.emit(event_record(name, details));
+    }
+
+    /// Report that a named piece of workload state took a value, such as a
+    /// role or a recovery phase. Keep values to a few short labels (at most
+    /// 64 bytes): a campaign treats each new value and each new transition
+    /// as progress. A name may not contain `/`, `=`, `:` or `>`, nor a value
+    /// `>`; such a report is an evidence error.
+    pub fn state(&self, name: &str, value: &str) {
+        self.emit(state_record(name, value));
     }
 
     /// Mark the workload on this machine as set up.
@@ -424,6 +518,14 @@ fn event_record(name: &str, details: Value) -> Value {
 
 fn setup_record(details: Value) -> Value {
     json!({ "setup_complete": with_details(json!({}), details) })
+}
+
+fn state_record(name: &str, value: &str) -> Value {
+    json!({"state": {"name": name, "value": value}})
+}
+
+fn choice_record(site: &str, alternatives: &[&str]) -> Value {
+    json!({"choice": {"site": site, "alternatives": alternatives}})
 }
 
 fn lost_record(count: u64, reason: &str) -> Vec<u8> {
@@ -607,9 +709,24 @@ pub fn unreachable(id: &str, details: Value) {
 pub fn event(name: &str, details: Value) {
     CLIENT.event(name, details);
 }
+/// Report a named piece of workload state's new value; see [`Client::state`].
+pub fn state(name: &str, value: &str) {
+    CLIENT.state(name, value);
+}
 /// Mark the workload on this machine as set up.
 pub fn setup_complete(details: Value) {
     CLIENT.setup_complete(details);
+}
+/// Let the engine choose one of `alternatives` at `site`; see
+/// [`Client::choose`]. If the request cannot be sent or is not answered in
+/// time, the first alternative is chosen and the failure is reported once on
+/// stderr; an unanswered choice is also recorded as an event.
+pub fn choose(site: &str, alternatives: &[&str]) -> usize {
+    CLIENT.choose(site, alternatives).unwrap_or_else(|error| {
+        static REPORTED: std::sync::Once = std::sync::Once::new();
+        REPORTED.call_once(|| eprintln!("seedbox-sdk: choice not answered: {error}"));
+        0
+    })
 }
 /// Wait until the engine has committed and reduced every earlier record
 /// from this process. Succeeds immediately outside Seedbox.

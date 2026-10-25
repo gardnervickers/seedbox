@@ -646,6 +646,7 @@ mod tests {
             faults: Vec::new(),
             override_rejections: BTreeMap::new(),
             triggers: Vec::new(),
+            choice_inputs: Default::default(),
         };
         Snapshot {
             simulation,

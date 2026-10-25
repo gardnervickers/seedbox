@@ -105,6 +105,20 @@ impl Receiver {
                                         reason,
                                     },
                                 ),
+                                Kind::ChoiceChanged {
+                                    input_key,
+                                    chosen,
+                                    selected_at_ns,
+                                } => event(
+                                    last_time,
+                                    EventKind::ChoiceChanged {
+                                        input_key,
+                                        choice: seedbox_api::ChoiceInputState {
+                                            chosen,
+                                            selected_at_ns,
+                                        },
+                                    },
+                                ),
                                 Kind::TriggerChanged { trigger } => event(
                                     last_time,
                                     EventKind::TriggerChanged {

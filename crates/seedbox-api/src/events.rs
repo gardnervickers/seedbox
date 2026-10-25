@@ -48,6 +48,11 @@ pub enum EventKind {
     TriggerChanged {
         trigger: Box<crate::TriggerState>,
     },
+    /// A choice input became due, or answered its request.
+    ChoiceChanged {
+        input_key: String,
+        choice: crate::ChoiceInputState,
+    },
     DeletionRequested,
     ExecutionTerminated {
         termination: crate::ExecutionTermination,
@@ -150,6 +155,12 @@ mod tests {
             }
         ));
         assert_eq!(serde_json::to_value(event).unwrap(), counted);
+        let choice = serde_json::json!({"type":"choiceChanged","inputKey":"pick","choice":{"chosen":"yes","selectedAtNs":9}});
+        let event: EventKind = serde_json::from_value(choice.clone()).unwrap();
+        assert!(
+            matches!(&event, EventKind::ChoiceChanged { choice, .. } if choice.selected_at_ns == Some(9))
+        );
+        assert_eq!(serde_json::to_value(event).unwrap(), choice);
         let control = serde_json::json!({"type":"controlChanged","control":{"request":{"command":{"type":"injectFault","action":{"action":"future_action"}}},"state":{"type":"futureStatus","extra":true}}});
         let event: EventKind = serde_json::from_value(control.clone()).unwrap();
         assert_eq!(serde_json::to_value(event).unwrap(), control);

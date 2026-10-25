@@ -348,6 +348,7 @@ mod tests {
             links: vec![],
             faults: vec![],
             triggers: Vec::new(),
+            choice_inputs: Default::default(),
         };
         let catalogue = discover(&world, 1_000_000);
         assert_eq!(catalogue.faults.len(), 15);

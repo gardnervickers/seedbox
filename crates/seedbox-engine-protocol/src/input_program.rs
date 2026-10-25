@@ -420,6 +420,7 @@ pub fn validate_program(inputs: &[TimedInput], duration_ns: u64) -> Result<(), S
     let mut keys = BTreeSet::new();
     let mut previous = 0;
     let mut triggers = 0;
+    let mut trigger_keys = BTreeSet::new();
     for input in inputs {
         if input.key.is_empty()
             || input.key.len() > 128
@@ -453,6 +454,17 @@ pub fn validate_program(inputs: &[TimedInput], duration_ns: u64) -> Result<(), S
                     ));
                 }
                 spec.validate_at(input.at_ns)
+                    .and_then(|()| match &spec.when {
+                        // A teardown follows a trigger input already in the program.
+                        crate::control::EventSelector::Fired { trigger }
+                            if !trigger_keys.contains(trigger.as_str()) =>
+                        {
+                            Err(format!(
+                                "fired selector names {trigger}, which is no earlier trigger input"
+                            ))
+                        }
+                        _ => Ok(()),
+                    })
             }
             InputAction::Rule(RuleAction::Choice(choice)) => choice.validate(),
             InputAction::Branch(BranchAction::Anchor {}) if input.key.len() > MAX_ANCHOR_KEY => {
@@ -462,6 +474,9 @@ pub fn validate_program(inputs: &[TimedInput], duration_ns: u64) -> Result<(), S
             InputAction::Fault(_) => Ok(()),
         }
         .map_err(|error| format!("input {}: {error}", input.key))?;
+        if let InputAction::Rule(RuleAction::Trigger(_)) = &input.action {
+            trigger_keys.insert(input.key.as_str());
+        }
         previous = input.at_ns;
     }
     validate_branches(inputs)
@@ -776,6 +791,29 @@ mod tests {
                 .unwrap_err()
                 .contains("anchor keys hold at most")
         );
+    }
+    #[test]
+    fn fired_teardowns_follow_an_earlier_trigger_input() {
+        let trigger = |key: &str, when: serde_json::Value, then: serde_json::Value| -> TimedInput {
+            serde_json::from_value(serde_json::json!({
+                "key": key, "at_ns": 1,
+                "action": {"action": "trigger", "when": when, "then": then},
+            }))
+            .unwrap()
+        };
+        let mutation = trigger(
+            "mutate-4",
+            serde_json::json!({"kind": "event", "name": "committed"}),
+            serde_json::json!({"action": "crash", "machine": "db"}),
+        );
+        let teardown = trigger(
+            "mutate-4-end",
+            serde_json::json!({"kind": "fired", "trigger": "mutate-4"}),
+            serde_json::json!({"action": "reboot", "machine": "db"}),
+        );
+        validate_program(&[mutation.clone(), teardown.clone()], 10).unwrap();
+        let error = validate_program(&[teardown, mutation], 10).unwrap_err();
+        assert!(error.contains("no earlier trigger input"), "{error}");
     }
     #[test]
     fn generated_keys_name_a_start_or_its_teardown() {

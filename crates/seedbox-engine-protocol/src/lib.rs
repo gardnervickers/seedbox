@@ -1,5 +1,6 @@
 //! Engine requests and retained evidence formats, independent of execution.
 pub mod application_log;
+pub mod choice;
 pub mod control;
 pub mod crash;
 pub mod driver_world;

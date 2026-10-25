@@ -8,7 +8,9 @@ so the SDK's calls do nothing and runs report no property results.
 A program on any machine links [seedbox-sdk](../crates/seedbox-sdk/src/lib.rs) and
 sends one JSON record per call over `SOCK_SEQPACKET` to `/run/seedbox/sdk.sock`.
 The supervisor relays each as `SBX_PROP1 <session> <seq> <hex>`, uninterpreted,
-and the engine answers `flush` and `summary` on `SBX_SDK1 <session> <json>`.
+and the engine answers `flush`, `summary` and `choice` on
+`SBX_SDK1 <session> <json>`; until it does, `choose` takes the first
+alternative.
 Records are at most 4096 bytes; IDs 256, messages and kept details 1024.
 Times come from frame commit, never the guest. The
 [records](../crates/seedbox-engine-protocol/src/property.rs) are:
@@ -21,6 +23,8 @@ Times come from frame commit, never the guest. The
 | `assert` `reachable` / `unreachable` | Reached at least once / never |
 | `declare` | Report a property even if never evaluated |
 | `event`, `setup_complete` | Counted workload milestones |
+| `state` | A named piece of workload state took a short value, such as a role |
+| `choice` | Ask the engine to pick one of up to 256 named alternatives; the session waits for the answer |
 | `flush`, `summary` | Wait until the session's earlier records are committed; `summary` adds counts |
 | `lost` | Records the SDK or supervisor could not deliver; an evidence error |
 

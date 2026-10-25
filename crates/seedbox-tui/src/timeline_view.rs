@@ -384,6 +384,7 @@ mod tests {
             links: vec![],
             faults: vec![],
             triggers: Vec::new(),
+            choice_inputs: Default::default(),
         };
         assert_eq!(observed_effect(&entry, None).0, "recorded");
         assert_eq!(observed_effect(&entry, Some(&world)).0, "upcoming");

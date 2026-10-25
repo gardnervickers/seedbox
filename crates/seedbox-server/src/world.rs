@@ -22,6 +22,7 @@ pub(crate) struct Tracker {
     oom_pending: BTreeSet<(String, u32)>,
     faults: BTreeMap<u32, FaultState>,
     triggers: BTreeMap<u32, seedbox_api::TriggerState>,
+    choice_inputs: BTreeMap<String, seedbox_api::ChoiceInputState>,
     override_rejections: BTreeMap<String, String>,
     counters: BTreeMap<Pair, LinkCounters>,
     /// Active partition and shape handles, with the fault that set them.
@@ -73,6 +74,7 @@ impl Tracker {
             oom_pending: BTreeSet::new(),
             faults: BTreeMap::new(),
             triggers: BTreeMap::new(),
+            choice_inputs: BTreeMap::new(),
             override_rejections: BTreeMap::new(),
             counters: BTreeMap::new(),
             partitions: BTreeMap::new(),
@@ -123,6 +125,9 @@ impl Tracker {
             EventKind::TriggerChanged { trigger } => {
                 // The latest receipt is the trigger's whole state.
                 self.triggers.insert(trigger.id, (**trigger).clone());
+            }
+            EventKind::ChoiceChanged { input_key, choice } => {
+                self.choice_inputs.insert(input_key.clone(), choice.clone());
             }
             EventKind::OverrideRejected {
                 input_key, reason, ..
@@ -501,6 +506,7 @@ impl Tracker {
                 })
                 .collect(),
             triggers: self.triggers.values().cloned().collect(),
+            choice_inputs: self.choice_inputs.clone(),
         }
     }
 }
@@ -734,6 +740,27 @@ mod tests {
         assert_eq!(world.triggers.len(), 1);
         assert_eq!(world.triggers[0].status, TriggerStatus::Expired);
         assert_eq!(world.triggers[0].when["marker"], "ready");
+    }
+
+    #[test]
+    fn choice_inputs_are_kept_by_key_at_their_latest_state() {
+        let mut t = tracker();
+        let before = t.snapshot().revision;
+        let change = |chosen: Option<&str>, at| EventKind::ChoiceChanged {
+            input_key: "pick".into(),
+            choice: seedbox_api::ChoiceInputState {
+                chosen: chosen.map(Into::into),
+                selected_at_ns: at,
+            },
+        };
+        t.event(5, &change(None, None));
+        assert_eq!(t.snapshot().choice_inputs["pick"].chosen, None);
+        t.event(9, &change(Some("retry"), Some(9)));
+        let world = t.snapshot();
+        assert!(world.revision > before);
+        assert_eq!(world.choice_inputs.len(), 1);
+        assert_eq!(world.choice_inputs["pick"].chosen.as_deref(), Some("retry"));
+        assert_eq!(world.choice_inputs["pick"].selected_at_ns, Some(9));
     }
 
     #[test]

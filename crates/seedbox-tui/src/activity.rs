@@ -264,6 +264,7 @@ pub fn derive(
         links: Vec::new(),
         faults: Vec::new(),
         triggers: Vec::new(),
+        choice_inputs: Default::default(),
     };
     let world_ref = world.unwrap_or(&empty);
     let null = serde_json::Value::Null;
@@ -456,6 +457,7 @@ mod tests {
             links: Vec::new(),
             faults,
             triggers: Vec::new(),
+            choice_inputs: Default::default(),
         }
     }
 

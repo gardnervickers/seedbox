@@ -63,8 +63,13 @@ fn submitted_programs_refuse_defined_only_faults_and_triggers_by_name() {
     );
     assert!(refusal(json!({"action":"trigger","when":{"kind":"frame"},"nth":0,"then":{"action":"crash","machine":"db"}}))
         .contains("nth counts from 1"));
-    assert!(refusal(json!({"action":"trigger","when":{"kind":"event","name":"x"},"then":{"action":"crash","machine":"db"}}))
+    assert!(refusal(json!({"action":"trigger","when":{"kind":"meteor","name":"x"},"then":{"action":"crash","machine":"db"}}))
         .contains("unknown variant"));
+    // SDK evidence selectors parse, and their triggers are refused by name.
+    assert!(matches!(
+        resolve_program(&spec(json!({"action":"trigger","when":{"kind":"event","name":"x"},"then":{"action":"crash","machine":"db"}}))),
+        Err(Error::NotImplemented(message)) if message.ends_with(&not_implemented("trigger"))
+    ));
 }
 
 #[test]

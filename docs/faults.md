@@ -26,7 +26,7 @@ same rule in general and arms when due:
 
 | Field | Meaning |
 | --- | --- |
-| `when` | A selector tagged `kind`: `output` (a marker, as a string or `{hex: ...}`, in a machine's committed output, as `arm_trigger` matches), `lifecycle` (`ready`, `exited`, `crashed`, `rebooted`, `paused`, `resumed`), `connection_open`, `frame`, or `block_request` |
+| `when` | A selector tagged `kind`: `output` (a marker, as a string or `{hex: ...}`, in a machine's committed output, as `arm_trigger` matches), `lifecycle` (`ready`, `exited`, `crashed`, `rebooted`, `paused`, `resumed`), `connection_open`, `frame`, `block_request`, SDK `event`, `assertion`, `state` or `setup_complete`, or `fired` |
 | `nth` | The occurrence that matches, from 1 |
 | `delay_ns` | Added to the matching barrier before the effect is admitted |
 | `within_ns` | Occurrences at or after this never match and the trigger expires; without it the run's end cuts it off |
@@ -34,8 +34,10 @@ same rule in general and arms when due:
 
 A `block_request` trigger holds the matching disk request at the device, so
 its only effect is an undelayed `crash` of that machine. Selectors on SDK
-evidence (`event`, `assertion`, `setup_complete`) are reserved for a later
-change.
+evidence match `event`, `assertion` (optionally only passing or failing),
+`state` (a name, optionally one value) and `setup_complete` records, and
+`fired` matches another trigger input's effect being admitted, so a teardown
+can follow the fault it undoes; see [exploration](exploration.md).
 Oracle-armed and program triggers share one lifecycle and 64 IDs per run, so a
 program alone may arm at most 64. The lifecycle is armed, matched, then fired,
 rejected, cancelled, expired or cut off. Each change of a program trigger is a

@@ -157,6 +157,40 @@ fn sdk_encoding_decodes_with_the_protocol_crate() {
             details: Some(json!({"nodes": 3}))
         }
     );
+    assert_eq!(
+        parse(state_record("role", "leader")),
+        Record::State {
+            name: "role".into(),
+            value: "leader".into()
+        }
+    );
+    assert_eq!(
+        parse(choice_record("retry", &["no", "yes"])),
+        Record::Choice {
+            site: "retry".into(),
+            alternatives: vec!["no".into(), "yes".into()]
+        }
+    );
+    assert_eq!(
+        MAX_CHOICE_ALTERNATIVES,
+        seedbox_engine_protocol::property::MAX_CHOICE_ALTERNATIVES
+    );
+    assert_eq!(
+        CHOICE_UNANSWERED_EVENT,
+        seedbox_engine_protocol::property::CHOICE_UNANSWERED_EVENT
+    );
+    assert_eq!(
+        CHOICE_TIMEOUT.as_nanos(),
+        u128::from(seedbox_engine_protocol::choice::CHOICE_TIMEOUT_NS)
+    );
+    let choice = Reply::Choice {
+        seq: 2,
+        site: "retry".into(),
+        occurrence: 1,
+        index: 1,
+    };
+    let body = reply_body(&serde_json::to_vec(&choice).unwrap(), "choice", 2).unwrap();
+    assert_eq!(body["index"], 1);
     assert_eq!(Record::parse(FLUSH), Ok(Record::Flush {}));
     assert_eq!(Record::parse(SUMMARY), Ok(Record::Summary {}));
 
@@ -243,6 +277,86 @@ fn an_unreachable_path_falls_back_to_the_abstract_listener() {
 
 /// A failing evaluation must arrive however large its details: the
 /// engine's verdict depends on it.
+#[test]
+fn choices_take_the_first_alternative_outside_seedbox_and_check_their_bounds() {
+    let directory = tempfile::tempdir().unwrap();
+    let client = Client::new(directory.path().join("missing.sock"));
+    client.state("role", "leader");
+    assert_eq!(client.choose("retry", &["no", "yes"]).unwrap(), 0);
+    for bad in [vec![], vec!["a"; MAX_CHOICE_ALTERNATIVES + 1]] {
+        assert_eq!(
+            client.choose("retry", &bad).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+    let long = "x".repeat(MAX_RECORD_BYTES);
+    assert_eq!(
+        client.choose("retry", &[&long]).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn choices_wait_for_the_engine_answer_for_their_site() {
+    let (_directory, path, listener) = server();
+    let client = Client::new(&path);
+    client.state("phase", "recovering");
+    let server = listener.accept();
+    let replier = std::thread::spawn(move || {
+        let mut buffer = [0u8; MAX_RECORD_BYTES];
+        let n = server.recv(&mut buffer).unwrap();
+        assert!(matches!(
+            Record::parse(&buffer[..n]),
+            Ok(Record::State { .. })
+        ));
+        for (site, index) in [("retry", 1), ("other", 0)] {
+            let n = server.recv(&mut buffer).unwrap();
+            assert!(matches!(
+                Record::parse(&buffer[..n]),
+                Ok(Record::Choice { .. })
+            ));
+            let reply = Reply::Choice {
+                seq: 2,
+                site: site.into(),
+                occurrence: 1,
+                index,
+            };
+            server.send(&serde_json::to_vec(&reply).unwrap()).unwrap();
+        }
+    });
+    assert_eq!(client.choose("retry", &["no", "yes"]).unwrap(), 1);
+    // An answer for another site is an error, not a silent choice.
+    assert!(client.choose("retry", &["no", "yes"]).is_err());
+    replier.join().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unanswered_choices_time_out_reopen_the_session_and_are_recorded() {
+    let (_directory, path, listener) = server();
+    let client = Client::new(&path).with_choice_timeout(Duration::from_millis(1));
+    client.state("phase", "recovering");
+    let first = listener.accept();
+    // Nobody answers the choice on the first session.
+    let error = client.choose("retry", &["no", "yes"]).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    let mut buffer = [0u8; MAX_RECORD_BYTES];
+    for _ in 0..2 {
+        first.recv(&mut buffer).unwrap();
+    }
+    // The event goes out on a new session.
+    let second = listener.accept();
+    let n = second.recv(&mut buffer).unwrap();
+    match Record::parse(&buffer[..n]).unwrap() {
+        Record::Event { name, details } => {
+            assert_eq!(name, CHOICE_UNANSWERED_EVENT);
+            assert_eq!(details.unwrap()["site"], "retry");
+        }
+        other => panic!("unexpected record {other:?}"),
+    }
+}
+
 #[test]
 fn oversized_records_keep_their_evaluation_and_mark_lost_details() {
     let big = json!({"log": "x".repeat(2 * MAX_RECORD_BYTES)});

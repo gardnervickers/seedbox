@@ -56,6 +56,16 @@ pub const MAX_ERRORS: usize = 16;
 pub const MAX_SUMMARY_PROPERTIES: usize = 32;
 /// The supervisor's own records use this session.
 pub const SUPERVISOR_SESSION: u32 = 0;
+/// A state name or value holds 1..=this many bytes.
+pub const MAX_STATE_BYTES: usize = 64;
+/// Distinct states, and distinct transitions, a run keeps first positions
+/// for; later ones are counted as dropped.
+pub const MAX_STATES: usize = 1024;
+/// A machine's coverage map in bytes: one bit per (hashed edge, hit-count
+/// bucket), 8192 edges of 4 buckets.
+pub const COVERAGE_BYTES: usize = 4096;
+/// The bytes one coverage record carries, at an offset that is a multiple.
+pub const COVERAGE_SLICE: usize = 1024;
 /// A choice offers 1..=this many alternatives.
 pub const MAX_CHOICE_ALTERNATIVES: usize = 256;
 /// Each alternative's name holds 1..=this many bytes.
@@ -233,6 +243,21 @@ pub enum Record {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         details: Option<Value>,
     },
+    /// A named piece of workload state took a value, such as a replica's
+    /// role or a recovery phase: short labels, whose new values and
+    /// transitions a campaign treats as progress. Keys read
+    /// `machine/name=value` and `machine/name:from>to`, so a name holds none
+    /// of `/=:>` and a value no `>`.
+    State { name: String, value: String },
+    /// Ask the engine to choose one of `alternatives` at `site`. The engine
+    /// draws the answer from the run's seed, or a choice input selects it,
+    /// and answers with a [`Reply::Choice`]. The SDK waits a bounded time,
+    /// then takes the first alternative and records
+    /// [`CHOICE_UNANSWERED_EVENT`].
+    Choice {
+        site: String,
+        alternatives: Vec<String>,
+    },
     /// Ask for a [`Reply::Flush`] once the engine has committed and reduced
     /// every earlier record of this session.
     Flush {},
@@ -246,7 +271,34 @@ pub enum Record {
     /// From [`SUPERVISOR_SESSION`] only: SDK `session` ended, so its
     /// sequence will not continue.
     Closed { session: u32 },
+    /// From [`SUPERVISOR_SESSION`] only: one [`COVERAGE_SLICE`] of the
+    /// machine's coverage map as lowercase hex, at a byte offset that is a
+    /// multiple of it, when the application's environment enables coverage.
+    /// Maps from one machine are unioned.
+    Coverage {
+        #[serde(default)]
+        offset: u32,
+        map: String,
+    },
 }
+
+/// A state name a [`Record::State`] can carry: 1..=[`MAX_STATE_BYTES`]
+/// bytes, no control characters, and none of `/=:>`, which keys use.
+pub fn valid_state_name(name: &str) -> bool {
+    valid_state_label(name) && !name.contains(['/', '=', ':', '>'])
+}
+/// A state value a [`Record::State`] can carry: as a name, but only `>` is
+/// excluded.
+pub fn valid_state_value(value: &str) -> bool {
+    valid_state_label(value) && !value.contains('>')
+}
+fn valid_state_label(label: &str) -> bool {
+    !label.is_empty() && label.len() <= MAX_STATE_BYTES && !label.chars().any(char::is_control)
+}
+
+/// The event an SDK records when no engine answered its choice in time and
+/// it took the first alternative.
+pub const CHOICE_UNANSWERED_EVENT: &str = "seedbox.choice_unanswered";
 
 impl Record {
     /// Parse and bound one payload. Failures are evidence errors.
@@ -257,9 +309,34 @@ impl Record {
             Record::Declare { id, message, .. } | Record::Assert { id, message, .. } => {
                 (Some(id), message.as_ref())
             }
-            Record::Event { name, .. } => (Some(name), None),
+            Record::Event { name, .. } | Record::Choice { site: name, .. } => (Some(name), None),
             _ => (None, None),
         };
+        match &record {
+            Record::State { name, value }
+                if !valid_state_name(name) || !valid_state_value(value) =>
+            {
+                return Err("invalid state name or value".into());
+            }
+            Record::Choice { alternatives, .. }
+                if alternatives.is_empty()
+                    || alternatives.len() > MAX_CHOICE_ALTERNATIVES
+                    || alternatives
+                        .iter()
+                        .any(|a| a.is_empty() || a.len() > MAX_CHOICE_ALTERNATIVE_BYTES) =>
+            {
+                return Err("invalid choice alternatives".into());
+            }
+            Record::Coverage { offset, map }
+                if map.len() != 2 * COVERAGE_SLICE
+                    || !map.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                    || !(*offset as usize).is_multiple_of(COVERAGE_SLICE)
+                    || *offset as usize >= COVERAGE_BYTES =>
+            {
+                return Err("invalid coverage slice".into());
+            }
+            _ => {}
+        }
         if let Some(id) = id {
             if id.is_empty() || id.len() > MAX_ID_BYTES || id.chars().any(char::is_control) {
                 return Err("invalid property id".into());
@@ -271,19 +348,20 @@ impl Record {
         Ok(record)
     }
 
-    /// [`SUPERVISOR_SESSION`] sends only [`Record::Lost`] and
-    /// [`Record::Closed`]; SDK sessions send anything else.
+    /// [`SUPERVISOR_SESSION`] sends only [`Record::Lost`], [`Record::Closed`]
+    /// and [`Record::Coverage`], which only it reads from the machine; SDK
+    /// sessions send anything else.
     pub fn allowed_from(&self, session: u32) -> bool {
         match self {
             Record::Lost { .. } => true,
-            Record::Closed { .. } => session == SUPERVISOR_SESSION,
+            Record::Closed { .. } | Record::Coverage { .. } => session == SUPERVISOR_SESSION,
             _ => session != SUPERVISOR_SESSION,
         }
     }
 }
 
-/// The engine's answer to a [`Record::Flush`] or [`Record::Summary`]; `seq` is
-/// that record's sequence number in its session.
+/// The engine's answer to a [`Record::Flush`], [`Record::Summary`] or
+/// [`Record::Choice`]; `seq` is that record's sequence number in its session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Reply {
@@ -298,6 +376,16 @@ pub enum Reply {
         seq: u64,
         properties: BTreeMap<String, Counts>,
         truncated: bool,
+    },
+    /// The selected alternative's index. `occurrence` counts this site's
+    /// requests in this session of the machine's incarnation, from 1: the
+    /// count a [`crate::input_program::ChoiceOverride`] and a
+    /// [`crate::choice::ChoiceRecord`] name.
+    Choice {
+        seq: u64,
+        site: String,
+        occurrence: u64,
+        index: u32,
     },
 }
 

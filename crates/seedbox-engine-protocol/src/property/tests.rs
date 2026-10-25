@@ -96,12 +96,36 @@ fn records_have_one_json_shape() {
             json!({"closed": {"session": 3}}),
             Record::Closed { session: 3 },
         ),
+        (
+            json!({"state": {"name": "role", "value": "leader"}}),
+            Record::State {
+                name: "role".into(),
+                value: "leader".into(),
+            },
+        ),
+        (
+            json!({"choice": {"site": "retry", "alternatives": ["no", "yes"]}}),
+            Record::Choice {
+                site: "retry".into(),
+                alternatives: vec!["no".into(), "yes".into()],
+            },
+        ),
+        (
+            json!({"coverage": {"offset": COVERAGE_SLICE, "map": "0f".repeat(COVERAGE_SLICE)}}),
+            Record::Coverage {
+                offset: COVERAGE_SLICE as u32,
+                map: "0f".repeat(COVERAGE_SLICE),
+            },
+        ),
     ] {
         assert_eq!(parse(wire.clone()), Ok(record.clone()), "{wire}");
         assert_eq!(serde_json::to_value(&record).unwrap(), wire);
-        let supervisor = wire.get("lost").is_some() || wire.get("closed").is_some();
-        assert_eq!(record.allowed_from(1), wire.get("closed").is_none());
-        assert_eq!(record.allowed_from(SUPERVISOR_SESSION), supervisor);
+        let supervisor_only = wire.get("closed").is_some() || wire.get("coverage").is_some();
+        assert_eq!(record.allowed_from(1), !supervisor_only);
+        assert_eq!(
+            record.allowed_from(SUPERVISOR_SESSION),
+            wire.get("lost").is_some() || supervisor_only
+        );
     }
 }
 
@@ -116,8 +140,18 @@ fn invalid_records_are_refused() {
         json!({"declare": {"id": "x".repeat(MAX_ID_BYTES + 1), "kind": "always"}}),
         json!({"declare": {"id": "x", "kind": "always", "message": "m".repeat(MAX_MESSAGE_BYTES + 1)}}),
         json!({"declare": {"id": "x", "kind": "always", "extra": 1}}),
-        json!({"state": {"name": "role", "value": "leader"}}),
-        json!({"choice": {"site": "pick", "alternatives": ["a"]}}),
+        json!({"state": {"name": "role/a", "value": "leader"}}),
+        json!({"state": {"name": "role", "value": "a>b"}}),
+        json!({"state": {"name": "role", "value": ""}}),
+        json!({"state": {"name": "role", "value": "x".repeat(MAX_STATE_BYTES + 1)}}),
+        json!({"choice": {"site": "pick", "alternatives": []}}),
+        json!({"choice": {"site": "pick", "alternatives": [""]}}),
+        json!({"choice": {"site": "pick", "alternatives": vec!["a"; MAX_CHOICE_ALTERNATIVES + 1]}}),
+        json!({"choice": {"site": "", "alternatives": ["a"]}}),
+        json!({"coverage": {"offset": 0, "map": "0f"}}),
+        json!({"coverage": {"offset": 1, "map": "00".repeat(COVERAGE_SLICE)}}),
+        json!({"coverage": {"offset": COVERAGE_BYTES, "map": "00".repeat(COVERAGE_SLICE)}}),
+        json!({"coverage": {"offset": 0, "map": "0F".repeat(COVERAGE_SLICE)}}),
         json!({"flush": {}, "summary": {}}),
     ] {
         assert!(parse(bad.clone()).is_err(), "{bad}");
@@ -151,6 +185,18 @@ fn replies_round_trip_on_their_session_line() {
         decode_reply(&encode_reply(1, &summary)),
         Ok(Some((1, summary)))
     );
+    let choice = Reply::Choice {
+        seq: 5,
+        site: "retry".into(),
+        occurrence: 2,
+        index: 1,
+    };
+    let line = encode_reply(3, &choice);
+    assert_eq!(
+        line,
+        br#"SBX_SDK1 3 {"choice":{"seq":5,"site":"retry","occurrence":2,"index":1}}"#
+    );
+    assert_eq!(decode_reply(&line), Ok(Some((3, choice))));
     assert_eq!(decode_reply(b"SBX_PROP1 1 1 7b7d"), Ok(None));
     for bad in [
         "SBX_SDK1 1",
@@ -207,6 +253,51 @@ fn summaries_fit_one_reply_line_whatever_their_ids() {
             properties: [("p".to_string(), counts)].into(),
             truncated: false
         }
+    );
+}
+
+#[test]
+fn state_labels_are_the_ones_a_state_record_can_carry() {
+    for name in [
+        "role",
+        "recovery phase",
+        "x".repeat(MAX_STATE_BYTES).as_str(),
+    ] {
+        assert!(valid_state_name(name), "{name}");
+    }
+    for name in ["", "a/b", "a=b", "a:b", "a>b", "a\nb"] {
+        assert!(!valid_state_name(name), "{name:?}");
+    }
+    assert!(valid_state_value("a=b:c/d"));
+    assert!(!valid_state_value("a>b"));
+    assert!(!valid_state_value(&"x".repeat(MAX_STATE_BYTES + 1)));
+}
+
+#[test]
+fn choice_evidence_round_trips_with_its_selecting_input() {
+    let record = crate::choice::ChoiceRecord {
+        machine: "client".into(),
+        incarnation: 0,
+        session: 2,
+        site: "retry".into(),
+        occurrence: 1,
+        alternatives: 2,
+        selected: 1,
+        chosen: "yes".into(),
+        requested_at_ns: 10,
+        replied_at_ns: 10,
+        input_key: Some("pick".into()),
+    };
+    let evidence = crate::choice::ChoiceEvidence {
+        records: vec![record],
+        untracked: 0,
+    };
+    let wire = serde_json::to_value(&evidence).unwrap();
+    assert_eq!(wire["records"][0]["input_key"], "pick");
+    assert!(wire.get("untracked").is_none());
+    assert_eq!(
+        serde_json::from_value::<crate::choice::ChoiceEvidence>(wire).unwrap(),
+        evidence
     );
 }
 

@@ -1123,6 +1123,7 @@ fn show_world_prints_machine_and_link_tables() {
         links: vec![link("n1", "oracle", None), link("oracle", "n1", Some("p1"))],
         faults: Vec::new(),
         triggers: Vec::new(),
+        choice_inputs: Default::default(),
     };
     let body = serde_json::to_string(&world).unwrap();
     let server = stand_in_server(

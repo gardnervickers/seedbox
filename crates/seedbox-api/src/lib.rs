@@ -48,9 +48,9 @@ pub use properties::{
 };
 mod world;
 pub use world::{
-    ApplicationCondition, ApplicationState, FaultState, Frame, FrameDelivery, FrameFate,
-    LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState, OutOfMemoryKill,
-    TriggerState, TriggerStatus, WorldState,
+    ApplicationCondition, ApplicationState, ChoiceInputState, FaultState, Frame, FrameDelivery,
+    FrameFate, LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState,
+    OutOfMemoryKill, TriggerState, TriggerStatus, WorldState,
 };
 
 mod timeline;

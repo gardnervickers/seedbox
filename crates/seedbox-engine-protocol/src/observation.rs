@@ -82,6 +82,15 @@ pub enum Kind {
     TriggerChanged {
         trigger: crate::control::TriggerReceipt,
     },
+    /// A choice input became due, or answered its request. The
+    /// observation's machine is the input's.
+    ChoiceChanged {
+        input_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chosen: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_at_ns: Option<u64>,
+    },
     /// Frames routed since the previous batch, in routing order. Published
     /// only to an observation socket; never part of evidence.
     Frames {

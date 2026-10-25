@@ -178,14 +178,73 @@ fn trigger_specs_round_trip_with_defaults_omitted() {
 }
 
 #[test]
-fn trigger_specs_refuse_reserved_selectors_and_bad_shapes() {
-    for name in RESERVED_SELECTORS {
-        let error = trigger(
-            json!({"when":{"kind":name,"name":"committed"},"then":{"action":"crash","machine":"db"}}),
-        )
-        .unwrap_err();
-        assert!(error.contains("unknown variant"), "{name}: {error}");
+fn sdk_evidence_selectors_round_trip_and_bound_their_names() {
+    let crash = json!({"action":"crash","machine":"db"});
+    for (when, name, machines) in [
+        (
+            json!({"kind":"event","name":"committed","machine":"db"}),
+            "event",
+            vec!["db"],
+        ),
+        (
+            json!({"kind":"assertion","property":"acked writes survive","holds":false}),
+            "assertion",
+            vec![],
+        ),
+        (
+            json!({"kind":"state","name":"role","value":"leader","machine":"db"}),
+            "state",
+            vec!["db"],
+        ),
+        (json!({"kind":"setup_complete"}), "setup_complete", vec![]),
+        (
+            json!({"kind":"fired","trigger":"mutate-1"}),
+            "fired",
+            vec![],
+        ),
+    ] {
+        let wire = json!({"when": when, "then": crash});
+        let spec = trigger(wire.clone()).unwrap();
+        spec.validate().unwrap();
+        assert_eq!(spec.when.name(), name);
+        assert_eq!(spec.when.machines(), machines);
+        assert_eq!(serde_json::to_value(&spec).unwrap(), wire);
     }
+    for (when, needle) in [
+        (json!({"kind":"event","name":""}), "event selector names"),
+        (
+            json!({"kind":"state","name":"role","value":"x".repeat(65)}),
+            "state selector value",
+        ),
+        (
+            json!({"kind":"state","name":"role/leader"}),
+            "state selector name",
+        ),
+        (
+            json!({"kind":"state","name":"role","value":"a>b"}),
+            "state selector value",
+        ),
+        (
+            json!({"kind":"setup_complete","machine":""}),
+            "machine is empty",
+        ),
+        (json!({"kind":"fired","trigger":""}), "fired selector names"),
+    ] {
+        let error = trigger(json!({"when": when, "then": crash}))
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert!(error.contains(needle), "{error}");
+    }
+}
+
+#[test]
+fn trigger_specs_refuse_unknown_selectors_and_bad_shapes() {
+    let error = trigger(
+        json!({"when":{"kind":"meteor","name":"committed"},"then":{"action":"crash","machine":"db"}}),
+    )
+    .unwrap_err();
+    assert!(error.contains("unknown variant"), "{error}");
     assert!(trigger(
         json!({"when":{"kind":"frame","extra":1},"then":{"action":"crash","machine":"db"}})
     )

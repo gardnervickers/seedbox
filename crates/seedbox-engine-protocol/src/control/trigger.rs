@@ -16,11 +16,6 @@ use serde::{Deserialize, Serialize};
 pub const MAX_TRIGGERS: usize = 64;
 /// Bytes in a console marker.
 pub const MAX_TRIGGER_MARKER: usize = 256;
-/// Selector names reserved for SDK workload evidence (events, assertions and
-/// setup markers), which arrive in a later change. They parse as unknown
-/// today.
-#[cfg(test)]
-pub(crate) const RESERVED_SELECTORS: [&str; 3] = ["event", "assertion", "setup_complete"];
 
 /// Once `when` has matched `nth` times, `then` is admitted as a fault at the
 /// committed barrier that found the match plus `delay_ns`, where it meets the
@@ -134,6 +129,44 @@ pub enum EventSelector {
     /// A guest disk request of kind `op`, held at the device on arrival,
     /// before it has any effect. Its only effect is the machine's crash.
     BlockRequest { machine: String, op: DiskOp },
+    // The SDK selectors below make `machine` optional, unlike `output`,
+    // `lifecycle` and `block_request`, whose evidence exists only per
+    // machine. An SDK record names a workload fact (an event, a property, a
+    // state) that any machine's client may report, and a property is one
+    // across the run; omitting the machine matches it from every machine,
+    // as `connection_open` and `frame` already allow.
+    /// An SDK workload event with this name.
+    Event {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// An SDK evaluation of this property; `holds` keeps only passing or
+    /// only failing evaluations.
+    Assertion {
+        property: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holds: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// An SDK state report: `name` taking `value`, or any value when absent.
+    State {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// The SDK marker that a machine's workload finished setting up.
+    SetupComplete {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// The trigger armed by program input `trigger`, an earlier trigger
+    /// input of the same program, admitting its effect: a teardown that
+    /// follows the effect it undoes.
+    Fired { trigger: String },
 }
 impl EventSelector {
     pub fn name(&self) -> &'static str {
@@ -143,6 +176,11 @@ impl EventSelector {
             Self::ConnectionOpen { .. } => "connection_open",
             Self::Frame { .. } => "frame",
             Self::BlockRequest { .. } => "block_request",
+            Self::Event { .. } => "event",
+            Self::Assertion { .. } => "assertion",
+            Self::State { .. } => "state",
+            Self::SetupComplete { .. } => "setup_complete",
+            Self::Fired { .. } => "fired",
         }
     }
     /// Every machine the selector names, in field order.
@@ -154,6 +192,11 @@ impl EventSelector {
             Self::ConnectionOpen { from, to, .. } | Self::Frame { from, to } => {
                 from.iter().chain(to).map(String::as_str).collect()
             }
+            Self::Event { machine, .. }
+            | Self::Assertion { machine, .. }
+            | Self::State { machine, .. }
+            | Self::SetupComplete { machine } => machine.iter().map(String::as_str).collect(),
+            Self::Fired { .. } => Vec::new(),
         }
     }
     fn validate(&self) -> Result<(), String> {
@@ -169,6 +212,38 @@ impl EventSelector {
         }
         if self.machines().iter().any(|machine| machine.is_empty()) {
             return Err(format!("{} selector machine is empty", self.name()));
+        }
+        // Names are the SDK's own record bounds.
+        let named = match self {
+            Self::Event { name, .. } | Self::State { name, .. } => Some(name),
+            Self::Assertion { property, .. } => Some(property),
+            Self::Fired { trigger } => Some(trigger),
+            _ => None,
+        };
+        if named.is_some_and(|name| name.is_empty() || name.len() > crate::property::MAX_ID_BYTES) {
+            return Err(format!(
+                "{} selector names 1..={} bytes",
+                self.name(),
+                crate::property::MAX_ID_BYTES
+            ));
+        }
+        // A state selector matches only what a state record can carry.
+        if let Self::State { name, value, .. } = self {
+            if !crate::property::valid_state_name(name) {
+                return Err(format!(
+                    "state selector name must be 1..={} bytes without control characters or /=:>",
+                    crate::property::MAX_STATE_BYTES
+                ));
+            }
+            if value
+                .as_deref()
+                .is_some_and(|value| !crate::property::valid_state_value(value))
+            {
+                return Err(format!(
+                    "state selector value must be 1..={} bytes without control characters or >",
+                    crate::property::MAX_STATE_BYTES
+                ));
+            }
         }
         Ok(())
     }

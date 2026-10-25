@@ -2787,6 +2787,7 @@ pub(crate) mod tests {
             links,
             faults: Vec::new(),
             triggers: Vec::new(),
+            choice_inputs: Default::default(),
         }
     }
 
