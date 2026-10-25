@@ -239,3 +239,142 @@ fn a_restart_behind_an_undelivered_stop_is_unavailable_with_it() {
     );
     assert!(commands(&d).is_empty());
 }
+
+fn skew(nanos: i64) -> Action {
+    Action::StepRealtime {
+        target: target(),
+        nanoseconds: std::num::NonZeroI64::new(nanos).unwrap(),
+    }
+}
+fn heal(name: &str) -> Action {
+    Action::Heal(HealTarget::Input(key(name)))
+}
+fn steps(d: &Driver<Mock>) -> Vec<i64> {
+    commands(d)
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::StepRealtime { nanoseconds, .. } => Some(nanoseconds.get()),
+            _ => None,
+        })
+        .collect()
+}
+/// A heal requested before its skew is acknowledged is admitted and sent
+/// once the skew lands, so the guest steps and then steps back; a second
+/// heal of that skew is refused while the first is outstanding.
+#[test]
+fn a_heal_requested_before_its_skew_lands_follows_it() {
+    let mut d = driver(vec![]);
+    input(&mut d, 10, "skew", skew(7));
+    // The guest acknowledges the skew at 13.
+    input(&mut d, 11, "heal", heal("skew"));
+    input(&mut d, 12, "again", heal("skew"));
+    let events = advance(&mut d, 100);
+    assert_eq!(rejected(&events, "heal"), None);
+    assert_eq!(settlement(&events, "skew").0, SettlementStatus::Applied);
+    assert_eq!(settlement(&events, "heal").0, SettlementStatus::Applied);
+    assert_eq!(
+        rejected(&events, "again").map(|r| r.reason),
+        Some(RejectionReason::InvalidState)
+    );
+    assert_eq!(steps(&d), [7, -7]);
+    // The skew is healed: no handle remains to heal.
+    input(&mut d, 150, "late", heal("skew"));
+    let events = advance(&mut d, 200);
+    assert_eq!(
+        rejected(&events, "late").map(|r| r.reason),
+        Some(RejectionReason::InvalidState)
+    );
+}
+
+/// A skew held for readiness and a heal requested before readiness: when
+/// readiness comes in time the skew is sent first and the heal follows it.
+#[test]
+fn a_skew_held_for_readiness_is_sent_before_its_queued_heal() {
+    let mut d = driver(vec![(60, Response::Ready)]);
+    reboot(&mut d);
+    input(&mut d, 30, "skew", skew(7));
+    input(&mut d, 31, "heal", heal("skew"));
+    let events = advance(&mut d, 200);
+    assert_eq!(rejected(&events, "heal"), None);
+    assert_eq!(settlement(&events, "skew").0, SettlementStatus::Applied);
+    assert_eq!(settlement(&events, "heal").0, SettlementStatus::Applied);
+    assert_eq!(steps(&d), [7, -7]);
+}
+
+/// A crash before the skew lands ends the skew and the heal queued behind
+/// it; the inverse step is never sent.
+#[test]
+fn a_crash_before_the_skew_lands_ends_its_queued_heal() {
+    let mut d = driver(vec![]);
+    input(&mut d, 10, "skew", skew(7));
+    input(&mut d, 11, "heal", heal("skew"));
+    input(&mut d, 12, "crash", Action::Crash(target()));
+    let events = advance(&mut d, 100);
+    assert_eq!(settlement(&events, "skew").0, SettlementStatus::Unavailable);
+    assert_eq!(settlement(&events, "heal").0, SettlementStatus::Unavailable);
+    assert_eq!(steps(&d), [7]);
+}
+
+/// Saved with a heal queued behind its unacknowledged skew, a restored
+/// Driver sends the undo once the skew lands.
+#[test]
+fn a_heal_queued_behind_its_skew_survives_a_checkpoint() {
+    let mut d = driver(vec![]);
+    input(&mut d, 10, "skew", skew(7));
+    input(&mut d, 11, "heal", heal("skew"));
+    advance(&mut d, 12);
+    let (bytes, store) = artifact(d.checkpoint().unwrap());
+    drop(d);
+    let mut d = restore(&decode(&bytes, &store), 1);
+    let events = advance(&mut d, 100);
+    assert_eq!(settlement(&events, "skew").0, SettlementStatus::Applied);
+    assert_eq!(settlement(&events, "heal").0, SettlementStatus::Applied);
+    assert_eq!(steps(&d), [7, -7]);
+}
+
+/// A skew and the heal queued behind it, both for a rebooted machine that
+/// is not ready in time: the skew is unavailable at its deadline and takes
+/// the heal with it, and readiness afterwards sends nothing.
+#[test]
+fn an_undelivered_skew_takes_its_queued_heal_with_it() {
+    let deadline = 30 + crate::oracle::PROCESS_EFFECT_TIMEOUT_NS;
+    // A long quantum reaches the default deadline in few steps.
+    let mut d = super::fixture::driver(
+        at(0),
+        Duration::from_millis(100),
+        1,
+        SeededRng::new(51),
+        || Ok(Context(None)),
+        || {
+            Ok(vec![
+                Mock::new(spec(0, true, vec![(0, Response::Ready)])),
+                Mock::new(spec(
+                    1,
+                    true,
+                    vec![(0, Response::Ready), (deadline + 100, Response::Ready)],
+                )),
+            ])
+        },
+    )
+    .unwrap();
+    reboot(&mut d);
+    input(&mut d, 30, "skew", skew(7));
+    input(&mut d, 40, "heal", heal("skew"));
+    let events = advance(&mut d, deadline + 500);
+    let fault = admitted(&events, "skew");
+    assert_eq!(
+        settlement(&events, "skew"),
+        (
+            SettlementStatus::Unavailable,
+            "target machine was not ready again in time".into()
+        )
+    );
+    assert_eq!(
+        settlement(&events, "heal"),
+        (
+            SettlementStatus::Unavailable,
+            format!("sequenced behind fault {}, which was not applied", fault.0)
+        )
+    );
+    assert!(steps(&d).is_empty());
+}

@@ -76,7 +76,11 @@ impl Service {
             return Ok((fault, self.finish(fault, now, now, Ok(()))?));
         }
         let mut plans = vec![];
-        if !unavailable && (!self.pending[&fault].effect.guest_command() || facts.ready) {
+        // A heal queued behind its unacknowledged step is sent once it lands.
+        let queued = (self.pending[&fault].handle.as_ref())
+            .is_some_and(|h| h.healing() && self.handles.awaiting_start(h.record_id));
+        if !unavailable && !queued && (!self.pending[&fault].effect.guest_command() || facts.ready)
+        {
             match Self::dispatch(adapter, fault, self.pending.get_mut(&fault).unwrap(), now) {
                 Ok(plan) => plans.push(plan),
                 Err(e) => return Err(self.fatal(Some(fault), Some(now), now, e.message).into()),
@@ -337,12 +341,28 @@ impl Service {
         if observed > at {
             return Err("Ready observation exceeds commit".into());
         }
+        self.dispatch_waiting(adapter, target, boot, at)
+    }
+    /// Send the boot's guest commands that wait for nothing more, in
+    /// admission order: readiness has come, and a heal queued behind its step
+    /// goes once that step is acknowledged.
+    pub(crate) fn dispatch_waiting(
+        &mut self,
+        adapter: &mut impl Adapter,
+        target: &str,
+        boot: u64,
+        at: u64,
+    ) -> Result<Vec<Plan>, Failure> {
+        self.valid()?;
         let mut plans = vec![];
         for (&fault, p) in &mut self.pending {
             if p.scope.is_machine(target, boot)
                 && p.effect.guest_command()
                 && p.command.is_none()
                 && at <= p.deadline
+                // Only the heal waits; its step goes first.
+                && !(p.handle.as_ref())
+                    .is_some_and(|h| h.healing() && self.handles.awaiting_start(h.record_id))
             {
                 match Self::dispatch(adapter, fault, p, at) {
                     Ok(plan) => plans.push(plan),

@@ -215,7 +215,9 @@ pub enum Action {
     /// control deadline (5 s of simulation time from admission) bounding
     /// dispatch and acknowledgment. Linux refuses a step that would put
     /// realtime below `CLOCK_MONOTONIC`. The step ends with its boot; healing
-    /// it afterwards changes nothing.
+    /// it afterwards changes nothing. A heal requested before the step is
+    /// acknowledged is admitted and sends the inverse once the step lands; if
+    /// the step never takes effect, the heal settles Unavailable with it.
     StepRealtime {
         target: Target,
         nanoseconds: NonZeroI64,
