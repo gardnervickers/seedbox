@@ -1,10 +1,10 @@
 //! Long-running application tier, run by `harness/check.sh mac-apps-long` or
-//! `linux-apps-long` and never by default. `harness/acceptance/long`
-//! workloads take minutes each, so they stay out of the `applications`
-//! corpus: each runs once through its own server, then reruns from its
-//! retained inputs and must match its full-state witness. Derived cases start
-//! from a workload (in either directory) and branch, crash or edit it
-//! (support/derived.rs); each also takes a minute or more.
+//! `linux-apps-long` and never by default. `harness/acceptance/long` holds the
+//! workloads that take minutes, or whose coverage overlaps the ordinary corpus
+//! enough not to justify its CI time: each runs once through its own server,
+//! then replays its retained inputs and must match its full-state witness.
+//! Derived cases start from a workload (in either directory) and branch, crash
+//! or edit it (support/derived.rs); each takes a minute or more.
 #![cfg(any(
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
@@ -26,12 +26,28 @@ macro_rules! long_applications {
     };
 }
 long_applications! {
+    checkpoint_altstack => "checkpoint-altstack",
+    checkpoint_links => "checkpoint-links",
+    checkpoint_pending_stop => "checkpoint-pending-stop",
+    checkpoint_tcp => "checkpoint-tcp",
+    checkpoint_throttle => "checkpoint-throttle",
+    checkpoint_waits => "checkpoint-waits",
+    crash_peer => "crash-peer",
+    disk_rebuild => "disk-rebuild",
     durability => "durability",
+    etcd_lease => "etcd-lease",
     #[ignore = "image preparation misplaces files whose image path is 94-100 bytes (kafka-python's sticky/partition_movements.py lands at rootfs/DIR/DIR/NAME), so the client cannot import kafka; follow-up: fix the rootfs export, then run"]
     kafka_idempotent_retry => "kafka-idempotent-retry",
     #[ignore = "image preparation misplaces files whose image path is 94-100 bytes (kafka-python's sticky/partition_movements.py lands at rootfs/DIR/DIR/NAME), so the client cannot import kafka; follow-up: fix the rootfs export, then run"]
     kafka_startup_crash => "kafka-startup-crash",
     large_volume => "large-volume",
+    #[ignore = "guest inspect reports the app Running after its leader exits while an orphan writes (the server world API reports it exited); follow-up: report application exits through inspect"]
+    logs_leader_exit => "logs-leader-exit",
+    logs_storm => "logs-storm",
+    postgres_cancel => "postgres-cancel",
+    redis_aof => "redis-aof",
+    sqlite_wal => "sqlite-wal",
+    two_crash => "two-crash",
 }
 
 /// Simulations derived from a workload run rather than submitted from its
@@ -92,8 +108,10 @@ fn every_long_workload_and_checkpoint_workload_has_a_case() {
         .iter()
         .all(|name| ordinary.contains(*name) || WORKLOADS.contains(name)));
     // Every checkpoint workload is also branched from its marked phase.
+    let long = stems(&acceptance().join("long"));
     for name in ordinary
         .iter()
+        .chain(&long)
         .filter(|name| name.starts_with("checkpoint-"))
     {
         assert!(
