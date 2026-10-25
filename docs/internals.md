@@ -293,3 +293,16 @@ Unchanged bundles reuse `build/assets`; changed bundles retain the previous gene
 for concurrent builds. With all Cargo builds stopped, `cargo xtask clean-assets`
 removes old generations while keeping the current bundle. Built executables embed
 their own assets. See [xtask](../crates/xtask/src/main.rs).
+
+## Whole-run determinism oracles
+
+[The oracles](../crates/seedbox/tests/determinism/main.rs) (`*-apps-long` suites) resolve
+[a fixture](../harness/fixtures/determinism) once, add seeded loss, a throttle and its heal as
+external inputs, and need the server's MATCH (witness, outcome, fault history and full
+state) when that definition reruns under slowed or paused playback with stalled
+followers, beside a concurrently controlled simulation, with checkpoints at each marker, after
+fault previews, with keyed controls whose clients disconnect, and with 2, 3 and 8 machine
+workers. Branches of one checkpoint match each other and the source's suffix, including
+from a checkpoint file in a second server session; fresh runs there repeat the first
+session's output. Edited inputs keep everything before their first changed time.
+Position targets are reached in real time: the server samples playback every 250 ms.

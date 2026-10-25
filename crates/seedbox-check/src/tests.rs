@@ -410,7 +410,7 @@ fn test_workspace_suite_targets_preserve_portable_linux_mac_and_pause_selection(
             vec![SuiteTests {
                 package: "seedbox".into(),
                 features: strings(&["long-application-tests"]),
-                targets: strings(&["long_applications"]),
+                targets: strings(&["determinism", "long_applications"]),
             }],
         ),
         (
@@ -418,7 +418,7 @@ fn test_workspace_suite_targets_preserve_portable_linux_mac_and_pause_selection(
             vec![SuiteTests {
                 package: "seedbox".into(),
                 features: strings(&["long-application-tests"]),
-                targets: strings(&["long_applications"]),
+                targets: strings(&["determinism", "long_applications"]),
             }],
         ),
     ] {

@@ -93,6 +93,9 @@ We do not need to support every possible application. If someone intentionally t
 - Run portable checks in `nix develop`; engine changes also need relevant native
   suites. Portable compiles native cases without running them. Missing requirements
   are blockers. Suite discovery/policy lives in `crates/seedbox-check/src/`.
+- Application workloads taking minutes (`harness/acceptance/long`, derived and
+  determinism cases) use feature `long-application-tests`; only the
+  `mac-apps-long`/`linux-apps-long` suites, in no group, run them.
 - Ordinary Seedbox CI remains automatic. The expensive native DynamoRIO workflow
   is manual-only; after updating `vendor/dynamorio`, dispatch it for both x86-64
   and ARM64. See internals for local commands and hosted workflow details.

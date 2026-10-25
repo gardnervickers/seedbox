@@ -52,6 +52,10 @@ name = "applications"
 required-features = ["application-tests"]
 
 [[test]]
+name = "determinism"
+required-features = ["long-application-tests"]
+
+[[test]]
 name = "long_applications"
 required-features = ["long-application-tests"]
 
