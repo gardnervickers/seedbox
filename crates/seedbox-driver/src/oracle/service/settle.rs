@@ -308,6 +308,10 @@ impl Service {
     /// one never sent because its rebooted machine was not ready again in
     /// time: like one for a down machine, it is unavailable. One waiting for
     /// a first boot that never becomes ready still fails.
+    ///
+    /// Commands admitted after it for that boot were checked against its
+    /// effect and would follow it, so the unsent ones are unavailable with it:
+    /// a restart never reaches the guest without its stop.
     pub(crate) fn deadline(&mut self, fault: u32, at: u64) -> Result<Vec<Plan>, Failure> {
         self.valid()?;
         if let Some(p) = self.pending.get(&fault) {
@@ -315,7 +319,13 @@ impl Service {
                 return Err("early effect deadline".into());
             }
             if p.command.is_none() && p.scope.machine().is_some_and(|(_, boot)| boot > 0) {
-                return self.finish(
+                let behind: Vec<u32> = (self.pending.range(fault + 1..))
+                    .filter(|(_, q)| {
+                        q.scope == p.scope && q.effect.guest_command() && q.command.is_none()
+                    })
+                    .map(|(&id, _)| id)
+                    .collect();
+                let mut plans = self.finish(
                     fault,
                     at,
                     at,
@@ -323,7 +333,19 @@ impl Service {
                         ErrorCode::TargetUnavailable,
                         "target machine was not ready again in time",
                     )),
-                );
+                )?;
+                for id in behind {
+                    let detail = format!("sequenced behind fault {fault}, which was not delivered");
+                    match self.finish(id, at, at, Err(error(ErrorCode::TargetUnavailable, detail)))
+                    {
+                        Ok(p) => plans.extend(p),
+                        Err(mut failure) => {
+                            failure.retain_before(plans);
+                            return Err(failure);
+                        }
+                    }
+                }
+                return Ok(plans);
             }
             return Err(self.fatal(Some(fault), Some(at), at, "process effect deadline expired"));
         }

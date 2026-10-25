@@ -141,3 +141,101 @@ fn a_first_boot_that_is_never_ready_fails_a_process_fault_at_its_deadline() {
         SettlementStatus::Failed
     );
 }
+
+fn stop(nanos: u64) -> Action {
+    Action::Stop {
+        target: target(),
+        deadline: deadline(nanos),
+    }
+}
+fn restart(nanos: u64) -> Action {
+    Action::Restart {
+        target: target(),
+        deadline: deadline(nanos),
+    }
+}
+fn application(d: &Driver<Mock>) -> Vec<crate::pv::ApplicationCommand> {
+    commands(d)
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::Application { command, .. } => Some(command),
+            _ => None,
+        })
+        .collect()
+}
+fn rejected(events: &[Event], name: &str) -> Option<InputRejection> {
+    events.iter().find_map(|event| match &event.kind {
+        EventKind::InputRejected { key, rejection } if key.as_str() == name => {
+            Some(rejection.clone())
+        }
+        _ => None,
+    })
+}
+fn admitted(events: &[Event], name: &str) -> FaultId {
+    events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::FaultAdmitted(FaultRecord {
+                fault,
+                origin: FaultOrigin::Input { key },
+                ..
+            }) if key.as_str() == name => Some(*fault),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{name} was not admitted"))
+}
+
+/// A restart requested while its stop is still being reaped is admitted and
+/// follows the stop, as the supervisor carries out commands in order; a
+/// process pause requested behind that stop is refused.
+#[test]
+fn a_restart_requested_before_its_stop_lands_follows_it() {
+    use crate::pv::ApplicationCommand::{Start, Stop};
+    let mut d = driver(vec![]);
+    input(&mut d, 10, "stop", stop(100));
+    let pause = Action::PauseProcess {
+        target: target(),
+        deadline: deadline(100),
+    };
+    input(&mut d, 11, "pause", pause);
+    // The guest acknowledges the stop at 13.
+    input(&mut d, 12, "restart", restart(100));
+    let events = advance(&mut d, 100);
+    assert_eq!(rejected(&events, "restart"), None);
+    assert_eq!(settlement(&events, "stop").0, SettlementStatus::Applied);
+    assert_eq!(settlement(&events, "restart").0, SettlementStatus::Applied);
+    assert_eq!(
+        rejected(&events, "pause").map(|r| r.reason),
+        Some(RejectionReason::InvalidState)
+    );
+    assert_eq!(application(&d), [Stop, Start]);
+    assert_eq!(
+        d.execution.machines[1].lifecycle.facts().unwrap().process,
+        crate::oracle::service::Process::Running
+    );
+}
+
+/// A restart queued behind a stop that never reaches a rebooted machine is
+/// never sent alone: it is unavailable with the stop, and readiness
+/// afterwards sends nothing.
+#[test]
+fn a_restart_behind_an_undelivered_stop_is_unavailable_with_it() {
+    let mut d = driver(vec![(200, Response::Ready)]);
+    reboot(&mut d);
+    input(&mut d, 30, "stop", stop(100));
+    input(&mut d, 50, "restart", restart(300));
+    let events = advance(&mut d, 400);
+    let fault = admitted(&events, "stop");
+    assert_eq!(settlement(&events, "stop").0, SettlementStatus::Unavailable);
+    assert_eq!(
+        settlement(&events, "restart"),
+        (
+            SettlementStatus::Unavailable,
+            format!(
+                "sequenced behind fault {}, which was not delivered",
+                fault.0
+            )
+        )
+    );
+    assert!(commands(&d).is_empty());
+}

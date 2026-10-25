@@ -446,14 +446,15 @@ fn concurrent_process_effects_deadline_and_early_wake_guards() {
         10,
         json!({"op":"stop","target":{"machine":"app"}}),
     );
-    let duplicate = call(
+    // A restart may follow the stop before its acknowledgment.
+    let restart = call(
         &mut s,
         &mut o,
         2,
         10,
-        json!({"op":"stop","target":{"service":"service"}}),
+        json!({"op":"restart","target":{"service":"service"}}),
     );
-    assert_ne!(fault(&duplicate), fault(&p));
+    assert_ne!(fault(&restart), fault(&p));
     assert!(s.applied(fault(&p), 10, 10).is_err()); // cannot bypass guest ack
     assert!(s.deadline(fault(&p), 11).is_err());
     assert!(!s.poisoned);
@@ -1062,7 +1063,7 @@ fn swapped_owner_fault_does_not_retarget_failure_settlement() {
         &mut o,
         2,
         10,
-        json!({"op":"stop","target":{"machine":"app"}}),
+        json!({"op":"restart","target":{"machine":"app"}}),
     );
     let Plan::Effect {
         fault: fa,
