@@ -82,6 +82,9 @@ pub(crate) struct Native {
     held: Option<Held>,
     entered: bool,
     poisoned: bool,
+    /// Guest entries so far, interrupted ones included.
+    #[cfg(test)]
+    entries: u64,
     // The VM is destroyed in Drop before the last RAM mapping references die.
     _ram: Rc<Memory>,
     _page: Rc<Memory>,
@@ -224,6 +227,8 @@ impl Backend for Native {
             landing: std::ptr::null(),
             held: None,
             entered: false,
+            #[cfg(test)]
+            entries: 0,
             poisoned: false,
             _ram: ram,
             _page: page,
@@ -297,6 +302,10 @@ impl Backend for Native {
             return Err("HVF entry with poisoned or incomplete state".into());
         }
         self.entered = true;
+        #[cfg(test)]
+        {
+            self.entries += 1;
+        }
         unsafe {
             checked("HVF run", hv_vcpu_run(self.cpu()?))?;
         }
@@ -532,6 +541,8 @@ impl Drop for Native {
     }
 }
 
+#[cfg(test)]
+mod guest_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

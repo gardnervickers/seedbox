@@ -48,6 +48,16 @@ impl Backend for Scripted {
         self.irqs.push((n, v));
         Ok(())
     }
+    fn canonical_pending_io(&self) -> Result<Vec<u8>> {
+        Ok(vec![0])
+    }
+    fn stopped_parts(&mut self) -> Result<Vec<(String, String)>> {
+        // The scripted register file, not a native register projection.
+        Ok(vec![super::super::evidence::part(
+            "cpu",
+            &(&self.core[..], &self.system),
+        )?])
+    }
     fn capture(&self) -> Result<Architecture> {
         Err("script capture unused".into())
     }
@@ -246,4 +256,156 @@ fn unknown_psci_call_returns_not_supported_and_wfi_stays_blocked() {
     );
     assert_eq!(vm.native.core[0], u64::MAX);
     assert!(!vm.ended);
+}
+
+/// One-component mutations of a stopped machine against each comparison
+/// field. The execution chain records native interactions only; pending
+/// output belongs to the pending-IO witness; the stopped state parts project
+/// CPU, clock, interrupt controller and PL011 registers, devices and RAM with
+/// the PV page; the disk is compared through its own digests, now and after a
+/// power loss. The matrix states what each mutation must change and what it
+/// must leave alone.
+#[test]
+fn each_component_mutation_changes_exactly_its_comparison_fields() {
+    use super::super::block::Block;
+    use seedbox_machine::machine::{combined_digest, disk::Store, hex};
+    use sha2::{Digest, Sha256};
+    let root = tempfile::tempdir().unwrap();
+    let fresh = || {
+        let mut image = vec![0; 64];
+        image[16..24].copy_from_slice(&4096u64.to_le_bytes());
+        image[56..60].copy_from_slice(b"ARM\x64");
+        let mut store = Store::zeroed(16).unwrap();
+        store.write(1, &[3; 512]).unwrap();
+        store.flush();
+        store.write(2, &[5; 512]).unwrap();
+        // Small RAM keeps the per-field RAM digests cheap.
+        let mut vm: Machine<Scripted> = Machine::boot_with_memory(
+            &image,
+            b"initrd",
+            7,
+            "",
+            Some(store),
+            Some([2, 0, 0, 0, 0, 1]),
+            16 << 20,
+        )
+        .unwrap();
+        let policy = super::super::super::policy::Named::new(
+            "node",
+            &seedbox_machine::definition::BackendPolicy::default(),
+        )
+        .unwrap()
+        .setup(0);
+        vm.configure_policy(Some(&policy)).unwrap();
+        vm.state.now = 10;
+        vm.uart(0, 4, true, b'r' as u64).unwrap();
+        vm.record_native(b'w', 4, 0x0900_0000, 1);
+        unsafe {
+            vm.ram
+                .modify(|ram| ram[0x2000..0x200a].copy_from_slice(b"guest data"))
+        };
+        vm
+    };
+    fn edit_disk(vm: &mut Machine<Scripted>, edit: impl FnOnce(&mut Store)) {
+        let block = vm.block.as_ref().unwrap();
+        let mut store = block.store().clone();
+        edit(&mut store);
+        vm.block = Some(Block::restore(block.transport().clone(), store));
+    }
+    let mut taken = 0;
+    let mut fields = |vm: &mut Machine<Scripted>| -> BTreeMap<String, String> {
+        taken += 1;
+        let evidence = vm
+            .stopped_evidence(&root.path().join(taken.to_string()))
+            .unwrap();
+        let execution = vm.native_execution().unwrap();
+        let store = vm.block.as_ref().unwrap().store();
+        let mut fields: BTreeMap<String, String> = evidence.parts.iter().cloned().collect();
+        fields.insert("state".into(), combined_digest(&evidence.parts));
+        fields.insert("chain".into(), hex(&execution.chain));
+        fields.insert("pending".into(), hex(&Sha256::digest(&execution.pending)));
+        fields.insert("disk".into(), store.state_digest(false).unwrap());
+        let (lost, _) = store.crash(None, 0).unwrap();
+        fields.insert("disk_after_loss".into(), lost.state_digest(false).unwrap());
+        fields
+    };
+    let original = fields(&mut fresh());
+    assert_eq!(
+        fields(&mut fresh()),
+        original,
+        "evidence is not reproducible"
+    );
+    type Mutation = fn(&mut Machine<Scripted>);
+    let matrix: [(&str, Mutation, &[&str]); 9] = [
+        (
+            "console byte",
+            |vm| {
+                let seedbox_machine::pv::transport::GuestWrite::Console(write) =
+                    &mut vm.state.writes[0]
+                else {
+                    panic!("console write");
+                };
+                write.bytes[0] ^= 1;
+            },
+            &["pending", "pending_writes", "state"],
+        ),
+        ("exit record", |vm| vm.state.witness[0] ^= 1, &["chain"]),
+        (
+            "timer delivery",
+            |vm| {
+                vm.state.deadline = Some(vm.state.now);
+                vm.interrupts().unwrap();
+            },
+            &["clock", "devices", "state"],
+        ),
+        (
+            "PL011 register",
+            |vm| {
+                vm.uart(0x38, 4, true, 0x20).unwrap();
+            },
+            &["devices", "state"],
+        ),
+        (
+            "unflushed sector",
+            |vm| edit_disk(vm, |s| s.write(2, &[6; 512]).unwrap()),
+            &["disk"],
+        ),
+        (
+            "durable sector",
+            |vm| {
+                edit_disk(vm, |s| {
+                    s.write(1, &[4; 512]).unwrap();
+                    s.flush();
+                })
+            },
+            &["disk", "disk_after_loss"],
+        ),
+        (
+            "guest RAM byte",
+            |vm| unsafe { vm.ram.modify(|ram| ram[0x2000] = b'G') },
+            &["ram", "ram_pages", "state"],
+        ),
+        (
+            "exclusive epoch",
+            |vm| vm.boundary().unwrap(),
+            &["ram", "ram_pages", "state"],
+        ),
+        (
+            "CPU register",
+            |vm| vm.native.set_core(3, 7).unwrap(),
+            &["cpu", "state"],
+        ),
+    ];
+    for (name, mutate, expected) in matrix {
+        let mut vm = fresh();
+        mutate(&mut vm);
+        let changed: Vec<String> = fields(&mut vm)
+            .into_iter()
+            .filter(|(field, value)| original[field] != *value)
+            .map(|(field, _)| field)
+            .collect();
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        assert_eq!(changed, expected, "{name}");
+    }
 }
