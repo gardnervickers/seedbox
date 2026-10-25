@@ -40,6 +40,17 @@ pub use status::{ExecutionTermination, Phase, Stage, StageTiming, TestVerdict};
 mod seeds;
 pub use seeds::{SeedRangeRequest, SeedRangeStatus};
 
+pub mod analysis;
+pub mod campaign;
+pub mod explanation;
+pub use analysis::{Analysis, AnalysisArm, AnalysisArmKind, AnalysisRequest};
+pub use campaign::{
+    CampaignAssessment, CampaignMember, CampaignPlan, CampaignProperty, CampaignRequest,
+    CampaignStatus, Finding, FindingLabel, MemberPlan, Mutation,
+};
+pub use explanation::{Explanation, ExplanationEntry, ExplanationKind};
+pub use seedbox_engine_protocol::fault_profile::FaultProfile;
+
 pub use seedbox_engine_protocol::out_of_memory::Kill as OutOfMemoryVictim;
 mod properties;
 pub use properties::{

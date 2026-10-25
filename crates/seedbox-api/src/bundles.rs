@@ -29,4 +29,9 @@ impl Default for BundleTransferQuery {
 }
 
 /// Portable resumable execution state and its complete binary closure.
+/// `GET /v1/simulations/{id}/cold-bundle` (a [`BundleTransferQuery`]) will
+/// return the same format with a fresh start in place of captured state: the
+/// simulation's whole program, its ancestors' consumed inputs first, over
+/// its root's preparation, so a branched run reproduces without its start
+/// checkpoint. It answers `notImplemented` for now.
 pub const CHECKPOINT_CONTENT_TYPE: &str = "application/vnd.seedbox.checkpoint+tar";

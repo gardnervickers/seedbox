@@ -156,7 +156,7 @@ pub async fn pv_lifecycle_replay(pair: LifecyclePair) {
         applied_once(session, &source, &[interrupted, recovered]).await;
         let resource = session.client.describe(&source).await.unwrap();
         assert_eq!(resource.spec.program.len(), 2);
-        let replay = session.submit(SubmitRequest { metadata: Default::default(), options: Default::default(), request_id: "lifecycle-replay".into(), spec: resource.spec }, 1).await;
+        let replay = session.submit(SubmitRequest { fault_profile: None, metadata: Default::default(), options: Default::default(), request_id: "lifecycle-replay".into(), spec: resource.spec }, 1).await;
         session.worker(&replay).await;
         assert_eq!(session.complete(&replay, false, 1, SEED).await.unwrap(), witness);
         assert_eq!(target_log(session, &replay).await, (output.clone(), boots));

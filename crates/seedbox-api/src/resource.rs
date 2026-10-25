@@ -179,6 +179,11 @@ pub struct ExecutionOptions {
     /// part of the simulation identity and never changes results.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_workers: Option<u32>,
+    /// Anchor inputs to capture checkpoints at, by key, as checkpoint
+    /// `anchor-<key>`. Captures are caches: a cold run takes the same path.
+    /// No worker captures anchors yet, so submission refuses any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capture_anchors: Vec<String>,
 }
 
 /// Request identity is scoped to this catalogue and retained for as long as its
@@ -192,6 +197,11 @@ pub struct SubmitRequest {
     pub metadata: seedbox_spec::definition::Metadata,
     pub request_id: String,
     pub spec: SimulationSpec,
+    /// Faults to generate, once, into the simulation's program from its
+    /// seed. Rerun and replay execute the generated inputs and never sample
+    /// this again. Nothing samples profiles yet, so submission refuses one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault_profile: Option<seedbox_engine_protocol::fault_profile::FaultProfile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,6 +430,36 @@ mod tests {
             };
             assert!(serde_json::from_value::<SimulationSpec>(spec).is_err());
         }
+    }
+
+    #[test]
+    fn exploration_options_are_request_options_omitted_when_unused() {
+        let options: ExecutionOptions =
+            serde_json::from_value(serde_json::json!({"captureAnchors": ["a0", "a1"]})).unwrap();
+        assert_eq!(options.capture_anchors, ["a0", "a1"]);
+        assert!(serde_json::to_value(ExecutionOptions::default())
+            .unwrap()
+            .get("captureAnchors")
+            .is_none());
+        let request = SubmitRequest {
+            options: ExecutionOptions::default(),
+            metadata: Default::default(),
+            request_id: "r".into(),
+            spec: project(),
+            fault_profile: None,
+        };
+        let mut wire = serde_json::to_value(&request).unwrap();
+        assert!(wire.get("faultProfile").is_none());
+        wire["faultProfile"] = serde_json::json!({
+            "end_ns": 10, "interval_ns": 1, "faults": [{"kind": "pause", "duration_ns": {"min": 1, "max": 1}}],
+        });
+        let profiled: SubmitRequest = serde_json::from_value(wire).unwrap();
+        profiled.fault_profile.unwrap().validate().unwrap();
+        // A profile is never part of the spec, so resubmitting a simulation
+        // document never samples it again.
+        let mut spec = serde_json::to_value(project()).unwrap();
+        spec["faultProfile"] = serde_json::json!({});
+        assert!(serde_json::from_value::<SimulationSpec>(spec).is_err());
     }
 
     #[test]

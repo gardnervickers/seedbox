@@ -136,6 +136,7 @@ async fn faulted_and_replayed(
     let replay = session
         .submit(
             SubmitRequest {
+                fault_profile: None,
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "network-fault-replay".into(),
@@ -461,6 +462,7 @@ pub async fn network_drop_connection_replay(backend: CpuBackend) {
             let replay = session
                 .submit(
                     SubmitRequest {
+                        fault_profile: None,
                         metadata: Default::default(),
                         options: Default::default(),
                         request_id: "drop-connection-replay".into(),

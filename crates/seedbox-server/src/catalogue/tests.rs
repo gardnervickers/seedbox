@@ -103,3 +103,51 @@ fn project_programs_may_not_use_reserved_keys() {
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
+
+#[test]
+fn fault_profiles_and_anchor_captures_are_refused_after_their_own_checks() {
+    let mut catalogue = Catalogue::in_memory();
+    let request = |profile: Option<serde_json::Value>, anchors: Vec<String>| SubmitRequest {
+        options: seedbox_api::ExecutionOptions {
+            capture_anchors: anchors,
+            ..Default::default()
+        },
+        metadata: Default::default(),
+        request_id: "explore-1".into(),
+        spec: spec(json!({"action":"crash","machine":"db"})),
+        fault_profile: profile.map(|p| serde_json::from_value(p).unwrap()),
+    };
+    let profile = json!({"end_ns": 10_000, "interval_ns": 1_000,
+                         "faults": [{"kind": "crash", "downtime_ns": {"min": 1, "max": 2}}]});
+    match catalogue.submit(request(Some(profile.clone()), vec![])) {
+        Err(Error::NotImplemented(message)) => {
+            assert_eq!(message, "fault profile is not implemented yet")
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    let mut invalid = profile;
+    invalid["interval_ns"] = 0.into();
+    assert!(matches!(
+        catalogue.submit(request(Some(invalid), vec![])),
+        Err(Error::Invalid(message)) if message.contains("interval_ns must be positive")
+    ));
+    assert!(matches!(
+        catalogue.submit(request(None, vec!["a0".into()])),
+        Err(Error::NotImplemented(message)) if message.contains("anchor capture is not implemented yet")
+    ));
+    // Nothing was recorded, so the same request ID is still free.
+    assert!(catalogue.submit(request(None, vec![])).is_ok());
+}
+
+#[test]
+fn profiles_must_fit_the_program_input_budget() {
+    let profile: seedbox_api::FaultProfile = serde_json::from_value(json!({
+        "end_ns": 10_000, "interval_ns": 1, "max_faults": 1024,
+        "faults": [{"kind": "crash", "downtime_ns": {"min": 1, "max": 2}}],
+    }))
+    .unwrap();
+    let max = seedbox_engine_protocol::input_program::MAX_INPUTS;
+    fits_input_budget(&profile, max - 2048).unwrap();
+    let error = fits_input_budget(&profile, max - 2047).unwrap_err();
+    assert!(error.contains("leaves no room"), "{error}");
+}

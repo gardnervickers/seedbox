@@ -9,7 +9,8 @@ pub enum ErrorCode {
     Conflict,
     Unavailable,
     Internal,
-    /// The request is well formed, but no engine carries it out yet.
+    /// The request is well formed, but no server or engine carries it out
+    /// yet (HTTP 501).
     NotImplemented,
 }
 

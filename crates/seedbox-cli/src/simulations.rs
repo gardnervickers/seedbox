@@ -156,6 +156,7 @@ pub(super) fn run(
         server,
         spec,
         seedbox_api::ExecutionOptions {
+            capture_anchors: Vec::new(),
             backend,
             start_paused: paused,
             wall_time_ns,
@@ -189,6 +190,7 @@ pub(super) fn run_checkpoint(
         server,
         spec,
         seedbox_api::ExecutionOptions {
+            capture_anchors: Vec::new(),
             backend,
             start_paused: paused,
             wall_time_ns: selection.wall_time,
@@ -224,7 +226,9 @@ pub(super) fn run_count(
         return Err(Error::Setup("seed range overflows u64".into()));
     }
     let mut request = seedbox_api::SeedRangeRequest {
+        fault_profile: None,
         options: seedbox_api::ExecutionOptions {
+            capture_anchors: Vec::new(),
             backend,
             start_paused: paused,
             wall_time_ns,
@@ -405,6 +409,7 @@ pub(super) fn replay(
         server,
         resource.spec,
         seedbox_api::ExecutionOptions {
+            capture_anchors: Vec::new(),
             backend,
             start_paused: paused,
             wall_time_ns,
@@ -463,6 +468,7 @@ fn submit_with_comparison(
     baseline: Option<&SimulationId>,
 ) -> Result<u8> {
     let mut request = SubmitRequest {
+        fault_profile: None,
         options,
         metadata,
         request_id: Client::request_id().map_err(client_error)?,

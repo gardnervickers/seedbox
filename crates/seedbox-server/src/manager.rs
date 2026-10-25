@@ -1257,6 +1257,7 @@ mod tests {
         .unwrap();
         let id = manager
             .submit(SubmitRequest {
+                fault_profile: None,
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "world-logs".into(),
@@ -1315,6 +1316,7 @@ mod tests {
         .unwrap();
         let id = manager
             .submit(SubmitRequest {
+                fault_profile: None,
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "oversized-events".into(),
@@ -1459,6 +1461,7 @@ mod tests {
             .unwrap();
             let resource = manager
                 .submit(SubmitRequest {
+                    fault_profile: None,
                     metadata: Default::default(),
                     options: Default::default(),
                     request_id: "oracle-observation".into(),
@@ -1539,6 +1542,7 @@ mod tests {
         .unwrap();
         let resource = manager
             .submit(SubmitRequest {
+                fault_profile: None,
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "readiness".into(),

@@ -72,6 +72,7 @@ fn unknown_input_sources_return_not_found_without_creating_resources() {
     );
     assert_eq!(catalogue.list().count(), 0);
     let range = SeedRangeRequest {
+        fault_profile: None,
         metadata: submission.metadata,
         options: submission.options,
         request_id: submission.request_id,
@@ -382,6 +383,7 @@ fn seed_range_waits_for_frozen_inputs_and_continues_once() {
     let mut catalogue = Catalogue::in_memory();
     let base = request();
     let request = SeedRangeRequest {
+        fault_profile: None,
         metadata: Default::default(),
         options: Default::default(),
         request_id: base.request_id,

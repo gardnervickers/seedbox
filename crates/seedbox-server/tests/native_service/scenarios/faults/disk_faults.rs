@@ -111,7 +111,7 @@ pub async fn pv_disk_crash_reboot_replay() {
         let final_output = lifecycle::target_log(session, &source).await;
         let resource = session.client.describe(&source).await.unwrap();
         assert_eq!(resource.spec.program.len(), 2);
-        let replay = session.submit(SubmitRequest { metadata: Default::default(), options: Default::default(), request_id: "disk-fault-replay".into(), spec: resource.spec }, 1).await;
+        let replay = session.submit(SubmitRequest { fault_profile: None, metadata: Default::default(), options: Default::default(), request_id: "disk-fault-replay".into(), spec: resource.spec }, 1).await;
         session.worker(&replay).await;
         assert_eq!(session.complete(&replay, false, 1, SEED).await.unwrap(), witness);
         assert_eq!(lifecycle::target_log(session, &replay).await, final_output);

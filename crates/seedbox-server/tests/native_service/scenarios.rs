@@ -663,6 +663,7 @@ fn fixture_submission(
         seedbox_application::definition::resolve(&configuration, &inputs, seed, vec![]).unwrap();
     assert_eq!(definition.simulator.oracle_control, fixture.control);
     let mut request = SubmitRequest {
+        fault_profile: None,
         metadata: Default::default(),
         options: Default::default(),
         request_id: fixture.request_id,
@@ -1924,6 +1925,7 @@ fn network_world_submission(
     assert_eq!(definition.simulator.oracle_control, controller);
     assert_eq!(definition.machines.len(), machines.len() - 1);
     let mut request = SubmitRequest {
+        fault_profile: None,
         metadata: Default::default(),
         options: Default::default(),
         request_id: "in-flight".into(),

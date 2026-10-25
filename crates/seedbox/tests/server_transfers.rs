@@ -327,6 +327,7 @@ use seedbox_api::{InputSource, SimulationSpec, SubmitRequest};
 
 fn request() -> SubmitRequest {
     SubmitRequest {
+        fault_profile: None,
         metadata: Default::default(),
         options: Default::default(),
         request_id: "submit-123".into(),

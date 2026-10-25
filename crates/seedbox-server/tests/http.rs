@@ -467,6 +467,7 @@ async fn timeline_reads_live_journal_in_admission_order_without_mutating_definit
     assert_eq!(retained_manager.describe(&id).unwrap(), completed);
     let resubmitted = client
         .submit(&seedbox_api::SubmitRequest {
+            fault_profile: None,
             metadata: Default::default(),
             options: Default::default(),
             request_id: "recorded-definition".into(),
@@ -586,6 +587,124 @@ async fn native_acceptance_submissions_round_trip_over_unix_http() {
             client.describe(&simulation.metadata.id).await.unwrap(),
             simulation
         );
+    }
+    shutdown.send(()).unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn exploration_endpoints_check_requests_then_answer_not_implemented() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = Arc::new(seedbox_server::manager::Manager::new(Catalogue::in_memory()));
+    let (work, _pending) = mpsc::channel(4);
+    let socket = temp.path().join("api.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let (shutdown, done) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router(ApiState::new(manager, work)))
+            .with_graceful_shutdown(async {
+                let _ = done.await;
+            })
+            .await
+            .unwrap();
+    });
+    let client = Client::connect_to(&socket).unwrap();
+    let id = client
+        .submit(&test_support::request())
+        .await
+        .unwrap()
+        .metadata
+        .id;
+    let refused = |result: Result<(), Error>, what: &str| match result {
+        Err(Error::Rejected { code, message }) => {
+            assert_eq!(code, ErrorCode::NotImplemented, "{message}");
+            assert_eq!(message, format!("{what} is not implemented yet"));
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    };
+    let mut campaign = seedbox_api::CampaignRequest {
+        options: Default::default(),
+        metadata: Default::default(),
+        request_id: "campaign-1".into(),
+        spec: test_support::request().spec,
+        fault_profile: None,
+        plan: seedbox_api::CampaignPlan {
+            planner_seed: None,
+            budget: 8,
+            batch: 4,
+            fresh_permille: 250,
+            corpus_limit: 2,
+            anchors_ns: vec![2_000_000_000],
+        },
+        group_by: vec![],
+        baseline: None,
+    };
+    refused(
+        client.submit_campaign(&campaign).await.map(drop),
+        "campaign",
+    );
+    refused(client.campaign(&id).await.map(drop), "campaign");
+    refused(client.stop_campaign(&id).await.map(drop), "campaign");
+    campaign.plan.batch = 0;
+    assert!(matches!(
+        client.submit_campaign(&campaign).await,
+        Err(Error::Rejected { code: ErrorCode::InvalidRequest, message }) if message.contains("batch")
+    ));
+    let mut analysis = seedbox_api::AnalysisRequest {
+        request_id: "why".into(),
+        options: Default::default(),
+        samples: 8,
+        times: 4,
+        faults: true,
+        property: None,
+    };
+    refused(
+        client.submit_analysis(&id, &analysis).await.map(drop),
+        "analysis",
+    );
+    refused(client.analysis(&id, "why").await.map(drop), "analysis");
+    analysis.samples = 0;
+    assert!(matches!(
+        client.submit_analysis(&id, &analysis).await,
+        Err(Error::Rejected {
+            code: ErrorCode::InvalidRequest,
+            ..
+        })
+    ));
+    refused(client.explanation(&id).await.map(drop), "explanation");
+    // An unknown simulation is not found before anything is refused.
+    let unknown: seedbox_api::SimulationId = "b7m2p9qx".parse().unwrap();
+    for result in [
+        client.campaign(&unknown).await.map(drop),
+        client.explanation(&unknown).await.map(drop),
+        client.analysis(&unknown, "why").await.map(drop),
+    ] {
+        assert!(
+            matches!(
+                &result,
+                Err(Error::Rejected {
+                    code: ErrorCode::NotFound,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+    }
+    // A profile on an ordinary submission is refused the same way.
+    let mut request = test_support::request();
+    request.fault_profile = Some(
+        serde_json::from_value(serde_json::json!({
+            "end_ns": 10_000, "interval_ns": 1_000,
+            "faults": [{"kind": "crash", "downtime_ns": {"min": 1, "max": 2}}],
+        }))
+        .unwrap(),
+    );
+    match client.submit(&request).await {
+        Err(Error::Rejected { code, message }) => {
+            assert_eq!(code, ErrorCode::NotImplemented);
+            assert_eq!(message, "fault profile is not implemented yet");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
     }
     shutdown.send(()).unwrap();
     server.await.unwrap();

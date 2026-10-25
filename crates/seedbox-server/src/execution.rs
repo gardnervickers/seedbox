@@ -885,6 +885,7 @@ mod tests {
             service.platform.clear();
         }
         let request = |name: &str| SubmitRequest {
+            fault_profile: None,
             metadata: Default::default(),
             options: Default::default(),
             request_id: name.into(),
@@ -1087,6 +1088,7 @@ mod tests {
         };
         let resource = manager
             .submit_seeds(seedbox_api::SeedRangeRequest {
+                fault_profile: None,
                 metadata: Default::default(),
                 options: seedbox_api::ExecutionOptions {
                     machine_workers: Some(4),
@@ -1136,6 +1138,7 @@ mod tests {
         .unwrap();
         let id = manager
             .submit(SubmitRequest {
+                fault_profile: None,
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "late-report".into(),
@@ -1200,6 +1203,7 @@ mod tests {
         .unwrap();
         let resource = manager
             .submit(SubmitRequest {
+                fault_profile: None,
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "delete-control-io".into(),
@@ -1295,6 +1299,7 @@ mod tests {
         .unwrap();
         let resource = manager
             .submit(SubmitRequest {
+                fault_profile: None,
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "delete-control-io".into(),
@@ -1397,6 +1402,7 @@ mod tests {
         }
         let resource = manager
             .submit(SubmitRequest {
+                fault_profile: None,
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "timeout".into(),

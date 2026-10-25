@@ -158,6 +158,7 @@ mod tests {
             .unwrap();
             let resource = manager
                 .submit(SubmitRequest {
+                    fault_profile: None,
                     metadata: Default::default(),
                     options: Default::default(),
                     request_id: name.into(),

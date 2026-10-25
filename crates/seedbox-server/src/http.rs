@@ -3,6 +3,7 @@
 
 mod checkpoint_bundle;
 mod checkpoint_export;
+mod exploration;
 
 use crate::{catalogue::Error as CatalogueError, manager::Manager};
 use axum::{
@@ -77,6 +78,28 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/seed-ranges", post(submit_seeds))
         .route("/v1/simulations/{id}/seeds", get(seed_range))
         .route("/v1/simulations/{id}/seeds/stop", post(stop_seeds))
+        .route("/v1/campaigns", post(exploration::submit_campaign))
+        .route("/v1/simulations/{id}/campaign", get(exploration::campaign))
+        .route(
+            "/v1/simulations/{id}/campaign/stop",
+            post(exploration::campaign),
+        )
+        .route(
+            "/v1/simulations/{id}/analyses",
+            post(exploration::submit_analysis),
+        )
+        .route(
+            "/v1/simulations/{id}/analyses/{request_id}",
+            get(exploration::analysis),
+        )
+        .route(
+            "/v1/simulations/{id}/explanation",
+            get(exploration::explanation),
+        )
+        .route(
+            "/v1/simulations/{id}/cold-bundle",
+            get(exploration::cold_bundle),
+        )
         .route(
             "/v1/simulations/{id}",
             get(describe).delete(delete_simulation),

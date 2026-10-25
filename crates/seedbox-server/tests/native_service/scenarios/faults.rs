@@ -141,7 +141,7 @@ pub async fn pv_throttle_heal_replay() {
         assert_eq!(resource.spec.program.len(), 2);
         assert!(matches!(&resource.spec.inputs, InputSource::Resolved { definition }
             if definition.overrides == resource.spec.program));
-        let replay = session.submit(SubmitRequest { metadata: Default::default(), options: Default::default(), request_id: "fault-replay".into(), spec: resource.spec }, 4).await;
+        let replay = session.submit(SubmitRequest { fault_profile: None, metadata: Default::default(), options: Default::default(), request_id: "fault-replay".into(), spec: resource.spec }, 4).await;
         session.worker(&replay).await;
         let replay_witness = session.complete(&replay, false, 4, SEED).await.unwrap();
         assert_eq!(source_witness, replay_witness);

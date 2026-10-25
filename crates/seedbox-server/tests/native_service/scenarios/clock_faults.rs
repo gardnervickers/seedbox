@@ -243,6 +243,7 @@ async fn clock_case(backend: CpuBackend, case: ClockCase) {
         let resource = session.client.describe(&source).await.unwrap();
         assert_eq!(resource.spec.program.len(), 2);
         let replay = session.submit(SubmitRequest {
+            fault_profile: None,
             metadata: Default::default(), options: Default::default(),
             request_id: "clock-replay".into(), spec: resource.spec,
         }, 1).await;

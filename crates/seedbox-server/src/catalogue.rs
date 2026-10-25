@@ -40,7 +40,8 @@ pub enum Error {
     RevisionConflict,
     #[error("host randomness unavailable: {0}")]
     Random(String),
-    /// A well-formed input or action that no engine carries out yet.
+    /// A well-formed request, input or action that no engine or server
+    /// carries out yet.
     #[error("{0}")]
     NotImplemented(String),
 }
@@ -200,6 +201,7 @@ impl Catalogue {
             .map_err(|_| Error::Invalid("host clock cannot be represented".into()))?;
         resource.status.playback = None;
         let request = SubmitRequest {
+            fault_profile: None,
             request_id: format!("import-{id}"),
             options: resource.options.clone(),
             metadata: seedbox_spec::definition::Metadata {
@@ -250,6 +252,7 @@ impl Catalogue {
         )
         .map_err(|e| Error::Invalid(e.to_string()))?;
         validate_request_id(&request.request_id)?;
+        refuse_exploration_options(&request)?;
         if let Some(id) = self.requests.get(&request.request_id) {
             let entry = &self.entries[id];
             if entry.request != request
@@ -793,6 +796,41 @@ fn check_injected(command: &seedbox_api::ControlCommand) -> Result<()> {
                 seedbox_engine_protocol::not_implemented(action.name()),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Fault profiles and anchor captures are defined request options that no
+/// server carries out yet. A profile's own shape, and room in the program
+/// for every input it can generate, are checked first.
+fn refuse_exploration_options(request: &SubmitRequest) -> Result<()> {
+    if let Some(profile) = &request.fault_profile {
+        profile.validate().map_err(Error::Invalid)?;
+        fits_input_budget(profile, request.spec.program.len()).map_err(Error::Invalid)?;
+        return Err(Error::NotImplemented(
+            seedbox_engine_protocol::not_implemented("fault profile"),
+        ));
+    }
+    if !request.options.capture_anchors.is_empty() {
+        return Err(Error::NotImplemented(
+            seedbox_engine_protocol::not_implemented("anchor capture"),
+        ));
+    }
+    Ok(())
+}
+
+/// A program of `authored` inputs leaves room for every start and teardown
+/// the profile can generate.
+pub(crate) fn fits_input_budget(
+    profile: &seedbox_api::FaultProfile,
+    authored: usize,
+) -> std::result::Result<(), String> {
+    let max = seedbox_engine_protocol::input_program::MAX_INPUTS;
+    if authored + profile.max_inputs() > max {
+        return Err(format!(
+            "a program of {authored} inputs leaves no room for the profile's {} generated inputs; a program holds at most {max}",
+            profile.max_inputs()
+        ));
     }
     Ok(())
 }

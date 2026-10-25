@@ -329,6 +329,7 @@ fn request(store: &ContentStore) -> SubmitRequest {
     let definition =
         seedbox_application::definition::resolve(&configuration, &inputs, 123, vec![]).unwrap();
     let mut request = SubmitRequest {
+        fault_profile: None,
         request_id: "paused-owned-execution".into(),
         metadata: Default::default(),
         options: Default::default(),

@@ -22,6 +22,7 @@ impl Catalogue {
         }
         self.submit_inner(
             SubmitRequest {
+                fault_profile: request.fault_profile,
                 request_id: request.request_id,
                 spec: request.spec,
                 options: request.options,
@@ -154,6 +155,8 @@ impl Catalogue {
 
         let member = match self.submit_inner(
             SubmitRequest {
+                // Each member samples the range's profile with its own seed.
+                fault_profile: entry.request.fault_profile.clone(),
                 request_id: member_request_id(&id, index),
                 options: entry.resource.options.clone(),
                 metadata: seedbox_spec::definition::Metadata {
@@ -189,6 +192,7 @@ mod tests {
 
     fn request(name: &str) -> SeedRangeRequest {
         SeedRangeRequest {
+            fault_profile: None,
             metadata: Default::default(),
             options: Default::default(),
             request_id: name.into(),
@@ -223,6 +227,7 @@ mod tests {
         let (source, _) = catalogue.submit_seeds(request("broken-range")).unwrap();
         let id = source.metadata.id.clone();
         let collision = SubmitRequest {
+            fault_profile: None,
             metadata: Default::default(),
             options: Default::default(),
             request_id: member_request_id(&id, 1),
@@ -234,6 +239,7 @@ mod tests {
         ));
         assert!(matches!(
             catalogue.submit_seeds(SeedRangeRequest {
+                fault_profile: None,
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: collision.request_id.clone(),
@@ -275,6 +281,7 @@ mod tests {
         let base = request("source");
         let source = catalogue
             .submit(SubmitRequest {
+                fault_profile: None,
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: base.request_id,
@@ -284,6 +291,7 @@ mod tests {
             .0;
         let source = complete(&mut catalogue, source);
         let mut rerun = SubmitRequest {
+            fault_profile: None,
             metadata: Default::default(),
             options: Default::default(),
             request_id: "rerun".into(),
@@ -299,6 +307,7 @@ mod tests {
         assert_eq!(catalogue.submit(rerun).unwrap().0.spec.seed, Some(124));
         assert!(catalogue
             .submit(SubmitRequest {
+                fault_profile: None,
                 metadata: Default::default(),
                 options: Default::default(),
                 request_id: "same-seed".into(),

@@ -192,6 +192,45 @@ impl Client {
             .await
     }
 
+    pub async fn submit_campaign(
+        &self,
+        request: &seedbox_api::CampaignRequest,
+    ) -> Result<seedbox_api::CampaignStatus, Error> {
+        self.document(self.json_request("/v1/campaigns", request)?)
+            .await
+    }
+    pub async fn campaign(&self, id: &SimulationId) -> Result<seedbox_api::CampaignStatus, Error> {
+        self.document(self.request(Method::GET, &format!("/v1/simulations/{id}/campaign")))
+            .await
+    }
+    pub async fn stop_campaign(
+        &self,
+        id: &SimulationId,
+    ) -> Result<seedbox_api::CampaignStatus, Error> {
+        self.document(self.request(Method::POST, &format!("/v1/simulations/{id}/campaign/stop")))
+            .await
+    }
+    pub async fn submit_analysis(
+        &self,
+        id: &SimulationId,
+        request: &seedbox_api::AnalysisRequest,
+    ) -> Result<seedbox_api::Analysis, Error> {
+        self.document(self.json_request(&format!("/v1/simulations/{id}/analyses"), request)?)
+            .await
+    }
+    pub async fn analysis(
+        &self,
+        id: &SimulationId,
+        request_id: &str,
+    ) -> Result<seedbox_api::Analysis, Error> {
+        let path = simulation_path(id, &["analyses", request_id])?;
+        self.document(self.request(Method::GET, &path)).await
+    }
+    pub async fn explanation(&self, id: &SimulationId) -> Result<seedbox_api::Explanation, Error> {
+        self.document(self.request(Method::GET, &format!("/v1/simulations/{id}/explanation")))
+            .await
+    }
+
     pub async fn compare(
         &self,
         baseline: &SimulationId,

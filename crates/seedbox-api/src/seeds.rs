@@ -12,6 +12,9 @@ pub struct SeedRangeRequest {
     pub request_id: String,
     pub spec: SimulationSpec,
     pub count: u32,
+    /// Faults to generate into each member's program, from its own seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault_profile: Option<seedbox_engine_protocol::fault_profile::FaultProfile>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

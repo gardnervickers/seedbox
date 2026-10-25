@@ -122,6 +122,7 @@ pub(crate) fn derive(
     spec.program
         .retain(|entry| included.contains(&format!("program:{}", entry.id)));
     Ok(SubmitRequest {
+        fault_profile: None,
         metadata,
         options,
         request_id: request.request_id,
