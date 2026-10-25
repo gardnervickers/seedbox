@@ -198,7 +198,13 @@ fn resolve_machine(
         volumes.push(VolumeMount {
             source: format!("{name}-{volume}"),
             target: options.target,
+            size_bytes: options.size_bytes,
         });
+    }
+    if let Err(error) =
+        seedbox_spec::project::machine_disk_bytes(volumes.iter().map(|v| v.size_bytes))
+    {
+        return invalid(&format!("{path}.volumes"), error);
     }
     Ok(Service {
         memory_mb: machine.memory_mib.map(|memory| memory.get()),
@@ -352,5 +358,29 @@ mod tests {
             crate::guest::Architecture::Arm64
         )
         .is_err());
+    }
+
+    #[test]
+    fn volume_sizes_are_optional_and_bounded_per_machine() {
+        let sim = parse_native(
+            "name: demo\nmachines:\n  db:\n    image: app\n    volumes:\n      data: {target: /data, size: 4GiB}\n      wal: {target: /wal}\noracle: {image: test}\n",
+        )
+        .unwrap();
+        let sizes: Vec<_> = sim.services["db"]
+            .volumes
+            .iter()
+            .map(|v| v.size_bytes)
+            .collect();
+        assert_eq!(sizes, [Some(4 << 30), None]);
+        let error = parse_native(
+            "name: demo\nmachines:\n  db:\n    image: app\n    volumes:\n      a: {target: /a, size: 40GiB}\n      b: {target: /b, size: 40GiB}\noracle: {image: test}\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("machines.db.volumes")
+                && error.contains("volume sizes total 80GiB, above the 64GiB limit"),
+            "{error}"
+        );
     }
 }
