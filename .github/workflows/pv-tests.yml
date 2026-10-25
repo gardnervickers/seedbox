@@ -60,7 +60,8 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_PROFILE_RELEASE_DEBUG: '0'
-    steps:
+      SUITE: pv
+    steps: &steps
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -82,6 +83,7 @@ jobs:
           fi
           df -h /
       - name: Verify usable KVM before building
+        if: env.SUITE == 'pv'
         run: |
           grep -m1 '^vendor_id' /proc/cpuinfo
           grep -m1 '^model name' /proc/cpuinfo
@@ -111,10 +113,13 @@ jobs:
       - uses: nix-community/cache-nix-action/restore@v7
         id: nix-cache
         with:
-          primary-key: pv-nix-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.sources.outputs.dynamorio }}-${{ steps.sources.outputs.nix-inputs }}-${{ github.run_id }}-${{ github.run_attempt }}
+          primary-key: ${{ env.SUITE }}-nix-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.sources.outputs.dynamorio }}-${{ steps.sources.outputs.nix-inputs }}-${{ github.run_id }}-${{ github.run_attempt }}
           # Each run saves newly realized derivations, including after an exact
           # input match. The immutable cache can only be written once per key.
+          # Both suites realize the same guest assets, so either cache will do.
           restore-prefixes-first-match: |
+            ${{ env.SUITE }}-nix-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.sources.outputs.dynamorio }}-${{ steps.sources.outputs.nix-inputs }}-
+            ${{ env.SUITE }}-nix-v3-${{ runner.os }}-${{ runner.arch }}-
             pv-nix-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.sources.outputs.dynamorio }}-${{ steps.sources.outputs.nix-inputs }}-
             pv-nix-v3-${{ runner.os }}-${{ runner.arch }}-
             pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-
@@ -124,7 +129,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         id: cargo-cache
         with:
-          key: pv-${{ hashFiles('flake.lock', 'flake.nix') }}
+          key: ${{ env.SUITE }}-${{ hashFiles('flake.lock', 'flake.nix') }}
           cmd-format: nix develop --command {0}
           workspaces: |
             . -> target
@@ -150,8 +155,10 @@ jobs:
             du -sh /nix/store
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Portable prerequisites and PV application acceptance
+        if: env.SUITE == 'pv'
         run: nix develop --command bash harness/check.sh linux-apps
       - name: Native TCG machine and public-service acceptance
+        if: env.SUITE == 'tcg'
         run: nix develop --command bash harness/check-machine-tcg.sh --skip-portable
       - name: Bound diagnostic artifact storage
         if: always()
@@ -160,7 +167,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: pv-results-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ env.SUITE }}-results-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/pv-artifacts/
           retention-days: 7
       - name: Exclude test state from the Cargo cache
@@ -168,3 +175,18 @@ jobs:
         # Diagnostics have been uploaded. Rust-cache archives the target tree,
         # so remove root-owned VM state and per-run reports before its post step.
         run: sudo rm -rf -- target/check-reports target/pv-artifacts
+
+  # The TCG suite alone needs most of the time limit, so it runs beside the
+  # PV job on its own runner. It needs neither KVM nor an image engine.
+  tcg:
+    needs: changes
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.run_tests == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      SUITE: tcg
+    steps: *steps
