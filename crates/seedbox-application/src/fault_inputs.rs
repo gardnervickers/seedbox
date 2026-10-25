@@ -25,11 +25,11 @@ pub fn validate_input_program(
                 fault_action_targets(configuration, action)
                     .map_err(|error| context(error.to_string()))?;
             }
-            // Rule shape was checked with the program; no Driver arms a
-            // program trigger yet.
-            InputAction::Rule(rule) => {
+            // Rule and branch shapes were checked with the program; no
+            // Driver arms a program trigger, answers a choice or branches yet.
+            InputAction::Rule(_) | InputAction::Branch(_) => {
                 return Err(context(seedbox_engine_protocol::not_implemented(
-                    rule.name(),
+                    input.action.name(),
                 )))
             }
         }
@@ -183,5 +183,27 @@ mod program_tests {
                 seedbox_engine_protocol::not_implemented("trigger")
             )
         );
+        for (key, action, name) in [
+            ("a0", serde_json::json!({"action": "anchor"}), "anchor"),
+            (
+                "pick",
+                serde_json::json!({"action": "choice", "machine": "db", "incarnation": 0,
+                                   "session": 1, "site": "s", "occurrence": 1, "select": 0}),
+                "choice",
+            ),
+        ] {
+            let input: TimedInput = serde_json::from_value(
+                serde_json::json!({"key": key, "at_ns": 10, "action": action}),
+            )
+            .unwrap();
+            let error = validate_input_program(&config, &[input]).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "program {key}: {}",
+                    seedbox_engine_protocol::not_implemented(name)
+                )
+            );
+        }
     }
 }

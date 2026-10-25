@@ -232,6 +232,19 @@ fn programs_with_rule_inputs_are_refused_before_any_machine_boots() {
             seedbox_engine_protocol::not_implemented("trigger")
         )
     );
+    // Branch points and choices are refused the same way.
+    request.program = vec![serde_json::from_value(serde_json::json!({
+        "key": "a0", "at_ns": 10, "action": {"action": "anchor"},
+    }))
+    .unwrap()];
+    let error = program(&request).unwrap_err().to_string();
+    assert_eq!(
+        error,
+        format!(
+            "input a0: {}",
+            seedbox_engine_protocol::not_implemented("anchor")
+        )
+    );
 }
 #[test]
 fn programs_beyond_the_engine_are_refused_before_any_machine_boots() {

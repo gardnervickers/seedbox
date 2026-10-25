@@ -754,12 +754,18 @@ pub(crate) fn resolve_program(
         })
         .collect::<Result<Vec<_>>>()?;
     // Shape, budget and arguments are reported as invalid before an input
-    // that is well formed but not implemented, and that before targets.
+    // that is well formed but not implemented, and that before targets. A
+    // project's program is authored, so it may not use the keys Seedbox
+    // reserves; retained and resolved programs keep what Seedbox generated.
     seedbox_engine_protocol::input_program::validate_program(
         &program,
         spec.configuration.limits.simulated_time_ns,
     )
     .map_err(Error::Invalid)?;
+    if matches!(spec.inputs, InputSource::Project) {
+        seedbox_engine_protocol::input_program::validate_authored_keys(&program)
+            .map_err(Error::Invalid)?;
+    }
     for input in &program {
         input
             .action

@@ -6,7 +6,8 @@
 use crate::{
     host_control::BoundaryPosition,
     input_program::{
-        ArmReceipt, InputAction, InputAdmission, InputRejection, TimedInput, TriggerProgress,
+        ArmReceipt, BranchReceipt, InputAction, InputAdmission, InputRejection, TimedInput,
+        TriggerProgress,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -173,12 +174,15 @@ pub struct Program {
     pub next: usize,
     pub admissions: Vec<InputAdmission>,
     pub rejections: Vec<InputRejection>,
-    /// Consumed trigger inputs, in program order.
+    /// Consumed rule (trigger and choice) inputs, in program order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub armed: Vec<ArmReceipt>,
     /// Live matching state of the triggers `armed` names, in trigger ID order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<TriggerProgress>,
+    /// Consumed anchors and reseeds, in program order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<BranchReceipt>,
 }
 impl Program {
     pub fn validate(&self) -> Result<(), String> {
@@ -189,6 +193,7 @@ impl Program {
                 .len()
                 .checked_add(self.rejections.len())
                 .and_then(|consumed| consumed.checked_add(self.armed.len()))
+                .and_then(|consumed| consumed.checked_add(self.branches.len()))
                 != Some(self.next)
         {
             return Err("Driver input cursor differs from its history".into());
@@ -196,6 +201,7 @@ impl Program {
         let mut admitted = self.admissions.iter().peekable();
         let mut rejected = self.rejections.iter().peekable();
         let mut armed = self.armed.iter().peekable();
+        let mut branches = self.branches.iter();
         let mut previous = 0;
         let mut previous_trigger = 0;
         for input in &self.inputs[..self.next] {
@@ -207,8 +213,13 @@ impl Program {
             } else if let InputAction::Rule(_) = &input.action {
                 armed
                     .next()
-                    .ok_or("missing trigger arm receipt")?
+                    .ok_or("missing rule receipt")?
                     .validate(input, &mut previous_trigger)?;
+            } else if let InputAction::Branch(_) = &input.action {
+                branches
+                    .next()
+                    .ok_or("missing branch receipt")?
+                    .validate(input)?;
             } else {
                 let row = admitted.next().ok_or("missing Driver input admission")?;
                 if row.key != input.key
@@ -222,7 +233,11 @@ impl Program {
                 previous = row.plan.id;
             }
         }
-        if admitted.next().is_some() || rejected.next().is_some() || armed.next().is_some() {
+        if admitted.next().is_some()
+            || rejected.next().is_some()
+            || armed.next().is_some()
+            || branches.next().is_some()
+        {
             return Err("unconsumed Driver input history".into());
         }
         let mut previous = 0;
@@ -231,7 +246,7 @@ impl Program {
                 || !self
                     .armed
                     .iter()
-                    .any(|receipt| receipt.trigger_id == progress.trigger_id)
+                    .any(|receipt| receipt.trigger_id == Some(progress.trigger_id))
             {
                 return Err("trigger progress names no armed program trigger".into());
             }

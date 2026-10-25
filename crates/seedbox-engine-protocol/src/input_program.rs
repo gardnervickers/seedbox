@@ -15,13 +15,15 @@ pub struct TimedInput {
     )]
     pub timeout_ns: u64,
 }
-/// What an input does when due: admit a fault, which takes a fault ID, or
-/// arm a rule, which takes none. Both share the `action`-tagged JSON form.
+/// What an input does when due: admit a fault, which takes a fault ID; arm a
+/// rule, which takes none; or mark a branch point, which takes none either.
+/// All share the `action`-tagged JSON form.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum InputAction {
     Fault(Action),
     Rule(RuleAction),
+    Branch(BranchAction),
 }
 impl<'de> Deserialize<'de> for InputAction {
     // Select by tag rather than trying each form in turn, so a malformed
@@ -29,12 +31,11 @@ impl<'de> Deserialize<'de> for InputAction {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
         let value = serde_json::Value::deserialize(deserializer)?;
-        let rule = value
-            .get("action")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|tag| RuleAction::TAGS.contains(&tag));
-        if rule {
+        let tag = value.get("action").and_then(serde_json::Value::as_str);
+        if tag.is_some_and(|tag| RuleAction::TAGS.contains(&tag)) {
             serde_json::from_value(value).map(Self::Rule)
+        } else if tag.is_some_and(|tag| BranchAction::TAGS.contains(&tag)) {
+            serde_json::from_value(value).map(Self::Branch)
         } else {
             serde_json::from_value(value).map(Self::Fault)
         }
@@ -48,24 +49,26 @@ impl From<Action> for InputAction {
 }
 impl InputAction {
     /// Inputs this protocol defines but no engine carries out yet: the
-    /// defined-only faults and every rule, since no Driver arms a program
-    /// trigger. Admission refuses them with [`crate::not_implemented`].
+    /// defined-only faults, every rule (no Driver arms a program trigger or
+    /// answers a choice) and every branch point. Admission refuses them with
+    /// [`crate::not_implemented`].
     pub fn is_defined_only(&self) -> bool {
         match self {
             Self::Fault(action) => action.is_defined_only(),
-            Self::Rule(_) => true,
+            Self::Rule(_) | Self::Branch(_) => true,
         }
     }
     pub fn fault(&self) -> Option<&Action> {
         match self {
             Self::Fault(action) => Some(action),
-            Self::Rule(_) => None,
+            Self::Rule(_) | Self::Branch(_) => None,
         }
     }
     pub fn name(&self) -> &'static str {
         match self {
             Self::Fault(action) => action.name(),
             Self::Rule(rule) => rule.name(),
+            Self::Branch(branch) => branch.name(),
         }
     }
     /// Arguments that need no world, as admission would check them.
@@ -73,22 +76,27 @@ impl InputAction {
         match self {
             Self::Fault(action) => action.validate(),
             Self::Rule(RuleAction::Trigger(spec)) => spec.validate(),
+            Self::Rule(RuleAction::Choice(choice)) => choice.validate(),
+            Self::Branch(branch) => branch.validate(),
         }
     }
 }
 /// Rule inputs. A trigger input arms a typed trigger when due; the trigger,
-/// not the input, later admits its effect as a fault with its own ID. The
-/// consumed input leaves an [`ArmReceipt`].
+/// not the input, later admits its effect as a fault with its own ID. A
+/// choice input selects the answer to one guest choice. Each consumed input
+/// leaves an [`ArmReceipt`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RuleAction {
     Trigger(Box<TriggerSpec>),
+    Choice(ChoiceOverride),
 }
 impl RuleAction {
-    const TAGS: [&'static str; 1] = ["trigger"];
+    const TAGS: [&'static str; 2] = ["trigger", "choice"];
     pub fn name(&self) -> &'static str {
         match self {
             Self::Trigger(_) => "trigger",
+            Self::Choice(_) => "choice",
         }
     }
 }
@@ -113,28 +121,236 @@ pub struct TriggerProgress {
 fn is_zero(value: &u64) -> bool {
     *value == 0
 }
-/// A consumed rule input: the trigger ID its trigger input armed. Trigger IDs
-/// increase in program order, interleaved with oracle-armed ones.
+/// Select one choice occurrence's alternative instead of drawing it. Its
+/// identity is a [`crate::property::Record::Choice`] request's: the machine,
+/// its incarnation, the SDK session, the site, and the site's occurrence in
+/// that session, counted from 1, exactly as [`crate::property::Reply::Choice`]
+/// and [`crate::choice::ChoiceRecord`] count it, so an observed choice can be
+/// copied into an override. Once due, it answers that request when it
+/// arrives; one that no request matches stays pending until the run ends.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChoiceOverride {
+    pub machine: String,
+    pub incarnation: u32,
+    pub session: u32,
+    pub site: String,
+    pub occurrence: u64,
+    /// The alternative's index.
+    pub select: u32,
+}
+impl ChoiceOverride {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.machine.is_empty() || self.site.is_empty() || self.occurrence == 0 {
+            return Err("a choice input names a machine, a site and an occurrence from 1".into());
+        }
+        if self.site.len() > crate::property::MAX_ID_BYTES {
+            return Err(format!(
+                "a choice site holds at most {} bytes",
+                crate::property::MAX_ID_BYTES
+            ));
+        }
+        if self.select as usize >= crate::property::MAX_CHOICE_ALTERNATIVES {
+            return Err(format!(
+                "a choice input selects an alternative index below {}",
+                crate::property::MAX_CHOICE_ALTERNATIVES
+            ));
+        }
+        Ok(())
+    }
+}
+/// A consumed rule input. A trigger input records the trigger ID it armed;
+/// trigger IDs increase in program order, interleaved with oracle-armed
+/// ones. A choice input arms no trigger.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArmReceipt {
     pub key: String,
     pub at_ns: u64,
-    pub trigger_id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_id: Option<u32>,
 }
 impl ArmReceipt {
-    /// The receipt names its input, at its time, and a later trigger ID.
+    /// The receipt names its input, at its time, and for a trigger a later
+    /// trigger ID.
     pub fn validate(&self, input: &TimedInput, previous_trigger: &mut u32) -> Result<(), String> {
-        if !matches!(input.action, InputAction::Rule(RuleAction::Trigger(_)))
-            || self.key != input.key
-            || self.at_ns != input.at_ns
-            || self.trigger_id <= *previous_trigger
-        {
-            return Err("trigger arm receipt differs from its source".into());
+        let InputAction::Rule(rule) = &input.action else {
+            return Err("rule receipt for another input".into());
+        };
+        if self.key != input.key || self.at_ns != input.at_ns {
+            return Err("rule receipt differs from its source".into());
         }
-        *previous_trigger = self.trigger_id;
+        match (rule, self.trigger_id) {
+            (RuleAction::Trigger(_), Some(id)) if id > *previous_trigger => {
+                *previous_trigger = id;
+                Ok(())
+            }
+            (RuleAction::Choice(_), None) => Ok(()),
+            _ => Err("rule receipt differs from its source".into()),
+        }
+    }
+}
+/// Branch inputs mark where a run may be continued with other draws.
+///
+/// An anchor is the checkpoint phase at its time: it runs before the
+/// ordinary inputs due then. When the `captureAnchors` execution option names
+/// it, the engine captures checkpoint [`anchor_capture`]`(key)` there, but only
+/// where main's own capture rules allow one: every initial application has
+/// been ready, no injected fault is prepared and no other capture is pending.
+/// Otherwise the anchor passes uncaptured and its [`BranchReceipt`] says why;
+/// the capture is never moved to a later barrier, so a capture always holds
+/// the state at its anchor's time and nothing can branch from a skipped one.
+/// A capture is only a cache of the execution.
+///
+/// A reseed at the same time, after its anchor, re-keys every seeded engine
+/// stream from then on to `seed` and `identity`: the Driver's per-machine
+/// streams (boot entropy for later reboots), seeded clock-fault values,
+/// every per-link network stream (loss, jitter, reorder, duplication, burst
+/// loss, latency spikes, resets), and the streams of seeded disk faults,
+/// preemption and choices. The result is the same in a cold run of the whole
+/// program as in a continuation of the capture. It does not touch guest
+/// memory: the guest kernel's random pool and every application PRNG carry
+/// over unchanged, and neither backend feeds a running guest entropy (PV
+/// passes boot entropy in the device tree, TCG a boot seed to its QEMU
+/// process). So after a reseed a guest's own randomness changes only through
+/// a reboot or through the different timing that re-keyed host draws cause;
+/// a run with no seeded network, fault or choice draws after the reseed may
+/// not vary at all.
+///
+/// Neither takes a fault ID; each consumed one leaves a [`BranchReceipt`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BranchAction {
+    Anchor {},
+    Reseed { seed: u64, identity: String },
+}
+/// Bytes in a reseed identity.
+pub const MAX_RESEED_IDENTITY: usize = 256;
+/// Bytes in an anchor's key, so its capture's checkpoint ID fits main's
+/// 128-byte request IDs.
+pub const MAX_ANCHOR_KEY: usize = 128 - ANCHOR_CAPTURE_PREFIX.len();
+/// Checkpoint IDs of anchor captures start with this; no input key can,
+/// since keys hold no `.`.
+pub const ANCHOR_CAPTURE_PREFIX: &str = "anchor.";
+/// The checkpoint ID of anchor `key`'s capture.
+pub fn anchor_capture(key: &str) -> String {
+    format!("{ANCHOR_CAPTURE_PREFIX}{key}")
+}
+impl BranchAction {
+    const TAGS: [&'static str; 2] = ["anchor", "reseed"];
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Anchor {} => "anchor",
+            Self::Reseed { .. } => "reseed",
+        }
+    }
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Reseed { identity, .. }
+                if identity.is_empty() || identity.len() > MAX_RESEED_IDENTITY =>
+            {
+                Err(format!(
+                    "reseed identity must be 1 to {MAX_RESEED_IDENTITY} bytes"
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+/// What became of an anchor capture that `captureAnchors` requested.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AnchorCapture {
+    /// Checkpoint [`anchor_capture`]`(key)` holds the state at the anchor.
+    Captured { checkpoint: String },
+    /// No capture was taken, for one of main's checkpoint reasons:
+    /// `notReady`, `faultPending`, `checkpointPending`, or `unsupported` on
+    /// an engine that cannot capture.
+    Skipped {
+        reason: crate::host_control::ControlError,
+    },
+}
+/// A consumed branch input: where the program cursor passed it, and for a
+/// requested anchor capture what became of it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BranchReceipt {
+    pub key: String,
+    pub at_ns: u64,
+    pub action: BranchAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<AnchorCapture>,
+}
+impl BranchReceipt {
+    pub fn validate(&self, input: &TimedInput) -> Result<(), String> {
+        let capture_matches = match (&self.action, &self.capture) {
+            (_, None) => true,
+            (BranchAction::Anchor {}, Some(AnchorCapture::Captured { checkpoint })) => {
+                *checkpoint == anchor_capture(&self.key)
+            }
+            (BranchAction::Anchor {}, Some(AnchorCapture::Skipped { .. })) => true,
+            (BranchAction::Reseed { .. }, Some(_)) => false,
+        };
+        if self.key != input.key
+            || self.at_ns != input.at_ns
+            || input.action != InputAction::Branch(self.action.clone())
+            || !capture_matches
+        {
+            return Err("branch receipt differs from its source".into());
+        }
         Ok(())
     }
+}
+/// Key prefixes that only Seedbox may give program inputs: profile faults
+/// ([`GENERATED_PREFIX`]), campaign mutations ([`MUTATION_PREFIX`]) and the
+/// other inputs a campaign adds ([`CAMPAIGN_PREFIX`]). An authored program
+/// (a project's overrides) may not use them, since engines gate inputs by
+/// these keys; programs Seedbox retains keep them.
+pub const RESERVED_KEY_PREFIXES: [&str; 3] = [GENERATED_PREFIX, MUTATION_PREFIX, CAMPAIGN_PREFIX];
+/// Refuse an authored input whose key Seedbox reserves.
+pub fn validate_authored_keys(inputs: &[TimedInput]) -> Result<(), String> {
+    for input in inputs {
+        if let Some(prefix) = RESERVED_KEY_PREFIXES
+            .iter()
+            .find(|prefix| input.key.starts_with(*prefix))
+        {
+            return Err(format!(
+                "input {}: keys starting {prefix} are reserved for inputs Seedbox generates",
+                input.key
+            ));
+        }
+    }
+    Ok(())
+}
+/// Keys of the inputs a campaign adds to its members' programs: a root's
+/// `n`th anchor, by ascending time, is [`campaign_anchor_key`]`(n)`, and member
+/// `m`'s reseed and `j`th choice input are `campaign-reseed-<m>` and
+/// `campaign-choice-<m>-<j>`.
+pub const CAMPAIGN_PREFIX: &str = "campaign-";
+/// The key of a campaign root's `index`th anchor.
+pub fn campaign_anchor_key(index: usize) -> String {
+    format!("{CAMPAIGN_PREFIX}anchor-{index}")
+}
+/// Keys of campaign mutations: trigger inputs a planner adds to a branch,
+/// placed after something its parent was seen doing. `mutate-<m>` arms
+/// member `m`'s [`Mutation`] and `mutate-<m>-end` its teardown. Their
+/// effects, though not their teardowns, are skipped during a quiet period,
+/// like generated faults.
+pub const MUTATION_PREFIX: &str = "mutate-";
+/// Trigger IDs one mutation takes from the run's shared
+/// [`MAX_TRIGGERS`](crate::control::MAX_TRIGGERS): its own and its teardown's.
+pub const MUTATION_TRIGGERS: usize = 2;
+/// A fault a branch places after something its parent did: trigger input
+/// `mutate-<m>` arms `trigger`, and `mutate-<m>-end`, a trigger on that
+/// effect delayed by `duration_ns`, tears it down (heal, resume, reboot or
+/// restart). A branch inherits its ancestors' mutations, so a lineage holds
+/// at most `MAX_TRIGGERS / MUTATION_TRIGGERS` of them, less any authored or
+/// oracle triggers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Mutation {
+    pub trigger: TriggerSpec,
+    pub duration_ns: u64,
 }
 /// Keys of inputs sampled from a [fault profile](crate::fault_profile): fault
 /// `n` starts at `gen-<n>` and is torn down at `gen-<n>-end`. The key alone
@@ -225,20 +441,58 @@ pub fn validate_program(inputs: &[TimedInput], duration_ns: u64) -> Result<(), S
             .at_ns
             .checked_add(input.timeout_ns)
             .ok_or_else(|| format!("input {} deadline overflows", input.key))?;
-        if let InputAction::Rule(RuleAction::Trigger(spec)) = &input.action {
-            spec.validate_at(input.at_ns)
-                .map_err(|error| format!("input {}: {error}", input.key))?;
-            // The run's budget is shared with oracle-armed triggers; a program
-            // alone must at least fit in it.
-            triggers += 1;
-            if triggers > crate::control::MAX_TRIGGERS {
-                return Err(format!(
-                    "input program arms more than {} triggers",
-                    crate::control::MAX_TRIGGERS
-                ));
+        match &input.action {
+            InputAction::Rule(RuleAction::Trigger(spec)) => {
+                // The run's budget is shared with oracle-armed triggers; a
+                // program alone must at least fit in it.
+                triggers += 1;
+                if triggers > crate::control::MAX_TRIGGERS {
+                    return Err(format!(
+                        "input program arms more than {} triggers",
+                        crate::control::MAX_TRIGGERS
+                    ));
+                }
+                spec.validate_at(input.at_ns)
             }
+            InputAction::Rule(RuleAction::Choice(choice)) => choice.validate(),
+            InputAction::Branch(BranchAction::Anchor {}) if input.key.len() > MAX_ANCHOR_KEY => {
+                Err(format!("anchor keys hold at most {MAX_ANCHOR_KEY} bytes"))
+            }
+            InputAction::Branch(branch) => branch.validate(),
+            InputAction::Fault(_) => Ok(()),
         }
+        .map_err(|error| format!("input {}: {error}", input.key))?;
         previous = input.at_ns;
+    }
+    validate_branches(inputs)
+}
+/// Branch inputs come first among the inputs due at their time, and a
+/// reseed follows an anchor at the same time.
+fn validate_branches(inputs: &[TimedInput]) -> Result<(), String> {
+    let mut ordinary_at = None;
+    let mut anchor_at = None;
+    for input in inputs {
+        match &input.action {
+            InputAction::Branch(branch) => {
+                if ordinary_at == Some(input.at_ns) {
+                    return Err(format!(
+                        "input {}: branch inputs precede the other inputs due at their time",
+                        input.key
+                    ));
+                }
+                match branch {
+                    BranchAction::Anchor {} => anchor_at = Some(input.at_ns),
+                    BranchAction::Reseed { .. } if anchor_at != Some(input.at_ns) => {
+                        return Err(format!(
+                            "input {}: a reseed follows an anchor at the same time",
+                            input.key
+                        ));
+                    }
+                    BranchAction::Reseed { .. } => {}
+                }
+            }
+            _ => ordinary_at = Some(input.at_ns),
+        }
     }
     Ok(())
 }
@@ -330,6 +584,198 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("unknown field"), "{error}");
+    }
+    #[test]
+    fn branch_and_choice_inputs_parse_by_tag_and_order_their_time() {
+        let parse = |at_ns: u64, key: &str, action: serde_json::Value| -> TimedInput {
+            serde_json::from_value(
+                serde_json::json!({"key": key, "at_ns": at_ns, "action": action}),
+            )
+            .unwrap()
+        };
+        let anchor = parse(10, "a0", serde_json::json!({"action": "anchor"}));
+        let reseed = parse(
+            10,
+            "a0-reseed",
+            serde_json::json!({"action": "reseed", "seed": 7, "identity": "campaign/3"}),
+        );
+        let choice = parse(
+            10,
+            "pick",
+            serde_json::json!({"action": "choice", "machine": "db", "incarnation": 0, "session": 2,
+                               "site": "retry", "occurrence": 1, "select": 1}),
+        );
+        let crash = parse(
+            10,
+            "crash",
+            serde_json::json!({"action": "crash", "machine": "db"}),
+        );
+        assert_eq!(
+            [&anchor, &reseed, &choice, &crash].map(|i| i.action.name()),
+            ["anchor", "reseed", "choice", "crash"]
+        );
+        assert!(matches!(
+            &choice.action,
+            InputAction::Rule(RuleAction::Choice(ChoiceOverride {
+                occurrence: 1,
+                incarnation: 0,
+                session: 2,
+                ..
+            }))
+        ));
+        assert!([&anchor, &reseed, &choice]
+            .iter()
+            .all(|i| i.action.fault().is_none()));
+        let ordered = [
+            anchor.clone(),
+            reseed.clone(),
+            choice.clone(),
+            crash.clone(),
+        ];
+        validate_program(&ordered, 100).unwrap();
+        for input in &ordered {
+            let wire = serde_json::to_value(input).unwrap();
+            assert_eq!(&serde_json::from_value::<TimedInput>(wire).unwrap(), input);
+        }
+        // Branch points come before every other input due at their time, and
+        // a reseed only after its anchor.
+        let late = [crash.clone(), anchor.clone()];
+        assert!(validate_program(&late, 100)
+            .unwrap_err()
+            .contains("branch inputs precede"));
+        assert!(validate_program(std::slice::from_ref(&reseed), 100)
+            .unwrap_err()
+            .contains("a reseed follows an anchor"));
+        let mut nameless = reseed.clone();
+        nameless.action = InputAction::Branch(BranchAction::Reseed {
+            seed: 7,
+            identity: String::new(),
+        });
+        assert!(validate_program(&[anchor.clone(), nameless], 100)
+            .unwrap_err()
+            .contains("reseed identity"));
+        let mut unbounded = choice.clone();
+        if let InputAction::Rule(RuleAction::Choice(c)) = &mut unbounded.action {
+            c.select = crate::property::MAX_CHOICE_ALTERNATIVES as u32;
+        }
+        assert!(validate_program(&[unbounded], 100)
+            .unwrap_err()
+            .contains("below 256"));
+        // An anchor takes no arguments.
+        assert!(serde_json::from_value::<TimedInput>(serde_json::json!({
+            "key": "a1", "at_ns": 1, "action": {"action": "anchor", "seed": 1}
+        }))
+        .is_err());
+    }
+    #[test]
+    fn rule_and_branch_receipts_match_their_inputs() {
+        let choice: TimedInput = serde_json::from_value(serde_json::json!({
+            "key": "pick", "at_ns": 3,
+            "action": {"action": "choice", "machine": "db", "incarnation": 0, "session": 1,
+                       "site": "retry", "occurrence": 1, "select": 0},
+        }))
+        .unwrap();
+        let mut previous = 0;
+        let receipt = ArmReceipt {
+            key: "pick".into(),
+            at_ns: 3,
+            trigger_id: None,
+        };
+        receipt.validate(&choice, &mut previous).unwrap();
+        let mut armed = receipt.clone();
+        armed.trigger_id = Some(1);
+        assert!(armed.validate(&choice, &mut previous).is_err());
+        assert_eq!(
+            serde_json::to_value(&receipt).unwrap(),
+            serde_json::json!({"key": "pick", "at_ns": 3})
+        );
+        let anchor: TimedInput = serde_json::from_value(serde_json::json!({
+            "key": "a0", "at_ns": 3, "action": {"action": "anchor"},
+        }))
+        .unwrap();
+        let mut passed = BranchReceipt {
+            key: "a0".into(),
+            at_ns: 3,
+            action: BranchAction::Anchor {},
+            capture: None,
+        };
+        passed.validate(&anchor).unwrap();
+        assert!(passed.validate(&choice).is_err());
+        // A requested capture records where it went, or why it was skipped.
+        passed.capture = Some(AnchorCapture::Captured {
+            checkpoint: anchor_capture("a0"),
+        });
+        passed.validate(&anchor).unwrap();
+        assert_eq!(
+            serde_json::to_value(&passed).unwrap()["capture"],
+            serde_json::json!({"outcome": "captured", "checkpoint": "anchor.a0"})
+        );
+        passed.capture = Some(AnchorCapture::Captured {
+            checkpoint: "somewhere-else".into(),
+        });
+        assert!(passed.validate(&anchor).is_err());
+        passed.capture = Some(AnchorCapture::Skipped {
+            reason: crate::host_control::ControlError::FaultPending,
+        });
+        passed.validate(&anchor).unwrap();
+        assert_eq!(
+            serde_json::to_value(&passed).unwrap()["capture"],
+            serde_json::json!({"outcome": "skipped", "reason": "faultPending"})
+        );
+    }
+    #[test]
+    fn authored_programs_may_not_use_reserved_keys() {
+        let input = |key: &str| TimedInput {
+            key: key.into(),
+            at_ns: 1,
+            action: Action::Crash {
+                machine: "db".into(),
+            }
+            .into(),
+            timeout_ns: default_timeout_ns(),
+        };
+        validate_authored_keys(&[input("crash-db"), input("general")]).unwrap();
+        for key in ["gen-1", "gen-1-end", "mutate-3", "campaign-anchor-0"] {
+            let error = validate_authored_keys(&[input(key)]).unwrap_err();
+            assert!(
+                error.contains("reserved for inputs Seedbox generates"),
+                "{error}"
+            );
+            // A retained program keeps them: the shape check alone allows it.
+            validate_program(&[input(key)], 10).unwrap();
+        }
+        assert_eq!(campaign_anchor_key(2), "campaign-anchor-2");
+    }
+    #[test]
+    fn programs_fit_the_shared_trigger_budget_and_anchor_keys_their_captures() {
+        let trigger = |n: usize| -> TimedInput {
+            serde_json::from_value(serde_json::json!({
+                "key": format!("t{n}"), "at_ns": 1,
+                "action": {"action": "trigger", "when": {"kind": "frame"},
+                           "then": {"action": "crash", "machine": "db"}},
+            }))
+            .unwrap()
+        };
+        let full: Vec<_> = (0..crate::control::MAX_TRIGGERS).map(trigger).collect();
+        validate_program(&full, 10).unwrap();
+        let mut over = full;
+        over.push(trigger(crate::control::MAX_TRIGGERS));
+        assert!(validate_program(&over, 10)
+            .unwrap_err()
+            .contains("arms more than 64 triggers"));
+        let anchor = |key: String| TimedInput {
+            key,
+            at_ns: 1,
+            action: InputAction::Branch(BranchAction::Anchor {}),
+            timeout_ns: default_timeout_ns(),
+        };
+        validate_program(&[anchor("a".repeat(MAX_ANCHOR_KEY))], 10).unwrap();
+        assert_eq!(anchor_capture(&"a".repeat(MAX_ANCHOR_KEY)).len(), 128);
+        assert!(
+            validate_program(&[anchor("a".repeat(MAX_ANCHOR_KEY + 1))], 10)
+                .unwrap_err()
+                .contains("anchor keys hold at most")
+        );
     }
     #[test]
     fn generated_keys_name_a_start_or_its_teardown() {

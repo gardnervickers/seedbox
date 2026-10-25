@@ -83,3 +83,18 @@ fn injected_faults_no_engine_implements_are_refused_before_journaling() {
         Err(Error::Invalid(message)) if message.contains("preempt ppm")
     ));
 }
+
+#[test]
+fn project_programs_may_not_use_reserved_keys() {
+    let mut project = spec(json!({"action":"crash","machine":"db"}));
+    project.program[0].id = "gen-4".into();
+    match resolve_program(&project) {
+        Err(Error::Invalid(message)) => {
+            assert!(
+                message.contains("reserved for inputs Seedbox generates"),
+                "{message}"
+            )
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}

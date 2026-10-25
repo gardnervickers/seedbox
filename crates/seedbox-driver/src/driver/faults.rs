@@ -261,6 +261,8 @@ pub fn check_input_engine(input: &InputAction, engine: Engine) -> Result<(), Str
             }
             check_engine(&spec.then, engine)
         }
+        // Choices and branch points need no particular engine.
+        InputAction::Rule(RuleAction::Choice(_)) | InputAction::Branch(_) => Ok(()),
     }
 }
 

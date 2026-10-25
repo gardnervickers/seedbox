@@ -56,6 +56,10 @@ pub const MAX_ERRORS: usize = 16;
 pub const MAX_SUMMARY_PROPERTIES: usize = 32;
 /// The supervisor's own records use this session.
 pub const SUPERVISOR_SESSION: u32 = 0;
+/// A choice offers 1..=this many alternatives.
+pub const MAX_CHOICE_ALTERNATIVES: usize = 256;
+/// Each alternative's name holds 1..=this many bytes.
+pub const MAX_CHOICE_ALTERNATIVE_BYTES: usize = 256;
 
 /// Property IDs the SDK may not use; default properties live here.
 pub const RESERVED_PREFIX: &str = "seedbox.";

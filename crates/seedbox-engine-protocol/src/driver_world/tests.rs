@@ -33,6 +33,7 @@ fn consumed_prefix_is_exact_and_pending_suffix_is_replaceable_without_reseeding(
         rejections: vec![],
         armed: vec![],
         triggers: vec![],
+        branches: vec![],
     };
     program.validate().unwrap();
     let original = program.clone();
@@ -59,6 +60,7 @@ fn rejects_cursor_history_order_identity_deadline_and_unconsumed_rows() {
         rejections: vec![],
         armed: vec![],
         triggers: vec![],
+        branches: vec![],
     };
     valid.validate().unwrap();
     for n in 0..5 {
@@ -95,6 +97,7 @@ fn state_rejection_consumes_only_its_authored_entry() {
         }],
         armed: vec![],
         triggers: vec![],
+        branches: vec![],
     };
     program.validate().unwrap();
 }
@@ -119,7 +122,7 @@ fn consumed_trigger_inputs_leave_ordered_arm_receipts() {
     let receipt = |input: &TimedInput, trigger_id| ArmReceipt {
         key: input.key.clone(),
         at_ns: input.at_ns,
-        trigger_id,
+        trigger_id: Some(trigger_id),
     };
     let valid = Program {
         inputs: vec![fault.clone(), first.clone(), second.clone()],
@@ -128,6 +131,7 @@ fn consumed_trigger_inputs_leave_ordered_arm_receipts() {
         rejections: vec![],
         armed: vec![receipt(&first, 2), receipt(&second, 4)],
         triggers: vec![],
+        branches: vec![],
     };
     valid.validate().unwrap();
     let wire = serde_json::to_value(&valid).unwrap();
@@ -139,7 +143,7 @@ fn consumed_trigger_inputs_leave_ordered_arm_receipts() {
     for n in 0..4 {
         let mut invalid = valid.clone();
         match n {
-            0 => invalid.armed[1].trigger_id = 2,
+            0 => invalid.armed[1].trigger_id = Some(2),
             1 => invalid.armed[0].key = "second".into(),
             2 => {
                 invalid.armed.pop();
@@ -176,6 +180,60 @@ fn consumed_trigger_inputs_leave_ordered_arm_receipts() {
     let empty = Program::default();
     let empty = serde_json::to_value(&empty).unwrap();
     assert!(empty.get("armed").is_none() && empty.get("triggers").is_none());
+}
+#[test]
+fn consumed_branch_inputs_leave_receipts_in_program_order() {
+    use crate::input_program::{BranchAction, BranchReceipt, InputAction};
+    let branch = |key: &str, action: BranchAction| TimedInput {
+        key: key.into(),
+        at_ns: 5,
+        action: InputAction::Branch(action),
+        timeout_ns: 10,
+    };
+    let anchor = branch("a0", BranchAction::Anchor {});
+    let reseed = branch(
+        "a0-reseed",
+        BranchAction::Reseed {
+            seed: 9,
+            identity: "member/4".into(),
+        },
+    );
+    let fault = input("fault", 5);
+    let receipt = |input: &TimedInput| BranchReceipt {
+        key: input.key.clone(),
+        at_ns: input.at_ns,
+        action: match &input.action {
+            InputAction::Branch(action) => action.clone(),
+            _ => unreachable!(),
+        },
+        capture: None,
+    };
+    let valid = Program {
+        inputs: vec![anchor.clone(), reseed.clone(), fault.clone()],
+        next: 3,
+        admissions: vec![admitted(&fault, 1)],
+        rejections: vec![],
+        armed: vec![],
+        triggers: vec![],
+        branches: vec![receipt(&anchor), receipt(&reseed)],
+    };
+    valid.validate().unwrap();
+    let wire = serde_json::to_value(&valid).unwrap();
+    assert_eq!(
+        wire["branches"][1],
+        serde_json::json!({"key":"a0-reseed","at_ns":5,"action":{"action":"reseed","seed":9,"identity":"member/4"}})
+    );
+    assert_eq!(serde_json::from_value::<Program>(wire).unwrap(), valid);
+    let mut swapped = valid.clone();
+    swapped.branches.reverse();
+    assert!(swapped.validate().is_err());
+    let mut missing = valid;
+    missing.branches.pop();
+    assert!(missing.validate().is_err());
+    assert!(serde_json::to_value(Program::default())
+        .unwrap()
+        .get("branches")
+        .is_none());
 }
 #[test]
 fn initial_ready_seen_set_and_ever_latch_survive_serialization_and_repeated_boots() {
@@ -233,6 +291,7 @@ fn authored_cursor_checks_saved_time_before_restore() {
         rejections: vec![],
         armed: vec![],
         triggers: vec![],
+        branches: vec![],
     };
     program.validate_at(10).unwrap();
     program.validate_at(20).unwrap();
