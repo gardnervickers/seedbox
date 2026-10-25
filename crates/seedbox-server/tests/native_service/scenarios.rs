@@ -591,6 +591,8 @@ fn fixture_submission(
             },
             disk: volumes.disk_bytes.map(|bytes| wire::Disk::Zero { bytes }),
             interface: None,
+            expected_crashes: Vec::new(),
+            expected_out_of_memory_kills: false,
         },
         machines: vec![],
         spawnable: vec![],
@@ -1816,6 +1818,8 @@ fn network_world_submission(
                 address: address.into(),
                 prefix_len: 24,
             }),
+            expected_crashes: Vec::new(),
+            expected_out_of_memory_kills: false,
         });
     }
     let mut inputs = PreparedInputs {
