@@ -412,6 +412,17 @@ fn prefix_archive(input: &Path, output: &Path, check: &dyn Fn() -> Result<()>) -
     Ok(())
 }
 
+/// An overlayfs xattr that only records the build host's layer storage.
+fn overlay_bookkeeping(field: &str) -> bool {
+    [
+        "SCHILY.xattr.user.overlay.",
+        "SCHILY.xattr.trusted.overlay.",
+    ]
+    .iter()
+    .filter_map(|prefix| field.strip_prefix(prefix))
+    .any(|name| matches!(name, "origin" | "impure" | "nlink" | "uuid"))
+}
+
 pub(crate) fn export_header<R: std::io::Read>(
     entry: &mut tar::Entry<'_, R>,
     path: &Path,
@@ -447,6 +458,11 @@ pub(crate) fn export_header<R: std::io::Read>(
                     }
                 }
                 "path" | "linkpath" | "size" | "atime" | "ctime" | "uname" | "gname" => (),
+                // Rootless engines export the bookkeeping overlay storage keeps for
+                // itself. These describe the build host's layer storage, not the
+                // image. Overlay xattrs that change layer contents (opaque,
+                // whiteout, redirect, metacopy) are still refused below.
+                _ if overlay_bookkeeping(field) => {}
                 _ => {
                     return Err(setup(format!(
                         "exported filesystem {}: unsupported extended metadata {field}",
@@ -463,6 +479,44 @@ pub(crate) fn export_header<R: std::io::Read>(
 mod tests {
     use super::*;
     use std::io::{BufRead, Read, Write};
+    #[test]
+    fn overlay_bookkeeping_xattrs_are_ignored_and_content_xattrs_refused() {
+        let export = |key: &str| {
+            let mut tar = tar::Builder::new(Vec::new());
+            tar.append_pax_extensions([(key, &b"y"[..])]).unwrap();
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o755);
+            header.set_size(0);
+            tar.append_data(&mut header, "bin/app", std::io::empty())
+                .unwrap();
+            let bytes = tar.into_inner().unwrap();
+            let mut archive = tar::Archive::new(bytes.as_slice());
+            let mut entry = archive.entries().unwrap().next().unwrap().unwrap();
+            export_header(&mut entry, Path::new("bin/app")).map(|_| ())
+        };
+        // Opaque directories, whiteouts, redirects and metacopy change what a
+        // layer contains; dropping them would silently resurrect files.
+        for key in [
+            "SCHILY.xattr.trusted.overlay.opaque",
+            "SCHILY.xattr.user.overlay.opaque",
+            "SCHILY.xattr.trusted.overlay.whiteout",
+            "SCHILY.xattr.user.overlay.redirect",
+            "SCHILY.xattr.trusted.overlay.metacopy",
+            "SCHILY.xattr.trusted.overlay.origin2",
+        ] {
+            let error = export(key).unwrap_err().to_string();
+            assert!(error.contains(key), "{key}: {error}");
+        }
+        for key in [
+            "SCHILY.xattr.user.overlay.origin",
+            "SCHILY.xattr.trusted.overlay.origin",
+            "SCHILY.xattr.trusted.overlay.impure",
+            "SCHILY.xattr.user.overlay.nlink",
+            "SCHILY.xattr.trusted.overlay.uuid",
+        ] {
+            assert!(export(key).is_ok(), "{key}");
+        }
+    }
     #[test]
     fn unsupported_xattr_names_the_image_path_and_key() {
         let mut tar = tar::Builder::new(Vec::new());
