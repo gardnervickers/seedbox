@@ -112,6 +112,32 @@ mod program_tests {
     }
 
     #[test]
+    fn documented_yaml_overrides_parse_as_program_inputs() {
+        // The example in docs/faults.md.
+        let document = r#"
+- {id: slow-fsync, atNs: 1000000000,
+   action: {action: disk_latency, handle: slow, machine: db, op: flush, latency_ns: 20000000}}
+- {id: reboot-db, atNs: 0,
+   action: {action: trigger, when: {kind: lifecycle, machine: db, transition: crashed},
+            then: {action: reboot, machine: db}}}
+"#;
+        let overrides: Vec<seedbox_spec::definition::Override> =
+            serde_yaml_ng::from_str(document).unwrap();
+        let names: Vec<_> = overrides
+            .into_iter()
+            .map(|entry| {
+                let input: TimedInput = serde_json::from_value(serde_json::json!({
+                    "key": entry.id, "at_ns": entry.at_ns, "action": entry.action,
+                }))
+                .unwrap();
+                input.action.validate().unwrap();
+                input.action.name()
+            })
+            .collect();
+        assert_eq!(names, ["disk_latency", "trigger"]);
+    }
+
+    #[test]
     fn defined_only_faults_are_refused_before_preparation() {
         let config = crate::config::parse(
             "name: test\nmachines:\n  db: {image: example:v1}\noracle: {image: example/oracle}\n",

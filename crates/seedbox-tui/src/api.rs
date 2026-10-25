@@ -684,6 +684,7 @@ async fn fault(
                     error,
                     seedbox_client::Error::Rejected {
                         code: seedbox_api::ErrorCode::InvalidRequest
+                            | seedbox_api::ErrorCode::NotImplemented
                             | seedbox_api::ErrorCode::NotFound
                             | seedbox_api::ErrorCode::Conflict,
                         ..

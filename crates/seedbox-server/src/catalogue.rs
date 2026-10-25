@@ -40,6 +40,9 @@ pub enum Error {
     RevisionConflict,
     #[error("host randomness unavailable: {0}")]
     Random(String),
+    /// A well-formed input or action that no engine carries out yet.
+    #[error("{0}")]
+    NotImplemented(String),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -567,6 +570,7 @@ impl Catalogue {
             .entries
             .get(id)
             .ok_or_else(|| Error::NotFound(id.clone()))?;
+        check_injected(&request.command)?;
         if let Some(existing) = entry.controls.get(&request.request_id) {
             return if existing.request == request {
                 Ok((existing.clone(), false))
@@ -749,7 +753,43 @@ pub(crate) fn resolve_program(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    // Shape, budget and arguments are reported as invalid before an input
+    // that is well formed but not implemented, and that before targets.
+    seedbox_engine_protocol::input_program::validate_program(
+        &program,
+        spec.configuration.limits.simulated_time_ns,
+    )
+    .map_err(Error::Invalid)?;
+    for input in &program {
+        input
+            .action
+            .validate()
+            .map_err(|error| Error::Invalid(format!("program {}: {error}", input.key)))?;
+    }
+    if let Some(input) = program.iter().find(|input| input.action.is_defined_only()) {
+        return Err(Error::NotImplemented(format!(
+            "program {}: {}",
+            input.key,
+            seedbox_engine_protocol::not_implemented(input.action.name())
+        )));
+    }
     seedbox_application::fault_inputs::validate_input_program(&spec.configuration, &program)
         .map_err(|error| Error::Invalid(error.to_string()))?;
     Ok(program)
 }
+
+/// Refuse an injected fault no engine carries out before it is journaled.
+fn check_injected(command: &seedbox_api::ControlCommand) -> Result<()> {
+    if let seedbox_api::ControlCommand::InjectFault { action } = command {
+        action.validate().map_err(Error::Invalid)?;
+        if action.is_defined_only() {
+            return Err(Error::NotImplemented(
+                seedbox_engine_protocol::not_implemented(action.name()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

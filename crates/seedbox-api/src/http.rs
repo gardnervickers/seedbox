@@ -9,6 +9,8 @@ pub enum ErrorCode {
     Conflict,
     Unavailable,
     Internal,
+    /// The request is well formed, but no engine carries it out yet.
+    NotImplemented,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -47,6 +47,15 @@ impl From<Action> for InputAction {
     }
 }
 impl InputAction {
+    /// Inputs this protocol defines but no engine carries out yet: the
+    /// defined-only faults and every rule, since no Driver arms a program
+    /// trigger. Admission refuses them with [`crate::not_implemented`].
+    pub fn is_defined_only(&self) -> bool {
+        match self {
+            Self::Fault(action) => action.is_defined_only(),
+            Self::Rule(_) => true,
+        }
+    }
     pub fn fault(&self) -> Option<&Action> {
         match self {
             Self::Fault(action) => Some(action),

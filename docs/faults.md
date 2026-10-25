@@ -4,6 +4,29 @@ These are interfaces only. Every engine refuses `disk_error`, `disk_latency`,
 `preempt` and program `trigger` inputs as not implemented yet. A later
 change implements them along the contracts below.
 
+## In the timeline
+
+`seedbox.yaml` declares no faults, so neither it nor the CLI's flags change.
+The new faults reach a run as a definition's `overrides` (a submission's
+`program`) or one at a time through `seedbox control inject`. The oracle's
+guest RPC carries none of them: its operations are unchanged. Each new action
+is an ordinary override; a trigger is one too, but only in a program, since it
+allocates a trigger ID rather than a fault ID:
+
+```yaml
+overrides:
+  - {id: slow-fsync, atNs: 1000000000,
+     action: {action: disk_latency, handle: slow, machine: db, op: flush, latency_ns: 20000000}}
+  - {id: reboot-db, atNs: 0,
+     action: {action: trigger, when: {kind: lifecycle, machine: db, transition: crashed},
+              then: {action: reboot, machine: db}}}
+```
+
+Submission checks each entry's arguments, and that a program arms no more
+triggers than the run's budget, then refuses it with the API's
+`notImplemented` error (HTTP 501), naming it. A fault preview or an injected
+fault is refused the same way, before it is journaled.
+
 ## Where each fault runs
 
 | Input | Needs | aarch64 PV | x86_64 PV | x86_64 TCG |

@@ -8,6 +8,12 @@ pub(crate) fn preview(
     configuration: &seedbox_spec::Simulation,
     action: &Action,
 ) -> Result<FaultPreview, Error> {
+    action.validate().map_err(Error::Invalid)?;
+    if action.is_defined_only() {
+        return Err(Error::NotImplemented(
+            seedbox_engine_protocol::not_implemented(action.name()),
+        ));
+    }
     let targets = seedbox_application::fault_inputs::fault_action_targets(configuration, action)
         .map_err(|error| Error::Invalid(error.to_string()))?;
     let mut result = FaultPreview {
@@ -199,11 +205,11 @@ pub(crate) fn preview(
                 .push("The machine must not already be throttled.".into());
             format!("Scale the machine's seeded CPU cost to {factor_permille} thousandths until healed.")
         }
-        // Target compilation refuses these until an engine implements them.
+        // Refused above until an engine implements them.
         Action::DiskError { .. } | Action::DiskLatency { .. } | Action::Preempt { .. } => {
-            return Err(Error::Invalid(seedbox_engine_protocol::not_implemented(
-                action.name(),
-            )))
+            return Err(Error::NotImplemented(
+                seedbox_engine_protocol::not_implemented(action.name()),
+            ))
         }
     };
     if action.is_process() || action.is_lifecycle() {
@@ -281,6 +287,19 @@ mod tests {
         let world =
             crate::world::Tracker::new("abcdefgh".parse().unwrap(), &configuration).snapshot();
         (configuration, world)
+    }
+
+    #[test]
+    fn preview_refuses_faults_no_engine_implements() {
+        let (configuration, world) = fixture();
+        let action: Action = serde_json::from_value(
+            json!({"action":"disk_error","handle":"eio","machine":"n1","op":"write","ppm":10}),
+        )
+        .unwrap();
+        assert!(matches!(
+            preview(&world, &configuration, &action),
+            Err(Error::NotImplemented(message)) if message == "disk_error is not implemented yet"
+        ));
     }
 
     #[test]

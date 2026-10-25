@@ -919,6 +919,9 @@ impl From<CatalogueError> for HttpError {
             | CatalogueError::ControlBusy
             | CatalogueError::ControlUnavailable => (StatusCode::CONFLICT, ErrorCode::Conflict),
             CatalogueError::Invalid(_) => (StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest),
+            CatalogueError::NotImplemented(_) => {
+                (StatusCode::NOT_IMPLEMENTED, ErrorCode::NotImplemented)
+            }
             _ => (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal),
         };
         Self::new(status, code, error.to_string())
@@ -981,5 +984,19 @@ mod tests {
             CatalogueError::ControlUnavailable,
         ));
         assert_eq!(error.status, StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn inputs_no_engine_implements_are_501_not_implemented() {
+        let error = HttpError::from(CatalogueError::NotImplemented(
+            "disk_error is not implemented yet".into(),
+        ));
+        assert_eq!(error.status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(error.error.code, ErrorCode::NotImplemented);
+        assert_eq!(error.error.message, "disk_error is not implemented yet");
+        assert_eq!(
+            serde_json::to_value(ErrorCode::NotImplemented).unwrap(),
+            "notImplemented"
+        );
     }
 }
