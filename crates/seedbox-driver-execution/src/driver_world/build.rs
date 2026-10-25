@@ -332,8 +332,14 @@ fn program(
         request.simulated_time_ns,
     )
     .map_err(bad)?;
-    // No Driver arms program triggers yet; refuse before any machine boots
+    // Refuse what this engine cannot carry out before any machine boots,
     // rather than failing when the input becomes due.
+    let engine = super::actions::engine(&request.prepared.inventory);
+    for input in &request.program {
+        seedbox_driver::driver::faults::check_input_engine(&input.action, engine)
+            .map_err(|error| Error::Setup(format!("input {}: {error}", input.key)))?;
+    }
+    // No Driver arms program triggers yet.
     if let Some(input) = request
         .program
         .iter()
@@ -363,20 +369,14 @@ fn materialize_factory(
 ) -> Result<Assets> {
     super::policy::check_optional(inventory.backend_policy()).map_err(bad)?;
     use crate::runtime_assets::Runtime;
-    use seedbox_spec::backend::CpuBackend;
-    use seedbox_spec::definition::Architecture;
-    let (archive, backend, architecture) = match inventory {
-        Inventory::Pv { runtime, .. } => (
-            runtime,
-            CpuBackend::Pv,
-            if cfg!(target_arch = "aarch64") {
-                Architecture::Aarch64
-            } else {
-                Architecture::X86_64
-            },
-        ),
-        Inventory::Tcg { runtime, .. } => (runtime, CpuBackend::Tcg, Architecture::X86_64),
-    };
+    let (Inventory::Pv {
+        runtime: archive, ..
+    }
+    | Inventory::Tcg {
+        runtime: archive, ..
+    }) = inventory;
+    let engine = super::actions::engine(inventory);
+    let (backend, architecture) = (engine.backend, engine.architecture);
     checkpoint::verified(archive)?;
     let (guest_assets, qemu, inputs) = if let Some(binding) = binding {
         binding.validate_archive(archive).map_err(bad)?;

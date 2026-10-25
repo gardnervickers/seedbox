@@ -3,8 +3,12 @@ use crate::{
     driver::{Action, FaultHandle, HealTarget, NetworkPolicy, Target},
     execution::ExecutionConfig,
 };
-use seedbox_engine_protocol::control::Action as Public;
+use seedbox_engine_protocol::{
+    control::{Action as Public, EventSelector},
+    input_program::{InputAction, RuleAction},
+};
 use seedbox_machine::clock::ClockRate;
+use seedbox_spec::{backend::CpuBackend, definition::Architecture};
 use std::{num::NonZeroI64, time::Duration};
 
 /// Translate a public action without resolving targets, sampling RNG or allocating IDs.
@@ -160,6 +164,101 @@ pub fn translate(
         }
     };
     Ok((action, alias))
+}
+
+/// A CPU backend executing guests of one architecture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Engine {
+    pub backend: CpuBackend,
+    pub architecture: Architecture,
+}
+impl std::fmt::Display for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let architecture = match self.architecture {
+            Architecture::X86_64 => "x86_64",
+            Architecture::Aarch64 => "aarch64",
+        };
+        let backend = match self.backend {
+            CpuBackend::Pv => "PV",
+            CpuBackend::Tcg => "TCG",
+        };
+        write!(f, "{architecture} {backend}")
+    }
+}
+
+/// Machine support a fault needs beyond what every engine provides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Capability {
+    /// Selecting, failing and corrupting block requests at the device.
+    DiskSelection,
+    /// Completing block requests after their notification.
+    DelayedBlockCompletion,
+    /// Holding a block request at the device for a crash.
+    HeldBlockRequest,
+    /// The guest kernel's seeded yield at syscalls.
+    GuestYield,
+}
+impl Capability {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::DiskSelection => "disk request selection",
+            Self::DelayedBlockCompletion => "delayed block completion",
+            Self::HeldBlockRequest => "held block requests",
+            Self::GuestYield => "the guest yield hook",
+        }
+    }
+    /// Whether `engine` provides this capability. PV runs both architectures
+    /// through one block device and worker, and both PV kernels have the
+    /// syscall hook. TCG's QEMU devices and guest have none of them yet.
+    pub fn provided_by(self, engine: Engine) -> bool {
+        use {Architecture::*, CpuBackend::*};
+        match (self, engine.backend, engine.architecture) {
+            (_, Pv, Aarch64 | X86_64) => true,
+            (_, Tcg, Aarch64 | X86_64) => false,
+        }
+    }
+    /// The capability a public action needs, if any.
+    pub fn required_by(action: &Public) -> Option<Self> {
+        match action {
+            Public::DiskError { .. } => Some(Self::DiskSelection),
+            Public::DiskLatency { .. } => Some(Self::DelayedBlockCompletion),
+            Public::Preempt { .. } => Some(Self::GuestYield),
+            _ => None,
+        }
+    }
+}
+fn require(engine: Engine, name: &str, capability: Option<Capability>) -> Result<(), String> {
+    match capability {
+        Some(capability) if !capability.provided_by(engine) => Err(format!(
+            "{name} needs {}, which {engine} does not provide",
+            capability.describe()
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Refuse an action `engine` cannot carry out. Every action main already
+/// implements runs on every engine.
+pub fn check_engine(action: &Public, engine: Engine) -> Result<(), String> {
+    require(engine, action.name(), Capability::required_by(action))
+}
+
+/// [`check_engine`] for a program input, including a trigger's selector and
+/// its effect.
+pub fn check_input_engine(input: &InputAction, engine: Engine) -> Result<(), String> {
+    match input {
+        InputAction::Fault(action) => check_engine(action, engine),
+        InputAction::Rule(RuleAction::Trigger(spec)) => {
+            if let EventSelector::BlockRequest { .. } = spec.when {
+                require(
+                    engine,
+                    "a block_request trigger",
+                    Some(Capability::HeldBlockRequest),
+                )?;
+            }
+            check_engine(&spec.then, engine)
+        }
+    }
 }
 
 impl Action {

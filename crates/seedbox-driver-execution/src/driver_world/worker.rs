@@ -432,7 +432,7 @@ where
             return Ok(reply);
         }
         let proposal = (|| -> std::result::Result<PreparedInput, String> {
-            let (action, handle) = super::actions::translate(action, *timeout_ns)?;
+            let (action, handle) = super::actions::translate(&self.inventory, action, *timeout_ns)?;
             let key = InputKey::new(request_id.clone()).map_err(|error| error.to_string())?;
             self.driver
                 .with_barrier(|barrier| match handle {
@@ -617,7 +617,8 @@ where
                 input.action.name(),
             )));
         };
-        let (action, handle) = super::actions::translate(fault, input.timeout_ns).map_err(fail)?;
+        let (action, handle) =
+            super::actions::translate(&self.inventory, fault, input.timeout_ns).map_err(fail)?;
         self.authored(action, handle)
     }
     /// Deliver exactly one authored entry at its due barrier. No future action

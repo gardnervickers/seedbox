@@ -393,3 +393,47 @@ fn defined_only_faults_are_refused_naming_their_follow_up_after_argument_checks(
         .unwrap_err()
         .contains("disk_latency latency_ns"));
 }
+
+#[test]
+fn new_faults_need_capabilities_every_pv_engine_has_and_tcg_lacks() {
+    let engines = [
+        (CpuBackend::Pv, Architecture::Aarch64),
+        (CpuBackend::Pv, Architecture::X86_64),
+        (CpuBackend::Tcg, Architecture::X86_64),
+    ]
+    .map(|(backend, architecture)| Engine {
+        backend,
+        architecture,
+    });
+    let input =
+        |action: serde_json::Value| -> InputAction { serde_json::from_value(action).unwrap() };
+    let limited = [
+        json!({"action":"disk_error","handle":"h","machine":"db","op":"write","ppm":1}),
+        json!({"action":"disk_latency","handle":"h","machine":"db","op":"any","latency_ns":1000}),
+        json!({"action":"preempt","handle":"h","machine":"db","ppm":10}),
+        json!({"action":"trigger","when":{"kind":"block_request","machine":"db","op":"flush"},"then":{"action":"crash","machine":"db"}}),
+        json!({"action":"trigger","when":{"kind":"frame"},"then":{"action":"preempt","handle":"h","machine":"db","ppm":10}}),
+    ]
+    .map(input);
+    let portable = [
+        json!({"action":"crash","machine":"db"}),
+        json!({"action":"trigger","when":{"kind":"frame"},"then":{"action":"crash","machine":"db"}}),
+    ]
+    .map(input);
+    for engine in engines {
+        let pv = engine.backend == CpuBackend::Pv;
+        for input in &portable {
+            check_input_engine(input, engine).unwrap();
+        }
+        for input in &limited {
+            assert_eq!(check_input_engine(input, engine).is_ok(), pv, "{input:?}");
+        }
+    }
+    let InputAction::Fault(disk_error) = &limited[0] else {
+        unreachable!()
+    };
+    assert_eq!(
+        check_engine(disk_error, engines[2]).unwrap_err(),
+        "disk_error needs disk request selection, which x86_64 TCG does not provide"
+    );
+}

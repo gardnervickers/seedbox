@@ -4,6 +4,24 @@ These are interfaces only. Every engine refuses `disk_error`, `disk_latency`,
 `preempt` and program `trigger` inputs as not implemented yet. A later
 change implements them along the contracts below.
 
+## Where each fault runs
+
+| Input | Needs | aarch64 PV | x86_64 PV | x86_64 TCG |
+| --- | --- | --- | --- | --- |
+| `disk_error` | disk request selection | not yet | not yet | refused |
+| `disk_latency` | delayed block completion | not yet | not yet | refused |
+| `preempt` | the guest yield hook | 3B | 3B | refused |
+| `trigger` on `block_request` | held block requests | not yet | not yet | refused |
+| any other `trigger` | its effect's needs | not yet | not yet | not yet |
+| every other action | nothing | yes | yes | yes |
+
+The [Driver](../crates/seedbox-driver/src/driver/faults.rs) keys each
+capability by backend and architecture, and its worker refuses an input its
+engine lacks, naming both: a program when it opens, before any machine boots,
+and an injected fault when it is prepared. Every engine also refuses the
+inputs marked "not yet" as not implemented yet, at submission and again
+there.
+
 ## Engine contracts
 
 ### Disk request selection
