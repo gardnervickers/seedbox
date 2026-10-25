@@ -27,6 +27,10 @@ macro_rules! long_applications {
 }
 long_applications! {
     durability => "durability",
+    #[ignore = "image preparation misplaces files whose image path is 94-100 bytes (kafka-python's sticky/partition_movements.py lands at rootfs/DIR/DIR/NAME), so the client cannot import kafka; follow-up: fix the rootfs export, then run"]
+    kafka_idempotent_retry => "kafka-idempotent-retry",
+    #[ignore = "image preparation misplaces files whose image path is 94-100 bytes (kafka-python's sticky/partition_movements.py lands at rootfs/DIR/DIR/NAME), so the client cannot import kafka; follow-up: fix the rootfs export, then run"]
+    kafka_startup_crash => "kafka-startup-crash",
     large_volume => "large-volume",
 }
 
