@@ -2,6 +2,7 @@
 
 use crate::{Error, Result};
 use seedbox_driver_execution::driver_world::ActionTargets;
+use seedbox_engine_protocol::input_program::InputAction;
 
 /// Validate a client's schedule before preparing or starting a simulation.
 /// Service and machine names coincide in the current one-service-per-machine ABI.
@@ -18,8 +19,20 @@ pub fn validate_input_program(
         return Ok(());
     }
     for input in program {
-        fault_action_targets(configuration, &input.action)
-            .map_err(|error| Error::Setup(format!("program {}: {error}", input.key)))?;
+        let context = |error: String| Error::Setup(format!("program {}: {error}", input.key));
+        match &input.action {
+            InputAction::Fault(action) => {
+                fault_action_targets(configuration, action)
+                    .map_err(|error| context(error.to_string()))?;
+            }
+            // Rule shape was checked with the program; no Driver arms a
+            // program trigger yet.
+            InputAction::Rule(rule) => {
+                return Err(context(seedbox_engine_protocol::not_implemented(
+                    rule.name(),
+                )))
+            }
+        }
     }
     Ok(())
 }
@@ -60,7 +73,8 @@ mod program_tests {
                 handle: "slow".into(),
                 machine: "db".into(),
                 factor_permille: 2000,
-            },
+            }
+            .into(),
         };
         let heal = TimedInput {
             timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
@@ -68,7 +82,8 @@ mod program_tests {
             at_ns: 10,
             action: Action::Heal {
                 handle: "slow".into(),
-            },
+            }
+            .into(),
         };
         let entries = [slow("first", 10), heal.clone(), slow("again", 20)];
         validate_input_program(&config, &entries).unwrap();
@@ -87,7 +102,8 @@ mod program_tests {
         let mut unknown = slow("unknown", 1);
         unknown.action = Action::Stop {
             machine: "missing".into(),
-        };
+        }
+        .into();
         assert!(validate_input_program(&config, &[unknown]).is_err());
         config.control = Some(crate::config::Control {
             service: "db".into(),
@@ -114,7 +130,8 @@ mod program_tests {
                 ppm: 1_000_000,
                 effect: Default::default(),
                 scope: Default::default(),
-            },
+            }
+            .into(),
         };
         let error = validate_input_program(&config, &[input]).unwrap_err();
         assert!(
@@ -122,6 +139,23 @@ mod program_tests {
                 .to_string()
                 .contains(&seedbox_engine_protocol::not_implemented("disk_error")),
             "{error}"
+        );
+        let trigger: TimedInput = serde_json::from_value(serde_json::json!({
+            "key": "reboot", "at_ns": 10,
+            "action": {
+                "action": "trigger",
+                "when": {"kind": "lifecycle", "machine": "db", "transition": "crashed"},
+                "then": {"action": "reboot", "machine": "db"},
+            },
+        }))
+        .unwrap();
+        let error = validate_input_program(&config, &[trigger]).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "program reboot: {}",
+                seedbox_engine_protocol::not_implemented("trigger")
+            )
         );
     }
 }

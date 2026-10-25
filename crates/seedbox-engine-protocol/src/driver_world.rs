@@ -5,7 +5,9 @@
 //! integrity, not provenance or permission to execute an imported native image.
 use crate::{
     host_control::BoundaryPosition,
-    input_program::{InputAdmission, InputRejection, TimedInput},
+    input_program::{
+        ArmReceipt, InputAction, InputAdmission, InputRejection, TimedInput, TriggerProgress,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -171,29 +173,47 @@ pub struct Program {
     pub next: usize,
     pub admissions: Vec<InputAdmission>,
     pub rejections: Vec<InputRejection>,
+    /// Consumed trigger inputs, in program order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub armed: Vec<ArmReceipt>,
+    /// Live matching state of the triggers `armed` names, in trigger ID order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<TriggerProgress>,
 }
 impl Program {
     pub fn validate(&self) -> Result<(), String> {
         crate::input_program::validate_program(&self.inputs, u64::MAX)?;
         if self.next > self.inputs.len()
-            || self.admissions.len().checked_add(self.rejections.len()) != Some(self.next)
+            || self
+                .admissions
+                .len()
+                .checked_add(self.rejections.len())
+                .and_then(|consumed| consumed.checked_add(self.armed.len()))
+                != Some(self.next)
         {
             return Err("Driver input cursor differs from its history".into());
         }
         let mut admitted = self.admissions.iter().peekable();
         let mut rejected = self.rejections.iter().peekable();
+        let mut armed = self.armed.iter().peekable();
         let mut previous = 0;
+        let mut previous_trigger = 0;
         for input in &self.inputs[..self.next] {
             if rejected.peek().is_some_and(|r| r.key == input.key) {
                 let rejection = rejected.next().ok_or("missing input rejection")?;
                 if rejection.at_ns != input.at_ns || rejection.reason.is_empty() {
                     return Err("invalid Driver input rejection evidence".into());
                 }
+            } else if let InputAction::Rule(_) = &input.action {
+                armed
+                    .next()
+                    .ok_or("missing trigger arm receipt")?
+                    .validate(input, &mut previous_trigger)?;
             } else {
                 let row = admitted.next().ok_or("missing Driver input admission")?;
                 if row.key != input.key
                     || row.plan.at_ns != input.at_ns
-                    || row.plan.action != input.action
+                    || input.action.fault() != Some(&row.plan.action)
                     || row.plan.id <= previous
                     || input.at_ns.checked_add(input.timeout_ns) != Some(row.plan.deadline_ns)
                 {
@@ -202,8 +222,20 @@ impl Program {
                 previous = row.plan.id;
             }
         }
-        if admitted.next().is_some() || rejected.next().is_some() {
+        if admitted.next().is_some() || rejected.next().is_some() || armed.next().is_some() {
             return Err("unconsumed Driver input history".into());
+        }
+        let mut previous = 0;
+        for progress in &self.triggers {
+            if progress.trigger_id <= previous
+                || !self
+                    .armed
+                    .iter()
+                    .any(|receipt| receipt.trigger_id == progress.trigger_id)
+            {
+                return Err("trigger progress names no armed program trigger".into());
+            }
+            previous = progress.trigger_id;
         }
         Ok(())
     }

@@ -305,10 +305,14 @@ impl Operation {
                 marker,
                 match_timeout_ns,
                 ..
-            } if marker.is_empty() || marker.len() > 256 || *match_timeout_ns == 0 => {
-                return Err(OperationError::invalid(
-                    "trigger requires 1..=256 marker bytes and positive match timeout",
-                ));
+            } if marker.is_empty()
+                || marker.len() > seedbox_engine_protocol::control::MAX_TRIGGER_MARKER
+                || *match_timeout_ns == 0 =>
+            {
+                return Err(OperationError::invalid(format!(
+                    "trigger requires 1..={} marker bytes and positive match timeout",
+                    seedbox_engine_protocol::control::MAX_TRIGGER_MARKER
+                )));
             }
             _ => {}
         }

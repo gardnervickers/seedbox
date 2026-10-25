@@ -105,6 +105,12 @@ impl Receiver {
                                         reason,
                                     },
                                 ),
+                                Kind::TriggerChanged { trigger } => event(
+                                    last_time,
+                                    EventKind::TriggerChanged {
+                                        trigger: Box::new(trigger.into()),
+                                    },
+                                ),
                                 Kind::FaultChanged {
                                     id,
                                     action,

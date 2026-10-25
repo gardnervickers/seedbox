@@ -191,7 +191,8 @@ fn loop_advances_idle_world_to_service_owned_future_input_without_queuing_a_copy
                     machine: "n1".into(),
                     rate_ppb: Some(100),
                     max_rate_ppb: None,
-                },
+                }
+                .into(),
             }];
         let checkpoint = worker
             .driver

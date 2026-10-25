@@ -21,6 +21,7 @@ pub(crate) struct Tracker {
     /// One kernel leader kill can explain one natural outcome of that boot.
     oom_pending: BTreeSet<(String, u32)>,
     faults: BTreeMap<u32, FaultState>,
+    triggers: BTreeMap<u32, seedbox_api::TriggerState>,
     override_rejections: BTreeMap<String, String>,
     counters: BTreeMap<Pair, LinkCounters>,
     /// Active partition and shape handles, with the fault that set them.
@@ -71,6 +72,7 @@ impl Tracker {
             machines: BTreeMap::new(),
             oom_pending: BTreeSet::new(),
             faults: BTreeMap::new(),
+            triggers: BTreeMap::new(),
             override_rejections: BTreeMap::new(),
             counters: BTreeMap::new(),
             partitions: BTreeMap::new(),
@@ -117,6 +119,10 @@ impl Tracker {
         match event {
             EventKind::SourceGap { .. } | EventKind::SourceUnavailable => {
                 self.oom_pending.clear();
+            }
+            EventKind::TriggerChanged { trigger } => {
+                // The latest receipt is the trigger's whole state.
+                self.triggers.insert(trigger.id, (**trigger).clone());
             }
             EventKind::OverrideRejected {
                 input_key, reason, ..
@@ -494,6 +500,7 @@ impl Tracker {
                     ..fault.clone()
                 })
                 .collect(),
+            triggers: self.triggers.values().cloned().collect(),
         }
     }
 }
@@ -687,6 +694,46 @@ mod tests {
             input_key: None,
             counts: None,
         }
+    }
+
+    #[test]
+    fn trigger_receipts_are_kept_by_id_at_their_latest_state() {
+        use seedbox_engine_protocol::control::{EventSelector, TriggerReceipt, TriggerStatus};
+        let mut t = tracker();
+        let receipt = |status, seen| TriggerReceipt {
+            id: 1,
+            input_key: None,
+            when: EventSelector::Output {
+                machine: "a".into(),
+                marker: seedbox_engine_protocol::control::Marker(b"ready".to_vec()),
+            },
+            status,
+            armed_at_ns: 5,
+            match_deadline_ns: Some(100),
+            seen,
+            matched_at_ns: None,
+            effect_at_ns: None,
+            fault_id: None,
+            reason: None,
+        };
+        let before = t.snapshot().revision;
+        t.event(
+            5,
+            &EventKind::TriggerChanged {
+                trigger: Box::new(receipt(TriggerStatus::Armed, 0).into()),
+            },
+        );
+        t.event(
+            100,
+            &EventKind::TriggerChanged {
+                trigger: Box::new(receipt(TriggerStatus::Expired, 0).into()),
+            },
+        );
+        let world = t.snapshot();
+        assert!(world.revision > before);
+        assert_eq!(world.triggers.len(), 1);
+        assert_eq!(world.triggers[0].status, TriggerStatus::Expired);
+        assert_eq!(world.triggers[0].when["marker"], "ready");
     }
 
     #[test]

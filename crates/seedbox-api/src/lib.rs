@@ -50,7 +50,7 @@ mod world;
 pub use world::{
     ApplicationCondition, ApplicationState, FaultState, Frame, FrameDelivery, FrameFate,
     LinkCounters, LinkPolicy, LinkState, MachineCondition, MachineState, OutOfMemoryKill,
-    WorldState,
+    TriggerState, TriggerStatus, WorldState,
 };
 
 mod timeline;

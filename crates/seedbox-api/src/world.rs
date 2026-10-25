@@ -2,6 +2,7 @@
 //! faults. Clients discover every entity here rather than from the spec, so a
 //! world whose machines change while it runs needs no client change.
 use crate::{FaultStatus, MachineTransition, SimulationId};
+pub use seedbox_engine_protocol::control::TriggerStatus;
 pub use seedbox_engine_protocol::observation::{Frame, FrameFate};
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +21,59 @@ pub struct WorldState {
     pub machines: Vec<MachineState>,
     pub links: Vec<LinkState>,
     pub faults: Vec<FaultState>,
+    /// Oracle-armed and program-armed triggers, in ID order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<TriggerState>,
+}
+
+/// A trigger's latest receipt. A fired trigger names the fault it admitted;
+/// that fault's status says whether the effect applied.
+///
+/// Forward compatibility follows [`FaultState`]: the lifecycle (`status`,
+/// like a fault's) is a closed vocabulary this API version defines, while
+/// what the trigger watches (`when`, like a fault's `plan`) is an open
+/// engine payload, so a client keeps working when later engines add
+/// selectors.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TriggerState {
+    pub id: u32,
+    /// The program input that armed it; absent for an oracle-armed trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_key: Option<String>,
+    /// What it watches, as the engine's selector object.
+    pub when: serde_json::Value,
+    pub status: TriggerStatus,
+    pub armed_at_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_deadline_ns: Option<u64>,
+    /// Matching occurrences seen so far.
+    pub seen: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_at_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_at_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+impl From<seedbox_engine_protocol::control::TriggerReceipt> for TriggerState {
+    fn from(receipt: seedbox_engine_protocol::control::TriggerReceipt) -> Self {
+        Self {
+            id: receipt.id,
+            input_key: receipt.input_key,
+            when: serde_json::to_value(receipt.when).expect("selector serializes"),
+            status: receipt.status,
+            armed_at_ns: receipt.armed_at_ns,
+            match_deadline_ns: receipt.match_deadline_ns,
+            seen: receipt.seen,
+            matched_at_ns: receipt.matched_at_ns,
+            effect_at_ns: receipt.effect_at_ns,
+            fault_id: receipt.fault_id,
+            reason: receipt.reason,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,5 +250,40 @@ mod tests {
         let world: WorldState = serde_json::from_value(document).unwrap();
         assert_eq!(world.faults[0].input_key.as_deref(), Some("future-input"));
         assert_eq!(world.faults[0].plan.as_ref().unwrap()["novel"]["value"], 7);
+        assert!(world.triggers.is_empty());
+    }
+
+    #[test]
+    fn trigger_states_carry_engine_receipts_in_camel_case() {
+        use seedbox_engine_protocol::control::{EventSelector, Transition, TriggerReceipt};
+        let receipt = TriggerReceipt {
+            id: 2,
+            input_key: Some("reboot-db".into()),
+            when: EventSelector::Lifecycle {
+                machine: "db".into(),
+                transition: Transition::Crashed,
+            },
+            status: TriggerStatus::Fired,
+            armed_at_ns: 10,
+            match_deadline_ns: None,
+            seen: 1,
+            matched_at_ns: Some(40),
+            effect_at_ns: Some(41),
+            fault_id: Some(7),
+            reason: None,
+        };
+        let state = TriggerState::from(receipt);
+        let wire = serde_json::json!({
+            "id":2,"inputKey":"reboot-db",
+            "when":{"kind":"lifecycle","machine":"db","transition":"crashed"},
+            "status":"fired","armedAtNs":10,"seen":1,"matchedAtNs":40,"effectAtNs":41,"faultId":7
+        });
+        assert_eq!(serde_json::to_value(&state).unwrap(), wire);
+        assert_eq!(serde_json::from_value::<TriggerState>(wire).unwrap(), state);
+        // Selectors this client does not know still parse.
+        let future = serde_json::json!({"id":3,"when":{"kind":"future_selector","x":1},"status":"cut_off","armedAtNs":0,"seen":0});
+        let state: TriggerState = serde_json::from_value(future.clone()).unwrap();
+        assert_eq!(state.status, TriggerStatus::CutOff);
+        assert_eq!(serde_json::to_value(state).unwrap(), future);
     }
 }

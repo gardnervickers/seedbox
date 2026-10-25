@@ -859,7 +859,8 @@ mod tests {
             at_ns: 37,
             action: seedbox_engine_protocol::control::Action::Stop {
                 machine: "oracle".into(),
-            },
+            }
+            .into(),
             timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
         }];
         for incoming in [None, Some(false), Some(true)] {

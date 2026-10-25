@@ -551,7 +551,7 @@ where
                 key: request_id.clone(),
                 at_ns: at,
                 timeout_ns: scope.intervention.plan.deadline_ns - at,
-                action: scope.intervention.plan.action.clone(),
+                action: scope.intervention.plan.action.clone().into(),
             },
         );
         let result = self
@@ -611,8 +611,13 @@ where
         else {
             return Ok(false);
         };
-        let (action, handle) =
-            super::actions::translate(&input.action, input.timeout_ns).map_err(fail)?;
+        // Opening the worker refuses programs with rule inputs; none is due here.
+        let Some(fault) = input.action.fault() else {
+            return Err(fail(seedbox_engine_protocol::not_implemented(
+                input.action.name(),
+            )));
+        };
+        let (action, handle) = super::actions::translate(fault, input.timeout_ns).map_err(fail)?;
         self.authored(action, handle)
     }
     /// Deliver exactly one authored entry at its due barrier. No future action
@@ -686,7 +691,11 @@ where
                                 .at_ns
                                 .checked_add(input.timeout_ns)
                                 .ok_or_else(|| fail("authored deadline overflow"))?,
-                            action: input.action,
+                            action: input
+                                .action
+                                .fault()
+                                .ok_or_else(|| fail("a rule input admits no fault"))?
+                                .clone(),
                         },
                     },
                 ),

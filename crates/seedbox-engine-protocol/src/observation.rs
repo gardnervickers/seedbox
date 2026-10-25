@@ -77,6 +77,11 @@ pub enum Kind {
         at_ns: u64,
         reason: String,
     },
+    /// A trigger was armed or changed state. The observation's machine is
+    /// the one whose committed evidence the trigger watches, if it names one.
+    TriggerChanged {
+        trigger: crate::control::TriggerReceipt,
+    },
     /// Frames routed since the previous batch, in routing order. Published
     /// only to an observation socket; never part of evidence.
     Frames {

@@ -12,6 +12,14 @@ pub const MAX_CLOCK_RATE_PPB: u64 = 100_000_000;
 
 use serde::{Deserialize, Serialize};
 
+mod trigger;
+#[cfg(test)]
+use trigger::RESERVED_SELECTORS;
+pub use trigger::{
+    EventSelector, Marker, Transition, TriggerReceipt, TriggerSpec, TriggerStatus, MAX_TRIGGERS,
+    MAX_TRIGGER_MARKER,
+};
+
 /// Opt-in send-time impairments, carried by a healable directed shape layer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]

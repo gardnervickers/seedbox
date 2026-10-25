@@ -263,6 +263,7 @@ pub fn derive(
         machines: Vec::new(),
         links: Vec::new(),
         faults: Vec::new(),
+        triggers: Vec::new(),
     };
     let world_ref = world.unwrap_or(&empty);
     let null = serde_json::Value::Null;
@@ -454,6 +455,7 @@ mod tests {
             machines: Vec::new(),
             links: Vec::new(),
             faults,
+            triggers: Vec::new(),
         }
     }
 

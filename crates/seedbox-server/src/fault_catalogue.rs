@@ -347,6 +347,7 @@ mod tests {
             machines: vec![],
             links: vec![],
             faults: vec![],
+            triggers: Vec::new(),
         };
         let catalogue = discover(&world, 1_000_000);
         assert_eq!(catalogue.faults.len(), 15);

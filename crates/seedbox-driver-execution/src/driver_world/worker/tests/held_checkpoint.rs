@@ -191,7 +191,7 @@ fn held_crash_partition_and_same_time_order_survive_binary_capture_one_and_four_
                         key: format!("effect-{index}"),
                         at_ns: 10,
                         timeout_ns: 100,
-                        action,
+                        action: action.into(),
                     },
                 )
                 .collect();

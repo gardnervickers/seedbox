@@ -210,3 +210,26 @@ fn checkpoint_quantum_must_match_without_changing_saved_state() {
     assert_eq!(before, after);
     validate_checkpoint_quantum(&saved, 1_000_000).unwrap();
 }
+#[test]
+fn programs_with_rule_inputs_are_refused_before_any_machine_boots() {
+    let root = tempfile::tempdir().unwrap();
+    let mut request = request(inventory(None), root.path().join("must-not-exist"));
+    request.simulated_time_ns = 100;
+    request.program = vec![serde_json::from_value(serde_json::json!({
+        "key": "reboot", "at_ns": 10,
+        "action": {
+            "action": "trigger",
+            "when": {"kind": "lifecycle", "machine": "oracle", "transition": "crashed"},
+            "then": {"action": "reboot", "machine": "oracle"},
+        },
+    }))
+    .unwrap()];
+    let error = program(&request).unwrap_err().to_string();
+    assert_eq!(
+        error,
+        format!(
+            "input reboot: {}",
+            seedbox_engine_protocol::not_implemented("trigger")
+        )
+    );
+}

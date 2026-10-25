@@ -105,7 +105,7 @@ fn public_authored_clock_draw_heal_draw_runs_in_order_without_a_service_alias_ta
                 key: key.into(),
                 at_ns: 10,
                 timeout_ns: 5_000_000_000,
-                action,
+                action: action.into(),
             },
         )
         .collect();

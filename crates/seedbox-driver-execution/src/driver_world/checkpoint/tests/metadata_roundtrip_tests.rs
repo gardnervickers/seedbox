@@ -298,7 +298,8 @@ fn future(handle: String) -> seedbox_engine_protocol::input_program::TimedInput 
             handle,
             left: vec!["oracle".into()],
             right: vec!["m1".into()],
-        },
+        }
+        .into(),
     }
 }
 #[test]
@@ -328,8 +329,8 @@ fn valid_future_named_handle_above_64k_captures_and_reads_exactly() {
     let restored = read(&path).unwrap();
     assert_eq!(restored.state.world.input_program.inputs, [input]);
     assert_eq!(restored.state.world.input_program.next, 0);
-    let seedbox_engine_protocol::control::Action::Partition { handle, .. } =
-        &restored.state.world.input_program.inputs[0].action
+    let Some(seedbox_engine_protocol::control::Action::Partition { handle, .. }) =
+        restored.state.world.input_program.inputs[0].action.fault()
     else {
         panic!("expected partition")
     };

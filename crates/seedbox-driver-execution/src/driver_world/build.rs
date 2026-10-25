@@ -332,6 +332,19 @@ fn program(
         request.simulated_time_ns,
     )
     .map_err(bad)?;
+    // No Driver arms program triggers yet; refuse before any machine boots
+    // rather than failing when the input becomes due.
+    if let Some(input) = request
+        .program
+        .iter()
+        .find(|input| input.action.fault().is_none())
+    {
+        return Err(Error::Setup(format!(
+            "input {}: {}",
+            input.key,
+            seedbox_engine_protocol::not_implemented(input.action.name())
+        )));
+    }
     Ok(request.program.clone())
 }
 fn encode(snapshot: Snapshot, writer: &mut BufWriter<fs::File>) -> Result<()> {

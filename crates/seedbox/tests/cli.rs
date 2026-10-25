@@ -1122,6 +1122,7 @@ fn show_world_prints_machine_and_link_tables() {
         machines: vec![machine("n1", false), machine("oracle", true)],
         links: vec![link("n1", "oracle", None), link("oracle", "n1", Some("p1"))],
         faults: Vec::new(),
+        triggers: Vec::new(),
     };
     let body = serde_json::to_string(&world).unwrap();
     let server = stand_in_server(

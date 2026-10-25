@@ -44,6 +44,10 @@ pub enum EventKind {
         at_ns: u64,
         reason: String,
     },
+    /// A trigger was armed or changed state; this is its latest receipt.
+    TriggerChanged {
+        trigger: Box<crate::TriggerState>,
+    },
     DeletionRequested,
     ExecutionTerminated {
         termination: crate::ExecutionTermination,

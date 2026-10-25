@@ -645,6 +645,7 @@ mod tests {
             links: Vec::new(),
             faults: Vec::new(),
             override_rejections: BTreeMap::new(),
+            triggers: Vec::new(),
         };
         Snapshot {
             simulation,

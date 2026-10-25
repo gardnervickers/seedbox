@@ -2786,6 +2786,7 @@ pub(crate) mod tests {
             machines,
             links,
             faults: Vec::new(),
+            triggers: Vec::new(),
         }
     }
 

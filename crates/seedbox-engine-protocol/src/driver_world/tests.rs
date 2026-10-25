@@ -6,7 +6,8 @@ fn input(key: &str, at_ns: u64) -> TimedInput {
         at_ns,
         action: Action::Crash {
             machine: "a".into(),
-        },
+        }
+        .into(),
         timeout_ns: 10,
     }
 }
@@ -17,7 +18,7 @@ fn admitted(input: &TimedInput, id: u32) -> InputAdmission {
             id,
             at_ns: input.at_ns,
             deadline_ns: input.at_ns + input.timeout_ns,
-            action: input.action.clone(),
+            action: input.action.fault().unwrap().clone(),
         },
     }
 }
@@ -30,6 +31,8 @@ fn consumed_prefix_is_exact_and_pending_suffix_is_replaceable_without_reseeding(
         next: 1,
         admissions: vec![admitted(&first, 9)],
         rejections: vec![],
+        armed: vec![],
+        triggers: vec![],
     };
     program.validate().unwrap();
     let original = program.clone();
@@ -54,6 +57,8 @@ fn rejects_cursor_history_order_identity_deadline_and_unconsumed_rows() {
         next: 2,
         admissions: vec![admitted(&first, 3), admitted(&second, 5)],
         rejections: vec![],
+        armed: vec![],
+        triggers: vec![],
     };
     valid.validate().unwrap();
     for n in 0..5 {
@@ -88,8 +93,89 @@ fn state_rejection_consumes_only_its_authored_entry() {
             at_ns: 0,
             reason: "not running".into(),
         }],
+        armed: vec![],
+        triggers: vec![],
     };
     program.validate().unwrap();
+}
+#[test]
+fn consumed_trigger_inputs_leave_ordered_arm_receipts() {
+    use crate::input_program::{ArmReceipt, InputAction, RuleAction};
+    let rule = |key: &str, at_ns| TimedInput {
+        key: key.into(),
+        at_ns,
+        action: InputAction::Rule(RuleAction::Trigger(Box::new(
+            serde_json::from_value(serde_json::json!({
+                "when": {"kind": "lifecycle", "machine": "a", "transition": "crashed"},
+                "then": {"action": "reboot", "machine": "a"},
+            }))
+            .unwrap(),
+        ))),
+        timeout_ns: 10,
+    };
+    let fault = input("fault", 0);
+    let first = rule("first", 1);
+    let second = rule("second", 2);
+    let receipt = |input: &TimedInput, trigger_id| ArmReceipt {
+        key: input.key.clone(),
+        at_ns: input.at_ns,
+        trigger_id,
+    };
+    let valid = Program {
+        inputs: vec![fault.clone(), first.clone(), second.clone()],
+        next: 3,
+        admissions: vec![admitted(&fault, 1)],
+        rejections: vec![],
+        armed: vec![receipt(&first, 2), receipt(&second, 4)],
+        triggers: vec![],
+    };
+    valid.validate().unwrap();
+    let wire = serde_json::to_value(&valid).unwrap();
+    assert_eq!(
+        wire["armed"][1],
+        serde_json::json!({"key":"second","at_ns":2,"trigger_id":4})
+    );
+    assert_eq!(serde_json::from_value::<Program>(wire).unwrap(), valid);
+    for n in 0..4 {
+        let mut invalid = valid.clone();
+        match n {
+            0 => invalid.armed[1].trigger_id = 2,
+            1 => invalid.armed[0].key = "second".into(),
+            2 => {
+                invalid.armed.pop();
+            }
+            _ => invalid.armed[0].at_ns = 0,
+        }
+        assert!(invalid.validate().is_err(), "case {n}");
+    }
+    // Live progress may only name armed triggers, once each, in ID order.
+    let progress = |trigger_id| crate::input_program::TriggerProgress {
+        trigger_id,
+        status: crate::control::TriggerStatus::Armed,
+        seen: 1,
+        marker_prefix: 0,
+        matched_at_ns: None,
+        effect_at_ns: None,
+    };
+    let mut live = valid.clone();
+    live.triggers = vec![progress(2), progress(4)];
+    live.validate().unwrap();
+    assert_eq!(
+        serde_json::to_value(&live).unwrap()["triggers"][0],
+        serde_json::json!({"trigger_id":2,"status":"armed","seen":1})
+    );
+    for triggers in [
+        vec![progress(3)],
+        vec![progress(4), progress(2)],
+        vec![progress(2), progress(2)],
+    ] {
+        live.triggers = triggers;
+        assert!(live.validate().is_err());
+    }
+    // An unconsumed program serializes exactly as before.
+    let empty = Program::default();
+    let empty = serde_json::to_value(&empty).unwrap();
+    assert!(empty.get("armed").is_none() && empty.get("triggers").is_none());
 }
 #[test]
 fn initial_ready_seen_set_and_ever_latch_survive_serialization_and_repeated_boots() {
@@ -145,6 +231,8 @@ fn authored_cursor_checks_saved_time_before_restore() {
         next: 1,
         admissions: vec![admitted(&consumed, 1)],
         rejections: vec![],
+        armed: vec![],
+        triggers: vec![],
     };
     program.validate_at(10).unwrap();
     program.validate_at(20).unwrap();

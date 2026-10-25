@@ -341,6 +341,8 @@ impl Publisher {
                     .find(|input| input.key == *key)
                     .ok_or_else(|| invalid("Driver admitted input absent from service program"))?
                     .action
+                    .fault()
+                    .ok_or_else(|| invalid("a rule input admits no fault"))?
                     .clone(),
             ))
         } else {

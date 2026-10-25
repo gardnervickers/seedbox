@@ -299,7 +299,7 @@ fn authored_same_time_entries_drain_individually_and_rejection_consumes_no_fault
                     key: (*key).into(),
                     at_ns: 10,
                     timeout_ns: 10,
-                    action: action.clone(),
+                    action: action.clone().into(),
                 },
             )
             .collect();

@@ -8,9 +8,9 @@
 //! and arm-ID-ordered admission through `due`/`resolve`. Guest command completion
 //! remains separate from admitting a trigger effect.
 
-const MAX_TRIGGERS: usize = 64;
-const MAX_MARKER: usize = 256;
+// The public limits, which program-armed triggers will share with these.
 use super::PROCESS_EFFECT_TIMEOUT_NS;
+use seedbox_engine_protocol::control::{MAX_TRIGGERS, MAX_TRIGGER_MARKER as MAX_MARKER};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Status {
@@ -89,10 +89,10 @@ impl Triggers {
         action: TriggerAction,
     ) -> Result<u32, String> {
         if self.records.len() >= MAX_TRIGGERS {
-            return Err("trigger budget exhausted (64 per run)".into());
+            return Err(format!("trigger budget exhausted ({MAX_TRIGGERS} per run)"));
         }
         if marker.is_empty() || marker.len() > MAX_MARKER {
-            return Err("marker must contain 1..=256 bytes".into());
+            return Err(format!("marker must contain 1..={MAX_MARKER} bytes"));
         }
         if timeout == 0 {
             return Err("match timeout must be positive".into());
