@@ -304,15 +304,30 @@ impl Service {
         }
         Ok(plans)
     }
-    pub(crate) fn deadline(&mut self, fault: u32, at: u64) -> Result<(), Failure> {
+    /// A guest command still pending at its deadline fails the run, except
+    /// one never sent because its rebooted machine was not ready again in
+    /// time: like one for a down machine, it is unavailable. One waiting for
+    /// a first boot that never becomes ready still fails.
+    pub(crate) fn deadline(&mut self, fault: u32, at: u64) -> Result<Vec<Plan>, Failure> {
         self.valid()?;
         if let Some(p) = self.pending.get(&fault) {
             if at < p.deadline {
                 return Err("early effect deadline".into());
             }
+            if p.command.is_none() && p.scope.machine().is_some_and(|(_, boot)| boot > 0) {
+                return self.finish(
+                    fault,
+                    at,
+                    at,
+                    Err(error(
+                        ErrorCode::TargetUnavailable,
+                        "target machine was not ready again in time",
+                    )),
+                );
+            }
             return Err(self.fatal(Some(fault), Some(at), at, "process effect deadline expired"));
         }
-        Ok(())
+        Ok(vec![])
     }
     fn settlement(
         fault: u32,
