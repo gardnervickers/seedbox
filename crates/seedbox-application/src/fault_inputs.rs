@@ -138,6 +138,32 @@ mod program_tests {
     }
 
     #[test]
+    fn documented_branch_overrides_parse_as_ordered_program_inputs() {
+        // The example in docs/exploration.md.
+        let document = r#"
+- {id: a0, atNs: 8000000000, action: {action: anchor}}
+- {id: a0-reseed, atNs: 8000000000, action: {action: reseed, seed: 7, identity: member/4}}
+- {id: pick, atNs: 8000000000,
+   action: {action: choice, machine: client, incarnation: 0, session: 1,
+            site: retry, occurrence: 2, select: 1}}
+"#;
+        let overrides: Vec<seedbox_spec::definition::Override> =
+            serde_yaml_ng::from_str(document).unwrap();
+        let inputs: Vec<TimedInput> = overrides
+            .into_iter()
+            .map(|entry| {
+                serde_json::from_value(serde_json::json!({
+                    "key": entry.id, "at_ns": entry.at_ns, "action": entry.action,
+                }))
+                .unwrap()
+            })
+            .collect();
+        seedbox_engine_protocol::input_program::validate_program(&inputs, u64::MAX).unwrap();
+        let names: Vec<_> = inputs.iter().map(|input| input.action.name()).collect();
+        assert_eq!(names, ["anchor", "reseed", "choice"]);
+    }
+
+    #[test]
     fn defined_only_faults_are_refused_before_preparation() {
         let config = crate::config::parse(
             "name: test\nmachines:\n  db: {image: example:v1}\noracle: {image: example/oracle}\n",

@@ -31,7 +31,9 @@ Times come from frame commit, never the guest. The
 An evaluation always arrives: details too large for a record are dropped and
 marked `details_truncated`. A record the SDK cannot send is counted and reported
 as `lost` on the next session. `flush` and `summary` fail when no reply with
-their own sequence number arrives within 60 seconds of guest time.
+their own sequence number arrives within 60 seconds of guest time; `choose`
+waits 10 seconds, then takes the first alternative and records a
+`seedbox.choice_unanswered` event.
 
 ## Verdicts and defaults
 
