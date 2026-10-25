@@ -258,6 +258,15 @@ Capture needs paused, application-ready execution at a committed boundary with n
 It consumes the required commit handoff before optional publication, without waiting for observers or releasing held effects.
 The [service envelope](../crates/seedbox-driver-execution/src/driver_world/checkpoint.rs) retains input authority, not observation history.
 
+## Owned cache objects
+
+Checkpoint capture and imports create *owned* cache objects; the running server remembers each new one in memory.
+An ordinary put of the same bytes makes an owned object a reusable input.
+Deletion removes owned objects that no resource, retained input, export of a remaining source or unsubmitted checkpoint upload names; creators hold a reference lock until one does.
+Ownership ends with the server: after graceful shutdown, a crash or a failed reclamation, remaining objects stay as ordinary cache content, so an uncertain path leaks rather than deletes.
+The exclusive server lock means only one process reclaims, and only objects it created.
+The [reclamation](../crates/seedbox-server/src/execution/content.rs) over-approximates roots: any digest-shaped string counts.
+
 ## Connection incarnations
 
 Connection selection follows observed IPv4 TCP sends, including packets later dropped, not the guest's TCP state.

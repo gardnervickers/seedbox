@@ -321,14 +321,22 @@ fn serve_inner(
             .map_err(|e| Error::Setup(format!("server socket {}: {e}", socket.display())))?;
         ready()?;
         let capacity = NonZeroUsize::MIN.saturating_add(1);
-        seedbox_server::serve(listener, manager, execution, capacity, shutdown)
+        seedbox_server::serve(listener, manager, execution.clone(), capacity, shutdown)
             .await
             .map_err(setup)
     });
+    // Remove what no remaining resource names. Whatever this keeps, also
+    // after a failure, stays in the cache as ordinary content for saved
+    // definitions: ownership ends with this process.
+    let reclaimed = execution
+        .reclaim_content()
+        .map(drop)
+        .map_err(|error| Error::Setup(format!("content reclamation: {error}")));
     let cleanup = scratch
         .close()
         .map_err(|error| Error::Setup(format!("session cleanup {}: {error}", session.display())));
     result?;
+    reclaimed?;
     cleanup?;
     // The socket lock and temporary execution files live through worker shutdown.
     // Leave the socket inode for the next owner's stale-socket check.
@@ -336,13 +344,12 @@ fn serve_inner(
 }
 
 /// Binary inputs outlive the server; observations and run evidence do not.
+/// This server may reclaim the cache objects its own resources created; the
+/// exclusive server lock means no other process reclaims meanwhile.
 fn session_store(root: &Path, session: &Path) -> Result<ContentStore> {
     let cache = root.join("cache");
     prepare_directory(&cache)?;
-    Ok(ContentStore::with_ephemeral_evidence(
-        cache,
-        session.join("store"),
-    ))
+    Ok(ContentStore::with_ephemeral_evidence(cache, session.join("store")).with_owned_objects())
 }
 
 mod session;
@@ -512,5 +519,39 @@ mod session_tests {
             assert!(!next.path().join("simulation-state").exists());
             next.close().unwrap();
         }
+    }
+
+    /// A crashed or abandoned session's objects stay in the cache: the next
+    /// server neither knows nor reclaims them, and putting them again keeps
+    /// them ordinary content.
+    #[test]
+    fn owned_objects_of_an_ended_session_stay_as_cache_content() {
+        let _scope = session::test_scope();
+        let root = tempfile::tempdir().unwrap();
+        let state = b"checkpoint state".as_slice();
+        let abandoned = session_directory(root.path()).unwrap();
+        let store = session_store(root.path(), abandoned.path()).unwrap();
+        let input = store.put(b"kernel").unwrap();
+        let owned = store.put_reader_owned(state).unwrap();
+        drop(store);
+        let _ = abandoned.keep();
+        let next = session_directory(root.path()).unwrap();
+        let restarted = session_store(root.path(), next.path()).unwrap();
+        assert_eq!(restarted.read(&input).unwrap(), b"kernel");
+        assert_eq!(restarted.read(&owned).unwrap(), state);
+        assert_eq!(restarted.put_reader_owned(state).unwrap(), owned);
+        assert!(restarted
+            .reclaim_owned(&Default::default())
+            .unwrap()
+            .is_empty());
+        // A graceful close without reclamation keeps them too.
+        let created = restarted.put_reader_owned(b"new state".as_slice()).unwrap();
+        drop(restarted);
+        next.close().unwrap();
+        let last = session_directory(root.path()).unwrap();
+        let store = session_store(root.path(), last.path()).unwrap();
+        assert_eq!(store.read(&created).unwrap(), b"new state");
+        assert_eq!(store.read(&owned).unwrap(), state);
+        last.close().unwrap();
     }
 }

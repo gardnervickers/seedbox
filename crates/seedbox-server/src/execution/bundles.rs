@@ -17,7 +17,7 @@ impl ExecutionService {
             .evidence
             .lock()
             .map_err(|_| catalogue::Error::StorageFailed)?;
-        let resource = self.checkpoint_definition_observed(id, checkpoint, &mut |_| {
+        let resource = self.checkpoint_definition_locked(id, checkpoint, &mut |_| {
             if options.cancellation.is_cancelled() {
                 Err(std::io::Error::other("checkpoint export cancelled"))
             } else {
@@ -41,10 +41,16 @@ impl ExecutionService {
         input: impl Read,
         options: &Options,
     ) -> Result<seedbox_spec::definition::Definition, Error> {
+        // Its owned binaries stay pinned until a submission names them.
+        let _references = self
+            .references
+            .read()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
         let definition = archive::import_checkpoint(input, &self.store, options)
             .map_err(|e| Error::Bundle(e.to_string()))?;
         seedbox_application::definition::prepared(&definition, &self.store)
             .map_err(|e| Error::Bundle(e.to_string()))?;
+        self.pin_upload(&definition)?;
         Ok(definition)
     }
 

@@ -694,6 +694,20 @@ impl Manager {
         Ok(state.results.get(id).cloned())
     }
 
+    /// What each resource names content in, including its retained result.
+    pub(crate) fn content(&self) -> Result<Vec<(SimulationId, serde_json::Value)>, Error> {
+        let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        let mut values = state.catalogue.content()?;
+        for (id, result) in &state.results {
+            let value = serde_json::to_value((&result.definition, &result.record));
+            values.push((
+                id.clone(),
+                value.map_err(|e| Error::Invalid(e.to_string()))?,
+            ));
+        }
+        Ok(values)
+    }
+
     pub fn submit(&self, request: SubmitRequest) -> Result<(Simulation, bool), Error> {
         let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
         if !state.accepting {

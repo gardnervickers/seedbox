@@ -348,8 +348,10 @@ fn import_payload<T>(
             remaining: max_bytes,
             cancellation: options.cancellation.clone(),
         };
+        // Imported binaries the cache does not already hold are owned: the
+        // server reclaims them once no resource names them.
         let published = if binaries.contains(&digest) {
-            store.put_reader(reader)?
+            store.put_reader_owned(reader)?
         } else {
             store.put_reader_unsynced(reader)?
         };

@@ -143,6 +143,21 @@ impl Catalogue {
         Ok(())
     }
 
+    /// What each resource names content in: its submitted and resolved
+    /// specs.
+    pub(crate) fn content(&self) -> Result<Vec<(SimulationId, serde_json::Value)>> {
+        self.entries
+            .iter()
+            .map(|(id, entry)| {
+                let value = serde_json::to_value((&entry.request.spec, &entry.resource.spec));
+                Ok((
+                    id.clone(),
+                    value.map_err(|e| Error::Invalid(e.to_string()))?,
+                ))
+            })
+            .collect()
+    }
+
     /// Returns (resource, newly_created). Retrying after an uncertain response
     /// returns the existing ID.
     pub fn submit(&mut self, request: SubmitRequest) -> Result<(Simulation, bool)> {
