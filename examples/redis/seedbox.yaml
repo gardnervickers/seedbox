@@ -9,9 +9,3 @@ oracle:
   environment:
     REDIS_ADDRESS: redis:6379
     SEEDBOX_PLANT_FAILURE: "0"
-network:
-  latency: 1ms
-simulator:
-  quantum: 1ms
-  machineWorkers: 1
-  blocksPerProgressCall: 10000

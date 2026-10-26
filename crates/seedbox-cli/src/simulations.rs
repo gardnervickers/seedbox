@@ -159,7 +159,7 @@ pub(super) fn run(
             backend,
             start_paused: paused,
             wall_time_ns,
-            machine_workers: None,
+            machine_workers: selection.machine_workers,
         },
         metadata,
         detach,
@@ -192,7 +192,7 @@ pub(super) fn run_checkpoint(
             backend,
             start_paused: paused,
             wall_time_ns: selection.wall_time,
-            machine_workers: None,
+            machine_workers: selection.machine_workers,
         },
         metadata,
         detach,
@@ -223,12 +223,12 @@ pub(super) fn run_count(
     {
         return Err(Error::Setup("seed range overflows u64".into()));
     }
-    let request = seedbox_api::SeedRangeRequest {
+    let mut request = seedbox_api::SeedRangeRequest {
         options: seedbox_api::ExecutionOptions {
             backend,
             start_paused: paused,
             wall_time_ns,
-            machine_workers: None,
+            machine_workers: selection.machine_workers,
         },
         metadata,
         request_id: Client::request_id().map_err(client_error)?,
@@ -240,6 +240,7 @@ pub(super) fn run_count(
     let _signals = super::signals::Signals::interrupt(&cancellation)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
+        default_machine_workers(&client, &mut request.options, &request.spec).await?;
         let mut range = client.submit_seeds(&request).await.map_err(client_error)?;
         if detach {
             if json {
@@ -407,7 +408,7 @@ pub(super) fn replay(
             backend,
             start_paused: paused,
             wall_time_ns,
-            machine_workers: resource.options.machine_workers,
+            machine_workers: selection.machine_workers,
         },
         metadata,
         detach,
@@ -425,6 +426,22 @@ fn resource_metadata(resource: &Simulation) -> seedbox_spec::definition::Metadat
         annotations,
     }
 }
+/// Compute the omitted worker count from the server that will run the simulation.
+async fn default_machine_workers(
+    client: &Client,
+    options: &mut seedbox_api::ExecutionOptions,
+    spec: &SimulationSpec,
+) -> Result<()> {
+    if options.machine_workers.is_none() {
+        let slots = client.capacity().await.map_err(client_error)?.slots;
+        options.machine_workers = Some(defaults::machine_workers(
+            spec.configuration.services.len(),
+            slots,
+        ));
+    }
+    Ok(())
+}
+
 fn submit(
     server: &ServerArgs,
     spec: SimulationSpec,
@@ -445,7 +462,7 @@ fn submit_with_comparison(
     json: bool,
     baseline: Option<&SimulationId>,
 ) -> Result<u8> {
-    let request = SubmitRequest {
+    let mut request = SubmitRequest {
         options,
         metadata,
         request_id: Client::request_id().map_err(client_error)?,
@@ -456,6 +473,7 @@ fn submit_with_comparison(
     let _signals = super::signals::Signals::interrupt(&cancellation)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
+        default_machine_workers(&client, &mut request.options, &request.spec).await?;
         let resource = client.submit(&request).await.map_err(client_error)?;
         if detach {
             if json { output::json(&resource)?; } else { output::status("CREATED", &resource.metadata.id); }
@@ -1006,7 +1024,7 @@ mod tests {
         let custom = tempfile::tempdir().unwrap();
         std::fs::write(
             custom.path().join("seedbox.yaml"),
-            "name: custom\noracle: {image: busybox}\nsimulator: {quantum: 2.5ms, machineWorkers: 4}\n",
+            "name: custom\noracle: {image: busybox}\nsimulator: {quantum: 2.5ms}\n",
         )
         .unwrap();
         let (spec, _) = load_spec(
@@ -1019,7 +1037,6 @@ mod tests {
         let restored: SimulationSpec =
             serde_json::from_slice(&serde_json::to_vec(&spec).unwrap()).unwrap();
         assert_eq!(restored.configuration.simulator.quantum_ns.get(), 2_500_000);
-        assert_eq!(restored.configuration.simulator.machine_workers.get(), 4);
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../harness/acceptance/workloads");

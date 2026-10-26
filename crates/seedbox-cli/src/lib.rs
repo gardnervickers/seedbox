@@ -423,6 +423,7 @@ struct BackendArgs {
 struct BackendSelection {
     backend: Option<seedbox_spec::backend::CpuBackend>,
     wall_time: Option<u64>,
+    machine_workers: Option<u32>,
 }
 impl BackendArgs {
     fn selection(self, execution: ExecutionArgs) -> BackendSelection {
@@ -432,6 +433,7 @@ impl BackendArgs {
                 BackendArg::Tcg => seedbox_spec::backend::CpuBackend::Tcg,
             }),
             wall_time: execution.wall_time,
+            machine_workers: execution.machine_workers,
         }
     }
 }
@@ -441,6 +443,9 @@ struct ExecutionArgs {
     /// Stop after this much active host time, excluding explicit pauses [default: unlimited].
     #[arg(long, value_parser = wall_time)]
     wall_time: Option<u64>,
+    /// Host threads that run machines; never changes results [default: one per machine, sharing CPUs across server slots].
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=64))]
+    machine_workers: Option<u32>,
 }
 
 fn wall_time(value: &str) -> std::result::Result<u64, String> {

@@ -403,11 +403,6 @@ fn prepared_boot_cache_matches_fresh_retention_and_cross_project_relative_files(
         store.verify(digest).unwrap();
         fresh_store.verify(digest).unwrap();
     }
-    // Host scheduling capacity is not a boot input.
-    let mut simulation = a.clone();
-    simulation.simulator.machine_workers = 4.try_into().unwrap();
-    assert_eq!(first, prepare(&simulation, &store));
-    assert_eq!(renders.get(), 3);
     // Replay/exports retain all bytes independently of project files and records.
     for name in ["a", "b", "same"] {
         fs::remove_dir_all(root.path().join(name)).unwrap();

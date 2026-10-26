@@ -71,10 +71,6 @@ oracle:
   environment:
     REDIS_ADDRESS: redis:6379
     SEEDBOX_PLANT_FAILURE: "0"
-network:
-  latency: 1ms
-simulator:
-  blocksPerProgressCall: 10000
 ```
 
 Machine names are hostnames on the simulated network. Build contexts are relative
@@ -87,21 +83,23 @@ names to `{target}` entries for writable disks that survive machine crashes.
 See [the etcd project](examples/etcd/seedbox.yaml) for a three-node cluster with
 persistent data disks.
 
-`network.latency` defaults to `1ms`; `simulator.blocksPerProgressCall` defaults to
-`10000` and controls how often translated code charges simulation progress.
-Choose the backend, seed and execution limits with CLI flags.
-
-Set the timeslice and machine execution threads in `seedbox.yaml`:
+`network.latency` sets the one-way delay between machines and defaults to `1ms`.
+`simulator.quantum` sets the timeslice:
 
 ```yaml
+network:
+  latency: 2ms
 simulator:
-  quantum: 1ms
-  machineWorkers: 4
+  quantum: 500us
 ```
 
 `quantum` defaults to `1ms` and must be a positive duration in whole nanoseconds.
 Network latency, timers and scheduled events can shorten a parallel execution window.
-Replay and checkpoints retain the quantum. `machineWorkers` accepts 1–64 and
-defaults to 1; it affects host throughput without changing simulation results.
-Workers steal queued machine runs, so machines can outnumber threads. Each round
-still waits for all its running machines to reach the barrier.
+Replay and checkpoints retain the quantum.
+
+Choose the backend, seed, execution limits and machine threads with CLI flags.
+`run` and `replay` accept `--machine-workers 1..64`; the default is one thread per
+machine, with host CPUs shared across the server's execution slots. The count
+affects host throughput without changing simulation results. Workers steal queued
+machine runs, so machines can outnumber threads. Each round still waits for all
+its running machines to reach the barrier.

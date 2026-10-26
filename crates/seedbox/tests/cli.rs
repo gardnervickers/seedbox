@@ -314,8 +314,7 @@ fn project_argument_defaults_to_the_project_directory() {
             &fs::read_to_string(directory.path().join(name).join("seedbox.yaml")).unwrap(),
         )
         .unwrap();
-        assert_eq!(document["simulator"]["quantum"].as_str(), Some("1ms"));
-        assert_eq!(document["simulator"]["machineWorkers"].as_u64(), Some(1));
+        assert!(document.get("simulator").is_none(), "{name}");
     }
     for args in [&["check"][..], &["check", "."], &["check", "seedbox.yaml"]] {
         let output = seedbox(args, &project);
@@ -1000,23 +999,40 @@ fn capacity_help_explains_resident_slots_and_accepts_json() {
 }
 
 #[test]
-fn machine_workers_is_only_configurable_in_the_project() {
+fn machine_workers_is_a_bounded_execution_option() {
     let root = tempfile::tempdir().unwrap();
     for command in ["run", "replay"] {
         let help = seedbox(&[command, "--help"], root.path());
         assert!(help.status.success(), "{command}: {}", stderr(&help));
         let text = String::from_utf8_lossy(&help.stdout);
-        assert!(!text.contains("--machine-workers"), "{command}: {text}");
-
-        let output = seedbox(&[command, "--machine-workers", "4"], root.path());
-        assert_eq!(output.status.code(), Some(2), "{command}");
-        assert!(output.stdout.is_empty());
-        assert!(
-            stderr(&output).contains("unexpected argument '--machine-workers'"),
-            "{command}: {}",
-            stderr(&output)
-        );
+        assert!(text.contains("--machine-workers"), "{command}: {text}");
+        for workers in ["0", "65"] {
+            let output = seedbox(
+                &[command, "k7m2p9qx", "--machine-workers", workers],
+                root.path(),
+            );
+            assert_eq!(output.status.code(), Some(2), "{command} {workers}");
+            assert!(output.stdout.is_empty());
+            assert!(
+                stderr(&output).contains("--machine-workers"),
+                "{command} {workers}: {}",
+                stderr(&output)
+            );
+        }
     }
+    let project = root.path().join("seedbox.yaml");
+    fs::write(
+        &project,
+        "name: demo\noracle: {image: test}\nsimulator: {machineWorkers: 4}\n",
+    )
+    .unwrap();
+    let output = seedbox(&["check", "seedbox.yaml"], root.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("machineWorkers"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]

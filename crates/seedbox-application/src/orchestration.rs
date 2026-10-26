@@ -17,7 +17,7 @@ pub struct RunOptions {
     pub seed: Option<u64>,
     pub cancellation: CancellationToken,
     /// Machine worker threads for this attempt. Performance only; never part
-    /// of the experiment identity. `None` uses the project setting.
+    /// of the experiment identity. `None` uses the executor's default.
     pub machine_workers: Option<u32>,
 }
 
@@ -144,17 +144,7 @@ impl Orchestrator {
                 path: "seed".into(),
                 message: "provide a seed in RunOptions".into(),
             })?;
-        let options = RunOptions {
-            machine_workers: Some(
-                options
-                    .machine_workers
-                    .unwrap_or(simulation.simulator.machine_workers.get()),
-            ),
-            ..options
-        };
-        let mut configuration = simulation.clone();
-        // Worker placement changes host throughput, never experiment identity.
-        configuration.simulator.machine_workers = Default::default();
+        let configuration = simulation.clone();
         let identity = RunIdentity {
             program: self.program.clone(),
             version: FORMAT_VERSION,
