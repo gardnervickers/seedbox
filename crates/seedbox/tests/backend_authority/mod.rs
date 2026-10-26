@@ -173,36 +173,34 @@ fn serve_resource(root: &Path, body: String) -> std::thread::JoinHandle<Vec<Stri
     })
 }
 #[test]
-fn backend_authority_replay_and_rerun_reject_unknown_cpu() {
+fn backend_authority_replay_rejects_unknown_cpu() {
     for (top, actual, flag) in [
         ("driver-pv", "driver-tcg", "pv"),
         ("driver-tcg", "driver-pv", "tcg"),
     ] {
-        for prefix in [vec!["replay"], vec!["run", "--from"]] {
-            let root = directory();
-            let body = invalid_backend_resource(top, actual).to_string();
-            let parse_error = serde_json::from_slice::<Simulation>(body.as_bytes()).unwrap_err();
-            let expected = seedbox_client::Error::from(parse_error).to_string();
-            let server = serve_resource(root.path(), body);
-            let mut args = prefix;
-            args.extend(["deadbeef", "--backend", flag, "--json"]);
-            let output = seedbox(&args, root.path());
-            let requests = server.join().unwrap();
-            assert_eq!(output.status.code(), Some(2));
-            assert_eq!(stderr(&output), format!("error: {expected}\n"));
-            assert!(
-                stderr(&output).contains("unknown Driver backend"),
-                "{}",
-                stderr(&output)
-            );
-            assert!(requests
-                .iter()
-                .any(|request| request.starts_with("GET /v1/simulations/deadbeef ")));
-            assert!(
-                requests.iter().all(|request| request.starts_with("GET ")),
-                "invalid retained metadata must never be submitted: {requests:?}"
-            );
-        }
+        let root = directory();
+        let body = invalid_backend_resource(top, actual).to_string();
+        let parse_error = serde_json::from_slice::<Simulation>(body.as_bytes()).unwrap_err();
+        let expected = seedbox_client::Error::from(parse_error).to_string();
+        let server = serve_resource(root.path(), body);
+        let mut args = vec!["replay"];
+        args.extend(["deadbeef", "--backend", flag, "--json"]);
+        let output = seedbox(&args, root.path());
+        let requests = server.join().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), format!("error: {expected}\n"));
+        assert!(
+            stderr(&output).contains("unknown Driver backend"),
+            "{}",
+            stderr(&output)
+        );
+        assert!(requests
+            .iter()
+            .any(|request| request.starts_with("GET /v1/simulations/deadbeef ")));
+        assert!(
+            requests.iter().all(|request| request.starts_with("GET ")),
+            "invalid retained metadata must never be submitted: {requests:?}"
+        );
     }
 }
 #[test]

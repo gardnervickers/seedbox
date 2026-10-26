@@ -43,20 +43,26 @@ fn handshake(value: &Handshake) -> Result<()> {
 }
 
 pub(crate) fn connect(options: &crate::server_args::ServerArgs) -> Result<Client> {
-    connect_inner(options, false)
+    connect_inner(options, None)
 }
 
-pub(super) fn background(options: &crate::server_args::ServerArgs) -> Result<()> {
-    connect_inner(options, true)?;
+/// Explicit startup; the inputs configure a new server, never an existing one.
+pub(super) fn background(
+    options: &crate::server_args::ServerArgs,
+    inputs: crate::RuntimeInputs,
+) -> Result<()> {
+    connect_inner(options, Some(inputs))?;
     Ok(())
 }
 
-fn connect_inner(options: &crate::server_args::ServerArgs, explicit: bool) -> Result<Client> {
+fn connect_inner(
+    options: &crate::server_args::ServerArgs,
+    explicit: Option<crate::RuntimeInputs>,
+) -> Result<Client> {
     let root = super::state_directory(options.state.clone())?;
     super::prepare_directory(&root)?;
     let socket = root.join("server.sock");
     if listening(&socket)? {
-        options.existing_server_notice();
         return Client::connect_to(&socket).map_err(super::setup);
     }
     let lock_path = root.join("startup.lock");
@@ -87,12 +93,14 @@ fn connect_inner(options: &crate::server_args::ServerArgs, explicit: bool) -> Re
         std::thread::sleep(Duration::from_millis(20));
     }
     if !listening(&socket)? {
-        if !explicit {
-            confirm_start()?;
-        }
-        start(&root, options, Instant::now() + TIMEOUT)?;
-    } else {
-        options.existing_server_notice();
+        let inputs = match explicit {
+            Some(inputs) => inputs,
+            None => {
+                confirm_start()?;
+                crate::RuntimeInputs::default()
+            }
+        };
+        start(&root, inputs, Instant::now() + TIMEOUT)?;
     }
     Client::connect_to(&socket).map_err(super::setup)
 }
@@ -115,7 +123,7 @@ pub(super) fn listening(socket: &Path) -> Result<bool> {
     }
 }
 
-fn start(root: &Path, options: &crate::server_args::ServerArgs, deadline: Instant) -> Result<()> {
+fn start(root: &Path, inputs: crate::RuntimeInputs, deadline: Instant) -> Result<()> {
     let executable = std::env::current_exe().map_err(super::setup)?;
     let mut command = Command::new(&executable);
     command
@@ -131,7 +139,9 @@ fn start(root: &Path, options: &crate::server_args::ServerArgs, deadline: Instan
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
-    options.append_startup_args(&mut command);
+    if inputs.full_state {
+        command.arg("--full-state");
+    }
     let mut child = seedbox_exec::spawn(&mut command)
         .map_err(|e| Error::Setup(format!("start server {}: {e}", executable.display())))?;
     let result = (|| {
