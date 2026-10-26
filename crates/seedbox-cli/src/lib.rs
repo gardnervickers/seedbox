@@ -817,16 +817,13 @@ mod parser_tests {
         for (words, expected) in [
             (vec!["seedbox", "--state", "run", "show"], true),
             (
-                vec![
-                    "seedbox",
-                    "--state=/tmp/state",
-                    "--full-state",
-                    "server",
-                    "start",
-                ],
+                vec!["seedbox", "--state=/tmp/state", "server", "start"],
                 true,
             ),
-            (vec!["seedbox", "--full-state", "example.yaml"], false),
+            (
+                vec!["seedbox", "--state", "/tmp/state", "example.yaml"],
+                false,
+            ),
             (vec!["seedbox", "--state", "/tmp/state"], false),
             (vec!["seedbox", "--seed", "3"], false),
             (vec!["seedbox", "--state", "/tmp/state", "--help"], true),
