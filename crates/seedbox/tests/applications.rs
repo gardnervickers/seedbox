@@ -332,17 +332,10 @@ fn application(name: &str) {
             Path::new(&cli),
             &directory,
             state,
-            "rerun",
-            &["run", "--from", first, "--wall-time", "30m"],
+            "replay",
+            &["replay", first, "--wall-time", "30m", "--json"],
         )?;
-        compare(
-            Path::new(&cli),
-            &directory,
-            state,
-            "compare-rerun",
-            first,
-            simulation_id(&repeated)?,
-        )?;
+        require_full_state_match(&repeated)?;
         Ok(())
     };
     let result = check();

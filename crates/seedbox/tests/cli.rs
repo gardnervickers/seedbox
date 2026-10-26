@@ -197,6 +197,17 @@ fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch
     assert!(help.contains("--seed"), "{help}");
     // Project files carry no seed; only the server or a document supplies one.
     assert!(!help.contains("project seed"), "{help}");
+
+    let replay_help = seedbox(&["help", "replay"], directory.path());
+    assert!(replay_help.status.success());
+    let help = String::from_utf8_lossy(&replay_help.stdout);
+    assert!(help.contains("--detach"), "{help}");
+    assert!(help.contains("--paused"), "{help}");
+    assert!(!help.contains("--seed"), "{help}");
+
+    let from = seedbox(&["run", "--from", "k7m2p9qx"], directory.path());
+    assert_eq!(from.status.code(), Some(2));
+    assert!(stderr(&from).contains("unexpected argument '--from'"));
 }
 
 #[test]
@@ -1369,8 +1380,6 @@ fn checkpoint_output_is_checked_before_connecting_and_never_overwrites() {
 fn run_source_and_inspection_choices_are_validated_before_connecting() {
     let root = tempfile::tempdir().unwrap();
     for args in [
-        vec!["run", "project.yaml", "--from", "k7m2p9qx"],
-        vec!["run", "--from", "k7m2p9qx", "--count", "2"],
         vec!["show", "--view", "world"],
         vec!["show", "k7m2p9qx", "--view", "unknown"],
         vec!["show", "k7m2p9qx", "--file", "vmm.stderr"],

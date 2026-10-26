@@ -38,6 +38,7 @@ Exit status:
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
   3    INCOMPLETE (cancelled or otherwise incomplete)
        A cancelled or incomplete replay reports 2 (NOT_COMPARABLE)
+       A detached replay reports 0 once submitted; compare it later
   124  TIMEOUT";
 
 #[derive(Parser)]
@@ -77,11 +78,8 @@ enum Command {
     #[command(after_help = EXIT_CODES)]
     Run {
         /// Project file, project directory, or self-contained checkpoint [default: current directory].
-        #[arg(value_name = "PROJECT|CHECKPOINT", conflicts_with = "from")]
+        #[arg(value_name = "PROJECT|CHECKPOINT")]
         input: Option<PathBuf>,
-        /// Repeat the retained inputs of an existing simulation.
-        #[arg(long, conflicts_with_all = ["input", "seed", "count"])]
-        from: Option<seedbox_api::SimulationId>,
         #[command(flatten)]
         backend: BackendArgs,
         /// Simulation seed [default: a simulation document's seed, otherwise allocated by the server].
@@ -102,14 +100,20 @@ enum Command {
         #[command(flatten)]
         execution: ExecutionArgs,
     },
-    /// Repeat a simulation and verify matching results.
+    /// Repeat a simulation's retained inputs and compare the results.
     #[command(after_help = EXIT_CODES)]
     Replay {
-        /// Completed simulation ID.
+        /// Simulation ID whose retained inputs to repeat.
         id: seedbox_api::SimulationId,
         #[command(flatten)]
         backend: BackendArgs,
-        /// Print the comparison as JSON.
+        /// Pause before guest execution; use --detach to return immediately.
+        #[arg(long)]
+        paused: bool,
+        /// Return after submission without comparing; use seedbox compare later.
+        #[arg(long)]
+        detach: bool,
+        /// Print the comparison as JSON, or the new simulation with --detach.
         #[arg(long)]
         json: bool,
         #[command(flatten)]
@@ -597,7 +601,6 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Check { project, json } => check(&project, json),
         Command::Run {
             input,
-            from,
             backend,
             seed,
             count,
@@ -607,9 +610,6 @@ fn run(cli: Cli) -> Result<u8> {
             execution,
         } => {
             let selection = backend.selection(execution);
-            if let Some(id) = from {
-                return simulations::run_from(server, &id, paused, detach, json, selection);
-            }
             let input = input.unwrap_or_else(|| PathBuf::from("."));
             if bundles::is_checkpoint(&input)? {
                 if seed.is_some() || count.is_some() {
@@ -632,9 +632,18 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Replay {
             id,
             backend,
+            paused,
+            detach,
             json,
             execution,
-        } => simulations::replay(server, &id, json, backend.selection(execution)),
+        } => simulations::replay(
+            server,
+            &id,
+            paused,
+            detach,
+            json,
+            backend.selection(execution),
+        ),
         Command::Compare {
             baseline,
             simulation,

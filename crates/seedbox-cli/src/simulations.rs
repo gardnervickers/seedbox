@@ -383,6 +383,8 @@ fn report_comparison(comparison: &seedbox_api::SimulationComparison, json: bool)
 pub(super) fn replay(
     server: &ServerArgs,
     id: &SimulationId,
+    paused: bool,
+    detach: bool,
     json: bool,
     selection: super::BackendSelection,
 ) -> Result<u8> {
@@ -403,42 +405,6 @@ pub(super) fn replay(
         resource.spec,
         seedbox_api::ExecutionOptions {
             backend,
-            start_paused: false,
-            wall_time_ns,
-            machine_workers: resource.options.machine_workers,
-        },
-        metadata,
-        false,
-        json,
-        Some(id),
-    )
-}
-
-pub(super) fn run_from(
-    server: &ServerArgs,
-    id: &SimulationId,
-    paused: bool,
-    detach: bool,
-    json: bool,
-    selection: super::BackendSelection,
-) -> Result<u8> {
-    let wall_time_ns = selection.wall_time;
-    let client = daemon::connect(server)?;
-    let resource = runtime()?
-        .block_on(client.describe(id))
-        .map_err(client_error)?;
-    if !matches!(resource.spec.inputs, InputSource::Resolved { .. }) {
-        return Err(Error::Setup(format!(
-            "simulation {id} has no prepared inputs; run its project again"
-        )));
-    }
-    let metadata = resource_metadata(&resource);
-    let backend = Some(select_backend(&resource.spec, selection.backend)?);
-    submit(
-        server,
-        resource.spec,
-        seedbox_api::ExecutionOptions {
-            backend,
             start_paused: paused,
             wall_time_ns,
             machine_workers: resource.options.machine_workers,
@@ -446,6 +412,7 @@ pub(super) fn run_from(
         metadata,
         detach,
         json,
+        Some(id),
     )
 }
 

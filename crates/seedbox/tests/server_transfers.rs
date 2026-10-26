@@ -197,7 +197,7 @@ fn show_diagnostics_and_compare_imported_fixtures_without_execution() {
         vec!["--state", state, "show", ""],
         vec!["show", "--state", state, ""],
         vec!["show", inline_state.as_str(), ""],
-        vec!["run", "--state", state, "--from", ""],
+        vec!["replay", "--state", state, ""],
     ] {
         let completed = command(root.path())
             .env("SEEDBOX_STATE", root.path().join("wrong-server"))
