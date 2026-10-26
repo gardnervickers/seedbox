@@ -86,7 +86,17 @@ impl Cli {
             .invoke(
                 guard,
                 "replay",
-                &words(&["replay", baseline, "--json", "--wall-time", "20m"]),
+                // A serial replay of the parallel baseline checks that the
+                // worker count cannot change results.
+                &words(&[
+                    "replay",
+                    baseline,
+                    "--json",
+                    "--wall-time",
+                    "20m",
+                    "--machine-workers",
+                    "1",
+                ]),
             )
             .await;
         if let Err(error) = &result {
