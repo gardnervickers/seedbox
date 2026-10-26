@@ -332,16 +332,20 @@ fn application(name: &str) {
             Path::new(&cli),
             &directory,
             state,
-            "rerun",
-            &["run", "--from", first, "--wall-time", "30m"],
+            "replay",
+            &["replay", first, "--wall-time", "30m"],
         )?;
+        let replayed = repeated
+            .lines()
+            .find_map(|line| line.strip_prefix("MATCH: "))
+            .ok_or_else(|| format!("missing replay MATCH: {repeated}"))?;
         compare(
             Path::new(&cli),
             &directory,
             state,
-            "compare-rerun",
+            "compare-replay",
             first,
-            simulation_id(&repeated)?,
+            replayed,
         )?;
         Ok(())
     };

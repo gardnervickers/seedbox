@@ -1,6 +1,5 @@
 //! Cold retained-provider ownership, not native guest or executable proof.
 use super::*;
-use clap::Parser;
 use seedbox_application::{
     execution::{ExecutionProfile, SemanticParameters, WitnessMode},
     store::ContentDigest,
@@ -135,10 +134,7 @@ fn retained_driver_acquires_only_recorded_runtime_once_per_session() {
     assert_eq!(digest, ContentDigest::of(&fs::read(&archive).unwrap()));
     let session = root.path().join("actual-session");
     fs::create_dir(&session).unwrap();
-    let arguments = super::super::Cli::try_parse_from(["seedbox", "server", "start"])
-        .unwrap()
-        .server
-        .inputs();
+    let arguments = crate::RuntimeInputs::default();
     let provider = NativeBackends {
         inputs: arguments,
         environment: vec![],

@@ -197,6 +197,17 @@ fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch
     assert!(help.contains("--seed"), "{help}");
     // Project files carry no seed; only the server or a document supplies one.
     assert!(!help.contains("project seed"), "{help}");
+
+    let replay_help = seedbox(&["help", "replay"], directory.path());
+    assert!(replay_help.status.success());
+    let help = String::from_utf8_lossy(&replay_help.stdout);
+    assert!(help.contains("--detach"), "{help}");
+    assert!(help.contains("--paused"), "{help}");
+    assert!(!help.contains("--seed"), "{help}");
+
+    let from = seedbox(&["run", "--from", "k7m2p9qx"], directory.path());
+    assert_eq!(from.status.code(), Some(2));
+    assert!(stderr(&from).contains("unexpected argument '--from'"));
 }
 
 #[test]
@@ -1369,8 +1380,6 @@ fn checkpoint_output_is_checked_before_connecting_and_never_overwrites() {
 fn run_source_and_inspection_choices_are_validated_before_connecting() {
     let root = tempfile::tempdir().unwrap();
     for args in [
-        vec!["run", "project.yaml", "--from", "k7m2p9qx"],
-        vec!["run", "--from", "k7m2p9qx", "--count", "2"],
         vec!["show", "--view", "world"],
         vec!["show", "k7m2p9qx", "--view", "unknown"],
         vec!["show", "k7m2p9qx", "--file", "vmm.stderr"],
@@ -1388,7 +1397,7 @@ fn run_source_and_inspection_choices_are_validated_before_connecting() {
 }
 
 #[test]
-fn every_auto_start_command_exposes_the_explicit_server_configuration() {
+fn server_location_is_global_and_full_state_is_a_server_start_flag() {
     let root = tempfile::tempdir().unwrap();
     for command in [
         vec!["run"],
@@ -1416,10 +1425,23 @@ fn every_auto_start_command_exposes_the_explicit_server_configuration() {
         let output = seedbox(&args, root.path());
         assert!(output.status.success(), "{command:?}: {}", stderr(&output));
         let help = String::from_utf8(output.stdout).unwrap();
-        for flag in ["--state", "--full-state"] {
-            assert!(help.contains(flag), "{command:?} omits {flag}: {help}");
-        }
+        assert!(
+            help.contains("--state"),
+            "{command:?} omits --state: {help}"
+        );
+        assert_eq!(
+            help.contains("--full-state"),
+            command == ["server", "start"],
+            "--full-state belongs only to server start: {command:?}: {help}"
+        );
     }
+    let output = seedbox(&["show", "--full-state"], root.path());
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("--full-state"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]
@@ -1479,4 +1501,21 @@ fn fixture_diagnostics_explains_kernel_victim_and_memory_setting() {
         "BEGIN FIXTURE diagnostics-oom (HTTP FIXTURE, NOT LIVE)\n{text}END FIXTURE diagnostics-oom"
     );
     server.join().unwrap();
+}
+
+#[test]
+fn control_receipt_internals_stay_out_of_help_but_remain_usable() {
+    let root = tempfile::tempdir().unwrap();
+    for (args, hidden) in [
+        (vec!["control", "--help"], "receipt"),
+        (vec!["control", "pause", "--help"], "--request-id"),
+        (vec!["show", "--help"], "--max-bytes"),
+    ] {
+        let output = seedbox(&args, root.path());
+        assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(!help.contains(hidden), "{args:?} shows {hidden}: {help}");
+    }
+    let output = seedbox(&["control", "receipt", "k7m2p9qx", "bad/id"], root.path());
+    assert!(stderr(&output).contains("request ID must be"));
 }

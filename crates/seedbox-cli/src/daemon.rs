@@ -134,13 +134,14 @@ pub(super) fn state_directory(explicit: Option<PathBuf>) -> Result<PathBuf> {
 /// Explicit startup shares the same options and readiness protocol as clients.
 pub(super) fn start(
     options: &crate::server_args::ServerArgs,
+    inputs: RuntimeInputs,
     foreground: bool,
     startup_handshake: bool,
 ) -> Result<u8> {
     if foreground || startup_handshake {
-        serve(options.state.clone(), options.inputs(), startup_handshake)
+        serve(options.state.clone(), inputs, startup_handshake)
     } else {
-        startup::background(options)?;
+        startup::background(options, inputs)?;
         super::output::status("STARTED", "local server");
         Ok(0)
     }

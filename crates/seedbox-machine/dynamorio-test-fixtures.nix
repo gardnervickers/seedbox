@@ -15,7 +15,7 @@ let
   };
 in
 assert pkgs.lib.assertMsg (builtins.pathExists (source + "/CMakeLists.txt"))
-  "DynamoRIO fork tests missing; run git submodule update --init --recursive vendor/dynamorio from the Seedbox checkout.";
+  "DynamoRIO fork tests missing; run bash tools/bootstrap-submodules.sh, then build with a git+file reference containing ?submodules=1.";
 pkgs.stdenv.mkDerivation {
   pname = "seedbox-dynamorio-test-fixtures${pkgs.lib.optionalString debug "-debug"}";
   version = "0.1.0";
