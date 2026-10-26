@@ -318,7 +318,7 @@ fn background_server_start_and_client_startup_options_share_state() {
         pid: info.process_id,
     };
     let shown = cli(root.path())
-        .args(["show", "--full-state", "--json", "--state"])
+        .args(["show", "--json", "--state"])
         .arg(&state)
         .guarded_output()
         .unwrap();
@@ -331,8 +331,6 @@ fn background_server_start_and_client_startup_options_share_state() {
         serde_json::from_slice::<serde_json::Value>(&shown.stdout).unwrap(),
         serde_json::json!([])
     );
-    assert!(String::from_utf8_lossy(&shown.stderr)
-        .contains("--full-state applies only when starting a server"));
     assert!(
         !root.path().join("state/server.sock").exists(),
         "explicit --state must override SEEDBOX_STATE"

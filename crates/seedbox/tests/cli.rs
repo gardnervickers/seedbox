@@ -1397,7 +1397,7 @@ fn run_source_and_inspection_choices_are_validated_before_connecting() {
 }
 
 #[test]
-fn every_auto_start_command_exposes_the_explicit_server_configuration() {
+fn server_location_is_global_and_full_state_is_a_server_start_flag() {
     let root = tempfile::tempdir().unwrap();
     for command in [
         vec!["run"],
@@ -1425,10 +1425,23 @@ fn every_auto_start_command_exposes_the_explicit_server_configuration() {
         let output = seedbox(&args, root.path());
         assert!(output.status.success(), "{command:?}: {}", stderr(&output));
         let help = String::from_utf8(output.stdout).unwrap();
-        for flag in ["--state", "--full-state"] {
-            assert!(help.contains(flag), "{command:?} omits {flag}: {help}");
-        }
+        assert!(
+            help.contains("--state"),
+            "{command:?} omits --state: {help}"
+        );
+        assert_eq!(
+            help.contains("--full-state"),
+            command == ["server", "start"],
+            "--full-state belongs only to server start: {command:?}: {help}"
+        );
     }
+    let output = seedbox(&["show", "--full-state"], root.path());
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("--full-state"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]
