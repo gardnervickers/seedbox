@@ -69,7 +69,7 @@ The [network policy](../crates/seedbox-driver/src/driver/network.rs) checks cuts
 
 Machine N is 10.0.0.N/16 in service-name order; `/etc/hosts` names only loopback and the machine itself.
 `/etc/resolv.conf` points at a [nameserver](../crates/seedbox-engine-core/src/dns.rs) at 10.0.1.1 that the
-driver network answers in place of routing: A records for current members with TTL 0, NXDOMAIN for
+driver network answers in place of routing: A and reverse PTR records for current members with TTL 0, NXDOMAIN for
 machines not yet spawned. Replies arrive one global latency later and ignore partitions and link policy,
 so name lookup never stands in for a network fault.
 

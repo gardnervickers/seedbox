@@ -640,6 +640,34 @@ fn duplicate_macs_are_rejected_before_the_factory_runs() {
 }
 
 #[test]
+fn definitions_cannot_claim_the_nameserver() {
+    let nameserver = |mac: [u8; 6], address: [u8; 4]| {
+        let mut definition = definition(1);
+        definition.network =
+            Some(NetworkInterface::new(MacAddress::new(mac).unwrap(), address.into(), 16).unwrap());
+        definition
+    };
+    for claimed in [
+        nameserver(seedbox_engine_core::dns::MAC, [10, 0, 0, 2]),
+        nameserver(mac(2), seedbox_engine_core::dns::ADDRESS),
+    ] {
+        let result = Driver::<Net>::new(
+            at(0),
+            Duration::from_nanos(10),
+            1,
+            crate::rng::SeededRng::new(0),
+            || Ok(()),
+            networked(0, Some(1)),
+            vec![],
+            vec![claimed],
+            NetworkConfig::default(),
+            |_| panic!("factory ran"),
+        );
+        assert!(matches!(result, Err(Error::ReservedNameserver(name)) if name == "fixture-1"));
+    }
+}
+
+#[test]
 fn unrepresentable_arrivals_fail_with_time_overflow_and_bounds_may_overflow() {
     let start = u64::MAX - MS / 2;
     // No send: the cap F + L overflows and the existing horizon applies.

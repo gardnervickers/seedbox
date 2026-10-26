@@ -519,6 +519,21 @@ fn malformed_layers_reject_but_observer_fields_never_enter_continuation() {
 }
 
 #[test]
+fn restored_member_addresses_must_match_attachment_and_avoid_the_nameserver() {
+    let n = net(NetworkSetup::from(config()));
+    assert!(n.check_persist(3, 0, &[]).is_ok());
+    for case in 0..3 {
+        let mut bad = n.clone();
+        match case {
+            0 => bad.members[1].address = None,
+            1 => bad.members[1].address = bad.members[0].address,
+            _ => bad.members[1].address = Some(seedbox_engine_core::dns::ADDRESS),
+        }
+        assert!(bad.check_persist(3, 0, &[]).is_err(), "case {case}");
+    }
+}
+
+#[test]
 fn validation_index_items_are_reserved_before_validation_allocations() {
     let mut bytes = 1u64.to_le_bytes().to_vec();
     bytes.extend(3u64.to_le_bytes());

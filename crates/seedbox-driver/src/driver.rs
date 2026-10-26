@@ -487,6 +487,9 @@ where
                 if !macs.insert(interface.mac()) {
                     return Err(Error::DuplicateMac(interface.mac()));
                 }
+                if network::reserved(interface.mac(), interface.ipv4().octets()) {
+                    return Err(Error::ReservedNameserver(definition.name.clone()));
+                }
             }
         }
         network::Network::validate_setup(
@@ -2215,6 +2218,8 @@ pub enum Error<E> {
     },
     /// Two definitions share one MAC address.
     DuplicateMac(crate::definition::MacAddress),
+    /// A definition's interface claims the simulated nameserver's MAC or address.
+    ReservedNameserver(String),
     /// A machine emitted a frame without a network interface, or outside the
     /// frame bounds. The failed batch publishes nothing.
     InvalidFrame {
@@ -2295,6 +2300,10 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
                 )
             }
             Self::DuplicateMac(mac) => write!(f, "duplicate machine MAC address: {mac}"),
+            Self::ReservedNameserver(name) => write!(
+                f,
+                "machine {name} uses the simulated nameserver's MAC or IPv4 address"
+            ),
             Self::InvalidFrame { id } => write!(
                 f,
                 "machine {} emitted a frame without an interface or outside frame bounds",

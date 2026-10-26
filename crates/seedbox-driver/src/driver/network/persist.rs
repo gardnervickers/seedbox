@@ -85,14 +85,22 @@ impl Network {
         use crate::persistence::require;
         require(self.members.len() == n, "network members")?;
         let mut macs = std::collections::BTreeSet::new();
+        let mut addresses = std::collections::BTreeSet::new();
         for m in &self.members {
-            if let Some(mac) = m.mac {
+            require(m.mac.is_some() == m.address.is_some(), "member address")?;
+            if let (Some(mac), Some(address)) = (m.mac, m.address) {
                 require(macs.insert(mac), "duplicate member MAC")?;
+                require(addresses.insert(address), "duplicate member address")?;
+                require(!super::reserved(mac, address), "member uses the nameserver")?;
             }
         }
         for d in definitions {
             if let Some(nic) = &d.network {
                 require(macs.insert(nic.mac()), "duplicate future MAC")?;
+                require(
+                    !super::reserved(nic.mac(), nic.ipv4().octets()),
+                    "future machine uses the nameserver",
+                )?;
             }
         }
         for (&(a, b), p) in &self.pairs {

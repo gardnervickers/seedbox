@@ -310,7 +310,9 @@ impl Network {
 
     /// Route one frame `from` sent at simulation time `sent`, against the cuts
     /// in force now: the caller routes in publication and FIFO-turn order, not
-    /// by timestamp alone. Broadcast reaches
+    /// by timestamp alone. ARP and DNS frames for the simulated nameserver are
+    /// answered back to the sender one latency later instead of routed, outside
+    /// cuts and link policy. Broadcast reaches
     /// every other attached machine in identity order; unicast reaches its
     /// address's owner; other group addresses and frames to the sender itself
     /// reach nobody. Each candidate draws its pair's enabled loss and jitter
@@ -391,6 +393,12 @@ mod parity_tests;
 
 mod evidence;
 mod persist;
+
+/// Whether an interface claims the simulated nameserver's MAC or address,
+/// whose frames the network answers instead of routing.
+pub(crate) fn reserved(mac: crate::definition::MacAddress, address: [u8; 4]) -> bool {
+    mac.octets() == seedbox_engine_core::dns::MAC || address == seedbox_engine_core::dns::ADDRESS
+}
 
 #[cfg(test)]
 mod network_parity_tests;

@@ -413,12 +413,11 @@ impl Network {
         observations: &mut FrameObservations,
     ) -> Result<(), RouteError> {
         if self.attached(from) {
-            if let Some(reply) = seedbox_engine_core::dns::answer(bytes, |name| {
-                self.members
-                    .iter()
-                    .find(|m| m.name == name)
-                    .and_then(|m| m.address)
-            }) {
+            let members = self
+                .members
+                .iter()
+                .filter_map(|m| Some((m.name.as_str(), m.address?)));
+            if let Some(reply) = seedbox_engine_core::dns::answer(bytes, members) {
                 return self.reply(from, sent, reply);
             }
         }

@@ -51,6 +51,7 @@
 #define SBX_ENV_MOUNT mount
 #define SBX_ENV_MKNOD mknod
 #define SBX_ENV_SYMLINK symlink
+#define SBX_ENV_UNLINK unlink
 #define SBX_ENV_SETHOSTNAME sethostname
 #define SBX_ENV_SETRLIMIT setrlimit
 #endif
@@ -389,6 +390,12 @@ static inline int sbx_env_file(const char *path,const void *data,size_t size,mod
     int result=sbx_env_write_all(fd,data,size);if(!result)result=SBX_ENV_FCHMOD(fd,mode);if(!result)result=SBX_ENV_FCHOWN(fd,0,0);
     int error=errno;if(SBX_ENV_CLOSE(fd)&&!result){result=-1;error=errno;}errno=error;return result;
 }
+/* Runtime-owned name files replace whatever the image put there, including a
+ * symlink such as systemd-resolved's resolv.conf, instead of writing through it. */
+static inline int sbx_env_replace(const char *path,const void *data,size_t size) {
+    if(SBX_ENV_UNLINK(path) && errno!=ENOENT)return -1;
+    return sbx_env_file(path,data,size,0644);
+}
 static inline int sbx_env_sysctl(const char *path,uint32_t value) {
     char bytes[32];int length=snprintf(bytes,sizeof(bytes),"%u\n",value);
     int fd=SBX_ENV_OPEN(path,O_WRONLY|O_CLOEXEC,0);if(fd<0)return -1;
@@ -416,10 +423,10 @@ static inline int sbx_env_after_root(struct sbx_guest_environment *e) {
     if(sbx_env_devices(e))return -1;
     if(SBX_ENV_SETHOSTNAME(e->hostname,strlen(e->hostname)))return sbx_env_error(e,"hostname",e->hostname);
     char hostname[66];int size=snprintf(hostname,sizeof(hostname),"%s\n",e->hostname);
-    if(sbx_env_file("/etc/hostname",hostname,(size_t)size,0644) || sbx_env_file("/etc/hosts",e->hosts,strlen(e->hosts),0644))return sbx_env_error(e,"hostname files","/etc/hostname or /etc/hosts");
+    if(sbx_env_file("/etc/hostname",hostname,(size_t)size,0644) || sbx_env_replace("/etc/hosts",e->hosts,strlen(e->hosts)))return sbx_env_error(e,"hostname files","/etc/hostname or /etc/hosts");
     /* The simulated nameserver; engine-core dns::ADDRESS. */
     static const char resolv[]="nameserver 10.0.1.1\n";
-    if(sbx_env_file("/etc/resolv.conf",resolv,sizeof resolv-1,0644))return sbx_env_error(e,"resolver file","/etc/resolv.conf");
+    if(sbx_env_replace("/etc/resolv.conf",resolv,sizeof resolv-1))return sbx_env_error(e,"resolver file","/etc/resolv.conf");
     if(sbx_env_sysctl("/proc/sys/vm/max_map_count",e->max_map_count))return sbx_env_error(e,"application sysctl","/proc/sys/vm/max_map_count");
     if(sbx_env_sysctl("/proc/sys/fs/nr_open",e->nofile))return sbx_env_error(e,"application sysctl","/proc/sys/fs/nr_open");
     for(uint32_t i=0;i<e->anonymous_count;i++)if(sbx_env_directories(e->anonymous[i],0755))return sbx_env_error(e,"anonymous volume directory",e->anonymous[i]);
