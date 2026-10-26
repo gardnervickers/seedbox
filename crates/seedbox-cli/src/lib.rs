@@ -323,6 +323,8 @@ enum ServerCommand {
         /// Report readiness to the launching client.
         #[arg(long, hide = true)]
         startup_handshake: bool,
+        #[command(flatten)]
+        inputs: RuntimeInputs,
     },
     /// Show server availability, occupied capacity and queued work.
     Status {
@@ -700,7 +702,8 @@ fn run(cli: Cli) -> Result<u8> {
             ServerCommand::Start {
                 foreground,
                 startup_handshake,
-            } => daemon::start(server, foreground, startup_handshake),
+                inputs,
+            } => daemon::start(server, inputs, foreground, startup_handshake),
             ServerCommand::Status { json } => daemon::status(server, json),
             ServerCommand::Stop => daemon::shutdown(server.state.clone()),
         },
