@@ -11,7 +11,7 @@ mod parity;
 #[cfg(test)]
 mod test_observer;
 use crate::{
-    definition::MacAddress,
+    definition::{MacAddress, NetworkInterface},
     rng::{RngDomain, RngStreamExt, SeededRng},
 };
 pub use parity::*;
@@ -140,7 +140,10 @@ struct Member {
     name: String,
     seed: u64,
     mac: Option<MacAddress>,
+    /// The interface's IPv4 address, which the simulated nameserver answers.
+    address: Option<[u8; 4]>,
     /// Frames this machine has routed, ordering same-arrival deliveries.
+    /// Nameserver replies to this machine consume the same sequence.
     sent: u64,
 }
 
@@ -226,13 +229,21 @@ impl Network {
     }
 
     /// Record machine `id`, admitted in identity order. `None` is unattached.
-    pub(crate) fn admit(&mut self, id: MachineId, name: &str, seed: u64, mac: Option<MacAddress>) {
+    pub(crate) fn admit(
+        &mut self,
+        id: MachineId,
+        name: &str,
+        seed: u64,
+        interface: Option<&NetworkInterface>,
+    ) {
+        let mac = interface.map(NetworkInterface::mac);
         debug_assert_eq!(id.0, self.members.len());
         debug_assert!(mac.is_none_or(|mac| self.members.iter().all(|m| m.mac != Some(mac))));
         self.members.push(Member {
             name: name.to_owned(),
             seed,
             mac,
+            address: interface.map(|i| i.ipv4().octets()),
             sent: 0,
         });
     }

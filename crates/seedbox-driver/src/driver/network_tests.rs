@@ -24,6 +24,8 @@ struct Log {
     runs: Vec<(usize, u64, u64)>,
     /// (machine, offered machine time, tag) of every accepted frame.
     received: Vec<(usize, u64, u8)>,
+    /// (machine, offered machine time, bytes) of every accepted frame.
+    frames: Vec<(usize, u64, Vec<u8>)>,
     /// (machine, offered machine time, payload) of every control reply.
     replies: Vec<(usize, u64, Vec<u8>)>,
 }
@@ -61,11 +63,10 @@ impl Machine for Net {
                 Request::ReceiveFrame { bytes } if !self.exited => {
                     assert_eq!(input.at.as_nanos(), start, "offered at adoption");
                     let tag = bytes[14];
-                    self.log
-                        .lock()
-                        .unwrap()
-                        .received
-                        .push((self.id, start, tag));
+                    let mut log = self.log.lock().unwrap();
+                    log.received.push((self.id, start, tag));
+                    log.frames.push((self.id, start, bytes.clone()));
+                    drop(log);
                     if let Some(to) = self.echo.filter(|_| tag < 60) {
                         let at = start + 1;
                         let index = self.sends.partition_point(|(t, _)| *t <= at);
@@ -532,6 +533,59 @@ fn spawned_machines_join_the_network_and_host_additions_stay_unattached() {
         .events
         .iter()
         .all(|event| !matches!(&event.kind, EventKind::Output(_))));
+}
+
+#[test]
+fn the_nameserver_answers_current_members_regardless_of_partitions() {
+    use super::fixture::owned::{dns_query, dns_reply};
+    let query = |id| dns_query(mac(1), [10, 0, 0, 1], "fixture-2", id);
+    let (mut driver, log) = world(
+        0,
+        10 * MS,
+        1,
+        NetworkConfig::default(),
+        vec![
+            spec(Some(1))
+                .send(MS, query(1))
+                .send(5 * MS, query(2))
+                .send(5 * MS, dns_query(mac(1), [10, 0, 0, 1], "FIXTURE-1", 3)),
+            spec(Some(2)),
+        ],
+        vec![spec(Some(3))],
+    )
+    .unwrap();
+    schedule(&mut driver, 0, partition(&[0], &[1]));
+    schedule(
+        &mut driver,
+        3 * MS,
+        Action::Spawn {
+            name: "fixture-2".into(),
+        },
+    );
+    barriers(&mut driver, 10 * MS);
+    let replies: Vec<_> = log
+        .lock()
+        .unwrap()
+        .frames
+        .iter()
+        .map(|(machine, at, bytes)| (*machine, *at, dns_reply(bytes)))
+        .collect();
+    assert_eq!(
+        replies,
+        [
+            // Not yet spawned: NXDOMAIN after one network latency.
+            (0, 2 * MS, (1, 3, None)),
+            (0, 6 * MS, (2, 0, Some([10, 0, 0, 3]))),
+            // Partitioned from fixture-1, yet its name still resolves.
+            (0, 6 * MS, (3, 0, Some([10, 0, 0, 2]))),
+        ]
+    );
+    assert!(driver
+        .execution
+        .network
+        .counts()
+        .keys()
+        .all(|pair| pair.from != pair.to));
 }
 
 #[test]

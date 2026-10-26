@@ -23,7 +23,14 @@ fn net(setup: NetworkSetup) -> Network {
             MachineId(i),
             &format!("m{i}"),
             7 + i as u64,
-            Some(MacAddress::new(frames::mac(i)).unwrap()),
+            Some(
+                &crate::definition::NetworkInterface::new(
+                    MacAddress::new(frames::mac(i)).unwrap(),
+                    std::net::Ipv4Addr::new(10, 0, 0, i as u8 + 1),
+                    16,
+                )
+                .unwrap(),
+            ),
         );
     }
     n

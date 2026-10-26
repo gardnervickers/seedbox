@@ -169,7 +169,7 @@ static inline int sbx_env_below(const char *s,const char *parent) {
     size_t n=strlen(parent);return !strncmp(s,parent,n) && (!s[n] || s[n]=='/');
 }
 static inline int sbx_env_config_target(const char *s,int runtime) {
-    return sbx_env_path(s,0) || !strcmp(s,"/etc/hosts") || sbx_env_below(s,"/dev") || sbx_env_below(s,"/proc") || sbx_env_below(s,"/sys") || (runtime && sbx_env_below(s,"/seedbox/progress"));
+    return sbx_env_path(s,0) || !strcmp(s,"/etc/hosts") || !strcmp(s,"/etc/resolv.conf") || sbx_env_below(s,"/dev") || sbx_env_below(s,"/proc") || sbx_env_below(s,"/sys") || (runtime && sbx_env_below(s,"/seedbox/progress"));
 }
 static inline int sbx_env_count(struct sbx_env_input *r,uint32_t *out,size_t minimum) {
     if (sbx_env_u32(r,out)) return -1;
@@ -417,6 +417,9 @@ static inline int sbx_env_after_root(struct sbx_guest_environment *e) {
     if(SBX_ENV_SETHOSTNAME(e->hostname,strlen(e->hostname)))return sbx_env_error(e,"hostname",e->hostname);
     char hostname[66];int size=snprintf(hostname,sizeof(hostname),"%s\n",e->hostname);
     if(sbx_env_file("/etc/hostname",hostname,(size_t)size,0644) || sbx_env_file("/etc/hosts",e->hosts,strlen(e->hosts),0644))return sbx_env_error(e,"hostname files","/etc/hostname or /etc/hosts");
+    /* The simulated nameserver; engine-core dns::ADDRESS. */
+    static const char resolv[]="nameserver 10.0.1.1\n";
+    if(sbx_env_file("/etc/resolv.conf",resolv,sizeof resolv-1,0644))return sbx_env_error(e,"resolver file","/etc/resolv.conf");
     if(sbx_env_sysctl("/proc/sys/vm/max_map_count",e->max_map_count))return sbx_env_error(e,"application sysctl","/proc/sys/vm/max_map_count");
     if(sbx_env_sysctl("/proc/sys/fs/nr_open",e->nofile))return sbx_env_error(e,"application sysctl","/proc/sys/fs/nr_open");
     for(uint32_t i=0;i<e->anonymous_count;i++)if(sbx_env_directories(e->anonymous[i],0755))return sbx_env_error(e,"anonymous volume directory",e->anonymous[i]);

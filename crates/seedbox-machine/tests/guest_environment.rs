@@ -284,6 +284,7 @@ fn invalid_paths_collisions_nul_limits_and_required_formatter_are_rejected_witho
         "/proc/x",
         "/sys/x",
         "/etc/hosts",
+        "/etc/resolv.conf",
         "/nul\0x",
     ] {
         let mut e = good.clone();
@@ -429,6 +430,8 @@ fn pure_c_setup_preserves_volume_metadata_order_binary_configs_devices_limits_an
         "symlink|/proc/self/fd/1|/dev/stdout",
         "fchmod|console|0666",
         "hostname|db-α",
+        "write|/etc/resolv.conf|6e616d657365727665722031302e302e312e310a",
+        "fchmod|/etc/resolv.conf|0644",
         "write|/etc/demo|00ff0a0080",
         "fchmod|/etc/demo|0444",
         "fchown|/etc/demo|0|0",

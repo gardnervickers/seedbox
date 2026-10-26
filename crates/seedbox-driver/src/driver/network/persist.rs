@@ -5,6 +5,7 @@ wire_struct!(Member {
     name,
     seed,
     mac,
+    address,
     sent
 });
 mod parity_persist;
@@ -123,7 +124,8 @@ impl Network {
             )?;
             require(
                 seq < self.members[a.0].sent
-                    && self.pairs.get(&(a, b)).is_some_and(|p| p.last.is_some())
+                    && (a == b && self.attached(a)
+                        || self.pairs.get(&(a, b)).is_some_and(|p| p.last.is_some()))
                     && bytes
                         .sent
                         .checked_add(self.config.latency_ns)

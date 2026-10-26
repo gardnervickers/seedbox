@@ -275,6 +275,40 @@ pub(in crate::driver) fn frame(to: [u8; 6], tag: u8) -> Response {
     bytes.extend_from_slice(&[2, 0, 0, 0, 0, 1, 0x88, 0xb5, tag]);
     Response::TransmitFrame { bytes }
 }
+/// A UDP DNS query for an A record, sent to the simulated nameserver.
+pub(in crate::driver) fn dns_query(mac: [u8; 6], ip: [u8; 4], name: &str, id: u16) -> Vec<u8> {
+    use seedbox_engine_core::dns;
+    let mut message = id.to_be_bytes().to_vec();
+    message.extend_from_slice(&[1, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+    for label in name.split('.') {
+        message.push(label.len() as u8);
+        message.extend_from_slice(label.as_bytes());
+    }
+    message.extend_from_slice(&[0, 0, 1, 0, 1]);
+    let mut bytes = dns::MAC.to_vec();
+    bytes.extend_from_slice(&mac);
+    bytes.extend_from_slice(&[8, 0, 0x45, 0]);
+    bytes.extend_from_slice(&((28 + message.len()) as u16).to_be_bytes());
+    bytes.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+    bytes.extend_from_slice(&ip);
+    bytes.extend_from_slice(&dns::ADDRESS);
+    bytes.extend_from_slice(&[0xc0, 0x00, 0, 53]);
+    bytes.extend_from_slice(&((8 + message.len()) as u16).to_be_bytes());
+    bytes.extend_from_slice(&[0, 0]);
+    bytes.extend_from_slice(&message);
+    bytes
+}
+/// A nameserver reply's (ID, RCODE, A address if any).
+pub(in crate::driver) fn dns_reply(bytes: &[u8]) -> (u16, u8, Option<[u8; 4]>) {
+    assert_eq!(bytes[6..12], seedbox_engine_core::dns::MAC);
+    let message = &bytes[42..];
+    let address = (message[7] == 1).then(|| message[message.len() - 4..].try_into().unwrap());
+    (
+        u16::from_be_bytes([message[0], message[1]]),
+        message[3] & 15,
+        address,
+    )
+}
 pub(in crate::driver) fn fresh(d: &MachineDefinition) -> Result<Mock, Io> {
     let index = d.name.strip_prefix("fixture-").unwrap().parse().unwrap();
     Ok(Mock::new(spec(index, true, vec![(0, Response::Ready)])))

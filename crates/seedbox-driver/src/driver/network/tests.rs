@@ -8,6 +8,9 @@ fn frame(to: [u8; 6], tag: u8) -> Vec<u8> {
     bytes.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0x88, 0xb5, tag]);
     bytes
 }
+fn interface(n: u8) -> NetworkInterface {
+    NetworkInterface::new(mac(n), std::net::Ipv4Addr::new(10, 0, 0, n), 16).unwrap()
+}
 fn network(config: NetworkConfig, attached: &[bool]) -> Network {
     let mut network = Network::new(config);
     for (index, &on) in attached.iter().enumerate() {
@@ -15,7 +18,7 @@ fn network(config: NetworkConfig, attached: &[bool]) -> Network {
             MachineId(index),
             &format!("m{index}"),
             index as u64 + 7,
-            on.then(|| mac(index as u8 + 1)),
+            on.then(|| interface(index as u8 + 1)).as_ref(),
         );
     }
     network

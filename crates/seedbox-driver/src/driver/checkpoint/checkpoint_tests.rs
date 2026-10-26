@@ -549,6 +549,51 @@ fn causal_network_flights_pair_cursors_fifo_and_stacked_cuts_continue() {
 }
 
 #[test]
+fn nameserver_replies_in_flight_survive_capture() {
+    let query = |name: &str, id| Response::TransmitFrame {
+        bytes: dns_query(mac(0), [10, 0, 0, 1], name, id),
+    };
+    let mut d = build_network(
+        vec![
+            spec(
+                0,
+                true,
+                vec![(2, query("fixture-1", 1)), (4, query("missing", 2))],
+            ),
+            spec(1, true, vec![]),
+        ],
+        vec![],
+        true,
+        true,
+    );
+    advance(&mut d, 5);
+    assert_eq!(d.execution.network.in_flight().len(), 2);
+    let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
+    let expected = advance(&mut d, 20);
+    let replies = |d: &Driver<Mock>| {
+        states(d)[0]
+            .received
+            .iter()
+            .filter_map(|input| match &input.payload {
+                Request::ReceiveFrame { bytes } => Some((input.at, dns_reply(bytes))),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        replies(&d),
+        [(at(7), (1, 0, Some([10, 0, 0, 2]))), (at(9), (2, 3, None))]
+    );
+    for workers in [1, 4] {
+        let mut b = restore(&c, workers);
+        assert_eq!(advance(&mut b, 20), expected);
+        assert_eq!(states(&b), states(&d));
+        assert_eq!(replies(&b), replies(&d));
+    }
+}
+
+#[test]
 fn finished_oracle_and_permanent_stop_are_capturable_but_not_resumed() {
     for permanent in [false, true] {
         let mut d = build(

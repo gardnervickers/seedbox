@@ -306,7 +306,12 @@ fn cold_driver_factory(backend: seedbox_spec::backend::CpuBackend) {
         environments["oracle"].configs["/etc/settings"].sha256,
         ContentDigest::of(b"kept config").hex()
     );
-    assert!(environments["oracle"].hosts.contains("10.0.0.2 side"));
+    // Peers resolve through the simulated nameserver, not a shared hosts file.
+    assert_eq!(
+        environments["side"].hosts,
+        "127.0.0.1 localhost\n::1 localhost\n10.0.0.2 side\n"
+    );
+    assert!(!environments["oracle"].hosts.contains("side"));
     assert!(environments["oracle"].control_socket);
     assert!(!environments["side"].control_socket);
     assert_eq!(prepared.oracle.name, "oracle");

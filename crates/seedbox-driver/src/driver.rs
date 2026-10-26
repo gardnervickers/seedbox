@@ -538,7 +538,7 @@ where
                 MachineId(index),
                 &definition.name,
                 seed,
-                definition.network.as_ref().map(|i| i.mac()),
+                definition.network.as_ref(),
             );
         }
         let mut driver = Self {
@@ -1616,12 +1616,9 @@ where
             .machines
             .push(Entry::new(id, machine, seed, now));
         let definition = &self.execution.definitions[index];
-        self.execution.network.admit(
-            id,
-            &definition.name,
-            seed,
-            definition.network.as_ref().map(|i| i.mac()),
-        );
+        self.execution
+            .network
+            .admit(id, &definition.name, seed, definition.network.as_ref());
         self.execution
             .control
             .spawned(name, seed)

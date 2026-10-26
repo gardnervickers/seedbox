@@ -60,7 +60,7 @@ fn imported(c: &Checkpoint<SnapshotReference>) -> Vec<u8> {
     let mut encoder = Encoder { output: Vec::new() };
     c.put(&mut encoder).unwrap();
     let mut bytes = b"SBXDRVR\0".to_vec();
-    bytes.extend(5u32.to_le_bytes());
+    bytes.extend(6u32.to_le_bytes());
     bytes.extend((encoder.output.len() as u64).to_le_bytes());
     bytes.extend(encoder.output);
     bytes
