@@ -333,9 +333,20 @@ fn application(name: &str) {
             &directory,
             state,
             "replay",
-            &["replay", first, "--wall-time", "30m", "--json"],
+            &["replay", first, "--wall-time", "30m"],
         )?;
-        require_full_state_match(&repeated)?;
+        let replayed = repeated
+            .lines()
+            .find_map(|line| line.strip_prefix("MATCH: "))
+            .ok_or_else(|| format!("missing replay MATCH: {repeated}"))?;
+        compare(
+            Path::new(&cli),
+            &directory,
+            state,
+            "compare-replay",
+            first,
+            replayed,
+        )?;
         Ok(())
     };
     let result = check();
