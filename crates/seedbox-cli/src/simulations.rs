@@ -801,6 +801,7 @@ pub(super) fn mutate_control(
     eprintln!("request: {request_id}");
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
+        let sent = command.clone();
         let request = ControlRequest {
             request_id,
             command,
@@ -820,13 +821,55 @@ pub(super) fn mutate_control(
         if mutation.json {
             output::json(&receipt)?;
         } else {
-            output::yaml(&receipt)?;
+            let (word, detail) = control_line(&mutation.id, &sent, &receipt.state);
+            output::status(word, detail);
         }
         Ok(match receipt.state {
             ControlState::Accepted | ControlState::Acknowledged { error: None, .. } => 0,
             _ => 2,
         })
     })
+}
+
+/// The status word and detail for a control request; `--json` prints the whole receipt.
+fn control_line(
+    id: &SimulationId,
+    command: &seedbox_api::ControlCommand,
+    state: &seedbox_api::ControlState,
+) -> (&'static str, String) {
+    use seedbox_api::{ControlCommand, ControlState, FaultAction, PlaybackRate};
+    match state {
+        ControlState::Accepted => ("ACCEPTED", format!("{id} (not yet applied)")),
+        ControlState::Unsupported => ("UNSUPPORTED", id.to_string()),
+        ControlState::Interrupted => (
+            "INTERRUPTED",
+            format!("{id} (the request may have taken effect)"),
+        ),
+        ControlState::Acknowledged {
+            error: Some(error), ..
+        } => ("REJECTED", format!("{id}: {}", output::word(error))),
+        ControlState::Acknowledged { status, .. } => {
+            let word = match command {
+                ControlCommand::SetRate {
+                    rate: PlaybackRate::Paused,
+                } => "PAUSED",
+                ControlCommand::SetRate {
+                    rate: PlaybackRate::Unlimited,
+                } => "RESUMED",
+                ControlCommand::SetRate { .. } | ControlCommand::PauseBeforeNextFault { .. } => {
+                    "RATE_SET"
+                }
+                ControlCommand::Step => "STEPPED",
+                ControlCommand::Checkpoint => "CHECKPOINTED",
+                ControlCommand::InjectFault {
+                    action: FaultAction::Heal { .. },
+                } => "HEALED",
+                ControlCommand::InjectFault { .. } => "INJECTED",
+            };
+            let at = seedbox_tui::short_time(status.position.simulated_time_ns);
+            (word, format!("{id} at {at}"))
+        }
+    }
 }
 
 fn status_outcome(status: &seedbox_api::SimulationStatus) -> (&'static str, u8) {
@@ -872,6 +915,46 @@ pub(super) fn client_error(error: seedbox_client::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_lines_name_the_action_and_simulated_time() {
+        use seedbox_api::{ControlCommand, ControlState, PlaybackRate};
+        let id: SimulationId = "k7m2p9qx".parse().unwrap();
+        let acknowledged = |error| ControlState::Acknowledged {
+            status: seedbox_api::PlaybackStatus {
+                position: seedbox_engine_protocol::host_control::BoundaryPosition {
+                    boundary_index: 3,
+                    completed_rounds: 2,
+                    simulated_time_ns: 12_300_000_000,
+                },
+                rate: PlaybackRate::Paused,
+                achieved_rate: None,
+                stepping: false,
+                before_next_fault: false,
+                terminal: false,
+                application_ready: true,
+            },
+            error,
+            intervention: None,
+            detail: None,
+            checkpoint: None,
+        };
+        let pause = ControlCommand::SetRate {
+            rate: PlaybackRate::Paused,
+        };
+        assert_eq!(
+            control_line(&id, &pause, &acknowledged(None)),
+            ("PAUSED", "k7m2p9qx at 12.3s".into())
+        );
+        assert_eq!(
+            control_line(&id, &ControlCommand::Step, &acknowledged(None)).0,
+            "STEPPED"
+        );
+        assert_eq!(
+            control_line(&id, &pause, &ControlState::Interrupted).0,
+            "INTERRUPTED"
+        );
+    }
 
     #[test]
     fn backend_selection_defaults_projects_but_preserves_retained_tcg() {

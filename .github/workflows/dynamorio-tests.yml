@@ -36,7 +36,7 @@ jobs:
           persist-credentials: false
           # Validate the exact ref selected for the manual run.
           ref: ${{ github.sha }}
-          submodules: recursive
+          submodules: true
       - uses: cachix/install-nix-action@v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
@@ -48,12 +48,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: dynamorio-${{ runner.arch }}-${{ hashFiles('flake.lock') }}
-          cmd-format: nix develop "git+file://${{ github.workspace }}?submodules=1" --command {0}
+          cmd-format: nix develop --command {0}
           cache-bin: false
       - name: Build native DR and public SDK fixtures
         timeout-minutes: 90
         run: |
-          seedbox_flake=$(bash tools/dev-flake.sh)
+          seedbox_flake="$(bash tools/dev-flake.sh)?submodules=1"
           fixtures=$(nix build "$seedbox_flake#dynamorioTestFixtures" --out-link "$RUNNER_TEMP/dr-fixtures" --print-out-paths)
           echo "SEEDBOX_DYNAMORIO_FIXTURES=$fixtures" >> "$GITHUB_ENV"
           debug_fixtures=$(nix build "$seedbox_flake#dynamorioDebugTestFixtures" --out-link "$RUNNER_TEMP/dr-debug-fixtures" --print-out-paths)

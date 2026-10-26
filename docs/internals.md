@@ -103,23 +103,32 @@ the selected gitlink, rather than a release archive label, identifies the API bu
 The recipe preserves C-only compiler flags for the baseline's type probes and uses
 RelWithDebInfo to match its public SDK exports.
 
-Follow the [README setup](../README.md#build) after
-cloning or switching Seedbox revisions. `inputs.self.submodules` includes gitlinks for flake consumers, but
-Nix can lock a clean parent before noticing edits confined to a submodule.
-From the checkout root, obtain a URL-encoded reference and build live DR edits:
-`seedbox_flake=$(bash tools/dev-flake.sh) && nix build "$seedbox_flake#machinePvAssets"`.
-For shell entry, see the README. Bare `.#machinePvAssets` can ignore those edits.
-Direnv and the asset builder request submodules on the initial fetch too, using
-the current checkout root, including linked Git worktrees and paths containing
-spaces or URL syntax characters.
-Nix traverses the nested elfutils, libipt and zlib gitlinks, so initialize all
-three; drsyms remains excluded from the build.
+Follow the [README setup](../README.md#build) after cloning or switching Seedbox
+revisions. Shell entry excludes submodules: direnv and
+[the local reference helper](../tools/dev-flake.sh) use a plain `git+file` reference.
+The helper URL-encodes the current checkout root, including linked Git worktrees
+and paths containing spaces or URL syntax characters.
 
-Direnv's [helper](../tools/dev-flake.sh) reads NUL-delimited index gitlinks and
-initializes each missing checkout separately, then visits its descendants.
-Initialized checkouts are never updated, even when their HEAD differs from the
-gitlink. To deliberately align all sources with a Seedbox revision, first save
-local work, then run `git submodule update --init --recursive vendor/dynamorio`.
+`cargo xtask build` and `build-assets` initialize missing submodules before
+preparing assets. For direct Nix asset or fixture builds, initialize explicitly
+and request submodules on the initial fetch so Nix includes live DR edits:
+
+```sh
+bash tools/bootstrap-submodules.sh
+seedbox_flake="$(bash tools/dev-flake.sh)?submodules=1"
+nix build "$seedbox_flake#machinePvAssets"
+```
+
+Bare `.#machinePvAssets` excludes the translator source. The maintained fork has
+no nested gitlinks: Seedbox's SDK, progress client and test fixtures do not use
+upstream's optional elfutils, libipt or zlib source checkouts. drsyms remains
+excluded from the SDK build.
+
+[Asset bootstrap](../tools/bootstrap-submodules.sh) reads NUL-delimited index
+gitlinks and initializes each missing checkout separately, then visits its
+descendants. Initialized checkouts are never updated, even when their HEAD differs
+from the gitlink. To deliberately align sources with a Seedbox revision, first
+save local work, then run `git submodule update --init vendor/dynamorio`.
 
 For coordinated edits, switch the submodule to `seedbox/release_11.3.0-1-backports`,
 edit and verify it with Seedbox's PV asset build, then commit and push DR first.
@@ -154,7 +163,8 @@ Seedbox guest epoch or executable-FD handoff, nor require KVM, root or Docker.
 From the checkout root inside the development shell:
 
 ```sh
-seedbox_flake=$(bash tools/dev-flake.sh)
+bash tools/bootstrap-submodules.sh
+seedbox_flake="$(bash tools/dev-flake.sh)?submodules=1"
 export SEEDBOX_DYNAMORIO_FIXTURES=$(nix build "$seedbox_flake#dynamorioTestFixtures" --no-link --print-out-paths)
 export SEEDBOX_DYNAMORIO_DEBUG_FIXTURES=$(nix build "$seedbox_flake#dynamorioDebugTestFixtures" --no-link --print-out-paths)
 bash harness/check.sh dynamorio

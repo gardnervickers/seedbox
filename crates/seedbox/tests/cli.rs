@@ -1496,3 +1496,20 @@ fn fixture_diagnostics_explains_kernel_victim_and_memory_setting() {
     );
     server.join().unwrap();
 }
+
+#[test]
+fn control_receipt_internals_stay_out_of_help_but_remain_usable() {
+    let root = tempfile::tempdir().unwrap();
+    for (args, hidden) in [
+        (vec!["control", "--help"], "receipt"),
+        (vec!["control", "pause", "--help"], "--request-id"),
+        (vec!["show", "--help"], "--max-bytes"),
+    ] {
+        let output = seedbox(&args, root.path());
+        assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(!help.contains(hidden), "{args:?} shows {hidden}: {help}");
+    }
+    let output = seedbox(&["control", "receipt", "k7m2p9qx", "bad/id"], root.path());
+    assert!(stderr(&output).contains("request ID must be"));
+}

@@ -34,8 +34,9 @@ We do not need to support every possible application. If someone intentionally t
 
 - Build inside `nix develop`; README owns the build sequence. Runtime lookup never
   builds. Replay consumes retained inputs without the image engine or source project.
-- Direnv initializes missing submodules before Nix; use `tools/dev-flake.sh` for
-  direct shell entry. Existing checkouts/edits stay untouched. Edit DR in the
+- Shell entry excludes submodules; use `tools/dev-flake.sh` for direct shell entry.
+  Asset preparation initializes only missing submodules, preserving existing
+  checkouts/edits. Explicit Nix asset builds need `?submodules=1`. Edit DR in the
   submodule, publish its commits first, then commit the Seedbox gitlink. See internals.
 - Image preparation never starts application containers or extracts guest paths onto
   the host; see `crates/seedbox-application/src/oci.rs` and its archive renderer.
