@@ -301,6 +301,7 @@ enum ControlCommand {
         handle: String,
     },
     /// Inspect whether a control request was applied.
+    #[command(hide = true)]
     Receipt {
         /// Simulation ID.
         id: seedbox_api::SimulationId,
@@ -461,7 +462,7 @@ Exit status:
 #[derive(Args)]
 struct Transfer {
     /// Maximum complete transfer bytes, including archive headers and padding.
-    #[arg(long, default_value_t = seedbox_api::BUNDLE_MAX_BYTES, value_parser = clap::value_parser!(u64).range(1..=seedbox_api::BUNDLE_MAX_BYTES))]
+    #[arg(long, hide = true, default_value_t = seedbox_api::BUNDLE_MAX_BYTES, value_parser = clap::value_parser!(u64).range(1..=seedbox_api::BUNDLE_MAX_BYTES))]
     max_bytes: u64,
 }
 
