@@ -226,8 +226,7 @@ impl Service {
         // not by equality of preparation metadata or a canned executor report.
         assert_eq!(original.len(), 64);
         let output = self.cli(&[
-            "run",
-            "--from",
+            "replay",
             id,
             "--backend",
             self.backend,
@@ -235,12 +234,14 @@ impl Service {
             "15m",
             "--json",
         ]);
-        let rerun: seedbox_api::Simulation = serde_json::from_slice(&output.stdout).unwrap();
-        self.assert_profile(rerun.metadata.id.as_str());
-        assert_eq!(original, self.witness(rerun.metadata.id.as_str()));
+        let rerun: seedbox_api::SimulationComparison =
+            serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(rerun.status, seedbox_api::ComparisonStatus::Match);
+        self.assert_profile(rerun.simulation.as_str());
+        assert_eq!(original, self.witness(rerun.simulation.as_str()));
         eprintln!(
-            "normal CLI same-backend rerun: backend={} id={}",
-            self.backend, rerun.metadata.id
+            "normal CLI same-backend replay: backend={} id={}",
+            self.backend, rerun.simulation
         );
     }
     fn cleanup_barriers(&self) -> Vec<fs::File> {
