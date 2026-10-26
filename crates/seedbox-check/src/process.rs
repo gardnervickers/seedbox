@@ -287,14 +287,57 @@ fn signal(pid: i32, signal: i32) -> io::Result<()> {
         return Ok(());
     }
     let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
-    } else {
-        Err(io::Error::new(
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(()),
+        // Darwin denies a group signal when every remaining member is a
+        // zombie, such as the unreaped leader of a finished job.
+        #[cfg(target_os = "macos")]
+        Some(libc::EPERM) if pid < 0 && only_zombies(-pid) => Ok(()),
+        _ => Err(io::Error::new(
             error.kind(),
             format!("signal {signal} to {pid}: {error}"),
-        ))
+        )),
     }
+}
+
+/// Whether no live process remains in `group`. A member whose state cannot be
+/// read counts as live, so a real permission failure is still reported.
+#[cfg(target_os = "macos")]
+fn only_zombies(group: i32) -> bool {
+    let mut members = vec![0 as libc::pid_t; 64];
+    let count = loop {
+        let bytes = std::mem::size_of_val(members.as_slice()) as libc::c_int;
+        let count = unsafe { libc::proc_listpgrppids(group, members.as_mut_ptr().cast(), bytes) };
+        // libproc reports a failed listing as 0. The denied group still lists
+        // its zombies, including the caller's unreaped leader, so an empty
+        // listing never confirms that the group is gone.
+        let Ok(count @ 1..) = usize::try_from(count) else {
+            return false;
+        };
+        if count < members.len() {
+            break count;
+        }
+        members.resize(members.len() * 2, 0);
+    };
+    members[..count].iter().all(|&pid| {
+        let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of_val(&info) as libc::c_int;
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDT_SHORTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdshortinfo).cast(),
+                size,
+            )
+        };
+        if read == size {
+            info.pbsi_status == libc::SZOMB
+        } else {
+            // Darwin reports a zombie, like an exited member, as absent.
+            read <= 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        }
+    })
 }
 
 struct Owned {
@@ -599,6 +642,58 @@ impl Drop for Temporary {
         if let Err(e) = std::fs::remove_dir_all(&self.0) {
             eprintln!("check: cleanup {}: {e}", self.0.display());
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod darwin_tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+
+    #[test]
+    fn group_of_only_an_unreaped_leader_is_already_gone() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]).process_group(0);
+        let mut child = seedbox_exec::spawn(&mut command).unwrap();
+        let group = child.id() as i32;
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id(),
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(rc, 0);
+        // The precondition this handles: Darwin denies the zombie-only group.
+        assert_eq!(unsafe { libc::kill(-group, libc::SIGKILL) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+        assert!(only_zombies(group));
+        signal(-group, libc::SIGKILL).unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn live_members_are_never_treated_as_gone() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30").process_group(0);
+        let mut child = seedbox_exec::spawn(&mut command).unwrap();
+        assert!(!only_zombies(child.id() as i32));
+        // launchd's group is live and cannot be signalled by this user.
+        assert!(!only_zombies(1));
+        signal(-(child.id() as i32), libc::SIGKILL).unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn an_empty_listing_does_not_confirm_a_denied_group() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]).process_group(0);
+        let mut child = seedbox_exec::spawn(&mut command).unwrap();
+        child.wait().unwrap();
+        // The reaped group lists nothing, as a failed listing does.
+        assert!(!only_zombies(child.id() as i32));
     }
 }
 
