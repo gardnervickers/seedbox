@@ -2,6 +2,7 @@ mod frames;
 mod held_checkpoint;
 mod public_actions;
 mod run;
+mod spawn;
 mod state_results;
 use super::*;
 use seedbox_driver::driver::{Action, NetworkConfig, Target};
@@ -140,6 +141,13 @@ fn worker_with_network(
     workers: usize,
     network: bool,
 ) -> (tempfile::TempDir, Worker<Mock>, Arc<AtomicUsize>) {
+    worker_with(workers, network, vec![])
+}
+fn worker_with(
+    workers: usize,
+    network: bool,
+    spawnable: Vec<MachineDefinition>,
+) -> (tempfile::TempDir, Worker<Mock>, Arc<AtomicUsize>) {
     let root = tempfile::tempdir().unwrap();
     let inventory = inventory(root.path());
     let output = root.path().join("output");
@@ -171,7 +179,7 @@ fn worker_with_network(
         || Ok(()),
         oracle,
         vec![peer],
-        vec![],
+        spawnable,
         NetworkConfig::default(),
         move |definition| {
             ledger.lock().unwrap().push_back(definition.name.clone());

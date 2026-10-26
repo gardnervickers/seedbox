@@ -62,6 +62,17 @@ pub fn recovery_scenarios(connection: Connection) -> Vec<FaultScenario> {
             ],
         },
         FaultScenario {
+            name: "standby-spawn-crash",
+            actions: vec![
+                Action::Spawn {
+                    machine: "standby".into(),
+                },
+                Action::Crash {
+                    machine: "standby".into(),
+                },
+            ],
+        },
+        FaultScenario {
             name: "partition-heal",
             actions: vec![
                 Action::Partition {
@@ -151,6 +162,7 @@ pub fn family(action: &Action) -> &'static str {
         | Action::Resume { .. }
         | Action::Crash { .. }
         | Action::Reboot { .. }
+        | Action::Spawn { .. }
         | Action::Throttle { .. } => "machine",
         Action::ClockSkew { .. } | Action::ClockDrift { .. } => "clock",
         Action::DropConnection { .. } | Action::Partition { .. } | Action::Shape { .. } => {

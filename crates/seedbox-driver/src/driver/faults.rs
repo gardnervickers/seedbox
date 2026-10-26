@@ -59,6 +59,12 @@ pub fn translate(
         Public::Resume { machine } => (Action::Resume(target(machine)), None),
         Public::Crash { machine } => (Action::Crash(target(machine)), None),
         Public::Reboot { machine } => (Action::Reboot(target(machine)), None),
+        Public::Spawn { machine } => (
+            Action::Spawn {
+                name: machine.clone(),
+            },
+            None,
+        ),
         Public::Partition {
             handle: alias,
             left,

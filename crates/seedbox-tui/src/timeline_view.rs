@@ -381,6 +381,7 @@ mod tests {
             revision: 1,
             simulated_time_ns: 9_000_000,
             machines: vec![],
+            spawnable: vec![],
             links: vec![],
             faults: vec![],
         };

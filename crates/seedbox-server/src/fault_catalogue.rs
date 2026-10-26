@@ -176,6 +176,16 @@ pub(crate) fn discover(world: &WorldState, minimum_latency_ns: u64) -> FaultCata
             &["machine"],
         ));
     }
+    // Only worlds that declared standby machines can spawn one.
+    if !world.spawnable.is_empty() {
+        faults.push(descriptor(
+            "spawn",
+            "Spawn machine",
+            "Boot a declared standby machine for the first time.",
+            json!({"machine":choice("Standby machine to boot", &world.spawnable)}),
+            &["machine"],
+        ));
+    }
     faults.push(descriptor("partition", "Partition network", "Cut traffic between two disjoint groups of machines. Every selected pair must have a configured link.",
         json!({"handle":handle, "left":group("First group of machines", &machines), "right":group("Second disjoint group of machines", &machines)}), &["handle","left","right"]));
     let mut network = json!({});
@@ -284,6 +294,7 @@ mod tests {
             | Action::Resume { .. }
             | Action::Crash { .. }
             | Action::Reboot { .. }
+            | Action::Spawn { .. }
             | Action::DropConnection { .. } => {}
         }
     }
@@ -336,11 +347,20 @@ mod tests {
             revision: 1,
             simulated_time_ns: 0,
             machines: vec![],
+            spawnable: vec!["standby".into()],
             links: vec![],
             faults: vec![],
         };
         let catalogue = discover(&world, 1_000_000);
-        assert_eq!(catalogue.faults.len(), 15);
+        assert_eq!(catalogue.faults.len(), 16);
+        let fixed = WorldState {
+            spawnable: vec![],
+            ..world.clone()
+        };
+        assert!(discover(&fixed, 1_000_000)
+            .faults
+            .iter()
+            .all(|fault| fault.name != "spawn"));
         let mut names = BTreeSet::new();
         for descriptor in &catalogue.faults {
             assert!(names.insert(&descriptor.name));

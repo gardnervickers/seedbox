@@ -184,6 +184,10 @@ pub enum Action {
     Reboot {
         machine: String,
     },
+    /// Boot a declared standby machine for the first time.
+    Spawn {
+        machine: String,
+    },
 }
 impl Action {
     pub fn name(&self) -> &'static str {
@@ -203,6 +207,7 @@ impl Action {
             Self::Resume { .. } => "resume",
             Self::Crash { .. } => "crash",
             Self::Reboot { .. } => "reboot",
+            Self::Spawn { .. } => "spawn",
         }
     }
     pub fn machine(&self) -> Option<&str> {
@@ -215,6 +220,7 @@ impl Action {
             | Self::Resume { machine }
             | Self::Crash { machine }
             | Self::Reboot { machine }
+            | Self::Spawn { machine }
             | Self::ClockSkew { machine, .. }
             | Self::ClockDrift { machine, .. }
             | Self::Throttle { machine, .. } => Some(machine),

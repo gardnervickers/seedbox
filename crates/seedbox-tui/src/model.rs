@@ -2784,6 +2784,7 @@ pub(crate) mod tests {
             revision: 1,
             simulated_time_ns: 0,
             machines,
+            spawnable: vec![],
             links,
             faults: Vec::new(),
         }

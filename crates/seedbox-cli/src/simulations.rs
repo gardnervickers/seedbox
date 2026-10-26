@@ -902,6 +902,7 @@ mod tests {
                 },
                 volumes: Default::default(),
                 anonymous_volumes: vec![],
+                standby: false,
             },
             network: spec.configuration.network.clone(),
             simulator: d::Simulator {

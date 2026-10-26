@@ -230,7 +230,10 @@ pub(crate) fn request(
     // Resolved inline process/memory edits are authoritative, not the launch
     // fields in the original preparation manifest. Binary filesystem identity
     // likewise comes from the current resolved machine record.
-    for machine in std::iter::once(&mut prepared.oracle).chain(&mut prepared.machines) {
+    for machine in std::iter::once(&mut prepared.oracle)
+        .chain(&mut prepared.machines)
+        .chain(&mut prepared.spawnable)
+    {
         let image = request.prepared.images.get(&machine.name).ok_or_else(|| {
             bad(format!(
                 "resolved Driver launch is missing for {}",
@@ -394,7 +397,10 @@ pub(crate) fn request(
             boot_archives
         }
     };
-    for machine in std::iter::once(&mut prepared.oracle).chain(&mut prepared.machines) {
+    for machine in std::iter::once(&mut prepared.oracle)
+        .chain(&mut prepared.machines)
+        .chain(&mut prepared.spawnable)
+    {
         if imported.contains(&machine.name) {
             let boot = boots
                 .get(&machine.name)

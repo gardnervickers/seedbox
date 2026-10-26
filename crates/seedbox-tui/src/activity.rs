@@ -261,6 +261,7 @@ pub fn derive(
         revision: 0,
         simulated_time_ns: 0,
         machines: Vec::new(),
+        spawnable: vec![],
         links: Vec::new(),
         faults: Vec::new(),
     };
@@ -452,6 +453,7 @@ mod tests {
             revision: 1,
             simulated_time_ns: 0,
             machines: Vec::new(),
+            spawnable: vec![],
             links: Vec::new(),
             faults,
         }

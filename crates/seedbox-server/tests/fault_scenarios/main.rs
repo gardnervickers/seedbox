@@ -17,7 +17,7 @@ fn observed_connection_fixture() -> seedbox_engine_protocol::control::Connection
         incarnation: 7,
     }
 }
-const NAMES: [&str; 15] = [
+const NAMES: [&str; 16] = [
     "drop_connection",
     "stop",
     "restart",
@@ -33,12 +33,13 @@ const NAMES: [&str; 15] = [
     "resume",
     "crash",
     "reboot",
+    "spawn",
 ];
 
 #[test]
 fn recovery_matrix_covers_all_public_actions_without_claiming_native_results() {
     let cases = recovery_scenarios(observed_connection_fixture());
-    assert_eq!(cases.len(), 10);
+    assert_eq!(cases.len(), 11);
     assert_eq!(
         cases
             .iter()
@@ -98,7 +99,8 @@ fn connection_tuple_and_recovery_handles_are_preserved() {
                 FaultAction::ResumeProcess { machine: b },
             )
             | (FaultAction::Pause { machine: a }, FaultAction::Resume { machine: b })
-            | (FaultAction::Crash { machine: a }, FaultAction::Reboot { machine: b }) => {
+            | (FaultAction::Crash { machine: a }, FaultAction::Reboot { machine: b })
+            | (FaultAction::Spawn { machine: a }, FaultAction::Crash { machine: b }) => {
                 assert_eq!(a, b)
             }
             (

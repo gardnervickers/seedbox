@@ -1093,6 +1093,7 @@ fn show_world_prints_machine_and_link_tables() {
         revision: 3,
         simulated_time_ns: 1_000_000_000,
         machines: vec![machine("n1", false), machine("oracle", true)],
+        spawnable: Vec::new(),
         links: vec![link("n1", "oracle", None), link("oracle", "n1", Some("p1"))],
         faults: Vec::new(),
     };

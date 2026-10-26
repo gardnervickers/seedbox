@@ -44,6 +44,10 @@ pub fn resolve(
                 digest: format!("sha256:{}", image.manifest.hex()),
             }),
             anonymous_volumes: image.launch.volumes.clone(),
+            standby: configuration
+                .services
+                .get(name)
+                .is_some_and(|service| service.standby),
             name: (name == oracle_name).then(|| name.clone()),
             boot_archive: asset(boot),
             memory_bytes: u64::from(inputs.memory_mb(name)?) * 1024 * 1024,

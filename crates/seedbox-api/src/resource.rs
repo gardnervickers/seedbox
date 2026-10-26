@@ -348,6 +348,7 @@ mod tests {
             configs: Vec::new(),
             volumes: Vec::new(),
             network: "default".into(),
+            standby: false,
         };
         SimulationSpec {
             seed: Some(123),
