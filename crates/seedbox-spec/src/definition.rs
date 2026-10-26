@@ -267,7 +267,6 @@ impl Definition {
             simulator: crate::SimulatorOptions {
                 progress_budget: self.simulator.progress_budget,
                 quantum_ns: self.simulator.quantum_ns,
-                machine_workers: Default::default(),
             },
         })
     }

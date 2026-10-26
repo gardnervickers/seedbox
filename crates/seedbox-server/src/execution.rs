@@ -530,18 +530,11 @@ impl ExecutionService {
         cancellation: &CancellationToken,
         preparation_expired: Arc<AtomicBool>,
     ) -> seedbox_application::Result<Run> {
-        let mut options = self
+        let options = self
             .manager
             .describe(id)
             .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?
             .options;
-        // Canonical definitions omit host performance settings. Retain the effective
-        // worker count in execution options for later members of this seed range.
-        options.machine_workers = Some(
-            options
-                .machine_workers
-                .unwrap_or(spec.configuration.simulator.machine_workers.get()),
-        );
         let mut resolved_spec = spec.clone();
         resolved_spec
             .resolve_project_architecture(
@@ -591,7 +584,6 @@ impl ExecutionService {
         self.manager
             .update(id, |s| {
                 s.spec = resolved_spec;
-                s.options.machine_workers = options.machine_workers;
                 s.status.phase = Phase::Running;
                 s.status.stage = Some(Stage::Booting);
             })
@@ -1021,7 +1013,7 @@ mod tests {
         let architecture =
             platform::Host::current().project_architecture(seedbox_spec::backend::CpuBackend::Pv);
         let configuration = seedbox_application::config::parse_for_architecture(
-            "name: mixed\nmachines:\n  app: {image: example/app, memoryMiB: 2048}\n  helper: {image: example/helper}\noracle: {image: example/oracle, memoryMiB: 256}\nsimulator: {quantum: 2.5ms, machineWorkers: 4}\n",
+            "name: mixed\nmachines:\n  app: {image: example/app, memoryMiB: 2048}\n  helper: {image: example/helper}\noracle: {image: example/oracle, memoryMiB: 256}\nsimulator: {quantum: 2.5ms}\n",
             Path::new("/project/seedbox.yaml"), &Default::default(),
             if cfg!(target_arch = "aarch64") { seedbox_application::guest::Architecture::Arm64 } else { seedbox_application::guest::Architecture::Amd64 },
         ).unwrap();
@@ -1096,7 +1088,10 @@ mod tests {
         let resource = manager
             .submit_seeds(seedbox_api::SeedRangeRequest {
                 metadata: Default::default(),
-                options: Default::default(),
+                options: seedbox_api::ExecutionOptions {
+                    machine_workers: Some(4),
+                    ..Default::default()
+                },
                 request_id: "mixed-memory".into(),
                 spec,
                 count: 2,

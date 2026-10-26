@@ -39,14 +39,12 @@ pub struct Simulation {
     pub disk: DiskOptions,
 }
 
-/// Resolved simulator semantics and host execution capacity.
+/// Resolved simulator semantics.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SimulatorOptions {
     pub progress_budget: progress::ProgressBudget,
     pub quantum_ns: std::num::NonZeroU64,
-    /// Host performance setting, excluded from semantic identity.
-    pub machine_workers: project::WorkerCount,
 }
 
 impl Default for SimulatorOptions {
@@ -54,7 +52,6 @@ impl Default for SimulatorOptions {
         Self {
             progress_budget: Default::default(),
             quantum_ns: std::num::NonZeroU64::new(1_000_000).expect("nonzero quantum"),
-            machine_workers: Default::default(),
         }
     }
 }

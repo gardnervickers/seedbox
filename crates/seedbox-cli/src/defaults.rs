@@ -1,4 +1,5 @@
-//! Portable CLI path resolution; complete builds keep guest inputs beside the executable.
+//! Portable CLI path resolution and computed execution defaults; complete builds
+//! keep guest inputs beside the executable.
 use seedbox_application::{Error, Result};
 use std::{
     env,
@@ -30,6 +31,19 @@ pub fn engine() -> Result<PathBuf> {
     })
 }
 
+/// Machine worker threads when `--machine-workers` is omitted: one per machine,
+/// with host CPUs shared across the server's execution slots, within 1..=64.
+pub fn machine_workers(machines: usize, slots: usize) -> u32 {
+    let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    workers_for(machines, cpus, slots)
+}
+
+fn workers_for(machines: usize, cpus: usize, slots: usize) -> u32 {
+    let share = cpus / slots.max(1);
+    // Bounded by the clamp, so the conversion cannot truncate.
+    machines.min(share).clamp(1, 64) as u32
+}
+
 /// An explicitly named input, checked before any slow preparation starts.
 pub fn existing(what: &str, path: PathBuf) -> Result<PathBuf> {
     if path.exists() {
@@ -56,6 +70,16 @@ fn missing(what: &str, searched: &[PathBuf], fix: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn machine_workers_share_cpus_across_slots_within_bounds() {
+        assert_eq!(workers_for(3, 16, 1), 3);
+        assert_eq!(workers_for(8, 16, 4), 4);
+        assert_eq!(workers_for(8, 2, 4), 1);
+        assert_eq!(workers_for(0, 16, 1), 1);
+        assert_eq!(workers_for(100, 256, 1), 64);
+        assert_eq!(workers_for(3, 16, 0), 3);
+    }
+
     #[test]
     fn project_directory_resolves_only_native_files() {
         let directory = tempfile::tempdir().unwrap();

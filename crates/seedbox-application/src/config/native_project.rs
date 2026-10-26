@@ -92,10 +92,9 @@ pub(super) fn parse(
         machine: MachineOptions::default(),
         disk: DiskOptions::default(),
         simulator: seedbox_spec::SimulatorOptions {
-            progress_budget: project.simulator.progress_budget,
+            progress_budget: Default::default(),
             quantum_ns: std::num::NonZeroU64::new(quantum_ns)
                 .ok_or_else(|| validation("$.simulator.quantum", "expected a positive duration"))?,
-            machine_workers: project.simulator.machine_workers,
         },
     };
     validate_project(&simulation)?;
@@ -297,33 +296,24 @@ mod tests {
         assert_eq!(sim.network.latency_ns, 2_500_000);
         assert_eq!(sim.limits.simulated_time_ns, u64::MAX);
         assert_eq!(sim.simulator.quantum_ns.get(), 1_000_000);
-        assert_eq!(sim.simulator.machine_workers.get(), 1);
+        assert_eq!(sim.simulator.progress_budget.get(), 10_000);
     }
 
     #[test]
-    fn simulator_resolves_quantum_and_machine_capacity() {
-        let sim = parse_native(
-            "name: demo\noracle: {image: test}\nsimulator: {quantum: 2.5ms, machineWorkers: 4}\n",
-        )
-        .unwrap();
+    fn simulator_resolves_quantum() {
+        let sim = parse_native("name: demo\noracle: {image: test}\nsimulator: {quantum: 2.5ms}\n")
+            .unwrap();
         assert_eq!(sim.simulator.quantum_ns.get(), 2_500_000);
-        assert_eq!(sim.simulator.machine_workers.get(), 4);
     }
 
     #[test]
-    fn simulator_rejects_invalid_quantum_and_capacity() {
+    fn simulator_rejects_invalid_quantum() {
         for quantum in ["0ns", "18446744073709551616ns", "0.1ns"] {
             let err = parse_native(&format!(
                 "name: demo\noracle: {{image: test}}\nsimulator: {{quantum: {quantum}}}\n"
             ))
             .unwrap_err();
             assert!(err.to_string().contains("$.simulator.quantum"), "{err}");
-        }
-        for workers in [0, 65] {
-            assert!(parse_native(&format!(
-                "name: demo\noracle: {{image: test}}\nsimulator: {{machineWorkers: {workers}}}\n"
-            ))
-            .is_err());
         }
     }
 
