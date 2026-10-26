@@ -2,7 +2,7 @@
 import socket
 import time
 
-from seedbox import World
+from seedbox import FaultError, World
 
 
 def identity(host, timeout=10):
@@ -19,16 +19,22 @@ def identity(host, timeout=10):
             time.sleep(0.05)
 
 
+def machines(world):
+    return {machine["name"] for machine in world.inspect()["machines"]}
+
+
 def main():
     with World.connect() as world:
         assert identity("server") == "server primary"
+        assert "replica" not in machines(world), "standby replica booted at launch"
+        world.spawn("replica")
+        assert "replica" in machines(world)
         try:
-            identity("replica", timeout=0.5)
-        except OSError:
+            world.spawn("replica")
+        except FaultError:
             pass
         else:
-            raise AssertionError("standby replica answered before it was spawned")
-        world.spawn("replica")
+            raise AssertionError("standby replica was spawnable twice")
         assert identity("replica") == "replica replica"
         assert identity("server") == "server primary"
         print("SPAWN_OK", flush=True)

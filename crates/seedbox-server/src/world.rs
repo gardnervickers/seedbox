@@ -266,7 +266,11 @@ impl Tracker {
                 plan,
                 input_key,
             } => {
-                if let Some(machine) = machine {
+                // A standby joins only when its spawn applies, never on a
+                // requested, failed or cut-off spawn.
+                if let Some(machine) = machine.as_ref().filter(|machine| {
+                    *status == FaultStatus::Applied || !self.spawnable.contains(*machine)
+                }) {
                     self.machine(machine);
                 }
                 let fault = self.faults.entry(*id).or_insert_with(|| FaultState {
@@ -708,16 +712,24 @@ mod tests {
             spawn.schema["properties"]["machine"]["enum"],
             serde_json::json!(["b"])
         );
-        t.event(
-            10,
-            &fault(
+        let spawn = |status| {
+            let mut event = fault(
                 1,
-                FaultStatus::Applied,
+                status,
                 FaultAction::Spawn {
                     machine: "b".into(),
                 },
-            ),
-        );
+            );
+            if let EventKind::FaultChanged { machine, .. } = &mut event {
+                *machine = Some("b".into());
+            }
+            event
+        };
+        t.event(5, &spawn(FaultStatus::Requested));
+        let requested = t.snapshot();
+        assert_eq!(requested.spawnable, ["b"]);
+        assert!(requested.machines.iter().all(|m| m.name != "b"));
+        t.event(10, &spawn(FaultStatus::Applied));
         let after = t.snapshot();
         assert!(after.spawnable.is_empty());
         let b = after.machines.iter().find(|m| m.name == "b").unwrap();

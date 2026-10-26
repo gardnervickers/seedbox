@@ -100,6 +100,8 @@ fn connection_tuple_and_recovery_handles_are_preserved() {
             )
             | (FaultAction::Pause { machine: a }, FaultAction::Resume { machine: b })
             | (FaultAction::Crash { machine: a }, FaultAction::Reboot { machine: b })
+            // Spawn has no recovery; crashing the spawned machine only gives the
+            // exhaustive action coverage a follow-up on the same target.
             | (FaultAction::Spawn { machine: a }, FaultAction::Crash { machine: b }) => {
                 assert_eq!(a, b)
             }
