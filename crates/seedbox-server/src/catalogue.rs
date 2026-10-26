@@ -47,7 +47,6 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone)]
 struct Entry {
     range: Option<seeds::Range>,
-    imported_checkpoints: Option<BTreeMap<String, seedbox_spec::definition::Definition>>,
     request: SubmitRequest,
     resource: Simulation,
     controls: BTreeMap<String, ControlReceipt>,
@@ -144,87 +143,6 @@ impl Catalogue {
         Ok(())
     }
 
-    pub(crate) fn imported_checkpoint(
-        &self,
-        id: &SimulationId,
-        name: &str,
-    ) -> Result<Option<seedbox_spec::definition::Definition>> {
-        self.captured_checkpoint(id, name)?;
-        Ok(self
-            .entries
-            .get(id)
-            .and_then(|entry| entry.imported_checkpoints.as_ref())
-            .and_then(|captures| captures.get(name))
-            .cloned())
-    }
-
-    pub(crate) fn is_imported(&self, id: &SimulationId) -> Result<bool> {
-        self.get(id)?;
-        Ok(self.entries[id].imported_checkpoints.is_some())
-    }
-
-    /// Prepare owned evidence before publishing one completed resource. No
-    /// queued intermediate resource or request queue entry is ever observable.
-    pub(crate) fn import(
-        &mut self,
-        snapshot: &seedbox_artifacts::archive::Snapshot,
-        prepare: impl FnOnce(&Simulation) -> Result<()>,
-    ) -> Result<Simulation> {
-        resolve_program(&snapshot.simulation.spec)?;
-        let id = loop {
-            let id = random_id()?;
-            if !self.entries.contains_key(&id)
-                && !self.requests.contains_key(&format!("import-{id}"))
-            {
-                break id;
-            }
-        };
-        let mut resource = snapshot.simulation.clone();
-        resource
-            .metadata
-            .annotations
-            .insert("imported-from".into(), resource.metadata.id.to_string());
-        resource.metadata.id = id.clone();
-        resource.metadata.parent = None;
-        resource.metadata.checkpoint = None;
-        resource.metadata.deletion_requested_at_unix_ms = None;
-        resource.metadata.revision = 1;
-        resource.metadata.created_at_unix_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| Error::Invalid("host clock precedes epoch".into()))?
-            .as_millis()
-            .try_into()
-            .map_err(|_| Error::Invalid("host clock cannot be represented".into()))?;
-        resource.status.playback = None;
-        let request = SubmitRequest {
-            request_id: format!("import-{id}"),
-            options: resource.options.clone(),
-            metadata: seedbox_spec::definition::Metadata {
-                name: resource.metadata.name.clone(),
-                labels: resource.metadata.labels.clone(),
-                annotations: resource.metadata.annotations.clone(),
-            },
-            spec: resource.spec.clone(),
-        };
-        let entry = Entry {
-            request,
-            resource: resource.clone(),
-            controls: snapshot
-                .controls
-                .iter()
-                .map(|receipt| (receipt.request.request_id.clone(), receipt.clone()))
-                .collect(),
-            imported_checkpoints: Some(snapshot.checkpoints.clone()),
-            deleting: false,
-            range: None,
-        };
-        prepare(&resource)?;
-        self.requests
-            .insert(entry.request.request_id.clone(), id.clone());
-        self.entries.insert(id, entry);
-        Ok(resource)
-    }
-
     /// Returns (resource, newly_created). Retrying after an uncertain response
     /// returns the existing ID.
     pub fn submit(&mut self, request: SubmitRequest) -> Result<(Simulation, bool)> {
@@ -262,10 +180,9 @@ impl Catalogue {
                 break id;
             }
         };
-        let mut spec = seeded_spec(&request.spec, range.as_ref())?;
+        let spec = seeded_spec(&request.spec, range.as_ref())?;
         let referenced_backend = self.referenced_backend(&spec)?;
         let parent = self.validate_source(&spec)?;
-        self.adopt_imported_definition(&mut spec)?;
         let recorded_backend = match &spec.inputs {
             InputSource::Resolved { definition } => definition
                 .runtime
@@ -311,7 +228,6 @@ impl Catalogue {
         resource.options.backend = Some(backend);
         let entry = Entry {
             request,
-            imported_checkpoints: None,
             resource: resource.clone(),
             controls: BTreeMap::new(),
             deleting: false,
@@ -378,31 +294,6 @@ impl Catalogue {
         }
     }
 
-    /// Imported resources own portable definitions, not executable attempt
-    /// paths. Existing reference validation still applies before this.
-    fn adopt_imported_definition(&self, spec: &mut seedbox_api::SimulationSpec) -> Result<()> {
-        let Some(source) = source_reference(spec) else {
-            return Ok(());
-        };
-        let entry = &self.entries[source];
-        if entry.imported_checkpoints.is_none() {
-            return Ok(());
-        }
-        let mut definition = match &entry.resource.spec.inputs {
-            InputSource::Resolved { definition } => definition.as_ref().clone(),
-            _ => return Err(Error::Invalid("imported definition unavailable".into())),
-        };
-        definition.start = seedbox_spec::definition::Start::Fresh;
-        definition.seed = spec.seed.expect("resolved above");
-        definition.overrides = spec.program.clone();
-        definition
-            .start
-            .validate_overrides(&definition.overrides)
-            .map_err(Error::Invalid)?;
-        *spec = seedbox_api::SimulationSpec::resolved(definition).map_err(Error::Invalid)?;
-        Ok(())
-    }
-
     /// Compare-and-swap prevents a late worker callback from overwriting newer
     /// control state.
     pub fn update(&mut self, mut resource: Simulation) -> Result<Simulation> {
@@ -464,7 +355,6 @@ impl Catalogue {
             .ok_or_else(|| Error::Invalid("resource revision exhausted".into()))?;
         let mut entry = Entry {
             request: original.request.clone(),
-            imported_checkpoints: original.imported_checkpoints.clone(),
             resource: resource.clone(),
             controls: original.controls.clone(),
             deleting: original.deleting,

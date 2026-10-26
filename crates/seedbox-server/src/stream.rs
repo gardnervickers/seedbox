@@ -114,32 +114,6 @@ impl<T: Payload> Stream<T> {
         })
     }
 
-    /// Restore a sealed stream's original sequence, including omitted ranges.
-    pub(crate) fn restore(&self, sequence: u64, payload: Option<T>) -> Result<(), PublishError> {
-        if payload
-            .as_ref()
-            .is_some_and(|p| p.payload_bytes() > self.max_payload_bytes.get())
-        {
-            return Err(PublishError::TooLarge {
-                limit: self.max_payload_bytes.get(),
-            });
-        }
-        let mut state = self.state.lock().map_err(|_| PublishError::Poisoned)?;
-        if sequence < state.next_sequence {
-            return Err(PublishError::SequenceExhausted);
-        }
-        let next = sequence
-            .checked_add(1)
-            .ok_or(PublishError::SequenceExhausted)?;
-        if let Some(payload) = payload {
-            if let Some((history, id)) = &self.history {
-                history.push(*id, Arc::new(Record { sequence, payload }))?;
-            }
-        }
-        state.next_sequence = next;
-        Ok(())
-    }
-
     pub fn publish(&self, payload: T) -> Result<u64, PublishError> {
         if payload.payload_bytes() > self.max_payload_bytes.get() {
             return Err(PublishError::TooLarge {
