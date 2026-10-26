@@ -25,6 +25,7 @@ pub fn fixture() -> sb::record::RunRecord {
                 configs: vec![],
                 volumes: vec![],
                 network: "default".into(),
+                standby: false,
             },
         )]),
         configs: BTreeMap::new(),

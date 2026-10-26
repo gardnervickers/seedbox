@@ -230,6 +230,7 @@ pub fn retain_oci_prepared(
         hosts.push_str(&format!("10.0.0.{} {name}\n", index + 1));
     }
     let mut machines = BTreeMap::new();
+    let mut spawnable = BTreeMap::new();
     let mut environments = BTreeMap::new();
     let mut boots = BTreeMap::new();
     for (index, (name, service)) in simulation.services.iter().enumerate() {
@@ -297,7 +298,12 @@ pub fn retain_oci_prepared(
         );
         let number = u8::try_from(index + 1)
             .map_err(|_| Error::Integrity("too many prepared network machines".into()))?;
-        machines.insert(
+        if service.standby {
+            &mut spawnable
+        } else {
+            &mut machines
+        }
+        .insert(
             name.clone(),
             wire::Machine {
                 name: name.clone(),
@@ -359,7 +365,7 @@ pub fn retain_oci_prepared(
         inventory,
         oracle,
         machines: machines.into_values().collect(),
-        spawnable: vec![],
+        spawnable: spawnable.into_values().collect(),
         quantum_ns: simulation.simulator.quantum_ns.get(),
         network: wire::Network {
             latency_ns: simulation.network.latency_ns,

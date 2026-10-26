@@ -113,6 +113,9 @@ pub struct Service {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<VolumeMount>,
     pub network: String,
+    /// Not started at launch; the controller spawns it by name.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub standby: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

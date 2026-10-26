@@ -18,6 +18,8 @@ pub(crate) struct Tracker {
     base: LinkPolicy,
     configured: BTreeMap<Pair, LinkPolicy>,
     machines: BTreeMap<String, MachineState>,
+    /// Standby machines that have not yet appeared in the world.
+    spawnable: BTreeSet<String>,
     /// One kernel leader kill can explain one natural outcome of that boot.
     oom_pending: BTreeSet<(String, u32)>,
     faults: BTreeMap<u32, FaultState>,
@@ -69,6 +71,7 @@ impl Tracker {
                 })
                 .collect(),
             machines: BTreeMap::new(),
+            spawnable: BTreeSet::new(),
             oom_pending: BTreeSet::new(),
             faults: BTreeMap::new(),
             override_rejections: BTreeMap::new(),
@@ -80,8 +83,12 @@ impl Tracker {
             machine_pauses: BTreeMap::new(),
             before_pause: BTreeMap::new(),
         };
-        for name in configuration.services.keys() {
-            tracker.machine(name);
+        for (name, service) in &configuration.services {
+            if service.standby {
+                tracker.spawnable.insert(name.clone());
+            } else {
+                tracker.machine(name);
+            }
         }
         tracker.revision = 1;
         tracker
@@ -90,6 +97,7 @@ impl Tracker {
     fn machine(&mut self, name: &str) -> &mut MachineState {
         if !self.machines.contains_key(name) {
             self.revision += 1;
+            self.spawnable.remove(name);
             self.machines.insert(
                 name.to_owned(),
                 MachineState {
@@ -258,7 +266,11 @@ impl Tracker {
                 plan,
                 input_key,
             } => {
-                if let Some(machine) = machine {
+                // A standby joins only when its spawn applies, never on a
+                // requested, failed or cut-off spawn.
+                if let Some(machine) = machine.as_ref().filter(|machine| {
+                    *status == FaultStatus::Applied || !self.spawnable.contains(*machine)
+                }) {
                     self.machine(machine);
                 }
                 let fault = self.faults.entry(*id).or_insert_with(|| FaultState {
@@ -331,6 +343,9 @@ impl Tracker {
             FaultAction::Crash { machine } | FaultAction::Reboot { machine } => {
                 self.machine_pauses.remove(machine);
                 self.process_effects.remove(machine);
+            }
+            FaultAction::Spawn { machine } => {
+                self.machine(machine);
             }
             FaultAction::Partition {
                 handle,
@@ -477,6 +492,7 @@ impl Tracker {
             revision: self.revision,
             simulated_time_ns: self.time,
             machines: self.machines.values().cloned().collect(),
+            spawnable: self.spawnable.iter().cloned().collect(),
             links,
             faults: self
                 .faults
@@ -599,7 +615,11 @@ mod tests {
     }
 
     fn tracker_with_bandwidth(bandwidth_bps: Option<u64>) -> Tracker {
-        let service = |_| seedbox_spec::Service {
+        tracker_with(bandwidth_bps, &[])
+    }
+
+    fn tracker_with(bandwidth_bps: Option<u64>, standby: &[&str]) -> Tracker {
+        let service = |name: &str| seedbox_spec::Service {
             memory_mb: None,
             source: seedbox_spec::ImageSource::Registry {
                 reference: "example".into(),
@@ -613,6 +633,7 @@ mod tests {
             configs: Vec::new(),
             volumes: Vec::new(),
             network: "default".into(),
+            standby: standby.contains(&name),
         };
         let mut spec = seedbox_spec::Simulation {
             name: "test".into(),
@@ -676,6 +697,48 @@ mod tests {
             plan: Some(Box::new(serde_json::to_value(plan).unwrap())),
             input_key: None,
         }
+    }
+
+    #[test]
+    fn standby_machines_join_the_world_when_spawned() {
+        let mut t = tracker_with(None, &["b"]);
+        let before = t.snapshot();
+        assert_eq!(before.spawnable, ["b"]);
+        assert!(before.machines.iter().all(|m| m.name != "b"));
+        assert!(before.links.iter().all(|l| l.from != "b" && l.to != "b"));
+        let forms = crate::fault_catalogue::discover(&before, 1_000_000);
+        let spawn = forms.faults.iter().find(|f| f.name == "spawn").unwrap();
+        assert_eq!(
+            spawn.schema["properties"]["machine"]["enum"],
+            serde_json::json!(["b"])
+        );
+        let spawn = |status| {
+            let mut event = fault(
+                1,
+                status,
+                FaultAction::Spawn {
+                    machine: "b".into(),
+                },
+            );
+            if let EventKind::FaultChanged { machine, .. } = &mut event {
+                *machine = Some("b".into());
+            }
+            event
+        };
+        t.event(5, &spawn(FaultStatus::Requested));
+        let requested = t.snapshot();
+        assert_eq!(requested.spawnable, ["b"]);
+        assert!(requested.machines.iter().all(|m| m.name != "b"));
+        t.event(10, &spawn(FaultStatus::Applied));
+        let after = t.snapshot();
+        assert!(after.spawnable.is_empty());
+        let b = after.machines.iter().find(|m| m.name == "b").unwrap();
+        assert_eq!(b.condition, MachineCondition::Starting);
+        assert!(after.links.iter().any(|l| l.from == "a" && l.to == "b"));
+        assert!(crate::fault_catalogue::discover(&after, 1_000_000)
+            .faults
+            .iter()
+            .all(|f| f.name != "spawn"));
     }
 
     #[test]

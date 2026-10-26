@@ -30,6 +30,22 @@ pub fn fault_action_targets(
     configuration: &crate::config::Simulation,
     action: &seedbox_engine_protocol::control::Action,
 ) -> Result<ActionTargets> {
+    if let seedbox_engine_protocol::control::Action::Spawn { machine } = action {
+        // Admission resolves spawn by declaration, not through machine targets.
+        if !configuration
+            .services
+            .get(machine)
+            .is_some_and(|service| service.standby)
+        {
+            return Err(Error::Setup(format!(
+                "spawn target {machine} is not a standby machine"
+            )));
+        }
+        return Ok(ActionTargets {
+            machines: vec![machine.clone()],
+            links: vec![],
+        });
+    }
     let names: Vec<_> = configuration.services.keys().cloned().collect();
     seedbox_driver_execution::driver_world::action_targets(
         action,
@@ -89,6 +105,24 @@ mod program_tests {
             machine: "missing".into(),
         };
         assert!(validate_input_program(&config, &[unknown]).is_err());
+        let spawn = |machine: &str| TimedInput {
+            timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+            key: "spawn".into(),
+            at_ns: 1,
+            action: Action::Spawn {
+                machine: machine.into(),
+            },
+        };
+        assert!(validate_input_program(&config, &[spawn("db")]).is_err());
+        config.services.get_mut("db").unwrap().standby = true;
+        validate_input_program(&config, &[spawn("db")]).unwrap();
+        assert_eq!(
+            fault_action_targets(&config, &spawn("db").action)
+                .unwrap()
+                .machines,
+            ["db"]
+        );
+        config.services.get_mut("db").unwrap().standby = false;
         config.control = Some(crate::config::Control {
             service: "db".into(),
         });

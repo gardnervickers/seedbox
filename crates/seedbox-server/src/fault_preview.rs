@@ -167,6 +167,13 @@ pub(crate) fn preview(
                 .push("The machine must be down.".into());
             "Boot a new machine incarnation from its prepared inputs and retained disk state; application readiness must be observed again.".into()
         }
+        Action::Spawn { .. } => {
+            result.preconditions.push(
+                "The machine must be a declared standby machine that has not been spawned.".into(),
+            );
+            "Boot the standby machine for the first time; application readiness must be observed."
+                .into()
+        }
         Action::ClockSkew {
             offset_ns,
             max_offset_ns,

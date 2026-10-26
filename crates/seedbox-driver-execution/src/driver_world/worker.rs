@@ -47,6 +47,8 @@ pub(super) struct Worker<M: Machine> {
     pub(super) inventory: Inventory,
     pub(super) output: PathBuf,
     pub(super) names: BTreeMap<driver::MachineId, String>,
+    /// Spawn identities named by admitted faults before their machine is added.
+    reserved: BTreeMap<driver::MachineId, String>,
     pub(super) constructed: Constructed,
     publisher: Publisher,
     prepared: Option<Prepared>,
@@ -94,6 +96,7 @@ where
             inventory,
             output,
             names,
+            reserved: BTreeMap::new(),
             constructed,
             publisher: Publisher::connect(observations)?,
             prepared: None,
@@ -125,7 +128,12 @@ where
                             .ok_or_else(|| {
                                 fail("Driver committed machine has no factory result")
                             })?;
-                        if self.names.insert(*machine, name.clone()).is_some() {
+                        if self.names.insert(*machine, name.clone()).is_some()
+                            || self
+                                .reserved
+                                .remove(machine)
+                                .is_some_and(|reserved| reserved != name)
+                        {
                             return Err(fail("Driver machine identity committed twice"));
                         }
                         self.state.world.machine_names.push(name);
@@ -142,6 +150,7 @@ where
                         self.state.world.readiness.observe(name);
                     }
                     driver::EventKind::FaultAdmitted(record) => {
+                        self.reserve(record);
                         facts.admissions.push(record.clone())
                     }
                     driver::EventKind::InputRejected { key, rejection } => facts
@@ -161,6 +170,7 @@ where
                         detail,
                         ..
                     } if *status == driver::SettlementStatus::Applied => {
+                        self.reserve(record);
                         let (machine, _) =
                             super::events::target_machine(&self.names, &record.target)?;
                         self.state.world.publication.session.applied_faults.push(
@@ -173,10 +183,17 @@ where
                             },
                         );
                     }
+                    driver::EventKind::FaultSettled { record, .. } => self.reserve(record),
                     _ => {}
                 }
             }
-            self.publisher.batch(&mut self.state, &self.names, batch)?;
+            if self.reserved.is_empty() {
+                self.publisher.batch(&mut self.state, &self.names, batch)?;
+            } else {
+                let mut names = self.names.clone();
+                names.extend(self.reserved.clone());
+                self.publisher.batch(&mut self.state, &names, batch)?;
+            }
             Ok(facts)
         })();
         if result.is_err() {
@@ -184,6 +201,17 @@ where
             self.terminal = true;
         }
         result
+    }
+    /// Name a spawn's reserved identity while its machine is not yet added, so
+    /// a pending, failed or cut-off spawn still publishes against its name.
+    fn reserve(&mut self, record: &FaultRecord) {
+        if let driver::FaultTarget::Machine { machine, .. } = record.target {
+            if !self.names.contains_key(&machine) {
+                if let Some(name) = self.driver.reserved_spawn(machine) {
+                    self.reserved.insert(machine, name.to_owned());
+                }
+            }
+        }
     }
     pub(super) fn playback(&mut self) -> Result<driver::PlaybackStatus> {
         self.driver
@@ -754,7 +782,9 @@ where
         } else {
             self.driver.step(upto)
         };
-        self.flush()?;
+        // A Driver failure is the cause; publication of its partial batch
+        // must not replace it.
+        let flushed = self.flush();
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -763,6 +793,7 @@ where
                 return Err(fail(error.to_string()));
             }
         };
+        flushed?;
         if let Err(error) = self.observe_terminal(&outcome) {
             self.failed = true;
             self.terminal = true;

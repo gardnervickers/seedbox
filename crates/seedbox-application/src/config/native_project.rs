@@ -26,6 +26,9 @@ pub(super) fn parse(
             "oracle is reserved; declare it in the top-level oracle section",
         );
     }
+    if project.oracle.standby {
+        return invalid("$.oracle.standby", "the oracle always starts at launch");
+    }
     let base = source.parent().unwrap_or(Path::new("."));
     let mut configs = BTreeMap::new();
     let mut services = BTreeMap::new();
@@ -213,6 +216,7 @@ fn resolve_machine(
         configs: mounts,
         volumes,
         network: "default".into(),
+        standby: machine.standby,
     })
 }
 
@@ -325,6 +329,26 @@ mod tests {
             ))
             .is_err());
         }
+    }
+
+    #[test]
+    fn standby_machines_resolve_but_the_oracle_always_starts() {
+        let sim = parse_native(
+            "name: demo\nmachines:\n  app: {image: app}\n  spare: {image: app, standby: true}\noracle: {image: test}\n",
+        )
+        .unwrap();
+        assert!(!sim.services["app"].standby);
+        assert!(sim.services["spare"].standby);
+        assert!(!sim.services["oracle"].standby);
+        let err = parse_native("name: demo\noracle: {image: test, standby: true}\n").unwrap_err();
+        assert!(err.to_string().contains("$.oracle.standby"), "{err}");
+        let example = super::super::load(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/spawn/seedbox.yaml"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(example.services["replica"].standby);
+        assert!(!example.services["server"].standby);
     }
 
     #[test]

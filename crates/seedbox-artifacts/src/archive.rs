@@ -600,6 +600,7 @@ mod tests {
                 },
                 volumes: BTreeMap::new(),
                 anonymous_volumes: Vec::new(),
+                standby: false,
             },
             network: seedbox_spec::Network {
                 name: "network".into(),
@@ -640,6 +641,7 @@ mod tests {
             revision: 1,
             simulated_time_ns: 0,
             machines: Vec::new(),
+            spawnable: Vec::new(),
             links: Vec::new(),
             faults: Vec::new(),
             override_rejections: BTreeMap::new(),

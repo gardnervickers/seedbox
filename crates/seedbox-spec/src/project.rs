@@ -45,6 +45,9 @@ pub struct Machine {
     pub user: Option<String>,
     pub files: Vec<InitialFile>,
     pub volumes: BTreeMap<String, Volume>,
+    /// Prepared with the others but booted only when spawned.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub standby: bool,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +67,8 @@ struct MachineFields {
     files: Vec<InitialFile>,
     #[serde(default)]
     volumes: BTreeMap<String, Volume>,
+    #[serde(default)]
+    standby: bool,
 }
 
 impl TryFrom<MachineFields> for Machine {
@@ -91,6 +96,7 @@ impl TryFrom<MachineFields> for Machine {
             user: fields.user,
             files: fields.files,
             volumes: fields.volumes,
+            standby: fields.standby,
         })
     }
 }

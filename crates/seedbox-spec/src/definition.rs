@@ -89,6 +89,9 @@ pub struct Machine {
     pub volumes: BTreeMap<String, Volume>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub anonymous_volumes: Vec<String>,
+    /// Not started at launch; the controller spawns it by name.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub standby: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -236,6 +239,7 @@ impl Definition {
                         })
                         .collect(),
                     network: self.network.name.clone(),
+                    standby: machine.standby,
                 },
             );
         }

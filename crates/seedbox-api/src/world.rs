@@ -18,6 +18,9 @@ pub struct WorldState {
     /// Simulated time of the newest observation folded in.
     pub simulated_time_ns: u64,
     pub machines: Vec<MachineState>,
+    /// Declared standby machines not yet spawned, in name order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawnable: Vec<String>,
     pub links: Vec<LinkState>,
     pub faults: Vec<FaultState>,
 }

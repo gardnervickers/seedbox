@@ -139,6 +139,13 @@ impl Control {
         self.spawning.remove(name);
         Ok(id)
     }
+    /// The declared name a reserved spawn identity takes once it is added.
+    pub(super) fn reserved_spawn(&self, id: MachineId) -> Option<&str> {
+        self.spawning
+            .iter()
+            .find(|&(_, &reserved)| reserved == id)
+            .map(|(name, _)| name.as_str())
+    }
     pub(super) fn spawn_target(&self, name: &str) -> Result<MachineId, String> {
         self.spawning
             .get(name)

@@ -87,6 +87,11 @@ names to `{target}` entries for writable disks that survive machine crashes.
 See [the etcd project](examples/etcd/seedbox.yaml) for a three-node cluster with
 persistent data disks.
 
+A machine with `standby: true` is prepared and keeps its hostname and address,
+but does not boot until it is spawned: from the oracle with the Python client's
+`World.spawn("name")`, or with the TUI's **Spawn machine** fault. See
+[the spawn project](examples/spawn/seedbox.yaml).
+
 `network.latency` defaults to `1ms`; `simulator.blocksPerProgressCall` defaults to
 `10000` and controls how often translated code charges simulation progress.
 Choose the backend, seed and execution limits with CLI flags.

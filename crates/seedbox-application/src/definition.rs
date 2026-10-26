@@ -44,6 +44,10 @@ pub fn resolve(
                 digest: format!("sha256:{}", image.manifest.hex()),
             }),
             anonymous_volumes: image.launch.volumes.clone(),
+            standby: configuration
+                .services
+                .get(name)
+                .is_some_and(|service| service.standby),
             name: (name == oracle_name).then(|| name.clone()),
             boot_archive: asset(boot),
             memory_bytes: u64::from(inputs.memory_mb(name)?) * 1024 * 1024,
@@ -155,6 +159,11 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
                     .then(|| definition.oracle_name()),
             )?;
         }
+    }
+    if definition.oracle.standby {
+        return Err(Error::Setup(
+            "oracle.standby: the oracle always starts at launch".into(),
+        ));
     }
     if definition.oracle.memory_bytes == 0
         || !definition.oracle.memory_bytes.is_multiple_of(1024 * 1024)
@@ -491,6 +500,15 @@ mod tests {
                 .contains("unknown Driver backend"));
             assert!(!output.exists());
         }
+    }
+
+    #[test]
+    fn resolved_definitions_cannot_hold_the_oracle_in_standby() {
+        let (_root, store, mut definition, _) = fixture();
+        definition.oracle.standby = true;
+        let error = prepared(&definition, &store).err().unwrap();
+        assert!(matches!(error, Error::Setup(_)), "{error}");
+        assert!(error.to_string().contains("oracle.standby"), "{error}");
     }
 
     #[test]

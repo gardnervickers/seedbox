@@ -591,6 +591,12 @@ where
     // The observer belongs to the host, including after restore: a
     // constructor-only capacity could not rebind a captured Driver to an absent
     // or new observer, so this stays a telemetry-only setter.
+    /// The declared name of a spawn identity that was reserved at admission but
+    /// whose machine has not been added: still pending, failed construction, or
+    /// cut off by finish/stop. Spawn fault records target that identity.
+    pub fn reserved_spawn(&self, id: MachineId) -> Option<&str> {
+        self.execution.control.reserved_spawn(id)
+    }
     pub fn set_frame_capacity(&mut self, capacity: usize) {
         self.observations.frames.set_capacity(capacity);
     }

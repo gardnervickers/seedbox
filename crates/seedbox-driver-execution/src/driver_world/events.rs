@@ -511,7 +511,10 @@ fn control_action(
             }
         }
         FaultAction::Heal => Action::Heal { handle: handle()? },
-        FaultAction::Spawn | FaultAction::Shutdown => return Ok(None),
+        FaultAction::Spawn => Action::Spawn {
+            machine: machine()?,
+        },
+        FaultAction::Shutdown => return Ok(None),
         _ => return Err(invalid("unknown Driver fault action projection")),
     }))
 }
