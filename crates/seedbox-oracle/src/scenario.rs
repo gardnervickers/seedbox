@@ -29,11 +29,11 @@ pub trait FinalRead {
     }
 }
 
-/// A test of one system: the runner declares one guest `always` property
-/// per checker, calls [`Scenario::setup`] and marks setup complete, runs the
+/// A test of one system: the runner calls [`Scenario::setup`], runs the
 /// clients on their own threads while the nemesis runs on the oracle's,
 /// stops the clients once the nemesis returns, heals, runs the final reads,
-/// then reports each checker's verdict as its property and flushes.
+/// then evaluates each decided checker's verdict as its `always` property
+/// and flushes.
 pub trait Scenario {
     type Op: Clone + Send + 'static;
     type Value: Send + 'static;
@@ -71,9 +71,8 @@ impl Report {
     pub const OK: u8 = 0;
     /// Some check was violated.
     pub const INVALID: u8 = 1;
-    /// No check was violated, but some could not decide. Today any nonzero
-    /// oracle exit makes the run's verdict failed, so an undecided run reads
-    /// as failed; mapping this status to incomplete is an open question.
+    /// No check was violated, but some could not decide: the run is
+    /// incomplete, neither a pass nor a bug.
     pub const UNKNOWN: u8 = 3;
 
     /// The oracle's exit status for this report.

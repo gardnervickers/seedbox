@@ -238,8 +238,9 @@ pub struct SimulationStatus {
     pub oracle_exit_code: Option<u8>,
     pub termination: Option<ExecutionTermination>,
     pub stop_requested: bool,
-    /// Guest property results. Absent until the final report carries them,
-    /// and absent for runs whose guests reported no property evidence.
+    /// Guest property findings: violations, unmet requirements and lost
+    /// evidence. Absent until the final report carries them, and absent when
+    /// there are none.
     pub properties: Option<crate::PropertyAssessment>,
 }
 
@@ -315,7 +316,7 @@ impl Default for SimulationStatus {
 
 impl SimulationStatus {
     /// Derived rather than independently writable, so diagnostics cannot
-    /// accidentally replace an observed oracle verdict. Property results do
+    /// accidentally replace an observed oracle verdict. Property findings do
     /// not qualify it yet; see [`TestVerdict::with_properties`].
     pub fn verdict(&self) -> TestVerdict {
         TestVerdict::from_oracle(self.oracle_exit_code, self.phase)
@@ -367,8 +368,7 @@ mod tests {
             configs: Vec::new(),
             volumes: Vec::new(),
             network: "default".into(),
-            expected_crashes: Vec::new(),
-            expected_out_of_memory_kills: false,
+            allow_crashes: false,
         };
         SimulationSpec {
             seed: Some(123),
@@ -593,25 +593,22 @@ mod tests {
     }
 
     #[test]
-    fn property_results_round_trip_without_changing_the_verdict_yet() {
-        use crate::PropertyAssessmentStatus as AssessmentStatus;
+    fn property_findings_round_trip_without_changing_the_verdict_yet() {
         let status = SimulationStatus {
             phase: Phase::Completed,
             oracle_exit_code: Some(0),
             properties: Some(crate::PropertyAssessment {
-                status: AssessmentStatus::Violated,
-                violated: 1,
-                unmet: 0,
-                evidence_complete: true,
-                error_count: 0,
-                errors: vec![],
-                properties: vec![],
+                unmet_requirements: vec!["failover exercised".into()],
+                ..Default::default()
             }),
             ..Default::default()
         };
         let document = serde_json::to_value(&status).unwrap();
         assert_eq!(document["verdict"], "passed");
-        assert_eq!(document["properties"]["status"], "violated");
+        assert_eq!(
+            document["properties"]["unmetRequirements"][0],
+            "failover exercised"
+        );
         assert_eq!(
             serde_json::from_value::<SimulationStatus>(document).unwrap(),
             status

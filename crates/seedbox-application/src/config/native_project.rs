@@ -212,8 +212,7 @@ fn resolve_machine(
         configs: mounts,
         volumes,
         network: "default".into(),
-        expected_crashes: machine.expected_crashes,
-        expected_out_of_memory_kills: machine.expected_out_of_memory_kills,
+        allow_crashes: machine.allow_crashes,
     })
 }
 

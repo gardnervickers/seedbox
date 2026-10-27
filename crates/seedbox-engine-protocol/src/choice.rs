@@ -7,7 +7,7 @@
 //! [`ChoiceOverride`](crate::input_program::ChoiceOverride) input selects
 //! it, so a run's choices replay exactly and a branch can vary them. No
 //! engine answers choices yet: the supervisor does not serve the SDK socket,
-//! so `seedbox_sdk::choose` takes the first alternative. Under an engine
+//! so `seedbox_guest::choose` takes the first alternative. Under an engine
 //! that does, an SDK that waits [`CHOICE_TIMEOUT_NS`] of guest time without
 //! an answer also takes the first alternative, reopens its session so a
 //! late answer cannot be misread, and records

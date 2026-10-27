@@ -44,15 +44,10 @@ pub fn resolve(
                 digest: format!("sha256:{}", image.manifest.hex()),
             }),
             anonymous_volumes: image.launch.volumes.clone(),
-            expected_crashes: configuration
+            allow_crashes: configuration
                 .services
                 .get(name)
-                .map(|service| service.expected_crashes.clone())
-                .unwrap_or_default(),
-            expected_out_of_memory_kills: configuration
-                .services
-                .get(name)
-                .is_some_and(|service| service.expected_out_of_memory_kills),
+                .is_some_and(|service| service.allow_crashes),
             name: (name == oracle_name).then(|| name.clone()),
             boot_archive: asset(boot),
             memory_bytes: u64::from(inputs.memory_mb(name)?) * 1024 * 1024,
@@ -706,8 +701,7 @@ mod tests {
                 },
                 disk: None,
                 interface: None,
-                expected_crashes: Vec::new(),
-                expected_out_of_memory_kills: false,
+                allow_crashes: false,
             },
             machines: vec![],
             spawnable: vec![],

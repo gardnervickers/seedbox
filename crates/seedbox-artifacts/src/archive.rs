@@ -1,14 +1,12 @@
-//! Portable server resources and their verified binary closure.
+//! Portable checkpoint definitions and their verified binary closure.
 //!
 //! Archives contain one `simulation.json`, followed by exactly the referenced
 //! `objects/<sha256>` regular files. Archive paths are never extracted; any
 //! descriptive host paths in retained diagnostics are never followed on import.
 use crate::{
-    record::RunRecord,
     store::{ContentDigest, ContentStore},
     Error, Result,
 };
-use seedbox_api::{ControlReceipt, InputSource, Phase, Simulation, WorldState};
 use seedbox_spec::definition::{Asset, Definition, Start};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -20,85 +18,6 @@ const MAX_OBJECTS: usize = 8192;
 const MANIFEST: &str = "simulation.json";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 pub const DEFAULT_MAX_BYTES: u64 = seedbox_api::BUNDLE_MAX_BYTES;
-
-/// A resource snapshot, not an execution request. Import must not enqueue work.
-/// Checkpoints carry independent resolved definitions, never source IDs.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Snapshot {
-    pub simulation: Simulation,
-    pub checkpoints: BTreeMap<String, Definition>,
-    pub record: Option<RunRecord>,
-    pub controls: Vec<ControlReceipt>,
-    pub world: WorldState,
-    /// JSON delivery arrays, including exact gaps; raw execution logs live in record.logs.
-    pub observations: BTreeMap<String, ContentDigest>,
-    /// Missing or bounded evidence is explicit, never inferred to be complete.
-    pub omissions: BTreeMap<String, String>,
-}
-
-impl Snapshot {
-    /// Enumerate every binary needed to resubmit or branch, and all retained logs.
-    /// Unresolved inputs are not portable and must be resolved by the server first.
-    pub fn assets(&self) -> Result<BTreeSet<ContentDigest>> {
-        if self.simulation.status.phase != Phase::Completed
-            || self.controls.len() > 4096
-            || self.checkpoints.len() > 4096
-        {
-            return Err(Error::Integrity(
-                "archive requires a completed resource within metadata bounds".into(),
-            ));
-        }
-        if self.observations.len() > MAX_OBJECTS
-            || self.observations.keys().any(|key| {
-                key != "logs"
-                    && key != "events"
-                    && !key.strip_prefix("logs:").is_some_and(|name| {
-                        self.simulation
-                            .spec
-                            .configuration
-                            .services
-                            .contains_key(name)
-                    })
-            })
-        {
-            return Err(Error::Integrity(
-                "unknown or excessive archive observation streams".into(),
-            ));
-        }
-        let InputSource::Resolved { definition } = &self.simulation.spec.inputs else {
-            return Err(Error::Integrity(
-                "archive requires resolved simulation inputs".into(),
-            ));
-        };
-        let mut assets = BTreeSet::new();
-        collect(definition, &mut assets)?;
-        for definition in self.checkpoints.values() {
-            if !matches!(definition.start, Start::Checkpoint { .. }) {
-                return Err(Error::Integrity(
-                    "archived checkpoint requires captured state".into(),
-                ));
-            }
-            collect(definition, &mut assets)?;
-        }
-        if let Some(record) = &self.record {
-            if record.identity.version != crate::record::FORMAT_VERSION
-                || ContentDigest::of(&serde_json::to_vec(&record.identity)?) != record.run_id
-            {
-                return Err(Error::Integrity(
-                    "archived run identity checksum mismatch".into(),
-                ));
-            }
-            assets.extend(record.identity.inputs.digests().cloned());
-            assets.extend(record.logs.values().cloned());
-        }
-        assets.extend(self.observations.values().cloned());
-        if assets.len() > MAX_OBJECTS {
-            return Err(Error::Integrity("archive exceeds 8192 objects".into()));
-        }
-        Ok(assets)
-    }
-}
 
 fn collect(definition: &Definition, assets: &mut BTreeSet<ContentDigest>) -> Result<()> {
     crate::checkpoint::validate(&definition.start)?;
@@ -215,13 +134,6 @@ impl Options {
         Ok(())
     }
 }
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Manifest {
-    format: String,
-    sha256: ContentDigest,
-    snapshot: Snapshot,
-}
 struct Transfer<T> {
     inner: T,
     remaining: u64,
@@ -260,24 +172,6 @@ impl<T: Write> Write for Transfer<T> {
         self.check()?;
         self.inner.flush()
     }
-}
-
-/// Write a snapshot with verified objects and bounded transfer buffers.
-/// The caller owns atomic publication and cancellation of its output file.
-pub fn export(
-    snapshot: &Snapshot,
-    store: &ContentStore,
-    output: impl Write,
-    options: &Options,
-) -> Result<()> {
-    options.check()?;
-    let assets = snapshot.assets()?;
-    let manifest = serde_json::to_vec(&Manifest {
-        format: "seedbox-simulation-v1".into(),
-        sha256: ContentDigest::of(&serde_json::to_vec(snapshot)?),
-        snapshot: snapshot.clone(),
-    })?;
-    export_payload(&manifest, assets, store, output, options)
 }
 
 fn export_payload(
@@ -349,38 +243,6 @@ fn append<W: Write>(
     Ok(())
 }
 
-/// Validate the entire archive before publishing any assets into `store`.
-/// Duplicate, undeclared, missing, corrupt and non-regular entries are errors.
-/// Files are streamed into an isolated staging store, never extracted by path.
-/// A failed publication may leave verified cache objects, but no resource is
-/// registered here. The caller registers the returned snapshot atomically.
-pub fn import(input: impl Read, store: &ContentStore, options: &Options) -> Result<Snapshot> {
-    import_payload(input, store, options, |bytes| {
-        let manifest: Manifest = serde_json::from_slice(bytes)?;
-        if manifest.format != "seedbox-simulation-v1"
-            || ContentDigest::of(&serde_json::to_vec(&manifest.snapshot)?) != manifest.sha256
-        {
-            return Err(Error::Integrity(
-                "unsupported archive format or manifest checksum mismatch".into(),
-            ));
-        }
-        let snapshot = manifest.snapshot;
-        let expected = snapshot.assets()?;
-        let mut binaries = BTreeSet::new();
-        let InputSource::Resolved { definition } = &snapshot.simulation.spec.inputs else {
-            unreachable!("validated")
-        };
-        collect(definition, &mut binaries)?;
-        for definition in snapshot.checkpoints.values() {
-            collect(definition, &mut binaries)?;
-        }
-        if let Some(record) = &snapshot.record {
-            binaries.extend(record.identity.inputs.digests().cloned());
-        }
-        Ok((snapshot, expected, binaries))
-    })
-}
-
 fn import_payload<T>(
     input: impl Read,
     store: &ContentStore,
@@ -406,7 +268,7 @@ fn import_payload<T>(
         || !manifest.header().entry_type().is_file()
     {
         return Err(Error::Integrity(
-            "expected server simulation archive (simulation.json first)".into(),
+            "expected checkpoint archive (simulation.json first)".into(),
         ));
     }
     let size = manifest.size();
@@ -542,6 +404,12 @@ pub fn export_checkpoint(
     export_payload(&manifest, assets, store, output, options)
 }
 
+/// Validate the entire archive before publishing any assets into `store`.
+/// Duplicate, undeclared, missing, corrupt and non-regular entries are errors.
+/// Files are streamed into an isolated staging store, never extracted by path.
+/// A failed publication may leave verified cache objects, but no resource is
+/// registered here.
+///
 /// Validate and restore checkpoint binaries into an empty content store.
 /// Returns independent inputs for a new submission; never registers a resource.
 pub fn import_checkpoint(
@@ -569,7 +437,7 @@ mod tests {
     use crate::execution::{ExecutionProfile, SemanticParameters, WitnessMode};
     use seedbox_spec::definition::*;
 
-    fn fixture(store: &ContentStore) -> Snapshot {
+    fn fixture(store: &ContentStore) -> Definition {
         let binary = store.put(b"guest-binary").unwrap();
         let asset = Asset(format!("sha256:{}", binary.hex()));
         let profile = ExecutionProfile {
@@ -577,7 +445,7 @@ mod tests {
             witness_mode: WitnessMode::Exits,
             semantic_parameters: SemanticParameters::new(),
         };
-        let definition = Definition {
+        Definition {
             architecture: Architecture::X86_64,
             seed: 7,
             clock: Clock {
@@ -600,8 +468,7 @@ mod tests {
                 },
                 volumes: BTreeMap::new(),
                 anonymous_volumes: Vec::new(),
-                expected_crashes: Vec::new(),
-                expected_out_of_memory_kills: false,
+                allow_crashes: false,
             },
             network: seedbox_spec::Network {
                 name: "network".into(),
@@ -620,47 +487,21 @@ mod tests {
             },
             start: Start::Fresh,
             overrides: Vec::new(),
-        };
-        let id = "abcdefgh".parse().unwrap();
-        let mut simulation = Simulation::queued(
-            seedbox_api::Metadata {
-                name: "archive".into(),
-                labels: BTreeMap::new(),
-                annotations: BTreeMap::new(),
-                id,
-                revision: 1,
-                created_at_unix_ms: 1,
-                deletion_requested_at_unix_ms: None,
-                parent: None,
-                checkpoint: None,
-            },
-            seedbox_api::SimulationSpec::resolved(definition).unwrap(),
-        );
-        simulation.status.phase = Phase::Completed;
-        let world = WorldState {
-            simulation: simulation.metadata.id.clone(),
-            revision: 1,
-            simulated_time_ns: 0,
-            machines: Vec::new(),
-            links: Vec::new(),
-            faults: Vec::new(),
-            override_rejections: BTreeMap::new(),
-            triggers: Vec::new(),
-            choice_inputs: Default::default(),
-        };
-        Snapshot {
-            simulation,
-            world,
-            checkpoints: BTreeMap::new(),
-            record: None,
-            controls: Vec::new(),
-            observations: BTreeMap::new(),
-            omissions: BTreeMap::from([("record".into(), "not executed".into())]),
         }
     }
-    fn encode(snapshot: &Snapshot, store: &ContentStore) -> Vec<u8> {
+    /// A checkpoint definition whose captured state is `ram`.
+    fn checkpoint(store: &ContentStore, ram: &[u8]) -> Definition {
+        let mut definition = fixture(store);
+        let state = store.put(ram).unwrap();
+        definition.start = Start::Checkpoint {
+            manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[]}}}, "ram":{"artifact":"asset:ram", "sha256":state.hex()}}),
+            assets: BTreeMap::from([("ram".into(), Asset(format!("sha256:{}", state.hex())))]),
+        };
+        definition
+    }
+    fn encode(definition: &Definition, store: &ContentStore) -> Vec<u8> {
         let mut bytes = Vec::new();
-        export(snapshot, store, &mut bytes, &Options::default()).unwrap();
+        export_checkpoint(definition, store, &mut bytes, &Options::default()).unwrap();
         bytes
     }
     fn entries(bytes: &[u8]) -> Vec<(String, tar::EntryType, Vec<u8>)> {
@@ -695,23 +536,15 @@ mod tests {
     fn checkpoint_file_survives_source_deletion_and_rejects_missing_or_corrupt_state() {
         let source = tempfile::tempdir().unwrap();
         let store = ContentStore::new(source.path());
-        let InputSource::Resolved { mut definition } = fixture(&store).simulation.spec.inputs
-        else {
-            unreachable!()
-        };
+        let definition = checkpoint(&store, b"checkpoint RAM and coordinator state");
         let state = store.put(b"checkpoint RAM and coordinator state").unwrap();
-        definition.start = Start::Checkpoint {
-            manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[]}}}, "ram":{"artifact":"asset:ram", "sha256":state.hex()}}),
-            assets: BTreeMap::from([("ram".into(), Asset(format!("sha256:{}", state.hex())))]),
-        };
-        let mut bytes = Vec::new();
-        export_checkpoint(&definition, &store, &mut bytes, &Options::default()).unwrap();
+        let bytes = encode(&definition, &store);
         drop(store);
         drop(source);
         let destination = tempfile::tempdir().unwrap();
         let store = ContentStore::new(destination.path());
         let restored = import_checkpoint(bytes.as_slice(), &store, &Options::default()).unwrap();
-        assert_eq!(restored, *definition);
+        assert_eq!(restored, definition);
         assert_eq!(
             store.read(&state).unwrap(),
             b"checkpoint RAM and coordinator state"
@@ -719,6 +552,7 @@ mod tests {
         for digest in checkpoint_assets(&restored).unwrap() {
             store.verify(&digest).unwrap();
         }
+        assert_eq!(encode(&restored, &store), bytes);
         let mut files = entries(&bytes);
         files[1].2[0] ^= 1;
         assert!(import_checkpoint(pack(&files).as_slice(), &store, &Options::default()).is_err());
@@ -731,49 +565,11 @@ mod tests {
     }
 
     #[test]
-    fn fresh_and_checkpoint_archives_are_independent_verified_closures() {
-        for checkpoint in [false, true] {
-            let source = tempfile::tempdir().unwrap();
-            let store = ContentStore::new(source.path());
-            let mut snapshot = fixture(&store);
-            if checkpoint {
-                let state = store.put(b"checkpoint-memory").unwrap();
-                let InputSource::Resolved { definition } = &mut snapshot.simulation.spec.inputs
-                else {
-                    unreachable!()
-                };
-                definition.start = Start::Checkpoint {
-                    manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[]}}}, "ram":{"artifact":"asset:ram", "sha256":state.hex()}}),
-                    assets: BTreeMap::from([(
-                        "ram".into(),
-                        Asset(format!("sha256:{}", state.hex())),
-                    )]),
-                };
-                snapshot
-                    .checkpoints
-                    .insert("capture".into(), definition.as_ref().clone());
-            }
-            let bytes = encode(&snapshot, &store);
-            drop(store);
-            drop(source);
-            let destination = tempfile::tempdir().unwrap();
-            let store = ContentStore::new(destination.path());
-            let imported = import(bytes.as_slice(), &store, &Options::default()).unwrap();
-            assert_eq!(imported.simulation.spec, snapshot.simulation.spec);
-            assert_eq!(imported.checkpoints, snapshot.checkpoints);
-            assert_eq!(imported.omissions, snapshot.omissions);
-            for digest in imported.assets().unwrap() {
-                store.verify(&digest).unwrap();
-            }
-            assert_eq!(encode(&imported, &store), bytes);
-        }
-    }
-    #[test]
     fn rejects_corruption_duplicates_unsafe_types_paths_and_missing_objects() {
         let directory = tempfile::tempdir().unwrap();
         let store = ContentStore::new(directory.path());
-        let snapshot = fixture(&store);
-        let bytes = encode(&snapshot, &store);
+        let definition = checkpoint(&store, b"checkpoint-memory");
+        let bytes = encode(&definition, &store);
         let original = entries(&bytes);
         let mut cases = Vec::new();
         let mut corrupt = original.clone();
@@ -783,10 +579,9 @@ mod tests {
         duplicate.push(duplicate[1].clone());
         cases.push(duplicate);
         let mut metadata = original.clone();
-        metadata[0].2 = String::from_utf8(metadata[0].2.clone())
-            .unwrap()
-            .replace("not executed", "not executed!")
-            .into_bytes();
+        let text = String::from_utf8(metadata[0].2.clone()).unwrap();
+        assert!(text.contains("\"/test\""));
+        metadata[0].2 = text.replace("\"/test\"", "\"/tesu\"").into_bytes();
         cases.push(metadata);
         cases.push(original[..1].to_vec());
         for name in [
@@ -814,7 +609,9 @@ mod tests {
         for case in cases {
             let destination = tempfile::tempdir().unwrap();
             let store = ContentStore::new(destination.path());
-            assert!(import(pack(&case).as_slice(), &store, &Options::default()).is_err());
+            assert!(
+                import_checkpoint(pack(&case).as_slice(), &store, &Options::default()).is_err()
+            );
             assert!(
                 !destination.path().join("objects").exists(),
                 "invalid archive published content"
@@ -822,39 +619,41 @@ mod tests {
         }
         let mut trailer = bytes.clone();
         trailer.push(1);
-        assert!(import(trailer.as_slice(), &store, &Options::default()).is_err());
-        assert!(import(&bytes[..bytes.len() - 513], &store, &Options::default()).is_err());
+        assert!(import_checkpoint(trailer.as_slice(), &store, &Options::default()).is_err());
+        assert!(
+            import_checkpoint(&bytes[..bytes.len() - 513], &store, &Options::default()).is_err()
+        );
     }
+
     #[test]
     fn enforces_wire_metadata_object_count_and_cancellation_bounds() {
         let directory = tempfile::tempdir().unwrap();
         let store = ContentStore::new(directory.path());
-        let mut snapshot = fixture(&store);
-        let bytes = encode(&snapshot, &store);
+        let mut definition = checkpoint(&store, b"checkpoint-memory");
+        let bytes = encode(&definition, &store);
         let exact = Options {
             max_bytes: bytes.len() as u64,
             ..Default::default()
         };
-        import(bytes.as_slice(), &store, &exact).unwrap();
-        export(&snapshot, &store, Vec::new(), &exact).unwrap();
+        import_checkpoint(bytes.as_slice(), &store, &exact).unwrap();
+        export_checkpoint(&definition, &store, Vec::new(), &exact).unwrap();
         let short = Options {
             max_bytes: bytes.len() as u64 - 1,
             ..Default::default()
         };
-        assert!(import(bytes.as_slice(), &store, &short).is_err());
-        assert!(export(&snapshot, &store, Vec::new(), &short).is_err());
+        assert!(import_checkpoint(bytes.as_slice(), &store, &short).is_err());
+        assert!(export_checkpoint(&definition, &store, Vec::new(), &short).is_err());
         let cancelled = Options::default();
         cancelled.cancellation.cancel();
-        assert!(import(bytes.as_slice(), &store, &cancelled).is_err());
-        assert!(export(&snapshot, &store, Vec::new(), &cancelled).is_err());
-        snapshot
-            .omissions
-            .insert("oversized".into(), "a".repeat(MAX_MANIFEST_BYTES as usize));
-        assert!(export(&snapshot, &store, Vec::new(), &Options::default()).is_err());
-        snapshot.omissions.clear();
-        let InputSource::Resolved { definition } = &mut snapshot.simulation.spec.inputs else {
-            unreachable!()
-        };
+        assert!(import_checkpoint(bytes.as_slice(), &store, &cancelled).is_err());
+        assert!(export_checkpoint(&definition, &store, Vec::new(), &cancelled).is_err());
+        definition
+            .oracle
+            .process
+            .environment
+            .insert("OVERSIZED".into(), "a".repeat(MAX_MANIFEST_BYTES as usize));
+        assert!(export_checkpoint(&definition, &store, Vec::new(), &Options::default()).is_err());
+        definition.oracle.process.environment.clear();
         definition.start = Start::Checkpoint {
             manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[]}}}}),
             assets: (0..=MAX_OBJECTS)
@@ -869,8 +668,9 @@ mod tests {
                 })
                 .collect(),
         };
-        assert!(snapshot.assets().is_err());
+        assert!(checkpoint_assets(&definition).is_err());
     }
+
     #[test]
     fn large_binary_closure_is_disk_spooled_with_bounded_reads_and_midstream_cancellation() {
         struct BoundedReader {
@@ -896,20 +696,17 @@ mod tests {
         }
         let source = tempfile::tempdir().unwrap();
         let store = ContentStore::new(source.path());
-        let mut snapshot = fixture(&store);
+        let mut definition = checkpoint(&store, b"checkpoint-memory");
         let large = store
             .put_reader(std::io::repeat(42).take(16 * 1024 * 1024))
             .unwrap();
-        let InputSource::Resolved { definition } = &mut snapshot.simulation.spec.inputs else {
-            unreachable!()
-        };
         definition.oracle.boot_archive = Asset(format!("sha256:{}", large.hex()));
         let mut spool = tempfile::tempfile().unwrap();
-        export(&snapshot, &store, &mut spool, &Options::default()).unwrap();
+        export_checkpoint(&definition, &store, &mut spool, &Options::default()).unwrap();
         spool.rewind().unwrap();
         let destination = tempfile::tempdir().unwrap();
         let target = ContentStore::new(destination.path());
-        import(
+        import_checkpoint(
             BoundedReader {
                 file: spool.try_clone().unwrap(),
                 cancellation: None,
@@ -924,7 +721,7 @@ mod tests {
         let cancelled = Options::default();
         let destination = tempfile::tempdir().unwrap();
         let target = ContentStore::new(destination.path());
-        assert!(import(
+        assert!(import_checkpoint(
             BoundedReader {
                 file: spool,
                 cancellation: Some(cancelled.cancellation.clone()),

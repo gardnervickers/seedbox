@@ -81,11 +81,11 @@ therefore changes only through a reboot or through the different timing
 that re-keyed host draws cause, and a run with no seeded network, fault or
 choice draws after the reseed may not vary at all.
 
-Guests ask with `seedbox_sdk::choose(site, &alternatives)`; the engine draws
+Guests ask with `seedbox_guest::choose(site, &alternatives)`; the engine draws
 the answer from the seed unless a choice input selects it, so choices
 replay and a branch can vary them. The SDK waits ten seconds of guest time
 for an answer, then takes the first alternative, reopens its session and
-records a `seedbox.choice_unanswered` event. `seedbox_sdk::state(name,
+records a `seedbox.choice_unanswered` event. `seedbox_guest::state(name,
 value)` reports short labels, such as a role or recovery phase, whose new
 values and transitions count as progress. Typed triggers can also match SDK
 `event`, `assertion`, `state` and `setup_complete` records, on any machine

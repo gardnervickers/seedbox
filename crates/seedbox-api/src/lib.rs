@@ -54,8 +54,8 @@ pub use seedbox_engine_protocol::fault_profile::FaultProfile;
 pub use seedbox_engine_protocol::out_of_memory::Kill as OutOfMemoryVictim;
 mod properties;
 pub use properties::{
-    PropertyAssessment, PropertyAssessmentStatus, PropertyEvidenceError, PropertyExample,
-    PropertyKind, PropertyOrigin, PropertyResult, PropertyStatus,
+    LostPropertyEvidence, PropertyAssessment, PropertyAssessmentStatus, PropertyExample,
+    PropertyKind, PropertyOrigin, PropertyViolation,
 };
 mod world;
 pub use world::{

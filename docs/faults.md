@@ -33,7 +33,7 @@ same rule in general and arms when due:
 | `then` | Any action, admitted as an ordinary fault with its own ID and the same checks as a timed input |
 
 A `block_request` trigger holds the matching disk request at the device, so
-its only effect is an undelayed `crash` of that machine. Selectors on SDK
+its only effect is an undelayed `crash` of that machine. Selectors on guest
 evidence match `event`, `assertion` (optionally only passing or failing),
 `state` (a name, optionally one value) and `setup_complete` records, and
 `fired` matches another trigger input's effect being admitted, so a teardown

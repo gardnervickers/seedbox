@@ -156,21 +156,18 @@ pub struct CampaignMember {
     pub error: Option<String>,
 }
 
-/// One property across the campaign. Counts are each member's own
-/// evaluations: a branch does not count again what its parent's prefix did.
+/// One property that some member violated or required without evaluating.
+/// Runs keep only property failures, so a property every member held is
+/// absent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CampaignProperty {
     pub id: String,
-    pub kind: crate::PropertyKind,
-    pub status: crate::PropertyStatus,
-    pub passes: u64,
-    pub failures: u64,
-    /// Members that evaluated it themselves.
-    pub members_evaluated: u32,
     /// Members whose own evaluations violated it: with the completed members,
     /// the observed campaign rate, not a population estimate.
     pub members_violating: u32,
+    /// Members that required it and never evaluated it.
+    pub members_unmet: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
