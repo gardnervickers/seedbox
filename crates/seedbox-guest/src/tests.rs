@@ -218,7 +218,7 @@ fn oversized_records_keep_their_evaluation_and_mark_lost_details() {
     let small = assert_record("p", Kind::Always, false, json!({"k": 1}));
     assert_eq!(fit(small.clone()), serde_json::to_vec(&small).unwrap());
     // An impossible ID still arrives, as a record the engine refuses: an
-    // evidence error rather than nothing.
+    // lost evidence rather than nothing.
     let huge = "i".repeat(2 * MAX_RECORD_BYTES);
     let bytes = fit(assert_record(&huge, Kind::Always, false, big));
     assert!(bytes.len() <= MAX_RECORD_BYTES);

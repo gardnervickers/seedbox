@@ -267,7 +267,7 @@ impl Client {
     fn emit(&self, record: Value) {
         if let Err(error) = self.send(record) {
             static REPORTED: std::sync::Once = std::sync::Once::new();
-            REPORTED.call_once(|| eprintln!("seedbox-sdk: property record not sent: {error}"));
+            REPORTED.call_once(|| eprintln!("seedbox-guest: property record not sent: {error}"));
         }
     }
 }
