@@ -178,8 +178,8 @@ fn trigger_specs_round_trip_with_defaults_omitted() {
 }
 
 #[test]
-fn trigger_specs_refuse_reserved_selectors_and_bad_shapes() {
-    for name in RESERVED_SELECTORS {
+fn trigger_specs_refuse_property_selectors_and_bad_shapes() {
+    for name in PROPERTY_SELECTORS {
         let error = trigger(
             json!({"when":{"kind":name,"name":"committed"},"then":{"action":"crash","machine":"db"}}),
         )

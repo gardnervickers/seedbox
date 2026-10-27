@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 mod trigger;
 #[cfg(test)]
-use trigger::RESERVED_SELECTORS;
+use trigger::PROPERTY_SELECTORS;
 pub use trigger::{
     EventSelector, Marker, Transition, TriggerReceipt, TriggerSpec, TriggerStatus, MAX_TRIGGERS,
     MAX_TRIGGER_MARKER,

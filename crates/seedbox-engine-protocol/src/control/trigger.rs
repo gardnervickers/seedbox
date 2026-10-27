@@ -16,11 +16,11 @@ use serde::{Deserialize, Serialize};
 pub const MAX_TRIGGERS: usize = 64;
 /// Bytes in a console marker.
 pub const MAX_TRIGGER_MARKER: usize = 256;
-/// Selector names reserved for SDK workload evidence (events, assertions and
-/// setup markers), which arrive in a later change. They parse as unknown
-/// today.
+/// Triggers never select guest property evidence: a run is deterministic,
+/// so an oracle that wants a fault on such a condition watches for it and
+/// applies the fault itself. These selector names parse as unknown.
 #[cfg(test)]
-pub(crate) const RESERVED_SELECTORS: [&str; 3] = ["event", "assertion", "setup_complete"];
+pub(crate) const PROPERTY_SELECTORS: [&str; 3] = ["event", "assertion", "setup_complete"];
 
 /// Once `when` has matched `nth` times, `then` is admitted as a fault at the
 /// committed barrier that found the match plus `delay_ns`, where it meets the

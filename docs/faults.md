@@ -33,9 +33,9 @@ same rule in general and arms when due:
 | `then` | Any action, admitted as an ordinary fault with its own ID and the same checks as a timed input |
 
 A `block_request` trigger holds the matching disk request at the device, so
-its only effect is an undelayed `crash` of that machine. Selectors on SDK
-evidence (`event`, `assertion`, `setup_complete`) are reserved for a later
-change.
+its only effect is an undelayed `crash` of that machine. No selector matches
+guest property evidence: the run is deterministic, so an oracle watches for
+such a condition itself and applies the fault then.
 Oracle-armed and program triggers share one lifecycle and 64 IDs per run, so a
 program alone may arm at most 64. The lifecycle is armed, matched, then fired,
 rejected, cancelled, expired or cut off. Each change of a program trigger is a
