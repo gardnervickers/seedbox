@@ -1,6 +1,6 @@
 [package]
-name = "seedbox-scenario"
-description = "Jepsen-style scenario library for Seedbox oracles: clients, histories, checkers and nemeses"
+name = "seedbox-oracle"
+description = "Jepsen-style library for writing Seedbox oracles: clients, histories, checkers and nemeses"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

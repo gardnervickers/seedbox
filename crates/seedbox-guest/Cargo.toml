@@ -1,6 +1,6 @@
 [package]
-name = "seedbox-sdk"
-description = "Guest-side property SDK for applications and oracles under Seedbox"
+name = "seedbox-guest"
+description = "Guest-side property API for applications and oracles under Seedbox"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

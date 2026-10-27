@@ -25,9 +25,8 @@ pub struct Verdict {
 }
 
 impl Verdict {
-    /// The condition of the checker's `always` property. Unknown leaves the
-    /// property unevaluated, so it reports as unmet, which does not fail a
-    /// run by itself.
+    /// The condition of the checker's `always` property. Unknown evaluates
+    /// nothing; the oracle's exit status 3 reports the run incomplete.
     pub fn condition(&self) -> Option<bool> {
         match self.validity {
             Validity::Valid => Some(true),

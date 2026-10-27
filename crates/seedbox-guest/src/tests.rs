@@ -1,8 +1,7 @@
 use super::*;
 use seedbox_engine_protocol::property::{
-    Counts, Kind as ProtocolKind, Record, Reply, SOCKET as PROTOCOL_SOCKET,
+    Kind as ProtocolKind, Record, Reply, SOCKET as PROTOCOL_SOCKET,
 };
-use std::cell::Cell;
 
 /// Capture what a client would send by pointing it at a fake socket server.
 #[cfg(target_os = "linux")]
@@ -111,19 +110,12 @@ fn sdk_encoding_decodes_with_the_protocol_crate() {
         seedbox_engine_protocol::property::MAX_ID_BYTES
     );
     assert_eq!(
-        parse(declare_record("p", Kind::AlwaysOrUnreachable)),
-        Record::Declare {
-            id: "p".into(),
-            kind: ProtocolKind::AlwaysOrUnreachable,
-            message: None
-        }
+        parse(require_record("p")),
+        Record::Require { id: "p".into() }
     );
     for (kind, expected) in [
         (Kind::Always, ProtocolKind::Always),
-        (Kind::AlwaysOrUnreachable, ProtocolKind::AlwaysOrUnreachable),
-        (Kind::Sometimes, ProtocolKind::Sometimes),
-        (Kind::Reachable, ProtocolKind::Reachable),
-        (Kind::Unreachable, ProtocolKind::Unreachable),
+        (Kind::Never, ProtocolKind::Never),
     ] {
         assert_eq!(
             parse(assert_record("p", kind, false, json!({"k": 1}))),
@@ -131,7 +123,6 @@ fn sdk_encoding_decodes_with_the_protocol_crate() {
                 id: "p".into(),
                 kind: expected,
                 condition: false,
-                message: None,
                 details: Some(json!({"k": 1})),
                 details_truncated: false,
             }
@@ -144,58 +135,23 @@ fn sdk_encoding_decodes_with_the_protocol_crate() {
             count: 2
         })
     );
-    assert_eq!(
-        parse(event_record("e", Value::Null)),
-        Record::Event {
-            name: "e".into(),
-            details: None
-        }
-    );
-    assert_eq!(
-        parse(setup_record(json!({"nodes": 3}))),
-        Record::SetupComplete {
-            details: Some(json!({"nodes": 3}))
-        }
-    );
     assert_eq!(Record::parse(FLUSH), Ok(Record::Flush {}));
-    assert_eq!(Record::parse(SUMMARY), Ok(Record::Summary {}));
 
     let flush = serde_json::to_vec(&Reply::Flush { seq: 3 }).unwrap();
     assert_eq!(reply_body(&flush, "flush", 3), Some(json!({"seq": 3})));
     // A reply to another request, or for another sequence number, is refused.
-    assert_eq!(reply_body(&flush, "summary", 3), None);
+    assert_eq!(reply_body(&flush, "choice", 3), None);
     assert_eq!(reply_body(&flush, "flush", 4), None);
-    let summary = Reply::Summary {
-        seq: 4,
-        properties: [(
-            "p".to_string(),
-            Counts {
-                passes: 2,
-                failures: 1,
-            },
-        )]
-        .into(),
-        truncated: true,
-    };
-    let body = reply_body(&serde_json::to_vec(&summary).unwrap(), "summary", 4).unwrap();
-    let parsed = parse_summary(&body).unwrap();
-    assert_eq!(
-        parsed.properties["p"],
-        PropertyCounts {
-            passes: 2,
-            failures: 1
-        }
-    );
-    assert!(parsed.truncated);
 }
 
 #[test]
 fn absent_socket_makes_every_call_a_no_op() {
     let directory = tempfile::tempdir().unwrap();
     let client = Client::new(directory.path().join("missing.sock"));
-    client.assert("p", Kind::Always, false, Value::Null);
+    client.require("p");
+    client.always("p", false, Value::Null);
+    client.never("q", true, Value::Null);
     client.flush().unwrap();
-    assert_eq!(client.summary().unwrap(), Summary::default());
 }
 
 /// Under Seedbox an unreachable socket is lost evidence, reported once on
@@ -210,8 +166,8 @@ fn an_unreachable_socket_under_seedbox_is_reported_as_lost() {
         "seedbox-sdk-test-nobody-listens",
         &kmsg,
     );
-    client.assert("p", Kind::Always, false, Value::Null);
-    client.event("e", Value::Null);
+    client.always("p", false, Value::Null);
+    client.never("q", true, Value::Null);
     assert!(client.flush().is_err());
     let logged = std::fs::read_to_string(&kmsg).unwrap();
     assert_eq!(logged.lines().count(), 1, "{logged}");
@@ -230,13 +186,13 @@ fn an_unreachable_path_falls_back_to_the_abstract_listener() {
     let listener = OwnedListener::bind_abstract(&name);
     let kmsg = directory.path().join("kmsg");
     let client = Client::with_fallback(&directory.path().join("missing.sock"), &name, &kmsg);
-    client.declare("p", Kind::Always);
+    client.require("p");
     let server = listener.accept();
     let mut buffer = [0u8; MAX_RECORD_BYTES];
     let n = server.recv(&mut buffer).unwrap();
     assert!(matches!(
         Record::parse(&buffer[..n]).unwrap(),
-        Record::Declare { .. }
+        Record::Require { .. }
     ));
     assert!(!kmsg.exists());
 }
@@ -254,7 +210,6 @@ fn oversized_records_keep_their_evaluation_and_mark_lost_details() {
             id: "p".into(),
             kind: ProtocolKind::Always,
             condition: false,
-            message: None,
             details: None,
             details_truncated: true,
         })
@@ -262,17 +217,8 @@ fn oversized_records_keep_their_evaluation_and_mark_lost_details() {
     // Details that fit are kept as they are.
     let small = assert_record("p", Kind::Always, false, json!({"k": 1}));
     assert_eq!(fit(small.clone()), serde_json::to_vec(&small).unwrap());
-    // Other records just lose their details.
-    let event = fit(event_record("e", big.clone()));
-    assert_eq!(
-        Record::parse(&event),
-        Ok(Record::Event {
-            name: "e".into(),
-            details: None
-        })
-    );
     // An impossible ID still arrives, as a record the engine refuses: an
-    // evidence error rather than nothing.
+    // lost evidence rather than nothing.
     let huge = "i".repeat(2 * MAX_RECORD_BYTES);
     let bytes = fit(assert_record(&huge, Kind::Always, false, big));
     assert!(bytes.len() <= MAX_RECORD_BYTES);
@@ -282,7 +228,7 @@ fn oversized_records_keep_their_evaluation_and_mark_lost_details() {
     );
     // A multibyte ID is cut on a character boundary.
     let wide = "é".repeat(MAX_RECORD_BYTES);
-    assert!(fit(declare_record(&wide, Kind::Always)).len() <= MAX_RECORD_BYTES);
+    assert!(fit(require_record(&wide)).len() <= MAX_RECORD_BYTES);
 }
 
 #[cfg(target_os = "linux")]
@@ -290,16 +236,16 @@ fn oversized_records_keep_their_evaluation_and_mark_lost_details() {
 fn records_and_flush_round_trip_over_seqpacket() {
     let (_directory, path, listener) = server();
     let client = Client::new(&path);
-    client.declare("p", Kind::Always);
+    client.require("p");
     let server = listener.accept();
-    client.assert("p", Kind::Always, true, json!({"n": 1}));
+    client.always("p", true, json!({"n": 1}));
     let mut buffer = [0u8; MAX_RECORD_BYTES];
     let mut records = Vec::new();
     for _ in 0..2 {
         let n = server.recv(&mut buffer).unwrap();
         records.push(Record::parse(&buffer[..n]).unwrap());
     }
-    assert!(matches!(records[0], Record::Declare { .. }));
+    assert!(matches!(records[0], Record::Require { .. }));
     assert!(matches!(
         records[1],
         Record::Assert {
@@ -313,32 +259,9 @@ fn records_and_flush_round_trip_over_seqpacket() {
         assert_eq!(&buffer[..n], FLUSH);
         let flush = Reply::Flush { seq: 3 };
         server.send(&serde_json::to_vec(&flush).unwrap()).unwrap();
-        let n = server.recv(&mut buffer).unwrap();
-        assert_eq!(&buffer[..n], SUMMARY);
-        let summary = Reply::Summary {
-            seq: 4,
-            properties: [(
-                "p".to_string(),
-                Counts {
-                    passes: 1,
-                    failures: 0,
-                },
-            )]
-            .into(),
-            truncated: false,
-        };
-        server.send(&serde_json::to_vec(&summary).unwrap()).unwrap();
         server
     });
     client.flush().unwrap();
-    let summary = client.summary().unwrap();
-    assert_eq!(
-        summary.properties["p"],
-        PropertyCounts {
-            passes: 1,
-            failures: 0
-        }
-    );
     let server = replier.join().unwrap();
     // A reply that is not the engine's, or confirms another record, is an
     // error, not a silent success; it also ends the session.
@@ -368,12 +291,12 @@ fn records_and_flush_round_trip_over_seqpacket() {
 fn records_that_cannot_be_sent_are_reported_as_lost() {
     let (_directory, path, listener) = server();
     let client = Client::new(&path);
-    client.declare("p", Kind::Always);
+    client.require("p");
     // The supervisor side goes away; the next record cannot be sent.
     drop(listener.accept());
-    client.assert("p", Kind::Always, false, Value::Null);
+    client.always("p", false, Value::Null);
     // The next call opens a new session and reports the loss first.
-    client.event("after", Value::Null);
+    client.never("q", false, Value::Null);
     let server = listener.accept();
     let mut buffer = [0u8; MAX_RECORD_BYTES];
     let n = server.recv(&mut buffer).unwrap();
@@ -384,7 +307,10 @@ fn records_that_cannot_be_sent_are_reported_as_lost() {
     let n = server.recv(&mut buffer).unwrap();
     assert!(matches!(
         Record::parse(&buffer[..n]).unwrap(),
-        Record::Event { .. }
+        Record::Assert {
+            kind: ProtocolKind::Never,
+            ..
+        }
     ));
     // The flush that follows confirms the session's third message.
     let replier = std::thread::spawn(move || {
@@ -396,47 +322,4 @@ fn records_that_cannot_be_sent_are_reported_as_lost() {
     });
     client.flush().unwrap();
     replier.join().unwrap();
-}
-
-/// Poll against a fake clock that each probe advances by `step`.
-fn poll(deadline_ms: u64, step_ms: u64, succeeds: impl Fn(u32) -> bool) -> (bool, Value, u32) {
-    let base = Instant::now();
-    let clock = Cell::new(base);
-    let calls = Cell::new(0);
-    let probe = || {
-        clock.set(clock.get() + Duration::from_millis(step_ms));
-        calls.set(calls.get() + 1);
-        succeeds(calls.get())
-    };
-    let sleep = |pause: Duration| clock.set(clock.get() + pause);
-    let (recovered, details) = poll_recovery(
-        Duration::from_millis(deadline_ms),
-        probe,
-        || clock.get(),
-        sleep,
-    );
-    (recovered, details, calls.get())
-}
-
-#[test]
-fn recovery_passes_within_the_deadline_and_fails_after_it() {
-    // The third probe succeeds after two 20ms pauses.
-    let (recovered, details, calls) = poll(100, 1, |call| call == 3);
-    assert!(recovered);
-    assert_eq!(calls, 3);
-    assert_eq!(details["waited_ms"], 43);
-    // A probe that never succeeds fails at the deadline, without oversleeping.
-    let (recovered, details, _) = poll(30, 1, |_| false);
-    assert!(!recovered);
-    assert_eq!(details["deadline_ms"], 30);
-    assert_eq!(details["waited_ms"], 31);
-    // A probe that succeeds, but only after the deadline, fails.
-    let (recovered, _, calls) = poll(10, 30, |_| true);
-    assert!(!recovered);
-    assert_eq!(calls, 1);
-    // A probe that fails past the deadline is not retried.
-    let (recovered, details, calls) = poll(10, 30, |call| call > 1);
-    assert!(!recovered);
-    assert_eq!(calls, 1);
-    assert_eq!(details["deadline_ms"], 10);
 }

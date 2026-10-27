@@ -2049,6 +2049,16 @@ name = "seedbox-exec"
 version = "0.1.0"
 
 [[package]]
+name = "seedbox-guest"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "seedbox-engine-protocol",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "seedbox-machine"
 version = "0.1.0"
 dependencies = [
@@ -2105,22 +2115,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "seedbox-scenario"
+name = "seedbox-oracle"
 version = "0.1.0"
 dependencies = [
  "seedbox-engine-protocol",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "seedbox-sdk"
-version = "0.1.0"
-dependencies = [
- "libc",
- "seedbox-engine-protocol",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]

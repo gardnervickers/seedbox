@@ -315,15 +315,10 @@ pub fn retain_oci_prepared(
                     address: std::net::Ipv4Addr::new(10, 0, 0, number),
                     prefix_len: 24,
                 }),
-                expected_crashes: simulation
+                allow_crashes: simulation
                     .services
                     .get(name)
-                    .map(|service| service.expected_crashes.clone())
-                    .unwrap_or_default(),
-                expected_out_of_memory_kills: simulation
-                    .services
-                    .get(name)
-                    .is_some_and(|service| service.expected_out_of_memory_kills),
+                    .is_some_and(|service| service.allow_crashes),
             },
         );
     }

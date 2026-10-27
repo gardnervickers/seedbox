@@ -13,7 +13,7 @@ use seedbox_application::{
     },
     orchestration::{Orchestrator, Run, RunOptions, RunProgress},
     preparation::PreparationContext,
-    store::{ContentDigest, ContentStore},
+    store::ContentStore,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -264,15 +264,6 @@ impl ExecutionService {
     ) -> Result<seedbox_api::Simulation, Error> {
         progress(0)?;
         self.manager.captured_checkpoint(id, name)?;
-        if let Some(definition) = self
-            .manager
-            .read(|catalogue| catalogue.imported_checkpoint(id, name))?
-        {
-            let mut resource = self.describe(id)?;
-            resource.spec =
-                seedbox_api::SimulationSpec::resolved(definition).map_err(Error::Bundle)?;
-            return Ok(resource);
-        }
         let mut resource = self.describe(id)?;
         let seedbox_api::InputSource::Resolved { definition } = &mut resource.spec.inputs else {
             return Err(Error::Evidence(seedbox_application::Error::Setup(

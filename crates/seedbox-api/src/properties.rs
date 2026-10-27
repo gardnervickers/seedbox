@@ -1,6 +1,7 @@
-//! Guest property results as the public API reports them: the engine's
+//! Guest property findings as the public API reports them: the engine's
 //! snake_case `seedbox_engine_protocol::property` evidence, converted to the
-//! API's camelCase resource style.
+//! API's camelCase resource style. Only failures are reported: violations
+//! with their first example, unmet requirements and lost evidence.
 use seedbox_engine_protocol::property as protocol;
 use serde::{Deserialize, Serialize};
 
@@ -8,25 +9,17 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub enum PropertyKind {
     Always,
-    AlwaysOrUnreachable,
-    Sometimes,
-    Reachable,
-    Unreachable,
+    Never,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PropertyStatus {
-    Passed,
-    Violated,
-    Unmet,
-}
-
+/// What a run's property findings make of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PropertyAssessmentStatus {
     Passed,
-    Violated,
+    /// A property was violated or a requirement was never evaluated.
+    Failed,
+    /// Nothing failed, but some evidence was lost.
     Incomplete,
 }
 
@@ -50,60 +43,64 @@ pub struct PropertyExample {
     pub details_truncated: bool,
 }
 
+/// A violated property and its first violating evaluation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PropertyEvidenceError {
-    pub error: String,
+pub struct PropertyViolation {
+    pub id: String,
+    pub kind: PropertyKind,
+    pub example: PropertyExample,
+}
+
+/// Why some property evidence did not count.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LostPropertyEvidence {
+    pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<PropertyOrigin>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PropertyResult {
-    pub id: String,
-    pub kind: PropertyKind,
-    pub status: PropertyStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    pub passes: u64,
-    pub failures: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub example: Option<PropertyExample>,
-}
-
-/// A run's guest property results, beside the oracle verdict.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A run's guest property findings, beside the oracle verdict.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PropertyAssessment {
-    pub status: PropertyAssessmentStatus,
-    pub violated: u32,
-    pub unmet: u32,
-    pub evidence_complete: bool,
-    pub error_count: u64,
+    /// Sorted by ID.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub errors: Vec<PropertyEvidenceError>,
-    pub properties: Vec<PropertyResult>,
+    pub violations: Vec<PropertyViolation>,
+    /// Required properties never evaluated, sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmet_requirements: Vec<String>,
+    /// Records lost or refused; the first reasons are in `lostEvidence`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub lost_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lost_evidence: Vec<LostPropertyEvidence>,
+}
+
+fn is_zero(count: &u64) -> bool {
+    *count == 0
+}
+
+impl PropertyAssessment {
+    /// A violation or unmet requirement fails; lost evidence alone leaves
+    /// the result incomplete.
+    pub fn status(&self) -> PropertyAssessmentStatus {
+        if !self.violations.is_empty() || !self.unmet_requirements.is_empty() {
+            PropertyAssessmentStatus::Failed
+        } else if self.lost_count > 0 {
+            PropertyAssessmentStatus::Incomplete
+        } else {
+            PropertyAssessmentStatus::Passed
+        }
+    }
 }
 
 impl From<protocol::Kind> for PropertyKind {
     fn from(kind: protocol::Kind) -> Self {
         match kind {
             protocol::Kind::Always => Self::Always,
-            protocol::Kind::AlwaysOrUnreachable => Self::AlwaysOrUnreachable,
-            protocol::Kind::Sometimes => Self::Sometimes,
-            protocol::Kind::Reachable => Self::Reachable,
-            protocol::Kind::Unreachable => Self::Unreachable,
-        }
-    }
-}
-
-impl From<protocol::PropertyStatus> for PropertyStatus {
-    fn from(status: protocol::PropertyStatus) -> Self {
-        match status {
-            protocol::PropertyStatus::Passed => Self::Passed,
-            protocol::PropertyStatus::Violated => Self::Violated,
-            protocol::PropertyStatus::Unmet => Self::Unmet,
+            protocol::Kind::Never => Self::Never,
         }
     }
 }
@@ -112,7 +109,7 @@ impl From<protocol::AssessmentStatus> for PropertyAssessmentStatus {
     fn from(status: protocol::AssessmentStatus) -> Self {
         match status {
             protocol::AssessmentStatus::Passed => Self::Passed,
-            protocol::AssessmentStatus::Violated => Self::Violated,
+            protocol::AssessmentStatus::Failed => Self::Failed,
             protocol::AssessmentStatus::Incomplete => Self::Incomplete,
         }
     }
@@ -133,34 +130,27 @@ impl From<protocol::Origin> for PropertyOrigin {
 impl From<protocol::Assessment> for PropertyAssessment {
     fn from(a: protocol::Assessment) -> Self {
         Self {
-            status: a.status.into(),
-            violated: a.violated,
-            unmet: a.unmet,
-            evidence_complete: a.evidence_complete,
-            error_count: a.error_count,
-            errors: a
-                .errors
+            violations: a
+                .violations
                 .into_iter()
-                .map(|e| PropertyEvidenceError {
-                    error: e.error,
-                    origin: e.origin.map(Into::into),
+                .map(|v| PropertyViolation {
+                    id: v.id,
+                    kind: v.kind.into(),
+                    example: PropertyExample {
+                        origin: v.example.origin.into(),
+                        details: v.example.details,
+                        details_truncated: v.example.details_truncated,
+                    },
                 })
                 .collect(),
-            properties: a
-                .properties
+            unmet_requirements: a.unmet_requirements,
+            lost_count: a.lost_count,
+            lost_evidence: a
+                .lost_evidence
                 .into_iter()
-                .map(|p| PropertyResult {
-                    id: p.id,
-                    kind: p.kind.into(),
-                    status: p.status.into(),
-                    message: p.message,
-                    passes: p.passes,
-                    failures: p.failures,
-                    example: p.example.map(|e| PropertyExample {
-                        origin: e.origin.into(),
-                        details: e.details,
-                        details_truncated: e.details_truncated,
-                    }),
+                .map(|e| LostPropertyEvidence {
+                    reason: e.reason,
+                    origin: e.origin.map(Into::into),
                 })
                 .collect(),
         }
@@ -173,7 +163,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn engine_evidence_becomes_camel_case_api_results() {
+    fn engine_evidence_becomes_camel_case_api_findings() {
         let origin = protocol::Origin {
             machine: "n1".into(),
             incarnation: 1,
@@ -182,46 +172,51 @@ mod tests {
             time_ns: 4,
         };
         let engine = protocol::Assessment {
-            status: protocol::AssessmentStatus::Violated,
-            violated: 1,
-            unmet: 0,
-            evidence_complete: false,
-            error_count: 1,
-            errors: vec![protocol::EvidenceError {
-                error: "lost".into(),
-                origin: Some(origin.clone()),
-            }],
-            properties: vec![protocol::PropertyResult {
+            violations: vec![protocol::Violation {
                 id: protocol::DEFAULT_NO_OOM.into(),
-                kind: protocol::Kind::AlwaysOrUnreachable,
-                status: protocol::PropertyStatus::Violated,
-                message: None,
-                passes: 0,
-                failures: 1,
-                example: Some(protocol::Example {
-                    origin,
+                kind: protocol::Kind::Never,
+                example: protocol::Example {
+                    origin: origin.clone(),
                     details: None,
                     details_truncated: true,
-                }),
+                },
+            }],
+            unmet_requirements: vec!["failover exercised".into()],
+            lost_count: 1,
+            lost_evidence: vec![protocol::LostEvidence {
+                reason: "lost".into(),
+                origin: Some(origin),
             }],
         };
+        let status = engine.status();
         let api = PropertyAssessment::from(engine);
+        assert_eq!(api.status(), status.into());
+        assert_eq!(api.status(), PropertyAssessmentStatus::Failed);
         let origin =
             json!({"machine": "n1", "incarnation": 1, "session": 2, "seq": 3, "timeNs": 4});
         let wire = serde_json::to_value(&api).unwrap();
         assert_eq!(
             wire,
             json!({
-                "status": "violated", "violated": 1, "unmet": 0, "evidenceComplete": false,
-                "errorCount": 1, "errors": [{"error": "lost", "origin": origin}],
-                "properties": [{"id": "seedbox.no_out_of_memory_kills",
-                    "kind": "alwaysOrUnreachable", "status": "violated", "passes": 0,
-                    "failures": 1, "example": {"origin": origin, "detailsTruncated": true}}]
+                "violations": [{"id": "seedbox.no_out_of_memory_kills", "kind": "never",
+                    "example": {"origin": origin, "detailsTruncated": true}}],
+                "unmetRequirements": ["failover exercised"],
+                "lostCount": 1,
+                "lostEvidence": [{"reason": "lost", "origin": origin}],
             })
         );
         assert_eq!(
             serde_json::from_value::<PropertyAssessment>(wire).unwrap(),
             api
+        );
+        let lost = PropertyAssessment {
+            lost_count: 2,
+            ..Default::default()
+        };
+        assert_eq!(lost.status(), PropertyAssessmentStatus::Incomplete);
+        assert_eq!(
+            PropertyAssessment::default().status(),
+            PropertyAssessmentStatus::Passed
         );
     }
 }

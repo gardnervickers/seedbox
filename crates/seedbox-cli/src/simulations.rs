@@ -970,8 +970,7 @@ mod tests {
                 },
                 volumes: Default::default(),
                 anonymous_volumes: vec![],
-                expected_crashes: Vec::new(),
-                expected_out_of_memory_kills: false,
+                allow_crashes: false,
             },
             network: spec.configuration.network.clone(),
             simulator: d::Simulator {

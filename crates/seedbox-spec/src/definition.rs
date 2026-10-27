@@ -89,29 +89,10 @@ pub struct Machine {
     pub volumes: BTreeMap<String, Volume>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub anonymous_volumes: Vec<String>,
-    /// The project's `expectedCrashes` for this machine, retained so replay
+    /// The project's `allowCrashes` for this machine, retained so replay
     /// and checkpoints judge crashes as the original run did.
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        deserialize_with = "expected_crashes"
-    )]
-    pub expected_crashes: Vec<crate::project::ExpectedCrash>,
-    /// The project's `expectedOutOfMemoryKills` for this machine.
-    #[serde(
-        default,
-        rename = "expectedOutOfMemoryKills",
-        skip_serializing_if = "std::ops::Not::not"
-    )]
-    pub expected_out_of_memory_kills: bool,
-}
-
-pub(crate) fn expected_crashes<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Vec<crate::project::ExpectedCrash>, D::Error> {
-    let expected = Vec::deserialize(deserializer)?;
-    crate::project::ExpectedCrash::check_all(&expected).map_err(serde::de::Error::custom)?;
-    Ok(expected)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_crashes: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -259,8 +240,7 @@ impl Definition {
                         })
                         .collect(),
                     network: self.network.name.clone(),
-                    expected_crashes: machine.expected_crashes.clone(),
-                    expected_out_of_memory_kills: machine.expected_out_of_memory_kills,
+                    allow_crashes: machine.allow_crashes,
                 },
             );
         }
@@ -353,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_machines_keep_validated_expected_crashes() {
+    fn retained_machines_keep_allow_crashes() {
         let machine = json!({
             "bootArchive": format!("sha256:{}", "0".repeat(64)),
             "memoryBytes": 1,
@@ -361,25 +341,16 @@ mod tests {
             "volumes": {},
         });
         let plain: Machine = serde_json::from_value(machine.clone()).unwrap();
-        assert!(plain.expected_crashes.is_empty());
+        assert!(!plain.allow_crashes);
         assert!(serde_json::to_value(&plain)
             .unwrap()
-            .get("expectedCrashes")
+            .get("allowCrashes")
             .is_none());
-        let mut declared = machine.clone();
-        declared["expectedCrashes"] = json!([{"signal": "SIGABRT", "command": "watchdog"}]);
-        let retained: Machine = serde_json::from_value(declared.clone()).unwrap();
-        assert_eq!(retained.expected_crashes[0].signal.number(), 6);
-        assert_eq!(serde_json::to_value(&retained).unwrap(), declared);
-        declared["expectedOutOfMemoryKills"] = json!(true);
-        let retained: Machine = serde_json::from_value(declared.clone()).unwrap();
-        assert!(retained.expected_out_of_memory_kills);
-        assert_eq!(serde_json::to_value(&retained).unwrap(), declared);
-        declared["expectedCrashes"] = json!([
-            {"signal": "SIGABRT", "command": "watchdog"},
-            {"signal": "SIGABRT", "command": "watchdog"}
-        ]);
-        assert!(serde_json::from_value::<Machine>(declared).is_err());
+        let mut allowed = machine.clone();
+        allowed["allowCrashes"] = json!(true);
+        let retained: Machine = serde_json::from_value(allowed.clone()).unwrap();
+        assert!(retained.allow_crashes);
+        assert_eq!(serde_json::to_value(&retained).unwrap(), allowed);
     }
 
     #[test]
