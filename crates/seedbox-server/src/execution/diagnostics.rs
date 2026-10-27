@@ -15,9 +15,6 @@ impl ExecutionService {
             )
             .into());
         }
-        if self.manager.read(|catalogue| catalogue.is_imported(id))? {
-            return Ok(self.imported_snapshot(id)?.record);
-        }
         let file = match fs::File::open(self.root.join("inputs").join(format!("{id}.json"))) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
