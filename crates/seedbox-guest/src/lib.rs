@@ -1,40 +1,42 @@
-//! Guest-side property SDK. Applications and oracles running under Seedbox
-//! declare and evaluate properties; the engine reduces them into a property
-//! assessment reported beside the oracle verdict, and a violated property
-//! fails the run even when the oracle passes.
+//! Guest-side properties. Applications and oracles running under Seedbox
+//! evaluate `always` and `never` properties; a violation fails the run even
+//! when the oracle passes. Properties are optional to hit unless
+//! [`require`]d: a required property that is never evaluated fails the run
+//! once it completes. The engine keeps only failures: each violated
+//! property's first example, unmet requirements and lost evidence.
 //!
 //! Each call sends one record to the machine's supervisor over [`SOCKET`],
 //! whose path the supervisor also exports as [`SOCKET_ENV`]. Outside Seedbox
 //! the variable is unset, the socket absent and every call does nothing, so
 //! instrumented code runs unchanged elsewhere. Under Seedbox a socket the
 //! program cannot reach (a directory mounted over `/run`, say) is not taken for
-//! absence: the SDK connects through the supervisor's abstract socket
+//! absence: the library connects through the supervisor's abstract socket
 //! instead, and if that fails too it reports its records as lost through
 //! `/dev/kmsg`, which the supervisor relays, so the run's evidence is
 //! incomplete rather than silently empty.
 //!
-//! Assertions are nonfatal and always arrive whole: details that would not
+//! Evaluations are nonfatal and always arrive whole: details that would not
 //! fit a record are dropped and marked truncated. A successful send means the
 //! supervisor's socket accepted the record; a record that could not be sent
 //! is reported to the engine as lost, which makes the run's evidence
 //! incomplete rather than letting a failure go unseen. [`flush`] returns once
 //! the engine has committed every earlier record from this process's
-//! connection; use it before an oracle exits so its final assertions are part
+//! connection; use it before an oracle exits so its final evaluations are part
 //! of the result.
 //!
 //! ```no_run
 //! use serde_json::json;
-//! seedbox_sdk::declare("acknowledged writes survive", seedbox_sdk::Kind::Always);
-//! seedbox_sdk::always("acknowledged writes survive", true, json!({"key": 7}));
-//! seedbox_sdk::sometimes("leader changed", false, json!(null));
-//! seedbox_sdk::flush().unwrap();
+//! seedbox_guest::require("failover exercised");
+//! seedbox_guest::always("acked writes survive", true, json!({"key": 7}));
+//! seedbox_guest::never("two leaders", false, json!({"leaders": 1}));
+//! seedbox_guest::flush().unwrap();
 //! ```
 use serde_json::{json, Value};
 use std::io;
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The supervisor's socket inside every Seedbox machine.
 pub const SOCKET: &str = "/run/seedbox/sdk.sock";
@@ -48,51 +50,26 @@ const KMSG: &str = "/dev/kmsg";
 const KMSG_LOST: &str = "seedbox-sdk: lost ";
 /// Largest record the supervisor relays.
 pub const MAX_RECORD_BYTES: usize = 4096;
-/// Longest property ID or event name.
+/// Longest property ID.
 const MAX_ID_BYTES: usize = 256;
-/// Largest flush or summary reply.
+/// Largest flush reply.
 const MAX_REPLY_BYTES: usize = 16 * 1024;
 const FLUSH: &[u8] = br#"{"flush":{}}"#;
-const SUMMARY: &[u8] = br#"{"summary":{}}"#;
 
-/// One property's evaluations so far.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PropertyCounts {
-    pub passes: u64,
-    pub failures: u64,
-}
-
-/// The run's properties as the engine has reduced them, from [`summary`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Summary {
-    pub properties: std::collections::BTreeMap<String, PropertyCounts>,
-    /// More properties exist than the reply lists (at most 32, by ID).
-    pub truncated: bool,
-}
-
-/// How a property is judged.
+/// How an evaluation is judged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    /// Every evaluation holds, and at least one happens.
+enum Kind {
+    /// Violated when the condition is false.
     Always,
-    /// Every evaluation holds; never evaluating it is fine.
-    AlwaysOrUnreachable,
-    /// At least one evaluation holds.
-    Sometimes,
-    /// Reached at least once.
-    Reachable,
-    /// Never reached.
-    Unreachable,
+    /// Violated when the condition is true.
+    Never,
 }
 
 impl Kind {
     fn name(self) -> &'static str {
         match self {
             Kind::Always => "always",
-            Kind::AlwaysOrUnreachable => "always_or_unreachable",
-            Kind::Sometimes => "sometimes",
-            Kind::Reachable => "reachable",
-            Kind::Unreachable => "unreachable",
+            Kind::Never => "never",
         }
     }
 }
@@ -143,8 +120,7 @@ enum State {
     Absent,
 }
 
-/// How long [`Client::flush`] and [`Client::summary`] wait for the engine's
-/// reply, in guest time.
+/// How long [`Client::flush`] waits for the engine's reply, in guest time.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl Client {
@@ -267,39 +243,23 @@ impl Client {
         self.request(FLUSH, "flush").map(drop)
     }
 
-    /// As [`Client::flush`], then the run's properties as the engine has
-    /// reduced them at that point. Empty outside Seedbox.
-    pub fn summary(&self) -> io::Result<Summary> {
-        match self.request(SUMMARY, "summary")? {
-            Some(body) => parse_summary(&body).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "unexpected summary reply")
-            }),
-            None => Ok(Summary::default()),
-        }
+    /// Require `id` to be evaluated at least once during the run; see
+    /// [`require`].
+    pub fn require(&self, id: &str) {
+        self.emit(require_record(id));
     }
 
-    /// Declare a property so it is reported even if never evaluated.
-    pub fn declare(&self, id: &str, kind: Kind) {
-        self.emit(declare_record(id, kind));
+    /// Evaluate a property that must always hold; see [`always`].
+    pub fn always(&self, id: &str, ok: bool, details: Value) {
+        self.emit(assert_record(id, Kind::Always, ok, details));
     }
 
-    /// Evaluate a property of the given kind. Details too large for one
-    /// record are dropped and marked truncated; the evaluation still goes.
-    pub fn assert(&self, id: &str, kind: Kind, condition: bool, details: Value) {
-        self.emit(assert_record(id, kind, condition, details));
+    /// Evaluate a property that must never happen; see [`never`].
+    pub fn never(&self, id: &str, condition: bool, details: Value) {
+        self.emit(assert_record(id, Kind::Never, condition, details));
     }
 
-    /// Record a named workload event.
-    pub fn event(&self, name: &str, details: Value) {
-        self.emit(event_record(name, details));
-    }
-
-    /// Mark the workload on this machine as set up.
-    pub fn setup_complete(&self, details: Value) {
-        self.emit(setup_record(details));
-    }
-
-    /// Assertions never fail the caller. A record that cannot be sent is
+    /// Evaluations never fail the caller. A record that cannot be sent is
     /// counted and reported to the engine as lost once the socket accepts
     /// again (the next call reconnects as a new session), which makes the
     /// run's evidence incomplete; the first failure is also printed on
@@ -409,21 +369,13 @@ fn send_message(socket: &UnixDatagram, bytes: &[u8]) -> io::Result<()> {
 // seedbox-engine-protocol so that guest programs link only libc and
 // serde_json. Tests decode every record with the protocol's own parser.
 
-fn declare_record(id: &str, kind: Kind) -> Value {
-    json!({"declare": {"id": id, "kind": kind.name()}})
+fn require_record(id: &str) -> Value {
+    json!({"require": {"id": id}})
 }
 
 fn assert_record(id: &str, kind: Kind, condition: bool, details: Value) -> Value {
     let body = json!({"id": id, "kind": kind.name(), "condition": condition});
     json!({ "assert": with_details(body, details) })
-}
-
-fn event_record(name: &str, details: Value) -> Value {
-    json!({ "event": with_details(json!({"name": name}), details) })
-}
-
-fn setup_record(details: Value) -> Value {
-    json!({ "setup_complete": with_details(json!({}), details) })
 }
 
 fn lost_record(count: u64, reason: &str) -> Vec<u8> {
@@ -434,7 +386,7 @@ fn lost_record(count: u64, reason: &str) -> Vec<u8> {
 /// The record's bytes, within [`MAX_RECORD_BYTES`] whatever its contents, so
 /// that every evaluation reaches the engine. Oversized details go first (an
 /// assertion says it lost them); an ID or name still too long is cut to one
-/// byte past the limit, which the engine reports as an evidence error.
+/// byte past the limit, which the engine reports as lost evidence.
 fn fit(mut record: Value) -> Vec<u8> {
     let encode = |record: &Value| serde_json::to_vec(record).expect("JSON values serialize");
     let mut bytes = encode(&record);
@@ -446,14 +398,12 @@ fn fit(mut record: Value) -> Vec<u8> {
             if body.remove("details").is_some() && body.contains_key("condition") {
                 body.insert("details_truncated".into(), true.into());
             }
-            for key in ["id", "name"] {
-                if let Some(Value::String(text)) = body.get_mut(key) {
-                    let mut end = text.len().min(MAX_ID_BYTES + 1);
-                    while !text.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    text.truncate(end);
+            if let Some(Value::String(text)) = body.get_mut("id") {
+                let mut end = text.len().min(MAX_ID_BYTES + 1);
+                while !text.is_char_boundary(end) {
+                    end -= 1;
                 }
+                text.truncate(end);
             }
         }
     }
@@ -467,21 +417,6 @@ fn reply_body(reply: &[u8], key: &str, seq: u64) -> Option<Value> {
     let mut reply: Value = serde_json::from_slice(reply).ok()?;
     let body = reply.get_mut(key)?.take();
     (body["seq"].as_u64()? == seq).then_some(body)
-}
-
-fn parse_summary(body: &Value) -> Option<Summary> {
-    let mut summary = Summary::default();
-    for (id, counts) in body["properties"].as_object()? {
-        summary.properties.insert(
-            id.clone(),
-            PropertyCounts {
-                passes: counts["passes"].as_u64()?,
-                failures: counts["failures"].as_u64()?,
-            },
-        );
-    }
-    summary.truncated = body["truncated"].as_bool()?;
-    Some(summary)
 }
 
 /// Null details are omitted from the record.
@@ -579,87 +514,33 @@ fn connect_address(bytes: &[u8], abstract_name: bool) -> io::Result<UnixDatagram
 
 static CLIENT: Client = Client::machine();
 
-/// Declare a property so it is reported even if never evaluated.
-pub fn declare(id: &str, kind: Kind) {
-    CLIENT.declare(id, kind);
+/// Require `id` to be evaluated, by [`always`] or [`never`], at least once
+/// during the run, from any machine. Call it at startup for each property
+/// the test must exercise, such as a failover path: one never evaluated by
+/// the end fails the run. Properties not required may go unevaluated.
+pub fn require(id: &str) {
+    CLIENT.require(id);
 }
-/// Every evaluation must hold, and at least one must happen.
-pub fn always(id: &str, condition: bool, details: Value) {
-    CLIENT.assert(id, Kind::Always, condition, details);
+
+/// `ok` must hold every time this is evaluated: one false evaluation
+/// violates the property and fails the run. `details` describe the
+/// evaluation; the first violation's are kept as its example.
+pub fn always(id: &str, ok: bool, details: Value) {
+    CLIENT.always(id, ok, details);
 }
-/// Every evaluation must hold; never reaching it is fine.
-pub fn always_or_unreachable(id: &str, condition: bool, details: Value) {
-    CLIENT.assert(id, Kind::AlwaysOrUnreachable, condition, details);
+
+/// `condition` must never hold: one true evaluation violates the property
+/// and fails the run. `never(id, true, ..)` marks a point that must not be
+/// reached.
+pub fn never(id: &str, condition: bool, details: Value) {
+    CLIENT.never(id, condition, details);
 }
-/// At least one evaluation should hold.
-pub fn sometimes(id: &str, condition: bool, details: Value) {
-    CLIENT.assert(id, Kind::Sometimes, condition, details);
-}
-/// This point should be reached at least once.
-pub fn reachable(id: &str, details: Value) {
-    CLIENT.assert(id, Kind::Reachable, true, details);
-}
-/// This point must never be reached.
-pub fn unreachable(id: &str, details: Value) {
-    CLIENT.assert(id, Kind::Unreachable, true, details);
-}
-/// Record a named workload event.
-pub fn event(name: &str, details: Value) {
-    CLIENT.event(name, details);
-}
-/// Mark the workload on this machine as set up.
-pub fn setup_complete(details: Value) {
-    CLIENT.setup_complete(details);
-}
+
 /// Wait until the engine has committed and reduced every earlier record
-/// from this process. Succeeds immediately outside Seedbox.
+/// from this process. Succeeds immediately outside Seedbox. Call it before
+/// an oracle exits so its final evaluations count.
 pub fn flush() -> io::Result<()> {
     CLIENT.flush()
-}
-
-/// Flush, then the run's properties as the engine has reduced them so far:
-/// a workload can finish once, for example, a property has been violated.
-/// Empty outside Seedbox.
-pub fn summary() -> io::Result<Summary> {
-    CLIENT.summary()
-}
-
-/// A recovery obligation, judged as an `always` property: `probe` must
-/// succeed within `deadline` of guest time from now, polled every 20ms.
-/// Start it once the system should be able to recover, for example after
-/// healing every fault; a host timeout ending the run first leaves the
-/// property unevaluated, never passed.
-pub fn recovers_within(id: &str, deadline: Duration, probe: impl FnMut() -> bool) -> bool {
-    let (recovered, details) = poll_recovery(deadline, probe, Instant::now, std::thread::sleep);
-    always(id, recovered, details);
-    recovered
-}
-
-/// Poll until `probe` succeeds within `deadline` or the deadline passes. A
-/// success counts only when the probe returned before the deadline, and no
-/// sleep runs past it.
-fn poll_recovery(
-    deadline: Duration,
-    mut probe: impl FnMut() -> bool,
-    now: impl Fn() -> Instant,
-    mut sleep: impl FnMut(Duration),
-) -> (bool, Value) {
-    let start = now();
-    loop {
-        let succeeded = probe();
-        let waited = now().duration_since(start);
-        if succeeded && waited <= deadline {
-            return (true, json!({"waited_ms": waited.as_millis() as u64}));
-        }
-        if waited >= deadline {
-            let deadline_ms = deadline.as_millis() as u64;
-            return (
-                false,
-                json!({"deadline_ms": deadline_ms, "waited_ms": waited.as_millis() as u64}),
-            );
-        }
-        sleep(Duration::from_millis(20).min(deadline - waited));
-    }
 }
 
 #[cfg(test)]

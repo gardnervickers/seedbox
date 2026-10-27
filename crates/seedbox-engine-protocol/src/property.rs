@@ -1,26 +1,29 @@
-//! Guest property records and the property results a run reports.
+//! Guest property records and the property findings a run reports.
 //!
-//! The guest SDK (`seedbox-sdk`) connects a `SOCK_SEQPACKET` socket to
+//! The guest library (`seedbox-guest`) connects a `SOCK_SEQPACKET` socket to
 //! [`SOCKET`] on any machine; each connection is one session and each message
 //! one JSON [`Record`] of at most [`MAX_RECORD_BYTES`]. The supervisor numbers
 //! a boot's sessions from 1 and each session's messages from 1, and relays
 //! every message uninterpreted as one management line,
 //! `SBX_PROP1 <session> <seq> <lowercase hex>` ([`Frame`]). Session
 //! [`SUPERVISOR_SESSION`] carries the supervisor's own records. The engine
-//! commits frames in occurrence order and answers [`Record::Flush`] and
-//! [`Record::Summary`] with a [`Reply`] on `SBX_SDK1 <session> <json>`,
-//! which the supervisor writes back to that session's socket.
+//! commits frames in occurrence order and answers [`Record::Flush`] with a
+//! [`Reply`] on `SBX_SDK1 <session> <json>`, which the supervisor writes back
+//! to that session's socket.
+//!
+//! Properties are `always` or `never` conditions. Only failures are kept: a
+//! run's [`Assessment`] lists each violated property with its first example,
+//! each [`Record::Require`]d property that was never evaluated, and any lost
+//! evidence (records the SDK or supervisor lost, or that were malformed, out
+//! of sequence or beyond a bound), so a run can never pass because evidence
+//! was lost. There is no per-property tally.
 //!
 //! Nothing reads these frames yet: the supervisor relay and the reduction
 //! into an [`Assessment`] come with the engine change that follows this one.
-//! Evidence errors (malformed records, broken sequencing, exceeded bounds,
-//! conflicting declarations, records the SDK or supervisor lost) make an
-//! assessment incomplete, so a run can never pass because evidence was lost.
-//! The SDK never drops an evaluation for its size: it drops the details
-//! instead and says so ([`Record::Assert`]'s `details_truncated`).
+//! The guest library never drops an evaluation for its size: it drops the
+//! details instead and says so ([`Record::Assert`]'s `details_truncated`).
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
 
 /// The SDK socket inside every machine. Outside Seedbox it is absent.
 pub const SOCKET: &str = "/run/seedbox/sdk.sock";
@@ -45,30 +48,26 @@ pub const MAX_RECORD_BYTES: usize = 4096;
 /// the supervisor writes its JSON to the session's socket as one message.
 pub const MAX_REPLY_BYTES: usize = 16 * 1024;
 pub const MAX_ID_BYTES: usize = 256;
-pub const MAX_MESSAGE_BYTES: usize = 1024;
 /// Serialized details beyond this size are dropped and marked truncated.
 pub const MAX_DETAILS_BYTES: usize = 1024;
+/// Distinct property IDs a run tracks, required or evaluated; more are lost
+/// evidence.
 pub const MAX_PROPERTIES: usize = 1024;
-pub const MAX_EVENT_NAMES: usize = 1024;
-/// Evidence errors kept with their origin; later ones are only counted.
-pub const MAX_ERRORS: usize = 16;
-/// Properties a [`Reply::Summary`] lists, by ID; more set `truncated`.
-pub const MAX_SUMMARY_PROPERTIES: usize = 32;
+/// Lost evidence kept with its reason and origin; more is only counted.
+pub const MAX_LOST_EVIDENCE: usize = 16;
 /// The supervisor's own records use this session.
 pub const SUPERVISOR_SESSION: u32 = 0;
 
-/// Property IDs the SDK may not use; default properties live here.
+/// Property IDs guest programs may not use; default properties live here.
 pub const RESERVED_PREFIX: &str = "seedbox.";
-/// Default `always_or_unreachable` property: the kernel kills no process for
-/// running out of memory. Each [`crate::out_of_memory::Kill`] report, whether
-/// or not the victim is the application, is one evaluation whose details are
-/// the report: passing on a machine that declares
-/// `expectedOutOfMemoryKills: true`, failing on any other.
+/// Default `never` property: the kernel kills a process for running out of
+/// memory. Each [`crate::out_of_memory::Kill`] report on a machine without
+/// `allowCrashes: true`, whether or not the victim is the application, is a
+/// violation whose details are the report.
 pub const DEFAULT_NO_OOM: &str = "seedbox.no_out_of_memory_kills";
-/// Default `always_or_unreachable` property: no process dies of a
-/// core-dumping signal it did not handle. Each [`crate::crash::Report`], one
-/// per crash, is one evaluation: passing when it matches one of its machine's
-/// declared `expectedCrashes`, failing otherwise. An OOM kill is never a crash.
+/// Default `never` property: a process dies of a core-dumping signal it did
+/// not handle. Each [`crate::crash::Report`], one per crash, on a machine
+/// without `allowCrashes: true` is a violation. An OOM kill is never a crash.
 pub const DEFAULT_NO_CRASH: &str = "seedbox.no_crashing_processes";
 
 /// One relayed SDK message with its supervisor attribution.
@@ -173,20 +172,24 @@ fn hex(field: Option<&[u8]>, max: usize) -> Result<Vec<u8>, &'static str> {
         .collect()
 }
 
-/// How a property is judged; see [`PropertyStatus::of`].
+/// How an evaluation is judged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
-    /// Every evaluation holds, and at least one happens.
+    /// Violated when the condition is false.
     Always,
-    /// Every evaluation holds; never evaluating it is fine.
-    AlwaysOrUnreachable,
-    /// At least one evaluation holds.
-    Sometimes,
-    /// Reached at least once; the condition is ignored.
-    Reachable,
-    /// Never reached; the condition is ignored.
-    Unreachable,
+    /// Violated when the condition is true.
+    Never,
+}
+
+impl Kind {
+    /// Whether an evaluation with this condition violates the property.
+    pub fn violated_by(self, condition: bool) -> bool {
+        match self {
+            Self::Always => !condition,
+            Self::Never => condition,
+        }
+    }
 }
 
 /// A guest message, after parsing. Each serializes as a one-key object, such
@@ -194,81 +197,51 @@ pub enum Kind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Record {
-    /// Make a property known before (or without) evaluating it, so a property
-    /// that is never evaluated is still reported.
-    Declare {
-        id: String,
-        kind: Kind,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        message: Option<String>,
-    },
-    /// Evaluate a property. An undeclared property is declared by its first
-    /// evaluation; a later declaration or evaluation with another kind is an
-    /// evidence error.
+    /// The property must be evaluated at least once during the run; one
+    /// never evaluated by the end is an unmet requirement, which fails the
+    /// run. Properties not required may go unevaluated.
+    Require { id: String },
+    /// Evaluate a property. Only a violating evaluation is kept, and only
+    /// the first per property as its example.
     Assert {
         id: String,
         kind: Kind,
         condition: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        message: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         details: Option<Value>,
-        /// The SDK dropped details that would not fit [`MAX_RECORD_BYTES`],
-        /// so that the evaluation itself still arrives.
+        /// The guest library dropped details that would not fit
+        /// [`MAX_RECORD_BYTES`], so that the evaluation itself still arrives.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         details_truncated: bool,
-    },
-    /// A named workload event; reports count each name.
-    Event {
-        name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        details: Option<Value>,
-    },
-    /// The workload on this machine finished setting up.
-    SetupComplete {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        details: Option<Value>,
     },
     /// Ask for a [`Reply::Flush`] once the engine has committed and reduced
     /// every earlier record of this session.
     Flush {},
-    /// As `Flush`, answered with a [`Reply::Summary`].
-    Summary {},
-    /// Records that never arrived: from an SDK session, the ones that
+    /// Records that never arrived: from a guest session, the ones that
     /// process failed to send (sent once it can again); from
     /// [`SUPERVISOR_SESSION`], the ones the supervisor failed to relay.
-    /// Either is an evidence error.
+    /// Either is lost evidence.
     Lost { reason: String, count: u64 },
-    /// From [`SUPERVISOR_SESSION`] only: SDK `session` ended, so its
+    /// From [`SUPERVISOR_SESSION`] only: guest `session` ended, so its
     /// sequence will not continue.
     Closed { session: u32 },
 }
 
 impl Record {
-    /// Parse and bound one payload. Failures are evidence errors.
+    /// Parse and bound one payload. Failures are lost evidence.
     pub fn parse(payload: &[u8]) -> Result<Self, String> {
         let record: Self =
             serde_json::from_slice(payload).map_err(|e| format!("malformed record: {e}"))?;
-        let (id, message) = match &record {
-            Record::Declare { id, message, .. } | Record::Assert { id, message, .. } => {
-                (Some(id), message.as_ref())
-            }
-            Record::Event { name, .. } => (Some(name), None),
-            _ => (None, None),
-        };
-        if let Some(id) = id {
+        if let Record::Require { id } | Record::Assert { id, .. } = &record {
             if id.is_empty() || id.len() > MAX_ID_BYTES || id.chars().any(char::is_control) {
                 return Err("invalid property id".into());
             }
-        }
-        if message.is_some_and(|m| m.len() > MAX_MESSAGE_BYTES) {
-            return Err("property message too long".into());
         }
         Ok(record)
     }
 
     /// [`SUPERVISOR_SESSION`] sends only [`Record::Lost`] and
-    /// [`Record::Closed`]; SDK sessions send anything else.
+    /// [`Record::Closed`]; guest sessions send anything else.
     pub fn allowed_from(&self, session: u32) -> bool {
         match self {
             Record::Lost { .. } => true,
@@ -278,74 +251,12 @@ impl Record {
     }
 }
 
-/// The engine's answer to a [`Record::Flush`] or [`Record::Summary`]; `seq` is
-/// that record's sequence number in its session.
+/// The engine's answer to a [`Record::Flush`]; `seq` is that record's
+/// sequence number in its session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Reply {
-    Flush {
-        seq: u64,
-    },
-    /// The run's properties as reduced so far, built by [`Reply::summary`]:
-    /// the first by ID, at most [`MAX_SUMMARY_PROPERTIES`] and only as many
-    /// as fit a [`MAX_REPLY_BYTES`] line, with `truncated` set when any are
-    /// left out.
-    Summary {
-        seq: u64,
-        properties: BTreeMap<String, Counts>,
-        truncated: bool,
-    },
-}
-
-impl Reply {
-    /// A summary of `properties` that fits one reply line for any session.
-    /// IDs escape in JSON (`"` and `\` double), so the count that fits
-    /// depends on them; the first IDs in order are kept.
-    pub fn summary(seq: u64, properties: impl IntoIterator<Item = (String, Counts)>) -> Self {
-        let sorted: BTreeMap<String, Counts> = properties.into_iter().collect();
-        let mut kept = BTreeMap::new();
-        let mut truncated = false;
-        // The longest session prefix: u32::MAX and its separator.
-        let fixed = REPLY_PREFIX.len() + u32::MAX.to_string().len() + 1;
-        for (id, counts) in sorted {
-            if kept.len() == MAX_SUMMARY_PROPERTIES {
-                truncated = true;
-                break;
-            }
-            kept.insert(id.clone(), counts);
-            let candidate = Self::Summary {
-                seq,
-                properties: kept,
-                // The longer spelling, so the final flag cannot overflow.
-                truncated: false,
-            };
-            let size = fixed
-                + serde_json::to_vec(&candidate)
-                    .expect("replies serialize")
-                    .len();
-            let Self::Summary { properties, .. } = candidate else {
-                unreachable!()
-            };
-            kept = properties;
-            if size > MAX_REPLY_BYTES {
-                kept.remove(&id);
-                truncated = true;
-                break;
-            }
-        }
-        Self::Summary {
-            seq,
-            properties: kept,
-            truncated,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Counts {
-    pub passes: u64,
-    pub failures: u64,
+    Flush { seq: u64 },
 }
 
 /// Where and when a record was committed. The engine supplies the time at
@@ -372,85 +283,76 @@ pub struct Example {
     pub details_truncated: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PropertyStatus {
-    Passed,
-    /// A safety property failed: `always` or `always_or_unreachable` false,
-    /// or `unreachable` reached.
-    Violated,
-    /// Never satisfied: an `always` never evaluated, or a `sometimes` or
-    /// `reachable` never true. Not a safety violation.
-    Unmet,
-}
-
-impl PropertyStatus {
-    /// What a kind's passing and failing evaluation counts mean. Reachability
-    /// counts every evaluation as a pass.
-    pub fn of(kind: Kind, passes: u64, failures: u64) -> Self {
-        let evaluated = passes + failures > 0;
-        match kind {
-            Kind::Always | Kind::AlwaysOrUnreachable if failures > 0 => Self::Violated,
-            Kind::Always if !evaluated => Self::Unmet,
-            Kind::Sometimes if passes == 0 => Self::Unmet,
-            Kind::Reachable if !evaluated => Self::Unmet,
-            Kind::Unreachable if evaluated => Self::Violated,
-            _ => Self::Passed,
-        }
-    }
-}
-
+/// A violated property and its first violating evaluation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct EvidenceError {
-    pub error: String,
+pub struct Violation {
+    pub id: String,
+    pub kind: Kind,
+    pub example: Example,
+}
+
+/// Why some evidence did not count, and where, when a record carried it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct LostEvidence {
+    pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<Origin>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct PropertyResult {
-    pub id: String,
-    pub kind: Kind,
-    pub status: PropertyStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    pub passes: u64,
-    pub failures: u64,
-    /// The evaluation that decided the status: the first failure of a
-    /// violated or unmet property, the first hit of a reached `unreachable`,
-    /// otherwise the first pass.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub example: Option<Example>,
-}
-
+/// What a run's property findings make of it; see [`Assessment::status`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssessmentStatus {
-    /// No property was violated and all evidence arrived. Unmet goals do not
-    /// fail a single run.
     Passed,
-    /// Some property was violated, even if evidence is also incomplete.
-    Violated,
-    /// No violation was seen, but some evidence was lost or invalid.
+    /// A property was violated or a requirement was never evaluated.
+    Failed,
+    /// Nothing failed, but some evidence was lost.
     Incomplete,
 }
 
-/// A run's property results, reported beside the oracle verdict.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A run's property findings: violations, unmet requirements and lost
+/// evidence. Empty when nothing went wrong.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct Assessment {
-    pub status: AssessmentStatus,
-    pub violated: u32,
-    pub unmet: u32,
-    pub evidence_complete: bool,
-    pub error_count: u64,
-    /// The first [`MAX_ERRORS`] evidence errors.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub errors: Vec<EvidenceError>,
     /// Sorted by ID.
-    pub properties: Vec<PropertyResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub violations: Vec<Violation>,
+    /// Required properties never evaluated, sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmet_requirements: Vec<String>,
+    /// Evidence that did not count: the records reported lost, plus one for
+    /// each record refused as malformed, out of sequence or beyond a bound.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub lost_count: u64,
+    /// The first [`MAX_LOST_EVIDENCE`] reasons.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lost_evidence: Vec<LostEvidence>,
+}
+
+fn is_zero(count: &u64) -> bool {
+    *count == 0
+}
+
+impl Assessment {
+    /// A violation or unmet requirement fails; lost evidence alone leaves
+    /// the result incomplete. A definite violation stays a failure even
+    /// when evidence was also lost.
+    pub fn status(&self) -> AssessmentStatus {
+        if !self.violations.is_empty() || !self.unmet_requirements.is_empty() {
+            AssessmentStatus::Failed
+        } else if self.lost_count > 0 {
+            AssessmentStatus::Incomplete
+        } else {
+            AssessmentStatus::Passed
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.status() == AssessmentStatus::Passed
+    }
 }
 
 #[cfg(test)]

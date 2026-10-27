@@ -10,9 +10,9 @@
 //!
 //! No other line counts. A segfault, trap or unhandled-exception line comes
 //! before the fatal-signal report of the same crash, and register dumps after
-//! it; relaying those too would count one crash twice, and an expected crash
-//! could never match all of its lines. A fault the process handles prints
-//! neither.
+//! it; relaying those too would count one crash twice. A fault the process
+//! handles prints neither. A crash on a machine with `allowCrashes: true` is
+//! not a violation.
 //!
 //! The frame is `SBX_CRASH1 MESSAGE_HEX`, where the message is the line's text
 //! after its kmsg header. Nothing emits or reads this frame yet.

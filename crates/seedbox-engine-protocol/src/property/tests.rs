@@ -43,20 +43,17 @@ fn decodes_frames_and_ignores_other_management_lines() {
 fn records_have_one_json_shape() {
     for (wire, record) in [
         (
-            json!({"declare": {"id": "p", "kind": "always_or_unreachable"}}),
-            Record::Declare {
-                id: "p".into(),
-                kind: Kind::AlwaysOrUnreachable,
-                message: None,
+            json!({"require": {"id": "failover exercised"}}),
+            Record::Require {
+                id: "failover exercised".into(),
             },
         ),
         (
-            json!({"assert": {"id": "p", "kind": "sometimes", "condition": false, "details": {"k": 1}}}),
+            json!({"assert": {"id": "p", "kind": "never", "condition": false, "details": {"k": 1}}}),
             Record::Assert {
                 id: "p".into(),
-                kind: Kind::Sometimes,
+                kind: Kind::Never,
                 condition: false,
-                message: None,
                 details: Some(json!({"k": 1})),
                 details_truncated: false,
             },
@@ -67,24 +64,11 @@ fn records_have_one_json_shape() {
                 id: "p".into(),
                 kind: Kind::Always,
                 condition: false,
-                message: None,
                 details: None,
                 details_truncated: true,
             },
         ),
-        (
-            json!({"event": {"name": "leader-elected"}}),
-            Record::Event {
-                name: "leader-elected".into(),
-                details: None,
-            },
-        ),
-        (
-            json!({"setup_complete": {}}),
-            Record::SetupComplete { details: None },
-        ),
         (json!({"flush": {}}), Record::Flush {}),
-        (json!({"summary": {}}), Record::Summary {}),
         (
             json!({"lost": {"reason": "socket buffer full", "count": 2}}),
             Record::Lost {
@@ -110,15 +94,18 @@ fn invalid_records_are_refused() {
     for bad in [
         json!("not a record"),
         json!({"assert": {"id": "x", "kind": "always"}}),
-        json!({"assert": {"id": "x", "kind": "often", "condition": true}}),
-        json!({"declare": {"id": "", "kind": "always"}}),
-        json!({"declare": {"id": "a\nb", "kind": "always"}}),
-        json!({"declare": {"id": "x".repeat(MAX_ID_BYTES + 1), "kind": "always"}}),
-        json!({"declare": {"id": "x", "kind": "always", "message": "m".repeat(MAX_MESSAGE_BYTES + 1)}}),
-        json!({"declare": {"id": "x", "kind": "always", "extra": 1}}),
-        json!({"state": {"name": "role", "value": "leader"}}),
-        json!({"choice": {"site": "pick", "alternatives": ["a"]}}),
-        json!({"flush": {}, "summary": {}}),
+        json!({"assert": {"id": "x", "kind": "sometimes", "condition": true}}),
+        json!({"assert": {"id": "x", "kind": "always", "condition": true, "message": "m"}}),
+        json!({"require": {"id": ""}}),
+        json!({"require": {"id": "a\nb"}}),
+        json!({"require": {"id": "x".repeat(MAX_ID_BYTES + 1)}}),
+        json!({"require": {"id": "x", "kind": "always"}}),
+        // Dropped record kinds are not part of the protocol.
+        json!({"declare": {"id": "x", "kind": "always"}}),
+        json!({"event": {"name": "x"}}),
+        json!({"setup_complete": {}}),
+        json!({"summary": {}}),
+        json!({"flush": {}, "require": {"id": "x"}}),
     ] {
         assert!(parse(bad.clone()).is_err(), "{bad}");
     }
@@ -131,114 +118,27 @@ fn replies_round_trip_on_their_session_line() {
     let line = encode_reply(7, &flush);
     assert_eq!(line, br#"SBX_SDK1 7 {"flush":{"seq":3}}"#);
     assert_eq!(decode_reply(&line), Ok(Some((7, flush))));
-    let summary = Reply::Summary {
-        seq: 4,
-        properties: [(
-            "p".to_string(),
-            Counts {
-                passes: 1,
-                failures: 0,
-            },
-        )]
-        .into(),
-        truncated: false,
-    };
-    assert_eq!(
-        serde_json::to_value(&summary).unwrap(),
-        json!({"summary": {"seq": 4, "properties": {"p": {"passes": 1, "failures": 0}}, "truncated": false}})
-    );
-    assert_eq!(
-        decode_reply(&encode_reply(1, &summary)),
-        Ok(Some((1, summary)))
-    );
     assert_eq!(decode_reply(b"SBX_PROP1 1 1 7b7d"), Ok(None));
     for bad in [
         "SBX_SDK1 1",
         "SBX_SDK1 1 {}",
         r#"SBX_SDK1 01 {"flush":{"seq":1}}"#,
-        r#"SBX_SDK1 1 {"choice":{"index":0}}"#,
+        r#"SBX_SDK1 1 {"summary":{"seq":1}}"#,
     ] {
         assert!(decode_reply(bad.as_bytes()).is_err(), "{bad}");
     }
 }
 
 #[test]
-fn summaries_fit_one_reply_line_whatever_their_ids() {
-    let counts = Counts {
-        passes: u64::MAX,
-        failures: u64::MAX,
-    };
-    // IDs of the maximum length that double in JSON.
-    let quoted = |i: usize| format!("{i:03}{}", "\"".repeat(MAX_ID_BYTES - 3));
-    let reply = Reply::summary(u64::MAX, (0..40).map(|i| (quoted(i), counts)));
-    let Reply::Summary {
-        properties,
-        truncated,
-        ..
-    } = &reply
-    else {
-        panic!("not a summary");
-    };
-    assert!(*truncated);
-    assert!(!properties.is_empty() && properties.len() < MAX_SUMMARY_PROPERTIES);
-    // The first IDs in order are the ones kept.
-    assert!(properties.contains_key(&quoted(0)));
-    let line = encode_reply(u32::MAX, &reply);
-    assert!(line.len() <= MAX_REPLY_BYTES, "{}", line.len());
-    assert_eq!(decode_reply(&line), Ok(Some((u32::MAX, reply))));
-    // Plain IDs stop at the count limit; few enough are not truncated.
-    let plain = Reply::summary(1, (0..40).map(|i| (format!("p{i:02}"), counts)));
-    let Reply::Summary {
-        properties,
-        truncated,
-        ..
-    } = plain
-    else {
-        panic!("not a summary");
-    };
-    assert_eq!(
-        (properties.len(), truncated),
-        (MAX_SUMMARY_PROPERTIES, true)
-    );
-    assert_eq!(
-        Reply::summary(1, [("p".to_string(), counts)]),
-        Reply::Summary {
-            seq: 1,
-            properties: [("p".to_string(), counts)].into(),
-            truncated: false
-        }
-    );
+fn kinds_say_which_conditions_violate() {
+    assert!(Kind::Always.violated_by(false));
+    assert!(!Kind::Always.violated_by(true));
+    assert!(Kind::Never.violated_by(true));
+    assert!(!Kind::Never.violated_by(false));
 }
 
 #[test]
-fn kinds_follow_their_semantics() {
-    use Kind::*;
-    use PropertyStatus::*;
-    for (kind, passes, failures, expected) in [
-        (Always, 1, 0, Passed),
-        (Always, 1, 1, Violated),
-        (Always, 0, 0, Unmet),
-        (AlwaysOrUnreachable, 0, 0, Passed),
-        (AlwaysOrUnreachable, 3, 0, Passed),
-        (AlwaysOrUnreachable, 3, 1, Violated),
-        (Sometimes, 0, 0, Unmet),
-        (Sometimes, 0, 4, Unmet),
-        (Sometimes, 1, 4, Passed),
-        (Reachable, 0, 0, Unmet),
-        (Reachable, 1, 0, Passed),
-        (Unreachable, 0, 0, Passed),
-        (Unreachable, 1, 0, Violated),
-    ] {
-        assert_eq!(
-            PropertyStatus::of(kind, passes, failures),
-            expected,
-            "{kind:?} {passes} {failures}"
-        );
-    }
-}
-
-#[test]
-fn assessments_serialize_canonically() {
+fn assessments_keep_only_failures_and_serialize_canonically() {
     let origin = Origin {
         machine: "n1".into(),
         incarnation: 1,
@@ -246,42 +146,49 @@ fn assessments_serialize_canonically() {
         seq: 3,
         time_ns: 4,
     };
-    let assessment = Assessment {
-        status: AssessmentStatus::Violated,
-        violated: 1,
-        unmet: 0,
-        evidence_complete: false,
-        error_count: 1,
-        errors: vec![EvidenceError {
-            error: "property sequence 5 after 3".into(),
+    assert_eq!(Assessment::default().status(), AssessmentStatus::Passed);
+    assert!(Assessment::default().is_empty());
+    assert_eq!(
+        serde_json::to_value(Assessment::default()).unwrap(),
+        json!({})
+    );
+    let lost = Assessment {
+        lost_count: 3,
+        lost_evidence: vec![LostEvidence {
+            reason: "property sequence 5 where 3 was next".into(),
             origin: Some(origin.clone()),
         }],
-        properties: vec![PropertyResult {
+        ..Default::default()
+    };
+    assert_eq!(lost.status(), AssessmentStatus::Incomplete);
+    let unmet = Assessment {
+        unmet_requirements: vec!["failover exercised".into()],
+        ..lost.clone()
+    };
+    assert_eq!(unmet.status(), AssessmentStatus::Failed);
+    let assessment = Assessment {
+        violations: vec![Violation {
             id: DEFAULT_NO_OOM.into(),
-            kind: Kind::AlwaysOrUnreachable,
-            status: PropertyStatus::Violated,
-            message: None,
-            passes: 0,
-            failures: 1,
-            example: Some(Example {
+            kind: Kind::Never,
+            example: Example {
                 origin,
                 details: None,
                 details_truncated: true,
-            }),
+            },
         }],
+        ..lost
     };
+    // A definite violation stays a failure when evidence was also lost.
+    assert_eq!(assessment.status(), AssessmentStatus::Failed);
+    let origin = json!({"machine": "n1", "incarnation": 1, "session": 2, "seq": 3, "time_ns": 4});
     let wire = serde_json::to_value(&assessment).unwrap();
     assert_eq!(
         wire,
         json!({
-            "status": "violated", "violated": 1, "unmet": 0, "evidence_complete": false,
-            "error_count": 1,
-            "errors": [{"error": "property sequence 5 after 3", "origin":
-                {"machine": "n1", "incarnation": 1, "session": 2, "seq": 3, "time_ns": 4}}],
-            "properties": [{"id": "seedbox.no_out_of_memory_kills", "kind": "always_or_unreachable",
-                "status": "violated", "passes": 0, "failures": 1, "example": {"origin":
-                {"machine": "n1", "incarnation": 1, "session": 2, "seq": 3, "time_ns": 4},
-                "details_truncated": true}}]
+            "violations": [{"id": "seedbox.no_out_of_memory_kills", "kind": "never",
+                "example": {"origin": origin, "details_truncated": true}}],
+            "lost_count": 3,
+            "lost_evidence": [{"reason": "property sequence 5 where 3 was next", "origin": origin}],
         })
     );
     assert_eq!(

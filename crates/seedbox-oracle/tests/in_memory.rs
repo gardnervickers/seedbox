@@ -1,5 +1,5 @@
 //! A fake replicated log run through every trait, as a runner would drive it.
-use seedbox_scenario::*;
+use seedbox_oracle::*;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,

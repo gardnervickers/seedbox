@@ -12,11 +12,11 @@
 //! * a [`FinalRead`] phase that waits for recovery and reads each node;
 //! * [`Checker`]s that turn the history and final reads into [`Verdict`]s.
 //!
-//! Each checker's verdict is reported as a guest `always` property named by
-//! the checker: valid passes it, invalid violates it and unknown leaves it
-//! unevaluated (unmet), so the run's property results carry every check.
-//! The oracle then exits with [`Report::exit_code`]; any nonzero exit,
-//! including an undecided run's, makes the run's verdict failed today.
+//! Each decided checker's verdict is evaluated as a guest `always` property
+//! named by the checker, through `seedbox-guest`: valid holds and invalid
+//! violates it, which fails the run. An unknown verdict evaluates nothing.
+//! The oracle then exits with [`Report::exit_code`]: 1 when a check was
+//! violated, and 3, incomplete, when one could not decide.
 //!
 //! This crate defines the traits and record types only. The runner, the
 //! in-memory history, the seeded random source, the control-socket
