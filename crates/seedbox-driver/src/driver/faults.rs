@@ -302,6 +302,10 @@ impl Action {
             Self::DropConnection { connection } => Ok(Command::DropConnection {
                 connection: connection.clone(),
             }),
+            Self::DeviceFault { target, fault } => Ok(Command::DeviceFault {
+                target: wire(target),
+                fault: *fault,
+            }),
             Self::DriftBounded {
                 target,
                 max_rate_ppb,

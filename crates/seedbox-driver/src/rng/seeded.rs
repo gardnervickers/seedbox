@@ -140,6 +140,16 @@ impl SeededRng {
     pub(crate) fn new(seed: u64) -> Self {
         Self::derived(seed, Domain::Machine)
     }
+    /// The seed of a device fault this stream's machine carries, for fault
+    /// `fault`: a pure function of the machine seed, so admission draws
+    /// nothing and checkpoints need no cursor.
+    pub(crate) fn fault_seed(&self, fault: u32) -> u64 {
+        let mut hash = Sha256::new();
+        hash.update(b"seedbox-machine device fault seed v1\0");
+        hash.update(self.seed.to_le_bytes());
+        hash.update(fault.to_le_bytes());
+        u64::from_le_bytes(hash.finalize()[..8].try_into().expect("eight digest bytes"))
+    }
     pub(crate) fn derived(seed: u64, domain: Domain) -> Self {
         Self {
             domain,

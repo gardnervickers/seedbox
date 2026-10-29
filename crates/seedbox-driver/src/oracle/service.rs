@@ -151,6 +151,15 @@ pub(crate) enum Effect {
     Unshape,
     Select,
     Unselect,
+    /// Install a machine-side fault under its handle record's identity.
+    Fault {
+        record: u64,
+        fault: crate::pv::DeviceFault,
+    },
+    /// Heal the machine-side fault of that handle record.
+    Unfault {
+        record: u64,
+    },
 }
 /// A validated admission subject before its fault ID is allocated.
 enum Subject {
@@ -192,8 +201,9 @@ impl Scope {
         self.machine() == Some((target, boot))
     }
 }
-impl From<Change> for Effect {
-    fn from(change: Change) -> Self {
+impl Effect {
+    /// The effect that makes a handle plan's change on `record`.
+    pub(crate) fn of(change: Change, record: super::handles::RecordId) -> Self {
         match change {
             Change::Execution(c) => Self::Execution(c),
             Change::Drift(c) => Self::Drift(c),
@@ -204,12 +214,17 @@ impl From<Change> for Effect {
             Change::Unshape => Self::Unshape,
             Change::Select => Self::Select,
             Change::Unselect => Self::Unselect,
+            Change::Fault(fault) => Self::Fault {
+                record: record.0,
+                fault,
+            },
+            Change::Unfault => Self::Unfault { record: record.0 },
         }
     }
 }
 impl Effect {
     /// The handle change this effect installs or restores; the inverse of
-    /// `Effect::from(Change)`.
+    /// [`Effect::of`].
     pub(crate) fn handle_change(&self) -> Option<Change> {
         Some(match *self {
             Self::Execution(c) => Change::Execution(c),
@@ -221,6 +236,8 @@ impl Effect {
             Self::Unshape => Change::Unshape,
             Self::Select => Change::Select,
             Self::Unselect => Change::Unselect,
+            Self::Fault { fault, .. } => Change::Fault(fault),
+            Self::Unfault { .. } => Change::Unfault,
             Self::Spawn
             | Self::Pause
             | Self::Resume
@@ -282,6 +299,11 @@ pub(crate) enum Command {
     },
     DropConnection {
         connection: Connection,
+    },
+    /// A disk or scheduler fault inside the target machine, under a handle.
+    DeviceFault {
+        target: Target,
+        fault: crate::pv::DeviceFault,
     },
     Effect {
         target: Target,
@@ -442,6 +464,8 @@ pub(crate) enum Notice {
 pub(crate) struct Settlement {
     pub record_id: Option<super::handles::RecordId>,
     pub network: Option<crate::driver::NetworkSettlement>,
+    /// What a healed device fault matched and did, over every boot.
+    pub counts: Option<crate::pv::FaultCounts>,
     pub fault: u32,
     pub requester: Requester,
     pub scope: Scope,

@@ -253,6 +253,21 @@ pub trait Machine {
     fn execution_evidence(&mut self) -> Result<Option<ExecutionEvidence>, Self::Error> {
         Ok(None)
     }
+
+    /// Take the final counts of the fault `id` healed by an accepted
+    /// [`crate::pv::Request::HealFault`]: requests it matched and acted on,
+    /// over every boot it applied to. A stopped read with no execution or
+    /// time effects; the counts are returned once. `None` means the machine
+    /// keeps no counts for that fault (or carries no device faults).
+    // Counts are read once at the heal's settlement, in the same barrier as
+    // its admission run, rather than streamed as outputs: a settlement must
+    // not wait for a later commit.
+    fn take_fault_counts(
+        &mut self,
+        _id: u64,
+    ) -> Result<Option<crate::pv::FaultCounts>, Self::Error> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2390,6 +2390,8 @@ mod control_failure_tests;
 #[cfg(test)]
 mod control_timer_tests;
 #[cfg(test)]
+mod device_fault_tests;
+#[cfg(test)]
 mod evidence_tests;
 #[cfg(test)]
 mod oracle_correlation_tests;

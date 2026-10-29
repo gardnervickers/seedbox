@@ -270,6 +270,10 @@ impl Control {
     pub(super) fn reset_commands(&mut self, id: MachineId) {
         self.entries[id.0].commands.reset();
     }
+    /// The seed of fault `fault`'s device fault on machine `id`.
+    pub(super) fn fault_seed(&self, id: MachineId, fault: u32) -> u64 {
+        self.entries[id.0].clock.fault_seed(fault)
+    }
 }
 pub(super) struct View<'a, M> {
     pub(super) guest_controller: Option<MachineId>,
@@ -842,6 +846,10 @@ impl Control {
                     network_faults: *faults,
                 },
                 FaultAction::Effect(Effect::Select) => Public::DropConnection,
+                FaultAction::Effect(Effect::Fault { fault, .. }) => Public::DeviceFault(*fault),
+                FaultAction::Effect(Effect::Unfault { .. }) => {
+                    return Err("device fault removal outside a heal".into())
+                }
                 FaultAction::Effect(Effect::Unshape | Effect::Unselect) => {
                     return Err("network inverse outside a heal".into())
                 }
@@ -886,6 +894,7 @@ impl Control {
                     outcome_at: s.outcome_at.map(Timestamp::from_nanos),
                     detail: s.detail,
                     network: s.network,
+                    counts: s.counts,
                 },
             ),
             Notice::TriggerArmed {

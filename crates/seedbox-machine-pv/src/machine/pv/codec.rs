@@ -1,5 +1,5 @@
-//! PV snapshot v3 retains native interaction chain plus named policy, boot ownership, ended evidence/page
-//! records and pending reports outside the bounded private JSON header.
+//! PV snapshot v4 retains native interaction chain plus named policy, boot ownership, ended evidence/page
+//! records, pending reports and device faults outside the bounded private JSON header.
 //! Layout: fixed host/format header, closed metadata, six raw lengths,
 //! then kernel, initrd, page+mapped RAM, native overlays, client overlays, base.
 //! All lengths precede raw bodies, allowing one exact retained-body reservation.
@@ -10,7 +10,7 @@ use seedbox_machine::snapshot::{
 use std::io::{Read, Write};
 const MAGIC: &[u8; 8] = b"SBXPVS01";
 const HEADER_BYTES: u64 = 24;
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 #[cfg(target_arch = "x86_64")]
 const ARCH: u8 = 1;
 #[cfg(target_arch = "aarch64")]

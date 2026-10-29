@@ -48,7 +48,8 @@ impl Command {
             Self::Effect { target, .. }
             | Self::Throttle { target, .. }
             | Self::Drift { target, .. }
-            | Self::StepRealtime { target, .. } => compiled.machine = Some(machine(target)?),
+            | Self::StepRealtime { target, .. }
+            | Self::DeviceFault { target, .. } => compiled.machine = Some(machine(target)?),
             Self::Partition { left, right } => compiled.sides = Some(sides(left, right, network)?),
             Self::Shape {
                 from,

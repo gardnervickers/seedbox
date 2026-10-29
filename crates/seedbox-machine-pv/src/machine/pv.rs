@@ -37,6 +37,7 @@ mod codec;
 mod evidence;
 mod execution;
 mod factory;
+mod faults;
 #[cfg(test)]
 mod guest;
 mod policy;
@@ -151,6 +152,9 @@ pub struct PVMachine {
     /// The NIC's MAC address, when the definition has a network interface.
     network: Option<[u8; 6]>,
     aux: retained::Aux,
+    /// The trigger whose hold holds a guest disk request in the live boot,
+    /// which then only ends; captures are refused meanwhile.
+    held: Option<u32>,
 }
 /// Kernel arguments for a definition: the assets' arguments plus, with a
 /// network interface, the guest's static address (`guest_network.h`).
@@ -366,6 +370,7 @@ impl PVMachine {
             disk: disk.map(Disk::new),
             network,
             aux: Default::default(),
+            held: None,
         })
     }
     fn boot(&mut self, seed: u64, now: u64) -> Result<(), String> {
@@ -421,6 +426,7 @@ impl PVMachine {
                 disk,
                 network: self.network,
                 policy: Box::new(selected.clone()),
+                faults: Box::new(self.aux.faults.boot(owner)),
             })?,
             self.memory_bytes,
             selected.as_ref(),
@@ -460,6 +466,11 @@ impl PVMachine {
             });
         }
         let store = self.stopped_store()?;
+        if native && self.aux.faults.live() {
+            // The ending boot's counts and hold progress carry to the next.
+            let report = self.fault_call(protocol::FaultChange::Report)?;
+            self.aux.faults.retire(&report)?;
+        }
         let disposition = if shutdown {
             EvidenceDisposition::Shutdown
         } else {
@@ -545,6 +556,7 @@ impl PVMachine {
         self.state = State::Invalid;
         self.end_boot(false, self.reached, 1)
             .map_err(std::io::Error::other)?;
+        self.held = None;
         self.shutdown = false;
         self.guest.reset();
         self.input.clear();
@@ -586,6 +598,7 @@ impl PVMachine {
         self.pending_boots = count;
         self.aux.logical = boot;
         self.pending_at = Some(at);
+        self.held = None;
         self.shutdown = false;
         self.guest.reset();
         self.input.clear();
@@ -622,6 +635,67 @@ impl PVMachine {
     }
     fn worker(&mut self) -> Result<&mut Worker, String> {
         self.worker.as_mut().ok_or("PV worker unavailable".into())
+    }
+    fn fault_call(
+        &mut self,
+        change: protocol::FaultChange,
+    ) -> Result<protocol::FaultReport, String> {
+        match self.worker()?.call(Request::Fault(change))? {
+            Response::Faults(report) => Ok(report),
+            _ => Err("PV unexpected fault response".into()),
+        }
+    }
+    /// Apply a device fault request: to the retained mirror, and to the live
+    /// worker if there is one. A boot that has ended keeps it for the next.
+    fn device_request(&mut self, request: &seedbox_machine::pv::Request) -> Result<(), String> {
+        use protocol::FaultChange;
+        use seedbox_machine::pv::Request as R;
+        let live = self.worker.is_some();
+        match *request {
+            R::InstallFault { id, seed, fault } => {
+                self.aux.faults.install(id, seed, fault)?;
+                if live {
+                    let installed = self.aux.faults.installed(id).expect("just installed");
+                    self.fault_call(FaultChange::Install(installed))?;
+                }
+            }
+            R::HealFault { id } => {
+                let live = if live {
+                    self.fault_call(FaultChange::Heal(id))?
+                        .healed
+                        .ok_or("PV worker heal without counts")?
+                } else {
+                    Default::default()
+                };
+                self.aux.faults.heal(id, live)?;
+            }
+            R::HoldBlockRequest {
+                trigger,
+                op,
+                nth,
+                until,
+            } => {
+                let hold = seedbox_machine::machine::disk::fault::Hold {
+                    trigger,
+                    op,
+                    nth,
+                    seen: 0,
+                    until: until.map(Timestamp::as_nanos),
+                };
+                self.aux.faults.hold(hold)?;
+                if live {
+                    self.fault_call(FaultChange::Hold(hold))?;
+                }
+            }
+            R::ReleaseBlockRequest { trigger } => {
+                self.aux.faults.release(trigger);
+                if live {
+                    self.fault_call(FaultChange::Release(trigger))?;
+                }
+            }
+            _ => return Err("PV request is not a device fault".into()),
+        }
+        Ok(())
     }
     fn execute(
         &mut self,
@@ -698,12 +772,26 @@ impl PVMachine {
                     reason: ExitReason::Crashed,
                 })
             }
+            // The worker stays stopped with the held request until the boot
+            // ends; the run reports the hold after the guest's writes.
+            Stop::Held(trigger) => {
+                self.aux.faults.held(trigger);
+                self.held = Some(trigger);
+                self.state = State::Blocked(None);
+                Ok(StopReason::Blocked {
+                    reached: Timestamp::from_nanos(time),
+                    deadline: None,
+                })
+            }
             _ => Err("PV worker returned invalid stop".into()),
         }
     }
     fn capture(&mut self) -> Result<Snapshot, String> {
         if self.state == State::Invalid {
             return Err("cannot snapshot invalid PV machine".into());
+        }
+        if self.held.is_some() {
+            return Err("cannot snapshot PV machine while a guest disk request is held".into());
         }
         let live = self.worker.is_some();
         let mut image = if live {
@@ -981,6 +1069,20 @@ impl Machine for PVMachine {
         let mut frames = Vec::new();
         let result: Result<StopReason, String> = (|| {
             while let Some(input) = context.inbox.front() {
+                // A held boot only ends: other work waits in the caller's inbox.
+                if self.held.is_some()
+                    && !matches!(
+                        input.payload,
+                        seedbox_machine::pv::Request::Crash
+                            | seedbox_machine::pv::Request::Reboot
+                            | seedbox_machine::pv::Request::InstallFault { .. }
+                            | seedbox_machine::pv::Request::HealFault { .. }
+                            | seedbox_machine::pv::Request::HoldBlockRequest { .. }
+                            | seedbox_machine::pv::Request::ReleaseBlockRequest { .. }
+                    )
+                {
+                    break;
+                }
                 match &input.payload {
                     seedbox_machine::pv::Request::Crash => {
                         crashed_this_run |= !matches!(self.state, State::Exited | State::Crashed)
@@ -1016,6 +1118,12 @@ impl Machine for PVMachine {
                             self.input.extend(self.guest.request(request)?);
                         }
                     }
+                    request @ (seedbox_machine::pv::Request::InstallFault { .. }
+                    | seedbox_machine::pv::Request::HealFault { .. }
+                    | seedbox_machine::pv::Request::HoldBlockRequest { .. }
+                    | seedbox_machine::pv::Request::ReleaseBlockRequest { .. }) => {
+                        self.device_request(request)?
+                    }
                     // The common request is non-exhaustive across crate boundaries.
                     _ => return Err("unsupported machine request".into()),
                 }
@@ -1042,10 +1150,26 @@ impl Machine for PVMachine {
                     },
                 });
             }
+            if self.held.is_some() {
+                self.reached = now.max(self.reached);
+                return Ok(StopReason::Blocked {
+                    reached: Timestamp::from_nanos(self.reached),
+                    deadline: None,
+                });
+            }
             let syscall_cost_ns = priced_syscall_ns(context.execution.factor_permille());
             let stopped = self.execute(now, upto, syscall_cost_ns, &frames)?;
             self.guest
                 .observe_ordered(context, std::mem::take(&mut self.writes))?;
+            if let (Some(trigger), StopReason::Blocked { reached, .. }) = (self.held, stopped) {
+                context
+                    .outbox
+                    .emit(seedbox_machine::pv::Output {
+                        at: reached,
+                        payload: seedbox_machine::pv::Response::BlockRequestHeld { trigger },
+                    })
+                    .map_err(|e| format!("PV held request output time: {e:?}"))?;
+            }
             self.flush_ends(context)?;
             Ok(stopped)
         })();
@@ -1090,6 +1214,12 @@ impl Machine for PVMachine {
     }
     fn snapshot(&mut self) -> Result<Snapshot, Self::Error> {
         self.capture().map_err(std::io::Error::other)
+    }
+    fn take_fault_counts(
+        &mut self,
+        id: u64,
+    ) -> Result<Option<seedbox_machine::pv::FaultCounts>, Self::Error> {
+        Ok(self.aux.faults.take(id))
     }
 }
 #[cfg(test)]
@@ -1218,3 +1348,5 @@ impl seedbox_machine::snapshot::Record for Capture {
 
 #[cfg(test)]
 mod disk_tests;
+#[cfg(test)]
+mod fault_tests;
