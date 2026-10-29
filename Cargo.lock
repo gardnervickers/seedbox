@@ -2119,9 +2119,12 @@ dependencies = [
 name = "seedbox-oracle"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "seedbox-engine-protocol",
+ "seedbox-guest",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
