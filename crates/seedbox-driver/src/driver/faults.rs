@@ -206,10 +206,11 @@ impl Capability {
             Self::GuestYield => "the guest yield hook",
         }
     }
-    /// Whether `engine` provides this capability. No engine's devices or
-    /// guest kernel provide any of them yet.
-    pub fn provided_by(self, _engine: Engine) -> bool {
-        false
+    /// Whether `engine` provides this capability. PV's block device, which
+    /// serves both architectures, holds requests; no engine provides the
+    /// others yet.
+    pub fn provided_by(self, engine: Engine) -> bool {
+        self == Self::HeldBlockRequest && engine.backend == CpuBackend::Pv
     }
     /// The refusal of `name`, which needs this capability, while no engine
     /// provides it.
@@ -233,6 +234,22 @@ fn require(engine: Engine, name: &str, capability: Option<Capability>) -> Result
             capability.describe()
         )),
         _ => Ok(()),
+    }
+}
+
+/// Refuse `name`, which needs `capability`, unless `engine` provides it. A
+/// Driver told no engine provides nothing.
+pub(crate) fn require_capability(
+    engine: Option<Engine>,
+    name: &str,
+    capability: Capability,
+) -> Result<(), String> {
+    match engine {
+        Some(engine) => require(engine, name, Some(capability)),
+        None => Err(format!(
+            "{name} needs {}, and this Driver was told no engine",
+            capability.describe()
+        )),
     }
 }
 

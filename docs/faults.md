@@ -1,9 +1,9 @@
 # Disk and scheduler faults
 
-These are interfaces only. No engine provides what they need yet, so every
-engine refuses `disk_error`, `disk_latency`, `preempt` and the oracle's
-`block_request` trigger, naming what it lacks. A later change implements them
-on PV along the contracts below.
+PV machines hold a disk request for the oracle's `block_request` trigger. No
+engine carries out `disk_error`, `disk_latency` or `preempt` yet, so every
+engine refuses them, naming what it lacks. The contracts below state how PV
+implements them.
 
 ## Actions
 
@@ -38,7 +38,10 @@ of the same machine:
 ```
 
 It shares the oracle triggers' budget (64 per run), match timeout,
-cancellation and lifecycle. An expired or cancelled trigger releases its hold.
+cancellation and lifecycle, and appears in `inspect` with its
+`block_request` in place of the marker. An expired or cancelled trigger
+releases its hold. The Python client arms it with
+`world.arm_block_request_crash(target, op, nth, match_timeout=...)`.
 No trigger watches guest property evidence or other application state: the
 run is deterministic, so an oracle watches for such a condition itself and
 applies the fault then.
@@ -70,7 +73,7 @@ are checked before it is journaled.
 | `disk_error` | disk request selection | refused | refused | refused |
 | `disk_latency` | delayed block completion | refused | refused | refused |
 | `preempt` | the guest yield hook | refused | refused | refused |
-| `block_request` trigger | held block requests | refused | refused | refused |
+| `block_request` trigger | held block requests | yes | yes (type-checked only) | refused |
 | every other action and trigger | nothing | yes | yes | yes |
 
 The [Driver](../crates/seedbox-driver/src/driver/faults.rs) keys each
@@ -78,8 +81,9 @@ capability by backend and architecture. Its worker refuses an input its engine
 lacks, naming both ("disk_error needs disk request selection, which x86_64 TCG
 does not provide"): a program when it opens, before any machine boots, and an
 injected fault when it is prepared. The oracle's `block_request` trigger is
-refused with `unsupported`. The implementation provides the first four on PV,
-except `preempt` on x86_64, whose kernel has no yield yet; TCG follows later.
+refused with `unsupported` where its engine cannot hold requests. The
+implementation provides the three actions on PV too, except `preempt` on
+x86_64, whose kernel has no yield yet; TCG follows later.
 
 ## Engine contracts
 

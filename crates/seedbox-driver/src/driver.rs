@@ -256,6 +256,9 @@ struct ExecutionState<M> {
     trigger_marker: Option<Timestamp>,
     definitions: Vec<MachineDefinition>,
     network: network::Network,
+    /// The engine running the machines, which decides what oracle calls
+    /// may ask of them. Not checkpoint state: its owner declares it again.
+    engine: Option<faults::Engine>,
 }
 
 /// Already-committed descriptions owned by one observer session. These are
@@ -561,6 +564,7 @@ where
                 control,
                 inputs: BTreeMap::new(),
                 trigger_marker: None,
+                engine: None,
                 definitions: spawnable,
                 network,
             },
@@ -655,6 +659,13 @@ where
             events: std::mem::take(&mut self.observations.published),
             frames: self.observations.frames.drain(),
         }
+    }
+
+    /// Declare the engine running the machines, so oracle calls that need a
+    /// capability, such as a `block_request` trigger's held request, are
+    /// checked against it. Its owner declares it again after a restore.
+    pub fn set_engine(&mut self, engine: faults::Engine) {
+        self.execution.engine = Some(engine);
     }
 
     fn stage_notices(&mut self) {
@@ -1214,6 +1225,57 @@ where
         }
     }
 
+    /// Send a block_request trigger's hold or release to its machine now,
+    /// ahead of anything the machine runs next. The match deadline becomes a
+    /// machine time at the rate the machine runs now.
+    fn send_hold(&mut self, plan: crate::oracle::service::Plan) -> Result<(), Error<M::Error>> {
+        use crate::oracle::service::Plan;
+        let now = self.now();
+        let (source, payload) = match plan {
+            Plan::Hold {
+                source,
+                trigger,
+                op,
+                nth,
+                until,
+            } => {
+                let id = self
+                    .execution
+                    .control
+                    .reply_target(&source)
+                    .map_err(Error::Control)?;
+                let until =
+                    self.execution.machines[id.0].machine_time(id, Timestamp::from_nanos(until))?;
+                (
+                    id,
+                    Request::HoldBlockRequest {
+                        trigger,
+                        op,
+                        nth,
+                        until: Some(until),
+                    },
+                )
+            }
+            Plan::Release { source, trigger } => (
+                self.execution
+                    .control
+                    .reply_target(&source)
+                    .map_err(Error::Control)?,
+                Request::ReleaseBlockRequest { trigger },
+            ),
+            _ => return Err(Error::Control("not a machine hold".into())),
+        };
+        self.execution
+            .events
+            .entry(now)
+            .or_default()
+            .push_back(Scheduled::Input {
+                id: source,
+                input: Input { at: now, payload },
+            });
+        Ok(())
+    }
+
     fn control_plans(
         &mut self,
         plans: Vec<crate::oracle::service::Plan>,
@@ -1262,12 +1324,16 @@ where
                     continue;
                 }
             }
+            if matches!(plan, Plan::Hold { .. } | Plan::Release { .. }) {
+                self.send_hold(plan)?;
+                continue;
+            }
             let at = match &plan {
                 Plan::Effect { at, .. }
                 | Plan::Wake { at, .. }
                 | Plan::Deadline { at, .. }
                 | Plan::Reply { at, .. } => Timestamp::from_nanos(*at),
-                Plan::Settled(_) => unreachable!(),
+                Plan::Settled(_) | Plan::Hold { .. } | Plan::Release { .. } => unreachable!(),
             };
             if at < self.now() {
                 return Err(Error::Control("control plan scheduled in the past".into()));
@@ -2395,5 +2461,7 @@ mod device_fault_tests;
 mod evidence_tests;
 #[cfg(test)]
 mod oracle_correlation_tests;
+#[cfg(test)]
+mod trigger_tests;
 
 mod persist;

@@ -35,7 +35,7 @@ wire_struct!(Settlement {
     command,
     detail
 });
-wire_enum!(Plan; units {} tuples {0=>Settled(v0)} records {1=>Effect{fault,scope,at,effect,command,handle},2=>Wake{token,at},3=>Deadline{fault,at},4=>Reply{boot,source,id,at,payload}});
+wire_enum!(Plan; units {} tuples {0=>Settled(v0)} records {1=>Effect{fault,scope,at,effect,command,handle},2=>Wake{token,at},3=>Deadline{fault,at},4=>Reply{boot,source,id,at,payload},5=>Hold{source,trigger,op,nth,until},6=>Release{source,trigger}});
 // The boxed immediate receipt has no extra wire tag. Charge its owned object
 // before constructing it even though persisted timelines reject this plan arm.
 impl crate::persistence::Wire for Box<Settlement> {
@@ -437,6 +437,9 @@ impl Service {
             Plan::Settled(_) => Err(crate::persistence::CodecError::Invalid(
                 "settlement cannot be queued",
             )),
+            Plan::Hold { .. } | Plan::Release { .. } => Err(
+                crate::persistence::CodecError::Invalid("a hold is sent at once, never queued"),
+            ),
             Plan::Effect {
                 fault,
                 at: t,

@@ -59,6 +59,8 @@ impl<M> ExecutionState<M> {
             trigger_marker,
             definitions,
             network,
+            // Declared by the owner, not simulation state.
+            engine: _,
         } = self;
         let SimulationRng::Seeded(rng) = rng else {
             return Err(CodecError::Invalid(

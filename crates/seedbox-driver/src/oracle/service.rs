@@ -73,6 +73,20 @@ pub(crate) trait Adapter {
         Err(OperationError::unsupported())
     }
     fn resolve(&self, target: &Target) -> Result<Facts, OperationError>;
+    /// Refuse `name` unless the engine running these machines provides
+    /// `capability`.
+    fn require_capability(
+        &self,
+        name: &str,
+        capability: crate::driver::faults::Capability,
+    ) -> Result<(), OperationError> {
+        Err(error(
+            ErrorCode::Unsupported,
+            crate::driver::faults::require_capability(None, name, capability)
+                .err()
+                .unwrap_or_default(),
+        ))
+    }
     /// Check indirect heal targets too. SDK adapters retain their unrestricted
     /// authority; the Driver's guest view can exclude its controller.
     fn check_control_target(&self, _target: &Target) -> Result<(), OperationError> {
@@ -569,6 +583,22 @@ pub(crate) enum Plan {
         id: SimulationControlId,
         at: u64,
         payload: Vec<u8>,
+    },
+    /// Ask `source`'s machine, now, to hold its `nth` disk request of kind
+    /// `op` for `block_request` trigger `trigger`, if that request arrives
+    /// before the match deadline `until`. The owner sends it at once; it is
+    /// never queued.
+    Hold {
+        source: String,
+        trigger: u32,
+        op: seedbox_engine_protocol::control::DiskOp,
+        nth: u64,
+        until: u64,
+    },
+    /// Ask `source`'s machine, now, to stop counting for `trigger`'s hold.
+    Release {
+        source: String,
+        trigger: u32,
     },
 }
 #[derive(Clone)]

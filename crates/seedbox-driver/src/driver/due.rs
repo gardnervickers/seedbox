@@ -255,10 +255,13 @@ where
                 Ok(None)
             }
             control::Event::TriggerFinalize => {
-                self.execution
+                // An expired block_request trigger releases its machine hold.
+                let releases = self
+                    .execution
                     .control
                     .service
                     .expire_triggers(now.as_nanos());
+                self.control_plans(releases)?;
                 self.sync_trigger_marker();
                 Ok(None)
             }
@@ -322,6 +325,12 @@ where
                 // by control_plans; they are never executable work.
                 Err(Error::Control("settlement entered execution queue".into()))
             }
+            control::Event::Plan(Plan::Hold { .. } | Plan::Release { .. }) => {
+                // control_plans sends holds to their machine at once.
+                Err(Error::Control(
+                    "machine hold entered execution queue".into(),
+                ))
+            }
         }
     }
 
@@ -352,6 +361,7 @@ where
             .control
             .controller
             .and_then(|setup| setup.controller);
+        let engine = self.execution.engine;
         if !configured {
             self.execution.control.record_call(source, id, boot);
         }
@@ -363,6 +373,7 @@ where
                 Some(&self.execution.network),
                 |service, view| {
                     view.guest_controller = excluded;
+                    view.engine = engine;
                     if configured {
                         service.admit_for_boot(
                             view,

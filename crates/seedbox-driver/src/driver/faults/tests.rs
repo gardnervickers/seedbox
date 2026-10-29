@@ -395,7 +395,7 @@ fn new_faults_are_refused_while_no_engine_provides_them_after_argument_checks() 
 }
 
 #[test]
-fn new_faults_need_capabilities_no_engine_provides_yet() {
+fn new_faults_need_capabilities_no_engine_provides_yet_and_pv_holds_requests() {
     let engines = [
         (CpuBackend::Pv, Architecture::Aarch64),
         (CpuBackend::Pv, Architecture::X86_64),
@@ -418,7 +418,10 @@ fn new_faults_need_capabilities_no_engine_provides_yet() {
         for action in &limited {
             assert!(check_engine(action, engine).is_err(), "{action:?}");
         }
-        assert!(!Capability::HeldBlockRequest.provided_by(engine));
+        assert_eq!(
+            Capability::HeldBlockRequest.provided_by(engine),
+            engine.backend == CpuBackend::Pv
+        );
     }
     assert_eq!(
         check_engine(&limited[2], engines[1]).unwrap_err(),
