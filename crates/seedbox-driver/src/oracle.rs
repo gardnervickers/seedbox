@@ -14,7 +14,9 @@
 //!
 //! Network operations use the Driver-owned canonical network policies.
 //! The guest schema defines no disk RPC operation; disk policy is likewise
-//! unsupported, and this parser does not invent disk operation names. Inspect
+//! unsupported, and this parser does not invent disk operation names. The one
+//! disk shape it knows is a `block_request` trigger, which crashes a machine on
+//! a request its device holds. Inspect
 //! results use a generic typed serialization seam so the complete projection
 //! (services, machines, active handles, network counters, optional triggers) can
 //! be supplied by its owner without defining a misleading partial schema here.
@@ -38,7 +40,7 @@ pub(crate) enum Target {
     Key(String),
 }
 
-pub(crate) use seedbox_engine_protocol::control::{Connection, NetworkFaults};
+pub(crate) use seedbox_engine_protocol::control::{Connection, DiskOp, NetworkFaults};
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -50,6 +52,20 @@ pub(crate) enum TriggerFault {
         left: Vec<Target>,
         right: Vec<Target>,
     },
+    /// A `block_request` trigger's only fault: crash the trigger's own
+    /// machine, undelayed, while the held request is still unwritten.
+    Crash {
+        target: Target,
+    },
+}
+
+/// What a `block_request` trigger watches: the source machine's `nth` disk
+/// request of kind `op` from arming, which its device holds unwritten.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BlockRequest {
+    pub(crate) op: DiskOp,
+    pub(crate) nth: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -108,9 +124,13 @@ pub(crate) enum Operation {
     Heal {
         handle: String,
     },
+    /// Watch `source` for an output `marker` or, instead, a `block_request`.
     ArmTrigger {
         source: Target,
-        marker: Vec<u8>,
+        #[serde(default)]
+        marker: Option<Vec<u8>>,
+        #[serde(default)]
+        block_request: Option<BlockRequest>,
         match_timeout_ns: u64,
         fault: TriggerFault,
     },
@@ -303,13 +323,39 @@ impl Operation {
             }
             Self::ArmTrigger {
                 marker,
+                block_request,
                 match_timeout_ns,
+                fault,
                 ..
-            } if marker.is_empty() || marker.len() > 256 || *match_timeout_ns == 0 => {
-                return Err(OperationError::invalid(
-                    "trigger requires 1..=256 marker bytes and positive match timeout",
-                ));
-            }
+            } => match (marker, block_request) {
+                (Some(marker), None)
+                    if marker.is_empty() || marker.len() > 256 || *match_timeout_ns == 0 =>
+                {
+                    return Err(OperationError::invalid(
+                        "trigger requires 1..=256 marker bytes and positive match timeout",
+                    ));
+                }
+                (Some(_), None) if matches!(fault, TriggerFault::Crash { .. }) => {
+                    return Err(OperationError::invalid(
+                        "only a block_request trigger crashes its machine",
+                    ));
+                }
+                (None, Some(request))
+                    if request.nth == 0
+                        || *match_timeout_ns == 0
+                        || !matches!(fault, TriggerFault::Crash { .. }) =>
+                {
+                    return Err(OperationError::invalid(
+                        "block_request trigger requires a positive nth and match timeout, and crashes its machine",
+                    ));
+                }
+                (Some(_), None) | (None, Some(_)) => {}
+                _ => {
+                    return Err(OperationError::invalid(
+                        "trigger watches exactly one of a marker or a block_request",
+                    ));
+                }
+            },
             _ => {}
         }
         Ok(())
