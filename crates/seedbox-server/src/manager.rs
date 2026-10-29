@@ -7,6 +7,7 @@ use seedbox_api::{ControlReceipt, ControlRequest, ControlState, LogEntry};
 use seedbox_api::{EventKind, SimulationEvent};
 use seedbox_api::{ExecutionTermination, Phase, Simulation, SimulationId, SubmitRequest};
 use seedbox_application::execution::CancellationToken;
+use seedbox_application::store::ContentDigest;
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
@@ -569,6 +570,24 @@ impl Manager {
     pub fn read<T>(&self, read: impl FnOnce(&Catalogue) -> Result<T, Error>) -> Result<T, Error> {
         let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
         read(&state.catalogue)
+    }
+
+    pub(crate) fn reclaimed(
+        &self,
+        removed: impl IntoIterator<Item = (ContentDigest, crate::catalogue::Reclaimed)>,
+    ) -> Result<(), Error> {
+        let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        state.catalogue.reclaimed(removed);
+        Ok(())
+    }
+
+    pub(crate) fn restored(
+        &self,
+        digests: &std::collections::BTreeSet<ContentDigest>,
+    ) -> Result<(), Error> {
+        let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        state.catalogue.restored(digests);
+        Ok(())
     }
 
     /// Durations reflect the query instant; their projection does not change

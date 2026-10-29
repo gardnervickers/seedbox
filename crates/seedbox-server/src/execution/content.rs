@@ -8,6 +8,9 @@
 //! pruning. Work that creates an owned object holds `references` for reading
 //! until a resource or one of those registries names it; reclamation holds it
 //! for writing, after the evidence lock that orders imports, exports and deletes.
+//! The catalogue remembers what a deletion reclaimed, so a later submission
+//! that names it fails at admission; an upload or export that puts the content
+//! back clears that record.
 use super::{Error, ExecutionService};
 use crate::catalogue;
 use seedbox_api::SimulationId;
@@ -26,11 +29,14 @@ pub(super) struct Pins {
     /// Uploaded checkpoints, with the resources that existed at upload. Each
     /// lasts until a later resource names all its content.
     uploads: Vec<(BTreeSet<SimulationId>, BTreeSet<ContentDigest>)>,
+    /// The latest exported checkpoint that named each digest, for the error a
+    /// submission gets after deletion reclaims it.
+    exported: BTreeMap<ContentDigest, (SimulationId, String)>,
 }
 
 /// Every digest a JSON document names, as `sha256:<hex>` or `<hex>`. Roots may
 /// over-approximate: an extra digest only keeps an object longer.
-pub(super) fn digests_in(value: &serde_json::Value, digests: &mut BTreeSet<ContentDigest>) {
+pub(crate) fn digests_in(value: &serde_json::Value, digests: &mut BTreeSet<ContentDigest>) {
     fn add(text: &str, digests: &mut BTreeSet<ContentDigest>) {
         let hex = text.strip_prefix("sha256:").unwrap_or(text);
         if let Ok(digest) = ContentDigest::try_from(hex.to_owned()) {
@@ -72,11 +78,15 @@ impl ExecutionService {
             .evidence
             .lock()
             .map_err(|_| catalogue::Error::StorageFailed)?;
-        self.reclaim_unreferenced()
+        self.reclaim_unreferenced(None)
     }
 
-    /// Callers hold the evidence lock.
-    pub(super) fn reclaim_unreferenced(&self) -> Result<Vec<ContentDigest>, Error> {
+    /// Callers hold the evidence lock. The catalogue records what deleting
+    /// `deleted` reclaimed.
+    pub(super) fn reclaim_unreferenced(
+        &self,
+        deleted: Option<&SimulationId>,
+    ) -> Result<Vec<ContentDigest>, Error> {
         let _references = self
             .references
             .write()
@@ -122,7 +132,26 @@ impl ExecutionService {
                 .flat_map(|(_, digests)| digests)
                 .cloned(),
         );
-        Ok(self.store.reclaim_owned(&roots)?)
+        let removed = self.store.reclaim_owned(&roots)?;
+        let records: Vec<_> = removed
+            .iter()
+            .filter_map(|digest| {
+                let checkpoint = pins.exported.remove(digest);
+                let deleted = deleted?.clone();
+                let checkpoint = checkpoint
+                    .map(|(source, name)| format!("checkpoint {name} of simulation {source}"));
+                Some((
+                    digest.clone(),
+                    catalogue::Reclaimed {
+                        checkpoint,
+                        deleted,
+                    },
+                ))
+            })
+            .collect();
+        drop(pins);
+        self.manager.reclaimed(records)?;
+        Ok(removed)
     }
 
     /// Callers hold `references` for reading from the capture.
@@ -133,10 +162,16 @@ impl ExecutionService {
         start: &seedbox_spec::definition::Start,
     ) -> Result<(), Error> {
         let digests = digests_of(start)?;
-        self.pins
+        self.manager.restored(&digests)?;
+        let mut pins = self
+            .pins
             .lock()
-            .map_err(|_| catalogue::Error::StorageFailed)?
-            .exports
+            .map_err(|_| catalogue::Error::StorageFailed)?;
+        for digest in &digests {
+            pins.exported
+                .insert(digest.clone(), (id.clone(), name.to_owned()));
+        }
+        pins.exports
             .entry(id.clone())
             .or_default()
             .insert(name.to_owned(), digests);
@@ -149,6 +184,7 @@ impl ExecutionService {
         definition: &seedbox_spec::definition::Definition,
     ) -> Result<(), Error> {
         let digests = digests_of(definition)?;
+        self.manager.restored(&digests)?;
         let existing = self
             .manager
             .read(|catalogue| Ok(catalogue.list().map(|s| s.metadata.id.clone()).collect()))?;

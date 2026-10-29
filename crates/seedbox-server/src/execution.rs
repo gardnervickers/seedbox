@@ -2,7 +2,7 @@
 //! injected by the executable; clients never own worker lifetimes or leases.
 
 mod bundles;
-mod content;
+pub(crate) mod content;
 mod diagnostics;
 
 use crate::{catalogue, manager::Manager};
@@ -192,7 +192,7 @@ impl ExecutionService {
             }
             self.manager.delete(&id)?;
         }
-        self.reclaim_unreferenced()?;
+        self.reclaim_unreferenced(Some(id))?;
         Ok(())
     }
 

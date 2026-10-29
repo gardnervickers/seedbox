@@ -7,6 +7,7 @@ use seedbox_api::{
     ControlReceipt, ControlRequest, ControlState, InputSource, Metadata, Phase, Simulation,
     SimulationId, SubmitRequest,
 };
+use seedbox_application::store::ContentDigest;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
@@ -40,6 +41,19 @@ pub enum Error {
     RevisionConflict,
     #[error("host randomness unavailable: {0}")]
     Random(String),
+    #[error("checkpoint state for {checkpoint} was reclaimed when simulation {deleted} was deleted; export a checkpoint file to keep it")]
+    Reclaimed {
+        checkpoint: String,
+        deleted: SimulationId,
+    },
+}
+
+/// Owned content a deletion reclaimed, by the checkpoint it held state for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Reclaimed {
+    /// `checkpoint NAME of simulation ID` when an export named the content.
+    pub(crate) checkpoint: Option<String>,
+    pub(crate) deleted: SimulationId,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -57,6 +71,9 @@ pub struct Catalogue {
     entries: BTreeMap<SimulationId, Entry>,
     requests: BTreeMap<String, SimulationId>,
     pending: BTreeMap<SimulationId, String>,
+    /// Owned content deletions removed this session, so a submission that
+    /// names it fails with what happened instead of partway through preparation.
+    reclaimed: BTreeMap<ContentDigest, Reclaimed>,
 }
 
 impl Catalogue {
@@ -65,6 +82,7 @@ impl Catalogue {
             entries: BTreeMap::new(),
             requests: BTreeMap::new(),
             pending: BTreeMap::new(),
+            reclaimed: BTreeMap::new(),
         }
     }
 
@@ -156,6 +174,21 @@ impl Catalogue {
                 ))
             })
             .collect()
+    }
+
+    /// Remember content a deletion reclaimed.
+    pub(crate) fn reclaimed(
+        &mut self,
+        removed: impl IntoIterator<Item = (ContentDigest, Reclaimed)>,
+    ) {
+        self.reclaimed.extend(removed);
+    }
+
+    /// Content an upload or export put back is no longer reclaimed.
+    pub(crate) fn restored(&mut self, digests: &BTreeSet<ContentDigest>) {
+        for digest in digests {
+            self.reclaimed.remove(digest);
+        }
     }
 
     /// Returns (resource, newly_created). Retrying after an uncertain response
@@ -280,6 +313,7 @@ impl Catalogue {
                     .start
                     .validate_overrides(&definition.overrides)
                     .map_err(Error::Invalid)?;
+                self.validate_unreclaimed(definition)?;
                 if definition.machines.contains_key(definition.oracle_name()) {
                     return Err(Error::Invalid(
                         "oracle must have its own dedicated declaration".into(),
@@ -306,6 +340,39 @@ impl Catalogue {
                 }
                 Ok(None)
             }
+        }
+    }
+
+    /// Refuse a definition that names reclaimed content before admission.
+    fn validate_unreclaimed(
+        &self,
+        definition: &seedbox_spec::definition::Definition,
+    ) -> Result<()> {
+        if self.reclaimed.is_empty() {
+            return Ok(());
+        }
+        let mut digests = BTreeSet::new();
+        crate::execution::content::digests_in(
+            &serde_json::to_value(definition).map_err(|e| Error::Invalid(e.to_string()))?,
+            &mut digests,
+        );
+        let mut reclaimed = digests
+            .iter()
+            .filter_map(|digest| self.reclaimed.get(digest));
+        // Prefer a record that names the exported checkpoint.
+        match reclaimed
+            .clone()
+            .find(|reclaimed| reclaimed.checkpoint.is_some())
+            .or_else(|| reclaimed.next())
+        {
+            Some(reclaimed) => Err(Error::Reclaimed {
+                checkpoint: reclaimed
+                    .checkpoint
+                    .clone()
+                    .unwrap_or_else(|| "this definition".into()),
+                deleted: reclaimed.deleted.clone(),
+            }),
+            None => Ok(()),
         }
     }
 

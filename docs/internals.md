@@ -265,6 +265,7 @@ An ordinary put of the same bytes makes an owned object a reusable input.
 Deletion removes owned objects that no resource, retained input, export of a remaining source or unsubmitted checkpoint upload names; creators hold a reference lock until one does.
 Ownership ends with the server: after graceful shutdown, a crash or a failed reclamation, remaining objects stay as ordinary cache content, so an uncertain path leaks rather than deletes.
 The exclusive server lock means only one process reclaims, and only objects it created.
+The catalogue remembers which deletion reclaimed each object, so submitting a definition that names one fails before admission with that checkpoint and deletion; an upload or export that puts the object back clears the record, which also ends with the server.
 The [reclamation](../crates/seedbox-server/src/execution/content.rs) over-approximates roots: any digest-shaped string counts.
 
 ## Connection incarnations

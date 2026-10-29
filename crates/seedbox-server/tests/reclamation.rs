@@ -261,3 +261,38 @@ fn cache_inputs_with_the_same_bytes_are_never_reclaimed() {
     execution.delete(&source).unwrap();
     store.verify(&ram).unwrap();
 }
+
+#[test]
+fn a_branch_whose_state_was_reclaimed_is_refused_before_admission_until_its_file_returns() {
+    let root = tempfile::tempdir().unwrap();
+    let (manager, execution, _store, source) = server(root.path());
+    let fetched = execution.checkpoint_definition(&source, "capture").unwrap();
+    let mut bytes = Vec::new();
+    execution
+        .export_checkpoint_bundle(&source, "capture", &mut bytes, &Options::default())
+        .unwrap();
+    let branched = complete(&manager, "branch", Some(fetched.spec.clone()));
+    execution.delete(&source).unwrap();
+    execution.delete(&branched).unwrap();
+    let mut request = test_support::resolved_request("resubmitted");
+    request.spec = fetched.spec;
+    let error = manager.submit(request.clone()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "checkpoint state for checkpoint capture of simulation {source} was reclaimed when \
+             simulation {branched} was deleted; export a checkpoint file to keep it"
+        )
+    );
+    assert_eq!(
+        manager
+            .read(|catalogue| Ok(catalogue.list().count()))
+            .unwrap(),
+        0
+    );
+    // Uploading the checkpoint file puts the state back.
+    execution
+        .import_checkpoint_bundle(bytes.as_slice(), &Options::default())
+        .unwrap();
+    manager.submit(request).unwrap();
+}
