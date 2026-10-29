@@ -290,6 +290,41 @@ fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
         assert!(!output.join("world.json").exists());
         drop(launch);
         assert!(!output.join("host-control").exists());
+        // An input this engine cannot carry out is the launch's own refusal,
+        // naming the input, before any worker request is written.
+        fs::remove_file(output.join(crate::worker_process::WORKER_REQUEST_FILE)).unwrap();
+        let program: Vec<seedbox_engine_protocol::input_program::TimedInput> =
+            serde_json::from_value(serde_json::json!([{
+                "key": "race-on",
+                "at_ns": 0,
+                "action": {"action": "preempt", "handle": "race", "machine": "oracle", "ppm": 10},
+            }]))
+            .unwrap();
+        let refused = ExecutionRequest {
+            program: &program,
+            ..request
+        };
+        let yields = backend == CpuBackend::Pv && cfg!(target_arch = "aarch64");
+        match crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&refused, None) {
+            Ok(_) => assert!(yields, "{backend:?} launched a preempt program"),
+            Err(error) => {
+                assert!(!yields, "{error}");
+                let (engine, lacks) = match backend {
+                    CpuBackend::Pv => ("x86_64 PV", "the guest yield hook"),
+                    CpuBackend::Tcg => ("x86_64 TCG", "the guest yield hook"),
+                };
+                assert!(matches!(error, crate::Error::Setup(_)), "{error:?}");
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "input race-on: preempt needs {lacks}, which {engine} does not provide"
+                    )
+                );
+                assert!(!output
+                    .join(crate::worker_process::WORKER_REQUEST_FILE)
+                    .exists());
+            }
+        }
     }
 }
 

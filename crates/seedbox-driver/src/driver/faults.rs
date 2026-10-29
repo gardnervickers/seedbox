@@ -153,13 +153,65 @@ pub fn translate(
             };
             (action, Some(handle(alias)?))
         }
-        // No engine provides what these need yet, so no Driver action carries
-        // them out. Invalid arguments are reported as such first.
-        Public::DiskError { .. } | Public::DiskLatency { .. } | Public::Preempt { .. } => {
+        Public::DiskError {
+            handle: alias,
+            machine,
+            op,
+            ppm,
+            effect,
+            scope,
+        } => {
             action.validate()?;
-            let capability = Capability::required_by(action)
-                .ok_or_else(|| format!("{} needs no capability", action.name()))?;
-            return Err(capability.unprovided(action.name()));
+            let fault = crate::pv::DeviceFault::DiskError {
+                op: *op,
+                ppm: u32::try_from(*ppm).map_err(|_| "disk_error ppm exceeds u32".to_owned())?,
+                effect: *effect,
+                scope: *scope,
+            };
+            (
+                Action::DeviceFault {
+                    target: target(machine),
+                    fault,
+                },
+                Some(handle(alias)?),
+            )
+        }
+        Public::DiskLatency {
+            handle: alias,
+            machine,
+            op,
+            latency_ns,
+            jitter_ns,
+        } => {
+            action.validate()?;
+            (
+                Action::DeviceFault {
+                    target: target(machine),
+                    fault: crate::pv::DeviceFault::DiskLatency {
+                        op: *op,
+                        latency_ns: *latency_ns,
+                        jitter_ns: *jitter_ns,
+                    },
+                },
+                Some(handle(alias)?),
+            )
+        }
+        Public::Preempt {
+            handle: alias,
+            machine,
+            ppm,
+        } => {
+            action.validate()?;
+            (
+                Action::DeviceFault {
+                    target: target(machine),
+                    fault: crate::pv::DeviceFault::Preempt {
+                        ppm: u32::try_from(*ppm)
+                            .map_err(|_| "preempt ppm exceeds u32".to_owned())?,
+                    },
+                },
+                Some(handle(alias)?),
+            )
         }
     };
     Ok((action, alias))
@@ -206,16 +258,18 @@ impl Capability {
             Self::GuestYield => "the guest yield hook",
         }
     }
-    /// Whether `engine` provides this capability. PV's block device, which
-    /// serves both architectures, holds requests; no engine provides the
-    /// others yet.
+    /// Whether `engine` provides this capability. PV runs both architectures
+    /// through one block device and worker, so both select, delay and hold
+    /// requests. Only the ARM PV kernel's syscall hook yields yet; the x86
+    /// kernel has the same hook point but no yield. TCG's QEMU devices and
+    /// guest have none of them yet.
     pub fn provided_by(self, engine: Engine) -> bool {
-        self == Self::HeldBlockRequest && engine.backend == CpuBackend::Pv
-    }
-    /// The refusal of `name`, which needs this capability, while no engine
-    /// provides it.
-    pub(crate) fn unprovided(self, name: &str) -> String {
-        format!("{name} needs {}, which no engine provides", self.describe())
+        use {Architecture::*, CpuBackend::*};
+        match (self, engine.backend, engine.architecture) {
+            (Self::GuestYield, Pv, X86_64) => false,
+            (_, Pv, Aarch64 | X86_64) => true,
+            (_, Tcg, Aarch64 | X86_64) => false,
+        }
     }
     /// The capability a public action needs, if any.
     pub fn required_by(action: &Public) -> Option<Self> {
