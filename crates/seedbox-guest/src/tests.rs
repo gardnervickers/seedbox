@@ -323,3 +323,97 @@ fn records_that_cannot_be_sent_are_reported_as_lost() {
     client.flush().unwrap();
     replier.join().unwrap();
 }
+
+/// A child forked after the parent's session opened must not write into it
+/// or read its replies: each process's records and flush replies travel in
+/// a session of its own, each with its own sequence.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_forked_child_opens_its_own_session() {
+    use std::os::fd::AsRawFd;
+    let (_directory, path, listener) = server();
+    // Fail rather than hang if the child never connects.
+    let timeout = libc::timeval {
+        tv_sec: 10,
+        tv_usec: 0,
+    };
+    // SAFETY: the listener is live and `timeout` is a valid timeval.
+    let set = unsafe {
+        libc::setsockopt(
+            listener.0.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            (&timeout as *const libc::timeval).cast(),
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(set, 0);
+    let client = Client::new(&path);
+    client.lock().reply_timeout = Duration::from_secs(10);
+    client.always("parent before fork", true, Value::Null);
+    let parent = listener.accept();
+    parent
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut buffer = [0u8; MAX_RECORD_BYTES];
+    let receive = |session: &UnixDatagram, buffer: &mut [u8]| {
+        let n = session.recv(buffer).unwrap();
+        Record::parse(&buffer[..n]).unwrap()
+    };
+    let id = |record: Record| match record {
+        Record::Assert { id, .. } => id,
+        other => panic!("expected an assertion, got {other:?}"),
+    };
+    assert_eq!(id(receive(&parent, &mut buffer)), "parent before fork");
+
+    // SAFETY: the child only uses the client and then leaves with _exit,
+    // never returning into the test harness.
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0, "{}", io::Error::last_os_error());
+    if child == 0 {
+        let flushed = std::panic::catch_unwind(|| {
+            client.always("child", true, Value::Null);
+            client.flush().is_ok()
+        });
+        // SAFETY: ends the forked child without running the harness.
+        unsafe { libc::_exit(if matches!(flushed, Ok(true)) { 0 } else { 1 }) };
+    }
+
+    // The child's records arrive in a new session, numbered from 1, and
+    // its flush is answered there.
+    let session = listener.accept();
+    session
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    assert_eq!(id(receive(&session, &mut buffer)), "child");
+    assert_eq!(receive(&session, &mut buffer), Record::Flush {});
+    session
+        .send(&serde_json::to_vec(&Reply::Flush { seq: 2 }).unwrap())
+        .unwrap();
+    let mut status = 0;
+    // SAFETY: waits for the child forked above.
+    assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+    assert!(
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+        "child flush failed: status {status}"
+    );
+
+    // Nothing from the child reached the parent's session, which is still
+    // open, and the parent's flush is its own second message.
+    parent.set_nonblocking(true).unwrap();
+    assert_eq!(
+        parent.recv(&mut buffer).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    parent.set_nonblocking(false).unwrap();
+    let replier = std::thread::spawn(move || {
+        let mut buffer = [0u8; 64];
+        let n = parent.recv(&mut buffer).unwrap();
+        assert_eq!(&buffer[..n], FLUSH);
+        parent
+            .send(&serde_json::to_vec(&Reply::Flush { seq: 2 }).unwrap())
+            .unwrap();
+    });
+    client.flush().unwrap();
+    replier.join().unwrap();
+}
