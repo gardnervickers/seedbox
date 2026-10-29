@@ -1,8 +1,9 @@
 # Disk and scheduler faults
 
 PV machines carry out `disk_error`, `disk_latency`, `preempt` and the
-oracle's `block_request` trigger along the contracts below. TCG refuses all
-four and x86_64 PV refuses `preempt` (see
+oracle's `block_request` trigger along the contracts below. The oracle applies
+and heals the three faults through its RPC, and a run's timeline can apply
+them too. TCG refuses all four and x86_64 PV refuses `preempt` (see
 [where each fault runs](#where-each-fault-runs)).
 
 ## Actions
@@ -21,6 +22,33 @@ Disk faults stack: each selects on its own stream and the first hit acts.
 A disk fault's counts cover every boot it applied to and arrive on its heal's
 settlement (`counts` on `faultChanged` and in the world view, and in
 `seedbox observe`); a preempt heal has none.
+
+## From the oracle
+
+The oracle's RPC ([schema](../crates/seedbox-driver/src/oracle.rs)) has an
+operation for each, named after its action. It takes the action's arguments
+and a `target`, as `throttle` does, and replies with a handle that `heal`
+ends. Because `op` names the operation, a disk fault's request kind is
+`disk_op`:
+
+```json
+{"op": "disk_error", "target": {"machine": "db"}, "disk_op": "read", "ppm": 1000000, "scope": "data"}
+{"op": "disk_latency", "target": {"machine": "db"}, "disk_op": "flush", "latency_ns": 20000000}
+{"op": "preempt", "target": {"machine": "db"}, "ppm": 100000}
+{"op": "heal", "handle": "p1"}
+```
+
+`effect`, `scope` and `jitter_ns` are optional, with the action's defaults.
+The action's own validator checks the arguments first (`invalid_request`).
+The engine is checked next: one that lacks the fault refuses it as
+`unsupported`, naming what it lacks ("preempt needs the guest yield hook,
+which x86_64 PV does not provide"). Admission then follows the action's rules:
+disk faults stack, and a second `preempt` on a machine is `invalid_state`.
+The reply comes once the machine has installed the fault. A disk fault's heal
+replies with no result; its counts are on the heal's settlement. The Python
+client has `world.disk_error(target, op, ppm, effect=..., scope=...)`,
+`world.disk_latency(target, op, latency_ns, jitter_ns=...)` and
+`world.preempt(target, ppm)`, each returning a handle for `world.heal`.
 
 ## Crash on a held block request
 
@@ -50,10 +78,9 @@ applies the fault then.
 ## In the timeline
 
 `seedbox.yaml` declares no faults, so neither it nor the CLI's flags change.
-The new faults reach a run as a definition's `overrides` (a submission's
-`program`) or one at a time through `seedbox control inject`. The oracle's
-guest RPC carries none of the three actions: its operations are unchanged
-apart from the `block_request` trigger.
+Besides the oracle's calls, the faults reach a run as a definition's
+`overrides` (a submission's `program`) or one at a time through
+`seedbox control inject`.
 
 ```yaml
 overrides:
@@ -81,7 +108,7 @@ run refuses a program input its engine lacks with a setup error naming the
 input, the engine and what it lacks ("input race-on: preempt needs the guest
 yield hook, which x86_64 PV does not provide"); the worker checks again when
 it opens and refuses an injected fault when it is prepared. The oracle's
-`block_request` trigger is refused with `unsupported`. x86_64 PV shares the
+calls and its `block_request` trigger are refused with `unsupported`. x86_64 PV shares the
 block device and worker with aarch64 but has only been type-checked; its
 kernel has the syscall hook point but no yield yet.
 
