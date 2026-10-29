@@ -83,6 +83,14 @@ report, so restarted applications cannot reuse an earlier kill. The world retain
 the newest 64 reports, including their boots; diagnostics suggests raising `memoryMiB`.
 Lost kernel records fail supervision with an I/O error rather than guessing a victim.
 
+## Guest property evidence
+
+Every supervisor serves `/run/seedbox/guest.sock` (and an abstract-namespace twin) and numbers a boot's guest sessions and each session's records from 1; it reports each session that closes, so the ledger stays bounded.
+The kmsg reader that relays OOM victims also relays fatal-signal reports, enabled by `print-fatal-signals`, one per crash; on a machine without `allowCrashes` each is a violation.
+The Driver reduces frames at commit and queues each flush reply behind items due at that boundary, for the same boot only.
+Its [ledger](../crates/seedbox-engine-core/src/properties.rs) keeps first violations, which IDs were required or evaluated, and lost evidence, never a tally; it is Driver checkpoint and policy-evidence state.
+Unmet requirements are read from the final report, so a run's verdict changes only at completion.
+
 ## ARM exclusive reservations
 
 Host interruption can clear a hardware reservation without any guest write, making raw store-exclusive failure nondeterministic.
