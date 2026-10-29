@@ -359,3 +359,51 @@ fn ledgers_round_trip_and_validate_their_bounds() {
     unknown["extra"] = json!(1);
     assert!(serde_json::from_value::<Ledger>(unknown).is_err());
 }
+
+#[test]
+fn findings_qualify_the_oracle_after_completion() {
+    use Verdict as V;
+    let violated = Findings {
+        violated: true,
+        ..Default::default()
+    };
+    let unmet = Findings {
+        unmet: true,
+        ..Default::default()
+    };
+    let lost = Findings {
+        lost: true,
+        ..Default::default()
+    };
+    let none = Findings::default();
+    for (oracle, exited, completed, findings, expected) in [
+        (V::Passed, true, true, None, V::Passed),
+        (V::Passed, true, true, Some(none), V::Passed),
+        (V::Passed, true, true, Some(violated), V::Failed),
+        (V::Passed, true, true, Some(unmet), V::Failed),
+        (V::Passed, true, true, Some(lost), V::Incomplete),
+        (V::Passed, true, false, Some(none), V::Pending),
+        (V::Passed, true, false, None, V::Pending),
+        (V::Failed, true, true, Some(none), V::Failed),
+        (V::Failed, true, false, None, V::Failed),
+        // Exit 3: the oracle could not decide.
+        (V::Incomplete, true, true, Some(none), V::Incomplete),
+        (V::Incomplete, true, true, Some(unmet), V::Failed),
+        (V::Incomplete, true, true, Some(lost), V::Incomplete),
+        // No oracle exit: only a definite violation fails it.
+        (V::Incomplete, false, true, Some(violated), V::Failed),
+        (V::Incomplete, false, true, Some(unmet), V::Incomplete),
+        (V::Incomplete, false, true, Some(lost), V::Incomplete),
+        (V::Pending, false, false, Some(violated), V::Pending),
+    ] {
+        assert_eq!(
+            verdict(oracle, exited, completed, findings),
+            expected,
+            "{oracle:?} {exited} {completed} {findings:?}"
+        );
+    }
+    assert_eq!(V::of_exit(0), V::Passed);
+    assert_eq!(V::of_exit(1), V::Failed);
+    assert_eq!(V::of_exit(3), V::Incomplete);
+    assert_eq!(V::of_exit(23), V::Failed);
+}

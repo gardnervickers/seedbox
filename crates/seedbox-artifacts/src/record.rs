@@ -148,7 +148,9 @@ pub fn compare(
                     _ => Some(false),
                 },
                 a.faults == b.faults,
-                a.workload_exit == b.workload_exit && a.reason == b.reason,
+                a.workload_exit == b.workload_exit
+                    && a.reason == b.reason
+                    && a.properties == b.properties,
             ),
             _ => (None, None, false, false),
         };

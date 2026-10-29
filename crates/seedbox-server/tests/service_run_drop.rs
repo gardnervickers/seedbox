@@ -90,6 +90,7 @@ impl ExecutionBackend for Paused {
             faults: vec![],
             host_wait_ns: 0,
             simulated_time_ns: Some(42),
+            properties: None,
         })
     }
 }
