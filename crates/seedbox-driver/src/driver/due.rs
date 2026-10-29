@@ -657,6 +657,7 @@ where
             Request::Application { .. }
             | Request::StepRealtime { .. }
             | Request::SimulationReply { .. }
+            | Request::PropertyReply { .. }
             | Request::ReceiveFrame { .. }
                 if matches!(entry.stopped, StopReason::Exited { .. }) =>
             {
@@ -668,6 +669,7 @@ where
             Request::Application { .. }
             | Request::StepRealtime { .. }
             | Request::SimulationReply { .. }
+            | Request::PropertyReply { .. }
             | Request::ReceiveFrame { .. }
             | Request::Shutdown => {}
             // Request is non-exhaustive across the common crate boundary.
