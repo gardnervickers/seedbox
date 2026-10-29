@@ -130,7 +130,8 @@ pub fn require_backend(execution: &serde_json::Value, backend: Backend) -> Resul
 /// and normal execution must finish cleanly before comparing retained evidence.
 pub fn require_pass(status: &SimulationStatus) -> Result<(), String> {
     if status.phase != Phase::Completed
-        || status.verdict() != TestVerdict::Passed
+        // Derive the verdict as the server does; a supplied one never stands.
+        || seedbox_server::verdict::of(status) != TestVerdict::Passed
         || status.termination != Some(ExecutionTermination::OracleExited)
     {
         return Err(format!(

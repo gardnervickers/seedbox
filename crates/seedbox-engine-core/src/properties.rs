@@ -1,5 +1,5 @@
 //! Reduction of committed guest property evidence into a run's
-//! [`Assessment`].
+//! [`Assessment`], and the verdict policy that applies it.
 //!
 //! The Driver feeds a [`Ledger`] every committed `SBX_PROP1` frame, `SBX_OOM1`
 //! victim report and `SBX_CRASH1` fatal-signal report in commit order, with
@@ -356,6 +356,81 @@ impl Ledger {
             lost_evidence: self.lost_evidence.clone(),
         };
         (!assessment.is_empty()).then_some(assessment)
+    }
+}
+
+/// A run's test verdict, in the API's terms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    Pending,
+    Incomplete,
+    Passed,
+    Failed,
+}
+
+impl Verdict {
+    /// An oracle's exit status: 0 passes, 3 could not decide (incomplete),
+    /// anything else fails.
+    pub fn of_exit(code: u8) -> Self {
+        match code {
+            0 => Self::Passed,
+            3 => Self::Incomplete,
+            _ => Self::Failed,
+        }
+    }
+}
+
+/// What a run's property findings contain, for [`verdict`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Findings {
+    pub violated: bool,
+    pub unmet: bool,
+    pub lost: bool,
+}
+
+impl From<&Assessment> for Findings {
+    fn from(assessment: &Assessment) -> Self {
+        Self {
+            violated: !assessment.violations.is_empty(),
+            unmet: !assessment.unmet_requirements.is_empty(),
+            lost: assessment.lost_count > 0,
+        }
+    }
+}
+
+/// The verdict policy: the oracle's verdict, qualified by the run's
+/// property findings.
+///
+/// A violation fails a completed run whatever the oracle said, even one
+/// whose oracle never exited: the violation is definite evidence, a missing
+/// exit only missing evidence. A required property never evaluated fails a
+/// run whose oracle exited; a run cut short before then stays as the oracle
+/// left it, since the workload may not have reached it. Lost evidence makes
+/// a passing oracle's run incomplete. Findings arrive with the final report,
+/// so a passing oracle stays pending until completion rather than passing
+/// first and failing later.
+pub fn verdict(
+    oracle: Verdict,
+    oracle_exited: bool,
+    completed: bool,
+    findings: Option<Findings>,
+) -> Verdict {
+    if !completed {
+        return if oracle == Verdict::Passed {
+            Verdict::Pending
+        } else {
+            oracle
+        };
+    }
+    let Some(findings) = findings else {
+        return oracle;
+    };
+    if findings.violated || (oracle_exited && findings.unmet) {
+        Verdict::Failed
+    } else if oracle == Verdict::Passed && findings.lost {
+        Verdict::Incomplete
+    } else {
+        oracle
     }
 }
 
