@@ -362,3 +362,93 @@ fn validation_and_admission_reject_the_same_invalid_target_shapes() {
         );
     }
 }
+
+#[test]
+fn disk_and_scheduler_faults_compile_to_named_device_faults_after_argument_checks() {
+    use crate::pv::{DeviceFault, DiskEffect, DiskOp, DiskScope};
+    for (wire, fault) in [
+        (
+            json!({"action":"disk_error","handle":"eio","machine":"node","op":"write","ppm":10,"effect":"corrupt","scope":"data"}),
+            DeviceFault::DiskError {
+                op: DiskOp::Write,
+                ppm: 10,
+                effect: DiskEffect::Corrupt,
+                scope: DiskScope::Data,
+            },
+        ),
+        (
+            json!({"action":"disk_latency","handle":"slow","machine":"node","op":"any","latency_ns":1000,"jitter_ns":5}),
+            DeviceFault::DiskLatency {
+                op: DiskOp::Any,
+                latency_ns: 1000,
+                jitter_ns: 5,
+            },
+        ),
+        (
+            json!({"action":"preempt","handle":"race","machine":"node","ppm":10}),
+            DeviceFault::Preempt { ppm: 10 },
+        ),
+    ] {
+        let public: Public = serde_json::from_value(wire).unwrap();
+        let (action, handle) = translate(&public, 19).unwrap();
+        assert_eq!(
+            action,
+            Action::DeviceFault {
+                target: Target::Name("node".into()),
+                fault,
+            }
+        );
+        assert!(handle.is_some());
+        let names = ["node".to_owned()];
+        assert_eq!(
+            action_targets(&public, &names, 1).unwrap().machines,
+            ["node"]
+        );
+    }
+    let invalid: Public = serde_json::from_value(
+        json!({"action":"disk_latency","handle":"slow","machine":"node","op":"any","latency_ns":1}),
+    )
+    .unwrap();
+    assert!(translate(&invalid, 19)
+        .unwrap_err()
+        .contains("disk_latency latency_ns"));
+}
+
+#[test]
+fn new_faults_need_capabilities_pv_has_except_the_x86_yield_and_tcg_lacks() {
+    let engines = [
+        (CpuBackend::Pv, Architecture::Aarch64),
+        (CpuBackend::Pv, Architecture::X86_64),
+        (CpuBackend::Tcg, Architecture::X86_64),
+    ]
+    .map(|(backend, architecture)| Engine {
+        backend,
+        architecture,
+    });
+    let action = |action: serde_json::Value| -> Public { serde_json::from_value(action).unwrap() };
+    let limited = [
+        json!({"action":"disk_error","handle":"h","machine":"db","op":"write","ppm":1}),
+        json!({"action":"disk_latency","handle":"h","machine":"db","op":"any","latency_ns":1000}),
+        json!({"action":"preempt","handle":"h","machine":"db","ppm":10}),
+    ]
+    .map(action);
+    let portable = action(json!({"action":"crash","machine":"db"}));
+    for engine in engines {
+        let pv = engine.backend == CpuBackend::Pv;
+        check_engine(&portable, engine).unwrap();
+        for (index, action) in limited.iter().enumerate() {
+            // preempt needs the guest yield hook.
+            let provided = pv && !(index == 2 && engine.architecture == Architecture::X86_64);
+            assert_eq!(check_engine(action, engine).is_ok(), provided, "{action:?}");
+        }
+        assert_eq!(Capability::HeldBlockRequest.provided_by(engine), pv);
+    }
+    assert_eq!(
+        check_engine(&limited[2], engines[1]).unwrap_err(),
+        "preempt needs the guest yield hook, which x86_64 PV does not provide"
+    );
+    assert_eq!(
+        check_engine(&limited[0], engines[2]).unwrap_err(),
+        "disk_error needs disk request selection, which x86_64 TCG does not provide"
+    );
+}

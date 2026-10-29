@@ -8,6 +8,7 @@ pub(crate) fn preview(
     configuration: &seedbox_spec::Simulation,
     action: &Action,
 ) -> Result<FaultPreview, Error> {
+    action.validate().map_err(Error::Invalid)?;
     let targets = seedbox_application::fault_inputs::fault_action_targets(configuration, action)
         .map_err(|error| Error::Invalid(error.to_string()))?;
     let mut result = FaultPreview {
@@ -199,6 +200,45 @@ pub(crate) fn preview(
                 .push("The machine must not already be throttled.".into());
             format!("Scale the machine's seeded CPU cost to {factor_permille} thousandths until healed.")
         }
+        Action::DiskError {
+            op,
+            ppm,
+            effect,
+            scope,
+            ..
+        } => {
+            result.limitations.push(
+                "Only the disk's requests are selected; a machine without a disk is unaffected."
+                    .into(),
+            );
+            let op = serde_json::to_value(op).unwrap_or_default();
+            let op = op.as_str().unwrap_or("any");
+            let spared = if scope.is_all() {
+                ""
+            } else {
+                ", sparing the filesystem's static metadata"
+            };
+            match effect {
+                seedbox_engine_protocol::control::DiskEffect::Eio => format!("Fail {ppm} per million {op} requests with an I/O error before any disk effect{spared}, until healed; the heal reports what it matched and failed."),
+                seedbox_engine_protocol::control::DiskEffect::Corrupt => format!("Complete {ppm} per million {op} requests with one sector of seeded bytes{spared}, until healed; the heal reports what it matched and corrupted."),
+            }
+        }
+        Action::DiskLatency {
+            op,
+            latency_ns,
+            jitter_ns,
+            ..
+        } => {
+            let op = serde_json::to_value(op).unwrap_or_default();
+            let op = op.as_str().unwrap_or("any");
+            format!("Complete {op} disk requests {latency_ns} ns late, plus up to {jitter_ns} ns of seeded jitter, in submission order, until healed; queued requests still complete after the heal.")
+        }
+        Action::Preempt { ppm, .. } => {
+            result
+                .preconditions
+                .push("The machine must not already have an active preempt fault.".into());
+            format!("Yield the guest CPU at {ppm} per million syscalls and progress charges, on a seeded guest stream, until healed.")
+        }
     };
     if action.is_process() || action.is_lifecycle() {
         for name in &result.machines {
@@ -251,6 +291,9 @@ fn healable_handle(action: &Action) -> Option<&str> {
         | Action::ClockSkew { handle, .. }
         | Action::ClockDrift { handle, .. }
         | Action::Throttle { handle, .. }
+        | Action::DiskError { handle, .. }
+        | Action::DiskLatency { handle, .. }
+        | Action::Preempt { handle, .. }
         | Action::DropConnection { handle, .. } => Some(handle),
         _ => None,
     }
@@ -272,6 +315,42 @@ mod tests {
         let world =
             crate::world::Tracker::new("abcdefgh".parse().unwrap(), &configuration).snapshot();
         (configuration, world)
+    }
+
+    #[test]
+    fn disk_and_scheduler_faults_preview_their_machine_and_effect() {
+        let (configuration, world) = fixture();
+        for (wire, category, effect) in [
+            (
+                json!({"action":"disk_error","handle":"eio","machine":"n1","op":"write","ppm":10,"scope":"data"}),
+                seedbox_api::FaultCategory::Disk,
+                "Fail 10 per million write requests with an I/O error before any disk effect, sparing the filesystem's static metadata, until healed",
+            ),
+            (
+                json!({"action":"disk_latency","handle":"slow","machine":"n1","op":"flush","latency_ns":5000}),
+                seedbox_api::FaultCategory::Disk,
+                "Complete flush disk requests 5000 ns late",
+            ),
+            (
+                json!({"action":"preempt","handle":"race","machine":"n1","ppm":20}),
+                seedbox_api::FaultCategory::Machine,
+                "Yield the guest CPU at 20 per million syscalls",
+            ),
+        ] {
+            let action: Action = serde_json::from_value(wire).unwrap();
+            let preview = preview(&world, &configuration, &action).unwrap();
+            assert_eq!(preview.machines, ["n1"]);
+            assert_eq!(preview.category, category);
+            assert!(preview.expected_effect.starts_with(effect), "{}", preview.expected_effect);
+        }
+        let invalid: Action = serde_json::from_value(
+            json!({"action":"disk_error","handle":"eio","machine":"n1","op":"write","ppm":0}),
+        )
+        .unwrap();
+        assert!(matches!(
+            preview(&world, &configuration, &invalid),
+            Err(Error::Invalid(message)) if message.contains("disk_error ppm")
+        ));
     }
 
     #[test]
@@ -329,6 +408,7 @@ mod tests {
             plan: Some(
                 json!({"action":"partition", "handle":"old", "left":["n1"], "right":["n2"]}),
             ),
+            counts: None,
         });
         for link in &mut world.links {
             link.partitioned_by = Some("newer".into());
@@ -387,6 +467,7 @@ mod tests {
             applied_time_ns: Some(10),
             plan: Some(serde_json::to_value(action).unwrap()),
             active: true,
+            counts: None,
         });
         let heal = preview(
             &world,

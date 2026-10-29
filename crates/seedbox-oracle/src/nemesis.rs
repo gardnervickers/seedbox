@@ -17,7 +17,7 @@ pub use profile::Profile;
 ///
 /// The caller names the handle of every action that installs one
 /// (`partition`, `shape`, `drop_connection`, `clock_skew`, `clock_drift`,
-/// `throttle`) and ends it with [`Action::Heal`] of that handle. Lifecycle
+/// `throttle`, `disk_error`, `disk_latency`, `preempt`) and ends it with [`Action::Heal`] of that handle. Lifecycle
 /// actions end with their counterpart: `restart` after `stop`,
 /// `resume_process` after `pause_process`, `resume` after `pause`, `reboot`
 /// after `crash`.

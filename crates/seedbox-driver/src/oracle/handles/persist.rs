@@ -5,7 +5,7 @@ wire_tuple_struct!(RecordId);
 wire_enum!(Text;units{}tuples{0=>Allocated(v0),1=>Named(v0)}records{});
 wire_struct!(Allocator { last });
 wire_enum!(Phase; units {0=>Pending,1=>Active,2=>Healing,3=>Lost} tuples {} records {});
-wire_enum!(Change; units {3=>Partition,4=>Unpartition,6=>Unshape,7=>Select,8=>Unselect} tuples {0=>Execution(v0),1=>Drift(v0),2=>Step(v0),5=>Shape(v0,v1)} records {});
+wire_enum!(Change; units {3=>Partition,4=>Unpartition,6=>Unshape,7=>Select,8=>Unselect,10=>Unfault} tuples {0=>Execution(v0),1=>Drift(v0),2=>Step(v0),5=>Shape(v0,v1),9=>Fault(v0)} records {});
 wire_enum!(HandleTarget; units {} tuples {0=>Machine(v0),3=>Connection(v0)} records {1=>Links{left,right},2=>DirectedLinks{from,to}});
 wire_struct!(Record {
     text,
@@ -78,7 +78,7 @@ impl Handles {
             require(
                 !matches!(
                     r.change,
-                    Change::Unpartition | Change::Unshape | Change::Unselect
+                    Change::Unpartition | Change::Unshape | Change::Unselect | Change::Unfault
                 ),
                 "inverse installed handle",
             )?;
@@ -87,7 +87,10 @@ impl Handles {
                     (&r.target, r.change),
                     (
                         HandleTarget::Machine(_),
-                        Change::Execution(_) | Change::Drift(_) | Change::Step(_)
+                        Change::Execution(_)
+                            | Change::Drift(_)
+                            | Change::Step(_)
+                            | Change::Fault(_)
                     ) | (HandleTarget::Links { .. }, Change::Partition)
                         | (HandleTarget::DirectedLinks { .. }, Change::Shape(..))
                         | (HandleTarget::Connection(_), Change::Select)

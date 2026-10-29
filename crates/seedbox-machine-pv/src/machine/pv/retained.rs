@@ -13,6 +13,8 @@ pub(super) struct Aux {
     pub execution: Option<EndedExecution>,
     pub retiring: Option<[u8; 32]>,
     pub pending: std::collections::VecDeque<Report>,
+    /// Device faults and holds across boots.
+    pub faults: super::faults::Faults,
 }
 /// Last ACTUAL physical endpoint; retained through logical-only retirements.
 #[derive(Clone, Debug)]
@@ -67,6 +69,7 @@ impl Cached {
 }
 impl Aux {
     pub fn validate(&self, c: &Capture) -> Result<(), String> {
+        self.faults.validate()?;
         if self.active.is_some() != c.live
             || self
                 .active
@@ -200,7 +203,7 @@ impl Aux {
         Ok(())
     }
 }
-seedbox_machine::record!(Aux{policy:Option<policy::Named>,logical:u64,active:Option<u64>,last:Option<Ended>,cache:Option<Cached>,execution:Option<EndedExecution>,retiring:Option<[u8;32]>,pending:std::collections::VecDeque<Report>});
+seedbox_machine::record!(Aux{policy:Option<policy::Named>,logical:u64,active:Option<u64>,last:Option<Ended>,cache:Option<Cached>,execution:Option<EndedExecution>,retiring:Option<[u8;32]>,pending:std::collections::VecDeque<Report>,faults:super::faults::Faults});
 seedbox_machine::record!(EndedExecution {
     boot: u64,
     shutdown: bool,

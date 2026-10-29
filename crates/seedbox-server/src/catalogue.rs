@@ -465,6 +465,7 @@ impl Catalogue {
             .entries
             .get(id)
             .ok_or_else(|| Error::NotFound(id.clone()))?;
+        check_injected(&request.command)?;
         if let Some(existing) = entry.controls.get(&request.request_id) {
             return if existing.request == request {
                 Ok((existing.clone(), false))
@@ -647,7 +648,30 @@ pub(crate) fn resolve_program(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    // Shape and arguments are reported before targets are compiled.
+    seedbox_engine_protocol::input_program::validate_program(
+        &program,
+        spec.configuration.limits.simulated_time_ns,
+    )
+    .map_err(Error::Invalid)?;
+    for input in &program {
+        input
+            .action
+            .validate()
+            .map_err(|error| Error::Invalid(format!("program {}: {error}", input.key)))?;
+    }
     seedbox_application::fault_inputs::validate_input_program(&spec.configuration, &program)
         .map_err(|error| Error::Invalid(error.to_string()))?;
     Ok(program)
 }
+
+/// Refuse an injected fault with invalid arguments before it is journaled.
+fn check_injected(command: &seedbox_api::ControlCommand) -> Result<()> {
+    if let seedbox_api::ControlCommand::InjectFault { action } = command {
+        action.validate().map_err(Error::Invalid)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

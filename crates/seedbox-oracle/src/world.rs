@@ -278,6 +278,46 @@ impl World for GuestWorld {
                 "throttle",
                 json!({"target": target(machine), "factor_permille": factor_permille}),
             ),
+            Action::DiskError {
+                handle,
+                machine,
+                op,
+                ppm,
+                effect,
+                scope,
+            } => {
+                let mut arguments = json!({"target": target(machine), "disk_op": op, "ppm": ppm});
+                if !effect.is_eio() {
+                    arguments["effect"] = json!(effect);
+                }
+                if !scope.is_all() {
+                    arguments["scope"] = json!(scope);
+                }
+                self.install(handle, "disk_error", arguments)
+            }
+            Action::DiskLatency {
+                handle,
+                machine,
+                op,
+                latency_ns,
+                jitter_ns,
+            } => {
+                let mut arguments =
+                    json!({"target": target(machine), "disk_op": op, "latency_ns": latency_ns});
+                if *jitter_ns != 0 {
+                    arguments["jitter_ns"] = json!(jitter_ns);
+                }
+                self.install(handle, "disk_latency", arguments)
+            }
+            Action::Preempt {
+                handle,
+                machine,
+                ppm,
+            } => self.install(
+                handle,
+                "preempt",
+                json!({"target": target(machine), "ppm": ppm}),
+            ),
             Action::Heal { handle } => {
                 let Some(world) = self.handles.remove(handle) else {
                     return Err(Error(format!(

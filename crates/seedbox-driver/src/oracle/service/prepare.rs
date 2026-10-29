@@ -132,6 +132,25 @@ impl Service {
             Command::DropConnection { connection } => {
                 self.prepare_drop_connection(adapter, connection, name)?
             }
+            Command::DeviceFault { fault, .. } => {
+                let facts = compiled
+                    .machine
+                    .ok_or_else(|| Failure::from("missing compiled machine target"))?;
+                let plan = self.reserve_handle(
+                    HandleTarget::Machine(facts.name.clone()),
+                    Change::Fault(fault),
+                    name,
+                )?;
+                (
+                    Subject::Machine(facts),
+                    Effect::Fault {
+                        record: plan.record_id.0,
+                        fault,
+                    },
+                    Some(plan),
+                    false,
+                )
+            }
             Command::Throttle { config, .. } => {
                 let facts = compiled
                     .machine
@@ -324,6 +343,9 @@ impl Service {
             Change::Partition => "partition",
             Change::Shape(..) => "shape",
             Change::Select => "drop_connection",
+            Change::Fault(crate::pv::DeviceFault::DiskError { .. }) => "disk_error",
+            Change::Fault(crate::pv::DeviceFault::DiskLatency { .. }) => "disk_latency",
+            Change::Fault(crate::pv::DeviceFault::Preempt { .. }) => "preempt",
             _ => "handle",
         };
         let result = if let Some(name) = name {
@@ -360,10 +382,10 @@ impl Service {
             }
         };
         let effect = match plan.change {
-            Change::Partition | Change::Shape(..) | Change::Select => {
+            Change::Partition | Change::Shape(..) | Change::Select | Change::Fault(_) => {
                 return Err(Failure::from("heal reapplies installed policy").into())
             }
-            change => Effect::from(change),
+            change => Effect::of(change, plan.record_id),
         };
         Ok((subject, effect, Some(plan), true))
     }

@@ -94,4 +94,47 @@ mod program_tests {
         });
         assert!(validate_input_program(&config, &[heal]).is_ok());
     }
+
+    #[test]
+    fn documented_yaml_overrides_parse_as_program_inputs() {
+        // The example in docs/faults.md.
+        let document = r#"
+- {id: slow-fsync, atNs: 1000000000,
+   action: {action: disk_latency, handle: slow, machine: db, op: flush, latency_ns: 20000000}}
+- {id: fast-fsync, atNs: 2000000000, action: {action: heal, handle: slow}}
+"#;
+        let overrides: Vec<seedbox_spec::definition::Override> =
+            serde_yaml_ng::from_str(document).unwrap();
+        let names: Vec<_> = overrides
+            .into_iter()
+            .map(|entry| {
+                let input: TimedInput = serde_json::from_value(serde_json::json!({
+                    "key": entry.id, "at_ns": entry.at_ns, "action": entry.action,
+                }))
+                .unwrap();
+                input.action.validate().unwrap();
+                input.action.name()
+            })
+            .collect();
+        assert_eq!(names, ["disk_latency", "heal"]);
+    }
+
+    #[test]
+    fn disk_faults_check_their_machine_before_preparation() {
+        let config = crate::config::parse(
+            "name: test\nmachines:\n  db: {image: example:v1}\noracle: {image: example/oracle}\n",
+            std::path::Path::new("/fixture/seedbox.yaml"),
+            &Default::default(),
+        )
+        .unwrap();
+        let eio = |machine: &str| -> TimedInput {
+            serde_json::from_value(serde_json::json!({
+                "key": "eio", "at_ns": 10,
+                "action": {"action": "disk_error", "handle": "eio", "machine": machine, "op": "write", "ppm": 1_000_000},
+            }))
+            .unwrap()
+        };
+        validate_input_program(&config, &[eio("db")]).unwrap();
+        assert!(validate_input_program(&config, &[eio("missing")]).is_err());
+    }
 }

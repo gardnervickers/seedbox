@@ -65,6 +65,8 @@ impl Service {
             op.validate_at(now)?;
             Ok(op)
         });
+        // A machine hold a block_request trigger installs or releases.
+        let mut hold = None;
         let result = match operation {
             Err(e) => Err(e),
             Ok(Operation::Now {}) => Ok(json!({"now_ns":now})),
@@ -81,11 +83,31 @@ impl Service {
             Ok(Operation::Sleep { duration_ns }) => return self.sleep(call, now, duration_ns),
             Ok(Operation::ArmTrigger {
                 source,
-                marker,
+                marker: Some(marker),
+                block_request: None,
                 match_timeout_ns,
                 fault,
             }) => self.arm_trigger(adapter, &source, marker, match_timeout_ns, fault, now),
-            Ok(Operation::CancelTrigger { trigger_id }) => self.cancel_trigger(trigger_id, now),
+            Ok(Operation::ArmTrigger {
+                source,
+                marker: None,
+                block_request: Some(request),
+                match_timeout_ns,
+                fault,
+            }) => self
+                .arm_block_request(adapter, &source, request, match_timeout_ns, fault, now)
+                .map(|(reply, plan)| {
+                    hold = Some(plan);
+                    reply
+                }),
+            Ok(Operation::ArmTrigger { .. }) => Err(OperationError::invalid(
+                "trigger watches exactly one of a marker or a block_request",
+            )),
+            Ok(Operation::CancelTrigger { trigger_id }) => {
+                self.cancel_trigger(trigger_id, now).inspect(|_| {
+                    hold = self.release(trigger_id);
+                })
+            }
             Ok(
                 op @ (Operation::Stop { .. }
                 | Operation::Restart { .. }
@@ -102,8 +124,13 @@ impl Service {
                 | Operation::Spawn { .. }
                 | Operation::Partition { .. }
                 | Operation::Shape { .. }
-                | Operation::DropConnection { .. }),
-            ) => match Command::from_operation(op) {
+                | Operation::DropConnection { .. }
+                | Operation::DiskError { .. }
+                | Operation::DiskLatency { .. }
+                | Operation::Preempt { .. }),
+            ) => match Self::require_capability(adapter, &op)
+                .and_then(|()| Command::from_operation(op))
+            {
                 Err(e) => Err(e),
                 Ok(command) => match self.prepare(
                     adapter,
@@ -131,7 +158,17 @@ impl Service {
                 .as_ref()
                 .is_err_and(|e| e.code == ErrorCode::TargetUnavailable))
         .then_some(now);
-        Ok(vec![self.reply(call, now, effect, result)?])
+        let mut plans: Vec<_> = hold.into_iter().collect();
+        plans.push(self.reply(call, now, effect, result)?);
+        Ok(plans)
+    }
+    /// Refuse a device fault the engine running these machines cannot carry
+    /// out, after its arguments and before its target or handle.
+    fn require_capability(adapter: &impl Adapter, op: &Operation) -> Result<(), OperationError> {
+        match op.capability() {
+            Some((name, capability)) => adapter.require_capability(name, capability),
+            None => Ok(()),
+        }
     }
     /// List the connections between two network members after `after`.
     fn connections(
@@ -183,6 +220,11 @@ impl Service {
                 let (left, right) = Self::partition_sides(adapter, &left, &right)?;
                 (TriggerAction::Partition { left, right }, None)
             }
+            TriggerFault::Crash { .. } => {
+                return Err(OperationError::invalid(
+                    "only a block_request trigger crashes its machine",
+                ))
+            }
         };
         let id = self
             .triggers
@@ -197,6 +239,59 @@ impl Service {
             deadline,
         });
         Ok(json!({"trigger_id":id}))
+    }
+    /// Check the engine holds requests and the crash targets the source
+    /// itself, then arm a block_request trigger and plan its machine hold.
+    fn arm_block_request(
+        &mut self,
+        adapter: &impl Adapter,
+        source: &Target,
+        request: crate::oracle::BlockRequest,
+        match_timeout_ns: u64,
+        fault: TriggerFault,
+        now: u64,
+    ) -> Result<(Value, Plan), OperationError> {
+        adapter.require_capability(
+            "a block_request trigger",
+            crate::driver::faults::Capability::HeldBlockRequest,
+        )?;
+        let source = adapter.resolve(source)?;
+        let TriggerFault::Crash { target } = fault else {
+            return Err(OperationError::invalid(
+                "a block_request trigger's only fault is crash",
+            ));
+        };
+        if adapter.resolve(&target)?.name != source.name {
+            return Err(OperationError::invalid(
+                "a block_request trigger crashes its own machine",
+            ));
+        }
+        let id = self
+            .triggers
+            .arm_block_request(
+                source.name.clone(),
+                request.op,
+                request.nth,
+                now,
+                match_timeout_ns,
+            )
+            .map_err(|e| error(ErrorCode::InvalidState, e))?;
+        let until = self.triggers.records()[id as usize - 1].match_deadline;
+        self.notices.push(Notice::TriggerArmed {
+            trigger: id,
+            source: source.name.clone(),
+            target: Some(source.name.clone()),
+            at: now,
+            deadline: until,
+        });
+        let plan = Plan::Hold {
+            source: source.name,
+            trigger: id,
+            op: request.op,
+            nth: request.nth,
+            until,
+        };
+        Ok((json!({"trigger_id":id}), plan))
     }
     fn cancel_trigger(&mut self, trigger_id: u32, now: u64) -> Result<Value, OperationError> {
         self.triggers

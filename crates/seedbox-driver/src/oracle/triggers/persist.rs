@@ -2,11 +2,12 @@
 //! checkpoint `VERSION` bump.
 use super::*;
 wire_enum!(Status; units {0=>Armed,1=>Cancelled,2=>Matched,3=>Expired,4=>Rejected,5=>Fired,6=>CutOff} tuples {} records {});
-wire_enum!(TriggerAction; units {} tuples {0=>Stop(v0)} records {1=>Partition{left,right}});
+wire_enum!(TriggerAction; units {} tuples {0=>Stop(v0),2=>Crash(v0)} records {1=>Partition{left,right}});
+wire_enum!(Watch; units {} tuples {0=>Output(v0)} records {1=>BlockRequest{op,nth}});
 wire_struct!(Record {
     id,
     source,
-    marker,
+    watch,
     action,
     armed_at,
     match_deadline,
@@ -36,13 +37,27 @@ impl Triggers {
             "trigger tables",
         )?;
         for (i, r) in self.records.iter().enumerate() {
+            let watched = match &r.watch {
+                Watch::Output(marker) => {
+                    !marker.is_empty()
+                        && marker.len() <= MAX_MARKER
+                        && r.prefix <= marker.len()
+                        && (r.status != Status::Armed || r.prefix < marker.len())
+                        && !matches!(r.action, TriggerAction::Crash(_))
+                }
+                // A held request crashes its own machine; nothing is scanned.
+                Watch::BlockRequest { nth, .. } => {
+                    *nth > 0
+                        && r.prefix == 0
+                        && r.seen == 0
+                        && r.resets == 0
+                        && r.action == TriggerAction::Crash(r.source.clone())
+                }
+            };
             require(
                 r.id as usize == i + 1
                     && exists(&r.source)
-                    && !r.marker.is_empty()
-                    && r.marker.len() <= MAX_MARKER
-                    && r.prefix <= r.marker.len()
-                    && (r.status != Status::Armed || r.prefix < r.marker.len())
+                    && watched
                     && r.armed_at <= now
                     && r.match_deadline > r.armed_at
                     && r.match_deadline
@@ -61,21 +76,8 @@ impl Triggers {
                     && (r.status != Status::Fired || r.fault_id.is_some_and(|id| id != 0)),
                 "trigger record",
             )?;
-            let mut failure = [0usize; MAX_MARKER];
-            for j in 1..r.marker.len() {
-                let mut p = failure[j - 1];
-                while p > 0 && r.marker[j] != r.marker[p] {
-                    p = failure[p - 1];
-                }
-                if r.marker[j] == r.marker[p] {
-                    p += 1;
-                }
-                failure[j] = p;
-            }
-            require(
-                failure[..r.marker.len()] == self.failure[i],
-                "trigger failure table",
-            )?;
+            let expected = r.watch.marker().map(failure_table).unwrap_or_default();
+            require(expected == self.failure[i], "trigger failure table")?;
         }
         Ok(())
     }

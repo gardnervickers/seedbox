@@ -237,6 +237,7 @@ applications! {
     clock_reboot => "clock-reboot",
     clock_skew => "clock-skew",
     connections => "connections",
+    device_faults => "device-faults",
     exclusives => "exclusives",
     key_value => "key-value",
     mac_capabilities => "mac-capabilities",
@@ -410,6 +411,9 @@ fn application(name: &str) {
             &["run", workload.to_str().unwrap(), "--wall-time", "30m"],
         )?;
         let first = simulation_id(&first_output)?;
+        if name == "device-faults" {
+            return faulted(Path::new(&cli), &directory, state, first);
+        }
         if !representative {
             return Ok(());
         }
@@ -473,6 +477,92 @@ fn application(name: &str) {
             retained.display()
         );
     }
+}
+
+/// The oracle applies and heals every fault itself (`device_faults.py`) and
+/// observes each from inside the guest; the world view keeps the heals'
+/// counts and the victim's crash on a held FLUSH and reboot, and a replay
+/// of the run's retained inputs matches it in full state.
+fn faulted(cli: &Path, directory: &Path, state: &Path, faulted: &str) -> Result<(), String> {
+    let logs = invoke(
+        cli,
+        directory,
+        state,
+        "faulted-logs",
+        &["logs", faulted, "oracle", "--tail", "100"],
+    )?;
+    let expected = if cfg!(target_arch = "aarch64") {
+        "RESULT pass device faults faulted=read-eio,corrupt,write-eio,slow,race"
+    } else {
+        "RESULT pass device faults faulted=read-eio,corrupt,write-eio,slow"
+    };
+    if !logs.contains(expected) || !logs.contains("VICTIM crashed on a held flush and rebooted") {
+        return Err(format!("faulted run did not observe its faults: {logs}"));
+    }
+    let world = invoke(
+        cli,
+        directory,
+        state,
+        "faulted-world",
+        &["show", "--view", "world", faulted, "--json"],
+    )?;
+    let world: seedbox_api::WorldState =
+        serde_json::from_str(&world).map_err(|error| format!("faulted world: {error}"))?;
+    // The oracle's disk faults in the order it applied them, each with the
+    // handle the world gave it.
+    let handle = |fault: &&seedbox_api::FaultState| {
+        fault
+            .plan
+            .as_ref()
+            .and_then(|plan| plan["handle"].as_str())
+            .map(str::to_owned)
+    };
+    let disk: Vec<_> = world
+        .faults
+        .iter()
+        .filter(|fault| matches!(fault.action.as_str(), "disk_error" | "disk_latency"))
+        .collect();
+    let phases = [
+        ("read-eio", 8),
+        ("corrupt", 8),
+        ("write-eio", 1),
+        ("slow", 4),
+    ];
+    if disk.len() != phases.len() {
+        return Err(format!("expected {} disk faults: {disk:?}", phases.len()));
+    }
+    for ((phase, at_least), fault) in phases.into_iter().zip(&disk) {
+        let applied = handle(fault).ok_or_else(|| format!("{phase} has no handle: {fault:?}"))?;
+        let counts = world
+            .faults
+            .iter()
+            .find(|heal| heal.action == "heal" && handle(heal).as_deref() == Some(&applied))
+            .and_then(|heal| heal.counts)
+            .ok_or_else(|| format!("{phase} ({applied}) heal has no counts"))?;
+        if counts.affected < at_least || counts.affected > counts.matched {
+            return Err(format!("{phase} heal counts {counts:?}"));
+        }
+    }
+    let victim = world
+        .machines
+        .iter()
+        .find(|machine| machine.name == "victim")
+        .ok_or("victim missing from the world")?;
+    if victim.incarnation < 1 {
+        return Err(format!("victim never rebooted: {victim:?}"));
+    }
+    let replay = invoke(
+        cli,
+        directory,
+        state,
+        "faulted-replay",
+        &["replay", faulted, "--wall-time", "30m"],
+    )?;
+    let replayed = replay
+        .lines()
+        .find_map(|line| line.strip_prefix("MATCH: "))
+        .ok_or_else(|| format!("missing faulted replay MATCH: {replay}"))?;
+    compare(cli, directory, state, "compare-faulted", faulted, replayed)
 }
 
 /// The acceptance fixture owns its server process; retained reports outlive it.

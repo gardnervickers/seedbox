@@ -3,7 +3,7 @@ use super::*;
 wire_enum!(Vm; units {0=>Up,1=>Paused,2=>Down} tuples {} records {});
 wire_enum!(Process; units {0=>Running,1=>Stopped,2=>Frozen} tuples {} records {});
 wire_enum!(CommandKind; units {1=>StepRealtime} tuples {0=>Application(v0)} records {});
-wire_enum!(Effect; units {0=>Spawn,1=>Pause,2=>Resume,3=>Crash,4=>Reboot,5=>Shutdown,10=>Partition,11=>Unpartition,13=>Unshape,14=>Select,15=>Unselect} tuples {6=>Execution(v0),7=>Drift(v0),8=>StepRealtime(v0),9=>Process(v0),12=>Shape(v0,v1)} records {});
+wire_enum!(Effect; units {0=>Spawn,1=>Pause,2=>Resume,3=>Crash,4=>Reboot,5=>Shutdown,10=>Partition,11=>Unpartition,13=>Unshape,14=>Select,15=>Unselect} tuples {6=>Execution(v0),7=>Drift(v0),8=>StepRealtime(v0),9=>Process(v0),12=>Shape(v0,v1)} records {16=>Fault{record,fault},17=>Unfault{record}});
 wire_enum!(Scope; units {} tuples {} records {0=>Machine{name,boot},1=>Links{left,right},2=>DirectedLinks{from,to},3=>Connection{connection}});
 wire_enum!(FaultAction; units {1=>Heal} tuples {0=>Effect(v0)} records {});
 wire_enum!(Requester; units {} tuples {1=>Trigger(v0),2=>Input(v0)} records {0=>Call{source,id}});
@@ -21,6 +21,7 @@ wire_enum!(Notice; units {} tuples {0=>Admitted(v0),1=>Settled(v0)} records {2=>
 wire_struct!(Settlement {
     record_id,
     network,
+    counts,
     fault,
     requester,
     scope,
@@ -34,7 +35,7 @@ wire_struct!(Settlement {
     command,
     detail
 });
-wire_enum!(Plan; units {} tuples {0=>Settled(v0)} records {1=>Effect{fault,scope,at,effect,command,handle},2=>Wake{token,at},3=>Deadline{fault,at},4=>Reply{boot,source,id,at,payload}});
+wire_enum!(Plan; units {} tuples {0=>Settled(v0)} records {1=>Effect{fault,scope,at,effect,command,handle},2=>Wake{token,at},3=>Deadline{fault,at},4=>Reply{boot,source,id,at,payload},5=>Hold{source,trigger,op,nth,until},6=>Release{source,trigger}});
 // The boxed immediate receipt has no extra wire tag. Charge its owned object
 // before constructing it even though persisted timelines reject this plan arm.
 impl crate::persistence::Wire for Box<Settlement> {
@@ -117,6 +118,14 @@ impl Service {
             )?;
         } else {
             require(!p.healing, "handleless heal")?;
+        }
+        if let Effect::Fault { record, .. } | Effect::Unfault { record } = p.effect {
+            require(
+                p.handle
+                    .as_ref()
+                    .is_some_and(|plan| plan.record_id.0 == record),
+                "pending device fault record",
+            )?;
         }
         if let Some(counts) = &p.network {
             counts.check_persist()?;
@@ -428,6 +437,9 @@ impl Service {
             Plan::Settled(_) => Err(crate::persistence::CodecError::Invalid(
                 "settlement cannot be queued",
             )),
+            Plan::Hold { .. } | Plan::Release { .. } => Err(
+                crate::persistence::CodecError::Invalid("a hold is sent at once, never queued"),
+            ),
             Plan::Effect {
                 fault,
                 at: t,

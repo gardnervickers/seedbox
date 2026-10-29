@@ -88,6 +88,9 @@ impl<M: Machine, R> Machine for Environment<M, R> {
     fn snapshot(&mut self) -> Result<M::Snapshot, M::Error> {
         self.machine.snapshot()
     }
+    fn take_fault_counts(&mut self, id: u64) -> Result<Option<crate::pv::FaultCounts>, M::Error> {
+        self.machine.take_fault_counts(id)
+    }
 }
 /// Drive a raw backend with explicit caller-owned queued inputs.
 pub fn run_requests<M: Machine<Context = ()>>(

@@ -211,6 +211,54 @@ pub enum Action {
         machine: String,
         factor_permille: u64,
     },
+    /// Select the machine's disk requests of kind `op`, each with probability
+    /// `ppm` per million on its own seeded stream, until the handle is healed.
+    /// With `eio` a selected request completes with an I/O error before any
+    /// disk effect: a failed write changes nothing, a failed flush makes
+    /// nothing durable, a failed read returns no data. With `corrupt` it
+    /// succeeds with one sector replaced by seeded bytes: a read returns them
+    /// and the disk keeps its data, a write stores them. `scope: data` spares
+    /// the filesystem's static metadata (see [`DiskScope::Data`]). The fault survives a guest device
+    /// reset and applies to every incarnation of the machine; heal stops new
+    /// selections and settles with [`FaultCounts`]. Requests already completed
+    /// stay as they completed. See [`validate_disk_error`].
+    DiskError {
+        handle: String,
+        machine: String,
+        op: DiskOp,
+        ppm: u64,
+        #[serde(default, skip_serializing_if = "DiskEffect::is_eio")]
+        effect: DiskEffect,
+        #[serde(default, skip_serializing_if = "DiskScope::is_all")]
+        scope: DiskScope,
+    },
+    /// Complete the machine's disk requests of kind `op` late, until the
+    /// handle is healed: each takes `latency_ns` plus a seeded draw up to
+    /// `jitter_ns`, and completes no earlier than the request before it, so
+    /// completion order stays submission order. A request has its disk
+    /// effect, data, status and interrupt when it completes; a crash or device
+    /// reset drops requests still pending, which were never acknowledged.
+    /// Heal stops delaying new requests; queued ones complete at their times.
+    /// See [`validate_disk_latency`].
+    DiskLatency {
+        handle: String,
+        machine: String,
+        op: DiskOp,
+        latency_ns: u64,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        jitter_ns: u64,
+    },
+    /// Perturb the machine's thread scheduling until the handle is healed:
+    /// its guest kernel yields the CPU at `ppm` per million syscalls and
+    /// progress charges, drawn on a seeded guest stream, so runnable threads
+    /// switch at points a single guest CPU rarely reaches. It charges no time
+    /// and applies to every incarnation; heal restores ordinary scheduling.
+    /// See [`validate_preempt`].
+    Preempt {
+        handle: String,
+        machine: String,
+        ppm: u64,
+    },
     /// Freeze the machine's CPU and devices; the world goes on.
     Pause {
         machine: String,
@@ -242,6 +290,9 @@ impl Action {
             Self::ClockSkew { .. } => "clock_skew",
             Self::ClockDrift { .. } => "clock_drift",
             Self::Throttle { .. } => "throttle",
+            Self::DiskError { .. } => "disk_error",
+            Self::DiskLatency { .. } => "disk_latency",
+            Self::Preempt { .. } => "preempt",
             Self::Pause { .. } => "pause",
             Self::Resume { .. } => "resume",
             Self::Crash { .. } => "crash",
@@ -260,8 +311,45 @@ impl Action {
             | Self::Reboot { machine }
             | Self::ClockSkew { machine, .. }
             | Self::ClockDrift { machine, .. }
-            | Self::Throttle { machine, .. } => Some(machine),
+            | Self::Throttle { machine, .. }
+            | Self::DiskError { machine, .. }
+            | Self::DiskLatency { machine, .. }
+            | Self::Preempt { machine, .. } => Some(machine),
             _ => None,
+        }
+    }
+    /// Check the arguments whose bounds this protocol defines: clock, throttle,
+    /// disk and scheduler faults. A shape's link policy is checked where links
+    /// are compiled, and every action's targets and state at admission.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::ClockSkew {
+                offset_ns,
+                max_offset_ns,
+                ..
+            } => validate_clock_skew(*offset_ns, *max_offset_ns),
+            Self::ClockDrift {
+                rate_ppb,
+                max_rate_ppb,
+                ..
+            } => validate_clock_drift(*rate_ppb, *max_rate_ppb),
+            Self::Throttle {
+                factor_permille, ..
+            } => validate_throttle(*factor_permille),
+            Self::DiskError {
+                op,
+                ppm,
+                effect,
+                scope,
+                ..
+            } => validate_disk_error(*op, *ppm, *effect, *scope),
+            Self::DiskLatency {
+                latency_ns,
+                jitter_ns,
+                ..
+            } => validate_disk_latency(*latency_ns, *jitter_ns),
+            Self::Preempt { ppm, .. } => validate_preempt(*ppm),
+            _ => Ok(()),
         }
     }
     /// Effects the target's supervisor carries out and acknowledges.
@@ -319,10 +407,125 @@ pub fn validate_throttle(factor_permille: u64) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "factor_permille must be in [{}, {}]",
+        "throttle factor_permille must be {} to {}",
         THROTTLE_PERMILLE.start(),
         THROTTLE_PERMILLE.end()
     ))
+}
+
+/// Which disk requests a disk fault selects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskOp {
+    Read,
+    Write,
+    Flush,
+    /// Reads, writes and flushes.
+    Any,
+}
+/// What a `disk_error` fault does to a request it selects.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskEffect {
+    /// Complete it with virtio-blk's IOERR status, which the guest sees as EIO.
+    #[default]
+    Eio,
+    /// Complete it successfully with one sector of seeded bytes: silent
+    /// corruption. Flushes carry no data and are never selected.
+    Corrupt,
+}
+impl DiskEffect {
+    pub fn is_eio(&self) -> bool {
+        *self == Self::Eio
+    }
+}
+/// Which sectors a `disk_error` fault may select.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskScope {
+    /// Any request of the selected kind.
+    #[default]
+    All,
+    /// Only reads and writes that touch none of the ext4 metadata laid out
+    /// when the disk is formatted: superblocks and their backups, group
+    /// descriptors and reserved GDT blocks, block and inode bitmaps, inode
+    /// tables and the journal. Metadata ext4 allocates later (directory,
+    /// extent-tree and xattr blocks) is ordinary data to this scope and can be
+    /// selected. Nothing is selected before the disk is formatted, and flushes
+    /// never are.
+    Data,
+}
+impl DiskScope {
+    pub fn is_all(&self) -> bool {
+        *self == Self::All
+    }
+}
+/// Disk error probabilities, in parts per million: from rare to every request.
+pub const DISK_ERROR_PPM: std::ops::RangeInclusive<u64> = 1..=MAX_PPM;
+/// Disk request latencies, in nanoseconds: from a fast SSD (1 µs) to a
+/// stalled device (1 s). Jitter is at most the same upper bound.
+pub const DISK_LATENCY_NS: std::ops::RangeInclusive<u64> = 1_000..=1_000_000_000;
+/// Scheduler perturbation rates, in parts per million of syscalls and
+/// progress charges: from rare to every one.
+pub const PREEMPT_PPM: std::ops::RangeInclusive<u64> = 1..=MAX_PPM;
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+/// A probability within [`DISK_ERROR_PPM`]. Corruption needs data, so it
+/// cannot select only flushes; neither can the data scope.
+pub fn validate_disk_error(
+    op: DiskOp,
+    ppm: u64,
+    effect: DiskEffect,
+    scope: DiskScope,
+) -> Result<(), String> {
+    if !DISK_ERROR_PPM.contains(&ppm) {
+        return Err(format!(
+            "disk_error ppm must be {} to {}",
+            DISK_ERROR_PPM.start(),
+            DISK_ERROR_PPM.end()
+        ));
+    }
+    if op == DiskOp::Flush && (effect == DiskEffect::Corrupt || scope == DiskScope::Data) {
+        return Err(
+            "disk_error on flushes takes neither the corrupt effect nor the data scope".into(),
+        );
+    }
+    Ok(())
+}
+/// A latency within [`DISK_LATENCY_NS`] and a jitter of at most its upper bound.
+pub fn validate_disk_latency(latency_ns: u64, jitter_ns: u64) -> Result<(), String> {
+    if !DISK_LATENCY_NS.contains(&latency_ns) || jitter_ns > *DISK_LATENCY_NS.end() {
+        return Err(format!(
+            "disk_latency latency_ns must be {} to {} and jitter_ns at most {}",
+            DISK_LATENCY_NS.start(),
+            DISK_LATENCY_NS.end(),
+            DISK_LATENCY_NS.end()
+        ));
+    }
+    Ok(())
+}
+/// A rate within [`PREEMPT_PPM`].
+pub fn validate_preempt(ppm: u64) -> Result<(), String> {
+    if !PREEMPT_PPM.contains(&ppm) {
+        return Err(format!(
+            "preempt ppm must be {} to {}",
+            PREEMPT_PPM.start(),
+            PREEMPT_PPM.end()
+        ));
+    }
+    Ok(())
+}
+/// What a disk fault selected and did, as its heal settles. For
+/// `disk_error`, `affected` counts failed or corrupted requests; for
+/// `disk_latency`, delayed ones. Faults that count nothing report none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FaultCounts {
+    /// Requests of the selected kind and scope seen while the fault was active.
+    pub matched: u64,
+    /// Matched requests the fault acted on.
+    pub affected: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,3 +536,6 @@ pub struct Plan {
     #[serde(flatten)]
     pub action: Action,
 }
+
+#[cfg(test)]
+mod tests;

@@ -25,6 +25,7 @@ pub(in crate::machine::pv) fn fixture(
         },
         architecture: fixture_architecture(),
         block: disk.then(block::Transport::default),
+        disk_faults: disk.then(Default::default),
     })
 }
 pub(in crate::machine::pv::worker) fn fixture_architecture() -> Architecture {

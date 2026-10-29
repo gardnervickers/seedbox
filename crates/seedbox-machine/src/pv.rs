@@ -146,6 +146,62 @@ pub enum Request {
         /// FCS or a virtio-net header. The EtherType and payload are opaque.
         bytes: Vec<u8>,
     },
+    // Disk and scheduler faults act inside the machine's own devices and
+    // guest, so the Driver installs them through the timed inbox, like
+    // lifecycle requests, and reads their counts back after a heal.
+    /// Start a [`DeviceFault`] identified by `id`, with draws keyed by `seed`.
+    /// It applies to this boot and every later one, surviving guest device
+    /// resets, until [`Request::HealFault`]; each boot draws on a fresh
+    /// stream derived from `seed` and that boot. An exited machine keeps it
+    /// for its next boot. Reusing a live `id` is invalid caller input.
+    InstallFault {
+        id: u64,
+        seed: u64,
+        fault: DeviceFault,
+    },
+    /// Stop the fault `id`. Its final counts become readable once through
+    /// [`crate::machine::Machine::take_fault_counts`]. Requests a latency
+    /// fault already delayed still complete at their times.
+    HealFault { id: u64 },
+    /// Hold the `nth` guest disk request of kind `op` from now on, counted
+    /// across boots, if it arrives before machine time `until`. The held
+    /// request has no effect and nothing after it is processed: the machine
+    /// emits [`Response::BlockRequestHeld`] and stays blocked, taking no
+    /// input but Crash, Reboot and fault requests, until its boot ends. The
+    /// hold survives reboots until it matches or is released.
+    HoldBlockRequest {
+        trigger: u32,
+        op: DiskOp,
+        nth: u64,
+        until: Option<Timestamp>,
+    },
+    /// Stop counting for the hold of `trigger`; a request it already holds
+    /// stays held.
+    ReleaseBlockRequest { trigger: u32 },
+}
+
+pub use seedbox_engine_protocol::control::{DiskEffect, DiskOp, DiskScope, FaultCounts};
+
+/// A fault a machine carries out in its own devices or guest kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DeviceFault {
+    /// Select disk requests of kind `op` with probability `ppm` per million:
+    /// complete them with IOERR, or with one sector of seeded bytes.
+    DiskError {
+        op: DiskOp,
+        ppm: u32,
+        effect: DiskEffect,
+        scope: DiskScope,
+    },
+    /// Complete disk requests of kind `op` after `latency_ns` plus a draw of
+    /// at most `jitter_ns`, in submission order.
+    DiskLatency {
+        op: DiskOp,
+        latency_ns: u64,
+        jitter_ns: u64,
+    },
+    /// Yield the guest CPU at `ppm` per million syscalls and progress charges.
+    Preempt { ppm: u32 },
 }
 
 pub use ethernet::frame_in_bounds;
@@ -281,6 +337,10 @@ pub enum Response {
         /// FCS or a virtio-net header. The EtherType and payload are opaque.
         bytes: Vec<u8>,
     },
+    /// The hold of `trigger` (see [`Request::HoldBlockRequest`]) holds a
+    /// guest disk request: from this output on, the machine is blocked until
+    /// a Crash or Reboot ends its boot.
+    BlockRequestHeld { trigger: u32 },
 }
 
 /// Application output pipe, distinct from boot console bytes.

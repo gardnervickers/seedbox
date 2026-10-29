@@ -4,7 +4,9 @@
 //! O/i/w/r: Machine::run -> record_exit after Interrupted/maintenance exclusions
 //! and accepted LAST; writes include value, reads use zero. H: Halt/Wait.
 //! d: Block::write_traced -> process callback AFTER each successful used-ring
-//! completion, preserving partial-prefix errors and actual completion order.
+//! completion, preserving partial-prefix errors and actual completion order;
+//! a delayed request records it at the rendezvous where it completes.
+//! h: a block request hold took its request (size0, a=notify time, b=trigger).
 //! N: fresh Boot dispatch after arch::load/reset/adopt, never restore.
 //! S: PV boot entropy-generation installation (arch::load wrote the boot seed);
 //! generation is physical boot ordinal. No runtime page-reseed API exists.

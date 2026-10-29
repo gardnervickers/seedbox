@@ -106,6 +106,17 @@ pub fn execute(store: &mut Store, buffers: &mut impl Buffers) -> Result<Completi
     Ok(complete(buffers, data, STATUS_OK))
 }
 
+/// Complete an answerable request with IOERR before any effect: nothing is
+/// read past the header, no data is written and the store is untouched. A
+/// `disk_error` fault's `eio` selection completes this way.
+pub fn fail(buffers: &mut impl Buffers) -> Result<Completion, Malformed> {
+    let (readable, writable) = (buffers.readable(), buffers.writable());
+    if readable < HEADER || writable == 0 || !representable(readable, writable) {
+        return Err(Malformed);
+    }
+    Ok(complete(buffers, 0, STATUS_IOERR))
+}
+
 fn complete(buffers: &mut impl Buffers, data: usize, status: u8) -> Completion {
     buffers.write(buffers.writable() - 1, &[status]);
     Completion {

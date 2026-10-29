@@ -126,6 +126,7 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     driver
         .allow_crashes(allow_crashes(&request.prepared))
         .map_err(|e| bad(e.to_string()))?;
+    driver.set_engine(super::actions::engine(&request.prepared.inventory));
     if request.start_paused {
         driver
             .with_barrier(|barrier| barrier.set_rate(seedbox_driver::driver::PlaybackRate::Paused))
@@ -301,6 +302,7 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
         },
     )
     .map_err(|e| bad(e.to_string()))?;
+    driver.set_engine(super::actions::engine(&request.prepared.inventory));
     if names.next().is_some() {
         return Err(bad("Driver checkpoint name inventory has unused entries"));
     }
@@ -345,7 +347,25 @@ fn program(
         request.simulated_time_ns,
     )
     .map_err(bad)?;
+    // Refuse what this engine cannot carry out before any machine boots,
+    // rather than failing when the input becomes due.
+    check_program_engine(&request.program, &request.prepared.inventory)?;
     Ok(request.program.clone())
+}
+/// Refuse a program input `inventory`'s engine cannot carry out, naming the
+/// input and what the engine lacks. The parent runs it before it launches a
+/// worker, so the refusal is the run's error rather than a worker failure;
+/// the worker runs it again on the request it is given.
+pub(super) fn check_program_engine(
+    program: &[seedbox_engine_protocol::input_program::TimedInput],
+    inventory: &Inventory,
+) -> Result<()> {
+    let engine = super::actions::engine(inventory);
+    for input in program {
+        seedbox_driver::driver::faults::check_engine(&input.action, engine)
+            .map_err(|error| Error::Setup(format!("input {}: {error}", input.key)))?;
+    }
+    Ok(())
 }
 fn encode(snapshot: Snapshot, writer: &mut BufWriter<fs::File>) -> Result<()> {
     snapshot.write_to(writer).map_err(bad)
@@ -363,20 +383,14 @@ fn materialize_factory(
 ) -> Result<Assets> {
     super::policy::check_optional(inventory.backend_policy()).map_err(bad)?;
     use crate::runtime_assets::Runtime;
-    use seedbox_spec::backend::CpuBackend;
-    use seedbox_spec::definition::Architecture;
-    let (archive, backend, architecture) = match inventory {
-        Inventory::Pv { runtime, .. } => (
-            runtime,
-            CpuBackend::Pv,
-            if cfg!(target_arch = "aarch64") {
-                Architecture::Aarch64
-            } else {
-                Architecture::X86_64
-            },
-        ),
-        Inventory::Tcg { runtime, .. } => (runtime, CpuBackend::Tcg, Architecture::X86_64),
-    };
+    let (Inventory::Pv {
+        runtime: archive, ..
+    }
+    | Inventory::Tcg {
+        runtime: archive, ..
+    }) = inventory;
+    let engine = super::actions::engine(inventory);
+    let (backend, architecture) = (engine.backend, engine.architecture);
     checkpoint::verified(archive)?;
     let (guest_assets, qemu, inputs) = if let Some(binding) = binding {
         binding.validate_archive(archive).map_err(bad)?;

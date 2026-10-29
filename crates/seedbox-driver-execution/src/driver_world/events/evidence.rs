@@ -140,8 +140,13 @@ pub(in crate::driver_world) fn encode(
             outcome_at,
             detail,
             network,
+            counts,
         } => {
-            json!({"type":"fault_settled","record":record(names,fault)?,"status":match status{SettlementStatus::Applied=>"applied",SettlementStatus::Unavailable=>"unavailable",SettlementStatus::Rejected=>"rejected",SettlementStatus::Failed=>"failed"},"outcome_at":outcome_at.map(|at|at.as_nanos()),"detail":detail,"network":network})
+            let mut settled = json!({"type":"fault_settled","record":record(names,fault)?,"status":match status{SettlementStatus::Applied=>"applied",SettlementStatus::Unavailable=>"unavailable",SettlementStatus::Rejected=>"rejected",SettlementStatus::Failed=>"failed"},"outcome_at":outcome_at.map(|at|at.as_nanos()),"detail":detail,"network":network});
+            if let Some(counts) = counts {
+                settled["counts"] = json!(counts);
+            }
+            settled
         }
         EventKind::InputRejected { key, rejection } => {
             json!({"type":"input_rejected","key":key.as_str(),"reason":rejection_reason(rejection.reason)?,"detail":rejection.detail})

@@ -82,6 +82,9 @@ pub enum EventKind {
         /// Typed network heal counts, also returned in the guest reply; None
         /// for unrelated settlements. This field adds no event or sequence.
         network: Option<super::NetworkSettlement>,
+        /// What a healed disk fault matched and acted on, over every boot it
+        /// applied to; None for other settlements.
+        counts: Option<crate::pv::FaultCounts>,
     },
     /// A guest call armed an output trigger at `at`. Bytes observed at or
     /// after `deadline` never match. `source` is the watched machine whose
@@ -268,6 +271,8 @@ pub enum FaultAction {
     },
     /// Select the exact connection carried by FaultTarget::Connection.
     DropConnection,
+    /// Install a disk or scheduler fault in the machine.
+    DeviceFault(crate::pv::DeviceFault),
     /// Restore the configuration replaced by an earlier fault's handle: nominal
     /// execution cost, nominal clock rate (keeping accrued offset), the inverse
     /// realtime step, or the links its partition cut. A step whose boot ended

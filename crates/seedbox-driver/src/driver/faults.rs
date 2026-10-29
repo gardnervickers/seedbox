@@ -5,6 +5,7 @@ use crate::{
 };
 use seedbox_engine_protocol::control::Action as Public;
 use seedbox_machine::clock::ClockRate;
+use seedbox_spec::{backend::CpuBackend, definition::Architecture};
 use std::{num::NonZeroI64, time::Duration};
 
 /// Translate a public action without resolving targets, sampling RNG or allocating IDs.
@@ -152,8 +153,164 @@ pub fn translate(
             };
             (action, Some(handle(alias)?))
         }
+        Public::DiskError {
+            handle: alias,
+            machine,
+            op,
+            ppm,
+            effect,
+            scope,
+        } => {
+            action.validate()?;
+            let fault = crate::pv::DeviceFault::DiskError {
+                op: *op,
+                ppm: u32::try_from(*ppm).map_err(|_| "disk_error ppm exceeds u32".to_owned())?,
+                effect: *effect,
+                scope: *scope,
+            };
+            (
+                Action::DeviceFault {
+                    target: target(machine),
+                    fault,
+                },
+                Some(handle(alias)?),
+            )
+        }
+        Public::DiskLatency {
+            handle: alias,
+            machine,
+            op,
+            latency_ns,
+            jitter_ns,
+        } => {
+            action.validate()?;
+            (
+                Action::DeviceFault {
+                    target: target(machine),
+                    fault: crate::pv::DeviceFault::DiskLatency {
+                        op: *op,
+                        latency_ns: *latency_ns,
+                        jitter_ns: *jitter_ns,
+                    },
+                },
+                Some(handle(alias)?),
+            )
+        }
+        Public::Preempt {
+            handle: alias,
+            machine,
+            ppm,
+        } => {
+            action.validate()?;
+            (
+                Action::DeviceFault {
+                    target: target(machine),
+                    fault: crate::pv::DeviceFault::Preempt {
+                        ppm: u32::try_from(*ppm)
+                            .map_err(|_| "preempt ppm exceeds u32".to_owned())?,
+                    },
+                },
+                Some(handle(alias)?),
+            )
+        }
     };
     Ok((action, alias))
+}
+
+/// A CPU backend executing guests of one architecture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Engine {
+    pub backend: CpuBackend,
+    pub architecture: Architecture,
+}
+impl std::fmt::Display for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let architecture = match self.architecture {
+            Architecture::X86_64 => "x86_64",
+            Architecture::Aarch64 => "aarch64",
+        };
+        let backend = match self.backend {
+            CpuBackend::Pv => "PV",
+            CpuBackend::Tcg => "TCG",
+        };
+        write!(f, "{architecture} {backend}")
+    }
+}
+
+/// Machine support a fault needs beyond what every engine provides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Capability {
+    /// Selecting, failing and corrupting block requests at the device.
+    DiskSelection,
+    /// Completing block requests after their notification.
+    DelayedBlockCompletion,
+    /// Holding a block request at the device for a crash.
+    HeldBlockRequest,
+    /// The guest kernel's seeded yield at syscalls.
+    GuestYield,
+}
+impl Capability {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::DiskSelection => "disk request selection",
+            Self::DelayedBlockCompletion => "delayed block completion",
+            Self::HeldBlockRequest => "held block requests",
+            Self::GuestYield => "the guest yield hook",
+        }
+    }
+    /// Whether `engine` provides this capability. PV runs both architectures
+    /// through one block device and worker, so both select, delay and hold
+    /// requests. Only the ARM PV kernel's syscall hook yields yet; the x86
+    /// kernel has the same hook point but no yield. TCG's QEMU devices and
+    /// guest have none of them yet.
+    pub fn provided_by(self, engine: Engine) -> bool {
+        use {Architecture::*, CpuBackend::*};
+        match (self, engine.backend, engine.architecture) {
+            (Self::GuestYield, Pv, X86_64) => false,
+            (_, Pv, Aarch64 | X86_64) => true,
+            (_, Tcg, Aarch64 | X86_64) => false,
+        }
+    }
+    /// The capability a public action needs, if any.
+    pub fn required_by(action: &Public) -> Option<Self> {
+        match action {
+            Public::DiskError { .. } => Some(Self::DiskSelection),
+            Public::DiskLatency { .. } => Some(Self::DelayedBlockCompletion),
+            Public::Preempt { .. } => Some(Self::GuestYield),
+            _ => None,
+        }
+    }
+}
+fn require(engine: Engine, name: &str, capability: Option<Capability>) -> Result<(), String> {
+    match capability {
+        Some(capability) if !capability.provided_by(engine) => Err(format!(
+            "{name} needs {}, which {engine} does not provide",
+            capability.describe()
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Refuse `name`, which needs `capability`, unless `engine` provides it. A
+/// Driver told no engine provides nothing.
+pub(crate) fn require_capability(
+    engine: Option<Engine>,
+    name: &str,
+    capability: Capability,
+) -> Result<(), String> {
+    match engine {
+        Some(engine) => require(engine, name, Some(capability)),
+        None => Err(format!(
+            "{name} needs {}, and this Driver was told no engine",
+            capability.describe()
+        )),
+    }
+}
+
+/// Refuse an action `engine` cannot carry out. Every action main already
+/// implements runs on every engine.
+pub fn check_engine(action: &Public, engine: Engine) -> Result<(), String> {
+    require(engine, action.name(), Capability::required_by(action))
 }
 
 impl Action {
@@ -215,6 +372,10 @@ impl Action {
             }),
             Self::DropConnection { connection } => Ok(Command::DropConnection {
                 connection: connection.clone(),
+            }),
+            Self::DeviceFault { target, fault } => Ok(Command::DeviceFault {
+                target: wire(target),
+                fault: *fault,
             }),
             Self::DriftBounded {
                 target,

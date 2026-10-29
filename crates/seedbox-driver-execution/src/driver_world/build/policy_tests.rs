@@ -209,3 +209,38 @@ fn checkpoint_quantum_must_match_without_changing_saved_state() {
     assert_eq!(before, after);
     validate_checkpoint_quantum(&saved, 1_000_000).unwrap();
 }
+#[test]
+fn programs_beyond_the_engine_are_refused_before_any_machine_boots() {
+    let root = tempfile::tempdir().unwrap();
+    // The fixture inventory is TCG, which emulates x86_64.
+    let mut request = request(inventory(None), root.path().join("must-not-exist"));
+    assert_eq!(
+        super::super::actions::engine(&request.prepared.inventory),
+        seedbox_driver::driver::faults::Engine {
+            backend: seedbox_spec::backend::CpuBackend::Tcg,
+            architecture: seedbox_spec::definition::Architecture::X86_64,
+        }
+    );
+    request.simulated_time_ns = 100;
+    request.program = vec![serde_json::from_value(serde_json::json!({
+        "key": "slow", "at_ns": 10,
+        "action": {"action": "disk_latency", "handle": "slow", "machine": "oracle", "op": "any", "latency_ns": 1000},
+    }))
+    .unwrap()];
+    assert_eq!(
+        program(&request).unwrap_err().to_string(),
+        "input slow: disk_latency needs delayed block completion, which x86_64 TCG does not provide"
+    );
+}
+#[test]
+fn injected_faults_meet_the_engine_check_before_compilation() {
+    let preempt: seedbox_engine_protocol::control::Action = serde_json::from_value(
+        serde_json::json!({"action": "preempt", "handle": "p", "machine": "oracle", "ppm": 10}),
+    )
+    .unwrap();
+    let error = super::super::actions::translate(&inventory(None), &preempt, 10).unwrap_err();
+    assert_eq!(
+        error,
+        "preempt needs the guest yield hook, which x86_64 TCG does not provide"
+    );
+}

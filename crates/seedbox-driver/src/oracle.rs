@@ -13,12 +13,18 @@
 //! calling machine's drifted time base; see the Driver's time-base docs.
 //!
 //! Network operations use the Driver-owned canonical network policies.
-//! The guest schema defines no disk RPC operation; disk policy is likewise
-//! unsupported, and this parser does not invent disk operation names. Inspect
+//! `disk_error`, `disk_latency` and `preempt` carry the control actions'
+//! arguments, checked by the same validators; the request kind a disk fault
+//! selects is `disk_op` here, because `op` names the operation. Whether the
+//! engine provides them is checked at admission. A `block_request` trigger
+//! crashes a machine on a request its device holds. Inspect
 //! results use a generic typed serialization seam so the complete projection
 //! (services, machines, active handles, network counters, optional triggers) can
 //! be supplied by its owner without defining a misleading partial schema here.
 
+use seedbox_engine_protocol::control::{
+    validate_disk_error, validate_disk_latency, validate_preempt,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, num::NonZeroU32};
@@ -38,7 +44,9 @@ pub(crate) enum Target {
     Key(String),
 }
 
-pub(crate) use seedbox_engine_protocol::control::{Connection, NetworkFaults};
+pub(crate) use seedbox_engine_protocol::control::{
+    Connection, DiskEffect, DiskOp, DiskScope, NetworkFaults,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -50,6 +58,20 @@ pub(crate) enum TriggerFault {
         left: Vec<Target>,
         right: Vec<Target>,
     },
+    /// A `block_request` trigger's only fault: crash the trigger's own
+    /// machine, undelayed, while the held request is still unwritten.
+    Crash {
+        target: Target,
+    },
+}
+
+/// What a `block_request` trigger watches: the source machine's `nth` disk
+/// request of kind `op` from arming, which its device holds unwritten.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BlockRequest {
+    pub(crate) op: DiskOp,
+    pub(crate) nth: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -105,12 +127,39 @@ pub(crate) enum Operation {
         target: Target,
         factor_permille: u64,
     },
+    /// Fail or corrupt the target's disk requests of kind `disk_op`.
+    DiskError {
+        target: Target,
+        disk_op: DiskOp,
+        ppm: u64,
+        #[serde(default)]
+        effect: DiskEffect,
+        #[serde(default)]
+        scope: DiskScope,
+    },
+    /// Complete the target's disk requests of kind `disk_op` late.
+    DiskLatency {
+        target: Target,
+        disk_op: DiskOp,
+        latency_ns: u64,
+        #[serde(default)]
+        jitter_ns: u64,
+    },
+    /// Yield the target's guest kernel at seeded syscalls.
+    Preempt {
+        target: Target,
+        ppm: u64,
+    },
     Heal {
         handle: String,
     },
+    /// Watch `source` for an output `marker` or, instead, a `block_request`.
     ArmTrigger {
         source: Target,
-        marker: Vec<u8>,
+        #[serde(default)]
+        marker: Option<Vec<u8>>,
+        #[serde(default)]
+        block_request: Option<BlockRequest>,
         match_timeout_ns: u64,
         fault: TriggerFault,
     },
@@ -297,21 +346,72 @@ impl Operation {
                 seedbox_engine_protocol::control::validate_throttle(*factor_permille)
                     .map_err(OperationError::invalid)?;
             }
+            Self::DiskError {
+                disk_op,
+                ppm,
+                effect,
+                scope,
+                ..
+            } => validate_disk_error(*disk_op, *ppm, *effect, *scope)
+                .map_err(OperationError::invalid)?,
+            Self::DiskLatency {
+                latency_ns,
+                jitter_ns,
+                ..
+            } => validate_disk_latency(*latency_ns, *jitter_ns).map_err(OperationError::invalid)?,
+            Self::Preempt { ppm, .. } => validate_preempt(*ppm).map_err(OperationError::invalid)?,
             Self::Heal { handle } if handle.is_empty() => {
                 return Err(OperationError::invalid("handle must be nonempty string"));
             }
             Self::ArmTrigger {
                 marker,
+                block_request,
                 match_timeout_ns,
+                fault,
                 ..
-            } if marker.is_empty() || marker.len() > 256 || *match_timeout_ns == 0 => {
-                return Err(OperationError::invalid(
-                    "trigger requires 1..=256 marker bytes and positive match timeout",
-                ));
-            }
+            } => match (marker, block_request) {
+                (Some(marker), None)
+                    if marker.is_empty() || marker.len() > 256 || *match_timeout_ns == 0 =>
+                {
+                    return Err(OperationError::invalid(
+                        "trigger requires 1..=256 marker bytes and positive match timeout",
+                    ));
+                }
+                (Some(_), None) if matches!(fault, TriggerFault::Crash { .. }) => {
+                    return Err(OperationError::invalid(
+                        "only a block_request trigger crashes its machine",
+                    ));
+                }
+                (None, Some(request))
+                    if request.nth == 0
+                        || *match_timeout_ns == 0
+                        || !matches!(fault, TriggerFault::Crash { .. }) =>
+                {
+                    return Err(OperationError::invalid(
+                        "block_request trigger requires a positive nth and match timeout, and crashes its machine",
+                    ));
+                }
+                (Some(_), None) | (None, Some(_)) => {}
+                _ => {
+                    return Err(OperationError::invalid(
+                        "trigger watches exactly one of a marker or a block_request",
+                    ));
+                }
+            },
             _ => {}
         }
         Ok(())
+    }
+
+    /// The engine capability a device fault needs, with its operation name.
+    pub(crate) fn capability(&self) -> Option<(&'static str, crate::driver::faults::Capability)> {
+        use crate::driver::faults::Capability;
+        match self {
+            Self::DiskError { .. } => Some(("disk_error", Capability::DiskSelection)),
+            Self::DiskLatency { .. } => Some(("disk_latency", Capability::DelayedBlockCompletion)),
+            Self::Preempt { .. } => Some(("preempt", Capability::GuestYield)),
+            _ => None,
+        }
     }
 
     /// Check duration/deadline arithmetic at the caller's committed admission

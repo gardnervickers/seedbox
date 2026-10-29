@@ -127,6 +127,80 @@ fn actions_become_rpc_calls_and_handles_map_to_the_worlds() {
 }
 
 #[test]
+fn disk_and_scheduler_faults_use_the_oracle_operations() {
+    use crate::control::{DiskEffect, DiskOp, DiskScope};
+    let (directory, server) = serve(|request| {
+        let handle = format!("p{}", request["id"]);
+        ok(json!({ "handle": handle }))
+    });
+    let mut world = GuestWorld::connect_to(directory.path().join("control.sock")).unwrap();
+    for action in [
+        Action::DiskError {
+            handle: "eio".into(),
+            machine: "db".into(),
+            op: DiskOp::Write,
+            ppm: 10,
+            effect: DiskEffect::Eio,
+            scope: DiskScope::All,
+        },
+        Action::DiskError {
+            handle: "rot".into(),
+            machine: "db".into(),
+            op: DiskOp::Read,
+            ppm: 20,
+            effect: DiskEffect::Corrupt,
+            scope: DiskScope::Data,
+        },
+        Action::DiskLatency {
+            handle: "slow".into(),
+            machine: "db".into(),
+            op: DiskOp::Flush,
+            latency_ns: 3_000_000,
+            jitter_ns: 0,
+        },
+        Action::DiskLatency {
+            handle: "jittery".into(),
+            machine: "db".into(),
+            op: DiskOp::Any,
+            latency_ns: 3_000_000,
+            jitter_ns: 500,
+        },
+        Action::Preempt {
+            handle: "race".into(),
+            machine: "db".into(),
+            ppm: 1_000,
+        },
+        Action::Heal {
+            handle: "slow".into(),
+        },
+    ] {
+        world.apply(&action).unwrap();
+    }
+    drop(world);
+    let mut requests = server.join().unwrap();
+    for request in &mut requests {
+        let object = request.as_object_mut().unwrap();
+        object.remove("version");
+        object.remove("id");
+    }
+    let db = json!({"machine": "db"});
+    assert_eq!(
+        requests,
+        [
+            json!({"op": "disk_error", "target": db, "disk_op": "write", "ppm": 10}),
+            json!({"op": "disk_error", "target": db, "disk_op": "read", "ppm": 20,
+                   "effect": "corrupt", "scope": "data"}),
+            json!({"op": "disk_latency", "target": db, "disk_op": "flush",
+                   "latency_ns": 3_000_000}),
+            json!({"op": "disk_latency", "target": db, "disk_op": "any",
+                   "latency_ns": 3_000_000, "jitter_ns": 500}),
+            json!({"op": "preempt", "target": db, "ppm": 1_000}),
+            json!({"op": "heal", "handle": "p3"}),
+        ]
+    );
+}
+
+#[test]
 fn an_uncorrelated_response_closes_the_connection() {
     let (directory, server) = serve(|_| {
         let mut response = ok(json!({"now_ns": 1}));

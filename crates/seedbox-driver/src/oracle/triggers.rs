@@ -1,9 +1,10 @@
 //! Private streaming trigger state, independent of source-channel policy.
 //!
 //! The caller resolves machine names and feeds the ordered union of committed
-//! stdout, stderr and raw console bytes, preserving their observation times.
-//! A match returns a Stop plan at the current committed barrier, not back at the
-//! byte's earlier observation time. This component neither routes nor mutates
+//! stdout, stderr and raw console bytes, preserving their observation times,
+//! and each disk request a source's machine holds for a `block_request`
+//! trigger. A match returns its effect at the current committed barrier, not
+//! back at the byte's or hold's earlier observation time. This component neither routes nor mutates
 //! Driver. The caller owns nondecreasing commit progress, future expiry barriers
 //! and arm-ID-ordered admission through `due`/`resolve`. Guest command completion
 //! remains separate from admitting a trigger effect.
@@ -11,6 +12,7 @@
 const MAX_TRIGGERS: usize = 64;
 const MAX_MARKER: usize = 256;
 use super::PROCESS_EFFECT_TIMEOUT_NS;
+use seedbox_engine_protocol::control::DiskOp;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Status {
@@ -33,13 +35,35 @@ pub(crate) enum TriggerAction {
         left: Vec<String>,
         right: Vec<String>,
     },
+    /// Crash the named machine: a `block_request` trigger's only effect, on
+    /// its own source.
+    Crash(String),
+}
+
+/// What a trigger watches on its source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Watch {
+    /// Committed output bytes containing this marker.
+    Output(Vec<u8>),
+    /// The source's `nth` disk request of kind `op` after arming. Its machine
+    /// counts requests and holds that one unwritten; the trigger sees only
+    /// the hold.
+    BlockRequest { op: DiskOp, nth: u64 },
+}
+impl Watch {
+    pub(crate) fn marker(&self) -> Option<&[u8]> {
+        match self {
+            Self::Output(marker) => Some(marker),
+            Self::BlockRequest { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Record {
     pub(crate) id: u32,
     pub(crate) source: String,
-    pub(crate) marker: Vec<u8>,
+    pub(crate) watch: Watch,
     pub(crate) action: TriggerAction,
     pub(crate) armed_at: u64,
     pub(crate) match_deadline: u64,
@@ -79,7 +103,11 @@ impl Triggers {
     pub(crate) fn records(&self) -> &[Record] {
         &self.records
     }
+    pub(crate) fn record(&self, id: u32) -> Option<&Record> {
+        self.records.get(id.checked_sub(1)? as usize)
+    }
 
+    /// Arm a trigger on `source`'s committed output.
     pub(crate) fn arm(
         &mut self,
         source: String,
@@ -88,11 +116,45 @@ impl Triggers {
         timeout: u64,
         action: TriggerAction,
     ) -> Result<u32, String> {
-        if self.records.len() >= MAX_TRIGGERS {
-            return Err("trigger budget exhausted (64 per run)".into());
-        }
         if marker.is_empty() || marker.len() > MAX_MARKER {
             return Err("marker must contain 1..=256 bytes".into());
+        }
+        self.insert(source, Watch::Output(marker), now, timeout, action)
+    }
+
+    /// Arm a `block_request` trigger, which crashes `source` when its machine
+    /// holds the source's `nth` disk request of kind `op`.
+    pub(crate) fn arm_block_request(
+        &mut self,
+        source: String,
+        op: DiskOp,
+        nth: u64,
+        now: u64,
+        timeout: u64,
+    ) -> Result<u32, String> {
+        if nth == 0 {
+            return Err("block_request nth counts from 1".into());
+        }
+        let action = TriggerAction::Crash(source.clone());
+        self.insert(
+            source,
+            Watch::BlockRequest { op, nth },
+            now,
+            timeout,
+            action,
+        )
+    }
+
+    fn insert(
+        &mut self,
+        source: String,
+        watch: Watch,
+        now: u64,
+        timeout: u64,
+        action: TriggerAction,
+    ) -> Result<u32, String> {
+        if self.records.len() >= MAX_TRIGGERS {
+            return Err("trigger budget exhausted (64 per run)".into());
         }
         if timeout == 0 {
             return Err("match timeout must be positive".into());
@@ -103,22 +165,12 @@ impl Triggers {
         deadline
             .checked_add(PROCESS_EFFECT_TIMEOUT_NS)
             .ok_or("trigger effect deadline overflow")?;
-        let mut failure = vec![0; marker.len()];
-        for i in 1..marker.len() {
-            let mut prefix = failure[i - 1];
-            while prefix > 0 && marker[i] != marker[prefix] {
-                prefix = failure[prefix - 1];
-            }
-            if marker[i] == marker[prefix] {
-                prefix += 1;
-            }
-            failure[i] = prefix;
-        }
+        let failure = watch.marker().map(failure_table).unwrap_or_default();
         let id = self.records.len() as u32 + 1;
         self.records.push(Record {
             id,
             source,
-            marker,
+            watch,
             action,
             armed_at: now,
             match_deadline: deadline,
@@ -163,19 +215,22 @@ impl Triggers {
             {
                 continue;
             }
+            let Watch::Output(marker) = &record.watch else {
+                continue;
+            };
             for &byte in bytes {
                 let seen = record
                     .seen
                     .checked_add(1)
                     .ok_or("trigger byte count overflow")?;
                 let mut prefix = record.prefix;
-                while prefix > 0 && byte != record.marker[prefix] {
+                while prefix > 0 && byte != marker[prefix] {
                     prefix = failure[prefix - 1];
                 }
-                if byte == record.marker[prefix] {
+                if byte == marker[prefix] {
                     prefix += 1;
                 }
-                if prefix == record.marker.len() {
+                if prefix == marker.len() {
                     let effect = committed_at;
                     let deadline = effect
                         .checked_add(PROCESS_EFFECT_TIMEOUT_NS)
@@ -198,6 +253,44 @@ impl Triggers {
             }
         }
         Ok(effects)
+    }
+
+    /// `source`'s machine holds the request trigger `id` watches, observed
+    /// at `at`: the machine counted the requests, so this is the `nth`. The
+    /// crash is due at this commit, while the request is still unwritten. A
+    /// hold observed at or after the match deadline still matches, since the
+    /// machine took the request before its own deadline and can now only
+    /// crash.
+    pub(crate) fn held(
+        &mut self,
+        id: u32,
+        source: &str,
+        at: u64,
+        committed_at: u64,
+    ) -> Result<Vec<Effect>, String> {
+        if at > committed_at {
+            return Err("trigger observation exceeds commit barrier".into());
+        }
+        let deadline = committed_at
+            .checked_add(PROCESS_EFFECT_TIMEOUT_NS)
+            .ok_or("trigger effect deadline overflow")?;
+        let record = self.record_mut(id)?;
+        if record.status != Status::Armed
+            || record.source != source
+            || !matches!(record.watch, Watch::BlockRequest { .. })
+            || at < record.armed_at
+        {
+            return Err("held block request names no armed block_request trigger".into());
+        }
+        record.status = Status::Matched;
+        record.matched_at = Some(at);
+        record.effect_at = Some(committed_at);
+        Ok(vec![Effect {
+            trigger_id: record.id,
+            action: record.action.clone(),
+            at: committed_at,
+            deadline,
+        }])
     }
 
     /// Effects ready for admission in arm-ID order, independent of the order
@@ -284,9 +377,13 @@ impl Triggers {
     }
 
     /// A source boot change clears partial matching, not the armed trigger.
+    /// A block_request trigger's machine keeps its count across boots.
     pub(crate) fn reset_source(&mut self, source: &str) -> Result<(), String> {
         for record in &mut self.records {
-            if record.status == Status::Armed && record.source == source {
+            if record.status == Status::Armed
+                && record.source == source
+                && matches!(record.watch, Watch::Output(_))
+            {
                 let resets = record
                     .resets
                     .checked_add(1)
@@ -316,6 +413,21 @@ impl Triggers {
             .get_mut(id.checked_sub(1).ok_or("unknown trigger ID")? as usize)
             .ok_or_else(|| "unknown trigger ID".into())
     }
+}
+
+fn failure_table(marker: &[u8]) -> Vec<usize> {
+    let mut failure = vec![0; marker.len()];
+    for i in 1..marker.len() {
+        let mut prefix = failure[i - 1];
+        while prefix > 0 && marker[i] != marker[prefix] {
+            prefix = failure[prefix - 1];
+        }
+        if marker[i] == marker[prefix] {
+            prefix += 1;
+        }
+        failure[i] = prefix;
+    }
+    failure
 }
 
 #[cfg(test)]
