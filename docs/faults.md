@@ -44,7 +44,9 @@ The engine is checked next: one that lacks the fault refuses it as
 `unsupported`, naming what it lacks ("preempt needs the guest yield hook,
 which x86_64 PV does not provide"). Admission then follows the action's rules:
 disk faults stack, and a second `preempt` on a machine is `invalid_state`.
-The reply comes once the machine has installed the fault. A disk fault's heal
+As for every oracle fault, the target is another machine: the oracle's own
+is outside the failure model. The reply comes once the machine has installed
+the fault. A disk fault's heal
 replies with no result; its counts are on the heal's settlement. The Python
 client has `world.disk_error(target, op, ppm, effect=..., scope=...)`,
 `world.disk_latency(target, op, latency_ns, jitter_ns=...)` and
