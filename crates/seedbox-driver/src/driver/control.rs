@@ -612,6 +612,13 @@ impl Control {
     ) -> Result<Vec<crate::oracle::service::Plan>, String> {
         self.invoke(machines, f)
     }
+    /// The machine's display name, or its canonical key when it has none.
+    pub(super) fn display_name(&self, id: MachineId) -> String {
+        self.entries
+            .get(id.0)
+            .and_then(|entry| entry.name.clone())
+            .unwrap_or_else(|| Self::source(id))
+    }
     /// The service's identity for this machine: its canonical key.
     pub(super) fn name(&self, id: MachineId) -> String {
         Self::source(id)

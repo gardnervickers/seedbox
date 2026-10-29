@@ -2004,6 +2004,7 @@ dependencies = [
  "libc",
  "seedbox-artifacts",
  "seedbox-driver",
+ "seedbox-engine-core",
  "seedbox-engine-protocol",
  "seedbox-exec",
  "seedbox-machine",
