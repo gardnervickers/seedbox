@@ -40,6 +40,11 @@ mod seeds;
 pub use seeds::{SeedRangeRequest, SeedRangeStatus};
 
 pub use seedbox_engine_protocol::out_of_memory::Kill as OutOfMemoryVictim;
+mod properties;
+pub use properties::{
+    LostPropertyEvidence, PropertyAssessment, PropertyAssessmentStatus, PropertyExample,
+    PropertyKind, PropertyOrigin, PropertyViolation,
+};
 mod world;
 pub use world::{
     ApplicationCondition, ApplicationState, FaultState, Frame, FrameDelivery, FrameFate,
