@@ -148,7 +148,19 @@ enum Staged {
 enum Scheduled {
     Driver(DriverEvent),
     Control(control::Event),
-    Input { id: MachineId, input: Input },
+    Input {
+        id: MachineId,
+        input: Input,
+    },
+    /// The engine's reply to a flush record, for one guest session of
+    /// `boot`; a later boot's sessions are unrelated, so it is dropped once
+    /// that boot ends.
+    PropertyReply {
+        machine: MachineId,
+        boot: u64,
+        session: NonZeroU32,
+        payload: Vec<u8>,
+    },
 }
 
 impl<M> Entry<M> {
@@ -256,6 +268,8 @@ struct ExecutionState<M> {
     trigger_marker: Option<Timestamp>,
     definitions: Vec<MachineDefinition>,
     network: network::Network,
+    /// Guest property evidence reduced at commit, in commit order.
+    properties: seedbox_engine_core::properties::Ledger,
 }
 
 /// Already-committed descriptions owned by one observer session. These are
@@ -563,6 +577,7 @@ where
                 trigger_marker: None,
                 definitions: spawnable,
                 network,
+                properties: Default::default(),
             },
             observations: ObservationState {
                 frames,
@@ -1028,6 +1043,7 @@ where
         for output in &outputs {
             self.stage(output.at, EventKind::Output(output.clone()));
         }
+        let replies = self.reduce_properties(&outputs);
         let mut plans = vec![];
         let mut calls = vec![];
         let now = self.now();
@@ -1083,6 +1099,15 @@ where
                 .service
                 .cut_off_triggers(self.now().as_nanos());
         } else {
+            // Replies follow the commit that reduced their requests, behind
+            // every item already due now.
+            if !replies.is_empty() {
+                self.execution
+                    .events
+                    .entry(self.now())
+                    .or_default()
+                    .extend(replies);
+            }
             self.schedule_calls(calls)?;
             self.control_plans(plans)?;
             let now = self.now().as_nanos();
@@ -1097,6 +1122,38 @@ where
             self.sync_trigger_marker();
         }
         self.flush_events()
+    }
+
+    /// Reduce committed property evidence in publication order. Returns the
+    /// replies its flush records ask for.
+    fn reduce_properties(&mut self, outputs: &[MachineResponse]) -> Vec<Scheduled> {
+        let mut replies = Vec::new();
+        for output in outputs {
+            let at = output.at.as_nanos();
+            // Boots are counted from zero and fit an incarnation in practice.
+            let incarnation = u32::try_from(output.boot).unwrap_or(u32::MAX);
+            let ledger = &mut self.execution.properties;
+            let name = || self.execution.control.display_name(output.machine);
+            match &output.payload {
+                Response::Property { frame } => {
+                    let reply = ledger.record(&name(), incarnation, at, frame);
+                    if let (Some(reply), Some(session)) = (reply, NonZeroU32::new(frame.session)) {
+                        replies.push(Scheduled::PropertyReply {
+                            machine: output.machine,
+                            boot: output.boot,
+                            session,
+                            payload: serde_json::to_vec(&reply).expect("replies serialize"),
+                        });
+                    }
+                }
+                Response::Crash { report } => ledger.crash(&name(), incarnation, at, report),
+                Response::OutOfMemoryKill { kill } => {
+                    ledger.out_of_memory(&name(), incarnation, at, kill)
+                }
+                _ => {}
+            }
+        }
+        replies
     }
 
     /// Route committed frames in publication order; they were validated when
@@ -1707,6 +1764,39 @@ where
         }
     }
 
+    /// Allow crashes and out-of-memory kills on the named machines (their
+    /// `allowCrashes`), which otherwise violate [`DEFAULT_NO_CRASH`] and
+    /// [`DEFAULT_NO_OOM`]. Only before the first committed boundary, so every
+    /// piece of evidence is judged alike; checkpoints retain them.
+    ///
+    /// [`DEFAULT_NO_CRASH`]: seedbox_engine_protocol::property::DEFAULT_NO_CRASH
+    /// [`DEFAULT_NO_OOM`]: seedbox_engine_protocol::property::DEFAULT_NO_OOM
+    pub fn allow_crashes(
+        &mut self,
+        machines: std::collections::BTreeSet<String>,
+    ) -> Result<(), Error<M::Error>> {
+        self.check_valid()?;
+        if self.execution.boundary_index != 0 {
+            return Err(Error::Properties(
+                "allowed crashes are set before execution".into(),
+            ));
+        }
+        for name in &machines {
+            let control = &self.execution.control;
+            if control.target(name).is_err() && !control.declared(name) {
+                return Err(Error::UnknownName(name.clone()));
+            }
+        }
+        self.execution.properties = seedbox_engine_core::properties::Ledger::new(machines);
+        Ok(())
+    }
+
+    /// The property findings reduced from every committed boundary so far;
+    /// `None` when there are none.
+    pub fn properties(&self) -> Option<seedbox_engine_protocol::property::Assessment> {
+        self.execution.properties.assessment()
+    }
+
     fn check_valid(&self) -> Result<(), Error<M::Error>> {
         if self.execution.failed {
             Err(Error::Failed)
@@ -2138,6 +2228,8 @@ pub enum Error<E> {
     SpawnPending,
     /// Simulation-control policy or correlation failed.
     Control(String),
+    /// Property expectations were invalid or set too late.
+    Properties(String),
     /// Quantum must be positive and representable in u64 nanoseconds.
     InvalidQuantum,
     /// At least one execution worker is required.
@@ -2244,6 +2336,7 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
                 f.write_str("host addition must wait for pending guest spawn dispatch")
             }
             Self::Control(message) => write!(f, "simulation control: {message}"),
+            Self::Properties(message) => write!(f, "guest properties: {message}"),
             Self::InvalidQuantum => {
                 f.write_str("quantum must be positive and fit in u64 nanoseconds")
             }
@@ -2393,5 +2486,7 @@ mod control_timer_tests;
 mod evidence_tests;
 #[cfg(test)]
 mod oracle_correlation_tests;
+#[cfg(test)]
+mod properties_tests;
 
 mod persist;

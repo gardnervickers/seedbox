@@ -141,3 +141,17 @@ impl Wire for DiskImage {
         }
     }
 }
+
+// Property evidence holds guest-supplied JSON details; its serde form is
+// canonical (every field ordered), so it travels as one JSON value.
+impl Wire for seedbox_engine_core::properties::Ledger {
+    fn put<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+        serde_json::to_value(self)
+            .map_err(|_| CodecError::Invalid("property ledger"))?
+            .put(e)
+    }
+    fn get<R: Read>(d: &mut Decoder<R>) -> Result<Self> {
+        serde_json::from_value(<serde_json::Value as Wire>::get(d)?)
+            .map_err(|_| CodecError::Invalid("property ledger"))
+    }
+}

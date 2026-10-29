@@ -15,7 +15,8 @@ where
     ///
     /// Versioned evidence includes continuing RNG cursors, logical machine
     /// lifecycle/time/input state, fault/controller and network policy/queues,
-    /// pending scheduled work and unstarted definitions. It excludes native
+    /// pending scheduled work, unstarted definitions and reduced guest property
+    /// evidence. It excludes native
     /// machine bytes, callbacks, worker resources, wall-clock playback pacing,
     /// already-published host-drain queues and frame-observation buffers.
     /// No machine callback, native capture, allocation of a checkpoint or RNG
@@ -59,6 +60,7 @@ impl<M> ExecutionState<M> {
             trigger_marker,
             definitions,
             network,
+            properties,
         } = self;
         let SimulationRng::Seeded(rng) = rng else {
             return Err(CodecError::Invalid(
@@ -67,7 +69,7 @@ impl<M> ExecutionState<M> {
         };
         output.write_all(b"SBXPOLE\0")?;
         let mut e = Encoder { output };
-        2u32.put(&mut e)?;
+        3u32.put(&mut e)?;
         Timestamp::from_nanos(clock.now()).put(&mut e)?;
         rng.put(&mut e)?;
         quantum_ns.put(&mut e)?;
@@ -113,6 +115,9 @@ impl<M> ExecutionState<M> {
         inputs.put(&mut e)?;
         trigger_marker.put(&mut e)?;
         definitions.put(&mut e)?;
+        // Reduced property evidence decides the run's verdict and flush
+        // replies, so it is part of the execution's identity.
+        properties.put(&mut e)?;
         network.policy_evidence(&mut e)
     }
 }
