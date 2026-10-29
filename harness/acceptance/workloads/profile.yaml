@@ -7,12 +7,18 @@ machines:
       dockerfile: harness/acceptance/images/profile/Dockerfile
     command:
     - node
+    volumes:
+      data:
+        target: "/data"
   n2:
     build:
       context: "../../.."
       dockerfile: harness/acceptance/images/profile/Dockerfile
     command:
     - node
+    volumes:
+      data:
+        target: "/data"
   n3:
     build:
       context: "../../.."

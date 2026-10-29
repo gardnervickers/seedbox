@@ -386,6 +386,11 @@ faults:
   - {kind: clock_skew, duration_ns: {min: 500000000, max: 3000000000}, max_offset_ns: 5000000000}
   - {kind: clock_drift, duration_ns: {min: 500000000, max: 3000000000}, max_rate_ppb: 1000000}
   - {kind: throttle, duration_ns: {min: 500000000, max: 3000000000}, factor_permille: 4000}
+  - {kind: disk_error, duration_ns: {min: 500000000, max: 3000000000}, op: write, ppm: 1000,
+     targets: [n1, n2]}
+  - {kind: disk_latency, duration_ns: {min: 500000000, max: 3000000000}, op: flush,
+     latency_ns: {min: 1000000, max: 20000000}, targets: [n1, n2]}
+  - {kind: preempt, duration_ns: {min: 500000000, max: 3000000000}, ppm: 10000}
 "#;
 
 /// A world that models every fault in force and refuses what the engine
@@ -478,7 +483,17 @@ impl World for Modelled {
                 max_rate_ppb: None,
                 ..
             }
-            | Action::Throttle { handle, .. } => {
+            | Action::Throttle { handle, .. }
+            | Action::Preempt { handle, .. } => {
+                assert!(self.handles.insert(handle.clone()));
+            }
+            Action::DiskError {
+                handle, machine, ..
+            }
+            | Action::DiskLatency {
+                handle, machine, ..
+            } => {
+                assert!(["n1", "n2"].contains(&machine.as_str()), "{action:?}");
                 assert!(self.handles.insert(handle.clone()));
             }
             other => {
@@ -540,7 +555,7 @@ fn a_profile_applies_the_same_sequence_for_the_same_seed() {
         .flat_map(applied)
         .map(|(_, action)| action.name())
         .collect();
-    assert_eq!(kinds.len(), 14, "{kinds:?}");
+    assert_eq!(kinds.len(), 17, "{kinds:?}");
 }
 
 #[test]

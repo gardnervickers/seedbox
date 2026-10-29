@@ -1,5 +1,5 @@
 //! Fault-profile acceptance oracle. Each node (`node`) answers `ping` with
-//! `pong` on port 7000. The oracle (`oracle`) pings random nodes while the
+//! `pong` on port 7000, and syncs a heartbeat to its volume, if it has one. The oracle (`oracle`) pings random nodes while the
 //! fault profile in `profile.yaml` runs as its nemesis, heals, then reads
 //! every node. It prints every action the world applied, and two checks
 //! decide the run: every node serves after the heal, and the profile ran
@@ -21,7 +21,24 @@ const NODES: [&str; 3] = ["n1", "n2", "n3"];
 const PORT: u16 = 7000;
 const PROFILE: &str = include_str!("../profile.yaml");
 
+/// Append and sync a line every 200 ms, ignoring failures, so disk faults on
+/// a node's volume meet requests.
+fn write(path: &str) {
+    use std::fs::OpenOptions;
+    loop {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = file
+                .write_all(b"heartbeat\n")
+                .and_then(|()| file.sync_all());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 fn node() -> ExitCode {
+    if std::path::Path::new("/data").is_dir() {
+        std::thread::spawn(|| write("/data/heartbeat"));
+    }
     let listener = TcpListener::bind(("0.0.0.0", PORT)).expect("bind");
     for stream in listener.incoming().flatten() {
         std::thread::spawn(move || {

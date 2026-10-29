@@ -114,6 +114,8 @@ faults:
   - {kind: crash, downtime_ns: {min: 500000000, max: 3000000000}}
   - {kind: clock_skew, duration_ns: {min: 1000000000, max: 5000000000},
      max_offset_ns: 30000000000}
+  - {kind: disk_latency, op: flush, targets: [db1], duration_ns: {min: 1000000000, max: 5000000000},
+     latency_ns: {min: 1000000, max: 50000000}}
 ```
 
 Each entry is named by the action it starts and carries that action's fields,
@@ -126,6 +128,7 @@ applied sequence. `run` checks every entry with its action's own validator
 before applying anything, and refuses an invalid entry with that action's
 message. `heal` ends every fault still in force. A partition cuts its target off
 from `from`, and a shape delays traffic to `to`; each defaults to the other
-targets. The world checks what needs the world, such as the network's latency
-floor, when the action is applied. See
+targets. `disk_error` and `disk_latency` entries may narrow the targets to the
+machines with a volume. The world checks what needs the world, such as the
+network's latency floor, when the action is applied. See
 [the acceptance oracle](../harness/acceptance/images/profile/src/main.rs).

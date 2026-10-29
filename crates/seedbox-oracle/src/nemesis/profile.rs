@@ -9,7 +9,7 @@
 //! Checks that need the world, such as the network's latency floor, are the
 //! world's when the action is applied.
 use crate::{
-    control::{self, Action},
+    control::{self, Action, DiskEffect, DiskOp, DiskScope},
     patterns::{InForce, Sleep},
     random::RandomExt,
     Error, Nemesis, Pace, Random, World,
@@ -23,8 +23,8 @@ pub const DEFAULT_MAX_FAULTS: u32 = 64;
 /// Faults start between `start_ns` and `end_ns` after [`Nemesis::run`]
 /// begins, one gap apart; each gap is drawn uniformly from half to one and a
 /// half times `interval_ns`. Each start draws an entry by weight, then a
-/// target among `targets` with no fault of this profile in force (a start
-/// with none free is skipped), then the entry's ranges, and holds the fault
+/// target among `targets` (or the entry's own, for the disk kinds) with no
+/// fault of this profile in force (a start with none free is skipped), then the entry's ranges, and holds the fault
 /// for its drawn duration before ending it. At most `max_faults` start. `run`
 /// returns at `end_ns`, or once the last fault ends if that is later; faults
 /// still in force when a failure cuts it short are ended by
@@ -179,8 +179,8 @@ impl Profile {
                 false
             })
             .expect("a draw below the total weight lands on an entry");
-        let free: Vec<String> = self
-            .targets
+        let free: Vec<String> = fault
+            .targets(&self.targets)
             .iter()
             .filter(|target| !self.state.busy.contains(*target))
             .cloned()
@@ -357,6 +357,43 @@ pub enum Fault {
         duration_ns: Range,
         factor_permille: u64,
     },
+    /// A `disk_error` on one target, then heal. As in the action, `op` and
+    /// `ppm` are required. Only machines with a retained disk can take it,
+    /// so `targets` narrows the profile's targets to those.
+    DiskError {
+        #[serde(default = "weight", skip_serializing_if = "is_one")]
+        weight: u32,
+        duration_ns: Range,
+        op: DiskOp,
+        ppm: u64,
+        #[serde(default, skip_serializing_if = "DiskEffect::is_eio")]
+        effect: DiskEffect,
+        #[serde(default, skip_serializing_if = "DiskScope::is_all")]
+        scope: DiskScope,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<String>,
+    },
+    /// A `disk_latency` on one target with a latency drawn from `latency_ns`,
+    /// then heal. As in the action, `op` is required; `targets` narrows the
+    /// profile's targets.
+    DiskLatency {
+        #[serde(default = "weight", skip_serializing_if = "is_one")]
+        weight: u32,
+        duration_ns: Range,
+        latency_ns: Range,
+        op: DiskOp,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        jitter_ns: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<String>,
+    },
+    /// A `preempt` on one target, then heal.
+    Preempt {
+        #[serde(default = "weight", skip_serializing_if = "is_one")]
+        weight: u32,
+        duration_ns: Range,
+        ppm: u64,
+    },
 }
 
 /// A drawn fault: the action that starts it, the one that ends it, and how
@@ -373,6 +410,14 @@ fn far_side(side: &[String], target: &str, targets: &[String]) -> Vec<String> {
     side.iter().filter(|m| *m != target).cloned().collect()
 }
 
+/// An entry's own `targets` are some of the profile's.
+fn narrows(own: &[String], targets: &[String]) -> Result<(), String> {
+    match own.iter().find(|machine| !targets.contains(machine)) {
+        Some(machine) => Err(format!("targets must be profile targets, not {machine:?}")),
+        None => Ok(()),
+    }
+}
+
 impl Fault {
     /// The action this kind starts.
     pub fn name(&self) -> &'static str {
@@ -386,6 +431,9 @@ impl Fault {
             Self::ClockSkew { .. } => "clock_skew",
             Self::ClockDrift { .. } => "clock_drift",
             Self::Throttle { .. } => "throttle",
+            Self::DiskError { .. } => "disk_error",
+            Self::DiskLatency { .. } => "disk_latency",
+            Self::Preempt { .. } => "preempt",
         }
     }
 
@@ -399,7 +447,23 @@ impl Fault {
             | Self::Stop { weight, .. }
             | Self::ClockSkew { weight, .. }
             | Self::ClockDrift { weight, .. }
-            | Self::Throttle { weight, .. } => *weight,
+            | Self::Throttle { weight, .. }
+            | Self::DiskError { weight, .. }
+            | Self::DiskLatency { weight, .. }
+            | Self::Preempt { weight, .. } => *weight,
+        }
+    }
+
+    /// The machines this entry may target: its own `targets`, or the
+    /// profile's.
+    fn targets<'a>(&'a self, profile: &'a [String]) -> &'a [String] {
+        match self {
+            Self::DiskError { targets, .. } | Self::DiskLatency { targets, .. }
+                if !targets.is_empty() =>
+            {
+                targets
+            }
+            _ => profile,
         }
     }
 
@@ -471,6 +535,38 @@ impl Fault {
             } => {
                 duration_ns.validate("duration_ns")?;
                 control::validate_throttle(*factor_permille)
+            }
+            Self::DiskError {
+                duration_ns,
+                op,
+                ppm,
+                effect,
+                scope,
+                targets: own,
+                ..
+            } => {
+                duration_ns.validate("duration_ns")?;
+                narrows(own, targets)?;
+                control::validate_disk_error(*op, *ppm, *effect, *scope)
+            }
+            Self::DiskLatency {
+                duration_ns,
+                latency_ns,
+                jitter_ns,
+                targets: own,
+                ..
+            } => {
+                duration_ns.validate("duration_ns")?;
+                latency_ns.validate("latency_ns")?;
+                narrows(own, targets)?;
+                control::validate_disk_latency(latency_ns.min, *jitter_ns)?;
+                control::validate_disk_latency(latency_ns.max, *jitter_ns)
+            }
+            Self::Preempt {
+                duration_ns, ppm, ..
+            } => {
+                duration_ns.validate("duration_ns")?;
+                control::validate_preempt(*ppm)
             }
         }
     }
@@ -603,6 +699,62 @@ impl Fault {
                         handle,
                         machine,
                         factor_permille: *factor_permille,
+                    },
+                }
+            }
+            Self::DiskError {
+                duration_ns,
+                op,
+                ppm,
+                effect,
+                scope,
+                ..
+            } => {
+                let handle = handle();
+                Drawn {
+                    hold_ns: duration_ns.draw(random),
+                    teardown: healed(&handle),
+                    action: Action::DiskError {
+                        handle,
+                        machine,
+                        op: *op,
+                        ppm: *ppm,
+                        effect: *effect,
+                        scope: *scope,
+                    },
+                }
+            }
+            Self::DiskLatency {
+                duration_ns,
+                latency_ns,
+                op,
+                jitter_ns,
+                ..
+            } => {
+                let handle = handle();
+                Drawn {
+                    hold_ns: duration_ns.draw(random),
+                    teardown: healed(&handle),
+                    action: Action::DiskLatency {
+                        handle,
+                        machine,
+                        op: *op,
+                        latency_ns: latency_ns.draw(random),
+                        jitter_ns: *jitter_ns,
+                    },
+                }
+            }
+            Self::Preempt {
+                duration_ns, ppm, ..
+            } => {
+                let handle = handle();
+                Drawn {
+                    hold_ns: duration_ns.draw(random),
+                    teardown: healed(&handle),
+                    action: Action::Preempt {
+                        handle,
+                        machine,
+                        ppm: *ppm,
                     },
                 }
             }

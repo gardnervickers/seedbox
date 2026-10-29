@@ -1,4 +1,5 @@
 use super::*;
+use crate::control::{DiskEffect, DiskOp, DiskScope};
 use serde_json::{json, Value};
 
 /// The example in docs/scenarios.md.
@@ -12,6 +13,8 @@ faults:
   - {kind: crash, downtime_ns: {min: 500000000, max: 3000000000}}
   - {kind: clock_skew, duration_ns: {min: 1000000000, max: 5000000000},
      max_offset_ns: 30000000000}
+  - {kind: disk_latency, op: flush, targets: [db1], duration_ns: {min: 1000000000, max: 5000000000},
+     latency_ns: {min: 1000000, max: 50000000}}
 "#;
 
 fn documented() -> Profile {
@@ -24,9 +27,9 @@ fn documented_profile_parses_with_defaults_and_round_trips() {
     profile.validate().unwrap();
     assert_eq!(profile.max_faults, DEFAULT_MAX_FAULTS);
     let weights: Vec<_> = profile.faults.iter().map(Fault::weight).collect();
-    assert_eq!(weights, [3, 1, 1]);
+    assert_eq!(weights, [3, 1, 1, 1]);
     let names: Vec<_> = profile.faults.iter().map(Fault::name).collect();
-    assert_eq!(names, ["partition", "crash", "clock_skew"]);
+    assert_eq!(names, ["partition", "crash", "clock_skew", "disk_latency"]);
     // Entries use their actions' snake_case names. Defaults are omitted, so
     // a spelled-out default and an omitted one are the same profile.
     let wire = serde_json::to_value(&profile).unwrap();
@@ -34,6 +37,8 @@ fn documented_profile_parses_with_defaults_and_round_trips() {
     assert!(wire["faults"][1].get("weight").is_none());
     assert!(wire["faults"][0].get("from").is_none());
     assert_eq!(wire["faults"][2]["max_offset_ns"], 30_000_000_000u64);
+    assert!(wire["faults"][3].get("jitter_ns").is_none());
+    assert_eq!(wire["faults"][3]["latency_ns"]["max"], 50_000_000);
     let again: Profile = serde_json::from_value(wire.clone()).unwrap();
     assert_eq!(serde_json::to_value(&again).unwrap(), wire);
 }
@@ -72,6 +77,34 @@ fn entries_are_refused_with_their_actions_own_errors() {
         (
             json!({"kind": "throttle", "factor_permille": 10, "duration_ns": range}),
             action(control::validate_throttle(10)),
+        ),
+        (
+            json!({"kind": "disk_error", "op": "flush", "ppm": 10, "effect": "corrupt",
+                   "duration_ns": range}),
+            action(control::validate_disk_error(
+                DiskOp::Flush,
+                10,
+                DiskEffect::Corrupt,
+                DiskScope::All,
+            )),
+        ),
+        (
+            json!({"kind": "disk_error", "op": "write", "ppm": 0, "duration_ns": range}),
+            action(control::validate_disk_error(
+                DiskOp::Write,
+                0,
+                DiskEffect::Eio,
+                DiskScope::All,
+            )),
+        ),
+        (
+            json!({"kind": "disk_latency", "op": "any", "duration_ns": range,
+                   "latency_ns": {"min": 1, "max": 2}}),
+            action(control::validate_disk_latency(1, 0)),
+        ),
+        (
+            json!({"kind": "preempt", "ppm": 2_000_000, "duration_ns": range}),
+            action(control::validate_preempt(2_000_000)),
         ),
         (
             json!({"kind": "shape", "duration_ns": range,
@@ -115,6 +148,40 @@ fn entries_are_refused_with_their_actions_own_errors() {
         "fault profile partition: from needs a machine other than db1"
     );
     with(json!({"kind": "partition", "duration_ns": range, "from": ["db1", "client"]})).unwrap();
+    assert_eq!(
+        with(
+            json!({"kind": "disk_error", "op": "write", "ppm": 10, "duration_ns": range,
+                    "targets": ["db1", "client"]})
+        )
+        .unwrap_err()
+        .0,
+        "fault profile disk_error: targets must be profile targets, not \"client\""
+    );
+    let disk = json!({"kind": "disk_error", "op": "write", "ppm": 1_000_000,
+                      "scope": "data", "duration_ns": range});
+    with(disk.clone()).unwrap();
+    let parsed: Fault = serde_json::from_value(disk.clone()).unwrap();
+    assert!(matches!(
+        parsed,
+        Fault::DiskError {
+            ppm: control::MAX_PPM,
+            effect: DiskEffect::Eio,
+            scope: DiskScope::Data,
+            ..
+        }
+    ));
+    // As in the actions, the disk op and the error rate are required.
+    for field in ["op", "ppm"] {
+        let mut partial = disk.clone();
+        partial.as_object_mut().unwrap().remove(field);
+        let error = serde_json::from_value::<Fault>(partial)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!("missing field `{field}`")),
+            "{error}"
+        );
+    }
 }
 
 #[test]
