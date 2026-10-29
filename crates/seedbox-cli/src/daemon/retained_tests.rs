@@ -123,6 +123,7 @@ fn retained_driver_acquires_only_recorded_runtime_once_per_session() {
             },
             disk: None,
             interface: None,
+            allow_crashes: false,
         },
         machines: vec![],
         spawnable: vec![],
