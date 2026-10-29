@@ -2114,6 +2114,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-oracle"
+version = "0.1.0"
+dependencies = [
+ "seedbox-engine-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "seedbox-server"
 version = "0.1.0"
 dependencies = [
