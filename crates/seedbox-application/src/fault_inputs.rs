@@ -94,4 +94,57 @@ mod program_tests {
         });
         assert!(validate_input_program(&config, &[heal]).is_ok());
     }
+
+    #[test]
+    fn documented_yaml_overrides_parse_as_program_inputs() {
+        // The example in docs/faults.md.
+        let document = r#"
+- {id: slow-fsync, atNs: 1000000000,
+   action: {action: disk_latency, handle: slow, machine: db, op: flush, latency_ns: 20000000}}
+- {id: fast-fsync, atNs: 2000000000, action: {action: heal, handle: slow}}
+"#;
+        let overrides: Vec<seedbox_spec::definition::Override> =
+            serde_yaml_ng::from_str(document).unwrap();
+        let names: Vec<_> = overrides
+            .into_iter()
+            .map(|entry| {
+                let input: TimedInput = serde_json::from_value(serde_json::json!({
+                    "key": entry.id, "at_ns": entry.at_ns, "action": entry.action,
+                }))
+                .unwrap();
+                input.action.validate().unwrap();
+                input.action.name()
+            })
+            .collect();
+        assert_eq!(names, ["disk_latency", "heal"]);
+    }
+
+    #[test]
+    fn faults_no_engine_provides_are_refused_before_preparation() {
+        let config = crate::config::parse(
+            "name: test\nmachines:\n  db: {image: example:v1}\noracle: {image: example/oracle}\n",
+            std::path::Path::new("/fixture/seedbox.yaml"),
+            &Default::default(),
+        )
+        .unwrap();
+        let input = TimedInput {
+            timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
+            key: "eio".into(),
+            at_ns: 10,
+            action: Action::DiskError {
+                handle: "eio".into(),
+                machine: "db".into(),
+                op: seedbox_engine_protocol::control::DiskOp::Write,
+                ppm: 1_000_000,
+                effect: Default::default(),
+                scope: Default::default(),
+            },
+        };
+        assert_eq!(
+            validate_input_program(&config, &[input])
+                .unwrap_err()
+                .to_string(),
+            "program eio: disk_error needs disk request selection, which no engine provides"
+        );
+    }
 }

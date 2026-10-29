@@ -12,6 +12,7 @@ test-support = ["seedbox-machine/test-support", "dep:tar"]
 # with standalone engines; scheduling and RNG stay in this crate.
 seedbox-engine-core.workspace = true
 seedbox-engine-protocol.workspace = true
+seedbox-spec.workspace = true
 seedbox-machine.workspace = true
 seedbox-machine-tcg.workspace = true
 seedbox-machine-pv.workspace = true
