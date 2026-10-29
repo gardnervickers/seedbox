@@ -1,0 +1,17 @@
+# The faults this oracle injects: every kind, on the three nodes, overlapping.
+start_ns: 2000000000
+end_ns: 20000000000
+interval_ns: 2500000000
+max_faults: 8
+targets: [n1, n2, n3]
+faults:
+  - {kind: partition, weight: 2, duration_ns: {min: 500000000, max: 2000000000}}
+  - {kind: shape, duration_ns: {min: 500000000, max: 2000000000},
+     latency_ns: {min: 2000000, max: 20000000}, jitter_ns: 1000000}
+  - {kind: crash, downtime_ns: {min: 500000000, max: 2000000000}}
+  - {kind: pause, duration_ns: {min: 500000000, max: 2000000000}}
+  - {kind: pause_process, duration_ns: {min: 500000000, max: 2000000000}}
+  - {kind: stop, downtime_ns: {min: 500000000, max: 2000000000}}
+  - {kind: clock_skew, duration_ns: {min: 500000000, max: 2000000000}, max_offset_ns: 5000000000}
+  - {kind: clock_drift, duration_ns: {min: 500000000, max: 2000000000}, max_rate_ppb: 1000000}
+  - {kind: throttle, duration_ns: {min: 500000000, max: 2000000000}, factor_permille: 4000}

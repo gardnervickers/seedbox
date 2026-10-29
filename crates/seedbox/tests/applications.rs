@@ -18,14 +18,16 @@ use support::{failure_capture, json_diff};
 // Every discovered workload proves a PASS. These retain the expensive
 // independent same-seed and retained-input comparisons, covering dynamic
 // network faults, volume durability across crashes, clock state across reboot,
-// concurrent application behavior, and guest property findings (with an
-// allowed crash and a machine's reboot) as part of the compared results.
-const REPEAT_WORKLOADS: [&str; 5] = [
+// concurrent application behavior, guest property findings (with an allowed
+// crash and a machine's reboot), and an oracle's seeded fault profile as part
+// of the compared results.
+const REPEAT_WORKLOADS: [&str; 6] = [
     "network-faults",
     "volume-crash",
     "clock-reboot",
     "race",
     "properties",
+    "profile",
 ];
 
 fn invoke(
@@ -239,6 +241,7 @@ applications! {
     key_value => "key-value",
     mac_capabilities => "mac-capabilities",
     network_faults => "network-faults",
+    profile => "profile",
     properties => "properties",
     race => "race",
     runtime => "runtime",
