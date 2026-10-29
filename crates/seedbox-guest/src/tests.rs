@@ -368,6 +368,10 @@ fn a_forked_child_opens_its_own_session() {
 
     // SAFETY: the child only uses the client and then leaves with _exit,
     // never returning into the test harness.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the regression subject is a forked child's session; it execs nothing"
+    )]
     let child = unsafe { libc::fork() };
     assert!(child >= 0, "{}", io::Error::last_os_error());
     if child == 0 {
