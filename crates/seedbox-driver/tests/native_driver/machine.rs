@@ -23,6 +23,8 @@ mod kernel_driver_tests;
 #[allow(dead_code)]
 mod network_driver_scenario;
 #[cfg(seedbox_pv)]
+mod pv_device_fault_tests;
+#[cfg(seedbox_pv)]
 mod pv_disk_driver_tests;
 #[cfg(seedbox_pv)]
 mod pv_network_driver_tests;
