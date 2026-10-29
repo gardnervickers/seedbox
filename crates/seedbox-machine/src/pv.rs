@@ -81,6 +81,15 @@ pub enum Request {
         /// Reply payload excluding transport framing.
         payload: Vec<u8>,
     },
+    /// Answer a flush record of one guest session of the machine's
+    /// current boot. `payload` is the compact JSON of a property reply, which
+    /// the supervisor sends to that session as one message; a session that has
+    /// closed discards it. Replies have no acknowledgment and the caller never
+    /// offers one to a later boot, whose sessions are unrelated.
+    PropertyReply {
+        session: NonZeroU32,
+        payload: Vec<u8>,
+    },
     /// A correlated operation on the prepared application.
     /// Command IDs are distinct from simulation-control RPC IDs and must not be reused
     /// within a machine incarnation, even after completion. The caller supplies
@@ -224,6 +233,17 @@ pub enum Response {
     /// Actual kernel victim report; emitted before the outcome it explains.
     OutOfMemoryKill {
         kill: seedbox_engine_protocol::out_of_memory::Kill,
+    },
+    /// One guest property record, relayed uninterpreted with its supervisor
+    /// session and sequence. Records of one session keep their order; a
+    /// session belongs to the boot that emitted it. The caller reduces it.
+    Property {
+        frame: seedbox_engine_protocol::property::Frame,
+    },
+    /// The kernel's fatal-signal report of one crashed process, before the
+    /// outcome of the application it ends.
+    Crash {
+        report: seedbox_engine_protocol::crash::Report,
     },
     /// Natural application termination, after draining already queued output.
     /// Commanded Stop produces only its acknowledgment. This observation does

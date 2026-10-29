@@ -138,6 +138,9 @@ int sbx_application_exec(struct sbx_application *application) {
     if (chdir(application->working_directory) ||
         credentials(application->user, privileged_runtime, &final_uid)) return errno;
     environ = application->environment;
+    /* The guest library tells an unreachable socket from running outside Seedbox. */
+    if (application->guest_socket && setenv("SEEDBOX_GUEST_SOCKET", application->guest_socket, 1))
+        return errno;
     if (runtime) unsetenv("SEEDBOX_DR_EXECUTABLE_FD");
     if (!application->execution_prefix[0]) {
         /* Native exec semantics permit execute-only ELF files and handle PATH
