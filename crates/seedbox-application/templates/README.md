@@ -13,7 +13,9 @@ The CLI asks before starting a local server; keep it running between commands.
 For scripts, start it explicitly with `seedbox server start`.
 
 Edit `seedbox.yaml` to configure your **machines** and **oracle**. The oracle drives
-the test: exit code zero means PASS; nonzero means FAIL. For longer etcd fault
+the test: exit code zero means PASS, 3 INCOMPLETE and anything else FAIL. A
+process crash or out-of-memory kill on any machine also fails the run, unless
+that machine sets `allowCrashes: true`. For longer etcd fault
 experiments, increase the oracle's `--writes` and `--duration` arguments.
 
 Use `seedbox logs <sim-id>` for application output or `seedbox tui <sim-id>`
