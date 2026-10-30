@@ -54,8 +54,12 @@ Press **Space** to resume or pause, and **f** to inject or heal faults.
 ## `seedbox.yaml` format
 
 `machines` defines the application nodes; `oracle` drives the workload and checks
-the result. The oracle's exit code determines PASS (zero) or FAIL (nonzero).
-Both use the same launch fields and require exactly one of `image` or `build`.
+the result. The oracle's exit code determines PASS (zero), INCOMPLETE (3, the
+oracle could not decide) or FAIL (any other). Guest
+[properties](docs/scenarios.md) can also fail a run, as can any process on any
+machine dying of a crash signal or an out-of-memory kill, unless that machine
+sets `allowCrashes: true`. Both use the same launch fields and require exactly
+one of `image` or `build`.
 
 For example, [the Redis project](examples/redis/seedbox.yaml) uses:
 
@@ -77,9 +81,10 @@ Machine names are hostnames on the simulated network. Build contexts are relativ
 to `seedbox.yaml`; `build.dockerfile` defaults to `Dockerfile`.
 
 Optional launch fields are `entrypoint`, `command`, `environment`, `memoryMiB`,
-`workingDirectory`, `user`, `files` and `volumes`. `files` is a list of
-`{source, target}` entries copied into the guest at preparation; `volumes` maps
-names to `{target}` entries for writable disks that survive machine crashes.
+`workingDirectory`, `user`, `files`, `volumes` and `allowCrashes`. `files` is a
+list of `{source, target}` entries copied into the guest at preparation;
+`volumes` maps names to `{target}` entries for writable disks that survive
+machine crashes.
 See [the etcd project](examples/etcd/seedbox.yaml) for a three-node cluster with
 persistent data disks.
 

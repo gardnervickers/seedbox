@@ -1,0 +1,10 @@
+# The oracle exits 0 and its properties hold, but one of its records was too
+# large to relay and is reported lost: the run is INCOMPLETE.
+name: guest-lost-evidence
+machines: {}
+oracle:
+  build:
+    context: "../../.."
+    dockerfile: harness/acceptance/images/properties/Dockerfile
+  command:
+  - lose

@@ -123,6 +123,9 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
         },
     )
     .map_err(|e| bad(e.to_string()))?;
+    driver
+        .allow_crashes(allow_crashes(&request.prepared))
+        .map_err(|e| bad(e.to_string()))?;
     if request.start_paused {
         driver
             .with_barrier(|barrier| barrier.set_rate(seedbox_driver::driver::PlaybackRate::Paused))
@@ -158,6 +161,16 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     )?;
     worker.flush()?;
     Ok(worker)
+}
+/// The machines with `allowCrashes`, by name. Restored Drivers keep the
+/// set their checkpoint captured.
+fn allow_crashes(prepared: &wire::Prepared) -> std::collections::BTreeSet<String> {
+    std::iter::once(&prepared.oracle)
+        .chain(&prepared.machines)
+        .chain(&prepared.spawnable)
+        .filter(|machine| machine.allow_crashes)
+        .map(|machine| machine.name.clone())
+        .collect()
 }
 pub(super) fn validate_policy_binding(expected: &Inventory, captured: &Inventory) -> Result<()> {
     super::policy::check_optional(expected.backend_policy()).map_err(bad)?;

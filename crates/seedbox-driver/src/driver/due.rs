@@ -114,6 +114,26 @@ where
                         Some(item) => item,
                         None => continue,
                     },
+                    Scheduled::PropertyReply {
+                        machine,
+                        boot,
+                        session,
+                        payload,
+                    } => {
+                        let entry = &self.execution.machines[machine.0];
+                        if entry.lifecycle.boot() != boot
+                            || matches!(entry.stopped, StopReason::Exited { .. })
+                        {
+                            continue;
+                        }
+                        DueItem::new(Scheduled::Input {
+                            id: machine,
+                            input: Input {
+                                at: now,
+                                payload: Request::PropertyReply { session, payload },
+                            },
+                        })
+                    }
                     scheduled => DueItem::new(scheduled),
                 };
                 self.apply_due_item(item, now)?;
@@ -562,7 +582,7 @@ where
         } = item;
         let cause = accepted_fault.map_or(Cause::Host, |fault| Cause::Fault(FaultId(fault)));
         let mechanical = match scheduled {
-            Scheduled::Control(_) => unreachable!(),
+            Scheduled::Control(_) | Scheduled::PropertyReply { .. } => unreachable!(),
             Scheduled::Input { id, input } => {
                 self.apply_input(id, input, reply_boot, service_origin, cause, now)
             }
@@ -657,6 +677,7 @@ where
             Request::Application { .. }
             | Request::StepRealtime { .. }
             | Request::SimulationReply { .. }
+            | Request::PropertyReply { .. }
             | Request::ReceiveFrame { .. }
                 if matches!(entry.stopped, StopReason::Exited { .. }) =>
             {
@@ -668,6 +689,7 @@ where
             Request::Application { .. }
             | Request::StepRealtime { .. }
             | Request::SimulationReply { .. }
+            | Request::PropertyReply { .. }
             | Request::ReceiveFrame { .. }
             | Request::Shutdown => {}
             // Request is non-exhaustive across the common crate boundary.
