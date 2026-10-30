@@ -64,7 +64,7 @@ fn full_scoped_wire_vocabulary_preserves_targets_and_binary_marker() {
     operation(json!({"op":"throttle","target":{"machine":"m"},"factor_permille":1000}));
     operation(json!({"op":"heal","handle":"p2"}));
     assert!(
-        matches!(operation(json!({"op":"arm_trigger","source":{"service":"s"},"marker":[0,255,10],"match_timeout_ns":7,"fault":{"action":"stop","target":{"machine":"m"}}})), Operation::ArmTrigger { marker, fault:TriggerFault::Stop { .. }, .. } if marker == [0,255,10])
+        matches!(operation(json!({"op":"arm_trigger","source":{"service":"s"},"marker":[0,255,10],"match_timeout_ns":7,"fault":{"action":"stop","target":{"machine":"m"}}})), Operation::ArmTrigger { marker: Some(marker), block_request: None, fault:TriggerFault::Stop { .. }, .. } if marker == [0,255,10])
     );
     // Zero is syntactically valid; unknown/cancelled trigger state is dispatcher-owned.
     assert_eq!(
@@ -185,6 +185,67 @@ fn semantic_bounds_and_time_overflow_are_checked_without_runtime_admission() {
     operation(trigger.clone());
     trigger["match_timeout_ns"] = json!(0);
     assert_eq!(invalid(trigger).code, ErrorCode::InvalidRequest);
+    // A block_request trigger watches a held disk request instead, and its
+    // only fault is a crash of its own machine.
+    let held = json!({"op":"arm_trigger","source":target,"block_request":{"op":"flush","nth":20},"match_timeout_ns":1,"fault":{"action":"crash","target":target}});
+    assert!(matches!(
+        operation(held.clone()),
+        Operation::ArmTrigger {
+            marker: None,
+            block_request: Some(BlockRequest {
+                op: DiskOp::Flush,
+                nth: 20
+            }),
+            fault: TriggerFault::Crash { .. },
+            ..
+        }
+    ));
+    for (field, value, message) in [
+        (
+            "nth",
+            json!(0),
+            "block_request trigger requires a positive nth",
+        ),
+        (
+            "match_timeout_ns",
+            json!(0),
+            "block_request trigger requires a positive nth",
+        ),
+        (
+            "fault",
+            json!({"action":"stop","target":target}),
+            "block_request trigger requires a positive nth",
+        ),
+        (
+            "marker",
+            json!([1]),
+            "trigger watches exactly one of a marker or a block_request",
+        ),
+    ] {
+        let mut bad = held.clone();
+        if field == "nth" {
+            bad["block_request"][field] = value;
+        } else {
+            bad[field] = value;
+        }
+        assert!(invalid(bad).message.starts_with(message));
+    }
+    let mut neither = held.clone();
+    neither.as_object_mut().unwrap().remove("block_request");
+    assert_eq!(
+        invalid(neither).message,
+        "trigger watches exactly one of a marker or a block_request"
+    );
+    let crash_on_marker = json!({"op":"arm_trigger","source":target,"marker":[1],"match_timeout_ns":1,"fault":{"action":"crash","target":target}});
+    assert_eq!(
+        invalid(crash_on_marker).message,
+        "only a block_request trigger crashes its machine"
+    );
+    let mut unknown = held;
+    unknown["block_request"]["extra"] = json!(1);
+    assert!(invalid(unknown)
+        .message
+        .starts_with("invalid request arguments:"));
     let too_large = br#"{"version":1,"id":1,"op":"sleep","duration_ns":18446744073709551616}"#;
     assert_eq!(
         parse(too_large).unwrap().operation.unwrap_err().code,

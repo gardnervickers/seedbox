@@ -362,3 +362,70 @@ fn validation_and_admission_reject_the_same_invalid_target_shapes() {
         );
     }
 }
+
+#[test]
+fn new_faults_are_refused_while_no_engine_provides_them_after_argument_checks() {
+    for (wire, message) in [
+        (
+            json!({"action":"disk_error","handle":"eio","machine":"node","op":"write","ppm":10}),
+            "disk_error needs disk request selection",
+        ),
+        (
+            json!({"action":"disk_latency","handle":"slow","machine":"node","op":"any","latency_ns":1000}),
+            "disk_latency needs delayed block completion",
+        ),
+        (
+            json!({"action":"preempt","handle":"race","machine":"node","ppm":10}),
+            "preempt needs the guest yield hook",
+        ),
+    ] {
+        let public: Public = serde_json::from_value(wire).unwrap();
+        let error = translate(&public, 19).unwrap_err();
+        assert_eq!(error, format!("{message}, which no engine provides"));
+        let names = ["node".to_owned()];
+        assert_eq!(action_targets(&public, &names, 1).unwrap_err(), error);
+    }
+    let invalid: Public = serde_json::from_value(
+        json!({"action":"disk_latency","handle":"slow","machine":"node","op":"any","latency_ns":1}),
+    )
+    .unwrap();
+    assert!(translate(&invalid, 19)
+        .unwrap_err()
+        .contains("disk_latency latency_ns"));
+}
+
+#[test]
+fn new_faults_need_capabilities_no_engine_provides_yet() {
+    let engines = [
+        (CpuBackend::Pv, Architecture::Aarch64),
+        (CpuBackend::Pv, Architecture::X86_64),
+        (CpuBackend::Tcg, Architecture::X86_64),
+    ]
+    .map(|(backend, architecture)| Engine {
+        backend,
+        architecture,
+    });
+    let action = |action: serde_json::Value| -> Public { serde_json::from_value(action).unwrap() };
+    let limited = [
+        json!({"action":"disk_error","handle":"h","machine":"db","op":"write","ppm":1}),
+        json!({"action":"disk_latency","handle":"h","machine":"db","op":"any","latency_ns":1000}),
+        json!({"action":"preempt","handle":"h","machine":"db","ppm":10}),
+    ]
+    .map(action);
+    let portable = action(json!({"action":"crash","machine":"db"}));
+    for engine in engines {
+        check_engine(&portable, engine).unwrap();
+        for action in &limited {
+            assert!(check_engine(action, engine).is_err(), "{action:?}");
+        }
+        assert!(!Capability::HeldBlockRequest.provided_by(engine));
+    }
+    assert_eq!(
+        check_engine(&limited[2], engines[1]).unwrap_err(),
+        "preempt needs the guest yield hook, which x86_64 PV does not provide"
+    );
+    assert_eq!(
+        check_engine(&limited[0], engines[2]).unwrap_err(),
+        "disk_error needs disk request selection, which x86_64 TCG does not provide"
+    );
+}

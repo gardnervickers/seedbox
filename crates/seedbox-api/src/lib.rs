@@ -26,7 +26,8 @@ pub use controls::{
 };
 
 pub use events::{
-    EventDelivery, EventKind, FaultStatus, MachineTransition, PreparationStage, SimulationEvent,
+    EventDelivery, EventKind, FaultCounts, FaultStatus, MachineTransition, PreparationStage,
+    SimulationEvent,
 };
 pub use http::{ApiError, ErrorCode, ServerInfo, SimulationList, SimulationSummary};
 pub use id::{InvalidSimulationId, SimulationId};

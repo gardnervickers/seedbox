@@ -52,6 +52,8 @@ const VERSION: usize = 24;
 const IRQ_DEFERRED: usize = 32;
 // Word 40 is the ARM exclusive-reservation epoch (see aarch64.rs).
 const SYSCALL_COST: usize = 48;
+// Words 88 and 96 are reserved for the preempt fault's rate and seed, which
+// the guest kernel's syscall hook reads; see docs/faults.md.
 const EVENT_MMIO: u64 = 0x0a01_0000;
 const EVENT_END: u64 = EVENT_MMIO + PAGE_BYTES as u64 - 1;
 const LIFECYCLE_MMIO: u64 = 0x0b01_0000;
