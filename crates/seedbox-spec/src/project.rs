@@ -45,6 +45,11 @@ pub struct Machine {
     pub user: Option<String>,
     pub files: Vec<InitialFile>,
     pub volumes: BTreeMap<String, Volume>,
+    /// Processes on this machine may die of a core-dumping signal or be
+    /// killed for running out of memory. Without it, any such death of any
+    /// process on the machine fails the run.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub allow_crashes: bool,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +69,8 @@ struct MachineFields {
     files: Vec<InitialFile>,
     #[serde(default)]
     volumes: BTreeMap<String, Volume>,
+    #[serde(default)]
+    allow_crashes: bool,
 }
 
 impl TryFrom<MachineFields> for Machine {
@@ -91,6 +98,7 @@ impl TryFrom<MachineFields> for Machine {
             user: fields.user,
             files: fields.files,
             volumes: fields.volumes,
+            allow_crashes: fields.allow_crashes,
         })
     }
 }
@@ -423,5 +431,27 @@ mod tests {
         );
         assert!(machine_disk_bytes([Some((1 << 30) + 512)]).is_err());
         assert!(machine_disk_bytes([Some(0)]).is_err());
+    }
+
+    #[test]
+    fn allow_crashes_is_a_per_machine_flag() {
+        let project: Project = serde_yaml_ng::from_str(
+            "name: keel\nmachines:\n  s3:\n    image: keel\n    allowCrashes: true\n  db:\n    image: db\noracle: {image: oracle}\n",
+        )
+        .unwrap();
+        assert!(project.machines["s3"].allow_crashes);
+        assert!(!project.machines["db"].allow_crashes);
+        assert!(!project.oracle.allow_crashes);
+        // Set flags serialize as authored; machines without one omit the key.
+        let value = serde_json::to_value(&project).unwrap();
+        assert_eq!(value["machines"]["s3"]["allowCrashes"], true);
+        assert!(value["machines"]["db"].get("allowCrashes").is_none());
+        assert_eq!(serde_json::from_value::<Project>(value).unwrap(), project);
+        for bad in [
+            "{image: app, allowCrashes: 2}",
+            "{image: app, allowCrashes: [SIGABRT]}",
+        ] {
+            assert!(serde_yaml_ng::from_str::<Machine>(bad).is_err(), "{bad}");
+        }
     }
 }

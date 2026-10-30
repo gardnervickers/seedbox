@@ -317,6 +317,10 @@ pub fn retain_oci_prepared(
                     address: std::net::Ipv4Addr::new(10, 0, 0, number),
                     prefix_len: 24,
                 }),
+                allow_crashes: simulation
+                    .services
+                    .get(name)
+                    .is_some_and(|service| service.allow_crashes),
             },
         );
     }

@@ -34,6 +34,7 @@ fn resource(tag: &str) -> serde_json::Value {
             },
             volumes: Default::default(),
             anonymous_volumes: vec![],
+            allow_crashes: false,
         },
         network: project.network,
         simulator: d::Simulator {
