@@ -100,6 +100,15 @@ def changes(root):
     edit("arch/arm64/kernel/time.c", time)
     edit("arch/arm64/kernel/process.c", lambda s: permanent_halt(counter_access(s)))
     edit("arch/arm64/include/asm/futex.h", futex_retries)
+    # Guest time advances only in the kernel, so every tick interrupts EL1 and
+    # tick accounting would charge translated compute as system time. Count a
+    # tick that interrupts a progress charge as user time. Only the accounting
+    # changes: RCU and the scheduler still see the interrupted kernel mode.
+    def user_ticks(s):
+        s = replace(s, "#include <asm/io.h>\n", "#include <asm/io.h>\n#include <asm/seedbox.h>\n")
+        return replace(s, "\taccount_process_tick(p, user_tick);\n",
+                       "\taccount_process_tick(p, user_tick || seedbox_user_tick());\n")
+    edit("kernel/time/timer.c", user_ticks)
     # Every return to EL0 crosses a guest exception/scheduling boundary, unlike
     # a host-only interruption. Publish its epoch and clear the physical
     # reservation before restoring user x0/x1; EL1 returns do not publish one.
@@ -125,7 +134,7 @@ def changes(root):
         s = replace(s, "#include <asm/syscall.h>",
                     "#include <asm/syscall.h>\n#include <asm/seedbox.h>")
         return replace(s, "\tadd_random_kstack_offset();",
-                       "\tseedbox_syscall_progress();\n\tadd_random_kstack_offset();")
+                       "\tseedbox_syscall_progress(regs, scno);\n\tadd_random_kstack_offset();")
     edit("arch/arm64/kernel/syscall.c", syscall)
 
     def generic_timer(s):

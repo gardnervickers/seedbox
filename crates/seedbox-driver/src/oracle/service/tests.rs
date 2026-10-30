@@ -446,14 +446,15 @@ fn concurrent_process_effects_deadline_and_early_wake_guards() {
         10,
         json!({"op":"stop","target":{"machine":"app"}}),
     );
-    let duplicate = call(
+    // A restart may follow the stop before its acknowledgment.
+    let restart = call(
         &mut s,
         &mut o,
         2,
         10,
-        json!({"op":"stop","target":{"service":"service"}}),
+        json!({"op":"restart","target":{"service":"service"}}),
     );
-    assert_ne!(fault(&duplicate), fault(&p));
+    assert_ne!(fault(&restart), fault(&p));
     assert!(s.applied(fault(&p), 10, 10).is_err()); // cannot bypass guest ack
     assert!(s.deadline(fault(&p), 11).is_err());
     assert!(!s.poisoned);
@@ -1062,7 +1063,7 @@ fn swapped_owner_fault_does_not_retarget_failure_settlement() {
         &mut o,
         2,
         10,
-        json!({"op":"stop","target":{"machine":"app"}}),
+        json!({"op":"restart","target":{"machine":"app"}}),
     );
     let Plan::Effect {
         fault: fa,
@@ -1477,6 +1478,90 @@ fn step_waits_ready_completes_on_ack_and_heals_inversely() {
         .unwrap();
     assert_eq!(settlement(&p).status, SettlementStatus::Applied);
     assert!(s.handles.active_handles().unwrap().is_empty());
+}
+/// A heal requested before its step is acknowledged is held, not sent: if
+/// the guest then refuses the step, the heal settles with it and the guest
+/// never receives the inverse step. A heal held past its own deadline leaves
+/// the step pending for a later heal.
+#[test]
+fn heal_queued_behind_an_unacknowledged_step_follows_its_outcome() {
+    let (mut s, mut o) = (Service::default(), Owner::default());
+    let skew = |s: &mut Service, o: &mut Owner, n| {
+        let p = call(
+            s,
+            o,
+            n,
+            10,
+            json!({"op":"clock_skew","target":{"machine":"app"},"offset_ns":-7}),
+        );
+        effect(&p)
+    };
+    let (step, _, command) = skew(&mut s, &mut o, 1);
+    let p = call(&mut s, &mut o, 2, 11, json!({"op":"heal","handle":"p1"}));
+    assert!(matches!(p[..], [Plan::Deadline { .. }]));
+    let p = s
+        .acknowledged(
+            &o,
+            "app",
+            0,
+            command.unwrap(),
+            CommandResult::Rejected,
+            12,
+            12,
+        )
+        .unwrap();
+    let settled: Vec<_> = p
+        .iter()
+        .filter_map(|p| match p {
+            Plan::Settled(s) => Some((s.fault, s.status, s.detail.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        settled,
+        [
+            (
+                step,
+                SettlementStatus::Rejected,
+                "guest refused the realtime step".into()
+            ),
+            (
+                step + 1,
+                SettlementStatus::Unavailable,
+                format!("sequenced behind fault {step}, which was not applied")
+            ),
+        ]
+    );
+    assert!(!p.iter().any(|p| matches!(p, Plan::Effect { .. })));
+    assert!(s.pending.is_empty() && s.handles.active_handles().unwrap().is_empty());
+    assert!(!s.poisoned);
+
+    // Held past its own deadline, the heal is unavailable and the step,
+    // acknowledged afterwards, can still be healed.
+    let (mut s, mut o) = (Service::default(), Owner::default());
+    let (_, _, command) = skew(&mut s, &mut o, 1);
+    let heal = Command::Heal {
+        handle: "p1".into(),
+    };
+    let (heal, p) = s
+        .admit_input(&mut o, "heal".into(), heal, 11, 5)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(p[..], [Plan::Deadline { at: 16, .. }]));
+    let p = s.deadline(heal, 16).unwrap();
+    assert_eq!(settlement(&p).status, SettlementStatus::Unavailable);
+    s.acknowledged(
+        &o,
+        "app",
+        0,
+        command.unwrap(),
+        CommandResult::Completed,
+        20,
+        20,
+    )
+    .unwrap();
+    let p = call(&mut s, &mut o, 3, 30, json!({"op":"heal","handle":"p1"}));
+    assert_eq!(effect(&p).1, Effect::StepRealtime(7));
 }
 #[test]
 fn step_admission_uses_process_state_rules_before_drawing() {

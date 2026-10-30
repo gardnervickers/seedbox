@@ -46,7 +46,7 @@ impl Service {
                 );
             }
         };
-        Self::check_machine_effect(mode, &requester, &facts, &effect)?;
+        Self::check_machine_effect(mode, &requester, &self.requested(&facts), &effect)?;
         let fault = self.token()?;
         let pending = Pending {
             network: None,
@@ -76,7 +76,11 @@ impl Service {
             return Ok((fault, self.finish(fault, now, now, Ok(()))?));
         }
         let mut plans = vec![];
-        if !unavailable && (!self.pending[&fault].effect.guest_command() || facts.ready) {
+        // A heal queued behind its unacknowledged step is sent once it lands.
+        let queued = (self.pending[&fault].handle.as_ref())
+            .is_some_and(|h| h.healing() && self.handles.awaiting_start(h.record_id));
+        if !unavailable && !queued && (!self.pending[&fault].effect.guest_command() || facts.ready)
+        {
             match Self::dispatch(adapter, fault, self.pending.get_mut(&fault).unwrap(), now) {
                 Ok(plan) => plans.push(plan),
                 Err(e) => return Err(self.fatal(Some(fault), Some(now), now, e.message).into()),
@@ -100,6 +104,25 @@ impl Service {
             )?;
         }
         Ok((fault, plans))
+    }
+    /// `facts` once the process commands already admitted for its boot land.
+    /// The supervisor carries them out in admission order, so a restart
+    /// requested while its stop is still being reaped follows that stop
+    /// instead of being refused.
+    fn requested(&self, facts: &Facts) -> Facts {
+        let mut facts = facts.clone();
+        for p in self.pending.values() {
+            if let (Effect::Process(command), true) =
+                (&p.effect, p.scope.is_machine(&facts.name, facts.boot))
+            {
+                facts.process = match command {
+                    ApplicationCommand::Start | ApplicationCommand::Resume => Process::Running,
+                    ApplicationCommand::Stop => Process::Stopped,
+                    ApplicationCommand::Pause => Process::Frozen,
+                };
+            }
+        }
+        facts
     }
     /// Machine-effect admission checks, in order: the control-only
     /// availability preflight, target state policy, then requester mode.
@@ -318,12 +341,28 @@ impl Service {
         if observed > at {
             return Err("Ready observation exceeds commit".into());
         }
+        self.dispatch_waiting(adapter, target, boot, at)
+    }
+    /// Send the boot's guest commands that wait for nothing more, in
+    /// admission order: readiness has come, and a heal queued behind its step
+    /// goes once that step is acknowledged.
+    pub(crate) fn dispatch_waiting(
+        &mut self,
+        adapter: &mut impl Adapter,
+        target: &str,
+        boot: u64,
+        at: u64,
+    ) -> Result<Vec<Plan>, Failure> {
+        self.valid()?;
         let mut plans = vec![];
         for (&fault, p) in &mut self.pending {
             if p.scope.is_machine(target, boot)
                 && p.effect.guest_command()
                 && p.command.is_none()
                 && at <= p.deadline
+                // Only the heal waits; its step goes first.
+                && !(p.handle.as_ref())
+                    .is_some_and(|h| h.healing() && self.handles.awaiting_start(h.record_id))
             {
                 match Self::dispatch(adapter, fault, p, at) {
                     Ok(plan) => plans.push(plan),

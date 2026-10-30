@@ -11,6 +11,23 @@ Syscall charges sample their price once. Each segment keeps its first clock read
 and interrupt unmask, then charges the remaining ticks together up to the published
 bound. A stopped continuation retains the unpaid charge in guest state.
 
+Some syscalls are not application work at full price. The PV clock leaves the vDSO
+without a clock on both architectures, so time syscalls (`clock_gettime`,
+`clock_getres`, `gettimeofday`, and x86 `time`) cost only the clock read they make.
+The translator also makes syscalls for itself: suspending threads to flush rewritten
+code, returning from its signal handler and waiting on futexes. On ARM its syscall
+stubs put a fixed mark in x7, which arm64 syscalls leave unused, and the kernel
+charges a marked syscall a tenth of a syscall. A JVM makes millions of these while
+it starts, and at full price they dominated simulated startup time. x86 has no such
+mark yet and charges translator syscalls in full, as system time.
+
+Guest time advances only inside the kernel, so every timer tick interrupts kernel
+mode and tick accounting would charge all translated compute as system time
+(`utime` zero, `ITIMER_VIRTUAL` never firing). The progress client passes a fixed
+first argument to its `getpid`, and on both architectures a tick that interrupts
+that call's charge directly counts as user time. RCU and the scheduler still see
+kernel mode, and the charge itself is unchanged.
+
 Progress instrumentation saves a fixed scratch register in thread-local storage,
 decrements the block budget without changing application flags, and restores the
 register before application execution. Exhaustion branches to one shared routine
@@ -240,6 +257,16 @@ A held, admitted fault is capturable; a prepared but uncommitted intervention re
 Capture needs paused, application-ready execution at a committed boundary with no outstanding I/O cost.
 It consumes the required commit handoff before optional publication, without waiting for observers or releasing held effects.
 The [service envelope](../crates/seedbox-driver-execution/src/driver_world/checkpoint.rs) retains input authority, not observation history.
+
+## Owned cache objects
+
+Checkpoint capture and imports create *owned* cache objects; the running server remembers each new one in memory.
+An ordinary put of the same bytes makes an owned object a reusable input.
+Deletion removes owned objects that no resource, retained input, export of a remaining source or unsubmitted checkpoint upload names; creators hold a reference lock until one does.
+Ownership ends with the server: after graceful shutdown, a crash or a failed reclamation, remaining objects stay as ordinary cache content, so an uncertain path leaks rather than deletes.
+The exclusive server lock means only one process reclaims, and only objects it created.
+The catalogue remembers which deletion reclaimed each object, so submitting a definition that names one fails before admission with that checkpoint and deletion; an upload or export that puts the object back clears the record, which also ends with the server.
+The [reclamation](../crates/seedbox-server/src/execution/content.rs) over-approximates roots: any digest-shaped string counts.
 
 ## Connection incarnations
 
