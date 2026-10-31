@@ -235,9 +235,13 @@ impl Publisher {
                     // Do not turn a carrier's prospective boot into another
                     // lifecycle transition or a fabricated application exit.
                     Response::BootEnded { .. } => {}
+                    // Property evidence is reduced by the Driver and reported
+                    // with the run's results, not as observation events.
                     Response::BootConsole { .. }
                     | Response::CommandAcknowledged { .. }
                     | Response::SimulationControl { .. }
+                    | Response::Property { .. }
+                    | Response::Crash { .. }
                     | Response::TransmitFrame { .. }
                     // A held request is visible as its trigger's resolution.
                     | Response::BlockRequestHeld { .. } => {}

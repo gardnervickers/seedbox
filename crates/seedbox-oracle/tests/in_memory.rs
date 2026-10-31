@@ -1,4 +1,5 @@
-//! A fake replicated log run through every trait, as a runner would drive it.
+//! A fake replicated log run through every trait, as a runner would drive it,
+//! and a fault profile run against a world that models every fault in force.
 use seedbox_oracle::*;
 use serde_json::{json, Value};
 use std::{
@@ -364,4 +365,242 @@ fn appends_lost_by_a_partition_are_a_violation() {
         verdicts: vec![("check".into(), unknown)],
     };
     assert_eq!(undecided.exit_code(), Report::UNKNOWN);
+}
+
+/// Every kind the profile has, overlapping: faults hold for up to three
+/// intervals.
+const PROFILE: &str = r#"
+start_ns: 1000000000
+end_ns: 30000000000
+interval_ns: 1000000000
+max_faults: 20
+targets: [n1, n2, n3]
+faults:
+  - {kind: partition, weight: 2, duration_ns: {min: 500000000, max: 3000000000}}
+  - {kind: shape, duration_ns: {min: 500000000, max: 3000000000},
+     latency_ns: {min: 1000000, max: 50000000}, jitter_ns: 500000, to: [n1, n2, n3, client]}
+  - {kind: crash, downtime_ns: {min: 500000000, max: 3000000000}}
+  - {kind: pause, duration_ns: {min: 500000000, max: 3000000000}}
+  - {kind: pause_process, duration_ns: {min: 500000000, max: 3000000000}}
+  - {kind: stop, downtime_ns: {min: 500000000, max: 3000000000}}
+  - {kind: clock_skew, duration_ns: {min: 500000000, max: 3000000000}, max_offset_ns: 5000000000}
+  - {kind: clock_drift, duration_ns: {min: 500000000, max: 3000000000}, max_rate_ppb: 1000000}
+  - {kind: throttle, duration_ns: {min: 500000000, max: 3000000000}, factor_permille: 4000}
+  - {kind: disk_error, duration_ns: {min: 500000000, max: 3000000000}, op: write, ppm: 1000,
+     targets: [n1, n2]}
+  - {kind: disk_latency, duration_ns: {min: 500000000, max: 3000000000}, op: flush,
+     latency_ns: {min: 1000000, max: 20000000}, targets: [n1, n2]}
+  - {kind: preempt, duration_ns: {min: 500000000, max: 3000000000}, ppm: 10000}
+"#;
+
+/// A world that models every fault in force and refuses what the engine
+/// would: a second lifecycle fault on a machine, an undo of nothing, a heal
+/// of a handle not in force, an unknown machine. `refuse` refuses the
+/// numbered apply it picks, as the world refuses an action it cannot take.
+struct Modelled {
+    now_ns: u64,
+    applied: Vec<(u64, Action)>,
+    attempts: usize,
+    handles: BTreeSet<String>,
+    /// Machines with a lifecycle fault in force, by the action that undoes it.
+    down: std::collections::BTreeMap<String, &'static str>,
+    refuse: Refusal,
+}
+
+/// Whether the world refuses an apply, by its number and action.
+type Refusal = Box<dyn FnMut(usize, &Action) -> bool>;
+
+impl Modelled {
+    fn new(refuse: impl FnMut(usize, &Action) -> bool + 'static) -> Self {
+        Self {
+            now_ns: 5_000_000_000,
+            applied: Vec::new(),
+            attempts: 0,
+            handles: BTreeSet::new(),
+            down: Default::default(),
+            refuse: Box::new(refuse),
+        }
+    }
+
+    fn in_force(&self) -> usize {
+        self.handles.len() + self.down.len()
+    }
+}
+
+impl World for Modelled {
+    fn now_ns(&mut self) -> Result<u64, Error> {
+        Ok(self.now_ns)
+    }
+    fn sleep(&mut self, duration: Duration) -> Result<(), Error> {
+        assert!(!duration.is_zero());
+        self.now_ns += duration.as_nanos() as u64;
+        Ok(())
+    }
+    fn apply(&mut self, action: &Action) -> Result<(), Error> {
+        self.attempts += 1;
+        if (self.refuse)(self.attempts, action) {
+            return Err(format!("{}: invalid_state: refused", action.name()).into());
+        }
+        let known = |machine: &String| ["n1", "n2", "n3", "client"].contains(&machine.as_str());
+        let undo = match action {
+            Action::Stop { .. } => Some("restart"),
+            Action::PauseProcess { .. } => Some("resume_process"),
+            Action::Pause { .. } => Some("resume"),
+            Action::Crash { .. } => Some("reboot"),
+            _ => None,
+        };
+        match action {
+            Action::Restart { machine }
+            | Action::ResumeProcess { machine }
+            | Action::Resume { machine }
+            | Action::Reboot { machine } => {
+                assert_eq!(self.down.remove(machine), Some(action.name()), "{action:?}");
+            }
+            Action::Heal { handle } => assert!(self.handles.remove(handle), "{action:?}"),
+            Action::Partition {
+                handle,
+                left,
+                right,
+            } => {
+                assert!(left.iter().chain(right).all(known) && !right.contains(&left[0]));
+                assert!(self.handles.insert(handle.clone()));
+            }
+            Action::Shape {
+                handle, from, to, ..
+            } => {
+                assert!(from.iter().chain(to).all(known) && !to.contains(&from[0]));
+                assert!(self.handles.insert(handle.clone()));
+            }
+            Action::ClockSkew {
+                handle,
+                offset_ns: Some(_),
+                max_offset_ns: None,
+                ..
+            }
+            | Action::ClockDrift {
+                handle,
+                rate_ppb: Some(_),
+                max_rate_ppb: None,
+                ..
+            }
+            | Action::Throttle { handle, .. }
+            | Action::Preempt { handle, .. } => {
+                assert!(self.handles.insert(handle.clone()));
+            }
+            Action::DiskError {
+                handle, machine, ..
+            }
+            | Action::DiskLatency {
+                handle, machine, ..
+            } => {
+                assert!(["n1", "n2"].contains(&machine.as_str()), "{action:?}");
+                assert!(self.handles.insert(handle.clone()));
+            }
+            other => {
+                let machine = other.machine().expect("a lifecycle action names a machine");
+                assert!(known(&machine.to_owned()));
+                let undo = undo.unwrap_or_else(|| panic!("unexpected {other:?}"));
+                assert!(
+                    self.down.insert(machine.into(), undo).is_none(),
+                    "{other:?} on a machine already down"
+                );
+            }
+        }
+        self.applied.push((self.now_ns, action.clone()));
+        Ok(())
+    }
+}
+
+fn profile() -> nemesis::Profile {
+    serde_yaml_ng::from_str(PROFILE).unwrap()
+}
+
+/// Run the profile to completion with `seed` and return what it applied.
+fn applied(seed: u64) -> Vec<(u64, Action)> {
+    let mut world = Modelled::new(|_, _| false);
+    let mut profile = profile();
+    profile.run(&mut world, &mut Rng::new(seed)).unwrap();
+    assert_eq!(world.in_force(), 0, "every fault ends within run");
+    profile.heal(&mut world).unwrap();
+    assert!(world.now_ns >= 5_000_000_000 + 30_000_000_000);
+    world.applied
+}
+
+#[test]
+fn a_profile_applies_the_same_sequence_for_the_same_seed() {
+    let first = applied(7);
+    assert_eq!(first, applied(7));
+    assert_ne!(first, applied(8));
+    // Faults start inside the window, at most max_faults of them, and every
+    // kind the profile names comes up.
+    let starts: Vec<_> = first
+        .iter()
+        .filter(|(_, action)| {
+            !matches!(
+                action,
+                Action::Heal { .. }
+                    | Action::Restart { .. }
+                    | Action::ResumeProcess { .. }
+                    | Action::Resume { .. }
+                    | Action::Reboot { .. }
+            )
+        })
+        .collect();
+    assert!(!starts.is_empty() && starts.len() <= 20, "{}", starts.len());
+    assert_eq!(first.len(), 2 * starts.len());
+    assert!(starts
+        .iter()
+        .all(|(at, _)| (6_000_000_000..35_000_000_000).contains(at)));
+    let kinds: BTreeSet<_> = (0..20)
+        .flat_map(applied)
+        .map(|(_, action)| action.name())
+        .collect();
+    assert_eq!(kinds.len(), 17, "{kinds:?}");
+}
+
+#[test]
+fn an_invalid_profile_is_refused_before_anything_applies() {
+    let mut profile = profile();
+    profile.faults.push(
+        serde_json::from_value(json!({"kind": "throttle", "factor_permille": 10,
+                                      "duration_ns": {"min": 1, "max": 2}}))
+        .unwrap(),
+    );
+    let mut world = Modelled::new(|_, _| false);
+    let error = profile.run(&mut world, &mut Rng::new(7)).unwrap_err();
+    let own = control::validate_throttle(10).unwrap_err();
+    assert_eq!(error.0, format!("fault profile throttle: {own}"));
+    assert!(world.applied.is_empty());
+}
+
+#[test]
+fn heal_ends_every_fault_still_in_force_after_a_refused_apply() {
+    let mut world = Modelled::new(|attempt, _| attempt == 9);
+    let mut profile = profile();
+    let error = profile.run(&mut world, &mut Rng::new(7)).unwrap_err();
+    assert!(error.0.ends_with("invalid_state: refused"), "{error}");
+    assert!(world.in_force() >= 2, "faults overlap before the refusal");
+    profile.heal(&mut world).unwrap();
+    assert_eq!(world.in_force(), 0);
+    // Nothing is left to heal.
+    let applied = world.applied.len();
+    profile.heal(&mut world).unwrap();
+    assert_eq!(world.applied.len(), applied);
+}
+
+#[test]
+fn heal_tries_every_fault_and_reports_the_first_failure() {
+    let mut world = Modelled::new(|attempt, _| attempt == 9);
+    let mut profile = profile();
+    profile.run(&mut world, &mut Rng::new(7)).unwrap_err();
+    let before = world.in_force();
+    // Refuse the first undo heal tries; the rest still apply.
+    let first_undo = world.attempts + 1;
+    world.refuse = Box::new(move |attempt, _| attempt == first_undo);
+    let error = profile.heal(&mut world).unwrap_err();
+    assert!(error.0.contains("invalid_state: refused"), "{error}");
+    assert_eq!(world.in_force(), 1, "{before} in force, one undo refused");
+    // The refused fault is still in force, and the next heal ends it.
+    profile.heal(&mut world).unwrap();
+    assert_eq!(world.in_force(), 0);
 }

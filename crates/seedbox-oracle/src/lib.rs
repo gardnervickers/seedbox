@@ -18,20 +18,32 @@
 //! The oracle then exits with [`Report::exit_code`]: 1 when a check was
 //! violated, and 3, incomplete, when one could not decide.
 //!
-//! This crate defines the traits and record types only. The runner, the
-//! in-memory history, the seeded random source, the control-socket
-//! [`World`] and the standard fault patterns and checkers follow it.
+//! The library supplies the [`run`]ner, the in-memory [`Recorder`] history,
+//! the seeded [`Rng`], the guest control socket's [`GuestWorld`], Jepsen's
+//! standard fault [`patterns`], fault profiles written as data
+//! ([`nemesis::Profile`]) and the [`queue`] checker. [`main`] runs a
+//! scenario as an oracle program.
 pub mod checker;
 pub mod client;
 pub mod history;
 pub mod nemesis;
+pub mod patterns;
+pub mod queue;
+pub mod random;
+pub mod recorder;
+pub mod runner;
 pub mod scenario;
+pub mod world;
 
 pub use checker::{Checker, Read, Validity, Verdict};
 pub use client::Client;
 pub use history::{Completion, Event, History, Record};
 pub use nemesis::{control, Action, Nemesis, Pace, World};
+pub use random::{RandomExt, Rng};
+pub use recorder::Recorder;
+pub use runner::{final_reads, main, run, run_with, NoClient};
 pub use scenario::{Checkers, FinalRead, Report, Scenario};
+pub use world::GuestWorld;
 
 /// A failure a scenario step reports; the caller decides whether it is fatal.
 #[derive(Clone, Debug, PartialEq, Eq)]

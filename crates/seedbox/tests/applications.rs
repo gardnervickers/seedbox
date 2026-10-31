@@ -15,11 +15,20 @@ use std::{
 pub mod support;
 use support::{failure_capture, json_diff};
 
-// Every discovered workload proves a PASS. These four retain the expensive
+// Every discovered workload proves a PASS. These retain the expensive
 // independent same-seed and retained-input comparisons, covering dynamic
 // network faults, volume durability across crashes, clock state across reboot,
-// and concurrent application behavior.
-const REPEAT_WORKLOADS: [&str; 4] = ["network-faults", "volume-crash", "clock-reboot", "race"];
+// concurrent application behavior, guest property findings (with an allowed
+// crash and a machine's reboot), and an oracle's seeded fault profile as part
+// of the compared results.
+const REPEAT_WORKLOADS: [&str; 6] = [
+    "network-faults",
+    "volume-crash",
+    "clock-reboot",
+    "race",
+    "properties",
+    "profile",
+];
 
 fn invoke(
     cli: &Path,
@@ -233,6 +242,8 @@ applications! {
     key_value => "key-value",
     mac_capabilities => "mac-capabilities",
     network_faults => "network-faults",
+    profile => "profile",
+    properties => "properties",
     race => "race",
     runtime => "runtime",
     slow_machine => "slow-machine",
@@ -255,6 +266,110 @@ fn every_discovered_workload_has_an_individually_selectable_case() {
         WORKLOADS.iter().map(|name| (*name).to_owned()).collect()
     );
     assert!(REPEAT_WORKLOADS.iter().all(|name| WORKLOADS.contains(name)));
+}
+
+/// Projects whose oracle exits 0 but whose guest properties decide the run:
+/// a violated `always`, an unmet requirement, a crash on a machine without
+/// `allowCrashes`, and a violation sent with the guest socket's path hidden
+/// must FAIL (1) giving the reason; lost records must make the run
+/// INCOMPLETE (3).
+#[test]
+fn guest_properties_decide_runs_whose_oracle_passes() {
+    let cli = std::env::var_os("SEEDBOX_TEST_CLI")
+        .expect("harness/check.sh supplies the current release CLI");
+    let reports =
+        std::env::var_os("SEEDBOX_TEST_REPORT_DIR").expect("set a fresh SEEDBOX_TEST_REPORT_DIR");
+    let state_directory = tempfile::Builder::new()
+        .prefix("seedbox-apps-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let state_path = state_directory.path().join("state");
+    let state = state_path.as_path();
+    let server = Server::start(Path::new(&cli), state).unwrap();
+    let check = || -> Result<(), String> {
+        for (name, word, code, reason) in [
+            (
+                "property-violation",
+                "FAIL",
+                1,
+                "violated: probe: arithmetic holds (always)",
+            ),
+            (
+                "unmet-requirement",
+                "FAIL",
+                1,
+                "unmet requirement: probe: never evaluated",
+            ),
+            (
+                "unexpected-crash",
+                "FAIL",
+                1,
+                "violated: seedbox.no_crashing_processes (never)",
+            ),
+            (
+                "hidden-socket",
+                "FAIL",
+                1,
+                "violated: probe: two plus two is four (never)",
+            ),
+            ("lost-evidence", "INCOMPLETE", 3, "lost evidence: "),
+        ] {
+            let project = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../harness/acceptance/verdicts")
+                .join(format!("{name}.yaml"));
+            let directory = Path::new(&reports).join("applications").join(name);
+            fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+            let log = directory.join("first.log");
+            let status = Command::new(&cli)
+                .args(["run", project.to_str().unwrap(), "--wall-time", "30m"])
+                .env_remove("SEEDBOX_VMM")
+                .env("SEEDBOX_STATE", state)
+                .stdout(fs::File::create(&log).map_err(|e| e.to_string())?)
+                .stderr(Stdio::inherit())
+                .guarded_status()
+                .map_err(|e| e.to_string())?;
+            let output = fs::read_to_string(&log).map_err(|e| e.to_string())?;
+            let id = output
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{word}: ")))
+                .ok_or_else(|| format!("{name}: no {word} ({status}): {output}"))?;
+            if status.code() != Some(code) || !output.contains(reason) {
+                return Err(format!("{name}: {status}: {output}"));
+            }
+            // `show` gives the same reason for the completed simulation.
+            let shown = invoke(Path::new(&cli), &directory, state, "show", &["show", id])?;
+            if !shown.contains(reason) {
+                return Err(format!("{name}: show: {shown}"));
+            }
+            let shown = invoke(
+                Path::new(&cli),
+                &directory,
+                state,
+                "show-json",
+                &["show", id, "--json"],
+            )?;
+            let resource: seedbox_api::Simulation =
+                serde_json::from_str(&shown).map_err(|e| format!("{name}: {e}: {shown}"))?;
+            let expected = if code == 1 {
+                seedbox_api::PropertyAssessmentStatus::Failed
+            } else {
+                seedbox_api::PropertyAssessmentStatus::Incomplete
+            };
+            let properties = resource.status.properties.as_ref();
+            if properties.map(|p| p.status()) != Some(expected)
+                || properties.is_some_and(|p| code == 1 && p.lost_count > 0)
+            {
+                return Err(format!("{name}: {shown}"));
+            }
+        }
+        Ok(())
+    };
+    let result = check();
+    drop(server);
+    if let Err(error) = result {
+        let retained = state_directory.keep();
+        panic!("{error}\nretained server state: {}", retained.display());
+    }
 }
 
 fn application(name: &str) {

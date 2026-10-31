@@ -342,10 +342,9 @@ impl Operation {
             }
             Self::Throttle {
                 factor_permille, ..
-            } if !(1000..=1_000_000).contains(factor_permille) => {
-                return Err(OperationError::invalid(
-                    "factor_permille must be in [1000, 1000000]",
-                ));
+            } => {
+                seedbox_engine_protocol::control::validate_throttle(*factor_permille)
+                    .map_err(OperationError::invalid)?;
             }
             Self::DiskError {
                 disk_op,

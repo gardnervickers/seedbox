@@ -15,7 +15,7 @@
 //! not a violation.
 //!
 //! The frame is `SBX_CRASH1 MESSAGE_HEX`, where the message is the line's text
-//! after its kmsg header. Nothing emits or reads this frame yet.
+//! after its kmsg header.
 use serde::{Deserialize, Serialize};
 
 pub const PREFIX: &[u8] = b"SBX_CRASH1 ";
