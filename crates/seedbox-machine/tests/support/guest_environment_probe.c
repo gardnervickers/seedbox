@@ -34,6 +34,7 @@ static int probe_chown(const char *,uid_t,gid_t);
 static int probe_mount(const char *,const char *,const char *,unsigned long,const void *);
 static int probe_mknod(const char *,mode_t,dev_t);
 static int probe_symlink(const char *,const char *);
+static int probe_unlink(const char *);
 static int probe_hostname(const char *,size_t);
 static int probe_rlimit(int,const struct rlimit *);
 static int probe_formatter(char *const []);
@@ -56,6 +57,7 @@ static int probe_formatter(char *const []);
 #define SBX_ENV_MOUNT probe_mount
 #define SBX_ENV_MKNOD probe_mknod
 #define SBX_ENV_SYMLINK probe_symlink
+#define SBX_ENV_UNLINK probe_unlink
 #define SBX_ENV_SETHOSTNAME probe_hostname
 #define SBX_ENV_SETRLIMIT probe_rlimit
 #define SBX_ENV_RUN_FORMATTER probe_formatter
@@ -153,6 +155,7 @@ static int probe_mount(const char *source,const char *target,const char *type,un
 }
 static int probe_mknod(const char *p,mode_t mode,dev_t dev){printf("mknod|%s|%06o|%u|%u\n",p,(unsigned)mode,(unsigned)major(dev),(unsigned)minor(dev));if(enabled("devicefail")){errno=EPERM;return -1;}return 0;}
 static int probe_symlink(const char *target,const char *path){printf("symlink|%s|%s\n",target,path);return 0;}
+static int probe_unlink(const char *path){printf("unlink|%s\n",path);errno=ENOENT;return -1;}
 static int probe_hostname(const char *p,size_t n){printf("hostname|%.*s\n",(int)n,p);if(enabled("hostnamefail")){errno=EPERM;return -1;}return 0;}
 static int probe_rlimit(int resource,const struct rlimit *limit){(void)resource;printf("rlimit|%llu|%llu\n",(unsigned long long)limit->rlim_cur,(unsigned long long)limit->rlim_max);if(enabled("rlimitfail")){errno=EPERM;return -1;}return 0;}
 static int probe_formatter(char *const args[]) {

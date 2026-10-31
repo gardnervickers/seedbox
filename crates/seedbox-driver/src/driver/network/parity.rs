@@ -412,6 +412,15 @@ impl Network {
         bytes: &[u8],
         observations: &mut FrameObservations,
     ) -> Result<(), RouteError> {
+        if self.attached(from) {
+            let members = self
+                .members
+                .iter()
+                .filter_map(|m| Some((m.name.as_str(), m.address?)));
+            if let Some(reply) = seedbox_engine_core::dns::answer(bytes, members) {
+                return self.reply(from, sent, reply);
+            }
+        }
         let destination: [u8; 6] = bytes[..6].try_into().expect("bounded frame");
         let receivers: Vec<_> = if destination == [255; 6] {
             (0..self.members.len())
@@ -599,6 +608,21 @@ impl Network {
         }
         Ok(())
     }
+    /// Schedule the nameserver's reply to `to` one global latency after its
+    /// query. Partitions and link policy never apply, and no observation or
+    /// link counter records it; the receiver's sequence orders the reply.
+    fn reply(&mut self, to: MachineId, sent: u64, bytes: Vec<u8>) -> Result<(), RouteError> {
+        let sequence = self.members[to.0].sent;
+        self.members[to.0].sent = sequence
+            .checked_add(1)
+            .ok_or(RouteError::SequenceOverflow)?;
+        let at = sent
+            .checked_add(self.config.latency_ns)
+            .ok_or(RouteError::ArrivalOverflow)?;
+        self.in_flight
+            .insert((at, to, sequence, to), Flight { sent, bytes });
+        Ok(())
+    }
     #[allow(clippy::too_many_arguments)]
     pub(in crate::driver) fn delivery_result(
         &mut self,
@@ -610,6 +634,10 @@ impl Network {
         dropped: bool,
         observations: &mut FrameObservations,
     ) {
+        if from == to {
+            // A nameserver reply belongs to no link.
+            return;
+        }
         let counts = self.counts.entry((from, to)).or_default();
         if dropped {
             counts.receiver_dropped += 1;

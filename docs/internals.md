@@ -65,6 +65,14 @@ A frame stamped T by the round ending at T routes before a partition/heal due at
 Admission-run output after that effect sees the changed policy; zero-budget receive can wake a paused machine.
 The [network policy](../crates/seedbox-driver/src/driver/network.rs) checks cuts before random draws and FIFO reservation.
 
+## Simulated DNS
+
+Machine N is 10.0.0.N/16 in service-name order; `/etc/hosts` names only loopback and the machine itself.
+`/etc/resolv.conf` points at a [nameserver](../crates/seedbox-engine-core/src/dns.rs) at 10.0.1.1 that the
+driver network answers in place of routing: A and reverse PTR records for current members with TTL 0, NXDOMAIN for
+machines not yet spawned. Replies arrive one global latency later and ignore partitions and link policy,
+so name lookup never stands in for a network fault.
+
 ## Disk state at boot end
 
 Device reset preserves durable and volatile overlays; boot end discards the volatile layer exactly once.

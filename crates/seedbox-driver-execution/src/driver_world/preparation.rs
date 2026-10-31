@@ -26,6 +26,29 @@ fn artifact(path: &Path) -> Result<wire::Artifact> {
     })
 }
 pub const FILESYSTEM: &str = "driver-world/filesystem/";
+/// Interface prefix wide enough that the simulated nameserver (engine-core
+/// `dns::ADDRESS`, 10.0.1.1) is on-link next to the 10.0.0.N machines.
+pub const PREFIX_LEN: u8 = 16;
+
+/// The machine's last address octet: services are numbered in name order.
+pub fn machine_number(simulation: &Simulation, name: &str) -> Result<u8> {
+    let index = simulation
+        .services
+        .keys()
+        .position(|service| service == name)
+        .ok_or_else(|| Error::Integrity("prepared machine has no network address".into()))?;
+    u8::try_from(index + 1)
+        .map_err(|_| Error::Integrity("too many prepared network machines".into()))
+}
+
+/// The guest hosts file names only loopback and the machine itself; peers
+/// resolve through the simulated nameserver so unspawned machines stay absent.
+pub fn hosts_file(simulation: &Simulation, name: &str) -> Result<String> {
+    let number = machine_number(simulation, name)?;
+    Ok(format!(
+        "127.0.0.1 localhost\n::1 localhost\n10.0.0.{number} {name}\n"
+    ))
+}
 
 pub struct OciBoot<'a> {
     pub name: &'a str,
@@ -115,20 +138,12 @@ impl OciBootFactory {
             let retained_filesystem = store.put(filesystem.as_bytes())?;
             let launch = request.launch;
             let volumes = super::volume_setup(launch.disk_volumes.iter());
-            let index = request
-                .simulation
-                .services
-                .keys()
-                .position(|name| name == request.name)
-                .ok_or_else(|| {
-                    Error::Integrity("prepared machine has no network address".into())
-                })?;
-            let number = u8::try_from(index + 1).map_err(|e| Error::Integrity(e.to_string()))?;
+            let number = machine_number(request.simulation, request.name)?;
             let network = NetworkInterface::new(
                 MacAddress::new([2, 0, 0, 0, 0, number])
                     .map_err(|e| Error::Integrity(e.to_string()))?,
                 std::net::Ipv4Addr::new(10, 0, 0, number),
-                24,
+                PREFIX_LEN,
             )
             .map_err(|e| Error::Integrity(e.to_string()))?;
             let definition = MachineDefinition {
@@ -225,14 +240,10 @@ pub fn retain_oci_prepared(
     let scratch = tempfile::tempdir()?;
     let engine = store.materialize(inputs.executable()?, &scratch.path().join("engine"))?;
     let root = &runtime.guest_assets;
-    let mut hosts = "127.0.0.1 localhost\n::1 localhost\n".to_owned();
-    for (index, name) in simulation.services.keys().enumerate() {
-        hosts.push_str(&format!("10.0.0.{} {name}\n", index + 1));
-    }
     let mut machines = BTreeMap::new();
     let mut environments = BTreeMap::new();
     let mut boots = BTreeMap::new();
-    for (index, (name, service)) in simulation.services.iter().enumerate() {
+    for (name, service) in &simulation.services {
         check()?;
         let image = inputs
             .images
@@ -281,7 +292,7 @@ pub fn retain_oci_prepared(
             name.clone(),
             wire::Environment {
                 hostname: name.clone(),
-                hosts: hosts.clone(),
+                hosts: hosts_file(simulation, name)?,
                 anonymous_volumes: image.launch.volumes.clone(),
                 named_volumes: volumes.named_volumes,
                 configs,
@@ -295,8 +306,7 @@ pub fn retain_oci_prepared(
                     .is_some_and(|control| control.service == *name),
             },
         );
-        let number = u8::try_from(index + 1)
-            .map_err(|_| Error::Integrity("too many prepared network machines".into()))?;
+        let number = machine_number(simulation, name)?;
         machines.insert(
             name.clone(),
             wire::Machine {
@@ -313,7 +323,7 @@ pub fn retain_oci_prepared(
                 interface: Some(wire::Interface {
                     mac: [2, 0, 0, 0, 0, number],
                     address: std::net::Ipv4Addr::new(10, 0, 0, number),
-                    prefix_len: 24,
+                    prefix_len: PREFIX_LEN,
                 }),
                 allow_crashes: simulation
                     .services

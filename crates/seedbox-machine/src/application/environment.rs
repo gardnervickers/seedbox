@@ -140,6 +140,7 @@ fn ancestors(path: &str) -> impl Iterator<Item = &str> {
 fn config_target(path: &str, runtime: bool) -> Result<(), DefinitionError> {
     absolute(path, false)?;
     if path == "/etc/hosts"
+        || path == "/etc/resolv.conf"
         || ["/dev", "/proc", "/sys"].iter().any(|p| below(path, p))
         || (runtime && below(path, "/seedbox/progress"))
     {

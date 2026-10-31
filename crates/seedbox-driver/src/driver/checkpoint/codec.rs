@@ -6,7 +6,7 @@ use crate::persistence::{
 };
 use std::io::{Read, Write};
 const MAGIC: [u8; 8] = *b"SBXDRVR\0";
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 
 impl<S> Checkpoint<S> {
     /// Consume this capture, replacing opaque snapshots in insertion order.

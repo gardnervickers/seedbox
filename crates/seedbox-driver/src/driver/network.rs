@@ -11,7 +11,7 @@ mod parity;
 #[cfg(test)]
 mod test_observer;
 use crate::{
-    definition::MacAddress,
+    definition::{MacAddress, NetworkInterface},
     rng::{RngDomain, RngStreamExt, SeededRng},
 };
 pub use parity::*;
@@ -140,7 +140,10 @@ struct Member {
     name: String,
     seed: u64,
     mac: Option<MacAddress>,
+    /// The interface's IPv4 address, which the simulated nameserver answers.
+    address: Option<[u8; 4]>,
     /// Frames this machine has routed, ordering same-arrival deliveries.
+    /// Nameserver replies to this machine consume the same sequence.
     sent: u64,
 }
 
@@ -226,13 +229,21 @@ impl Network {
     }
 
     /// Record machine `id`, admitted in identity order. `None` is unattached.
-    pub(crate) fn admit(&mut self, id: MachineId, name: &str, seed: u64, mac: Option<MacAddress>) {
+    pub(crate) fn admit(
+        &mut self,
+        id: MachineId,
+        name: &str,
+        seed: u64,
+        interface: Option<&NetworkInterface>,
+    ) {
+        let mac = interface.map(NetworkInterface::mac);
         debug_assert_eq!(id.0, self.members.len());
         debug_assert!(mac.is_none_or(|mac| self.members.iter().all(|m| m.mac != Some(mac))));
         self.members.push(Member {
             name: name.to_owned(),
             seed,
             mac,
+            address: interface.map(|i| i.ipv4().octets()),
             sent: 0,
         });
     }
@@ -299,7 +310,9 @@ impl Network {
 
     /// Route one frame `from` sent at simulation time `sent`, against the cuts
     /// in force now: the caller routes in publication and FIFO-turn order, not
-    /// by timestamp alone. Broadcast reaches
+    /// by timestamp alone. ARP and DNS frames for the simulated nameserver are
+    /// answered back to the sender one latency later instead of routed, outside
+    /// cuts and link policy. Broadcast reaches
     /// every other attached machine in identity order; unicast reaches its
     /// address's owner; other group addresses and frames to the sender itself
     /// reach nobody. Each candidate draws its pair's enabled loss and jitter
@@ -380,6 +393,12 @@ mod parity_tests;
 
 mod evidence;
 mod persist;
+
+/// Whether an interface claims the simulated nameserver's MAC or address,
+/// whose frames the network answers instead of routing.
+pub(crate) fn reserved(mac: crate::definition::MacAddress, address: [u8; 4]) -> bool {
+    mac.octets() == seedbox_engine_core::dns::MAC || address == seedbox_engine_core::dns::ADDRESS
+}
 
 #[cfg(test)]
 mod network_parity_tests;

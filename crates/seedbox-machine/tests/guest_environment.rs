@@ -284,6 +284,7 @@ fn invalid_paths_collisions_nul_limits_and_required_formatter_are_rejected_witho
         "/proc/x",
         "/sys/x",
         "/etc/hosts",
+        "/etc/resolv.conf",
         "/nul\0x",
     ] {
         let mut e = good.clone();
@@ -429,6 +430,9 @@ fn pure_c_setup_preserves_volume_metadata_order_binary_configs_devices_limits_an
         "symlink|/proc/self/fd/1|/dev/stdout",
         "fchmod|console|0666",
         "hostname|db-α",
+        "unlink|/etc/resolv.conf",
+        "write|/etc/resolv.conf|6e616d657365727665722031302e302e312e310a",
+        "fchmod|/etc/resolv.conf|0644",
         "write|/etc/demo|00ff0a0080",
         "fchmod|/etc/demo|0444",
         "fchown|/etc/demo|0|0",
@@ -445,6 +449,7 @@ fn pure_c_setup_preserves_volume_metadata_order_binary_configs_devices_limits_an
     assert!(position(&text, "fsync|/seedbox/disk") < position(&text, "root-switch-stub"));
     assert!(position(&text, "root-switch-stub") < position(&text, "mount|tmpfs|/dev|"));
     assert!(position(&text, "mount|-|/etc/demo") < position(&text, "start-one"));
+    assert!(position(&text, "unlink|/etc/resolv.conf") < position(&text, "write|/etc/resolv.conf"));
     assert_eq!(text.matches("formatter|").count(), 1);
     assert_eq!(text.matches("rlimit|1048576|1048576").count(), 2);
     assert!(
