@@ -700,6 +700,16 @@ impl Control {
                 &output.payload,
             )
             .map_err(|e| format!("control observation response: {e:?}"))?;
+        let ready = machines[output.machine.0]
+            .lifecycle
+            .facts()
+            .is_ok_and(|facts| facts.ready);
+        if ready && matches!(output.payload, Response::CommandAcknowledged { .. }) {
+            // A heal queued behind the acknowledged step can go now.
+            plans.extend(self.invoke_plans(machines, |service, view| {
+                service.dispatch_waiting(view, &name, output.boot, commit.as_nanos())
+            })?);
+        }
         if matches!(output.payload, Response::Ready) {
             plans.extend(self.invoke_plans(machines, |service, view| {
                 service.ready(

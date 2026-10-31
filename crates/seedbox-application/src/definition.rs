@@ -66,7 +66,7 @@ pub fn resolve(
                         v.source.clone(),
                         Volume {
                             target: v.target.clone(),
-                            size_bytes: crate::execution::VOLUME_DISK_MIB * 1024 * 1024,
+                            size_bytes: v.size_bytes,
                         },
                     )
                 })
@@ -192,13 +192,10 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
         })?;
         crate::preparation::validate_machine_memory(&profile, name, memory_mb)?;
         machine_memory_mb.insert(name.into(), memory_mb);
-        for volume in machine.volumes.values() {
-            if volume.size_bytes != crate::execution::VOLUME_DISK_MIB * 1024 * 1024 {
-                return Err(Error::Setup(
-                    "volume sizeBytes must equal the supported 1 GiB disk size".into(),
-                ));
-            }
-        }
+        seedbox_spec::project::machine_disk_bytes(
+            machine.volumes.values().map(|volume| volume.size_bytes),
+        )
+        .map_err(|error| Error::Setup(format!("machine {name}: {error}")))?;
         let boot = digest(&machine.boot_archive)?;
         images.insert(
             name.into(),
@@ -218,6 +215,7 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
                         .map(|(n, v)| seedbox_spec::VolumeMount {
                             source: n.clone(),
                             target: v.target.clone(),
+                            size_bytes: v.size_bytes,
                         })
                         .collect(),
                 },
@@ -1135,12 +1133,12 @@ mod tests {
             "data".into(),
             Volume {
                 target: "/var/lib/data".into(),
-                size_bytes: 10,
+                size_bytes: Some(10),
             },
         );
         assert!(prepared(&definition, &store)
             .unwrap_err()
             .to_string()
-            .contains("sizeBytes"));
+            .contains("volume size 10B must be a whole number of MiB"));
     }
 }

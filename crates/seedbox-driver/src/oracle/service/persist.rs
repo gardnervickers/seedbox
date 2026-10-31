@@ -216,13 +216,28 @@ impl Service {
         require(!self.poisoned, "poisoned service")?;
         self.handles.check_persist(exists)?;
         self.triggers.check_persist(now, exists)?;
-        let mut owners = std::collections::BTreeSet::new();
+        // Each record has one pending owner, except a step not yet
+        // acknowledged and the unsent heal queued behind it.
+        let mut owners = BTreeMap::<_, (bool, bool)>::new();
         for (&id, p) in &self.pending {
             self.check_pending_handle_persist(p)?;
             if let Some(plan) = &p.handle {
+                let owner = owners.entry(plan.record_id).or_default();
+                let slot = if plan.healing() {
+                    &mut owner.1
+                } else {
+                    &mut owner.0
+                };
+                require(!*slot, "duplicate pending handle record")?;
+                *slot = true;
+                let queued = self.handles.awaiting_start(plan.record_id);
                 require(
-                    owners.insert(plan.record_id),
+                    !(owner.0 && owner.1) || queued,
                     "duplicate pending handle record",
+                )?;
+                require(
+                    !(queued && plan.healing()) || p.command.is_none(),
+                    "queued heal sent before its step",
                 )?;
             }
             self.check_requester_persist(&p.requester, exists)?;
@@ -273,7 +288,12 @@ impl Service {
             }
         }
         for record in self.handles.unsettled_records() {
-            require(owners.contains(&record), "unowned pending handle record")?;
+            let owner = owners.get(&record).copied().unwrap_or_default();
+            let queued = self.handles.awaiting_start(record);
+            require(
+                (owner.0 || owner.1) && (!queued || (owner.0 && owner.1)),
+                "unowned pending handle record",
+            )?;
         }
         for (&token, (c, _)) in &self.sleepers {
             require(

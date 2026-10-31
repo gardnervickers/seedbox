@@ -121,6 +121,7 @@ fn prepared_boot_cache_invalidates_every_machine_input() {
             "disk_volumes" => changed.disk_volumes.push(config::VolumeMount {
                 source: "data".into(),
                 target: "/data".into(),
+                size_bytes: None,
             }),
             _ => unreachable!(),
         }
@@ -443,6 +444,7 @@ fn prepared_boot_cache_matches_production_pv_and_tcg_archives() {
         launch.disk_volumes.push(config::VolumeMount {
             source: "disk".into(),
             target: "/data".into(),
+            size_bytes: None,
         });
         let configs = BTreeMap::from([("/config".into(), b"configuration".to_vec())]);
         let request = || OciBoot {

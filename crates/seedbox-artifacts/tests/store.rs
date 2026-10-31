@@ -177,3 +177,99 @@ fn put_file_hashes_same_length_source_rewrites() {
     assert_eq!(store.read(&first).unwrap(), b"original");
     assert_eq!(store.read(&second).unwrap(), b"modified");
 }
+
+fn put_file_owned(store: &ContentStore, path: &std::path::Path) -> ContentDigest {
+    store
+        .put_file_owned_observed(path, &mut |_| Ok(()))
+        .unwrap()
+}
+
+#[test]
+fn owned_objects_are_reclaimable_until_reused_as_cache_inputs() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let store = ContentStore::new(&cache).with_owned_objects();
+    let input = store.put(b"cache input").unwrap();
+    // Owned puts of bytes the cache already holds leave them cache inputs.
+    assert_eq!(store.put_reader_owned(&b"cache input"[..]).unwrap(), input);
+    let file = directory.path().join("state");
+    fs::write(&file, b"captured state").unwrap();
+    let state = put_file_owned(&store, &file);
+    let imported = store.put_reader_owned(&b"imported binary"[..]).unwrap();
+    let adopted = store.put_reader_owned(&b"later an input"[..]).unwrap();
+    assert_eq!(store.put(b"later an input").unwrap(), adopted);
+    let reused = store.put_reader_owned(&b"later a file input"[..]).unwrap();
+    let source = directory.path().join("input");
+    fs::write(&source, b"later a file input").unwrap();
+    assert_eq!(store.put_file(&source).unwrap(), reused);
+    assert_eq!(
+        store.owned_objects(),
+        [state.clone(), imported.clone()].into()
+    );
+    assert_eq!(
+        store.reclaim_owned(&[imported.clone()].into()).unwrap(),
+        vec![state.clone()]
+    );
+    assert!(store.verify(&state).is_err());
+    for kept in [&imported, &input, &adopted, &reused] {
+        store.verify(kept).unwrap();
+    }
+    // Putting reclaimed bytes again recreates an owned object.
+    assert_eq!(put_file_owned(&store, &file), state);
+    store.verify(&state).unwrap();
+    assert!(store.owned_objects().contains(&state));
+}
+
+/// Ownership lives only in the process that created the objects: another
+/// store on the same cache, such as the next server after a crash, sees
+/// ordinary cache content and never reclaims it.
+#[test]
+fn owned_objects_outlive_their_owner_as_cache_content() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let store = ContentStore::new(&cache).with_owned_objects();
+    let owned = store.put_reader_owned(&b"owned state"[..]).unwrap();
+    drop(store);
+    let restarted = ContentStore::new(&cache).with_owned_objects();
+    assert!(restarted.owned_objects().is_empty());
+    assert!(restarted
+        .reclaim_owned(&Default::default())
+        .unwrap()
+        .is_empty());
+    restarted.verify(&owned).unwrap();
+    // Putting it again does not make it owned: it already exists.
+    assert_eq!(
+        restarted.put_reader_owned(&b"owned state"[..]).unwrap(),
+        owned
+    );
+    assert!(restarted.owned_objects().is_empty());
+}
+
+#[test]
+fn stores_without_ownership_keep_owned_puts_as_cache_inputs() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(directory.path());
+    let digest = store.put_reader_owned(&b"state"[..]).unwrap();
+    assert!(store.owned_objects().is_empty());
+    assert!(store.reclaim_owned(&Default::default()).unwrap().is_empty());
+    store.verify(&digest).unwrap();
+}
+
+#[test]
+fn reclamation_never_removes_an_object_an_ordinary_put_returned() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(directory.path().join("cache")).with_owned_objects();
+    for round in 0..200u32 {
+        let bytes = format!("racing object {round}").into_bytes();
+        let digest = std::thread::scope(|scope| {
+            let input = scope.spawn(|| store.put(&bytes).unwrap());
+            // Without the caller's exclusion an owned put can lose its object.
+            scope.spawn(|| store.put_reader_owned(bytes.as_slice()).ok());
+            scope.spawn(|| store.reclaim_owned(&Default::default()).unwrap());
+            input.join().unwrap()
+        });
+        store.reclaim_owned(&Default::default()).unwrap();
+        store.verify(&digest).unwrap();
+    }
+    assert!(store.owned_objects().is_empty());
+}

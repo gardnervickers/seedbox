@@ -3672,6 +3672,7 @@ mod tests {
             status: FaultStatus::Applied,
             applied_time_ns: Some(5),
             plan: None,
+            counts: None,
         };
         let admitted = |id: u32| EventKind::ControlChanged {
             control: Box::new(serde_json::json!({
@@ -4056,6 +4057,7 @@ mod tests {
                 applied_time_ns: Some(1_000_000),
                 plan: Some(serde_json::json!({"action":action,"machine":"app"})),
                 active: false,
+                counts: None,
             });
         }
         let activity = app.focus.as_ref().unwrap().activity();
@@ -4106,6 +4108,7 @@ mod tests {
             applied_time_ns: Some(1_500_000),
             plan: Some(serde_json::json!({"action":"partition","handle":"split","left":["api"],"right":["db"]})),
             active: true,
+            counts: None,
         });
         for link in &mut w.links {
             if (link.from == "api" && link.to == "db") || (link.from == "db" && link.to == "api") {
@@ -4257,6 +4260,7 @@ mod tests {
             applied_time_ns: Some(1_000_000_000),
             plan: Some(serde_json::json!({"action":"partition","handle":"p1","left":["api"],"right":["db"]})),
             active: true,
+            counts: None,
         });
         app.apply(Update::World(w));
         app.focus.as_mut().unwrap().timeline = vec![seedbox_api::TimelineEntry {
@@ -4502,6 +4506,7 @@ mod tests {
                 applied_time_ns: Some(1_000_000_000),
                 plan: Some(serde_json::json!({"action":action,"machine":"n1","handle":handle})),
                 active: true,
+                counts: None,
             });
         }
         for healed in [false, true] {

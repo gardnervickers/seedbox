@@ -555,7 +555,7 @@ fn require_definition(simulation: &Simulation, backend: Backend, seed: u64) -> R
             || !member
                 .volumes
                 .get(&format!("{name}-data"))
-                .is_some_and(|volume| volume.target == "/data" && volume.size_bytes > 0)
+                .is_some_and(|volume| volume.target == "/data" && volume.size_bytes.is_none())
         {
             return Err(format!("{name} did not retain its persistent /data disk"));
         }

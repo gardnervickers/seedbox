@@ -661,8 +661,9 @@ impl Service {
             payload,
         })
     }
+    /// Whether a heal of this input's handle may be admitted.
     pub(crate) fn input_record_active(&self, id: super::handles::RecordId) -> bool {
-        self.handles.active_record(id)
+        self.handles.healable_record(id)
     }
     pub(crate) fn handle_collision(&self, fault: u32) -> bool {
         self.pending

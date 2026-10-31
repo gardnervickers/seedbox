@@ -139,7 +139,10 @@ impl InForce {
             | Action::DropConnection { handle, .. }
             | Action::ClockSkew { handle, .. }
             | Action::ClockDrift { handle, .. }
-            | Action::Throttle { handle, .. } => self.handles.push(handle.clone()),
+            | Action::Throttle { handle, .. }
+            | Action::DiskError { handle, .. }
+            | Action::DiskLatency { handle, .. }
+            | Action::Preempt { handle, .. } => self.handles.push(handle.clone()),
         }
         Ok(())
     }

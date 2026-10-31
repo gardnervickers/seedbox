@@ -1987,6 +1987,7 @@ dependencies = [
  "seedbox-machine",
  "seedbox-machine-pv",
  "seedbox-machine-tcg",
+ "seedbox-spec",
  "seedbox-test",
  "seedbox-test-time",
  "serde",

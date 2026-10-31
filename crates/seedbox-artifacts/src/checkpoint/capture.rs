@@ -15,7 +15,8 @@ pub fn capture_start(
 
 /// Capture with cooperative byte-work observation, including verification passes.
 /// An observer error stops capture without returning a partial starting state.
-/// Already retained immutable assets remain reusable in the shared store.
+/// Already retained immutable assets remain reusable in the shared store; new
+/// ones are owned by the resources that reference them (`put_reader_owned`).
 pub fn capture_start_observed(
     path: &std::path::Path,
     owned: &std::path::Path,
@@ -57,7 +58,7 @@ pub fn capture_start_observed(
                 let name = format!("state-{}", assets.len() + 1);
                 assets.insert(
                     name.clone(),
-                    asset(&store.put_file_observed(&path, progress)?),
+                    asset(&store.put_file_owned_observed(&path, progress)?),
                 );
                 values.insert(key.into(), format!("asset:{name}").into());
                 for value in values.values_mut() {
