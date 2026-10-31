@@ -395,6 +395,7 @@ mod tests {
             applied_time_ns: Some(1_000_000),
             plan: Some(entry.action.clone()),
             active: false,
+            counts: None,
         });
         assert_eq!(observed_effect(&entry, Some(&world)).0, "applied");
         world.faults[0].active = true;
