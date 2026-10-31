@@ -38,6 +38,7 @@ The [capture boundary](internals.md#checkpoint-capture) preserves input cursors 
 ## Definitions do not borrow resource ownership
 
 A resolved definition owns its binary closure by digest; source IDs and image names are provenance.
-Deleting the source simulation does not invalidate a checkpoint branch, but YAML alone cannot move its bytes.
+A submitted checkpoint branch keeps its captured state when the source simulation is deleted; a fetched but unsubmitted branch definition does not, so submit it or export a bundle first. YAML alone cannot move its bytes.
 The catalogue and execution scratch are session-scoped; the binary cache is not.
+Deleting a simulation reclaims captured checkpoint state and imported binaries no remaining resource names; kernels and images stay cached.
 A [portable archive](../crates/seedbox-artifacts/src/archive.rs) carries the closure without restoring source ownership.

@@ -422,7 +422,7 @@ fn fixture_submission(
     let oracle = fixture.name;
     let filesystem = fixture.filesystem;
     let launch = fixture.launch;
-    let volumes = driver_world::volume_setup(&fixture.volumes);
+    let volumes = driver_world::volume_setup(&fixture.volumes).unwrap();
     let mut definition = MachineDefinition {
         name: oracle.into(),
         resources: Resources { memory_bytes: 0 },

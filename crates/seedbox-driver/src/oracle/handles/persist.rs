@@ -4,7 +4,7 @@ wire_tuple_struct!(Handle);
 wire_tuple_struct!(RecordId);
 wire_enum!(Text;units{}tuples{0=>Allocated(v0),1=>Named(v0)}records{});
 wire_struct!(Allocator { last });
-wire_enum!(Phase; units {0=>Pending,1=>Active,2=>Healing,3=>Lost} tuples {} records {});
+wire_enum!(Phase; units {0=>Pending,1=>Active,2=>Healing,3=>Lost,4=>PendingHealing} tuples {} records {});
 wire_enum!(Change; units {3=>Partition,4=>Unpartition,6=>Unshape,7=>Select,8=>Unselect,10=>Unfault} tuples {0=>Execution(v0),1=>Drift(v0),2=>Step(v0),5=>Shape(v0,v1),9=>Fault(v0)} records {});
 wire_enum!(HandleTarget; units {} tuples {0=>Machine(v0),3=>Connection(v0)} records {1=>Links{left,right},2=>DirectedLinks{from,to}});
 wire_struct!(Record {
@@ -40,7 +40,7 @@ impl Handles {
         crate::persistence::require(
             self.records
                 .get(&id)
-                .is_some_and(|r| r.text.matches(text) && (!settled || r.phase != Phase::Pending)),
+                .is_some_and(|r| r.text.matches(text) && (!settled || !r.phase.unapplied())),
             "input owned record",
         )
     }
@@ -62,7 +62,7 @@ impl Handles {
                 Text::Named(n) => require(!n.is_empty(), "empty named handle")?,
             }
             require(
-                r.phase == Phase::Pending || active.insert(r.text.to_string()),
+                r.phase.unapplied() || active.insert(r.text.to_string()),
                 "duplicate active handle",
             )?;
             if let Change::Step(n) = r.change {
@@ -72,8 +72,9 @@ impl Handles {
                 )?;
             }
             require(
-                r.phase != Phase::Lost || matches!(r.change, Change::Step(_)),
-                "lost nonstep handle",
+                !matches!(r.phase, Phase::Lost | Phase::PendingHealing)
+                    || matches!(r.change, Change::Step(_)),
+                "lost or queued-heal nonstep handle",
             )?;
             require(
                 !matches!(
@@ -122,16 +123,17 @@ impl Handles {
         Ok(())
     }
     pub(crate) fn check_plan_persist(&self, p: &ExecutionPlan) -> crate::persistence::Result<()> {
-        let phase = match p.transition {
-            Transition::Apply => Phase::Pending,
-            Transition::Heal => Phase::Healing,
-        };
         crate::persistence::require(
             self.records.get(&p.record_id).is_some_and(|r| {
                 r.text == p.handle
                     && r.target == p.target
-                    && r.revision == p.revision
-                    && r.phase == phase
+                    && match p.transition {
+                        Transition::Apply => r.phase.unapplied() && p.revision == 0,
+                        Transition::Heal => {
+                            r.revision == p.revision
+                                && matches!(r.phase, Phase::Healing | Phase::PendingHealing)
+                        }
+                    }
                     && Some(p.change)
                         == match (p.transition, p.lost) {
                             (Transition::Apply, _) => Some(r.change),

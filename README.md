@@ -79,7 +79,11 @@ to `seedbox.yaml`; `build.dockerfile` defaults to `Dockerfile`.
 Optional launch fields are `entrypoint`, `command`, `environment`, `memoryMiB`,
 `workingDirectory`, `user`, `files` and `volumes`. `files` is a list of
 `{source, target}` entries copied into the guest at preparation; `volumes` maps
-names to `{target}` entries for writable disks that survive machine crashes.
+names to `{target, size}` entries for writable disks that survive machine crashes.
+A machine's volumes share one disk: volumes without a `size` share one 1 GiB
+allotment, and each `size` (whole MiB or GiB from `16MiB`, such as `size: 4GiB`)
+adds to it, up to 64 GiB per machine. The disk is sparse: host memory, checkpoints and crash
+transfers scale with written sectors, not the declared size.
 See [the etcd project](examples/etcd/seedbox.yaml) for a three-node cluster with
 persistent data disks.
 

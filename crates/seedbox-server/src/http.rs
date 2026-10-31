@@ -800,7 +800,9 @@ impl From<CatalogueError> for HttpError {
             | CatalogueError::RevisionConflict
             | CatalogueError::ControlBusy
             | CatalogueError::ControlUnavailable => (StatusCode::CONFLICT, ErrorCode::Conflict),
-            CatalogueError::Invalid(_) => (StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest),
+            CatalogueError::Invalid(_) | CatalogueError::Reclaimed { .. } => {
+                (StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest)
+            }
             _ => (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal),
         };
         Self::new(status, code, error.to_string())

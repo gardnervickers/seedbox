@@ -576,9 +576,9 @@ fn decoded_invariants_reject_untrusted_complete_objects() {
         let mut e = Encoder { output: Vec::new() };
         c.put(&mut e).unwrap();
         let mut bad = b"SBXDRVR\0".to_vec();
-        // Use current v5 framing so the intended state invariant, not version,
+        // Use current v7 framing so the intended state invariant, not version,
         // is what rejects these deliberately malformed imported bodies.
-        bad.extend(5u32.to_le_bytes());
+        bad.extend(7u32.to_le_bytes());
         bad.extend((e.output.len() as u64).to_le_bytes());
         bad.extend(e.output);
         assert!(
@@ -850,8 +850,8 @@ fn closed_codec_version_and_orphaned_network_ownership_fail_before_restore() {
     let mut d = net(initial(), setup(8), 1);
     advance(&mut d, 1);
     let (bytes, _) = artifact(d.checkpoint().unwrap());
-    assert_eq!(&bytes[8..12], &6u32.to_le_bytes());
-    for version in [0u32, 1, 2, 3, 4, 5, 7, u32::MAX] {
+    assert_eq!(&bytes[8..12], &7u32.to_le_bytes());
+    for version in [0u32, 1, 2, 3, 4, 5, 6, 8, u32::MAX] {
         let mut old = bytes.clone();
         old[8..12].copy_from_slice(&version.to_le_bytes());
         assert!(matches!(

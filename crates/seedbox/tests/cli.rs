@@ -986,6 +986,43 @@ fn native_project_discovery_prefers_seedbox_yaml_and_validates_oracle() {
 }
 
 #[test]
+fn volume_sizes_validate_before_host_admission() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = |volumes: &str| {
+        fs::write(
+            directory.path().join("seedbox.yaml"),
+            format!("name: sized\nmachines:\n  db:\n    image: app\n    volumes:\n{volumes}oracle: {{image: checker}}\n"),
+        )
+        .unwrap();
+        seedbox(&["check", "."], directory.path())
+    };
+    let output = project("      data: {target: /data, size: 4GiB}\n      wal: {target: /wal}\n");
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        unavailable_driver_stderr(&directory.path().join("assets"))
+    );
+    for size in ["4GB", "4096", "1.5GiB", "128GiB"] {
+        let output = project(&format!("      data: {{target: /data, size: {size}}}\n"));
+        assert_eq!(output.status.code(), Some(2), "{size}");
+        assert!(
+            stderr(&output).contains(&format!("size \"{size}\": expected a whole number of MiB or GiB such as 4GiB or 512MiB, from 16MiB to 64GiB")),
+            "{size}: {}",
+            stderr(&output)
+        );
+    }
+    let output = project(
+        "      data: {target: /data, size: 40GiB}\n      wal: {target: /wal, size: 30GiB}\n",
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("volume sizes total 70GiB, above the 64GiB limit for one machine"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn capacity_help_explains_resident_slots_and_accepts_json() {
     let directory = tempfile::tempdir().unwrap();
     let output = seedbox(&["server", "status", "--help"], directory.path());
@@ -1534,4 +1571,97 @@ fn control_receipt_internals_stay_out_of_help_but_remain_usable() {
     }
     let output = seedbox(&["control", "receipt", "k7m2p9qx", "bad/id"], root.path());
     assert!(stderr(&output).contains("request ID must be"));
+}
+
+#[test]
+fn a_definition_whose_checkpoint_state_was_reclaimed_fails_at_submission() {
+    use seedbox_api::{InputSource, Simulation};
+    // A short state path keeps the server socket within the platform limit.
+    let root = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    let root = root.path();
+    let state = root.join("state");
+    let cli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_seedbox"))
+            .args(args)
+            .current_dir(root)
+            .env_clear()
+            .env("HOME", root)
+            .env("TMPDIR", root)
+            .env("SEEDBOX_STATE", &state)
+            .env("SEEDBOX_ASSET_DIR", root.join("assets"))
+            .env("PATH", "")
+            .guarded_output()
+            .unwrap()
+    };
+    // A checkpoint file, written without hardware.
+    let source = seedbox_application::store::ContentStore::new(root.join("source-cache"));
+    source.put(b"catalogue-only-binary").unwrap();
+    let InputSource::Resolved { definition } =
+        seedbox_server::test_support::resolved_request("file")
+            .spec
+            .inputs
+    else {
+        unreachable!()
+    };
+    let mut definition = *definition;
+    let ram = source.put(b"captured checkpoint RAM").unwrap();
+    definition.start = seedbox_spec::definition::Start::Checkpoint {
+        manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[]}}}, "ram":{"path":"asset:ram", "sha256":ram.hex()}}),
+        assets: std::collections::BTreeMap::from([(
+            "ram".into(),
+            seedbox_spec::definition::Asset(format!("sha256:{}", ram.hex())),
+        )]),
+    };
+    let file = root.join("capture.seedbox");
+    seedbox_artifacts::archive::export_checkpoint(
+        &definition,
+        &source,
+        &mut fs::File::create(&file).unwrap(),
+        &Default::default(),
+    )
+    .unwrap();
+
+    let started = cli(&["server", "start"]);
+    assert!(started.status.success(), "{}", stderr(&started));
+    let _server = ServerCleanup(state.join("server.sock"));
+    // Two runs name the uploaded state; neither can execute here.
+    let runs: Vec<Simulation> = (0..2)
+        .map(|_| {
+            let run = cli(&["run", file.to_str().unwrap(), "--json"]);
+            serde_json::from_slice(&run.stdout).unwrap_or_else(|e| panic!("{e}: {}", stderr(&run)))
+        })
+        .collect();
+    let shown = cli(&[
+        "show",
+        runs[1].metadata.id.as_str(),
+        "--view",
+        "definition",
+        "--json",
+    ]);
+    assert!(shown.status.success(), "{}", stderr(&shown));
+    let branch = root.join("branch.yaml");
+    fs::write(&branch, &shown.stdout).unwrap();
+    for run in &runs {
+        let deleted = cli(&["delete", run.metadata.id.as_str()]);
+        assert!(deleted.status.success(), "{}", stderr(&deleted));
+    }
+
+    let output = cli(&["run", branch.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(output.stdout.is_empty());
+    let text = stderr(&output);
+    assert_eq!(
+        text,
+        format!(
+            "error: server rejected request (InvalidRequest): checkpoint state for this definition was reclaimed when simulation {} was deleted; export a checkpoint file to keep it\n",
+            runs[1].metadata.id
+        )
+    );
+    println!("BEGIN TEST CAPTURE reclaimed-checkpoint\n$ seedbox run branch.yaml\n{text}END TEST CAPTURE reclaimed-checkpoint");
+    // Nothing was admitted.
+    let listed = cli(&["show", "--json"]);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&listed.stdout).unwrap(),
+        serde_json::json!([])
+    );
 }
