@@ -278,7 +278,11 @@ impl Scenario for Profiled {
         vec![Pinger, Pinger]
     }
     fn nemesis(&mut self) -> Box<dyn Nemesis> {
-        let profile: Profile = serde_yaml_ng::from_str(PROFILE).expect("profile.yaml parses");
+        let mut profile: Profile = serde_yaml_ng::from_str(PROFILE).expect("profile.yaml parses");
+        // x86_64 PV has no guest yield hook, so it refuses preempt.
+        if cfg!(target_arch = "x86_64") {
+            profile.faults.retain(|fault| fault.name() != "preempt");
+        }
         Box::new(Logged {
             profile,
             outcome: self.outcome.clone(),

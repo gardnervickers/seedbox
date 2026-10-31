@@ -1,5 +1,6 @@
 # The faults this oracle injects: every kind, on the three nodes, overlapping.
-# Only n1 and n2 have a volume, so the disk kinds target those.
+# Only n1 and n2 have a volume, so the disk kinds target those. The oracle
+# drops preempt on x86_64, whose PV engine has no guest yield hook.
 start_ns: 2000000000
 end_ns: 25000000000
 interval_ns: 2500000000
