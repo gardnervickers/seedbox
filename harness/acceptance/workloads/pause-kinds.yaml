@@ -1,0 +1,35 @@
+name: pause-kinds
+machines:
+  app:
+    image: docker.io/library/python:3.13-alpine
+    entrypoint:
+    - python3
+    - "/scenario/pause_kinds.py"
+    - app
+    files:
+    - source: "../driver/pause_kinds.py"
+      target: "/scenario/pause_kinds.py"
+  peer:
+    image: docker.io/library/python:3.13-alpine
+    entrypoint:
+    - python3
+    - "/scenario/pause_kinds.py"
+    - peer
+    files:
+    - source: "../driver/pause_kinds.py"
+      target: "/scenario/pause_kinds.py"
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint:
+  - python3
+  - "/scenario/pause_kinds.py"
+  - oracle
+  files:
+  - source: "../driver/pause_kinds.py"
+    target: "/scenario/pause_kinds.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms

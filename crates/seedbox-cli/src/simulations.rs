@@ -1039,10 +1039,14 @@ mod tests {
             serde_json::from_slice(&serde_json::to_vec(&spec).unwrap()).unwrap();
         assert_eq!(restored.configuration.simulator.quantum_ns.get(), 2_500_000);
 
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../harness/acceptance/workloads");
+        // Both the ordinary corpus and the long-running tier.
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../harness/acceptance");
         let mut tested = 0;
-        for entry in std::fs::read_dir(root).unwrap() {
+        let entries = std::fs::read_dir(root.join("workloads"))
+            .unwrap()
+            .chain(std::fs::read_dir(root.join("long")).unwrap());
+        for entry in entries {
             let path = entry.unwrap().path();
             if path.extension().and_then(|v| v.to_str()) != Some("yaml") {
                 continue;

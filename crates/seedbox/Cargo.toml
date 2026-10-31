@@ -24,6 +24,7 @@ seedbox-machine-pv = { workspace = true, features = ["test-support"] }
 seedbox-server = { workspace = true, features = ["test-support"] }
 seedbox-api.workspace = true
 seedbox-client.workspace = true
+futures-util.workspace = true
 seedbox-artifacts.workspace = true
 seedbox-spec.workspace = true
 serde_yaml_ng.workspace = true
@@ -36,15 +37,27 @@ tokio = { workspace = true, features = ["process"] }
 linux-apps = ["application-tests", "etcd-prep-tests"]
 mac-apps = ["application-tests"]
 linux-pause = ["retained-run-tests"]
+linux-apps-long = ["long-application-tests"]
+mac-apps-long = ["long-application-tests"]
 
 [features]
 application-tests = []
 etcd-prep-tests = []
 retained-run-tests = []
+# Multi-minute server workloads; only the *-apps-long suites select them.
+long-application-tests = []
 
 [[test]]
 name = "applications"
 required-features = ["application-tests"]
+
+[[test]]
+name = "determinism"
+required-features = ["long-application-tests"]
+
+[[test]]
+name = "long_applications"
+required-features = ["long-application-tests"]
 
 [[test]]
 name = "etcd_service_native"
