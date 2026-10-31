@@ -245,6 +245,7 @@ impl Service {
                 .map(|h| (id, h.clone()))
         })
     }
+    #[allow(clippy::too_many_arguments)]
     fn complete(
         &mut self,
         fault: u32,
