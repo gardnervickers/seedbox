@@ -151,6 +151,7 @@ fn settlement_retires_its_deadline_without_deleting_other_policy_or_external_wor
             Settlement {
                 record_id: None,
                 network: None,
+                counts: None,
                 fault: 7,
                 requester: crate::oracle::service::Requester::Trigger(1),
                 scope: crate::oracle::service::Scope::Machine {

@@ -96,7 +96,11 @@ impl Codec {
             | Request::Reboot
             | Request::Shutdown
             | Request::SimulationReply { .. }
-            | Request::ReceiveFrame { .. } => Err(Error::Frame),
+            | Request::ReceiveFrame { .. }
+            | Request::InstallFault { .. }
+            | Request::HealFault { .. }
+            | Request::HoldBlockRequest { .. }
+            | Request::ReleaseBlockRequest { .. } => Err(Error::Frame),
         }
     }
 

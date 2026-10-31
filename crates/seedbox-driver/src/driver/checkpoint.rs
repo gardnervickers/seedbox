@@ -396,6 +396,7 @@ where
                 control: checkpoint.control.clone(),
                 inputs: checkpoint.inputs.clone(),
                 trigger_marker: checkpoint.trigger_marker,
+                engine: None,
                 definitions: checkpoint.definitions.clone(),
                 network: checkpoint.network.clone(),
             },

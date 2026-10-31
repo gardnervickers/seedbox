@@ -406,6 +406,7 @@ pub(crate) fn request(
         }
     }
     let workers = workers?;
+    super::build::check_program_engine(request.program, &prepared.inventory)?;
     Ok(wire::Request {
         prepared,
         runtime_binding: runtime.map(|runtime| runtime.wire.clone()),

@@ -10,7 +10,12 @@ wire_enum!(ApplicationCommand; units {0=>Start,1=>Stop,2=>Pause,3=>Resume} tuple
 wire_enum!(CommandResult; units {0=>Completed,1=>Rejected} tuples {} records {});
 wire_enum!(Stream; units {0=>Stdout,1=>Stderr} tuples {} records {});
 wire_struct!(SimulationControlId { session, request });
-wire_enum!(foreign Request; units {0=>Crash,1=>Reboot,2=>Shutdown} tuples {} records {3=>SimulationReply{id,payload},4=>Application{id,command},5=>StepRealtime{id,nanoseconds},6=>ReceiveFrame{bytes}});
+wire_enum!(foreign Request; units {0=>Crash,1=>Reboot,2=>Shutdown} tuples {} records {3=>SimulationReply{id,payload},4=>Application{id,command},5=>StepRealtime{id,nanoseconds},6=>ReceiveFrame{bytes},7=>InstallFault{id,seed,fault},8=>HealFault{id},9=>HoldBlockRequest{trigger,op,nth,until},10=>ReleaseBlockRequest{trigger}});
+wire_enum!(DiskOp; units {0=>Read,1=>Write,2=>Flush,3=>Any} tuples {} records {});
+wire_enum!(DiskEffect; units {0=>Eio,1=>Corrupt} tuples {} records {});
+wire_enum!(DiskScope; units {0=>All,1=>Data} tuples {} records {});
+wire_enum!(DeviceFault; units {} tuples {} records {0=>DiskError{op,ppm,effect,scope},1=>DiskLatency{op,latency_ns,jitter_ns},2=>Preempt{ppm}});
+wire_struct!(FaultCounts { matched, affected });
 wire_enum!(EvidenceDisposition; units {0=>Live,1=>Crashed,2=>Shutdown} tuples {} records {3=>Exited{code}});
 use seedbox_engine_protocol::out_of_memory::Kill;
 wire_struct!(Kill {
@@ -19,7 +24,7 @@ wire_struct!(Kill {
     anon_rss_kib,
     application
 });
-wire_enum!(foreign Response; units {1=>Ready} tuples {} records {0=>SimulationControl{id,payload},2=>BootConsole{bytes},3=>ApplicationOutput{stream,bytes},4=>ApplicationOutcome{code},5=>CommandAcknowledged{id,result},6=>TransmitFrame{bytes},8=>OutOfMemoryKill{kill},7=>BootEnded{ended_boot,disposition,native_booted,disk_lost_sectors,surviving_disk,retired_state_digest}});
+wire_enum!(foreign Response; units {1=>Ready} tuples {} records {0=>SimulationControl{id,payload},2=>BootConsole{bytes},3=>ApplicationOutput{stream,bytes},4=>ApplicationOutcome{code},5=>CommandAcknowledged{id,result},6=>TransmitFrame{bytes},8=>OutOfMemoryKill{kill},7=>BootEnded{ended_boot,disposition,native_booted,disk_lost_sectors,surviving_disk,retired_state_digest},9=>BlockRequestHeld{trigger}});
 wire_struct!(Input { at, payload });
 wire_enum!(StopReason; units {0=>BoundaryReached} tuples {} records {1=>Blocked{reached,deadline},2=>Exited{reached,reason}});
 wire_enum!(ExitReason; units {0=>Shutdown,2=>Crashed} tuples {} records {1=>ProgramExit{code}});

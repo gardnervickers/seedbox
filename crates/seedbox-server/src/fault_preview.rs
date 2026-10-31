@@ -318,17 +318,31 @@ mod tests {
     }
 
     #[test]
-    fn preview_refuses_faults_no_engine_provides() {
+    fn disk_and_scheduler_faults_preview_their_machine_and_effect() {
         let (configuration, world) = fixture();
-        let action: Action = serde_json::from_value(
-            json!({"action":"disk_error","handle":"eio","machine":"n1","op":"write","ppm":10}),
-        )
-        .unwrap();
-        assert!(matches!(
-            preview(&world, &configuration, &action),
-            Err(Error::Invalid(message))
-                if message == "disk_error needs disk request selection, which no engine provides"
-        ));
+        for (wire, category, effect) in [
+            (
+                json!({"action":"disk_error","handle":"eio","machine":"n1","op":"write","ppm":10,"scope":"data"}),
+                seedbox_api::FaultCategory::Disk,
+                "Fail 10 per million write requests with an I/O error before any disk effect, sparing the filesystem's static metadata, until healed",
+            ),
+            (
+                json!({"action":"disk_latency","handle":"slow","machine":"n1","op":"flush","latency_ns":5000}),
+                seedbox_api::FaultCategory::Disk,
+                "Complete flush disk requests 5000 ns late",
+            ),
+            (
+                json!({"action":"preempt","handle":"race","machine":"n1","ppm":20}),
+                seedbox_api::FaultCategory::Machine,
+                "Yield the guest CPU at 20 per million syscalls",
+            ),
+        ] {
+            let action: Action = serde_json::from_value(wire).unwrap();
+            let preview = preview(&world, &configuration, &action).unwrap();
+            assert_eq!(preview.machines, ["n1"]);
+            assert_eq!(preview.category, category);
+            assert!(preview.expected_effect.starts_with(effect), "{}", preview.expected_effect);
+        }
         let invalid: Action = serde_json::from_value(
             json!({"action":"disk_error","handle":"eio","machine":"n1","op":"write","ppm":0}),
         )

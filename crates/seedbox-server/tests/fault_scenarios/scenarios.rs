@@ -157,7 +157,8 @@ pub fn family(action: &Action) -> &'static str {
             "network"
         }
         Action::Heal { .. } => "recovery",
-        // The catalogue offers no form for them yet.
+        // The catalogue offers no form for them yet; the device-faults
+        // application workload exercises them on PV.
         Action::DiskError { .. } | Action::DiskLatency { .. } => "disk",
         Action::Preempt { .. } => "machine",
     }

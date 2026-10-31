@@ -16,6 +16,7 @@ impl Service {
             at,
             Err(error(ErrorCode::InvalidState, message)),
             Some(SettlementStatus::Failed),
+            None,
         )
     }
     pub(crate) fn applied_network(
@@ -50,6 +51,31 @@ impl Service {
             return Err("guest command completion requires acknowledgment".into());
         }
         self.finish(fault, observed, at, Ok(()))
+    }
+    /// Confirm a non-guest effect that took effect at `at`, with the counts
+    /// its machine reported for a healed device fault.
+    pub(crate) fn applied_counts(
+        &mut self,
+        fault: u32,
+        at: u64,
+        counts: Option<crate::pv::FaultCounts>,
+    ) -> Result<Vec<Plan>, Failure> {
+        if self
+            .pending
+            .get(&fault)
+            .is_some_and(|p| p.effect.guest_command())
+        {
+            return Err("guest command completion requires acknowledgment".into());
+        }
+        if counts.is_some()
+            && !self
+                .pending
+                .get(&fault)
+                .is_some_and(|p| matches!(p.effect, Effect::Unfault { .. }))
+        {
+            return Err("fault counts settle only a device fault heal".into());
+        }
+        self.finish_inner(fault, at, at, Ok(()), None, counts)
     }
     // Keep the existing acknowledgment seam stable during service integration.
     #[allow(clippy::too_many_arguments)]
@@ -163,7 +189,7 @@ impl Service {
         at: u64,
         result: Result<(), OperationError>,
     ) -> Result<Vec<Plan>, Failure> {
-        self.finish_inner(fault, observed, at, result, None)
+        self.finish_inner(fault, observed, at, result, None, None)
     }
     fn finish_inner(
         &mut self,
@@ -172,6 +198,7 @@ impl Service {
         at: u64,
         result: Result<(), OperationError>,
         forced: Option<SettlementStatus>,
+        counts: Option<crate::pv::FaultCounts>,
     ) -> Result<Vec<Plan>, Failure> {
         self.valid()?;
         let p = self
@@ -196,7 +223,8 @@ impl Service {
             .err()
             .map(|e| e.message.clone())
             .unwrap_or_else(|| p.note.unwrap_or("confirmed effect").into());
-        let settlement = Self::settlement(fault, p, Some(observed), at, status, detail);
+        let mut settlement = Self::settlement(fault, p, Some(observed), at, status, detail);
+        settlement.counts = counts;
         if let Some(handle) = &p.handle {
             let completion = if result.is_ok() {
                 self.handles.applied(handle)
@@ -325,6 +353,7 @@ impl Service {
         Settlement {
             record_id: p.handle.as_ref().map(|h| h.record_id),
             network: p.network.clone(),
+            counts: None,
             fault,
             requester: p.requester.clone(),
             scope: p.scope.clone(),

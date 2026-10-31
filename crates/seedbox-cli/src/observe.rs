@@ -351,7 +351,7 @@ pub(super) fn world(server: &ServerArgs, id: &SimulationId, json: bool) -> Resul
                             .map(target)
                             .or_else(|| f.machine.clone())
                             .unwrap_or_default(),
-                        output::word(&f.status).to_lowercase(),
+                        with_counts(output::word(&f.status).to_lowercase(), f.counts),
                         f.applied_time_ns
                             .map_or_else(|| "-".into(), seedbox_tui::short_time),
                         if f.active { "yes".into() } else { "-".into() },
@@ -397,7 +397,7 @@ pub(super) fn timeline(server: &ServerArgs, id: &SimulationId, json: bool) -> Re
             .and_then(|id| world.faults.iter().find(|f| f.id == id))
             .map_or_else(
                 || "upcoming".into(),
-                |fault| output::word(&fault.status).to_lowercase(),
+                |fault| with_counts(output::word(&fault.status).to_lowercase(), fault.counts),
             )
     };
     output::table(
@@ -418,6 +418,15 @@ pub(super) fn timeline(server: &ServerArgs, id: &SimulationId, json: bool) -> Re
             .collect(),
     )?;
     Ok(0)
+}
+
+/// A fault status with what a disk fault's heal reported it matched and did:
+/// `applied (matched 8, affected 3)`.
+fn with_counts(status: String, counts: Option<seedbox_api::FaultCounts>) -> String {
+    match counts {
+        Some(c) => format!("{status} (matched {}, affected {})", c.matched, c.affected),
+        None => status,
+    }
 }
 
 /// A condition `wait` can observe.
@@ -693,5 +702,20 @@ mod tests {
         assert!(!filter.admits(&entry(15, 0, seedbox_api::LogStream::Stderr)));
         assert!(!filter.admits(&entry(15, 1, seedbox_api::LogStream::Stdout)));
         assert!(filter.admits(&LogEntry::SourceUnavailable));
+    }
+
+    #[test]
+    fn fault_counts_summarize_in_a_few_words() {
+        assert_eq!(
+            with_counts(
+                "applied".into(),
+                Some(seedbox_api::FaultCounts {
+                    matched: 8,
+                    affected: 3
+                })
+            ),
+            "applied (matched 8, affected 3)"
+        );
+        assert_eq!(with_counts("failed".into(), None), "failed");
     }
 }

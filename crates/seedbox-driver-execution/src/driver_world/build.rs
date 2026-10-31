@@ -123,6 +123,7 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
         },
     )
     .map_err(|e| bad(e.to_string()))?;
+    driver.set_engine(super::actions::engine(&request.prepared.inventory));
     if request.start_paused {
         driver
             .with_barrier(|barrier| barrier.set_rate(seedbox_driver::driver::PlaybackRate::Paused))
@@ -288,6 +289,7 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
         },
     )
     .map_err(|e| bad(e.to_string()))?;
+    driver.set_engine(super::actions::engine(&request.prepared.inventory));
     if names.next().is_some() {
         return Err(bad("Driver checkpoint name inventory has unused entries"));
     }
@@ -334,12 +336,23 @@ fn program(
     .map_err(bad)?;
     // Refuse what this engine cannot carry out before any machine boots,
     // rather than failing when the input becomes due.
-    let engine = super::actions::engine(&request.prepared.inventory);
-    for input in &request.program {
+    check_program_engine(&request.program, &request.prepared.inventory)?;
+    Ok(request.program.clone())
+}
+/// Refuse a program input `inventory`'s engine cannot carry out, naming the
+/// input and what the engine lacks. The parent runs it before it launches a
+/// worker, so the refusal is the run's error rather than a worker failure;
+/// the worker runs it again on the request it is given.
+pub(super) fn check_program_engine(
+    program: &[seedbox_engine_protocol::input_program::TimedInput],
+    inventory: &Inventory,
+) -> Result<()> {
+    let engine = super::actions::engine(inventory);
+    for input in program {
         seedbox_driver::driver::faults::check_engine(&input.action, engine)
             .map_err(|error| Error::Setup(format!("input {}: {error}", input.key)))?;
     }
-    Ok(request.program.clone())
+    Ok(())
 }
 fn encode(snapshot: Snapshot, writer: &mut BufWriter<fs::File>) -> Result<()> {
     snapshot.write_to(writer).map_err(bad)

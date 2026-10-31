@@ -166,6 +166,20 @@ impl Machine for Mock {
             })
         }
     }
+    /// A healed device fault `id` reports `id` matched and half of them
+    /// affected, once per heal the machine received.
+    fn take_fault_counts(&mut self, id: u64) -> Result<Option<crate::pv::FaultCounts>, Io> {
+        let heals = self
+            .state
+            .received
+            .iter()
+            .filter(|input| input.payload == Request::HealFault { id })
+            .count();
+        Ok((heals > 0).then_some(crate::pv::FaultCounts {
+            matched: id,
+            affected: id / 2,
+        }))
+    }
     fn snapshot(&mut self) -> Result<Saved, Io> {
         self.captures.fetch_add(1, Ordering::SeqCst);
         if self.state.fail_capture {

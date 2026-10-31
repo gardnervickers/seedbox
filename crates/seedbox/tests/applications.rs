@@ -228,6 +228,7 @@ applications! {
     clock_reboot => "clock-reboot",
     clock_skew => "clock-skew",
     connections => "connections",
+    device_faults => "device-faults",
     exclusives => "exclusives",
     key_value => "key-value",
     mac_capabilities => "mac-capabilities",
@@ -295,6 +296,9 @@ fn application(name: &str) {
             &["run", workload.to_str().unwrap(), "--wall-time", "30m"],
         )?;
         let first = simulation_id(&first_output)?;
+        if name == "device-faults" {
+            return faulted(Path::new(&cli), &directory, state, first);
+        }
         if !representative {
             return Ok(());
         }
@@ -358,6 +362,156 @@ fn application(name: &str) {
             retained.display()
         );
     }
+}
+
+/// The program `device-faults` adds to its own unfaulted run's definition:
+/// phase i's fault is active from `START_NS + i * PERIOD_NS` for
+/// `ACTIVE_NS`, the schedule its oracle (`device_faults.py`) runs each phase
+/// in. The preempt phase is applied only where PV provides the guest yield
+/// hook.
+fn device_fault_program() -> Vec<serde_json::Value> {
+    use serde_json::json;
+    const START_NS: u64 = 1_000_000_000;
+    const PERIOD_NS: u64 = 1_250_000_000;
+    const ACTIVE_NS: u64 = 1_000_000_000;
+    let phases = [
+        (
+            "read-eio",
+            json!({"action":"disk_error","handle":"read-eio","machine":"oracle","op":"read","ppm":1_000_000,"scope":"data"}),
+        ),
+        (
+            "corrupt",
+            json!({"action":"disk_error","handle":"corrupt","machine":"oracle","op":"read","ppm":1_000_000,"effect":"corrupt","scope":"data"}),
+        ),
+        (
+            "write-eio",
+            json!({"action":"disk_error","handle":"write-eio","machine":"oracle","op":"write","ppm":500_000,"scope":"data"}),
+        ),
+        (
+            "slow",
+            json!({"action":"disk_latency","handle":"slow","machine":"oracle","op":"flush","latency_ns":20_000_000}),
+        ),
+        (
+            "race",
+            json!({"action":"preempt","handle":"race","machine":"oracle","ppm":100_000}),
+        ),
+    ];
+    let mut program = Vec::new();
+    for (index, (phase, fault)) in phases.into_iter().enumerate() {
+        // Only the ARM PV kernel yields; x86_64 PV refuses preempt, so there
+        // the oracle observes the race phase unfaulted.
+        if phase == "race" && !cfg!(target_arch = "aarch64") {
+            continue;
+        }
+        let start = START_NS + index as u64 * PERIOD_NS;
+        program.push(json!({"id": format!("{phase}-on"), "atNs": start, "action": fault}));
+        program.push(json!({
+            "id": format!("{phase}-off"),
+            "atNs": start + ACTIVE_NS,
+            "action": {"action": "heal", "handle": phase},
+        }));
+    }
+    program
+}
+
+/// Resubmit the unfaulted run's own definition with the fault program: the
+/// oracle observes every fault from inside the guest, the world view keeps
+/// the heals' counts and the victim's crash on a held FLUSH and reboot, and
+/// a replay of the faulted run's retained inputs matches it in full state.
+fn faulted(cli: &Path, directory: &Path, state: &Path, baseline: &str) -> Result<(), String> {
+    let described = invoke(
+        cli,
+        directory,
+        state,
+        "describe-baseline",
+        &["show", "--view", "definition", baseline, "--json"],
+    )?;
+    let mut resource: serde_json::Value =
+        serde_json::from_str(&described).map_err(|error| format!("describe baseline: {error}"))?;
+    resource["spec"]["overrides"] = serde_json::Value::Array(device_fault_program());
+    let document = directory.join("faulted.json");
+    fs::write(&document, serde_json::to_vec_pretty(&resource).unwrap())
+        .map_err(|error| error.to_string())?;
+    let output = invoke(
+        cli,
+        directory,
+        state,
+        "faulted",
+        &["run", document.to_str().unwrap(), "--wall-time", "30m"],
+    )?;
+    let faulted = simulation_id(&output)?;
+    let logs = invoke(
+        cli,
+        directory,
+        state,
+        "faulted-logs",
+        &["logs", faulted, "oracle", "--tail", "100"],
+    )?;
+    let expected = if cfg!(target_arch = "aarch64") {
+        "RESULT pass device faults faulted=read-eio,corrupt,write-eio,slow,race"
+    } else {
+        "RESULT pass device faults faulted=read-eio,corrupt,write-eio,slow"
+    };
+    if !logs.contains(expected) || !logs.contains("VICTIM crashed on a held flush and rebooted") {
+        return Err(format!("faulted run did not observe its faults: {logs}"));
+    }
+    let world = invoke(
+        cli,
+        directory,
+        state,
+        "faulted-world",
+        &["show", "--view", "world", faulted, "--json"],
+    )?;
+    let world: seedbox_api::WorldState =
+        serde_json::from_str(&world).map_err(|error| format!("faulted world: {error}"))?;
+    let heals: Vec<_> = world
+        .faults
+        .iter()
+        .filter(|fault| fault.action == "heal")
+        .collect();
+    let counts = |handle: &str| {
+        heals
+            .iter()
+            .find(|fault| {
+                fault
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| plan["handle"] == handle)
+            })
+            .and_then(|fault| fault.counts)
+            .ok_or_else(|| format!("{handle} heal has no counts: {heals:?}"))
+    };
+    for (handle, at_least) in [
+        ("read-eio", 8),
+        ("corrupt", 8),
+        ("write-eio", 1),
+        ("slow", 4),
+    ] {
+        let counts = counts(handle)?;
+        if counts.affected < at_least || counts.affected > counts.matched {
+            return Err(format!("{handle} heal counts {counts:?}"));
+        }
+    }
+    let victim = world
+        .machines
+        .iter()
+        .find(|machine| machine.name == "victim")
+        .ok_or("victim missing from the world")?;
+    if victim.incarnation < 1 {
+        return Err(format!("victim never rebooted: {victim:?}"));
+    }
+    let replay = invoke(
+        cli,
+        directory,
+        state,
+        "faulted-replay",
+        &["replay", faulted, "--wall-time", "30m"],
+    )?;
+    let replayed = replay
+        .lines()
+        .find_map(|line| line.strip_prefix("MATCH: "))
+        .ok_or_else(|| format!("missing faulted replay MATCH: {replay}"))?;
+    compare(cli, directory, state, "compare-faulted", faulted, replayed)
 }
 
 /// The acceptance fixture owns its server process; retained reports outlive it.

@@ -850,8 +850,8 @@ fn closed_codec_version_and_orphaned_network_ownership_fail_before_restore() {
     let mut d = net(initial(), setup(8), 1);
     advance(&mut d, 1);
     let (bytes, _) = artifact(d.checkpoint().unwrap());
-    assert_eq!(&bytes[8..12], &5u32.to_le_bytes());
-    for version in [0u32, 1, 2, 3, 4, 6, u32::MAX] {
+    assert_eq!(&bytes[8..12], &6u32.to_le_bytes());
+    for version in [0u32, 1, 2, 3, 4, 5, 7, u32::MAX] {
         let mut old = bytes.clone();
         old[8..12].copy_from_slice(&version.to_le_bytes());
         assert!(matches!(
@@ -915,5 +915,52 @@ fn oom_victim_output_survives_persisted_continuation_and_worker_counts() {
     advance(&mut d, 3);
     // exercise destroys the source and compares publications and machine state
     // after binary decode/restoration with both one and four workers.
+    exercise(d);
+}
+#[test]
+fn device_fault_handles_inputs_and_requests_roundtrip() {
+    use crate::pv::{DeviceFault, DiskOp};
+    let mut d = build(
+        vec![
+            spec(0, true, vec![(0, Response::Ready)]),
+            spec(1, true, vec![(0, Response::Ready)]),
+        ],
+        vec![],
+        true,
+    );
+    let install = |d: &mut Driver<Mock>, when, name: &str, fault| {
+        d.with_barrier(|b| {
+            b.schedule_with_handle(
+                at(when),
+                key(name),
+                Action::DeviceFault {
+                    target: Target::Name("fixture-1".into()),
+                    fault,
+                },
+                FaultHandle::named(name.to_owned()).unwrap(),
+            )
+        })
+        .unwrap();
+    };
+    install(
+        &mut d,
+        5,
+        "slow",
+        DeviceFault::DiskLatency {
+            op: DiskOp::Flush,
+            latency_ns: 3_000,
+            jitter_ns: 7,
+        },
+    );
+    install(&mut d, 15, "race", DeviceFault::Preempt { ppm: 77 });
+    d.schedule(
+        at(25),
+        key("heal"),
+        Action::Heal(HealTarget::Handle(
+            FaultHandle::named("slow".to_owned()).unwrap(),
+        )),
+    )
+    .unwrap();
+    advance(&mut d, 10);
     exercise(d);
 }
