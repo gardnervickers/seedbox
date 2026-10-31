@@ -2,6 +2,7 @@
 //! injected by the executable; clients never own worker lifetimes or leases.
 
 mod bundles;
+pub(crate) mod content;
 mod diagnostics;
 
 use crate::{catalogue, manager::Manager};
@@ -23,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
     },
     time::Duration,
 };
@@ -89,6 +90,10 @@ pub struct ExecutionService {
     backends: Arc<dyn BackendProvider>,
     preparation_limit: Duration,
     evidence: Mutex<()>,
+    /// Read while creating owned content until something names it; written by
+    /// reclamation (`content.rs`).
+    references: RwLock<()>,
+    pins: Mutex<content::Pins>,
     admission: Mutex<(usize, BTreeMap<tokio::task::Id, SimulationId>)>,
 }
 
@@ -130,6 +135,8 @@ impl ExecutionService {
             backends,
             preparation_limit: crate::preparation_budget::DEFAULT_LIMIT,
             evidence: Mutex::new(()),
+            references: RwLock::new(()),
+            pins: Mutex::default(),
             admission: Mutex::new((0, BTreeMap::new())),
         })
     }
@@ -145,7 +152,8 @@ impl ExecutionService {
     }
 
     /// Foreground cascading deletion: stop the frozen ownership tree, wait for
-    /// execution cleanup, then remove dependents before their parents.
+    /// execution cleanup, then remove dependents before their parents, and
+    /// finally the owned content no remaining resource references.
     pub fn delete(&self, id: &SimulationId) -> Result<(), Error> {
         let _evidence = self
             .evidence
@@ -184,6 +192,7 @@ impl ExecutionService {
             }
             self.manager.delete(&id)?;
         }
+        self.reclaim_unreferenced(Some(id))?;
         Ok(())
     }
 
@@ -262,6 +271,22 @@ impl ExecutionService {
         name: &str,
         progress: &mut impl FnMut(u64) -> std::io::Result<()>,
     ) -> Result<seedbox_api::Simulation, Error> {
+        // Deleting the source reclaims under this lock; an export must not
+        // return state a concurrent deletion is removing.
+        let _evidence = self
+            .evidence
+            .lock()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
+        self.checkpoint_definition_locked(id, name, progress)
+    }
+
+    /// `checkpoint_definition_observed` for a caller that holds the evidence lock.
+    pub(crate) fn checkpoint_definition_locked(
+        &self,
+        id: &SimulationId,
+        name: &str,
+        progress: &mut impl FnMut(u64) -> std::io::Result<()>,
+    ) -> Result<seedbox_api::Simulation, Error> {
         progress(0)?;
         self.manager.captured_checkpoint(id, name)?;
         let mut resource = self.describe(id)?;
@@ -281,12 +306,17 @@ impl ExecutionService {
             .join("output")
             .join(seedbox_application::execution::MACHINE_OUTPUT_DIR)
             .join(format!("checkpoint-{name}.json"));
+        let _references = self
+            .references
+            .read()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
         definition.start = seedbox_application::definition::capture_start_observed(
             &path,
             &attempt,
             &self.store,
             progress,
         )?;
+        self.pin_export(id, name, &definition.start)?;
         progress(0)?;
         resource
             .metadata
@@ -439,6 +469,10 @@ impl ExecutionService {
             // its journal and checkpoint files. Later comparisons read only the
             // manager-owned record. A missing journal is an explicit completion
             // error, never an empty history or a failed owner task.
+            // Recapturing a start checkpoint stays owned until the result names it.
+            let _references = self.references.read().map_err(|_| {
+                seedbox_application::Error::Setup("content reference lock failed".into())
+            })?;
             let simulation = self.portable_simulation(&id)?;
             let InputSource::Resolved { definition } = simulation.spec.inputs else {
                 return Err(seedbox_application::Error::Integrity(

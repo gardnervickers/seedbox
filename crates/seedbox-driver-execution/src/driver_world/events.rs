@@ -1,6 +1,8 @@
 //! Committed Driver publications become service observations and result evidence.
 //! Transport loss never changes service state. A restored branch starts a new
-//! transport stream and publication cursor.
+//! transport stream and publication cursor. Logs and events wait for a live
+//! observer to drain its receive buffer; the worker publishes between rounds,
+//! so waiting only delays the next round. Optional frame batches never wait.
 use crate::{Error, Result};
 use seedbox_driver::driver::{
     self as driver, Event, EventKind, FaultAction, FaultOrigin, FaultRecord, FaultTarget,
@@ -13,17 +15,105 @@ use seedbox_engine_protocol::{
     observation::{self, Kind, MachineTransition},
 };
 use seedbox_machine::pv::{ApplicationCommand, Response, Stream};
-use std::{collections::BTreeMap, os::unix::net::UnixDatagram, path::Path};
+use std::{
+    collections::BTreeMap,
+    os::unix::net::UnixDatagram,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 #[cfg(test)]
 pub(super) mod evidence;
+#[cfg(test)]
+mod tests;
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::Integrity(message.into())
 }
 
+/// How long one mandatory observation waits for a live observer to drain
+/// earlier datagrams before it is dropped as a source gap.
+const STALL: Duration = Duration::from_secs(2);
+
+/// Whether a nonblocking send failed only because the receiver has not yet
+/// drained earlier datagrams: Linux reports a full peer queue as `EAGAIN`,
+/// Darwin a full receive buffer as `ENOBUFS`.
+fn receiver_full(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock || error.raw_os_error() == Some(libc::ENOBUFS)
+}
+
+struct Sender {
+    socket: UnixDatagram,
+    stall: Duration,
+    /// The observer let a datagram time out. Later sends try once until one is
+    /// accepted, so a stopped observer delays a worker at most once.
+    stalled: bool,
+    /// Waits that ran out, for tests.
+    #[cfg(test)]
+    expired: u32,
+    /// Told when a send starts waiting for the observer, for tests.
+    #[cfg(test)]
+    waiting: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl Sender {
+    fn connect(path: &Path, stall: Duration) -> std::io::Result<Self> {
+        let socket = UnixDatagram::unbound()?;
+        observation::configure_socket(&socket)?;
+        socket.connect(path)?;
+        socket.set_nonblocking(true)?;
+        Ok(Self {
+            socket,
+            stall,
+            stalled: false,
+            #[cfg(test)]
+            expired: 0,
+            #[cfg(test)]
+            waiting: None,
+        })
+    }
+    /// Send one datagram, waiting for a full receiver only when asked and not
+    /// already stalled. False means the datagram was lost.
+    fn send(&mut self, bytes: &[u8], wait: bool) -> bool {
+        let mut deadline = None;
+        let mut pause = Duration::from_micros(20);
+        loop {
+            match self.socket.send(bytes) {
+                Ok(_) => {
+                    self.stalled = false;
+                    return true;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if wait && !self.stalled && receiver_full(&error) => {
+                    let now = Instant::now();
+                    #[cfg(test)]
+                    if deadline.is_none() {
+                        if let Some(waiting) = &self.waiting {
+                            let _ = waiting.send(());
+                        }
+                    }
+                    let deadline = *deadline.get_or_insert(now + self.stall);
+                    if now >= deadline {
+                        self.stalled = true;
+                        #[cfg(test)]
+                        {
+                            self.expired += 1;
+                        }
+                        return false;
+                    }
+                    // A datagram socket has no writability wait that covers a
+                    // full peer queue on both platforms; back off briefly.
+                    std::thread::sleep(pause.min(deadline - now));
+                    pause = (pause * 2).min(Duration::from_millis(1));
+                }
+                Err(_) => return false,
+            }
+        }
+    }
+}
+
 pub(super) struct Publisher {
-    socket: Option<UnixDatagram>,
+    socket: Option<Sender>,
     sequence: u64,
     /// Every committed Driver event, structurally encoded, for unit tests.
     #[cfg(test)]
@@ -31,15 +121,7 @@ pub(super) struct Publisher {
 }
 impl Publisher {
     pub(super) fn connect(path: Option<&Path>) -> Result<Self> {
-        let socket = path
-            .map(|path| -> std::io::Result<_> {
-                let socket = UnixDatagram::unbound()?;
-                observation::configure_socket(&socket)?;
-                socket.connect(path)?;
-                socket.set_nonblocking(true)?;
-                Ok(socket)
-            })
-            .transpose()?;
+        let socket = path.map(|path| Sender::connect(path, STALL)).transpose()?;
         Ok(Self {
             socket,
             sequence: 0,
@@ -81,7 +163,10 @@ impl Publisher {
             .observation_records
             .checked_add(1)
             .ok_or_else(|| invalid("Driver logical observation count exhausted"))?;
-        if let Some(socket) = &self.socket {
+        if let Some(socket) = &mut self.socket {
+            // Mandatory observations wait for a live observer; optional frame
+            // batches never delay a round.
+            let wait = !matches!(kind, Kind::Frames { .. });
             let record = observation::Observation {
                 sequence: self.sequence,
                 machine: machine.into(),
@@ -91,10 +176,10 @@ impl Publisher {
             };
             let bytes = serde_json::to_vec(&record)?;
             if bytes.len() <= observation::MAX_DATAGRAM_BYTES {
-                let _ = socket.send(&bytes);
+                socket.send(&bytes, wait);
             }
-            // Oversize or unavailable transport consumes its sequence. The
-            // receiver reports gaps; no retry or evidence mutation depends on it.
+            // Oversize, unavailable or stalled transport consumes its sequence.
+            // The receiver reports gaps; no evidence mutation depends on it.
         }
         Ok(())
     }

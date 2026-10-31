@@ -2553,6 +2553,8 @@ mod device_fault_tests;
 #[cfg(test)]
 mod evidence_tests;
 #[cfg(test)]
+mod guest_command_tests;
+#[cfg(test)]
 mod oracle_correlation_tests;
 #[cfg(test)]
 mod properties_tests;

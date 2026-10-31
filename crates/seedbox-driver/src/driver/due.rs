@@ -297,14 +297,13 @@ where
             }
             control::Event::Plan(Plan::Deadline { fault, .. }) => {
                 // A Failed settlement publishes through service notices.
-                if let Err(failure) = self
+                let plans = self
                     .execution
                     .control
                     .service
                     .deadline(fault, now.as_nanos())
-                {
-                    return Err(Error::Control(failure.message));
-                }
+                    .map_err(|failure| Error::Control(failure.message))?;
+                self.control_plans(plans)?;
                 Ok(None)
             }
             control::Event::Plan(Plan::Reply {

@@ -81,6 +81,15 @@ enum Phase {
     Healing,
     /// A realtime step whose guest kernel ended; healing it changes nothing.
     Lost,
+    /// A realtime step not yet acknowledged, with its heal queued behind it:
+    /// the guest carries out commands in order, so the undo follows the step.
+    PendingHealing,
+}
+impl Phase {
+    /// The installing change has not taken effect yet.
+    fn unapplied(self) -> bool {
+        matches!(self, Self::Pending | Self::PendingHealing)
+    }
 }
 /// The change a handle installed. Execution and drift are Driver-owned
 /// dependencies that survive crash and reboot; a realtime step is guest kernel
@@ -278,7 +287,7 @@ impl Handles {
         if self
             .records
             .values()
-            .any(|r| r.phase != Phase::Pending && r.text.matches(text))
+            .any(|r| !r.phase.unapplied() && r.text.matches(text))
         {
             return Err(Error::DuplicateActive);
         }
@@ -335,7 +344,7 @@ impl Handles {
         let text = plan.handle.to_string();
         plan.transition == Transition::Apply
             && self.records.iter().any(|(&id, r)| {
-                id != plan.record_id && r.phase != Phase::Pending && r.text.matches(&text)
+                id != plan.record_id && !r.phase.unapplied() && r.text.matches(&text)
             })
     }
     pub(crate) fn record_highwater(&self) -> u64 {
@@ -344,14 +353,14 @@ impl Handles {
     pub(crate) fn unsettled_records(&self) -> impl Iterator<Item = RecordId> + '_ {
         self.records
             .iter()
-            .filter(|(_, r)| matches!(r.phase, Phase::Pending | Phase::Healing))
+            .filter(|(_, r)| r.phase.unapplied() || r.phase == Phase::Healing)
             .map(|(&id, _)| id)
     }
     pub(crate) fn retained_network(&self) -> impl Iterator<Item = (String, Change, &HandleTarget)> {
         self.records
             .values()
             .filter(|r| {
-                r.phase != Phase::Pending
+                !r.phase.unapplied()
                     && matches!(
                         r.change,
                         Change::Partition | Change::Shape(..) | Change::Select
@@ -363,6 +372,21 @@ impl Handles {
         self.records
             .get(&id)
             .is_some_and(|r| matches!(r.phase, Phase::Active | Phase::Lost))
+    }
+    /// Whether a heal of `id` may be admitted: an active handle, or a
+    /// realtime step not yet acknowledged, whose undo then follows it.
+    pub(crate) fn healable_record(&self, id: RecordId) -> bool {
+        self.active_record(id)
+            || self
+                .records
+                .get(&id)
+                .is_some_and(|r| r.phase == Phase::Pending && matches!(r.change, Change::Step(_)))
+    }
+    /// Whether `id` is a step whose heal waits for the step to take effect.
+    pub(crate) fn awaiting_start(&self, id: RecordId) -> bool {
+        self.records
+            .get(&id)
+            .is_some_and(|r| r.phase == Phase::PendingHealing)
     }
     /// None only for a step outside its installation bound (a corrupt record).
     fn inverse(change: Change) -> Option<Change> {
@@ -389,7 +413,7 @@ impl Handles {
         let id = self
             .records
             .iter()
-            .find(|(_, r)| r.phase != Phase::Pending && r.text.matches(text))
+            .find(|(_, r)| !r.phase.unapplied() && r.text.matches(text))
             .or_else(|| self.records.iter().find(|(_, r)| r.text.matches(text)))
             .map(|(&id, _)| id)
             .ok_or(Error::InactiveHandle)?;
@@ -400,7 +424,11 @@ impl Handles {
         let Some(record) = self.records.get_mut(&id) else {
             return Err(Error::InactiveHandle);
         };
-        if !matches!(record.phase, Phase::Active | Phase::Lost) {
+        // A step not yet acknowledged may be healed: the guest carries out
+        // commands in order, and the undo is sent once the step lands.
+        let pending_step =
+            record.phase == Phase::Pending && matches!(record.change, Change::Step(_));
+        if !pending_step && !matches!(record.phase, Phase::Active | Phase::Lost) {
             return Err(Error::Unsettled);
         }
         let revision = record
@@ -414,7 +442,11 @@ impl Handles {
             Self::inverse(record.change).ok_or(Error::StepOutOfRange)?
         };
         record.revision = revision;
-        record.phase = Phase::Healing;
+        record.phase = if pending_step {
+            Phase::PendingHealing
+        } else {
+            Phase::Healing
+        };
         Ok(ExecutionPlan {
             record_id: id,
             handle: record.text.clone(),
@@ -427,14 +459,17 @@ impl Handles {
     }
     fn matching(&mut self, plan: &ExecutionPlan) -> Result<(), Error> {
         self.valid()?;
-        let expected_phase = match plan.transition {
-            Transition::Apply => Phase::Pending,
-            Transition::Heal => Phase::Healing,
-        };
         let matches = self.records.get(&plan.record_id).is_some_and(|record| {
             record.target == plan.target
-                && record.revision == plan.revision
-                && record.phase == expected_phase
+                // Heal attempts revise the record; its one Apply plan is
+                // unchanged by a heal queued behind it.
+                && match plan.transition {
+                    Transition::Apply => record.phase.unapplied(),
+                    Transition::Heal => {
+                        record.revision == plan.revision
+                            && matches!(record.phase, Phase::Healing | Phase::PendingHealing)
+                    }
+                }
                 && Some(plan.change)
                     == match (plan.transition, plan.lost) {
                         (Transition::Apply, _) => Some(record.change),
@@ -451,11 +486,16 @@ impl Handles {
     /// Confirm successful application, distinct from enqueue/plan acceptance.
     pub(crate) fn applied(&mut self, plan: &ExecutionPlan) -> Result<(), Error> {
         self.matching(plan)?;
-        match plan.transition {
-            Transition::Apply => {
-                self.records.get_mut(&plan.record_id).unwrap().phase = Phase::Active;
+        let record = self.records.get_mut(&plan.record_id).unwrap();
+        match (plan.transition, record.phase) {
+            (Transition::Apply, Phase::PendingHealing) => record.phase = Phase::Healing,
+            (Transition::Apply, _) => record.phase = Phase::Active,
+            // A queued heal is sent only after its step lands.
+            (Transition::Heal, Phase::PendingHealing) => {
+                self.poisoned = true;
+                return Err(Error::UnexpectedEffect);
             }
-            Transition::Heal => {
+            (Transition::Heal, _) => {
                 self.records.remove(&plan.record_id);
             }
         }
@@ -465,12 +505,20 @@ impl Handles {
     /// This bookkeeping success is not an operation success response.
     pub(crate) fn rejected(&mut self, plan: &ExecutionPlan) -> Result<(), Error> {
         self.matching(plan)?;
-        match plan.transition {
-            Transition::Apply => {
+        let record = self.records.get_mut(&plan.record_id).unwrap();
+        match (plan.transition, record.phase) {
+            // The heal queued behind a step settles before the step does.
+            (Transition::Apply, Phase::PendingHealing) => {
+                self.poisoned = true;
+                return Err(Error::UnexpectedEffect);
+            }
+            (Transition::Apply, _) => {
                 self.records.remove(&plan.record_id);
             }
-            Transition::Heal => {
-                self.records.get_mut(&plan.record_id).unwrap().phase = if plan.lost {
+            // A heal that never reached the guest leaves its step pending.
+            (Transition::Heal, Phase::PendingHealing) => record.phase = Phase::Pending,
+            (Transition::Heal, _) => {
+                record.phase = if plan.lost {
                     Phase::Lost
                 } else {
                     Phase::Active
@@ -503,7 +551,7 @@ impl Handles {
         let mut active: Vec<_> = self
             .records
             .iter()
-            .filter(|(_, record)| record.phase != Phase::Pending)
+            .filter(|(_, record)| !record.phase.unapplied())
             .map(|(_, record)| record.text.to_string())
             .collect();
         active.sort(); // Inspection uses lexical handle order.
