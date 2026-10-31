@@ -37,6 +37,7 @@ fn request(inventory: Inventory, output: PathBuf) -> wire::Request {
                 },
                 disk: None,
                 interface: None,
+                allow_crashes: false,
             },
             machines: vec![],
             spawnable: vec![],

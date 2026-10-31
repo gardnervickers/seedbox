@@ -36,6 +36,11 @@ pub struct Machine {
     pub process: Process,
     pub disk: Option<Disk>,
     pub interface: Option<Interface>,
+    /// Crash-signal deaths and out-of-memory kills here do not violate the
+    /// default `seedbox.no_crashing_processes` and
+    /// `seedbox.no_out_of_memory_kills` properties.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_crashes: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
