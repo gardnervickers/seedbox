@@ -71,8 +71,18 @@ def changes(root):
         return replace(
             s,
             "\tinstrumentation_begin();\n\n\tif (!do_syscall_x64(regs, nr)",
-            "\tinstrumentation_begin();\n\tseedbox_syscall_progress();\n\n\tif (!do_syscall_x64(regs, nr)")
+            "\tinstrumentation_begin();\n\tseedbox_syscall_progress(regs, nr);\n\n\tif (!do_syscall_x64(regs, nr)")
     edit("arch/x86/entry/common.c", entry)
+
+    # Guest time moves only at kernel rendezvous, so every tick interrupts the
+    # kernel and tick accounting would charge translated compute as system
+    # time. Count a tick that interrupts a progress charge as user time. Only
+    # the accounting changes: RCU and the scheduler still see kernel mode.
+    def user_ticks(s):
+        s = replace(s, "#include <asm/io.h>\n", "#include <asm/io.h>\n#include <asm/seedbox.h>\n")
+        return replace(s, "\taccount_process_tick(p, user_tick);\n",
+                       "\taccount_process_tick(p, user_tick || seedbox_user_tick());\n")
+    edit("kernel/time/timer.c", user_ticks)
 
     # Fixed 1 GHz TSC and the PV timer instead of HPET/PIT calibration and ticks.
     def x86_init(s):
