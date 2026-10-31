@@ -8,6 +8,10 @@
 //! `u32::MAX` bytes is an error; requests completed before it remain
 //! completed. A driver reset (status 0) clears transport state only;
 //! the store, including unflushed writes, is not a power loss.
+//!
+//! Disk faults select requests in `process` before they execute, and
+//! `disk_latency` queues them for later completion; docs/faults.md states
+//! both contracts.
 use super::virtio::*;
 use super::Result;
 use seedbox_machine::machine::disk::{
