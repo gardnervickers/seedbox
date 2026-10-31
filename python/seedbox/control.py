@@ -8,6 +8,9 @@ from typing import Optional
 MAX_FRAME = 16_384
 MAX_CLOCK_OFFSET_NS = 365 * 86_400 * 1_000_000_000
 MAX_CLOCK_RATE_PPB = 100_000_000
+MAX_PPM = 1_000_000
+DISK_LATENCY_NS = (1_000, 1_000_000_000)
+DISK_OPS = ("read", "write", "flush", "any")
 DEFAULT_SOCKET = "/run/seedbox/control.sock"
 
 
@@ -63,6 +66,24 @@ class Throttle:
 
 
 @dataclass(frozen=True)
+class DiskError:
+    handle: str
+    effect: Effect
+
+
+@dataclass(frozen=True)
+class DiskLatency:
+    handle: str
+    effect: Effect
+
+
+@dataclass(frozen=True)
+class Preempt:
+    handle: str
+    effect: Effect
+
+
+@dataclass(frozen=True)
 class ConnectionDrop:
     handle: str
     effect: Effect
@@ -87,6 +108,18 @@ def _target(value):
     if not isinstance(name, str) or not name:
         raise ValueError("targets must be nonempty service names or Machine objects")
     return {kind: name}
+
+
+def _ppm(name, value):
+    if type(value) is not int or not 1 <= value <= MAX_PPM:
+        raise ValueError(f"{name} ppm must be an integer from 1 to {MAX_PPM}")
+    return value
+
+
+def _disk_op(op):
+    if op not in DISK_OPS:
+        raise ValueError("op must be read, write, flush or any")
+    return op
 
 
 def _nanoseconds(seconds):
@@ -376,9 +409,68 @@ class World:
             raise ProtocolError("throttle response lacks an opaque handle")
         return Throttle(result["handle"], effect)
 
+    def _device_fault(self, op, kind, **arguments):
+        result, effect = self._call(op, **arguments)
+        if not isinstance(result.get("handle"), str) or not result["handle"]:
+            self.close()
+            raise ProtocolError(f"{op} response lacks an opaque handle")
+        return kind(result["handle"], effect)
+
+    def disk_error(self, target, op, ppm, *, effect="eio", scope="all"):
+        """Fail or corrupt the target machine's disk requests of kind op until healed.
+
+        op is "read", "write", "flush" or "any"; each such request is selected
+        with probability ppm per million on a seeded stream. With effect "eio"
+        a selected request fails with EIO before any disk effect; with
+        "corrupt" it succeeds with one sector of seeded bytes. scope "data"
+        spares the ext4 metadata laid out at format time. Neither "corrupt"
+        nor "data" selects flushes. Engines without disk request selection
+        refuse it as unsupported. heal() stops selecting.
+        """
+        _disk_op(op)
+        _ppm("disk_error", ppm)
+        if effect not in ("eio", "corrupt") or scope not in ("all", "data"):
+            raise ValueError('effect must be "eio" or "corrupt" and scope "all" or "data"')
+        if op == "flush" and (effect == "corrupt" or scope == "data"):
+            raise ValueError("disk_error on flushes takes neither the corrupt effect nor the data scope")
+        arguments = {"target": _target(target), "disk_op": op, "ppm": ppm}
+        if effect != "eio":
+            arguments["effect"] = effect
+        if scope != "all":
+            arguments["scope"] = scope
+        return self._device_fault("disk_error", DiskError, **arguments)
+
+    def disk_latency(self, target, op, latency_ns, *, jitter_ns=0):
+        """Complete the target machine's disk requests of kind op late until healed.
+
+        Each takes latency_ns (1 µs to 1 s) plus a seeded draw up to jitter_ns
+        (at most 1 s), in submission order. Engines without delayed block
+        completion refuse it as unsupported. heal() stops delaying new
+        requests; queued ones still complete at their times.
+        """
+        _disk_op(op)
+        low, high = DISK_LATENCY_NS
+        if type(latency_ns) is not int or not low <= latency_ns <= high or type(jitter_ns) is not int or not 0 <= jitter_ns <= high:
+            raise ValueError(f"latency_ns must be {low} to {high} and jitter_ns 0 to {high}")
+        arguments = {"target": _target(target), "disk_op": op, "latency_ns": latency_ns}
+        if jitter_ns:
+            arguments["jitter_ns"] = jitter_ns
+        return self._device_fault("disk_latency", DiskLatency, **arguments)
+
+    def preempt(self, target, ppm):
+        """Yield the target machine's guest kernel at ppm per million syscalls until healed.
+
+        Runnable threads switch at points a single guest CPU rarely reaches. A
+        machine takes one preempt at a time. Engines without the guest yield
+        hook (x86_64 PV, TCG) refuse it as unsupported.
+        """
+        _ppm("preempt", ppm)
+        return self._device_fault("preempt", Preempt, target=_target(target), ppm=ppm)
+
     def heal(self, partition):
         """Release this handle only; prior shape layers or overlapping cuts remain."""
-        if not isinstance(partition, (Partition, Shape, ConnectionDrop, ClockSkew, ClockDrift, Throttle)):
+        if not isinstance(partition, (Partition, Shape, ConnectionDrop, ClockSkew, ClockDrift, Throttle,
+                                      DiskError, DiskLatency, Preempt)):
             raise TypeError("heal expects a fault handle returned by this API")
         result, effect = self._call("heal", handle=partition.handle)
         return result if isinstance(partition, ConnectionDrop) or "queue_counts" in result or "network_fault_counts" in result else effect

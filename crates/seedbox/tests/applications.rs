@@ -364,82 +364,11 @@ fn application(name: &str) {
     }
 }
 
-/// The program `device-faults` adds to its own unfaulted run's definition:
-/// phase i's fault is active from `START_NS + i * PERIOD_NS` for
-/// `ACTIVE_NS`, the schedule its oracle (`device_faults.py`) runs each phase
-/// in. The preempt phase is applied only where PV provides the guest yield
-/// hook.
-fn device_fault_program() -> Vec<serde_json::Value> {
-    use serde_json::json;
-    const START_NS: u64 = 1_000_000_000;
-    const PERIOD_NS: u64 = 1_250_000_000;
-    const ACTIVE_NS: u64 = 1_000_000_000;
-    let phases = [
-        (
-            "read-eio",
-            json!({"action":"disk_error","handle":"read-eio","machine":"oracle","op":"read","ppm":1_000_000,"scope":"data"}),
-        ),
-        (
-            "corrupt",
-            json!({"action":"disk_error","handle":"corrupt","machine":"oracle","op":"read","ppm":1_000_000,"effect":"corrupt","scope":"data"}),
-        ),
-        (
-            "write-eio",
-            json!({"action":"disk_error","handle":"write-eio","machine":"oracle","op":"write","ppm":500_000,"scope":"data"}),
-        ),
-        (
-            "slow",
-            json!({"action":"disk_latency","handle":"slow","machine":"oracle","op":"flush","latency_ns":20_000_000}),
-        ),
-        (
-            "race",
-            json!({"action":"preempt","handle":"race","machine":"oracle","ppm":100_000}),
-        ),
-    ];
-    let mut program = Vec::new();
-    for (index, (phase, fault)) in phases.into_iter().enumerate() {
-        // Only the ARM PV kernel yields; x86_64 PV refuses preempt, so there
-        // the oracle observes the race phase unfaulted.
-        if phase == "race" && !cfg!(target_arch = "aarch64") {
-            continue;
-        }
-        let start = START_NS + index as u64 * PERIOD_NS;
-        program.push(json!({"id": format!("{phase}-on"), "atNs": start, "action": fault}));
-        program.push(json!({
-            "id": format!("{phase}-off"),
-            "atNs": start + ACTIVE_NS,
-            "action": {"action": "heal", "handle": phase},
-        }));
-    }
-    program
-}
-
-/// Resubmit the unfaulted run's own definition with the fault program: the
-/// oracle observes every fault from inside the guest, the world view keeps
-/// the heals' counts and the victim's crash on a held FLUSH and reboot, and
-/// a replay of the faulted run's retained inputs matches it in full state.
-fn faulted(cli: &Path, directory: &Path, state: &Path, baseline: &str) -> Result<(), String> {
-    let described = invoke(
-        cli,
-        directory,
-        state,
-        "describe-baseline",
-        &["show", "--view", "definition", baseline, "--json"],
-    )?;
-    let mut resource: serde_json::Value =
-        serde_json::from_str(&described).map_err(|error| format!("describe baseline: {error}"))?;
-    resource["spec"]["overrides"] = serde_json::Value::Array(device_fault_program());
-    let document = directory.join("faulted.json");
-    fs::write(&document, serde_json::to_vec_pretty(&resource).unwrap())
-        .map_err(|error| error.to_string())?;
-    let output = invoke(
-        cli,
-        directory,
-        state,
-        "faulted",
-        &["run", document.to_str().unwrap(), "--wall-time", "30m"],
-    )?;
-    let faulted = simulation_id(&output)?;
+/// The oracle applies and heals every fault itself (`device_faults.py`) and
+/// observes each from inside the guest; the world view keeps the heals'
+/// counts and the victim's crash on a held FLUSH and reboot, and a replay
+/// of the run's retained inputs matches it in full state.
+fn faulted(cli: &Path, directory: &Path, state: &Path, faulted: &str) -> Result<(), String> {
     let logs = invoke(
         cli,
         directory,
@@ -464,32 +393,39 @@ fn faulted(cli: &Path, directory: &Path, state: &Path, baseline: &str) -> Result
     )?;
     let world: seedbox_api::WorldState =
         serde_json::from_str(&world).map_err(|error| format!("faulted world: {error}"))?;
-    let heals: Vec<_> = world
+    // The oracle's disk faults in the order it applied them, each with the
+    // handle the world gave it.
+    let handle = |fault: &&seedbox_api::FaultState| {
+        fault
+            .plan
+            .as_ref()
+            .and_then(|plan| plan["handle"].as_str())
+            .map(str::to_owned)
+    };
+    let disk: Vec<_> = world
         .faults
         .iter()
-        .filter(|fault| fault.action == "heal")
+        .filter(|fault| matches!(fault.action.as_str(), "disk_error" | "disk_latency"))
         .collect();
-    let counts = |handle: &str| {
-        heals
-            .iter()
-            .find(|fault| {
-                fault
-                    .plan
-                    .as_ref()
-                    .is_some_and(|plan| plan["handle"] == handle)
-            })
-            .and_then(|fault| fault.counts)
-            .ok_or_else(|| format!("{handle} heal has no counts: {heals:?}"))
-    };
-    for (handle, at_least) in [
+    let phases = [
         ("read-eio", 8),
         ("corrupt", 8),
         ("write-eio", 1),
         ("slow", 4),
-    ] {
-        let counts = counts(handle)?;
+    ];
+    if disk.len() != phases.len() {
+        return Err(format!("expected {} disk faults: {disk:?}", phases.len()));
+    }
+    for ((phase, at_least), fault) in phases.into_iter().zip(&disk) {
+        let applied = handle(fault).ok_or_else(|| format!("{phase} has no handle: {fault:?}"))?;
+        let counts = world
+            .faults
+            .iter()
+            .find(|heal| heal.action == "heal" && handle(heal).as_deref() == Some(&applied))
+            .and_then(|heal| heal.counts)
+            .ok_or_else(|| format!("{phase} ({applied}) heal has no counts"))?;
         if counts.affected < at_least || counts.affected > counts.matched {
-            return Err(format!("{handle} heal counts {counts:?}"));
+            return Err(format!("{phase} heal counts {counts:?}"));
         }
     }
     let victim = world

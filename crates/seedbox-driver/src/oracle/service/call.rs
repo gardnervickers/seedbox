@@ -124,8 +124,13 @@ impl Service {
                 | Operation::Spawn { .. }
                 | Operation::Partition { .. }
                 | Operation::Shape { .. }
-                | Operation::DropConnection { .. }),
-            ) => match Command::from_operation(op) {
+                | Operation::DropConnection { .. }
+                | Operation::DiskError { .. }
+                | Operation::DiskLatency { .. }
+                | Operation::Preempt { .. }),
+            ) => match Self::require_capability(adapter, &op)
+                .and_then(|()| Command::from_operation(op))
+            {
                 Err(e) => Err(e),
                 Ok(command) => match self.prepare(
                     adapter,
@@ -156,6 +161,14 @@ impl Service {
         let mut plans: Vec<_> = hold.into_iter().collect();
         plans.push(self.reply(call, now, effect, result)?);
         Ok(plans)
+    }
+    /// Refuse a device fault the engine running these machines cannot carry
+    /// out, after its arguments and before its target or handle.
+    fn require_capability(adapter: &impl Adapter, op: &Operation) -> Result<(), OperationError> {
+        match op.capability() {
+            Some((name, capability)) => adapter.require_capability(name, capability),
+            None => Ok(()),
+        }
     }
     /// List the connections between two network members after `after`.
     fn connections(
