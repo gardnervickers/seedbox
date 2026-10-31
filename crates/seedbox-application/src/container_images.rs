@@ -26,6 +26,9 @@ pub struct ContainerTransport {
     /// image yields the same bytes. `None` exports every time.
     pub export_cache: Option<ContentDigest>,
 }
+/// Keys cached image exports. Change it whenever export or layer merging
+/// changes the bytes produced for the same image.
+const EXPORT_FORMAT: &str = "image-export-v2";
 fn setup(error: impl std::fmt::Display) -> Error {
     Error::Setup(format!("container image preparation: {error}"))
 }
@@ -38,6 +41,64 @@ fn immutable_reference(info: bollard::models::ImageInspect) -> Result<String> {
         .next()
         .or(info.id)
         .ok_or_else(|| setup("image has no immutable reference"))
+}
+/// What an engine build's event stream has said so far.
+#[derive(Default)]
+struct BuildProgress {
+    id: Option<String>,
+    step_error: Option<String>,
+}
+impl BuildProgress {
+    fn observe(&mut self, event: bollard::models::BuildInfo, progress: fn(&str)) -> Result<()> {
+        if let Some(error) = event.error_detail {
+            return Err(setup(
+                error.message.unwrap_or_else(|| "image build failed".into()),
+            ));
+        }
+        match event.aux {
+            Some(BuildInfoAux::Default(aux)) => self.id = aux.id,
+            Some(BuildInfoAux::BuildKit(status)) => {
+                for vertex in status.vertexes {
+                    if !vertex.name.is_empty() {
+                        progress(&format!(
+                            "{}{}",
+                            if vertex.cached { "cached: " } else { "" },
+                            vertex.name
+                        ));
+                    }
+                    // A step's error is progress, not the build's result:
+                    // BuildKit shares a step among concurrent identical builds
+                    // and reports it cancelled to all but the one that runs it.
+                    // A failed build ends with error_detail.
+                    if !vertex.error.is_empty() {
+                        progress(&format!("{}: {}", vertex.name, vertex.error));
+                        self.step_error = Some(vertex.error);
+                    }
+                }
+                for log in status.logs {
+                    for line in String::from_utf8_lossy(&log.msg).lines() {
+                        progress(line);
+                    }
+                }
+            }
+            None => (),
+        }
+        if let Some(stream) = event.stream {
+            for line in stream.lines().filter(|line| !line.is_empty()) {
+                progress(line);
+            }
+        }
+        Ok(())
+    }
+    /// The built image's ID, once the stream has ended.
+    fn image(self) -> Result<String> {
+        self.id.ok_or_else(|| {
+            setup(
+                self.step_error
+                    .unwrap_or_else(|| "engine build completed without an image ID".into()),
+            )
+        })
+    }
 }
 impl ContainerTransport {
     fn check(&self) -> Result<()> {
@@ -180,44 +241,11 @@ impl ContainerTransport {
                         file,
                     ))),
                 );
-                let mut id = None;
+                let mut outcome = BuildProgress::default();
                 while let Some(event) = self.next(&mut build).await? {
-                    let event = event.map_err(setup)?;
-                    if let Some(error) = event.error_detail {
-                        return Err(setup(
-                            error.message.unwrap_or_else(|| "image build failed".into()),
-                        ));
-                    }
-                    match event.aux {
-                        Some(BuildInfoAux::Default(aux)) => id = aux.id,
-                        Some(BuildInfoAux::BuildKit(status)) => {
-                            for vertex in status.vertexes {
-                                if !vertex.name.is_empty() {
-                                    (self.progress)(&format!(
-                                        "{}{}",
-                                        if vertex.cached { "cached: " } else { "" },
-                                        vertex.name
-                                    ));
-                                }
-                                if !vertex.error.is_empty() {
-                                    return Err(setup(vertex.error));
-                                }
-                            }
-                            for log in status.logs {
-                                for line in String::from_utf8_lossy(&log.msg).lines() {
-                                    (self.progress)(line);
-                                }
-                            }
-                        }
-                        None => (),
-                    }
-                    if let Some(stream) = event.stream {
-                        for line in stream.lines().filter(|line| !line.is_empty()) {
-                            (self.progress)(line);
-                        }
-                    }
+                    outcome.observe(event.map_err(setup)?, self.progress)?;
                 }
-                id.ok_or_else(|| setup("engine build completed without an image ID"))?
+                outcome.image()?
             }
         };
         self.check()?;
@@ -281,7 +309,7 @@ impl ImageTransport for ContainerTransport {
         let (docker, image) = runtime.block_on(self.resolve(service, directory, architecture))?;
         let record = self.export_cache.as_ref().map(|engine| {
             ContentDigest::of(
-                serde_json::json!(["image-export", engine, architecture.platform(), image])
+                serde_json::json!([EXPORT_FORMAT, engine, architecture.platform(), image])
                     .to_string()
                     .as_bytes(),
             )
@@ -412,6 +440,17 @@ fn prefix_archive(input: &Path, output: &Path, check: &dyn Fn() -> Result<()>) -
     Ok(())
 }
 
+/// An overlayfs xattr that only records the build host's layer storage.
+fn overlay_bookkeeping(field: &str) -> bool {
+    [
+        "SCHILY.xattr.user.overlay.",
+        "SCHILY.xattr.trusted.overlay.",
+    ]
+    .iter()
+    .filter_map(|prefix| field.strip_prefix(prefix))
+    .any(|name| matches!(name, "origin" | "impure" | "nlink" | "uuid"))
+}
+
 pub(crate) fn export_header<R: std::io::Read>(
     entry: &mut tar::Entry<'_, R>,
     path: &Path,
@@ -447,6 +486,11 @@ pub(crate) fn export_header<R: std::io::Read>(
                     }
                 }
                 "path" | "linkpath" | "size" | "atime" | "ctime" | "uname" | "gname" => (),
+                // Rootless engines export the bookkeeping overlay storage keeps for
+                // itself. These describe the build host's layer storage, not the
+                // image. Overlay xattrs that change layer contents (opaque,
+                // whiteout, redirect, metacopy) are still refused below.
+                _ if overlay_bookkeeping(field) => {}
                 _ => {
                     return Err(setup(format!(
                         "exported filesystem {}: unsupported extended metadata {field}",
@@ -462,7 +506,109 @@ pub(crate) fn export_header<R: std::io::Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bollard::{
+        moby::buildkit::v1::{StatusResponse, Vertex},
+        models::{BuildInfo, ErrorDetail, ImageId},
+    };
     use std::io::{BufRead, Read, Write};
+    fn step(name: &str, error: &str) -> BuildInfo {
+        BuildInfo {
+            aux: Some(BuildInfoAux::BuildKit(StatusResponse {
+                vertexes: vec![Vertex {
+                    name: name.into(),
+                    error: error.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+    fn built(id: &str) -> BuildInfo {
+        BuildInfo {
+            aux: Some(BuildInfoAux::Default(ImageId {
+                id: Some(id.into()),
+            })),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn a_cancelled_shared_step_does_not_fail_a_build_that_completes() {
+        let mut outcome = BuildProgress::default();
+        for event in [
+            step(
+                "[2/2] COPY bin/blob /blob",
+                "context canceled: context canceled",
+            ),
+            step("[2/2] COPY bin/blob /blob", ""),
+            built("sha256:built"),
+        ] {
+            outcome.observe(event, |_| ()).unwrap();
+        }
+        assert_eq!(outcome.image().unwrap(), "sha256:built");
+    }
+    #[test]
+    fn a_build_without_an_image_reports_its_step_error() {
+        let mut outcome = BuildProgress::default();
+        outcome
+            .observe(step("[2/2] RUN exit 7", "process did not complete"), |_| ())
+            .unwrap();
+        let error = outcome.image().unwrap_err().to_string();
+        assert!(error.contains("process did not complete"), "{error}");
+    }
+    #[test]
+    fn an_error_detail_fails_the_build() {
+        let event = BuildInfo {
+            error_detail: Some(ErrorDetail {
+                message: Some("RUN exit 7: exit code 7".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let error = BuildProgress::default()
+            .observe(event, |_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exit code 7"), "{error}");
+    }
+    #[test]
+    fn overlay_bookkeeping_xattrs_are_ignored_and_content_xattrs_refused() {
+        let export = |key: &str| {
+            let mut tar = tar::Builder::new(Vec::new());
+            tar.append_pax_extensions([(key, &b"y"[..])]).unwrap();
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o755);
+            header.set_size(0);
+            tar.append_data(&mut header, "bin/app", std::io::empty())
+                .unwrap();
+            let bytes = tar.into_inner().unwrap();
+            let mut archive = tar::Archive::new(bytes.as_slice());
+            let mut entry = archive.entries().unwrap().next().unwrap().unwrap();
+            export_header(&mut entry, Path::new("bin/app")).map(|_| ())
+        };
+        // Opaque directories, whiteouts, redirects and metacopy change what a
+        // layer contains; dropping them would silently resurrect files.
+        for key in [
+            "SCHILY.xattr.trusted.overlay.opaque",
+            "SCHILY.xattr.user.overlay.opaque",
+            "SCHILY.xattr.trusted.overlay.whiteout",
+            "SCHILY.xattr.user.overlay.redirect",
+            "SCHILY.xattr.trusted.overlay.metacopy",
+            "SCHILY.xattr.trusted.overlay.origin2",
+        ] {
+            let error = export(key).unwrap_err().to_string();
+            assert!(error.contains(key), "{key}: {error}");
+        }
+        for key in [
+            "SCHILY.xattr.user.overlay.origin",
+            "SCHILY.xattr.trusted.overlay.origin",
+            "SCHILY.xattr.trusted.overlay.impure",
+            "SCHILY.xattr.user.overlay.nlink",
+            "SCHILY.xattr.trusted.overlay.uuid",
+        ] {
+            assert!(export(key).is_ok(), "{key}");
+        }
+    }
     #[test]
     fn unsupported_xattr_names_the_image_path_and_key() {
         let mut tar = tar::Builder::new(Vec::new());

@@ -66,7 +66,11 @@ pub struct Process {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Volume {
     pub target: String,
-    pub size_bytes: u64,
+    /// Space this volume adds to its machine's disk. Without a size, the
+    /// volume shares one [`crate::project::DEFAULT_VOLUME_BYTES`] allotment
+    /// with the machine's other unsized volumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -237,6 +241,7 @@ impl Definition {
                         .map(|(n, v)| crate::VolumeMount {
                             source: n.clone(),
                             target: v.target.clone(),
+                            size_bytes: v.size_bytes,
                         })
                         .collect(),
                     network: self.network.name.clone(),

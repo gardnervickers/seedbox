@@ -7,6 +7,7 @@ use seedbox_api::{ControlReceipt, ControlRequest, ControlState, LogEntry};
 use seedbox_api::{EventKind, SimulationEvent};
 use seedbox_api::{ExecutionTermination, Phase, Simulation, SimulationId, SubmitRequest};
 use seedbox_application::execution::CancellationToken;
+use seedbox_application::store::ContentDigest;
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
@@ -571,6 +572,24 @@ impl Manager {
         read(&state.catalogue)
     }
 
+    pub(crate) fn reclaimed(
+        &self,
+        removed: impl IntoIterator<Item = (ContentDigest, crate::catalogue::Reclaimed)>,
+    ) -> Result<(), Error> {
+        let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        state.catalogue.reclaimed(removed);
+        Ok(())
+    }
+
+    pub(crate) fn restored(
+        &self,
+        digests: &std::collections::BTreeSet<ContentDigest>,
+    ) -> Result<(), Error> {
+        let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        state.catalogue.restored(digests);
+        Ok(())
+    }
+
     /// Durations reflect the query instant; their projection does not change
     /// the revision of the last lifecycle mutation.
     pub fn describe(&self, id: &SimulationId) -> Result<Simulation, Error> {
@@ -692,6 +711,20 @@ impl Manager {
             return Err(Error::Invalid(format!("simulation {id} is not complete")));
         }
         Ok(state.results.get(id).cloned())
+    }
+
+    /// What each resource names content in, including its retained result.
+    pub(crate) fn content(&self) -> Result<Vec<(SimulationId, serde_json::Value)>, Error> {
+        let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        let mut values = state.catalogue.content()?;
+        for (id, result) in &state.results {
+            let value = serde_json::to_value((&result.definition, &result.record));
+            values.push((
+                id.clone(),
+                value.map_err(|e| Error::Invalid(e.to_string()))?,
+            ));
+        }
+        Ok(values)
     }
 
     pub fn submit(&self, request: SubmitRequest) -> Result<(Simulation, bool), Error> {

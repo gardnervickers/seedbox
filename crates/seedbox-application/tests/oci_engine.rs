@@ -17,6 +17,13 @@ fn engine() -> bollard::Docker {
     .unwrap()
 }
 fn import(service: &config::Service, directory: &Path, store: &ContentStore) -> ImportedImage {
+    try_import(service, directory, store).unwrap()
+}
+fn try_import(
+    service: &config::Service,
+    directory: &Path,
+    store: &ContentStore,
+) -> seedbox_application::Result<ImportedImage> {
     ContainerTransport {
         docker: engine(),
         cancellation: CancellationToken::default(),
@@ -34,7 +41,6 @@ fn import(service: &config::Service, directory: &Path, store: &ContentStore) -> 
             Architecture::Amd64
         },
     )
-    .unwrap()
 }
 fn entries(image: &ImportedImage) -> BTreeMap<std::path::PathBuf, (tar::EntryType, Vec<u8>)> {
     use std::io::Read;
@@ -191,6 +197,30 @@ fn build_honors_ignore_whiteouts_and_launch_metadata() {
     assert_eq!(image.image.launch.user, "123:456");
     assert_eq!(image.image.launch.working_dir, "/data");
     assert_eq!(image.image.launch.environment["MESSAGE"], "hello");
+}
+#[test]
+fn failing_build_step_fails_the_import() {
+    let directory = tempfile::tempdir().unwrap();
+    let context = directory.path().join("context");
+    fs::create_dir(&context).unwrap();
+    fs::write(
+        context.join("Dockerfile"),
+        "FROM docker.io/library/alpine:3.22\nRUN exit 7\n",
+    )
+    .unwrap();
+    let mut service = simulation("unused:test").services.remove("oracle").unwrap();
+    service.source = config::ImageSource::Build {
+        context: context.clone(),
+        dockerfile: context.join("Dockerfile"),
+    };
+    let store = ContentStore::new(directory.path().join("store"));
+    let error = try_import(&service, &directory.path().join("image"), &store)
+        .err()
+        .expect("a failing RUN must fail the import");
+    assert!(
+        error.to_string().contains("container image preparation"),
+        "{error}"
+    );
 }
 fn simulation(image: &str) -> config::Simulation {
     config::parse(&format!("name: image-test\nmachines: {{}}\noracle:\n  image: {image}\n  entrypoint: [/bin/sh]\n  command: [-c, 'exit 0']\n"), Path::new("/fixture/seedbox.yaml"), &BTreeMap::new()).unwrap()

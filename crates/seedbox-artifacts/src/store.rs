@@ -4,7 +4,7 @@ use crate::{limits::read_bounded, Context, Error, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs,
     io::{self, Read, Seek, Write},
     os::unix::fs::MetadataExt,
@@ -57,7 +57,14 @@ pub struct ContentStore {
     /// Objects this process hashed, with the file identity they had then.
     /// Clones share it, so concurrent users verify each object once.
     verified: Arc<Mutex<HashMap<ContentDigest, Stamp>>>,
+    /// Cache objects this process created for its resources, if it reclaims
+    /// them. Ownership lives only in this process: after a crash or any other
+    /// exit, the objects stay as ordinary cache content. Clones share it, and
+    /// its lock orders every publication into the cache against reclamation.
+    owned: Option<Arc<Mutex<BTreeSet<ContentDigest>>>>,
 }
+
+type OwnedGuard<'a> = std::sync::MutexGuard<'a, BTreeSet<ContentDigest>>;
 
 /// File identity and metadata used to invalidate cached verification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +95,53 @@ impl ContentStore {
             root: root.into(),
             evidence_root: None,
             verified: Arc::default(),
+            owned: None,
+        }
+    }
+
+    /// Let `*_owned` calls create objects this process may reclaim. Without
+    /// it they are ordinary cache objects.
+    pub fn with_owned_objects(self) -> Self {
+        Self {
+            owned: Some(Arc::default()),
+            ..self
+        }
+    }
+
+    /// Owned objects that have been neither reclaimed nor reused as cache inputs.
+    pub fn owned_objects(&self) -> BTreeSet<ContentDigest> {
+        self.owned_lock()
+            .map(|objects| objects.clone())
+            .unwrap_or_default()
+    }
+
+    /// Remove every owned object not in `keep`. Callers must exclude
+    /// concurrent work that has created an owned object it has not yet
+    /// recorded a reference to. Returns the removed digests.
+    pub fn reclaim_owned(&self, keep: &BTreeSet<ContentDigest>) -> Result<Vec<ContentDigest>> {
+        let Some(mut objects) = self.owned_lock() else {
+            return Ok(Vec::new());
+        };
+        let unreferenced: Vec<_> = objects.difference(keep).cloned().collect();
+        for digest in &unreferenced {
+            remove_if_present(&self.path(digest))?;
+            self.forget(digest);
+            objects.remove(digest);
+        }
+        Ok(unreferenced)
+    }
+
+    fn owned_lock(&self) -> Option<OwnedGuard<'_>> {
+        self.owned
+            .as_ref()
+            .map(|owned| owned.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// An ordinary put reuses this object as a cache input: it is no longer
+    /// owned.
+    fn adopt(objects: Option<&mut OwnedGuard<'_>>, digest: &ContentDigest) {
+        if let Some(objects) = objects {
+            objects.remove(digest);
         }
     }
 
@@ -130,6 +184,14 @@ impl ContentStore {
         self.put_reader_with(reader, true)
     }
 
+    /// `put_reader` for an object that belongs to a resource rather than to the
+    /// reusable cache. A new object becomes owned and `reclaim_owned` may remove
+    /// it, so callers exclude reclamation until a reference names it; an object
+    /// already present is unchanged.
+    pub fn put_reader_owned(&self, mut reader: impl Read) -> Result<ContentDigest> {
+        self.put_reader_observed(&mut reader, true, true, &mut |_| Ok(()))
+    }
+
     /// Retain a run's own evidence (identity, logs) without syncing it. A host
     /// crash can lose such an object, and a record that names it then fails
     /// verification as an integrity error; it is never silently wrong. Putting
@@ -151,13 +213,14 @@ impl ContentStore {
     }
 
     fn put_reader_with(&self, mut reader: impl Read, durable: bool) -> Result<ContentDigest> {
-        self.put_reader_observed(&mut reader, durable, &mut |_| Ok(()))
+        self.put_reader_observed(&mut reader, durable, false, &mut |_| Ok(()))
     }
 
     fn put_reader_observed(
         &self,
         reader: &mut impl Read,
         durable: bool,
+        owned: bool,
         progress: &mut impl FnMut(u64) -> io::Result<()>,
     ) -> Result<ContentDigest> {
         progress(0)?;
@@ -175,17 +238,33 @@ impl ContentStore {
             temp.as_file().sync_all()?;
         }
         progress(0)?;
-        match temp.persist_noclobber(&path) {
-            Ok(_) => {}
+        // Naming a cache object and reclaiming one are ordered by this lock.
+        let mut objects = if *root == self.root {
+            self.owned_lock()
+        } else {
+            None
+        };
+        // Only a new object becomes owned; an existing one keeps its role.
+        let claim = owned && objects.is_some() && !path.exists();
+        if !owned {
+            Self::adopt(objects.as_mut(), &digest);
+        }
+        let published = match temp.persist_noclobber(&path) {
+            Ok(_) => true,
             Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
                 // A host crash can leave an unsynced object named but short.
                 // These bytes hash to the digest, so put them in its place.
                 if !durable && self.verify(&digest).is_err() {
                     e.file.persist(&path).map_err(|e| e.error)?;
                 }
+                false
             }
             Err(e) => return Err(e.error.into()),
+        };
+        if let (true, true, Some(objects)) = (claim, published, objects.as_mut()) {
+            objects.insert(digest.clone());
         }
+        drop(objects);
         // Verify an existing entry too; never repair corruption implicitly.
         self.verify_observed(&digest, progress)?;
         Ok(digest)
@@ -209,13 +288,39 @@ impl ContentStore {
         path: &Path,
         progress: &mut impl FnMut(u64) -> io::Result<()>,
     ) -> Result<ContentDigest> {
+        self.put_file_with(path, false, progress)
+    }
+
+    /// `put_file_observed` for an object that belongs to a resource
+    /// (`put_reader_owned`).
+    pub fn put_file_owned_observed(
+        &self,
+        path: &Path,
+        progress: &mut impl FnMut(u64) -> io::Result<()>,
+    ) -> Result<ContentDigest> {
+        self.put_file_with(path, true, progress)
+    }
+
+    fn put_file_with(
+        &self,
+        path: &Path,
+        owned: bool,
+        progress: &mut impl FnMut(u64) -> io::Result<()>,
+    ) -> Result<ContentDigest> {
         progress(0)?;
         let mut file = fs::File::open(path)?;
         // External files can be rewritten or have their inode reused without
         // changing a coarse filesystem timestamp. Read their bytes each time.
         let digest = transfer_observed(&mut file, &mut io::sink(), progress)?;
         progress(0)?;
-        if let Ok(existing) = fs::File::open(self.path(&digest)) {
+        let existing = {
+            let mut objects = self.owned_lock();
+            if !owned {
+                Self::adopt(objects.as_mut(), &digest);
+            }
+            fs::File::open(self.path(&digest))
+        };
+        if let Ok(existing) = existing {
             // Verify the existing entry; never repair corruption implicitly.
             if self.trusted(&digest, &existing)?.is_none() {
                 self.verify_observed(&digest, progress)?;
@@ -223,7 +328,7 @@ impl ContentStore {
             return Ok(digest);
         }
         file.seek(io::SeekFrom::Start(0))?;
-        self.put_reader_observed(&mut file, true, progress)
+        self.put_reader_observed(&mut file, true, owned, progress)
     }
 
     /// The object a named record points at, if the record exists and is
@@ -383,6 +488,15 @@ impl ContentStore {
     ) -> Result<PathBuf> {
         let _writing = seedbox_exec::writing();
         self.materialize(digest, directory)
+    }
+}
+
+/// Whether `path` existed; a missing file is already removed.
+fn remove_if_present(path: &Path) -> io::Result<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
 }
 

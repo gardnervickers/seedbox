@@ -1,4 +1,4 @@
-//! Version 5: fixed header then closed, field-ordered binary records.
+//! Version 7: fixed header then closed, field-ordered binary records.
 //! Contains only continuing state; observation sessions are never encoded.
 use super::*;
 use crate::persistence::{
@@ -6,7 +6,7 @@ use crate::persistence::{
 };
 use std::io::{Read, Write};
 const MAGIC: [u8; 8] = *b"SBXDRVR\0";
-pub(super) const VERSION: u32 = 6;
+pub(super) const VERSION: u32 = 7;
 
 impl<S> Checkpoint<S> {
     /// Consume this capture, replacing opaque snapshots in insertion order.
