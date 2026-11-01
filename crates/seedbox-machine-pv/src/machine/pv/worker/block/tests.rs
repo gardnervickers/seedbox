@@ -5,6 +5,8 @@ use seedbox_machine::machine::disk::{
     SECTOR,
 };
 
+mod split_ring;
+
 // Guest physical layout of the synthetic ring, relative to RAM.
 const QUEUE: u16 = 16;
 const DESCRIPTORS: u64 = 0;

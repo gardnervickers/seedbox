@@ -1,5 +1,7 @@
 use super::*;
 
+mod reference;
+
 fn fill(value: u8, sectors: usize) -> Vec<u8> {
     vec![value; sectors * SECTOR]
 }

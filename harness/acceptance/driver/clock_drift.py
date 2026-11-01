@@ -37,12 +37,26 @@ def clock():
         while True:
             with listener.accept()[0] as channel:
                 for _ in channel.makefile("rb"):
-                    sample = {
-                        "raw_ns": time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW),
-                        "monotonic_ns": time.monotonic_ns(),
-                        "realtime_ns": time.time_ns(),
-                    }
-                    channel.sendall(json.dumps(sample).encode() + b"\n")
+                    channel.sendall(json.dumps(bracketed()).encode() + b"\n")
+
+
+def bracketed():
+    """One sample whose clocks were read as close together as possible.
+
+    A timer interrupt or a switch between two reads would add its time to one
+    clock only, so read monotonic and realtime between two raw reads and keep
+    the attempt with the tightest bracket, using the raw midpoint.
+    """
+    best = None
+    for _ in range(20):
+        before = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+        monotonic = time.monotonic_ns()
+        realtime = time.time_ns()
+        after = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+        if best is None or after - before < best[0]:
+            best = (after - before, {"raw_ns": (before + after) // 2, "monotonic_ns": monotonic,
+                                     "realtime_ns": realtime})
+    return best[1]
 
 
 def scenario():

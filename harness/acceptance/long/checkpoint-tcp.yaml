@@ -1,0 +1,36 @@
+name: checkpoint-tcp
+machines:
+  server:
+    image: docker.io/library/python:3.13-alpine
+    entrypoint:
+    - python3
+    - "/scenario/tcp_checkpoint.py"
+    - server
+    files:
+    - source: "../driver/tcp_checkpoint.py"
+      target: "/scenario/tcp_checkpoint.py"
+  client:
+    image: docker.io/library/python:3.13-alpine
+    entrypoint:
+    - python3
+    - "/scenario/tcp_checkpoint.py"
+    - client
+    files:
+    - source: "../driver/tcp_checkpoint.py"
+      target: "/scenario/tcp_checkpoint.py"
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint:
+  - python3
+  - "/scenario/tcp_checkpoint.py"
+  - oracle
+  files:
+  - source: "../driver/tcp_checkpoint.py"
+    target: "/scenario/tcp_checkpoint.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  # Frames spend 20 ms on each link, so some are always in transit.
+  latency: 20ms

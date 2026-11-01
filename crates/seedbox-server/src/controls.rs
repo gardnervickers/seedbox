@@ -390,4 +390,344 @@ mod tests {
             peer.join().unwrap();
         }
     }
+
+    /// NEXT-100 case 96: a background status read times out with its reply
+    /// withheld, and a fault, a checkpoint and a rate change are then requested.
+    /// Later commands are refused while one is pending rather than queued. No
+    /// mutation reaches the worker until the same status request resolves; then
+    /// each command crosses the wire once, in request order, with one receipt.
+    #[test]
+    fn mutations_wait_for_an_uncertain_status_and_never_overtake() {
+        use seedbox_engine_protocol::host_control::{CheckpointState, CheckpointStatus, Command};
+        // What the fake worker received, in arrival order. A marker is a
+        // datagram sent by the test itself: everything queued before it was
+        // sent before the test's send.
+        #[derive(Debug)]
+        enum Arrival {
+            Request {
+                wire: u64,
+                kind: &'static str,
+                released: bool,
+            },
+            Marker,
+        }
+        let guard = seedbox_test_time::HangGuard::new(
+            "the fake worker and the control driver make progress",
+            Duration::from_secs(60),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let manager = Arc::new(Manager::new(crate::catalogue::Catalogue::in_memory()));
+        let configuration = seedbox_application::config::parse(
+            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+            std::path::Path::new("/project/seedbox.yaml"),
+            &Default::default(),
+        )
+        .unwrap();
+        let id = manager
+            .submit(SubmitRequest {
+                metadata: Default::default(),
+                options: Default::default(),
+                request_id: "ordered".into(),
+                spec: SimulationSpec {
+                    program: Vec::new(),
+                    seed: Some(1),
+                    inputs: InputSource::Project,
+                    configuration,
+                },
+            })
+            .unwrap()
+            .0
+            .metadata
+            .id;
+        manager.begin(&id).unwrap().unwrap();
+        manager
+            .update(&id, |resource| resource.status.phase = Phase::Running)
+            .unwrap();
+        let run_dir = directory.path().join("run");
+        fs::create_dir_all(run_dir.join("output")).unwrap();
+        let endpoint = directory.path().join("worker.sock");
+        let socket = UnixDatagram::bind(&endpoint).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        fs::write(
+            run_dir.join("output/host-control"),
+            endpoint.as_os_str().as_encoded_bytes(),
+        )
+        .unwrap();
+        manager.attach_worker(&id, &run_dir).unwrap();
+
+        // The fake worker withholds every reply until released, then answers
+        // each command, including retransmissions of the withheld status.
+        let stop = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicBool::new(false));
+        let (arrived, arrivals) = std::sync::mpsc::channel();
+        let peer = {
+            let (stop, released, guard) = (stop.clone(), released.clone(), guard.clone());
+            std::thread::spawn(move || {
+                let mut buffer = [0; MAX_DATAGRAM + 1];
+                let position = BoundaryPosition {
+                    boundary_index: 4,
+                    completed_rounds: 3,
+                    simulated_time_ns: 500,
+                };
+                let mut rate = PlaybackRate::Unlimited;
+                let mut proposal = None;
+                loop {
+                    let received = guard
+                        .wait_for(|| {
+                            if stop.load(Ordering::Acquire) {
+                                return Some(None);
+                            }
+                            match socket.recv_from(&mut buffer) {
+                                Ok(received) => Some(Some(received)),
+                                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                    None
+                                }
+                                Err(error) => panic!("fake worker: {error}"),
+                            }
+                        })
+                        .unwrap();
+                    let Some((count, from)) = received else {
+                        break;
+                    };
+                    if &buffer[..count] == b"marker" {
+                        arrived.send(Arrival::Marker).unwrap();
+                        continue;
+                    }
+                    let request: Request = serde_json::from_slice(&buffer[..count]).unwrap();
+                    let open = released.load(Ordering::Acquire);
+                    let kind = match &request.command {
+                        Command::Status => "status",
+                        Command::SetRate { .. } => "rate",
+                        Command::Step => "step",
+                        Command::Checkpoint { .. } => "checkpoint",
+                        Command::PrepareFault { .. } => "prepare",
+                        Command::CommitFault { .. } => "commit",
+                        other => panic!("unexpected command {other:?}"),
+                    };
+                    // Report before replying: a receipt implies its arrival.
+                    arrived
+                        .send(Arrival::Request {
+                            wire: request.id,
+                            kind,
+                            released: open,
+                        })
+                        .unwrap();
+                    if !open {
+                        continue;
+                    }
+                    let mut reply = Reply {
+                        id: request.id,
+                        position,
+                        terminal: false,
+                        application_ready: true,
+                        rate,
+                        achieved_rate: None,
+                        stepping: false,
+                        before_next_fault: false,
+                        checkpoint: None,
+                        error: None,
+                        detail: None,
+                        intervention: None,
+                    };
+                    match request.command {
+                        Command::SetRate { rate: requested } => {
+                            rate = requested;
+                            reply.rate = requested;
+                        }
+                        Command::Checkpoint { request_id } => {
+                            reply.checkpoint = Some(CheckpointStatus {
+                                request_id,
+                                position,
+                                state: CheckpointState::Captured,
+                            });
+                        }
+                        Command::PrepareFault {
+                            request_id,
+                            action,
+                            timeout_ns,
+                        } => {
+                            let record = seedbox_api::Intervention {
+                                request_id,
+                                position,
+                                plan: seedbox_engine_protocol::control::Plan {
+                                    id: 1,
+                                    at_ns: position.simulated_time_ns,
+                                    deadline_ns: position.simulated_time_ns + timeout_ns,
+                                    action,
+                                },
+                            };
+                            proposal = Some(record.clone());
+                            reply.intervention = Some(record);
+                        }
+                        Command::CommitFault { .. } => reply.intervention = proposal.clone(),
+                        _ => {}
+                    }
+                    socket
+                        .send_to(
+                            &serde_json::to_vec(&reply).unwrap(),
+                            from.as_pathname().unwrap(),
+                        )
+                        .unwrap();
+                }
+            })
+        };
+        let shutdown = CancellationToken::default();
+        let driver = {
+            let (manager, shutdown) = (manager.clone(), shutdown.clone());
+            std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(run(manager, shutdown))
+            })
+        };
+        let mut seen = Vec::new();
+        let next = |seen: &mut Vec<Arrival>| {
+            seen.push(guard.recv(&arrivals).unwrap());
+            seen.last()
+                .map(|arrival| matches!(arrival, Arrival::Marker))
+        };
+        let marker = || {
+            UnixDatagram::unbound()
+                .unwrap()
+                .send_to(b"marker", &endpoint)
+                .unwrap();
+        };
+        let worker = manager.worker(&id).unwrap().unwrap();
+        // The driver's background status read is withheld. Acquiring the
+        // connection gate after its datagram arrived means that read returned,
+        // and without a reply it can only have timed out.
+        next(&mut seen);
+        let mut gate = worker.lock().unwrap();
+        let fault = ControlRequest {
+            request_id: "cut".into(),
+            command: ControlCommand::InjectFault {
+                action: seedbox_api::FaultAction::Heal {
+                    handle: "cut".into(),
+                },
+            },
+        };
+        let checkpoint = ControlRequest {
+            request_id: "saved".into(),
+            command: ControlCommand::Checkpoint,
+        };
+        let rate = ControlRequest {
+            request_id: "slow".into(),
+            command: ControlCommand::SetRate {
+                rate: PlaybackRate::Paused,
+            },
+        };
+        manager.accept_control(&id, fault.clone()).unwrap();
+        // Later commands are refused, not queued, while the fault is pending.
+        for later in [&checkpoint, &rate] {
+            assert!(matches!(
+                manager.accept_control(&id, later.clone()),
+                Err(Error::ControlBusy)
+            ));
+        }
+        // One drive whose work was read before the fault was accepted may still
+        // inspect. Two rounds of "a datagram after a marker, then the gate"
+        // pass it, so the second round's datagram comes from a drive applying
+        // the fault while the status is still unresolved.
+        for _ in 0..2 {
+            marker();
+            drop(gate);
+            while next(&mut seen) != Some(true) {}
+            next(&mut seen);
+            gate = worker.lock().unwrap();
+        }
+        let first = match &seen[0] {
+            Arrival::Request {
+                wire,
+                kind: "status",
+                released: false,
+            } => *wire,
+            other => panic!("first arrival {other:?}"),
+        };
+        for arrival in &seen {
+            let resolving = match arrival {
+                Arrival::Marker => true,
+                Arrival::Request {
+                    wire,
+                    kind,
+                    released,
+                } => *wire == first && *kind == "status" && !released,
+            };
+            assert!(
+                resolving,
+                "a mutation overtook the uncertain status: {seen:?}"
+            );
+        }
+        released.store(true, Ordering::Release);
+        drop(gate);
+        let acknowledged = |request_id: &str| {
+            guard
+                .wait_for(|| {
+                    let receipt = manager
+                        .read(|catalogue| Ok(catalogue.control_receipt(&id, request_id)?.cloned()))
+                        .unwrap()
+                        .unwrap();
+                    match &receipt.state {
+                        ControlState::Accepted => None,
+                        ControlState::Acknowledged { error: None, .. } => Some(receipt),
+                        other => panic!("{request_id}: {other:?}"),
+                    }
+                })
+                .unwrap()
+        };
+        acknowledged("cut");
+        for later in [&checkpoint, &rate] {
+            manager.accept_control(&id, later.clone()).unwrap();
+            acknowledged(&later.request_id);
+        }
+        // A retry of an acknowledged key returns its receipt and enqueues
+        // nothing: a later probe is admitted at once and is the next mutation.
+        let retried = manager.accept_control(&id, fault.clone()).unwrap();
+        assert!(matches!(retried.state, ControlState::Acknowledged { .. }));
+        manager
+            .accept_control(
+                &id,
+                ControlRequest {
+                    request_id: "probe".into(),
+                    command: ControlCommand::Step,
+                },
+            )
+            .unwrap();
+        acknowledged("probe");
+        seen.extend(arrivals.try_iter());
+        // The withheld status was resolved by the same wire request: the
+        // fault's prepare is the very next request the connection issued.
+        let mut mutations = Vec::new();
+        for arrival in &seen {
+            if let Arrival::Request {
+                wire,
+                kind,
+                released,
+            } = arrival
+            {
+                if *kind != "status" && !mutations.iter().any(|(seen, _)| seen == wire) {
+                    assert!(released, "{kind} reached the worker before release");
+                    mutations.push((*wire, *kind));
+                }
+            }
+        }
+        assert_eq!(
+            mutations.iter().map(|(_, kind)| *kind).collect::<Vec<_>>(),
+            ["prepare", "commit", "checkpoint", "rate", "step"],
+            "each mutation crosses the wire once, in request order: {seen:?}"
+        );
+        assert_eq!(mutations[0].0, first + 1);
+        for request_id in ["cut", "saved", "slow"] {
+            let receipt = manager
+                .read(|catalogue| Ok(catalogue.control_receipt(&id, request_id)?.cloned()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(receipt.revision, 2, "{request_id}: one acknowledgement");
+        }
+        shutdown.cancel();
+        driver.join().unwrap().unwrap();
+        stop.store(true, Ordering::Release);
+        peer.join().unwrap();
+    }
 }

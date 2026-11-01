@@ -209,3 +209,115 @@ fn external_rng_cannot_be_invented_or_replaced_by_a_seeded_projection() {
         .contains("owned seeded Driver RNG"));
     assert!(bytes.is_empty());
 }
+/// Network, control, scheduled-work and keyed-input policy: parts of the projection.
+fn components(d: &Driver<Mock>) -> [Vec<u8>; 4] {
+    let x = &d.execution;
+    let mut network = Encoder { output: Vec::new() };
+    x.network.policy_evidence(&mut network).unwrap();
+    let mut control = Encoder { output: Vec::new() };
+    x.control.put(&mut control).unwrap();
+    let mut scheduled = Encoder { output: Vec::new() };
+    x.events.put(&mut scheduled).unwrap();
+    let mut inputs = Encoder { output: Vec::new() };
+    x.inputs.put(&mut inputs).unwrap();
+    [
+        network.output,
+        control.output,
+        scheduled.output,
+        inputs.output,
+    ]
+}
+/// Each one-component mutation changes the projection, and only the part that
+/// owns it: neither a queued frame nor a pending fault can be silently ignored
+/// or misattributed by the comparison.
+#[test]
+fn one_component_mutations_change_only_their_own_part_of_the_projection() {
+    let mut source = build_network(
+        vec![spec(0, true, vec![]), spec(1, true, vec![])],
+        vec![],
+        true,
+        true,
+    );
+    advance(&mut source, 10);
+    assert!(source.execution.network.is_idle());
+    let captured = source.checkpoint().unwrap();
+    let mut base = restore(&captured, 1);
+    let original = (evidence(&mut base), components(&base));
+    let mut again = restore(&captured, 4);
+    assert_eq!((evidence(&mut again), components(&again)), original);
+    let changed = |d: &mut Driver<Mock>| {
+        let parts = components(d);
+        assert_ne!(evidence(d), original.0, "the projection ignored a change");
+        [0, 1, 2, 3].map(|part| parts[part] != original.1[part])
+    };
+
+    // One link-queue entry: a frame in flight between the two machines.
+    let mut queued = restore(&captured, 1);
+    let Response::TransmitFrame { bytes } = frame(mac(1), 9) else {
+        unreachable!()
+    };
+    let now = queued.now().as_nanos();
+    queued
+        .execution
+        .network
+        .route(MachineId(0), now, &bytes)
+        .unwrap();
+    assert!(!queued.execution.network.is_idle());
+    assert_eq!(
+        changed(&mut queued),
+        [true, false, false, false],
+        "queued frame"
+    );
+
+    // One pending host fault, with links and control untouched.
+    let mut pending = restore(&captured, 1);
+    pending
+        .with_barrier(|b| {
+            b.schedule(
+                at(30),
+                key("pause"),
+                Action::Pause(Target::Machine(MachineId(1))),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        changed(&mut pending),
+        [false, false, true, true],
+        "pending fault"
+    );
+
+    // An applied partition is network state held by its input's handle; once
+    // applied it is no longer scheduled work, and healing changes the network
+    // part again.
+    let mut cut = restore(&captured, 1);
+    cut.with_barrier(|b| {
+        b.schedule(
+            at(10),
+            key("cut"),
+            Action::Partition {
+                left: vec![Target::Machine(MachineId(0))],
+                right: vec![Target::Machine(MachineId(1))],
+            },
+        )
+    })
+    .unwrap();
+    cut.step(at(10)).unwrap();
+    let applied = components(&cut);
+    assert_ne!(applied[0], original.1[0], "partition left the network part");
+    assert_eq!(
+        applied[2], original.1[2],
+        "applied partition is still scheduled"
+    );
+    cut.with_barrier(|b| {
+        b.schedule(
+            at(10),
+            key("heal"),
+            Action::Heal(HealTarget::Input(key("cut"))),
+        )
+    })
+    .unwrap();
+    cut.step(at(10)).unwrap();
+    let healed = components(&cut);
+    assert_ne!(healed[0], applied[0], "heal left the network part");
+    assert_eq!(healed[2], original.1[2]);
+}

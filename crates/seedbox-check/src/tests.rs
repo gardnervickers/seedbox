@@ -405,6 +405,22 @@ fn test_workspace_suite_targets_preserve_portable_linux_mac_and_pause_selection(
                 targets: strings(&["host_pause"]),
             }],
         ),
+        (
+            vec!["mac-apps-long"],
+            vec![SuiteTests {
+                package: "seedbox".into(),
+                features: strings(&["long-application-tests"]),
+                targets: strings(&["determinism", "long_applications"]),
+            }],
+        ),
+        (
+            vec!["linux-apps-long"],
+            vec![SuiteTests {
+                package: "seedbox".into(),
+                features: strings(&["long-application-tests"]),
+                targets: strings(&["determinism", "long_applications"]),
+            }],
+        ),
     ] {
         assert_eq!(
             suite_test_targets(&metadata, &suites(&names)).unwrap(),
@@ -577,6 +593,32 @@ fn test_platform_mismatch_is_unavailable() {
         ["requires Linux"]
     );
     assert!(requirements(Suite::Portable, &mac, &Environment::new(), &t.0).is_empty());
+}
+#[test]
+fn test_long_application_suites_are_in_no_group_and_share_their_short_hosts() {
+    assert_eq!(
+        suites(&["mac-apps-long"]),
+        [Suite::Portable, Suite::MacAppsLong]
+    );
+    assert!(!suites(&["mac", "linux"]).contains(&Suite::MacAppsLong));
+    assert!(!suites(&["mac", "linux"]).contains(&Suite::LinuxAppsLong));
+    let t = fixture();
+    let mut mac = host();
+    mac.system = "Darwin".into();
+    mac.machine = "arm64".into();
+    let linux = host();
+    for h in [&mac, &linux] {
+        for (long, short) in [
+            (Suite::MacAppsLong, Suite::MacApps),
+            (Suite::LinuxAppsLong, Suite::LinuxApps),
+        ] {
+            assert_eq!(
+                requirements(long, h, &Environment::new(), &t.0),
+                requirements(short, h, &Environment::new(), &t.0)
+            );
+            assert!(long.applications());
+        }
+    }
 }
 #[test]
 fn test_mac_apps_requirements() {

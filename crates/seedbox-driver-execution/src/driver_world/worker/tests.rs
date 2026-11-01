@@ -140,6 +140,17 @@ fn worker_with_network(
     workers: usize,
     network: bool,
 ) -> (tempfile::TempDir, Worker<Mock>, Arc<AtomicUsize>) {
+    worker_writing(workers, network, |saved, writer| {
+        serde_json::to_writer(writer, &saved.0)?;
+        Ok(())
+    })
+}
+type WriteSnapshot = fn(Saved, &mut std::io::BufWriter<std::fs::File>) -> Result<()>;
+fn worker_writing(
+    workers: usize,
+    network: bool,
+    write_snapshot: WriteSnapshot,
+) -> (tempfile::TempDir, Worker<Mock>, Arc<AtomicUsize>) {
     let root = tempfile::tempdir().unwrap();
     let inventory = inventory(root.path());
     let output = root.path().join("output");
@@ -212,10 +223,7 @@ fn worker_with_network(
         BTreeMap::new(),
         constructed,
         None,
-        |saved, writer| {
-            serde_json::to_writer(writer, &saved.0)?;
-            Ok(())
-        },
+        write_snapshot,
     )
     .unwrap();
     worker.flush().unwrap();
@@ -580,6 +588,98 @@ fn checkpoint_receipt_follows_durable_manifest_and_is_not_recaptured() {
         },
     );
     assert_eq!(repeat.checkpoint.unwrap(), captured);
+}
+/// A requested checkpoint whose capture fails is never acknowledged or held:
+/// failing before writing, while writing, or on the second machine after the
+/// first was written leaves no manifest or bodies, reports the refusal once,
+/// and is not retried. A run that then ends refuses checkpoints as completed
+/// instead of fabricating one.
+#[test]
+fn failed_capture_is_never_acknowledged_and_completion_fabricates_nothing() {
+    let attempts: [(&str, WriteSnapshot); 3] = [
+        ("before writing", |_, _| {
+            Err(fail("no space before writing"))
+        }),
+        ("while writing", |_, writer| {
+            std::io::Write::write_all(writer, b"partial")?;
+            Err(fail("short write"))
+        }),
+        ("second machine", |saved, writer| {
+            if saved.0.name == "n1" {
+                return Err(fail("n1 snapshot failed"));
+            }
+            serde_json::to_writer(writer, &saved.0)?;
+            Ok(())
+        }),
+    ];
+    let checkpoint = |id: &str| Command::Checkpoint {
+        request_id: id.into(),
+    };
+    for (stage, write) in attempts {
+        let (_root, mut worker, _) = worker_writing(1, false, write);
+        worker.step(Timestamp::from_nanos(10)).unwrap();
+        playback(
+            &mut worker,
+            1,
+            Command::SetRate {
+                rate: host::PlaybackRate::Paused,
+            },
+        );
+        let published = |worker: &Worker<Mock>| {
+            std::fs::read_dir(&worker.output)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .filter(|name| name.starts_with("checkpoint-"))
+                .collect::<Vec<_>>()
+        };
+        for attempt in 0..2u64 {
+            let requested = playback(&mut worker, 10 + attempt, checkpoint("saved"));
+            assert_eq!(requested.error, None, "{stage}");
+            assert_eq!(
+                requested.checkpoint.unwrap().state,
+                host::CheckpointState::Requested,
+                "{stage}"
+            );
+            let error = worker.capture_pending().unwrap_err();
+            assert!(
+                matches!(error, checkpoint::CaptureFailure::Refused(_)),
+                "{stage}: {error}"
+            );
+            assert_eq!(published(&worker), Vec::<String>::new(), "{stage}");
+            let status = playback(&mut worker, 20 + attempt, Command::Status);
+            assert_eq!(status.checkpoint, None, "{stage}: held after failure");
+            assert_eq!(
+                status.error,
+                Some(ControlError::InvalidCheckpoint),
+                "{stage}"
+            );
+            assert!(
+                status.detail.unwrap().contains(&error.to_string()),
+                "{stage}"
+            );
+            assert!(
+                worker.capture_pending().unwrap().is_none(),
+                "{stage}: retried"
+            );
+        }
+
+        // The run ends: no capture is fabricated and later requests are refused.
+        worker
+            .driver
+            .with_barrier(|barrier| {
+                barrier.stop();
+                Ok(())
+            })
+            .unwrap();
+        let at = worker.playback().unwrap().position.at;
+        worker.step(at).unwrap();
+        let late = playback(&mut worker, 30, checkpoint("saved"));
+        assert_eq!(late.error, Some(ControlError::Completed), "{stage}");
+        assert!(late.terminal, "{stage}");
+        assert_eq!(late.checkpoint, None, "{stage}");
+        assert!(worker.capture_pending().unwrap().is_none(), "{stage}");
+        assert_eq!(published(&worker), Vec::<String>::new(), "{stage}");
+    }
 }
 #[test]
 fn event_chain_ignores_absent_observation_socket_and_worker_count() {

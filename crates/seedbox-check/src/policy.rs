@@ -16,8 +16,10 @@ pub enum Suite {
     LinuxApps,
     LinuxPause,
     MacApps,
+    LinuxAppsLong,
+    MacAppsLong,
 }
-pub const SUITES: [Suite; 9] = [
+pub const SUITES: [Suite; 11] = [
     Suite::Portable,
     Suite::Dynamorio,
     Suite::DynamorioIsolated,
@@ -27,6 +29,8 @@ pub const SUITES: [Suite; 9] = [
     Suite::LinuxApps,
     Suite::LinuxPause,
     Suite::MacApps,
+    Suite::LinuxAppsLong,
+    Suite::MacAppsLong,
 ];
 impl Suite {
     pub fn name(self) -> &'static str {
@@ -40,7 +44,24 @@ impl Suite {
             Self::LinuxApps => "linux-apps",
             Self::LinuxPause => "linux-pause",
             Self::MacApps => "mac-apps",
+            Self::LinuxAppsLong => "linux-apps-long",
+            Self::MacAppsLong => "mac-apps-long",
         }
+    }
+    /// The long tiers need exactly their short suite's host.
+    pub fn host_suite(self) -> Self {
+        match self {
+            Self::LinuxAppsLong => Self::LinuxApps,
+            Self::MacAppsLong => Self::MacApps,
+            other => other,
+        }
+    }
+    /// Suites that run server application workloads through the release CLI.
+    pub fn applications(self) -> bool {
+        matches!(
+            self.host_suite(),
+            Self::LinuxApps | Self::LinuxPause | Self::MacApps
+        )
     }
     pub fn description(self) -> &'static str {
         match self {
@@ -52,7 +73,9 @@ impl Suite {
         Self::LinuxOci=>"Linux x86-64 with a Docker-compatible engine; no KVM required.",
         Self::LinuxApps=>"Linux x86-64 KVM, root, engine and Nix guest builds; server application acceptance.",
         Self::LinuxPause=>"Linux x86-64 KVM, root, engine and guest builds; server pause/resume rerun.",
-        Self::MacApps=>"Apple Silicon macOS 15+, Hypervisor.framework, codesign, engine and guest builds; server application acceptance."
+        Self::MacApps=>"Apple Silicon macOS 15+, Hypervisor.framework, codesign, engine and guest builds; server application acceptance.",
+        Self::LinuxAppsLong=>"As linux-apps; multi-minute server workloads and determinism oracles. In no group.",
+        Self::MacAppsLong=>"As mac-apps; multi-minute server workloads and determinism oracles. In no group."
     }
     }
 }
@@ -249,6 +272,7 @@ pub fn machine_inputs(suite: Suite) -> Vec<String> {
     inputs
 }
 pub fn requirements(suite: Suite, host: &Host, env: &Environment, root: &Path) -> Vec<String> {
+    let suite = suite.host_suite();
     let mut missing = Vec::new();
     let mut need = |condition: bool, reason: String| {
         if !condition {
