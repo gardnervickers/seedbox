@@ -176,6 +176,7 @@ impl Fixture {
                 full_state: None,
                 faults: vec![],
                 detail: None,
+                properties: None,
             },
             calls: AtomicUsize::new(0),
             fail: false,
@@ -269,7 +270,8 @@ fn run_retains_inputs_result_logs_and_replay_does_not_prepare_again() {
 #[test]
 fn reproduced_application_failure_is_separate_from_replay_mismatch() {
     let mut fixture = Fixture::new();
-    fixture.backend.report.workload_exit.as_mut().unwrap().code = 3;
+    // Exit 3 is an undecided oracle, so fail with 5.
+    fixture.backend.report.workload_exit.as_mut().unwrap().code = 5;
     let failed = fixture.run();
     let reproduced = fixture.replay(&failed);
     assert_eq!(reproduced.record.outcome, Outcome::Fail);

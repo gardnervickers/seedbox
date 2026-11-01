@@ -231,6 +231,7 @@ impl Orchestrator {
                     full_state: None,
                     faults: vec![],
                     detail: Some("cancelled before execution".into()),
+                    properties: None,
                 });
             }
             let start = seedbox_engine_protocol::host_clock::Instant::now()?;
@@ -365,7 +366,19 @@ fn validate_inputs(identity: &RunIdentity, executor: &dyn ExecutionBackend) -> R
     Ok(())
 }
 
+/// The recorded outcome follows the verdict policy
+/// (`seedbox_engine_core::properties::verdict`), with one precedence: a
+/// violated property fails the run whatever else happened (a time limit,
+/// cancellation, quiescence, an error or a missing oracle exit), as the
+/// status verdict does; then the termination rules below apply, an unmet
+/// requirement fails a run whose oracle exited, and lost property evidence
+/// leaves a passing oracle's run incomplete.
 fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome> {
+    use seedbox_engine_core::properties::{verdict, Findings, Verdict};
+    let findings = report.properties.as_ref().map(Findings::from);
+    if verdict(Verdict::Incomplete, false, true, findings) == Verdict::Failed {
+        return Ok(Outcome::Fail);
+    }
     let simulation = &identity.configuration;
     // A backend stopping early may not have a complete effect transcript.
     // Preserve its termination reason and its specific diagnostic first.
@@ -424,11 +437,14 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
             ));
         }
     }
-    Ok(if exit.code == 0 {
-        Outcome::Pass
-    } else {
-        Outcome::Fail
-    })
+    // Property findings qualify the oracle's exit as the run's verdict does.
+    Ok(
+        match verdict(Verdict::of_exit(exit.code), true, true, findings) {
+            Verdict::Passed => Outcome::Pass,
+            Verdict::Failed => Outcome::Fail,
+            Verdict::Incomplete | Verdict::Pending => Outcome::Incomplete,
+        },
+    )
 }
 
 fn retain_logs(
@@ -534,6 +550,7 @@ fn incomplete(reason: crate::execution::StopReason) -> crate::execution::Executi
         host_wait_ns: 0,
         simulated_time_ns: None,
         faults: vec![],
+        properties: None,
     }
 }
 
@@ -594,6 +611,89 @@ mod tests {
             assert_eq!(report.detail.as_deref(), Some("preserved backend report"));
             assert_eq!(report.host_wait_ns, 123);
         }
+    }
+
+    #[test]
+    fn a_violated_property_fails_the_recorded_outcome_whatever_else_happened() {
+        use seedbox_engine_protocol::property::Assessment;
+        #[derive(Clone, Copy, Debug)]
+        enum Found {
+            Violated,
+            Unmet,
+            Lost,
+            Nothing,
+        }
+        let record = seedbox_artifacts::test_support::fixture();
+        let base = record.report.clone().unwrap();
+        let assessment = |found| {
+            let mut assessment = Assessment::default();
+            match found {
+                Found::Violated => {
+                    assessment
+                        .violations
+                        .push(seedbox_engine_protocol::property::Violation {
+                            id: "p".into(),
+                            kind: seedbox_engine_protocol::property::Kind::Always,
+                            example: seedbox_engine_protocol::property::Example {
+                                origin: seedbox_engine_protocol::property::Origin {
+                                    machine: "workload".into(),
+                                    incarnation: 0,
+                                    session: 1,
+                                    seq: 1,
+                                    time_ns: 0,
+                                },
+                                details: None,
+                                details_truncated: false,
+                            },
+                        })
+                }
+                Found::Unmet => assessment.unmet_requirements.push("p".into()),
+                Found::Lost => assessment.lost_count = 1,
+                Found::Nothing => {}
+            }
+            assessment
+        };
+        let classified = |reason, exit: Option<u8>, found: Option<Found>| {
+            let mut report = base.clone();
+            report.reason = reason;
+            report.workload_exit = exit.map(|code| crate::execution::WorkloadExit {
+                service: "workload".into(),
+                code,
+            });
+            report.properties = found.map(assessment);
+            classify(&record.identity, &report).ok()
+        };
+        use Found::*;
+        use StopReason::*;
+        for (reason, exit, found, expected) in [
+            // A violation decides first, as the status verdict does.
+            (SimulatedTimeLimit, None, Some(Violated), Outcome::Fail),
+            (Quiescent, None, Some(Violated), Outcome::Fail),
+            (Cancelled, Some(0), Some(Violated), Outcome::Fail),
+            (Error, None, Some(Violated), Outcome::Fail),
+            (Completed, None, Some(Violated), Outcome::Fail),
+            (Completed, Some(0), Some(Violated), Outcome::Fail),
+            // Otherwise the termination rules apply.
+            (SimulatedTimeLimit, None, Some(Lost), Outcome::Timeout),
+            (SimulatedTimeLimit, None, Some(Unmet), Outcome::Timeout),
+            (Quiescent, None, Some(Nothing), Outcome::Incomplete),
+            (Completed, None, Some(Unmet), Outcome::Incomplete),
+            (Completed, Some(0), Some(Unmet), Outcome::Fail),
+            (Completed, Some(3), Some(Unmet), Outcome::Fail),
+            (Completed, Some(0), Some(Lost), Outcome::Incomplete),
+            (Completed, Some(0), Some(Nothing), Outcome::Pass),
+            (Completed, Some(0), None, Outcome::Pass),
+            (Completed, Some(1), Some(Nothing), Outcome::Fail),
+            // An oracle that could not decide leaves the run incomplete.
+            (Completed, Some(3), None, Outcome::Incomplete),
+        ] {
+            assert_eq!(
+                classified(reason.clone(), exit, found),
+                Some(expected),
+                "{reason:?} {exit:?} {found:?}"
+            );
+        }
+        assert_eq!(classified(Error, None, Some(Nothing)), None);
     }
 
     #[test]

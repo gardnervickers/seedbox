@@ -873,6 +873,7 @@ where
                 })
                 .collect(),
             detail,
+            properties: self.driver.properties(),
         })
     }
     pub(super) fn close(&mut self) -> Result<()> {
