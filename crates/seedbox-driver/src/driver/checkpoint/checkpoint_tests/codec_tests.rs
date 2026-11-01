@@ -576,9 +576,9 @@ fn decoded_invariants_reject_untrusted_complete_objects() {
         let mut e = Encoder { output: Vec::new() };
         c.put(&mut e).unwrap();
         let mut bad = b"SBXDRVR\0".to_vec();
-        // Use current v7 framing so the intended state invariant, not version,
+        // Use current v8 framing so the intended state invariant, not version,
         // is what rejects these deliberately malformed imported bodies.
-        bad.extend(7u32.to_le_bytes());
+        bad.extend(8u32.to_le_bytes());
         bad.extend((e.output.len() as u64).to_le_bytes());
         bad.extend(e.output);
         assert!(
@@ -850,8 +850,8 @@ fn closed_codec_version_and_orphaned_network_ownership_fail_before_restore() {
     let mut d = net(initial(), setup(8), 1);
     advance(&mut d, 1);
     let (bytes, _) = artifact(d.checkpoint().unwrap());
-    assert_eq!(&bytes[8..12], &7u32.to_le_bytes());
-    for version in [0u32, 1, 2, 3, 4, 5, 6, 8, u32::MAX] {
+    assert_eq!(&bytes[8..12], &8u32.to_le_bytes());
+    for version in [0u32, 1, 2, 3, 4, 5, 6, 7, 9, u32::MAX] {
         let mut old = bytes.clone();
         old[8..12].copy_from_slice(&version.to_le_bytes());
         assert!(matches!(
@@ -917,6 +917,27 @@ fn oom_victim_output_survives_persisted_continuation_and_worker_counts() {
     // after binary decode/restoration with both one and four workers.
     exercise(d);
 }
+
+#[test]
+fn an_imported_property_ledger_is_checked_before_restore() {
+    let mut d = build(
+        vec![spec(0, true, vec![(0, Response::Ready)])],
+        vec![],
+        true,
+    );
+    advance(&mut d, 4);
+    let (bytes, _) = artifact(d.checkpoint().unwrap());
+    let mut c = Checkpoint::read_from(&mut &bytes[..], limits()).unwrap();
+    c.properties = serde_json::from_value(serde_json::json!({
+        "sequences": {"m": {"incarnation": 1, "next": (0..70).map(|s| (s.to_string(), serde_json::json!(1))).collect::<serde_json::Map<_, _>>()}}
+    }))
+    .unwrap();
+    assert!(matches!(
+        c.write_to(&mut Vec::new()),
+        Err(CodecError::Invalid("property ledger bounds"))
+    ));
+}
+
 #[test]
 fn device_fault_handles_inputs_and_requests_roundtrip() {
     use crate::pv::{DeviceFault, DiskOp};

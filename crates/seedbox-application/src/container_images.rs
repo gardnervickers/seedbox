@@ -456,6 +456,16 @@ pub(crate) fn export_header<R: std::io::Read>(
     path: &Path,
 ) -> Result<tar::Header> {
     let mut header = entry.header().clone();
+    // Callers give the entry a new path and link target. The tar crate writes
+    // the USTAR prefix only when it splits a path longer than 100 bytes, so a
+    // source prefix would be read back in front of a new path that fits in
+    // `name` (`rootfs/DIR` + `DIR/NAME`). Clear every source path field.
+    if let Some(ustar) = header.as_ustar_mut() {
+        ustar.prefix.fill(0);
+    }
+    let fields = header.as_old_mut();
+    fields.name.fill(0);
+    fields.linkname.fill(0);
     header.set_size(entry.size());
     if let Some(extensions) = entry.pax_extensions()? {
         for extension in extensions {
@@ -865,5 +875,215 @@ mod tests {
         fs::remove_dir_all(directory.path().join("store/sha256")).unwrap();
         assert_eq!(import(b"engine", "fourth"), exported);
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    /// A path of exactly `length` bytes ending in a 30-byte name of `leaf`,
+    /// in components short enough for a USTAR split wherever one fits.
+    fn path_of(length: usize, leaf: char) -> String {
+        let directory: String = (0..length - 31)
+            .map(|i| {
+                if i % 20 == 19 && i + 1 < length - 31 {
+                    '/'
+                } else {
+                    'a'
+                }
+            })
+            .collect();
+        format!("{directory}/{}", leaf.to_string().repeat(30))
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct Entry {
+        path: std::path::PathBuf,
+        kind: tar::EntryType,
+        link: Option<std::path::PathBuf>,
+        data: Vec<u8>,
+    }
+
+    fn entries(archive: &Path) -> Vec<Entry> {
+        let mut archive = tar::Archive::new(fs::File::open(archive).unwrap());
+        archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let mut entry = entry.unwrap();
+                let mut data = vec![];
+                entry.read_to_end(&mut data).unwrap();
+                Entry {
+                    path: entry.path().unwrap().components().collect(),
+                    kind: entry.header().entry_type(),
+                    link: entry.link_name().unwrap().map(|link| link.into_owned()),
+                    data,
+                }
+            })
+            .collect()
+    }
+
+    /// How an engine might encode paths too long for the 100-byte `name`.
+    #[derive(Clone, Copy, Debug)]
+    enum Encoding {
+        /// USTAR prefix/name split, falling back to GNU long names.
+        Ustar,
+        /// GNU long name and long link records.
+        Gnu,
+        /// PAX `path`/`linkpath` records over truncated header fields.
+        Pax,
+    }
+
+    fn append(
+        tar: &mut tar::Builder<fs::File>,
+        encoding: Encoding,
+        kind: tar::EntryType,
+        path: &str,
+        link: Option<&str>,
+        data: &[u8],
+    ) {
+        let mut header = match encoding {
+            Encoding::Gnu => tar::Header::new_gnu(),
+            Encoding::Ustar | Encoding::Pax => tar::Header::new_ustar(),
+        };
+        header.set_entry_type(kind);
+        header.set_mode(if kind.is_dir() { 0o755 } else { 0o644 });
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_size(data.len() as u64);
+        if let Encoding::Pax = encoding {
+            let mut records = vec![];
+            if path.len() > 100 {
+                records.push(("path", path.as_bytes()));
+            }
+            if let Some(link) = link.filter(|link| link.len() > 100) {
+                records.push(("linkpath", link.as_bytes()));
+            }
+            if !records.is_empty() {
+                tar.append_pax_extensions(records).unwrap();
+            }
+            let raw = header.as_mut_bytes();
+            let path = &path.as_bytes()[..path.len().min(100)];
+            raw[..path.len()].copy_from_slice(path);
+            if let Some(link) = link {
+                let link = &link.as_bytes()[..link.len().min(100)];
+                raw[157..157 + link.len()].copy_from_slice(link);
+            }
+            header.set_cksum();
+            tar.append(&header, data).unwrap();
+        } else if let Some(link) = link {
+            tar.append_link(&mut header, path, link).unwrap();
+        } else {
+            tar.append_data(&mut header, path, data).unwrap();
+        }
+    }
+
+    #[test]
+    fn rerooting_keeps_every_path_and_link_target_through_the_transport_archive() {
+        let mut lengths: Vec<usize> = (90..=110).chain(254..=258).collect();
+        lengths.push(300);
+        for encoding in [Encoding::Ustar, Encoding::Gnu, Encoding::Pax] {
+            let directory = tempfile::tempdir().unwrap();
+            let export = directory.path().join("export.tar");
+            let mut tar = tar::Builder::new(fs::File::create(&export).unwrap());
+            let mut expected = vec![Entry {
+                path: ".".into(),
+                kind: tar::EntryType::Directory,
+                link: None,
+                data: vec![],
+            }];
+            let mut paths: Vec<_> = lengths
+                .iter()
+                .map(|length| (path_of(*length, 'f'), path_of(*length, 'd')))
+                .collect();
+            // One component longer than a header field cannot be split.
+            paths.push((format!("usr/{}", "f".repeat(120)), "d".repeat(120)));
+            for (file, dir) in paths {
+                let symlink = format!("{file}-symlink");
+                let hardlink = format!("{file}-hardlink");
+                let target = format!("/{file}");
+                append(
+                    &mut tar,
+                    encoding,
+                    tar::EntryType::Directory,
+                    &format!("{dir}/"),
+                    None,
+                    b"",
+                );
+                append(
+                    &mut tar,
+                    encoding,
+                    tar::EntryType::Regular,
+                    &file,
+                    None,
+                    file.as_bytes(),
+                );
+                append(
+                    &mut tar,
+                    encoding,
+                    tar::EntryType::Symlink,
+                    &symlink,
+                    Some(&target),
+                    b"",
+                );
+                append(
+                    &mut tar,
+                    encoding,
+                    tar::EntryType::Link,
+                    &hardlink,
+                    Some(&file),
+                    b"",
+                );
+                expected.extend(
+                    [
+                        (dir, tar::EntryType::Directory, None, vec![]),
+                        (
+                            file.clone(),
+                            tar::EntryType::Regular,
+                            None,
+                            file.clone().into_bytes(),
+                        ),
+                        (symlink, tar::EntryType::Symlink, Some(target), vec![]),
+                        (hardlink, tar::EntryType::Link, Some(file), vec![]),
+                    ]
+                    .map(|(path, kind, link, data)| Entry {
+                        path: path.into(),
+                        kind,
+                        link: link.map(Into::into),
+                        data,
+                    }),
+                );
+            }
+            tar.finish().unwrap();
+            drop(tar);
+
+            let transport = directory.path().join("rootfs.tar");
+            prefix_archive(&export, &transport, &|| Ok(())).unwrap();
+            let rooted = |path: &Path| Path::new("rootfs").join(path).components().collect();
+            let expected_transport: Vec<_> = expected
+                .iter()
+                .map(|entry| Entry {
+                    path: rooted(&entry.path),
+                    kind: entry.kind,
+                    link: entry.link.as_ref().map(|link| {
+                        if entry.kind.is_hard_link() {
+                            rooted(link)
+                        } else {
+                            link.clone()
+                        }
+                    }),
+                    data: entry.data.clone(),
+                })
+                .collect();
+            assert_eq!(entries(&transport), expected_transport, "{encoding:?}");
+
+            let guest = directory.path().join("guest.tar");
+            fs::write(
+                &guest,
+                crate::driver_preparation::logical_archive(&transport).unwrap(),
+            )
+            .unwrap();
+            for (actual, expected) in entries(&guest).iter().zip(&expected) {
+                assert_eq!(actual, expected, "{encoding:?}");
+            }
+            assert_eq!(entries(&guest).len(), expected.len(), "{encoding:?}");
+        }
     }
 }

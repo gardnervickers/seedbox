@@ -1,9 +1,5 @@
 # Properties and oracles
 
-These are interfaces only: the engine does not read guest property records yet,
-so the guest library's calls do nothing, runs report no property findings and
-an oracle's exit 3 still reads as failed.
-
 ## Guest properties
 
 A program on any machine links [seedbox-guest](../crates/seedbox-guest/src/lib.rs):
@@ -34,23 +30,39 @@ marked `details_truncated`. A record the library cannot send is counted and
 reported as `lost` on the next session. `flush` fails when no reply with its own
 sequence number arrives within 60 seconds of guest time.
 
+The supervisor exports the socket's path as `SEEDBOX_GUEST_SOCKET`, so the
+library can tell running outside Seedbox from a socket it cannot reach (a mount
+over `/run`, say): then it connects to the supervisor's abstract socket
+`seedbox-guest`, and if that fails too, it reports its records lost on
+`/dev/kmsg`, which the supervisor relays, so the evidence reads incomplete.
+
+The engine reduces records at commit, in commit order, and answers a `flush`
+only after reducing every earlier record of that session, on the same boot.
+Every record committed before the run ends is reduced, including other
+machines' records in the oracle's last round, and the supervisor reports each
+session that ends. Records still inside a guest, in a program's socket or the
+supervisor, when its machine crashes or the run ends are physically lost with
+it: flush before relying on them.
+
 ## Verdicts and crashes
 
-Once property findings exist, a violation fails a completed run whatever the
-oracle said, and a required property never evaluated fails a run whose oracle
-exited. Lost or malformed evidence makes a passing oracle's run incomplete.
-Findings arrive with the final report, so a passing oracle reads as pending
-until completion. A failed run's status lists the violations, unmet
-requirements and lost evidence as its reason. Until then the verdict stays the
-oracle's; see [the policy](../crates/seedbox-api/src/status.rs).
+A violation fails a completed run whatever the oracle said, even one whose
+oracle never exited. A required property never evaluated fails a run whose
+oracle exited; a run cut short before then stays as the oracle left it. Lost or
+malformed evidence makes a passing oracle's run incomplete (exit status 3), as
+does an oracle's own exit 3. Findings arrive with the final report, so a
+passing oracle reads as pending until completion; see
+[the policy](../crates/seedbox-engine-core/src/properties.rs). `seedbox show ID`
+lists a failed run's violations, unmet requirements and lost evidence as its
+reason; `--json` status documents carry them as `properties`.
 
 Two default `never` properties need no guest library. On any machine,
-`seedbox.no_out_of_memory_kills` is violated by each existing `SBX_OOM1` victim
-report, and `seedbox.no_crashing_processes` by each process death from a
-core-dumping signal, reported once per crash from the kernel's fatal-signal
-line and relayed as `SBX_CRASH1`; segfault, trap and exception lines are not
-relayed, since they precede the same crash's report. A machine whose processes
-may crash or be killed by design opts out of both:
+`seedbox.no_out_of_memory_kills` is violated by each `SBX_OOM1` victim report,
+the application's or any other process's, and `seedbox.no_crashing_processes`
+by each process death from a core-dumping signal, reported once per crash from
+the kernel's fatal-signal line and relayed as `SBX_CRASH1`; segfault, trap and
+exception lines are not relayed, since they precede the same crash's report. A
+machine whose processes may crash or be killed by design opts out of both:
 
 ```yaml
 machines:
@@ -62,16 +74,20 @@ machines:
 ## Oracles
 
 [seedbox-oracle](../crates/seedbox-oracle/src/lib.rs) holds the Jepsen-style
-shapes an oracle fills in. `Client`s generate operations from a seeded `Random`
+shapes an oracle fills in, and the runner that drives them (`run`, or `main` for
+an oracle binary). `Client`s generate operations from a seeded `Random`
 and perform them; a `History` records invoke/ok/fail/info lines with guest times.
 A `Nemesis` applies the world's own
 [control `Action`s](../crates/seedbox-engine-protocol/src/control.rs), with handles
 it names, through the oracle's `World` while the clients run, then heals them.
 `FinalRead` waits for recovery, restarts exited nodes and lets replicas converge
-before reading each node. Each `Checker` turns the history and reads into a
-`Verdict`, evaluated as an `always` property named by the checker. An undecided
-verdict evaluates nothing and the oracle exits 3, which marks the run
-incomplete:
+before reading each node. The library also has an in-memory `Recorder`, a seeded
+`Rng`, the control socket's `GuestWorld` (which maps the handles it is given to
+the world's own), the standard fault `patterns` (kill/restart, process pauses,
+partitions, crash-all) and the `queue` checker. Each `Checker` turns the history
+and reads into a `Verdict`, evaluated as an `always` property named by the
+checker. An undecided verdict evaluates nothing and the oracle exits 3, which
+marks the run incomplete:
 
 ```rust
 impl Checker<Publish, Ack, Stream> for Queue {

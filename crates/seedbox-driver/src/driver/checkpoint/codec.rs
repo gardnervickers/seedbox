@@ -1,4 +1,4 @@
-//! Version 7: fixed header then closed, field-ordered binary records.
+//! Version 8: fixed header then closed, field-ordered binary records.
 //! Contains only continuing state; observation sessions are never encoded.
 use super::*;
 use crate::persistence::{
@@ -6,7 +6,7 @@ use crate::persistence::{
 };
 use std::io::{Read, Write};
 const MAGIC: [u8; 8] = *b"SBXDRVR\0";
-pub(super) const VERSION: u32 = 7;
+pub(super) const VERSION: u32 = 8;
 
 impl<S> Checkpoint<S> {
     /// Consume this capture, replacing opaque snapshots in insertion order.
@@ -40,6 +40,7 @@ impl<S> Checkpoint<S> {
             trigger_marker,
             definitions,
             network,
+            properties,
         } = self;
         let machines = machines
             .into_iter()
@@ -93,6 +94,7 @@ impl<S> Checkpoint<S> {
             trigger_marker,
             definitions,
             network,
+            properties,
         })
     }
 }
@@ -474,6 +476,20 @@ impl Checkpoint<SnapshotReference> {
                     | Scheduled::Input { id, .. } => {
                         require(id.0 < self.machines.len(), "scheduled machine index")?
                     }
+                    Scheduled::PropertyReply {
+                        machine,
+                        boot,
+                        payload,
+                        ..
+                    } => require(
+                        machine.0 < self.machines.len()
+                            && *boot <= self.machines[machine.0].lifecycle.boot()
+                            && serde_json::from_slice::<seedbox_engine_protocol::property::Reply>(
+                                payload,
+                            )
+                            .is_ok(),
+                        "scheduled property reply",
+                    )?,
                     Scheduled::Control(control::Event::Call {
                         source,
                         boot,
@@ -596,6 +612,7 @@ impl Checkpoint<SnapshotReference> {
                 }
             }
         }
+        self.properties.validate().map_err(CodecError::Invalid)?;
         self.check_retired_outputs()?;
         self.playback.check_persist(self.completed_quanta)?;
         if let Some(held) = &self.playback.held {
@@ -650,4 +667,4 @@ impl<T: Wire> Wire for Entry<T> {
         })
     }
 }
-wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,quantum_end,machines,events,boundary_index,completed_quanta,quantum_committed,stopped,playback,oracle,finished,oracle_stops,control,inputs,trigger_marker,definitions,network});
+wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,quantum_end,machines,events,boundary_index,completed_quanta,quantum_committed,stopped,playback,oracle,finished,oracle_stops,control,inputs,trigger_marker,definitions,network,properties});

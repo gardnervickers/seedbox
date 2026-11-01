@@ -41,6 +41,7 @@ serde_yaml_ng = "0.10"
 seedbox-engine-protocol = { path = "crates/seedbox-engine-protocol" }
 clap = { version = "4", features = ["derive", "env"] }
 seedbox-engine-core = { path = "crates/seedbox-engine-core" }
+seedbox-guest = { path = "crates/seedbox-guest" }
 serde = { version = "1", features = ["derive"] }
 libc = "0.2"
 serde_json = "1"

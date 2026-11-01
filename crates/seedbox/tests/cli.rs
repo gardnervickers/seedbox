@@ -1574,6 +1574,89 @@ fn control_receipt_internals_stay_out_of_help_but_remain_usable() {
 }
 
 #[test]
+fn fixture_show_explains_a_failed_run_by_its_property_findings() {
+    use seedbox_api::{
+        LostPropertyEvidence, Phase, PropertyAssessment, PropertyExample, PropertyKind,
+        PropertyOrigin, PropertyViolation,
+    };
+    let origin = |machine: &str, session, seq, time_ns| PropertyOrigin {
+        machine: machine.into(),
+        incarnation: 0,
+        session,
+        seq,
+        time_ns,
+    };
+    let mut resource = seedbox_api::Simulation::queued(
+        seedbox_api::Metadata {
+            name: "properties".into(),
+            labels: Default::default(),
+            annotations: Default::default(),
+            id: "k7m2p9qx".parse().unwrap(),
+            revision: 3,
+            created_at_unix_ms: 0,
+            deletion_requested_at_unix_ms: None,
+            parent: None,
+            checkpoint: None,
+        },
+        seedbox_server::test_support::request().spec,
+    );
+    resource.status.phase = Phase::Completed;
+    resource.status.oracle_exit_code = Some(0);
+    resource.status.properties = Some(PropertyAssessment {
+        violations: vec![
+            PropertyViolation {
+                id: "acknowledged writes survive".into(),
+                kind: PropertyKind::Always,
+                example: PropertyExample {
+                    origin: origin("client", 1, 7, 4_200_000_000),
+                    details: Some(serde_json::json!({"key": 7})),
+                    details_truncated: false,
+                },
+            },
+            PropertyViolation {
+                id: "seedbox.no_crashing_processes".into(),
+                kind: PropertyKind::Never,
+                example: PropertyExample {
+                    origin: origin("n1", 0, 0, 1_500_000_000),
+                    details: None,
+                    details_truncated: true,
+                },
+            },
+        ],
+        unmet_requirements: vec!["failover exercised".into()],
+        lost_count: 2,
+        lost_evidence: vec![LostPropertyEvidence {
+            reason: "property sequence 5 where 3 was next".into(),
+            origin: Some(origin("n1", 2, 5, 9)),
+        }],
+    });
+    resource.status.verdict = seedbox_server::verdict::of(&resource.status);
+    let body = serde_json::to_string(&resource).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let server = stand_in_server(directory.path(), "GET /v1/simulations/k7m2p9qx ", body);
+    let output = seedbox(&["show", "k7m2p9qx"], directory.path());
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = String::from_utf8(output.stdout).unwrap();
+    let (table, reasons) = text.split_at(text.find("violated: ").unwrap());
+    assert!(table.starts_with("ID "), "{text}");
+    assert!(table.lines().nth(1).unwrap().contains("failed"), "{text}");
+    assert_eq!(
+        reasons,
+        "\
+violated: acknowledged writes survive (always) on client at 4.2s: {\"key\":7}
+violated: seedbox.no_crashing_processes (never) on n1 at 1.5s: details truncated
+unmet requirement: failover exercised
+lost evidence: 2
+lost: property sequence 5 where 3 was next (n1 session 2 seq 5)
+"
+    );
+    println!(
+        "BEGIN FIXTURE show-failed-properties (HTTP FIXTURE, NOT LIVE; AGE column varies)\n{text}END FIXTURE show-failed-properties"
+    );
+    server.join().unwrap();
+}
+
+#[test]
 fn a_definition_whose_checkpoint_state_was_reclaimed_fails_at_submission() {
     use seedbox_api::{InputSource, Simulation};
     // A short state path keeps the server socket within the platform limit.

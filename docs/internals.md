@@ -100,12 +100,29 @@ report, so restarted applications cannot reuse an earlier kill. The world retain
 the newest 64 reports, including their boots; diagnostics suggests raising `memoryMiB`.
 Lost kernel records fail supervision with an I/O error rather than guessing a victim.
 
+## Guest property evidence
+
+Every supervisor serves `/run/seedbox/guest.sock` (and an abstract-namespace twin) and numbers a boot's guest sessions and each session's records from 1; it reports each session that closes, so the ledger stays bounded.
+The kmsg reader that relays OOM victims also relays fatal-signal reports, enabled by `print-fatal-signals`, one per crash; on a machine without `allowCrashes` each is a violation.
+The Driver reduces frames at commit and queues each flush reply behind items due at that boundary, for the same boot only.
+Its [ledger](../crates/seedbox-engine-core/src/properties.rs) keeps first violations, which IDs were required or evaluated, and lost evidence, never a tally; it is Driver checkpoint and policy-evidence state.
+Unmet requirements are read from the final report, so a run's verdict changes only at completion.
+
 ## ARM exclusive reservations
 
 Host interruption can clear a hardware reservation without any guest write, making raw store-exclusive failure nondeterministic.
 Translation retains address/value/size/guest epoch and retries physical monitor loss inside the exclusive pair.
 Guest boundaries advance the epoch; watchdog and maintenance exits do not. Value equality alone misses ABA.
 The [translator](../vendor/dynamorio/core/arch/aarchxx/mangle.c) and kernel return hook assume one guest CPU.
+
+## ARM code-cache consistency
+
+The ARM translator flushes rewritten code when the application issues `IC IVAU` (`-no_hw_cache_consistency`).
+Translated `CTR_EL0` reads clear DIC (`-fake_ctr_dic`), so applications cannot omit it even where the CPU would allow.
+DynamoRIO's AArch64 default instead write-protects code pages and sandboxes self-modifying code.
+That mode grew a Kafka broker to about 2 GB until it was killed, against about 250 MB with `IC IVAU`.
+HotSpot null checks in inline-cache code (the fork's `suite/tests/jvm` IcNull) also crashed there at pc 0.
+The [options](../crates/seedbox-machine-pv/src/machine/pv/factory.rs) apply to every application.
 
 ## Editing DynamoRIO
 

@@ -6,6 +6,9 @@ struct sbx_application {
     char **environment;
     char *working_directory;
     char *user;
+    /* Exported to the program as SEEDBOX_GUEST_SOCKET when set; not part of the
+     * retained recipe. */
+    const char *guest_socket;
 };
 /* Read the retained counted recipe once before entering the image root. */
 int sbx_application_load(struct sbx_application *application, const char *path);

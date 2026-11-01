@@ -40,6 +40,7 @@ pub struct Checkpoint<S> {
     trigger_marker: Option<Timestamp>,
     definitions: Vec<MachineDefinition>,
     network: network::Network,
+    properties: seedbox_engine_core::properties::Ledger,
 }
 
 impl<S> Checkpoint<S> {
@@ -317,6 +318,7 @@ where
             trigger_marker: self.execution.trigger_marker,
             definitions: self.execution.definitions.clone(),
             network: self.execution.network.clone(),
+            properties: self.execution.properties.clone(),
         })
     }
 
@@ -399,6 +401,7 @@ where
                 engine: None,
                 definitions: checkpoint.definitions.clone(),
                 network: checkpoint.network.clone(),
+                properties: checkpoint.properties.clone(),
             },
             workers,
             observations: ObservationState::default(),

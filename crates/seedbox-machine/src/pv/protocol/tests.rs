@@ -401,3 +401,73 @@ fn oom_is_explicit_ordered_and_preserved_in_partial_snapshot() {
         vec![response(3, Response::ApplicationOutcome { code: 137 })]
     );
 }
+
+#[test]
+fn property_and_crash_frames_decode_and_replies_encode() {
+    use seedbox_engine_protocol::{crash, property};
+    let mut codec = Codec::default();
+    let report = "keel: potentially unexpected fatal signal 6.";
+    let hex: String = report.bytes().map(|b| format!("{b:02x}")).collect();
+    let events = codec
+        .receive(&write(
+            4,
+            format!("SBX_PROP1 2 1 7b7d\nSBX_CRASH1 {hex}\nSBX_EXIT1 status=134\n").as_bytes(),
+        ))
+        .unwrap();
+    assert_eq!(
+        events,
+        [
+            response(
+                4,
+                Response::Property {
+                    frame: property::Frame {
+                        session: 2,
+                        seq: 1,
+                        payload: b"{}".to_vec(),
+                    }
+                }
+            ),
+            response(
+                4,
+                Response::Crash {
+                    report: crash::Report {
+                        message: report.into(),
+                        signal: 6,
+                    }
+                }
+            ),
+            response(4, Response::ApplicationOutcome { code: 134 }),
+        ]
+    );
+    let reply = property::Reply::Flush { seq: 3 };
+    let payload = serde_json::to_vec(&reply).unwrap();
+    let bytes = codec
+        .request(&Request::PropertyReply {
+            session: id(2),
+            payload: payload.clone(),
+        })
+        .unwrap();
+    assert_eq!(bytes.last(), Some(&b'\n'));
+    assert_eq!(
+        property::decode_reply(&bytes[..bytes.len() - 1]),
+        Ok(Some((2, reply)))
+    );
+    for payload in [
+        vec![],
+        b"{}\n".to_vec(),
+        vec![b'x'; property::MAX_REPLY_BYTES],
+    ] {
+        assert_eq!(
+            codec.request(&Request::PropertyReply {
+                session: id(1),
+                payload
+            }),
+            Err(Error::Frame)
+        );
+    }
+    // The supervisor encodes every frame; a malformed one fails the boot.
+    for bad in ["SBX_PROP1 1 1 7B7D\n", "SBX_CRASH1 6162\n"] {
+        let mut codec = Codec::default();
+        assert_eq!(codec.receive(&write(1, bad.as_bytes())), Err(Error::Frame));
+    }
+}

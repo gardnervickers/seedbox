@@ -3934,6 +3934,8 @@ mod tests {
         resource.status.phase = Phase::Completed;
         resource.status.stage = None;
         resource.status.oracle_exit_code = Some(0);
+        // The server derives and serves the verdict.
+        resource.status.verdict = seedbox_api::TestVerdict::Passed;
         resource.status.termination = Some(seedbox_api::ExecutionTermination::OracleExited);
         resource.status.simulated_time_ns = 100_000_000_000;
         app.apply(Update::Resource(resource));
