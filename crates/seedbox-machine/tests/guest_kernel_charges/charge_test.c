@@ -35,6 +35,8 @@ static char registers[64];
 #define READ_ONCE(x) (x)
 #define WRITE_ONCE(x, v) do { (x) = (v); } while (0)
 static void writeq(unsigned long value, volatile void *address);
+static unsigned int yields;
+static void yield(void);
 
 #include "charge.c"
 
@@ -58,6 +60,13 @@ static void writeq(unsigned long value, volatile void *address)
 	preempt = 0;
 }
 
+/* A preempt hit switches threads only after a charge, never inside one. */
+static void yield(void)
+{
+	assert(user_charge == NULL);
+	++yields;
+}
+
 static struct pt_regs regs;
 
 static void reset(u64 cost, u64 bound, u64 next_window)
@@ -66,7 +75,7 @@ static void reset(u64 cost, u64 bound, u64 next_window)
 	page = &storage;
 	event = registers;
 	window = next_window;
-	writes = user_ticks = system_ticks = 0;
+	writes = user_ticks = system_ticks = yields = 0;
 	nesting = 0;
 	current = &tasks[0];
 	regs = (struct pt_regs){ { 0 } };
@@ -132,5 +141,17 @@ int main(void)
 	nesting = SOFTIRQ_OFFSET;
 	seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
 	assert(user_ticks == 0 && system_ticks == 3);
+	assert(yields == 0);
+
+	/* A certain preempt hit yields once per charged syscall, progress calls
+	 * included, after the charge; time syscalls charge nothing and draw none. */
+	reset(1000, 300, 300);
+	storage.preempt_ppm = 1000000;
+	storage.preempt_seed = 1;
+	regs.regs[0] = SEEDBOX_PROGRESS_MARK;
+	seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+	seedbox_syscall_progress(&(struct pt_regs){ { 0 } }, 63);
+	seedbox_syscall_progress(&regs, SEEDBOX_CLOCK_GETTIME_NR);
+	assert(yields == 2 && storage.last == 2000);
 	return 0;
 }
