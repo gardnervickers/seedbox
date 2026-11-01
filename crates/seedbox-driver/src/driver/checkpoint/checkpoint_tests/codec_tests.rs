@@ -576,9 +576,9 @@ fn decoded_invariants_reject_untrusted_complete_objects() {
         let mut e = Encoder { output: Vec::new() };
         c.put(&mut e).unwrap();
         let mut bad = b"SBXDRVR\0".to_vec();
-        // Use current v7 framing so the intended state invariant, not version,
+        // Use current version 1 framing so the intended state invariant, not version,
         // is what rejects these deliberately malformed imported bodies.
-        bad.extend(7u32.to_le_bytes());
+        bad.extend(1u32.to_le_bytes());
         bad.extend((e.output.len() as u64).to_le_bytes());
         bad.extend(e.output);
         assert!(
