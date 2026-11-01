@@ -219,6 +219,7 @@ mod tests {
             applied_time_ns: Some(at),
             plan: Some(plan),
             active: false,
+            counts: None,
         };
         world.faults = vec![
             fault(
