@@ -18,10 +18,10 @@
 //! malformed, out of sequence or beyond a bound), so a run can never pass
 //! because evidence was lost. There is no per-property tally.
 //!
-//! Nothing reads these frames yet: the supervisor relay and the reduction
-//! into an [`Assessment`] come with the engine change that follows this one.
-//! The guest library never drops an evaluation for its size: it drops the
-//! details instead and says so ([`Record::Assert`]'s `details_truncated`).
+//! The engine reduces them into an [`Assessment`]
+//! (`seedbox_engine_core::properties`). The guest library never drops an
+//! evaluation for its size: it drops the details instead and says so
+//! ([`Record::Assert`]'s `details_truncated`).
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

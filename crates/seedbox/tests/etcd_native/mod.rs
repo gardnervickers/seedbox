@@ -928,6 +928,7 @@ mod tests {
                 full_state: Some(BTreeMap::from([("oracle".into(), digest)])),
                 faults: vec![],
                 detail: None,
+                properties: None,
             }),
             error: None,
             logs: BTreeMap::from([

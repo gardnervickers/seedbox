@@ -36,12 +36,9 @@ long_applications! {
     disk_rebuild => "disk-rebuild",
     durability => "durability",
     etcd_lease => "etcd-lease",
-    #[ignore = "image preparation misplaces files whose image path is 94-100 bytes (kafka-python's sticky/partition_movements.py lands at rootfs/DIR/DIR/NAME), so the client cannot import kafka; follow-up: fix the rootfs export, then run"]
     kafka_idempotent_retry => "kafka-idempotent-retry",
-    #[ignore = "image preparation misplaces files whose image path is 94-100 bytes (kafka-python's sticky/partition_movements.py lands at rootfs/DIR/DIR/NAME), so the client cannot import kafka; follow-up: fix the rootfs export, then run"]
     kafka_startup_crash => "kafka-startup-crash",
     large_volume => "large-volume",
-    #[ignore = "guest inspect reports the app Running after its leader exits while an orphan writes (the server world API reports it exited); follow-up: report application exits through inspect"]
     logs_leader_exit => "logs-leader-exit",
     logs_storm => "logs-storm",
     postgres_cancel => "postgres-cancel",
@@ -73,7 +70,6 @@ derived! {
     two_crash_torn_writes => torn_writes("two-crash"),
     stale_ack_crash_while_stop_held => crashed_pending_stop("stale-ack"),
     logs_storm_retained_and_replayed => retained_output("logs-storm"),
-    #[ignore = "guest inspect reports the app Running after its leader exits while an orphan writes (the server world API reports it exited); follow-up: report application exits through inspect"]
     logs_leader_exit_retained_and_replayed => retained_output("logs-leader-exit"),
 }
 

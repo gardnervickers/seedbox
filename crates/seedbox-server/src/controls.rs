@@ -356,7 +356,9 @@ mod tests {
         let failed = manager.describe(broken).unwrap();
         assert_eq!(failed.status.phase, Phase::Running);
         assert!(!failed.status.stop_requested);
-        assert_eq!(failed.status.verdict(), TestVerdict::Passed);
+        // A passing oracle reads pending until the final report's property
+        // results arrive with completion.
+        assert_eq!(failed.status.verdict(), TestVerdict::Pending);
         assert!(!manager
             .control_work()
             .unwrap()
