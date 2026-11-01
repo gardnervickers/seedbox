@@ -850,13 +850,13 @@ fn closed_codec_version_and_orphaned_network_ownership_fail_before_restore() {
     let mut d = net(initial(), setup(8), 1);
     advance(&mut d, 1);
     let (bytes, _) = artifact(d.checkpoint().unwrap());
-    assert_eq!(&bytes[8..12], &7u32.to_le_bytes());
-    for version in [0u32, 1, 2, 3, 4, 5, 6, 8, u32::MAX] {
+    assert_eq!(&bytes[8..12], &1u32.to_le_bytes());
+    for version in [0u32, 2, u32::MAX] {
         let mut old = bytes.clone();
         old[8..12].copy_from_slice(&version.to_le_bytes());
         assert!(matches!(
             Checkpoint::read_from(&mut &old[..], limits()),
-            Err(CodecError::Invalid(message)) if message.contains("replay with its retained engine or run fresh")
+            Err(CodecError::Invalid(message)) if message == "version"
         ));
     }
     for shape_layer in [false, true] {

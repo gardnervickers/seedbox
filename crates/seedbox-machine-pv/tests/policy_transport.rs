@@ -91,7 +91,7 @@ fn cold_mode(full: bool) -> Snapshot {
     let mut out = Vec::new();
     let mut w = Writer::new(&mut out);
     w.raw(b"SBXPVS01").unwrap();
-    w.u32(3).unwrap();
+    w.u32(1).unwrap();
     w.u8(1).unwrap();
     w.u8(0).unwrap();
     w.u16(0).unwrap();
