@@ -78,7 +78,8 @@ impl Kind {
 /// their order. The free functions share a process-wide client for
 /// [`SOCKET`]; a thread that must not wait behind another's flush can use a
 /// client of its own. A process forked after a call opens a session of its
-/// own on its next call, leaving its parent's session untouched.
+/// own on its next call, leaving its parent's session and unreported losses
+/// to the parent.
 pub struct Client {
     /// `None` is the machine's socket: [`SOCKET_ENV`]'s path, or [`SOCKET`].
     path: Option<PathBuf>,
@@ -100,6 +101,9 @@ struct Fallback {
 }
 
 struct Inner {
+    /// The process this state belongs to, from its first call: a child
+    /// forked after that inherits the state but must not use it.
+    owner: Option<u32>,
     state: State,
     /// Records this client failed to send, reported as one `lost` record
     /// before anything else once a send succeeds again.
@@ -113,12 +117,9 @@ struct Inner {
 enum State {
     Unopened,
     /// `sent` counts this session's messages, the supervisor's `seq`.
-    /// `pid` is the process that opened the session: a child forked after
-    /// that inherits the socket but must not share the session.
     Connected {
         socket: UnixDatagram,
         sent: u64,
-        pid: u32,
     },
     /// Not running under Seedbox: calls do nothing.
     Absent,
@@ -279,6 +280,7 @@ impl Client {
 impl Inner {
     const fn new() -> Self {
         Self {
+            owner: None,
             state: State::Unopened,
             lost: 0,
             lost_reason: String::new(),
@@ -307,21 +309,23 @@ impl Inner {
         result
     }
 
-    /// A forked child inherits its parent's connected socket and sequence
-    /// count. Sending on it would interleave two processes' records under
-    /// one sequence, and either could read the other's flush reply. So the
-    /// child closes its copy unused, which leaves the parent's session
-    /// open, and starts afresh: its next record opens a session of its own.
-    /// It carries over no lost count, since it lost nothing.
+    /// A forked child inherits its parent's state: a connected socket and
+    /// sequence count, or losses not yet reported. Sending on the socket
+    /// would interleave two processes' records under one sequence, and
+    /// either could read the other's flush reply; reporting the losses would
+    /// count them twice, since the parent still reports them. So the child
+    /// closes its copy of any socket unused, which leaves the parent's
+    /// session open, and starts afresh: its next record opens a session of
+    /// its own, with no lost count and nothing yet on the kernel log.
     fn leave_inherited_session(&mut self) {
-        if let State::Connected { pid, .. } = self.state {
-            if pid != std::process::id() {
-                *self = Self {
-                    reply_timeout: self.reply_timeout,
-                    ..Self::new()
-                };
-            }
+        let pid = std::process::id();
+        if self.owner.is_some_and(|owner| owner != pid) {
+            *self = Self {
+                reply_timeout: self.reply_timeout,
+                ..Self::new()
+            };
         }
+        self.owner = Some(pid);
     }
 
     fn try_send(&mut self, target: &Target, bytes: &[u8]) -> io::Result<Option<u64>> {
@@ -344,11 +348,7 @@ impl Inner {
             self.state = match socket {
                 Some(socket) => {
                     socket.set_read_timeout(Some(self.reply_timeout))?;
-                    State::Connected {
-                        socket,
-                        sent: 0,
-                        pid: std::process::id(),
-                    }
+                    State::Connected { socket, sent: 0 }
                 }
                 None => State::Absent,
             };

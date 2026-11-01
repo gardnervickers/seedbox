@@ -115,6 +115,15 @@ Translation retains address/value/size/guest epoch and retries physical monitor 
 Guest boundaries advance the epoch; watchdog and maintenance exits do not. Value equality alone misses ABA.
 The [translator](../vendor/dynamorio/core/arch/aarchxx/mangle.c) and kernel return hook assume one guest CPU.
 
+## ARM code-cache consistency
+
+The ARM translator flushes rewritten code when the application issues `IC IVAU` (`-no_hw_cache_consistency`).
+Translated `CTR_EL0` reads clear DIC (`-fake_ctr_dic`), so applications cannot omit it even where the CPU would allow.
+DynamoRIO's AArch64 default instead write-protects code pages and sandboxes self-modifying code.
+That mode grew a Kafka broker to about 2 GB until it was killed, against about 250 MB with `IC IVAU`.
+HotSpot null checks in inline-cache code (the fork's `suite/tests/jvm` IcNull) also crashed there at pc 0.
+The [options](../crates/seedbox-machine-pv/src/machine/pv/factory.rs) apply to every application.
+
 ## Editing DynamoRIO
 
 [vendor/dynamorio](../vendor/dynamorio) is the maintained
