@@ -446,6 +446,7 @@ impl<M> Adapter for View<'_, M> {
         triggers: &[crate::oracle::triggers::Record],
     ) -> Result<Value, OperationError> {
         use crate::oracle::{
+            observation::ApplicationCondition,
             service::{Process, Vm},
             triggers::{Status, TriggerAction},
         };
@@ -471,12 +472,12 @@ impl<M> Adapter for View<'_, M> {
             let facts = state
                 .facts()
                 .map_err(|_| OperationError::invalid("unavailable observation"))?;
+            let view = state
+                .view()
+                .map_err(|_| OperationError::invalid("unavailable observation"))?;
             let state = if facts.vm == Vm::Down {
                 "Down".into()
             } else if facts.physically_ended {
-                let view = state
-                    .view()
-                    .map_err(|_| OperationError::invalid("unavailable observation"))?;
                 match view.first_terminal.map(|t| t.reason) {
                     Some(crate::machine::ExitReason::ProgramExit { code }) => {
                         format!("Exited({code})")
@@ -486,6 +487,13 @@ impl<M> Adapter for View<'_, M> {
                 }
             } else if facts.vm == Vm::Paused {
                 "Paused".into()
+            } else if let (ApplicationCondition::Exited, Some(code)) =
+                (view.application.condition, view.application.exit_code)
+            {
+                // The application's leader exited by itself while the machine
+                // stays up, as the world API reports it. Its process is only
+                // eligible for Start; a commanded Stop still shows Stopped.
+                format!("Exited({code})")
             } else {
                 match facts.process {
                     Process::Running => "Running",
