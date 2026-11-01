@@ -140,7 +140,7 @@ fn guest_encoding_decodes_with_the_protocol_crate() {
     let flush = serde_json::to_vec(&Reply::Flush { seq: 3 }).unwrap();
     assert_eq!(reply_body(&flush, "flush", 3), Some(json!({"seq": 3})));
     // A reply to another request, or for another sequence number, is refused.
-    assert_eq!(reply_body(&flush, "choice", 3), None);
+    assert_eq!(reply_body(&flush, "other", 3), None);
     assert_eq!(reply_body(&flush, "flush", 4), None);
 }
 
@@ -324,15 +324,12 @@ fn records_that_cannot_be_sent_are_reported_as_lost() {
     replier.join().unwrap();
 }
 
-/// A child forked after the parent's session opened must not write into it
-/// or read its replies: each process's records and flush replies travel in
-/// a session of its own, each with its own sequence.
+/// A server whose accept and sessions fail rather than hang when a forked
+/// child never connects or sends.
 #[cfg(target_os = "linux")]
-#[test]
-fn a_forked_child_opens_its_own_session() {
+fn timed_server() -> (tempfile::TempDir, PathBuf, OwnedListener) {
     use std::os::fd::AsRawFd;
-    let (_directory, path, listener) = server();
-    // Fail rather than hang if the child never connects.
+    let (directory, path, listener) = server();
     let timeout = libc::timeval {
         tv_sec: 10,
         tv_usec: 0,
@@ -348,26 +345,38 @@ fn a_forked_child_opens_its_own_session() {
         )
     };
     assert_eq!(set, 0);
-    let client = Client::new(&path);
-    client.lock().reply_timeout = Duration::from_secs(10);
-    client.always("parent before fork", true, Value::Null);
-    let parent = listener.accept();
-    parent
+    (directory, path, listener)
+}
+
+#[cfg(target_os = "linux")]
+fn timed_accept(listener: &OwnedListener) -> UnixDatagram {
+    let session = listener.accept();
+    session
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
+    session
+}
+
+#[cfg(target_os = "linux")]
+fn receive(session: &UnixDatagram) -> Record {
     let mut buffer = [0u8; MAX_RECORD_BYTES];
-    let receive = |session: &UnixDatagram, buffer: &mut [u8]| {
-        let n = session.recv(buffer).unwrap();
-        Record::parse(&buffer[..n]).unwrap()
-    };
-    let id = |record: Record| match record {
+    let n = session.recv(&mut buffer).unwrap();
+    Record::parse(&buffer[..n]).unwrap()
+}
+
+#[cfg(target_os = "linux")]
+fn assertion_id(record: Record) -> String {
+    match record {
         Record::Assert { id, .. } => id,
         other => panic!("expected an assertion, got {other:?}"),
-    };
-    assert_eq!(id(receive(&parent, &mut buffer)), "parent before fork");
+    }
+}
 
-    // SAFETY: the child only uses the client and then leaves with _exit,
-    // never returning into the test harness.
+/// Fork a child that runs `body` and exits with success if it returns true.
+#[cfg(target_os = "linux")]
+fn fork_child(body: impl FnOnce() -> bool + std::panic::UnwindSafe) -> libc::pid_t {
+    // SAFETY: the child only runs `body` and then leaves with _exit, never
+    // returning into the test harness.
     #[allow(
         clippy::disallowed_methods,
         reason = "the regression subject is a forked child's session; it execs nothing"
@@ -375,35 +384,54 @@ fn a_forked_child_opens_its_own_session() {
     let child = unsafe { libc::fork() };
     assert!(child >= 0, "{}", io::Error::last_os_error());
     if child == 0 {
-        let flushed = std::panic::catch_unwind(|| {
-            client.always("child", true, Value::Null);
-            client.flush().is_ok()
-        });
+        let succeeded = std::panic::catch_unwind(body);
         // SAFETY: ends the forked child without running the harness.
-        unsafe { libc::_exit(if matches!(flushed, Ok(true)) { 0 } else { 1 }) };
+        unsafe { libc::_exit(if matches!(succeeded, Ok(true)) { 0 } else { 1 }) };
     }
+    child
+}
 
-    // The child's records arrive in a new session, numbered from 1, and
-    // its flush is answered there.
-    let session = listener.accept();
-    session
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    assert_eq!(id(receive(&session, &mut buffer)), "child");
-    assert_eq!(receive(&session, &mut buffer), Record::Flush {});
-    session
-        .send(&serde_json::to_vec(&Reply::Flush { seq: 2 }).unwrap())
-        .unwrap();
+#[cfg(target_os = "linux")]
+fn wait_for_success(child: libc::pid_t) {
     let mut status = 0;
-    // SAFETY: waits for the child forked above.
+    // SAFETY: waits for a child this test forked.
     assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
     assert!(
         libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
         "child flush failed: status {status}"
     );
+}
+
+/// A child forked after the parent's session opened must not write into it
+/// or read its replies: each process's records and flush replies travel in
+/// a session of its own, each with its own sequence.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_forked_child_opens_its_own_session() {
+    let (_directory, path, listener) = timed_server();
+    let client = Client::new(&path);
+    client.lock().reply_timeout = Duration::from_secs(10);
+    client.always("parent before fork", true, Value::Null);
+    let parent = timed_accept(&listener);
+    assert_eq!(assertion_id(receive(&parent)), "parent before fork");
+
+    let child = fork_child(|| {
+        client.always("child", true, Value::Null);
+        client.flush().is_ok()
+    });
+    // The child's records arrive in a new session, numbered from 1, and
+    // its flush is answered there.
+    let session = timed_accept(&listener);
+    assert_eq!(assertion_id(receive(&session)), "child");
+    assert_eq!(receive(&session), Record::Flush {});
+    session
+        .send(&serde_json::to_vec(&Reply::Flush { seq: 2 }).unwrap())
+        .unwrap();
+    wait_for_success(child);
 
     // Nothing from the child reached the parent's session, which is still
     // open, and the parent's flush is its own second message.
+    let mut buffer = [0u8; MAX_RECORD_BYTES];
     parent.set_nonblocking(true).unwrap();
     assert_eq!(
         parent.recv(&mut buffer).unwrap_err().kind(),
@@ -420,4 +448,40 @@ fn a_forked_child_opens_its_own_session() {
     });
     client.flush().unwrap();
     replier.join().unwrap();
+}
+
+/// Losses the parent has yet to report stay the parent's: a child forked
+/// before its next call opens a session without them, and the parent still
+/// reports them, once.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_forked_child_does_not_report_its_parents_losses() {
+    let (_directory, path, listener) = timed_server();
+    let client = Client::new(&path);
+    client.lock().reply_timeout = Duration::from_secs(10);
+    client.require("p");
+    // The supervisor side goes away; the parent's next record is lost.
+    drop(listener.accept());
+    client.always("lost by the parent", false, Value::Null);
+
+    let child = fork_child(|| {
+        client.always("child", true, Value::Null);
+        client.flush().is_ok()
+    });
+    // The child's session starts with its own record, not a lost count.
+    let session = timed_accept(&listener);
+    assert_eq!(assertion_id(receive(&session)), "child");
+    assert_eq!(receive(&session), Record::Flush {});
+    session
+        .send(&serde_json::to_vec(&Reply::Flush { seq: 2 }).unwrap())
+        .unwrap();
+    wait_for_success(child);
+
+    client.never("parent after fork", false, Value::Null);
+    let parent = timed_accept(&listener);
+    assert!(
+        matches!(receive(&parent), Record::Lost { count: 1, .. }),
+        "the parent reports its own loss first"
+    );
+    assert_eq!(assertion_id(receive(&parent)), "parent after fork");
 }

@@ -92,6 +92,22 @@ impl Codec {
                 self.pending.push_back((*id, "step".into()));
                 Ok(format!("step {id} {nanoseconds}\n").into_bytes())
             }
+            Request::PropertyReply { session, payload } => {
+                use seedbox_engine_protocol::property;
+                // One compact JSON message within the reply line bound.
+                let line = property::REPLY_PREFIX.len() + 11 + payload.len();
+                if payload.is_empty()
+                    || line > property::MAX_REPLY_BYTES
+                    || payload.iter().any(|b| matches!(b, b'\n' | 0))
+                {
+                    return Err(Error::Frame);
+                }
+                let mut bytes = property::REPLY_PREFIX.to_vec();
+                bytes.extend_from_slice(format!("{session} ").as_bytes());
+                bytes.extend_from_slice(payload);
+                bytes.push(b'\n');
+                Ok(bytes)
+            }
             Request::Crash
             | Request::Reboot
             | Request::Shutdown
@@ -159,6 +175,14 @@ impl Codec {
             seedbox_engine_protocol::out_of_memory::decode(line).map_err(|_| Error::Frame)?
         {
             Response::OutOfMemoryKill { kill }
+        } else if let Some(frame) =
+            seedbox_engine_protocol::property::decode(line).map_err(|_| Error::Frame)?
+        {
+            Response::Property { frame }
+        } else if let Some(report) =
+            seedbox_engine_protocol::crash::decode(line).map_err(|_| Error::Frame)?
+        {
+            Response::Crash { report }
         } else if let Some(log) = line.strip_prefix(b"SBX_LOG1 ") {
             if log.len() < 4 || log[1] != b' ' {
                 return Err(Error::Frame);

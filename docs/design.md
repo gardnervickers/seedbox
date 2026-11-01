@@ -11,6 +11,7 @@ Neither host elapsed time nor watchdog interruptions count as guest progress.
 ## Replay and fresh execution answer different questions
 
 The oracle checks application behaviour; a witness comparison checks reproducibility, not correctness.
+Guest properties and crash reports qualify the oracle's verdict: violations, unmet requirements and lost evidence are the only property results kept, and they arrive with the final report ([properties](scenarios.md)).
 Replay uses retained runtime inputs, so MATCH alone cannot validate a changed engine.
 Independent fresh runs exercise the new engine; comparison first checks resolved input compatibility.
 [Comparison](../crates/seedbox-server/src/execution.rs) ignores image names and descriptive host/engine metadata,

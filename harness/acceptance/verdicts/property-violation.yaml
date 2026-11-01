@@ -1,0 +1,9 @@
+# The oracle exits 0, but its `always` property is violated: FAIL.
+name: guest-property-violation
+machines: {}
+oracle:
+  build:
+    context: "../../.."
+    dockerfile: harness/acceptance/images/properties/Dockerfile
+  command:
+  - violate

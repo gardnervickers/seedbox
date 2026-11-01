@@ -77,6 +77,13 @@ pub struct Catalogue {
 }
 
 impl Catalogue {
+    /// Every entry is stored through here, so its status always carries the
+    /// verdict the server derives, never one supplied with the resource.
+    fn store(&mut self, id: SimulationId, mut entry: Entry) {
+        crate::verdict::qualify(&mut entry.resource.status);
+        self.entries.insert(id, entry);
+    }
+
     pub fn in_memory() -> Self {
         Self {
             entries: BTreeMap::new(),
@@ -130,7 +137,7 @@ impl Catalogue {
                 if let Some(range) = &mut entry.range {
                     range.stop_requested = true;
                 }
-                self.entries.insert(id.clone(), entry);
+                self.store(id.clone(), entry);
             }
         }
         ids.reverse();
@@ -283,7 +290,7 @@ impl Catalogue {
         };
         self.requests
             .insert(entry.request.request_id.clone(), id.clone());
-        self.entries.insert(id, entry);
+        self.store(id, entry);
         Ok((resource, true))
     }
 
@@ -379,6 +386,7 @@ impl Catalogue {
     /// Compare-and-swap prevents a late worker callback from overwriting newer
     /// control state.
     pub fn update(&mut self, mut resource: Simulation) -> Result<Simulation> {
+        crate::verdict::qualify(&mut resource.status);
         let original = self
             .entries
             .get(&resource.metadata.id)
@@ -453,7 +461,7 @@ impl Catalogue {
         if resource.status.phase == Phase::Completed {
             self.pending.remove(&resource.metadata.id);
         }
-        self.entries.insert(resource.metadata.id.clone(), entry);
+        self.store(resource.metadata.id.clone(), entry);
         Ok(resource)
     }
 
@@ -580,7 +588,7 @@ impl Catalogue {
             .insert(control.request.request_id.clone(), control.clone());
         self.pending
             .insert(id.clone(), control.request.request_id.clone());
-        self.entries.insert(id.clone(), entry);
+        self.store(id.clone(), entry);
         Ok((control, true))
     }
 
@@ -616,7 +624,7 @@ impl Catalogue {
             .controls
             .insert(request_id.to_owned(), control.clone());
         self.pending.remove(id);
-        self.entries.insert(id.clone(), entry);
+        self.store(id.clone(), entry);
         Ok(control)
     }
 }

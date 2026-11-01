@@ -1111,7 +1111,8 @@ impl Machine for PVMachine {
                     }
                     request @ (seedbox_machine::pv::Request::Application { .. }
                     | seedbox_machine::pv::Request::StepRealtime { .. }
-                    | seedbox_machine::pv::Request::SimulationReply { .. }) => {
+                    | seedbox_machine::pv::Request::SimulationReply { .. }
+                    | seedbox_machine::pv::Request::PropertyReply { .. }) => {
                         if !matches!(self.state, State::Exited | State::Crashed)
                             || self.pending_boots > 0
                         {

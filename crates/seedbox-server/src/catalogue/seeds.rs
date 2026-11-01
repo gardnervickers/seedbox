@@ -56,7 +56,7 @@ impl Catalogue {
             }
         }
         for (id, entry) in updates {
-            self.entries.insert(id, entry);
+            self.store(id, entry);
         }
         Ok(())
     }
@@ -115,7 +115,7 @@ impl Catalogue {
             .as_mut()
             .ok_or_else(|| Error::Invalid("simulation has no seed range".into()))?;
         range.stop_requested = true;
-        self.entries.insert(id.clone(), entry);
+        self.store(id.clone(), entry);
         Ok(self
             .seed_range(id)?
             .members
@@ -145,7 +145,7 @@ impl Catalogue {
             InputSource::Resolved { .. } | InputSource::Prepared { .. }
         ) {
             range.error = Some("source simulation did not retain prepared inputs".into());
-            self.entries.insert(id, entry);
+            self.store(id, entry);
             return Ok(None);
         }
         let index = range.next;
@@ -168,12 +168,12 @@ impl Catalogue {
             Ok(member) => member,
             Err(error) => {
                 range.error = Some(error.to_string());
-                self.entries.insert(id, entry);
+                self.store(id, entry);
                 return Ok(None);
             }
         };
         range.next += 1;
-        self.entries.insert(id, entry);
+        self.store(id, entry);
         Ok(Some(member))
     }
 }

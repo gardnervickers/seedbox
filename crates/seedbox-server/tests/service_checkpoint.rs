@@ -201,6 +201,7 @@ fn report(reason: StopReason, simulated_time_ns: u64) -> ExecutionReport {
         faults: Vec::new(),
         host_wait_ns: 0,
         detail: None,
+        properties: None,
     }
 }
 struct CancelOnDrop(CancellationToken);
