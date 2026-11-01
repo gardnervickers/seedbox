@@ -10,7 +10,7 @@ use seedbox_machine::snapshot::{
 use std::io::{Read, Write};
 const MAGIC: &[u8; 8] = b"SBXPVS01";
 const HEADER_BYTES: u64 = 24;
-const VERSION: u32 = 3;
+const VERSION: u32 = 1;
 #[cfg(target_arch = "x86_64")]
 const ARCH: u8 = 1;
 #[cfg(target_arch = "aarch64")]

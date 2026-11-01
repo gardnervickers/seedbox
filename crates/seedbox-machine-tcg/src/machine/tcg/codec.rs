@@ -1,8 +1,8 @@
 //! Closed persistence of the Rust-owned closure; QEMU migration stays opaque.
 //!
-//! v2 retains factory policy, logical/active boot identity, ended RAM evidence
-//! and pending reports before the six raw body lengths. The changed owned
-//! metadata requires a format bump; no source/engine provenance is recorded.
+//! The body retains factory policy, logical/active boot identity, ended RAM
+//! evidence and pending reports before the six raw body lengths. No
+//! source/engine provenance is recorded.
 //! `SBXTCG01`, LE u32 version, u8 guest arch (1=x86-64), u8 native
 //! format (0=none, 1=patched-QEMU migration), two zero reserved bytes, LE u64
 //! body length. The body contains Linux kind (1), memory MiB, optional MAC,
@@ -19,7 +19,7 @@ use seedbox_machine::snapshot::{reserve, CodecError, DecodeLimits, Reader, Resul
 use std::io::{Read, Write};
 
 const MAGIC: &[u8; 8] = b"SBXTCG01";
-const VERSION: u32 = 3;
+const VERSION: u32 = 1;
 const HEADER: u64 = 24;
 const ARCH: u8 = 1; // Guest x86-64, on every supported host.
 const NATIVE: u8 = 1; // Opaque patched-QEMU migration, not a host ABI.

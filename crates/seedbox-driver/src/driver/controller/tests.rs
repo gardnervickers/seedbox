@@ -247,7 +247,7 @@ fn both_due_queue_phases_roundtrip_codec_and_workers_without_readmission_or_draw
         let mut source = configured(specs, Some(Some(MachineId(0))), 1);
         advance(&mut source, boundary);
         let (bytes, store) = artifact(source.checkpoint().unwrap());
-        assert_eq!(&bytes[8..12], &7u32.to_le_bytes());
+        assert_eq!(&bytes[8..12], &1u32.to_le_bytes());
         reference_observer_session(&mut source);
         let expected = advance(&mut source, 35);
         let expected_states = states(&source);
