@@ -254,6 +254,124 @@ fn semantic_bounds_and_time_overflow_are_checked_without_runtime_admission() {
 }
 
 #[test]
+fn device_faults_take_their_actions_arguments_and_validators() {
+    use crate::driver::faults::Capability;
+    let target = json!({"machine":"m"});
+    // `disk_op` is the action's `op`; effect, scope and jitter default.
+    assert_eq!(
+        operation(json!({"op":"disk_error","target":target,"disk_op":"read","ppm":1_000_000})),
+        Operation::DiskError {
+            target: Target::Machine("m".into()),
+            disk_op: DiskOp::Read,
+            ppm: 1_000_000,
+            effect: DiskEffect::Eio,
+            scope: DiskScope::All,
+        }
+    );
+    assert_eq!(
+        operation(
+            json!({"op":"disk_error","target":{"service":"s"},"disk_op":"write","ppm":1,"effect":"corrupt","scope":"data"})
+        ),
+        Operation::DiskError {
+            target: Target::Service("s".into()),
+            disk_op: DiskOp::Write,
+            ppm: 1,
+            effect: DiskEffect::Corrupt,
+            scope: DiskScope::Data,
+        }
+    );
+    assert_eq!(
+        operation(
+            json!({"op":"disk_latency","target":target,"disk_op":"flush","latency_ns":1_000})
+        ),
+        Operation::DiskLatency {
+            target: Target::Machine("m".into()),
+            disk_op: DiskOp::Flush,
+            latency_ns: 1_000,
+            jitter_ns: 0,
+        }
+    );
+    operation(
+        json!({"op":"disk_latency","target":target,"disk_op":"any","latency_ns":1_000_000_000,"jitter_ns":1_000_000_000}),
+    );
+    assert_eq!(
+        operation(json!({"op":"preempt","target":target,"ppm":100_000})),
+        Operation::Preempt {
+            target: Target::Machine("m".into()),
+            ppm: 100_000,
+        }
+    );
+    // Each names the capability its engine must provide.
+    for (arguments, capability) in [
+        (
+            json!({"op":"disk_error","target":target,"disk_op":"read","ppm":1}),
+            Capability::DiskSelection,
+        ),
+        (
+            json!({"op":"disk_latency","target":target,"disk_op":"read","latency_ns":1_000}),
+            Capability::DelayedBlockCompletion,
+        ),
+        (
+            json!({"op":"preempt","target":target,"ppm":1}),
+            Capability::GuestYield,
+        ),
+    ] {
+        let operation = operation(arguments.clone());
+        assert_eq!(
+            operation.capability(),
+            Some((arguments["op"].as_str().unwrap(), capability))
+        );
+        operation.validate_at(0).unwrap();
+    }
+    assert_eq!(
+        operation(json!({"op":"throttle","target":target,"factor_permille":1000})).capability(),
+        None
+    );
+    // The actions' own validators refuse their arguments, with their messages.
+    for (arguments, message) in [
+        (
+            json!({"op":"disk_error","target":target,"disk_op":"read","ppm":0}),
+            "disk_error ppm must be 1 to 1000000",
+        ),
+        (
+            json!({"op":"disk_error","target":target,"disk_op":"read","ppm":1_000_001}),
+            "disk_error ppm must be 1 to 1000000",
+        ),
+        (
+            json!({"op":"disk_error","target":target,"disk_op":"flush","ppm":1,"scope":"data"}),
+            "disk_error on flushes takes neither the corrupt effect nor the data scope",
+        ),
+        (
+            json!({"op":"disk_latency","target":target,"disk_op":"read","latency_ns":999}),
+            "disk_latency latency_ns must be 1000 to 1000000000 and jitter_ns at most 1000000000",
+        ),
+        (
+            json!({"op":"disk_latency","target":target,"disk_op":"read","latency_ns":1_000,"jitter_ns":1_000_000_001}),
+            "disk_latency latency_ns must be 1000 to 1000000000 and jitter_ns at most 1000000000",
+        ),
+        (
+            json!({"op":"preempt","target":target,"ppm":1_000_001}),
+            "preempt ppm must be 1 to 1000000",
+        ),
+    ] {
+        let error = invalid(arguments);
+        assert_eq!(
+            (error.code, error.message.as_str()),
+            (ErrorCode::InvalidRequest, message)
+        );
+    }
+    // Shapes outside the schema: no `disk_op`, a handle, an unknown kind, `machine`.
+    for arguments in [
+        json!({"op":"disk_error","target":target,"ppm":1}),
+        json!({"op":"disk_error","target":target,"disk_op":"read","ppm":1,"handle":"h"}),
+        json!({"op":"disk_latency","target":target,"disk_op":"trim","latency_ns":1_000}),
+        json!({"op":"preempt","machine":"m","ppm":1}),
+    ] {
+        assert_eq!(invalid(arguments).code, ErrorCode::InvalidRequest);
+    }
+}
+
+#[test]
 fn network_operations_parse_and_validate_before_policy_admission() {
     assert_eq!(
         operation(json!({"op":"connections","from":{"machine":"a"},"to":{"service":"b"}})),

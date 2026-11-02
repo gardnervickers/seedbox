@@ -366,6 +366,10 @@ impl Command {
             _ => Err(OperationError::invalid("clock fault needs one value")),
         }
     }
+    /// A rate the schema has bounded to at most a million.
+    fn ppm(ppm: u64) -> Result<u32, OperationError> {
+        u32::try_from(ppm).map_err(|_| OperationError::invalid("ppm exceeds u32"))
+    }
     fn from_operation(op: Operation) -> Result<Self, OperationError> {
         let effect = |target, effect| Ok(Self::Effect { target, effect });
         match op {
@@ -434,6 +438,40 @@ impl Command {
                 network_faults,
             }),
             Operation::DropConnection { connection } => Ok(Self::DropConnection { connection }),
+            Operation::DiskError {
+                target,
+                disk_op,
+                ppm,
+                effect,
+                scope,
+            } => Ok(Self::DeviceFault {
+                target,
+                fault: crate::pv::DeviceFault::DiskError {
+                    op: disk_op,
+                    ppm: Self::ppm(ppm)?,
+                    effect,
+                    scope,
+                },
+            }),
+            Operation::DiskLatency {
+                target,
+                disk_op,
+                latency_ns,
+                jitter_ns,
+            } => Ok(Self::DeviceFault {
+                target,
+                fault: crate::pv::DeviceFault::DiskLatency {
+                    op: disk_op,
+                    latency_ns,
+                    jitter_ns,
+                },
+            }),
+            Operation::Preempt { target, ppm } => Ok(Self::DeviceFault {
+                target,
+                fault: crate::pv::DeviceFault::Preempt {
+                    ppm: Self::ppm(ppm)?,
+                },
+            }),
             _ => Err(OperationError::unsupported()),
         }
     }

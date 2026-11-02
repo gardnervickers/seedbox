@@ -1,49 +1,53 @@
 """Disk and scheduler faults take effect in the guest and heal.
 
-Without a program this is the unfaulted baseline. The acceptance test adds a
-program that applies each phase's fault at the start of its window and heals
-it at the end. The oracle runs each phase inside its window and observes the
-fault from inside the guest; a phase whose fault is not active is observed
-unfaulted. Meanwhile the oracle crashes the victim on a held FLUSH and
-reboots it.
+The oracle's own machine is outside the failure model, so the `disk` machine
+runs each phase's work when the oracle asks (`probe`). The oracle applies the
+phase's fault to it, observes the fault there, heals it and observes the same
+work unfaulted. An engine that refuses a fault as unsupported has that phase
+observed unfaulted. Meanwhile the oracle crashes the victim on a held FLUSH
+and reboots it.
 """
+import json
 import re
+import socket
 import subprocess
+import sys
+import time
 
-from seedbox import FaultError, Machine, World
-
-PHASES = [
-    ("read-eio", ["read", "/data/f", "8"]),
-    ("corrupt", ["read", "/data/f", "8"]),
-    ("write-eio", ["write", "/data/f", "16"]),
-    ("slow", ["fsync", "/data/g", "4"]),
-    ("race", ["race", "20000"]),
-]
 LATENCY_NS = 20_000_000
-# The program's schedule: phase i's fault is active from START_NS + i *
-# PERIOD_NS for ACTIVE_NS. crates/seedbox/tests/applications.rs uses the same.
-START_NS = 1_000_000_000
-PERIOD_NS = 1_250_000_000
-ACTIVE_NS = 1_000_000_000
-# Admission and settlement land well within this after a window edge.
-SETTLE_NS = 10_000_000
-VICTIM = Machine("victim")
+PORT = 9000
 
 
-def run(arguments):
+def faults(arguments):
     result = subprocess.run(["/faults", *arguments], capture_output=True, text=True, check=True)
-    print(result.stdout, end="", flush=True)
-    return {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", result.stdout)}
+    return result.stdout
 
 
-def sleep_until(world, at_ns):
-    now = world.now_ns()
-    if now < at_ns:
-        world.sleep((at_ns - now) / 1e9)
+def probe():
+    """Run /faults for each JSON argument list the oracle sends; reply with its output."""
+    with socket.socket() as listener:
+        listener.bind(("0.0.0.0", PORT))
+        listener.listen()
+        while True:
+            with listener.accept()[0] as channel:
+                for line in channel.makefile("rb"):
+                    output = faults(json.loads(line))
+                    print(output, end="", flush=True)
+                    channel.sendall(json.dumps(output).encode() + b"\n")
 
 
-def active(world, handle):
-    return handle in world.inspect()["active_handles"]
+def connect(host):
+    deadline = time.monotonic() + 30
+    while True:
+        channel = socket.socket()
+        try:
+            channel.connect((host, PORT))
+            return channel
+        except OSError:
+            channel.close()
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 def check(phase, values, faulted):
@@ -58,7 +62,21 @@ def check(phase, values, faulted):
         raise RuntimeError(f"{phase}: unexpected observation {values} (faulted={faulted})")
 
 
-def victim(world, trigger):
+def phases(disk):
+    """Each phase: its name, its fault on the disk machine and the work that observes it."""
+    return [
+        ("read-eio", lambda w: w.disk_error(disk, "read", 1_000_000, scope="data"),
+         ["read", "/data/f", "8"]),
+        ("corrupt", lambda w: w.disk_error(disk, "read", 1_000_000, effect="corrupt", scope="data"),
+         ["read", "/data/f", "8"]),
+        ("write-eio", lambda w: w.disk_error(disk, "write", 500_000, scope="data"),
+         ["write", "/data/f", "16"]),
+        ("slow", lambda w: w.disk_latency(disk, "flush", LATENCY_NS), ["fsync", "/data/g", "4"]),
+        ("race", lambda w: w.preempt(disk, 100_000), ["race", "20000"]),
+    ]
+
+
+def victim(world, trigger, machine):
     """Wait for the held FLUSH's crash, then reboot the victim."""
     if trigger is None:
         return
@@ -66,14 +84,37 @@ def victim(world, trigger):
         world.sleep(0.001)
     while not any(m["name"] == "victim" and m["state"] == "Down" for m in world.inspect()["machines"]):
         world.sleep(0.001)
-    world.reboot(VICTIM)
+    world.reboot(machine)
     print("VICTIM crashed on a held flush and rebooted", flush=True)
 
 
-def main():
+def scenario():
+    from seedbox import FaultError, Machine, World
+
+    victim_machine = Machine("victim")
+    channel = connect("disk")
+    replies = channel.makefile("rb")
+
+    def run(arguments):
+        channel.sendall(json.dumps(arguments).encode() + b"\n")
+        output = json.loads(replies.readline())
+        print(output, end="", flush=True)
+        return {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", output)}
+
+    def apply(world, phase, fault):
+        """Apply the phase's fault, or return None if the engine lacks it."""
+        try:
+            return fault(world)
+        except FaultError as error:
+            # x86_64 PV has no guest yield hook, so it refuses preempt.
+            if error.code != "unsupported":
+                raise
+            print(f"PHASE {phase} unsupported: {error}", flush=True)
+            return None
+
     with World.connect() as world:
         try:
-            trigger = world.arm_block_request_crash(VICTIM, "flush", 20, match_timeout=5)
+            trigger = world.arm_block_request_crash(victim_machine, "flush", 20, match_timeout=5)
         except FaultError as error:
             # An engine without held block requests refuses it.
             if error.code != "unsupported":
@@ -82,27 +123,22 @@ def main():
             trigger = None
         run(["prepare", "/data/f"])
         faulted_phases = []
-        for index, (phase, arguments) in enumerate(PHASES):
-            start = START_NS + index * PERIOD_NS
-            end = start + ACTIVE_NS
-            print(f"PHASE {phase}", flush=True)
-            sleep_until(world, start + SETTLE_NS)
-            # A program may leave out a phase its engine cannot fault (x86_64
-            # PV has no guest yield hook); that phase is observed unfaulted.
-            faulted = active(world, phase)
-            check(phase, run(arguments), faulted)
-            if faulted:
-                if world.now_ns() >= end:
-                    raise RuntimeError(f"{phase}: the phase overran its fault window")
-                faulted_phases.append(phase)
-            print(f"HEAL {phase}", flush=True)
-            sleep_until(world, end + SETTLE_NS)
-            if active(world, phase):
+        for phase, fault, arguments in phases(Machine("disk")):
+            handle = apply(world, phase, fault)
+            print(f"PHASE {phase} handle={handle.handle if handle else '-'}", flush=True)
+            check(phase, run(arguments), handle is not None)
+            if handle is None:
+                continue
+            world.heal(handle)
+            if handle.handle in world.inspect()["active_handles"]:
                 raise RuntimeError(f"{phase}: the fault is still active after its heal")
-        victim(world, trigger)
+            print(f"HEAL {phase}", flush=True)
+            check(phase, run(arguments), False)
+            faulted_phases.append(phase)
+        victim(world, trigger, victim_machine)
     print(f"RESULT pass device faults faulted={','.join(faulted_phases) or 'none'}", flush=True)
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(probe() if sys.argv[1:] == ["probe"] else scenario())

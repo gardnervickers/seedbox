@@ -1,5 +1,19 @@
 name: device-faults
 machines:
+  disk:
+    build:
+      context: "../images/faults"
+      dockerfile: Dockerfile
+    entrypoint:
+    - python3
+    - "/scenario/device_faults.py"
+    - probe
+    files:
+    - source: "../driver/device_faults.py"
+      target: "/scenario/device_faults.py"
+    volumes:
+      data:
+        target: "/data"
   victim:
     build:
       context: "../images/faults"
@@ -25,6 +39,3 @@ oracle:
     target: "/scenario/seedbox/__init__.py"
   - source: "../../../python/seedbox/control.py"
     target: "/scenario/seedbox/control.py"
-  volumes:
-    data:
-      target: "/data"
