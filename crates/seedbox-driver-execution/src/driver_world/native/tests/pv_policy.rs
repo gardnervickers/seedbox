@@ -90,7 +90,7 @@ fn inventory(policy: Option<wire::BackendPolicy>) -> Inventory {
     }
 }
 #[test]
-fn codec3_policy_binding_refuses_before_native_restore_and_driver_hosts_restore_cold_pv() {
+fn codec_policy_binding_refuses_before_native_restore_and_driver_hosts_restore_cold_pv() {
     let policy = BackendPolicy::default();
     let (name, snapshot) = cold(Some(policy.clone()));
     let mut encoded = vec![];
@@ -146,7 +146,7 @@ fn codec3_policy_binding_refuses_before_native_restore_and_driver_hosts_restore_
     assert!(!missing.exists());
 }
 #[test]
-fn codec3_ordinary_none_is_not_explicit_default_and_closed_body_is_checked() {
+fn codec_ordinary_none_is_not_explicit_default_and_closed_body_is_checked() {
     let (name, snapshot) = cold(None);
     snapshot.validate_policy(&name, None).unwrap();
     assert!(snapshot
