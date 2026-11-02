@@ -97,3 +97,38 @@ impl Checker<Publish, Ack, Stream> for Queue {
     }
 }
 ```
+
+### Fault profiles
+
+A [`nemesis::Profile`](../crates/seedbox-oracle/src/nemesis/profile.rs) is a
+nemesis written as data, which the oracle ships as YAML or JSON: which kinds of
+fault, on which machines, in what window, how often and with what ranges.
+
+```yaml
+start_ns: 2000000000      # after Nemesis::run begins
+end_ns: 60000000000
+interval_ns: 5000000000   # each gap is drawn from half to 1.5 times this
+targets: [db1, db2, db3]  # max_faults defaults to 64
+faults:
+  - {kind: partition, weight: 3, duration_ns: {min: 1000000000, max: 10000000000}}
+  - {kind: crash, downtime_ns: {min: 500000000, max: 3000000000}}
+  - {kind: clock_skew, duration_ns: {min: 1000000000, max: 5000000000},
+     max_offset_ns: 30000000000}
+  - {kind: disk_latency, op: flush, targets: [db1], duration_ns: {min: 1000000000, max: 5000000000},
+     latency_ns: {min: 1000000, max: 50000000}}
+```
+
+Each entry is named by the action it starts and carries that action's fields,
+with `{min, max}` ranges for drawn values. Each start draws an entry by weight,
+a target with no fault of the profile in force (or skips the start when there is
+none), then the entry's values. It applies the fault through `World::apply` and
+ends it with the action's counterpart after its drawn duration, so faults may
+overlap. Every draw comes from the scenario's `Random`, so a seed fixes the
+applied sequence. `run` checks every entry with its action's own validator
+before applying anything, and refuses an invalid entry with that action's
+message. `heal` ends every fault still in force. A partition cuts its target off
+from `from`, and a shape delays traffic to `to`; each defaults to the other
+targets. `disk_error` and `disk_latency` entries may narrow the targets to the
+machines with a volume. The world checks what needs the world, such as the
+network's latency floor, when the action is applied. See
+[the acceptance oracle](../harness/acceptance/images/profile/src/main.rs).
