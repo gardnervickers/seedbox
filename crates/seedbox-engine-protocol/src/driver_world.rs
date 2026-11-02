@@ -23,7 +23,7 @@ mod policy;
 pub use policy::BackendPolicy;
 
 pub const CONTRACT: &str = "driver-world-v1";
-pub const ENVELOPE_VERSION: u32 = 3;
+pub const ENVELOPE_VERSION: u32 = 1;
 pub const MAX_ENVELOPE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// A materialized, immutable artifact. Paths are service-supplied authority,
@@ -354,20 +354,12 @@ pub struct State {
 #[serde(deny_unknown_fields)]
 pub struct Checkpoint {
     pub contract: String,
-    #[serde(deserialize_with = "checkpoint_version")]
     pub version: u32,
     pub inventory: Inventory,
     pub driver: Artifact,
     /// Native bodies in the Driver's insertion order, independent of filenames.
     pub machines: Vec<Artifact>,
     pub state: State,
-}
-fn checkpoint_version<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<u32, D::Error> {
-    let version = u32::deserialize(decoder)?;
-    if version != ENVELOPE_VERSION {
-        return Err(serde::de::Error::custom("checkpoint was made by an older or incompatible engine; replay with its retained engine or run fresh"));
-    }
-    Ok(version)
 }
 impl Checkpoint {
     pub fn validate(&self) -> Result<(), String> {

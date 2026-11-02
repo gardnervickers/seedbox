@@ -10,7 +10,7 @@ use seedbox_engine_protocol::driver_world as wire;
 use std::{collections::BTreeMap, num::NonZeroU32};
 
 #[test]
-fn tcg_codec_three_policy_and_name_refuse_before_native_reconstruction() {
+fn tcg_codec_policy_and_name_refuse_before_native_reconstruction() {
     use seedbox_machine::{
         definition::BackendPolicy,
         test_support::{assets, factory_definition},
@@ -36,7 +36,7 @@ fn tcg_codec_three_policy_and_name_refuse_before_native_reconstruction() {
     let mut encoded = vec![];
     snapshot.write_to(&mut encoded).unwrap();
     assert_eq!(&encoded[..8], b"SBXTCG01");
-    assert_eq!(&encoded[8..12], &3u32.to_le_bytes());
+    assert_eq!(&encoded[8..12], &1u32.to_le_bytes());
     let missing = root.path().join("must-not-be-created");
     let artifact = wire::Artifact {
         sha256: "00".repeat(32),
