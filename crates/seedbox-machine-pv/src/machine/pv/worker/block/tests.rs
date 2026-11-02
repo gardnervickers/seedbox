@@ -175,7 +175,10 @@ fn setup(device: &mut Block, guest: &mut Guest) {
 }
 
 fn ready(sectors: u64) -> (Block, Guest) {
-    let mut device = Block::new(Store::from_image(vec![b'.'; sectors as usize * SECTOR]).unwrap());
+    let mut device = Block::new(
+        Store::from_image(vec![b'.'; sectors as usize * SECTOR]).unwrap(),
+        Default::default(),
+    );
     let mut guest = Guest::new();
     setup(&mut device, &mut guest);
     (device, guest)
@@ -203,7 +206,7 @@ fn view(store: &Store) -> (Vec<u8>, Vec<u8>) {
 
 #[test]
 fn identifies_as_a_flushing_block_device_of_store_capacity() {
-    let mut device = Block::new(Store::zeroed((5 << 32) + 7).unwrap());
+    let mut device = Block::new(Store::zeroed((5 << 32) + 7).unwrap(), Default::default());
     let expected = [
         (MAGIC, 0x74726976),
         (VERSION, 2),
@@ -232,7 +235,7 @@ fn identifies_as_a_flushing_block_device_of_store_capacity() {
 #[test]
 fn rejects_unoffered_or_legacy_feature_sets() {
     for (low, high) in [(FEATURES | 1 << 28, 1), (FEATURE_FLUSH, 0), (0, 1 | 2)] {
-        let mut device = Block::new(Store::zeroed(1).unwrap());
+        let mut device = Block::new(Store::zeroed(1).unwrap(), Default::default());
         let mut ram = vec![0; 64];
         device.write(&mut ram, DRIVER_FEATURES, low).unwrap();
         device.write(&mut ram, DRIVER_FEATURES_SEL, 1).unwrap();
@@ -254,9 +257,13 @@ fn one_notify_completes_requests_in_ring_order() {
     }
     let mut completions = Vec::new();
     device
-        .write_traced(&mut guest.ram, QUEUE_NOTIFY, 0, |kind, status, sector| {
-            completions.push((kind, status, sector))
-        })
+        .write_traced(
+            &mut guest.ram,
+            QUEUE_NOTIFY,
+            0,
+            0,
+            &mut |kind, status, sector| completions.push((kind, status, sector)),
+        )
         .unwrap();
     assert_eq!(
         completions,
@@ -443,7 +450,7 @@ fn malformed_requests_fail_after_completing_the_earlier_prefix() {
 
 #[test]
 fn notifies_before_driver_ok_or_for_other_queues() {
-    let mut device = Block::new(Store::zeroed(1).unwrap());
+    let mut device = Block::new(Store::zeroed(1).unwrap(), Default::default());
     let mut guest = Guest::new();
     let (head, _) = guest.chain(&out(0, b'Z', 1));
     guest.offer(head);
@@ -528,7 +535,7 @@ fn overlapping_chains_past_u32_fail_before_any_effect() {
     // 130 descriptors overlapping one 33 MiB span exceed 2^32 bytes in total.
     const SPAN: usize = 33 << 20;
     for writable in [false, true] {
-        let mut device = Block::new(Store::zeroed(1 << 20).unwrap());
+        let mut device = Block::new(Store::zeroed(1 << 20).unwrap(), Default::default());
         let mut guest = Guest::with(SPAN + 0x10000, 256);
         setup(&mut device, &mut guest);
         let (first, _) = guest.chain(&out(0, b'P', 1));
@@ -561,7 +568,7 @@ fn transport_and_store_restore_into_an_identical_device() {
     notify(&mut device, &mut guest).unwrap();
     let transport: Transport =
         serde_json::from_slice(&serde_json::to_vec(device.transport()).unwrap()).unwrap();
-    let mut restored = Block::restore(transport, device.store().clone());
+    let mut restored = Block::restore(transport, device.store().clone(), device.faults().clone());
     for offset in [QUEUE_READY, INTERRUPT_STATUS, STATUS] {
         assert_eq!(restored.read(offset).unwrap(), device.read(offset).unwrap());
     }
@@ -573,4 +580,182 @@ fn transport_and_store_restore_into_an_identical_device() {
     device.write(&mut other, QUEUE_NOTIFY, 0).unwrap();
     assert_eq!(guest.ram, other);
     assert_eq!(view(restored.store()), view(device.store()));
+}
+
+fn latency(op: seedbox_machine::pv::DiskOp, latency_ns: u64) -> DiskFaults {
+    let mut faults = DiskFaults::new(0);
+    faults
+        .install(
+            1,
+            3,
+            seedbox_machine::pv::DeviceFault::DiskLatency {
+                op,
+                latency_ns,
+                jitter_ns: 0,
+            },
+        )
+        .unwrap();
+    faults
+}
+
+fn notify_at(device: &mut Block, guest: &mut Guest, now: u64) -> Option<u32> {
+    device
+        .write_traced(&mut guest.ram, QUEUE_NOTIFY, 0, now, &mut |_, _, _| {})
+        .unwrap()
+}
+
+#[test]
+fn delayed_requests_complete_late_in_submission_order_with_their_effects_then() {
+    use seedbox_machine::pv::DiskOp;
+    let mut device = Block::new(Store::zeroed(64).unwrap(), latency(DiskOp::Write, 1_000));
+    let mut guest = Guest::new();
+    setup(&mut device, &mut guest);
+    let (write, _) = guest.chain(&out(2, b'W', 1));
+    // A read the fault does not select still queues behind the write.
+    let (read_back, data) = guest.chain(&read(2, 1));
+    let (flushed, _) = guest.chain(&flush());
+    for head in [write, read_back, flushed] {
+        guest.offer(head);
+    }
+    assert_eq!(notify_at(&mut device, &mut guest, 500), None);
+    assert!(guest.used().is_empty() && !device.irq());
+    assert_eq!(device.next_due(), Some(1_500));
+    assert!(device.store().read(2, &mut [0; SECTOR]).is_ok());
+    let mut stored = [0; SECTOR];
+    device.store().read(2, &mut stored).unwrap();
+    assert_eq!(stored, [0; SECTOR], "no disk effect before completion");
+    let mut completions = Vec::new();
+    device
+        .complete_due(&mut guest.ram, 1_499, &mut |k, s, _| {
+            completions.push((k, s))
+        })
+        .unwrap();
+    assert!(completions.is_empty());
+    device
+        .complete_due(&mut guest.ram, 1_500, &mut |k, s, _| {
+            completions.push((k, s))
+        })
+        .unwrap();
+    assert_eq!(
+        completions,
+        [(1, STATUS_OK), (0, STATUS_OK), (4, STATUS_OK)]
+    );
+    assert_eq!(
+        guest.used(),
+        [(write, 1), (read_back, SECTOR as u32 + 1), (flushed, 1)]
+    );
+    assert_eq!(guest.get(data[0], SECTOR), &[b'W'; SECTOR][..]);
+    assert!(device.irq());
+    assert_eq!(device.next_due(), None);
+    // Healed with nothing pending, requests complete at notification again.
+    assert_eq!(
+        device.faults_mut().heal(1),
+        Some(seedbox_machine::pv::FaultCounts {
+            matched: 1,
+            affected: 1
+        })
+    );
+    let (again, _) = guest.chain(&read(2, 1));
+    guest.offer(again);
+    notify_at(&mut device, &mut guest, 2_000);
+    assert_eq!(guest.used(), [(again, SECTOR as u32 + 1)]);
+}
+
+#[test]
+fn a_driver_reset_drops_pending_requests_but_keeps_the_faults() {
+    use seedbox_machine::pv::DiskOp;
+    let mut device = Block::new(Store::zeroed(8).unwrap(), latency(DiskOp::Any, 10));
+    let mut guest = Guest::new();
+    setup(&mut device, &mut guest);
+    let (write, _) = guest.chain(&out(0, 1, 1));
+    guest.offer(write);
+    notify_at(&mut device, &mut guest, 0);
+    assert_eq!(device.next_due(), Some(10));
+    device.write(&mut guest.ram, STATUS, 0).unwrap();
+    assert_eq!(device.next_due(), None);
+    assert_eq!(device.faults().installed().len(), 1);
+    device
+        .complete_due(&mut guest.ram, 100, &mut |_, _, _| {})
+        .unwrap();
+    assert!(guest.used().is_empty());
+    assert_eq!(
+        device.store().encode_overlays(),
+        Store::zeroed(8).unwrap().encode_overlays()
+    );
+}
+
+#[test]
+fn a_hold_stops_processing_at_its_request_without_any_effect() {
+    use seedbox_machine::machine::disk::fault::Hold;
+    use seedbox_machine::pv::DiskOp;
+    let mut faults = DiskFaults::new(0);
+    faults
+        .hold(Hold {
+            trigger: 7,
+            op: DiskOp::Flush,
+            nth: 1,
+            seen: 0,
+            until: None,
+        })
+        .unwrap();
+    let mut device = Block::new(Store::zeroed(8).unwrap(), faults);
+    let mut guest = Guest::new();
+    setup(&mut device, &mut guest);
+    let (write, _) = guest.chain(&out(0, 9, 1));
+    let (flushed, _) = guest.chain(&flush());
+    let (after, _) = guest.chain(&out(1, 9, 1));
+    for head in [write, flushed, after] {
+        guest.offer(head);
+    }
+    assert_eq!(notify_at(&mut device, &mut guest, 5), Some(7));
+    // The earlier write completed; the flush and everything after did not.
+    assert_eq!(guest.used(), [(write, 1)]);
+    let mut stored = [0; SECTOR];
+    device.store().read(1, &mut stored).unwrap();
+    assert_eq!(stored, [0; SECTOR]);
+    assert!(device.faults().holds().is_empty());
+}
+
+#[test]
+fn pending_requests_and_faults_survive_a_closed_snapshot() {
+    use seedbox_machine::pv::DiskOp;
+    use seedbox_machine::snapshot::Record;
+    let mut device = Block::new(Store::zeroed(8).unwrap(), latency(DiskOp::Read, 40));
+    let mut guest = Guest::new();
+    setup(&mut device, &mut guest);
+    let (first, _) = guest.chain(&read(0, 1));
+    let (second, _) = guest.chain(&read(1, 1));
+    guest.offer(first);
+    guest.offer(second);
+    notify_at(&mut device, &mut guest, 0);
+    let mut bytes = Vec::new();
+    device
+        .transport()
+        .encode(&mut seedbox_machine::snapshot::Writer::new(&mut bytes))
+        .unwrap();
+    let limits = seedbox_machine::snapshot::DecodeLimits {
+        encoded_bytes: 1 << 20,
+        allocation_bytes: 1 << 20,
+        collection_items: 64,
+        total_items: 64,
+        string_bytes: 64,
+        blob_bytes: 1 << 20,
+    };
+    let mut input = &bytes[..];
+    let mut reader =
+        seedbox_machine::snapshot::Reader::new(&mut input, bytes.len() as u64, 0, &limits).unwrap();
+    let transport = Transport::decode(&mut reader).unwrap();
+    transport.validate_snapshot().unwrap();
+    let json: Transport =
+        serde_json::from_value(serde_json::to_value(device.transport()).unwrap()).unwrap();
+    assert_eq!(json.pending, transport.pending);
+    let mut restored = Block::restore(transport, device.store().clone(), device.faults().clone());
+    assert_eq!(restored.next_due(), Some(40));
+    let mut completions = Vec::new();
+    restored
+        .complete_due(&mut guest.ram, 40, &mut |k, s, sector| {
+            completions.push((k, s, sector))
+        })
+        .unwrap();
+    assert_eq!(completions, [(0, STATUS_OK, 0), (0, STATUS_OK, 1)]);
 }

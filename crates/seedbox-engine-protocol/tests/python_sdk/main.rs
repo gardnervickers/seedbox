@@ -700,6 +700,52 @@ fn inspection_exposes_protocol_result() {
     assert_eq!(sdk.close()["requests"][0]["op"], "inspect");
 }
 #[test]
+fn block_request_crash_arms_on_the_target_itself() {
+    let mut sdk = Sdk::open(replies(&[
+        (1, json!({"trigger_id":3}), json!({})),
+        (2, json!({}), json!({})),
+    ]));
+    let out = sdk.call(
+        "arm_block_request_crash",
+        json!([machine("db-vm"), "flush", 20]),
+        json!({"match_timeout":5}),
+    );
+    typed(ok(&out), "Trigger");
+    ok(&call(
+        &mut sdk,
+        "cancel_trigger",
+        json!([reference("arm_block_request_crash")]),
+    ));
+    for (args, kind) in [
+        (json!(["db", "trim", 1]), "ValueError"),
+        (json!(["db", "flush", 0]), "ValueError"),
+        (json!(["db", "flush", true]), "ValueError"),
+    ] {
+        error(
+            &sdk.call("arm_block_request_crash", args, json!({"match_timeout":1})),
+            kind,
+        );
+    }
+    error(
+        &sdk.call(
+            "arm_block_request_crash",
+            json!(["db", "flush", 1]),
+            json!({"match_timeout":0}),
+        ),
+        "ValueError",
+    );
+    let closed = sdk.close();
+    assert_eq!(
+        closed["requests"][0],
+        json!({"version":1,"id":1,"op":"arm_trigger","source":{"machine":"db-vm"},"block_request":{"op":"flush","nth":20},"match_timeout_ns":5000000000u64,"fault":{"action":"crash","target":{"machine":"db-vm"}}})
+    );
+    assert_eq!(
+        closed["requests"][1],
+        json!({"version":1,"id":2,"op":"cancel_trigger","trigger_id":3})
+    );
+    assert_eq!(closed["requests"].as_array().unwrap().len(), 2);
+}
+#[test]
 fn arm_and_cancel_literal_wire_and_fired_partition_handle() {
     let mut sdk = Sdk::open(replies(&[
         (1, json!({"trigger_id":1}), json!({})),

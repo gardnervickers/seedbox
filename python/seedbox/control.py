@@ -411,6 +411,31 @@ class World:
                                  {"action": "partition", "left": [_target(t) for t in left],
                                   "right": [_target(t) for t in right]})
 
+    def arm_block_request_crash(self, target, op, nth, *, match_timeout):
+        """Crash the target's machine when its device holds its nth disk request of kind op.
+
+        op is "read", "write", "flush" or "any", counted from this arm. The
+        request is held unwritten and the crash lands at the commit that
+        reports the hold. Confirmation means armed; an expired or cancelled
+        trigger stops holding. Engines without held block requests refuse it
+        as unsupported.
+        """
+        if op not in ("read", "write", "flush", "any"):
+            raise ValueError("op must be read, write, flush or any")
+        if type(nth) is not int or nth < 1:
+            raise ValueError("nth must be a positive integer")
+        timeout = _nanoseconds(match_timeout)
+        if timeout == 0:
+            raise ValueError("match timeout must be positive")
+        result, effect = self._call("arm_trigger", source=_target(target),
+                                    block_request={"op": op, "nth": nth}, match_timeout_ns=timeout,
+                                    fault={"action": "crash", "target": _target(target)})
+        trigger_id = result.get("trigger_id")
+        if type(trigger_id) is not int or not 1 <= trigger_id <= 64:
+            self.close()
+            raise ProtocolError("arm response lacks a bounded trigger ID")
+        return Trigger(trigger_id, effect)
+
     def trigger_partition(self, trigger):
         """Inspect a fired partition trigger and return its actual healable handle.
 
@@ -451,7 +476,7 @@ class World:
     def cancel_trigger(self, trigger):
         """Cancel at admission; a matched, fired, or expired trigger cannot cancel."""
         if not isinstance(trigger, Trigger):
-            raise TypeError("cancel expects the Trigger returned by arm_console_*()")
+            raise TypeError("cancel expects the Trigger returned by an arm_* call")
         return self._call("cancel_trigger", trigger_id=trigger.id)[1]
 
 

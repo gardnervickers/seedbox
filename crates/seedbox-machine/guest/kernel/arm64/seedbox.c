@@ -33,6 +33,8 @@
 struct seedbox_page {
 	u64 now, last, bound, abi, deferred_irq_pending, exclusive_epoch;
 	u64 syscall_ns;
+	u64 x86_only[4];	/* Words 56-80: x86 PIC and virtio publications. */
+	u64 preempt_ppm, preempt_seed;
 };
 static struct seedbox_page *page;
 static void __iomem *event;
@@ -82,6 +84,40 @@ again:
 out:
 	local_irq_restore(flags);
 	return value;
+}
+
+/* The preempt fault's draw: one step of a splitmix64 stream kept in kernel
+ * memory, so checkpoints continue it, reseeded whenever the host publishes a
+ * new seed word (each boot has its own). Zero rate is off. Interrupts are
+ * masked so the one-CPU stream advances once per call.
+ */
+static u64 preempt_seed, preempt_state;
+static bool seedbox_preempt_draw(void)
+{
+	unsigned long flags;
+	u64 ppm, seed, z;
+	bool hit;
+
+	if (!page)
+		return false;
+	local_irq_save(flags);
+	ppm = READ_ONCE(page->preempt_ppm);
+	seed = READ_ONCE(page->preempt_seed);
+	if (!ppm) {
+		local_irq_restore(flags);
+		return false;
+	}
+	if (seed != preempt_seed) {
+		preempt_seed = seed;
+		preempt_state = seed;
+	}
+	z = (preempt_state += 0x9e3779b97f4a7c15ULL);
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+	z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+	z ^= z >> 31;
+	hit = z % 1000000 < ppm;
+	local_irq_restore(flags);
+	return hit;
 }
 
 /* Charge work through the existing bounded clock rendezvous. Keeping each
@@ -154,11 +190,15 @@ void seedbox_syscall_progress(struct pt_regs *regs, unsigned int scno)
 		WRITE_ONCE(user_charge, current);
 		seedbox_charge(ns);
 		WRITE_ONCE(user_charge, NULL);
-		return;
+	} else {
+		if (regs->regs[7] == SEEDBOX_TRANSLATOR_MARK)
+			ns = max(ns / SEEDBOX_TRANSLATOR_DIVISOR, 1ULL);
+		seedbox_charge(ns);
 	}
-	if (regs->regs[7] == SEEDBOX_TRANSLATOR_MARK)
-		ns = max(ns / SEEDBOX_TRANSLATOR_DIVISOR, 1ULL);
-	seedbox_charge(ns);
+	/* Syscall entry runs in process context with IRQs enabled, so a seeded
+	 * hit can switch to another runnable thread here, after the charge. */
+	if (seedbox_preempt_draw())
+		yield();
 }
 
 static u64 cs_read(struct clocksource *cs) { return seedbox_read(); }

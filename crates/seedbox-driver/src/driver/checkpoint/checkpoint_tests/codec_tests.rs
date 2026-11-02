@@ -937,3 +937,51 @@ fn an_imported_property_ledger_is_checked_before_restore() {
         Err(CodecError::Invalid("property ledger bounds"))
     ));
 }
+
+#[test]
+fn device_fault_handles_inputs_and_requests_roundtrip() {
+    use crate::pv::{DeviceFault, DiskOp};
+    let mut d = build(
+        vec![
+            spec(0, true, vec![(0, Response::Ready)]),
+            spec(1, true, vec![(0, Response::Ready)]),
+        ],
+        vec![],
+        true,
+    );
+    let install = |d: &mut Driver<Mock>, when, name: &str, fault| {
+        d.with_barrier(|b| {
+            b.schedule_with_handle(
+                at(when),
+                key(name),
+                Action::DeviceFault {
+                    target: Target::Name("fixture-1".into()),
+                    fault,
+                },
+                FaultHandle::named(name.to_owned()).unwrap(),
+            )
+        })
+        .unwrap();
+    };
+    install(
+        &mut d,
+        5,
+        "slow",
+        DeviceFault::DiskLatency {
+            op: DiskOp::Flush,
+            latency_ns: 3_000,
+            jitter_ns: 7,
+        },
+    );
+    install(&mut d, 15, "race", DeviceFault::Preempt { ppm: 77 });
+    d.schedule(
+        at(25),
+        key("heal"),
+        Action::Heal(HealTarget::Handle(
+            FaultHandle::named("slow".to_owned()).unwrap(),
+        )),
+    )
+    .unwrap();
+    advance(&mut d, 10);
+    exercise(d);
+}

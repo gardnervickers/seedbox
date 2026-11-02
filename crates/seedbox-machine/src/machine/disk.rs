@@ -25,6 +25,12 @@ pub mod request;
 // Hashing needs sha2, which the standalone QEMU disk library does not link.
 #[cfg(not(seedbox_disk_abi))]
 mod policy;
+// Fault selection hashes its streams and serializes with the machine's
+// snapshots; QEMU's devices do not carry disk faults yet.
+#[cfg(not(seedbox_disk_abi))]
+pub mod ext4;
+#[cfg(not(seedbox_disk_abi))]
+pub mod fault;
 
 pub const SECTOR: usize = 512;
 

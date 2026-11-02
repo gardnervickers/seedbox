@@ -327,7 +327,9 @@ impl Publisher {
                     | Response::SimulationControl { .. }
                     | Response::Property { .. }
                     | Response::Crash { .. }
-                    | Response::TransmitFrame { .. } => {}
+                    | Response::TransmitFrame { .. }
+                    // A held request is visible as its trigger's resolution.
+                    | Response::BlockRequestHeld { .. } => {}
                     _ => return Err(invalid("unknown Driver output publication")),
                 }
             }
@@ -363,13 +365,18 @@ impl Publisher {
                     )?;
                 }
             }
-            EventKind::FaultAdmitted(record) => {
-                self.fault(state, names, record, FaultStatus::Requested, None, at)?
-            }
+            EventKind::FaultAdmitted(record) => self.fault(
+                state,
+                names,
+                record,
+                (FaultStatus::Requested, None, None),
+                at,
+            )?,
             EventKind::FaultSettled {
                 record,
                 status,
                 outcome_at,
+                counts,
                 ..
             } => {
                 let row = match status {
@@ -381,8 +388,7 @@ impl Publisher {
                     state,
                     names,
                     record,
-                    row,
-                    outcome_at.map(|at| at.as_nanos()),
+                    (row, outcome_at.map(|at| at.as_nanos()), *counts),
                     at,
                 )?;
             }
@@ -410,8 +416,12 @@ impl Publisher {
         state: &mut State,
         names: &BTreeMap<MachineId, String>,
         record: &FaultRecord,
-        status: FaultStatus,
-        applied_time_ns: Option<u64>,
+        // Its status, applied time and, for a disk fault's heal, its counts.
+        (status, applied_time_ns, counts): (
+            FaultStatus,
+            Option<u64>,
+            Option<seedbox_engine_protocol::control::FaultCounts>,
+        ),
         at: u64,
     ) -> Result<()> {
         let (machine, boot) = target_machine(names, &record.target)?;
@@ -448,8 +458,8 @@ impl Publisher {
                 status,
                 applied_time_ns,
                 plan,
-                // No Driver fault counts its effects yet; disk faults will.
-                counts: None,
+                // A disk fault's heal settles with what the fault did.
+                counts,
             },
         )
     }
@@ -491,6 +501,11 @@ pub(super) fn action_name(action: FaultAction) -> Result<&'static str> {
         FaultAction::Partition => "partition",
         FaultAction::Shape { .. } => "shape",
         FaultAction::DropConnection => "drop_connection",
+        FaultAction::DeviceFault(fault) => match fault {
+            seedbox_machine::pv::DeviceFault::DiskError { .. } => "disk_error",
+            seedbox_machine::pv::DeviceFault::DiskLatency { .. } => "disk_latency",
+            seedbox_machine::pv::DeviceFault::Preempt { .. } => "preempt",
+        },
         FaultAction::Heal => "heal",
         FaultAction::Application(command) => match command {
             ApplicationCommand::Start => "restart",
@@ -599,6 +614,40 @@ fn control_action(
             Action::DropConnection {
                 handle: handle()?,
                 connection: connection.clone(),
+            }
+        }
+        FaultAction::DeviceFault(fault) => {
+            use seedbox_machine::pv::DeviceFault;
+            match fault {
+                DeviceFault::DiskError {
+                    op,
+                    ppm,
+                    effect,
+                    scope,
+                } => Action::DiskError {
+                    handle: handle()?,
+                    machine: machine()?,
+                    op,
+                    ppm: ppm.into(),
+                    effect,
+                    scope,
+                },
+                DeviceFault::DiskLatency {
+                    op,
+                    latency_ns,
+                    jitter_ns,
+                } => Action::DiskLatency {
+                    handle: handle()?,
+                    machine: machine()?,
+                    op,
+                    latency_ns,
+                    jitter_ns,
+                },
+                DeviceFault::Preempt { ppm } => Action::Preempt {
+                    handle: handle()?,
+                    machine: machine()?,
+                    ppm: ppm.into(),
+                },
             }
         }
         FaultAction::Heal => Action::Heal { handle: handle()? },

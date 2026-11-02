@@ -264,6 +264,19 @@ pub enum Action {
     // An incarnation selector belongs to network state, not machine lifecycle
     // or a guessed transport connection in the service worker.
     DropConnection { connection: super::Connection },
+    // Disk and scheduler faults act inside the target machine, so their
+    // effect is a machine request, not Driver state; the handle owns them.
+    /// Install a disk or scheduler fault on the machine and allocate a
+    /// [`FaultHandle`]. It is delivered as a
+    /// [`Request::InstallFault`](crate::pv::Request::InstallFault) with a
+    /// seed derived from the machine and the fault ID, survives crashes,
+    /// reboots and device resets, and applies to every boot until healed.
+    /// At most one preempt fault per machine is active or pending; disk
+    /// faults stack. Heal settles with the fault's counts.
+    DeviceFault {
+        target: Target,
+        fault: crate::pv::DeviceFault,
+    },
 }
 
 /// The installed fault a [`Action::Heal`] undoes.
@@ -337,6 +350,7 @@ impl Action {
                 | Self::Partition { .. }
                 | Self::Shape { .. }
                 | Self::DropConnection { .. }
+                | Self::DeviceFault { .. }
         )
     }
     pub(super) fn target(&self) -> Option<&Target> {
@@ -354,7 +368,8 @@ impl Action {
             | Self::Drift { target, .. }
             | Self::DriftBounded { target, .. }
             | Self::StepRealtime { target, .. }
-            | Self::StepRealtimeBounded { target, .. } => Some(target),
+            | Self::StepRealtimeBounded { target, .. }
+            | Self::DeviceFault { target, .. } => Some(target),
             Self::Heal(_)
             | Self::Spawn { .. }
             | Self::Partition { .. }

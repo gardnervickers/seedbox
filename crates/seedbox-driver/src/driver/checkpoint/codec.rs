@@ -325,7 +325,8 @@ impl Checkpoint<SnapshotReference> {
                             | FaultAction::SetExecution(_)
                             | FaultAction::Application(_)
                             | FaultAction::Drift(_)
-                            | FaultAction::StepRealtime(_),
+                            | FaultAction::StepRealtime(_)
+                            | FaultAction::DeviceFault(_),
                         FaultTarget::Machine { .. },
                     )
             ),

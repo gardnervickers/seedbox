@@ -52,8 +52,10 @@ const VERSION: usize = 24;
 const IRQ_DEFERRED: usize = 32;
 // Word 40 is the ARM exclusive-reservation epoch (see aarch64.rs).
 const SYSCALL_COST: usize = 48;
-// Words 88 and 96 are reserved for the preempt fault's rate and seed, which
-// the guest kernel's syscall hook reads; see docs/faults.md.
+// The preempt fault's rate (parts per million) and seed, which the guest
+// kernel's syscall hook reads; zero is off. See docs/faults.md.
+const PREEMPT_PPM: usize = 88;
+const PREEMPT_SEED: usize = 96;
 const EVENT_MMIO: u64 = 0x0a01_0000;
 const EVENT_END: u64 = EVENT_MMIO + PAGE_BYTES as u64 - 1;
 const LIFECYCLE_MMIO: u64 = 0x0b01_0000;
@@ -84,6 +86,12 @@ struct State {
     writes: Vec<seedbox_machine::pv::transport::GuestWrite>,
     #[serde(default)]
     policy: Option<super::policy::Runtime>,
+    /// The installed preempt fault: its identity and the boot it draws for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preempt: Option<(u64, u64)>,
+    /// The trigger whose hold holds a guest disk request; the boot can only end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    held: Option<u32>,
 }
 /// Snapshot header. With a disk, the file ends with the store's encoded
 /// overlays after RAM; its base stays with the boot inputs.
@@ -96,6 +104,9 @@ struct Capture {
     state: State,
     architecture: Architecture,
     block: Option<block::Transport>,
+    /// The disk's faults and holds, with the disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disk_faults: Option<seedbox_machine::machine::disk::fault::DiskFaults>,
 }
 /// Result of one architecture-specific exit handled at a stopped rendezvous.
 #[derive(Default)]
@@ -176,17 +187,26 @@ impl<B: Backend> Machine<B> {
                 net: network.map(net::Net::new),
                 ..State::default()
             },
-            block: disk.map(block::Block::new),
+            block: disk.map(|store| block::Block::new(store, Default::default())),
             output: Vec::new(),
             ended: false,
         })
+    }
+    /// When the machine next has work of its own: its timer, or a pending
+    /// disk completion. The guest stops there and an idle guest wakes there.
+    fn wake(&self) -> Option<u64> {
+        let disk = self.block.as_ref().and_then(block::Block::next_due);
+        match (self.state.deadline, disk) {
+            (Some(timer), Some(disk)) => Some(timer.min(disk)),
+            (timer, disk) => timer.or(disk),
+        }
     }
     fn publish(&self, upto: u64) {
         #[cfg(target_arch = "x86_64")]
         self.publish_virtio_irq();
         self.page.set_word(NOW, self.state.now);
         self.page
-            .set_word(BOUND, self.state.deadline.map_or(upto, |d| d.min(upto)));
+            .set_word(BOUND, self.wake().map_or(upto, |d| d.min(upto)));
         self.page.set_word(VERSION, ABI);
         self.page
             .set_word(IRQ_DEFERRED, self.state.devices.deferred() as u64);
@@ -201,7 +221,149 @@ impl<B: Backend> Machine<B> {
             self.page.set_word(LAST, self.page.word(LAST).max(now));
         }
         self.state.now = now;
+        self.complete_disk()?;
         self.interrupts()?;
+        Ok(())
+    }
+    /// Complete disk requests due by now, recording each as an immediate
+    /// completion records it.
+    fn complete_disk(&mut self) -> Result<()> {
+        let now = self.state.now;
+        let Some(block) = self
+            .block
+            .as_mut()
+            .filter(|block| block.next_due().is_some_and(|due| due <= now))
+        else {
+            return Ok(());
+        };
+        let h = &mut self.state.witness;
+        unsafe {
+            self.ram.modify(|ram| {
+                block.complete_due(ram, now, &mut |kind, status, sector| {
+                    *h = seedbox_machine::machine::execution_evidence::chain::record(
+                        h,
+                        b'd',
+                        0,
+                        now,
+                        sector,
+                        kind as u64 | ((status as u64) << 32),
+                    );
+                })
+            })
+        }
+    }
+    /// Publish the preempt fault's words for this boot, or clear them.
+    fn publish_preempt(&self, preempt: Option<(u64, u32)>) {
+        let (ppm, seed) = match preempt {
+            Some((seed, ppm)) => (u64::from(ppm), preempt_seed(seed, self.state.witness_boot)),
+            None => (0, 0),
+        };
+        self.page.set_word(PREEMPT_PPM, ppm);
+        self.page.set_word(PREEMPT_SEED, seed);
+    }
+    /// Apply a device fault change at a stopped rendezvous.
+    fn change_faults(&mut self, change: protocol::FaultChange) -> Result<protocol::FaultReport> {
+        use protocol::FaultChange;
+        use seedbox_machine::pv::DeviceFault;
+        // An ended boot still reports its counts as the client retires it.
+        if self.ended && !matches!(change, FaultChange::Report) {
+            return Err("PV fault change after the guest ended its boot".into());
+        }
+        let mut healed = None;
+        match change {
+            FaultChange::Install(protocol::InstalledFault {
+                id,
+                seed,
+                fault: DeviceFault::Preempt { ppm },
+            }) => {
+                if self.state.preempt.is_some() {
+                    return Err("PV preempt fault already installed".into());
+                }
+                self.state.preempt = Some((id, seed));
+                self.publish_preempt(Some((seed, ppm)));
+            }
+            FaultChange::Install(installed) => {
+                if let Some(block) = &mut self.block {
+                    block
+                        .faults_mut()
+                        .install(installed.id, installed.seed, installed.fault)?;
+                }
+            }
+            FaultChange::Heal(id) if self.state.preempt.is_some_and(|(p, _)| p == id) => {
+                self.state.preempt = None;
+                self.publish_preempt(None);
+                healed = Some(Default::default());
+            }
+            FaultChange::Heal(id) => {
+                healed = Some(
+                    self.block
+                        .as_mut()
+                        .and_then(|block| block.faults_mut().heal(id))
+                        .unwrap_or_default(),
+                );
+            }
+            FaultChange::Hold(hold) => {
+                if let Some(block) = &mut self.block {
+                    block.faults_mut().hold(hold)?;
+                }
+            }
+            FaultChange::Release(trigger) => {
+                if let Some(block) = &mut self.block {
+                    block.faults_mut().release(trigger);
+                }
+            }
+            FaultChange::Report => {}
+        }
+        Ok(self.fault_report(healed))
+    }
+    fn fault_report(
+        &self,
+        healed: Option<seedbox_machine::pv::FaultCounts>,
+    ) -> protocol::FaultReport {
+        let faults = self.block.as_ref().map(block::Block::faults);
+        protocol::FaultReport {
+            counts: faults
+                .map(|f| f.installed().iter().map(|i| (i.id, i.counts)).collect())
+                .unwrap_or_default(),
+            holds: faults.map(|f| f.holds().to_vec()).unwrap_or_default(),
+            healed,
+        }
+    }
+    /// Install a fresh boot's faults: disk faults on this boot's streams,
+    /// the preempt words and the holds still counting.
+    fn configure_faults(&mut self, faults: &protocol::BootFaults) -> Result<()> {
+        use seedbox_machine::pv::DeviceFault;
+        if let Some(block) = &mut self.block {
+            *block.faults_mut() =
+                seedbox_machine::machine::disk::fault::DiskFaults::new(faults.boot);
+        }
+        for installed in &faults.installed {
+            match installed.fault {
+                DeviceFault::Preempt { ppm } => {
+                    if self
+                        .state
+                        .preempt
+                        .replace((installed.id, installed.seed))
+                        .is_some()
+                    {
+                        return Err("PV boot with two preempt faults".into());
+                    }
+                    self.publish_preempt(Some((installed.seed, ppm)));
+                }
+                fault => {
+                    if let Some(block) = &mut self.block {
+                        block
+                            .faults_mut()
+                            .install(installed.id, installed.seed, fault)?;
+                    }
+                }
+            }
+        }
+        for hold in &faults.holds {
+            if let Some(block) = &mut self.block {
+                block.faults_mut().hold(*hold)?;
+            }
+        }
         Ok(())
     }
     fn collect_lifecycle(&mut self) {
@@ -275,6 +437,9 @@ impl<B: Backend> Machine<B> {
         if self.ended {
             return Err("PV run after the guest ended its boot".into());
         }
+        if self.state.held.is_some() {
+            return Err("PV run while a guest disk request is held".into());
+        }
         // Guest syscall progress samples this word once into its remaining
         // charge. Existing partial work keeps its old price in captured CPU/RAM.
         // Republish even after restore and on zero-budget adoption; the caller,
@@ -311,7 +476,7 @@ impl<B: Backend> Machine<B> {
         self.collect_lifecycle();
         self.publish(upto);
         if self.state.idle && self.quiet() {
-            return Ok(Stop::Blocked(self.state.deadline));
+            return Ok(Stop::Blocked(self.wake()));
         }
         if self.state.now == upto {
             return Ok(Stop::Horizon);
@@ -338,6 +503,7 @@ impl<B: Backend> Machine<B> {
             self.state.now = self.state.now.max(last);
             self.consume_irq_update()?;
             self.record_exit(&exit)?;
+            self.complete_disk()?;
             let mut effect = Effect::default();
             match exit {
                 Exit::Mmio {
@@ -388,11 +554,16 @@ impl<B: Backend> Machine<B> {
                     if write {
                         let h = &mut self.state.witness;
                         let now = self.state.now;
-                        unsafe {
-                            self.ram.modify(|ram| block.write_traced(ram, offset, value as u32, |kind, status, sector| {
+                        let held = unsafe {
+                            self.ram.modify(|ram| block.write_traced(ram, offset, value as u32, now, &mut |kind, status, sector| {
                                 *h = seedbox_machine::machine::execution_evidence::chain::record(h, b'd', 0, now, sector, kind as u64 | ((status as u64) << 32));
                             }))
                         }?;
+                        if let Some(trigger) = held {
+                            self.record_native(b'h', 0, now, trigger.into());
+                            self.state.held = Some(trigger);
+                            effect.terminal = Some(Stop::Held(trigger));
+                        }
                     } else {
                         effect.response = Some(block.read(offset)? as u64);
                     }
@@ -429,7 +600,11 @@ impl<B: Backend> Machine<B> {
                     return Err(format!("PV guest terminal {stop:?} before handshake"));
                 }
                 self.finish_stop()?;
-                self.ended = true;
+                // A held request leaves the boot stopped, not ended: its disk
+                // still belongs to it until the client ends the boot.
+                if !matches!(stop, Stop::Held(_)) {
+                    self.ended = true;
+                }
                 return Ok(stop);
             }
             if self.state.now == upto {
@@ -439,7 +614,7 @@ impl<B: Backend> Machine<B> {
             if effect.idle && self.quiet() {
                 self.state.idle = true;
                 self.finish_stop()?;
-                return Ok(Stop::Blocked(self.state.deadline));
+                return Ok(Stop::Blocked(self.wake()));
             }
             // Host interruptions re-enter above without preparing anything new.
             self.prepare()?;
@@ -474,10 +649,10 @@ impl<B: Backend> Machine<B> {
                 self.record_native(b'Y', 0, upto, 0);
                 if !self.state.devices.deferred() {
                     self.state.now = self
-                        .state
-                        .deadline
+                        .wake()
                         .map_or(upto, |d| d.min(upto))
                         .max(self.state.now);
+                    self.complete_disk()?;
                 }
             }
             32 => {
@@ -499,6 +674,9 @@ impl<B: Backend> Machine<B> {
         if self.ended {
             return Err("PV capture after the guest ended its boot".into());
         }
+        if self.state.held.is_some() {
+            return Err("PV capture while a guest disk request is held".into());
+        }
         let layout = self.ram.layout()?;
         let state = Capture {
             memory_bytes: layout.capacity,
@@ -512,6 +690,7 @@ impl<B: Backend> Machine<B> {
             state: self.state.clone(),
             architecture: self.native.capture()?,
             block: self.block.as_ref().map(|block| block.transport().clone()),
+            disk_faults: self.block.as_ref().map(|block| block.faults().clone()),
         };
         let mut file = File::options()
             .write(true)
@@ -671,7 +850,12 @@ fn restore_machine(inputs: &BootInputs, mut saved: Saved) -> Result<Machine> {
             store
                 .replace_overlays(&saved.overlays)
                 .map_err(|e| format!("PV snapshot disk: {e:?}"))?;
-            Some(block::Block::restore(transport, store))
+            let faults = saved
+                .capture
+                .disk_faults
+                .take()
+                .ok_or("PV snapshot disk without its faults")?;
+            Some(block::Block::restore(transport, store, faults))
         }
         (None, None) => None,
         _ => return Err("PV snapshot disk differs from boot disk".into()),
@@ -734,6 +918,7 @@ pub(crate) fn serve() -> Result<()> {
                 disk,
                 network,
                 policy,
+                faults,
             } => {
                 let policy = *policy;
                 if machine.is_some() {
@@ -774,6 +959,7 @@ pub(crate) fn serve() -> Result<()> {
                     vm.state.witness_origin = witness.initial;
                     vm.state.witness_boot = witness.boot;
                     vm.configure_policy(policy.as_ref())?;
+                    vm.configure_faults(&faults)?;
                     vm.adopt(now)?;
                     let ordinal = witness.boot;
                     if matches!(witness.mark, Some(1 | 2)) {
@@ -843,6 +1029,12 @@ pub(crate) fn serve() -> Result<()> {
                     .export_disk(&path)?;
                 Ok(Response::Exported)
             }
+            Request::Fault(change) => Ok(Response::Faults(
+                machine
+                    .as_mut()
+                    .ok_or("PV fault change before boot")?
+                    .change_faults(change)?,
+            )),
         })();
         let response = match result {
             Ok(answer) => answer,
@@ -870,7 +1062,9 @@ impl seedbox_machine::snapshot::Record for State {
         + <console::Console as seedbox_machine::snapshot::Record>::MIN
         + <Option<net::Net> as seedbox_machine::snapshot::Record>::MIN
         + <Vec<seedbox_machine::pv::transport::GuestWrite> as seedbox_machine::snapshot::Record>::MIN
-        + <Option<super::policy::Runtime> as seedbox_machine::snapshot::Record>::MIN;
+        + <Option<super::policy::Runtime> as seedbox_machine::snapshot::Record>::MIN
+        + <Option<(u64, u64)> as seedbox_machine::snapshot::Record>::MIN
+        + <Option<u32> as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -890,6 +1084,8 @@ impl seedbox_machine::snapshot::Record for State {
             net,
             writes,
             policy,
+            preempt,
+            held,
         } = self;
         witness.encode(w)?;
         witness_boot.encode(w)?;
@@ -905,6 +1101,8 @@ impl seedbox_machine::snapshot::Record for State {
         net.encode(w)?;
         writes.encode(w)?;
         policy.encode(w)?;
+        preempt.encode(w)?;
+        held.encode(w)?;
         Ok(())
     }
     fn decode<R: std::io::Read>(
@@ -925,6 +1123,8 @@ impl seedbox_machine::snapshot::Record for State {
             net: seedbox_machine::snapshot::Record::decode(r)?,
             writes: seedbox_machine::snapshot::Record::decode(r)?,
             policy: seedbox_machine::snapshot::Record::decode(r)?,
+            preempt: seedbox_machine::snapshot::Record::decode(r)?,
+            held: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }
@@ -937,7 +1137,8 @@ impl seedbox_machine::snapshot::Record for Capture {
         + <Vec<(u64, u64)> as seedbox_machine::snapshot::Record>::MIN
         + <State as seedbox_machine::snapshot::Record>::MIN
         + <Architecture as seedbox_machine::snapshot::Record>::MIN
-        + <Option<block::Transport> as seedbox_machine::snapshot::Record>::MIN;
+        + <Option<block::Transport> as seedbox_machine::snapshot::Record>::MIN
+        + <Option<seedbox_machine::machine::disk::fault::DiskFaults> as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -950,6 +1151,7 @@ impl seedbox_machine::snapshot::Record for Capture {
             state,
             architecture,
             block,
+            disk_faults,
         } = self;
         memory_bytes.encode(w)?;
         layout_version.encode(w)?;
@@ -958,6 +1160,7 @@ impl seedbox_machine::snapshot::Record for Capture {
         state.encode(w)?;
         architecture.encode(w)?;
         block.encode(w)?;
+        disk_faults.encode(w)?;
         Ok(())
     }
     fn decode<R: std::io::Read>(
@@ -971,6 +1174,7 @@ impl seedbox_machine::snapshot::Record for Capture {
             state: seedbox_machine::snapshot::Record::decode(r)?,
             architecture: seedbox_machine::snapshot::Record::decode(r)?,
             block: seedbox_machine::snapshot::Record::decode(r)?,
+            disk_faults: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }
@@ -996,8 +1200,11 @@ impl Capture {
         {
             return Err("PV snapshot RAM layout differs from boot".into());
         }
-        if self.block.is_some() != disk {
+        if self.block.is_some() != disk || self.disk_faults.is_some() != disk {
             return Err("PV snapshot disk differs from boot disk".into());
+        }
+        if self.state.held.is_some() {
+            return Err("PV snapshot with a held guest disk request".into());
         }
         if self.state.net.as_ref().map(net::Net::mac) != network {
             return Err("PV snapshot NIC differs from boot NIC".into());
@@ -1017,6 +1224,22 @@ impl Capture {
         if let Some(block) = &self.block {
             block.validate_snapshot()?;
         }
+        if let Some(faults) = &self.disk_faults {
+            faults.validate_snapshot()?;
+        }
         Ok(layout)
     }
+}
+
+/// The guest's splitmix64 seed for a preempt fault's `seed` on `boot`: a
+/// fresh, nonzero stream for each boot, which the kernel adopts when the
+/// word changes.
+fn preempt_seed(seed: u64, boot: u64) -> u64 {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"seedbox-v1");
+    h.update(seed.to_le_bytes());
+    h.update(format!("preempt/{boot}").as_bytes());
+    let value = u64::from_le_bytes(h.finalize()[..8].try_into().expect("eight digest bytes"));
+    value.max(1)
 }

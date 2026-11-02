@@ -322,3 +322,61 @@ fn actual_partition_handle_is_absent_until_firing_and_survives_codec() {
     invalid.records[0].action = TriggerAction::Stop("left".into());
     assert!(invalid.check_persist(2, &|_| true).is_err());
 }
+
+#[test]
+fn a_block_request_trigger_matches_only_its_reported_hold_and_crashes_its_source() {
+    use seedbox_engine_protocol::control::DiskOp;
+    let mut engine = Triggers::default();
+    assert!(engine
+        .arm_block_request("db".into(), DiskOp::Flush, 0, 0, 10)
+        .is_err());
+    assert!(engine
+        .arm_block_request("db".into(), DiskOp::Flush, 3, 0, 0)
+        .is_err());
+    assert!(engine.records().is_empty());
+    let id = engine
+        .arm_block_request("db".into(), DiskOp::Flush, 3, 5, 100)
+        .unwrap();
+    assert_eq!(
+        engine.records()[0].action,
+        TriggerAction::Crash("db".into())
+    );
+    // Output never matches it, and a source reset keeps the machine's count.
+    assert!(engine
+        .committed("db", 6, b"anything", 6)
+        .unwrap()
+        .is_empty());
+    engine.reset_source("db").unwrap();
+    assert_eq!(engine.records()[0].resets, 0);
+    // Only the armed trigger's own source can report its hold.
+    assert!(engine.held(id, "other", 7, 7).is_err());
+    assert!(engine.held(id + 1, "db", 7, 7).is_err());
+    let effects = engine.held(id, "db", 7, 9).unwrap();
+    assert_eq!(
+        effects,
+        [Effect {
+            trigger_id: id,
+            action: TriggerAction::Crash("db".into()),
+            at: 9,
+            deadline: 9 + PROCESS_EFFECT_TIMEOUT_NS,
+        }]
+    );
+    assert_eq!(engine.due(9), effects);
+    assert!(engine.held(id, "db", 8, 9).is_err());
+    engine.resolve(id, 9, Ok((4, None))).unwrap();
+    assert_eq!(engine.records()[0].status, Status::Fired);
+    engine.check_persist(9, &|_| true).unwrap();
+    // A held request's trigger crashes its own source and scans nothing.
+    let mut invalid = engine.clone();
+    invalid.records[0].action = TriggerAction::Crash("other".into());
+    assert!(invalid.check_persist(9, &|_| true).is_err());
+    let mut invalid = engine.clone();
+    invalid.records[0].seen = 1;
+    assert!(invalid.check_persist(9, &|_| true).is_err());
+    // An unmatched one expires like an output trigger.
+    let other = engine
+        .arm_block_request("db".into(), DiskOp::Any, 1, 10, 5)
+        .unwrap();
+    assert_eq!(engine.boundary(), Some(15));
+    assert_eq!(engine.expire(15), [other]);
+}

@@ -137,10 +137,12 @@ fn delayed_queues_obey_decode_limits_and_older_versions_are_not_accepted() {
         let bytes = imported(&c);
         let mut small = limits();
         small.collection_items = 0;
-        assert!(matches!(
-            Checkpoint::read_from(&mut &bytes[..], small),
-            Err(CodecError::Limit(_))
-        ));
+        let error = Checkpoint::read_from(&mut &bytes[..], small);
+        assert!(
+            matches!(error, Err(CodecError::Limit(_))),
+            "{:?}",
+            error.err()
+        );
         let mut old = bytes.clone();
         old[8..12].copy_from_slice(&3u32.to_le_bytes());
         assert!(matches!(
