@@ -28,10 +28,11 @@ device is absent, so instrumented code checks for it once and skips the write.
   hit already accepted is still delivered, so two machines can both hit a name
   the oracle meant as one-shot. The second hit is delivered and resumed like
   any other.
-- Simulation time keeps running while a machine is suspended. On resume, the
-  machine catches up to the current time, as after any stop: overdue timers
-  fire and overdue disk requests complete at once. The suspended interval is
-  not hidden from the guest.
+- To the guest, a suspension is a VM stall. Simulation time keeps running
+  while the machine is suspended, and on resume the machine catches up to the
+  current time, as after any stall: overdue timers fire and overdue disk
+  requests complete at once. A short handler is a short stall, and a slow one
+  can, for example, cost a leader its lease.
 - Names are 1 to 64 bytes of `[a-z0-9_.-]`. Any other name fails the write with
   `EINVAL`, and nothing is suspended.
 
@@ -69,21 +70,32 @@ are not resumed and run no further guest work; their hits end with
 `wait_break` parks in Driver state the way `sleep` does. It never blocks the
 Driver thread. `inspect` lists each suspended machine with its hit.
 
-The guest oracle relay serves one request at a time on one connection, so an
-oracle handles hits sequentially on that connection. It waits, reacts, resumes,
-and then waits again. A `timeout_ns` lets one loop interleave other faults with
-hits. The libraries wrap this in `serve_breaks(handlers, until)`, in Python's
-`World` and Rust's `GuestWorld`. It declares the handlers' names, waits for a
-hit, runs the handler, and resumes the machine when the handler returns,
-unless the handler crashed it. Breakpoints that run concurrently with an
-independent nemesis need relay multiplexing, which is later work.
+The libraries wrap this in `on_break(name, handler)`, in Python's `World` and
+Rust's `GuestWorld`. The library declares the union of the handlers' names and
+runs a `wait_break` loop on its own connection. It calls the handler while the
+machine is suspended, and resumes the machine when the handler returns, unless
+the handler crashed it. The nemesis and other oracle calls keep using their
+own connections at the same time.
 
 ```python
 def crash_new_leader(world, hit):
     world.crash(hit.machine)
 
-world.serve_breaks({"leader-elected": crash_new_leader}, until=deadline)
+world.on_break("leader-elected", crash_new_leader)
 ```
+
+### Several oracle connections
+
+Today the guest oracle relay accepts one client and one request in flight
+(`guest_oracle.c`), and the host decoder and bridge each keep one pending
+request. Breakpoints need that lifted, so step 1 starts here. The relay accepts
+up to 8 connections. Each connection is a session, which the frame header
+already carries, with at most one request in flight, so a connection's calls
+stay sequential. The decoder and bridge keep one pending request per session.
+Replies are correlated by session and request ID, and snapshots record the
+pending request of each session. The Driver admits calls from different
+sessions in committed order, as it already does for calls from different
+machines.
 
 Two schedules deadlock, and both are oracle bugs: a handler that waits for
 something from its own suspended machine, and a handler for A that waits on a
@@ -168,15 +180,16 @@ fault the oracle used to arm ahead of time, it now applies in its handler.
 
 ## Order of work
 
-1. Write-to-file breakpoints, end to end on PV: kernel device, worker,
+1. Several oracle connections: relay, decoder, bridge and their snapshots.
+2. Write-to-file breakpoints, end to end on PV: kernel device, worker,
    suspension state and set-aside inbox, the Driver's hit queue and declared
-   set, the oracle calls, and `serve_breaks` in both libraries.
-2. Remove triggers.
-3. `break_on_block_request`, built on #375's held block request, with the
+   set, the oracle calls, and `on_break` in both libraries.
+3. Remove triggers.
+4. `break_on_block_request`, built on #375's held block request, with the
    continuation on resume.
 
-#375 implements the `block_request` trigger on PV, and step 2 removes the code
-it extends. Its device hold and held machine state carry over into step 3.
+#375 implements the `block_request` trigger on PV, and step 3 removes the code
+it extends. Its device hold and held machine state carry over into step 4.
 That step adds the in-order continuation on resume and moves the hold mirror
 from the machine to the Driver. Its trigger-table and `arm_trigger` changes are
 replaced.
