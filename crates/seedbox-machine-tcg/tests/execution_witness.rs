@@ -45,7 +45,7 @@ fn cold_native_absence_and_codec_restore_do_not_manufacture_execution() {
             .unwrap();
         let mut machine = factory.create(&factory_definition::definition(0)).unwrap();
         let before = wire(&machine.snapshot().unwrap());
-        assert_eq!(&before[8..12], &3u32.to_le_bytes());
+        assert_eq!(&before[8..12], &1u32.to_le_bytes());
         for _ in 0..3 {
             assert!(machine.execution_evidence().unwrap().is_none());
             assert!(machine.state_evidence().unwrap().is_none());

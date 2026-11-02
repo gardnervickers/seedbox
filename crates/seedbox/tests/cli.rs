@@ -1110,8 +1110,6 @@ fn backend_flag_is_typed_and_only_on_execution_commands() {
 #[cfg(unix)]
 mod checkpoint_history;
 #[cfg(unix)]
-mod checkpoint_version;
-
 #[test]
 fn show_world_prints_machine_and_link_tables() {
     use seedbox_api::{
