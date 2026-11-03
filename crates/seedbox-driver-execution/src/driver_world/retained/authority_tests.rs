@@ -85,6 +85,7 @@ fn fixture_bytes(
             },
             disk: None,
             interface: None,
+            allow_crashes: false,
         },
         machines: vec![],
         spawnable: vec![],

@@ -7,6 +7,7 @@
 #include "guest_environment.h"
 #include "guest_policy.h"
 #include "guest_oom.h"
+#include "guest_properties.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -28,6 +29,7 @@ static int kernel_log = -1;
 static const char *failure_phase = "initialize";
 static const char *failure_path = "init";
 static struct sbx_oracle oracle;
+static struct sbx_properties properties;
 static struct sbx_guest_environment environment;
 static sigset_t application_mask;
 static void changed(int signal) { (void)signal; }
@@ -52,9 +54,11 @@ static int write_all(void *sink, const void *opaque, size_t length) {
 }
 /* The descriptor is opened before entering the image root. No guest timer or
  * host monitor is needed: kmsg wakes ppoll, and collect drains it after reaping.
- * Fail clearly on lost records rather than attributing an unobserved kill. */
-static int report_oom_kills(pid_t application) {
+ * Fail clearly on lost records rather than attributing an unobserved kill.
+ * Kernel OOM victims and fatal-signal reports share this one reader. */
+static int report_kernel_evidence(pid_t application) {
     char record[OOM_REPORT_RECORD_BYTES], frame[OOM_REPORT_FRAME_BYTES];
+    char crash[SBX_CRASH_FRAME_BYTES];
     for (;;) {
         ssize_t count = read(kernel_log, record, sizeof(record));
         if (count < 0 && errno == EINTR) continue;
@@ -62,7 +66,20 @@ static int report_oom_kills(pid_t application) {
         if (count <= 0) { if (!count) errno = EIO; return -1; }
         size_t length = oom_report_frame(record, (size_t)count, application, frame);
         if (length && write_all(&management, frame, length)) return -1;
+        length = sbx_crash_frame(record, (size_t)count, crash);
+        if (length == (size_t)-1) {
+            if (sbx_properties_lost(&properties, "crash report too long", 1)) return -1;
+        } else if (length && write_all(&management, crash, length)) return -1;
+        /* A program that reached neither guest socket reported its loss here. */
+        uint64_t lost;
+        char reason[SBX_PROPERTY_REASON_BYTES];
+        if (sbx_guest_lost_line(record, (size_t)count, &lost, reason) &&
+            sbx_properties_lost(&properties, reason, lost)) return -1;
     }
+}
+/* Before an outcome: the kernel's reports, then records the application sent. */
+static int report_evidence(pid_t application) {
+    return report_kernel_evidence(application) || sbx_properties_drain(&properties) ? -1 : 0;
 }
 __attribute__((noreturn)) static void poweroff(void) {
     sync();
@@ -135,6 +152,7 @@ static int launch(void *opaque, int error_fd) {
     if (management >= 0) close(management);
     if (kernel_log >= 0) close(kernel_log);
     sbx_oracle_close(&oracle);
+    sbx_properties_close(&properties);
     if (sbx_env_application_limits(&environment)) {
         int error=errno;
         dprintf(diagnostic,"seedbox init: application nofile limit: %s\n",strerror(error));
@@ -215,11 +233,22 @@ static void set_realtime(void) {
     };
     if (clock_settime(CLOCK_REALTIME, &realtime)) failed();
 }
+/* The kernel reports each core-dumping signal a process does not handle
+ * (seedbox.no_crashing_processes); the image never selects this. */
+static void report_fatal_signals(void) {
+    failure_phase = "report fatal signals"; failure_path = "/proc/sys/kernel/print-fatal-signals";
+    int fd = open(failure_path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0) failed();
+    if (write(fd, "1\n", 2) != 2) { if (!errno) errno = EIO; close(fd); failed(); }
+    close(fd);
+}
 int main(void) {
     sbx_oracle_init(&oracle, write_all, &management);
+    sbx_properties_init(&properties, write_all, &management);
     mount_fs("devtmpfs", "/dev");
     mount_fs("proc", "/proc");
     mount_fs("sysfs", "/sys");
+    report_fatal_signals();
     failure_phase = "open console"; failure_path = "/dev/console";
     int console = open("/dev/console", O_RDWR);
     if (console < 0) failed();
@@ -296,15 +325,24 @@ int main(void) {
         if (chmod("/run", 0755) || chmod("/run/seedbox", 0755)) failed();
         if (sbx_oracle_open(&oracle, "/run/seedbox/control.sock")) failed();
     }
+    /* Every machine serves the guest property socket, whatever its image. */
+    failure_phase = "open property socket"; failure_path = "/run/seedbox/guest.sock";
+    if (mkdir("/run", 0755) && errno != EEXIST) failed();
+    if (mkdir("/run/seedbox", 0755) && errno != EEXIST) failed();
+    /* An image's own /run/seedbox must not keep programs out. */
+    if (chmod("/run/seedbox", 0755)) failed();
+    if (sbx_properties_open(&properties, failure_path)) failed();
+    application.guest_socket = "/run/seedbox/guest.sock";
     service.oracle = &oracle;
-    service.before_outcome = report_oom_kills;
+    service.properties = &properties;
+    service.before_outcome = report_evidence;
     failure_phase = "launch prepared application"; failure_path = application.arguments[0];
     if (sbx_service_start(&service)) failed();
     int terminating = 0;
     for (;;) {
         int exit_code, result;
-        failure_phase = "read kernel OOM log"; failure_path = "/dev/kmsg";
-        if (report_oom_kills(service.supervisor.child)) failed();
+        failure_phase = "read kernel log"; failure_path = "/dev/kmsg";
+        if (report_kernel_evidence(service.supervisor.child)) failed();
         failure_phase = "shutdown application"; failure_path = application.arguments[0];
         if (service.shutdown_requested && !terminating) {
             terminating = 1;
@@ -321,7 +359,8 @@ int main(void) {
         /* Natural application exit is an observation, not guest shutdown.
          * The retained recipe remains available for a later Start. */
         if (terminating && service.supervisor.child <= 0) poweroff();
-        struct pollfd fds[6] = {
+        enum { SERVICES = 6, POLLED = SERVICES + SBX_PROPERTY_POLLED };
+        struct pollfd fds[POLLED] = {
             {.fd = terminating ? -1 : management, .events = POLLIN},
             {.fd = service.supervisor.output[0], .events = POLLIN},
             {.fd = service.supervisor.output[1], .events = POLLIN},
@@ -330,11 +369,19 @@ int main(void) {
              .events = POLLIN | (oracle.reply_used ? POLLOUT : 0)},
             {.fd = kernel_log, .events = POLLIN}
         };
+        for (unsigned i = SERVICES; i < POLLED; ++i)
+            fds[i] = (struct pollfd){.fd = sbx_properties_fd(&properties, i - SERVICES), .events = POLLIN};
         failure_phase = "poll services"; failure_path = "management/output/control";
-        result = ppoll(fds, 6, NULL, &application_mask);
+        result = ppoll(fds, POLLED, NULL, &application_mask);
         if (result < 0) { if (errno == EINTR) continue; failed(); }
-        failure_phase = "read kernel OOM log"; failure_path = "/dev/kmsg";
-        if (report_oom_kills(service.supervisor.child)) failed();
+        failure_phase = "read kernel log"; failure_path = "/dev/kmsg";
+        if (report_kernel_evidence(service.supervisor.child)) failed();
+        failure_phase = "relay property records"; failure_path = "/run/seedbox/guest.sock";
+        {
+            short revents[SBX_PROPERTY_POLLED];
+            for (unsigned i = 0; i < SBX_PROPERTY_POLLED; ++i) revents[i] = fds[SERVICES + i].revents;
+            if (sbx_properties_poll(&properties, revents)) failed();
+        }
         failure_phase = "accept control connection"; failure_path = "/run/seedbox/control.sock";
         if (fds[3].revents & (POLLERR | POLLHUP | POLLNVAL)) failed();
         if (fds[3].revents & POLLIN) if (sbx_oracle_accept(&oracle)) failed();

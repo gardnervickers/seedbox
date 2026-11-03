@@ -54,8 +54,12 @@ Press **Space** to resume or pause, and **f** to inject or heal faults.
 ## `seedbox.yaml` format
 
 `machines` defines the application nodes; `oracle` drives the workload and checks
-the result. The oracle's exit code determines PASS (zero) or FAIL (nonzero).
-Both use the same launch fields and require exactly one of `image` or `build`.
+the result. The oracle's exit code determines PASS (zero), INCOMPLETE (3, the
+oracle could not decide) or FAIL (any other). Guest
+[properties](docs/scenarios.md) can also fail a run, as can any process on any
+machine dying of a crash signal or an out-of-memory kill, unless that machine
+sets `allowCrashes: true`. Both use the same launch fields and require exactly
+one of `image` or `build`.
 
 For example, [the Redis project](examples/redis/seedbox.yaml) uses:
 
@@ -71,37 +75,40 @@ oracle:
   environment:
     REDIS_ADDRESS: redis:6379
     SEEDBOX_PLANT_FAILURE: "0"
-network:
-  latency: 1ms
-simulator:
-  blocksPerProgressCall: 10000
 ```
 
 Machine names are hostnames on the simulated network. Build contexts are relative
 to `seedbox.yaml`; `build.dockerfile` defaults to `Dockerfile`.
 
 Optional launch fields are `entrypoint`, `command`, `environment`, `memoryMiB`,
-`workingDirectory`, `user`, `files` and `volumes`. `files` is a list of
-`{source, target}` entries copied into the guest at preparation; `volumes` maps
-names to `{target}` entries for writable disks that survive machine crashes.
+`workingDirectory`, `user`, `files`, `volumes` and `allowCrashes`. `files` is a
+list of `{source, target}` entries copied into the guest at preparation;
+`volumes` maps names to `{target, size}` entries for writable disks that survive
+machine crashes.
+A machine's volumes share one disk: volumes without a `size` share one 1 GiB
+allotment, and each `size` (whole MiB or GiB from `16MiB`, such as `size: 4GiB`)
+adds to it, up to 64 GiB per machine. The disk is sparse: host memory, checkpoints and crash
+transfers scale with written sectors, not the declared size.
 See [the etcd project](examples/etcd/seedbox.yaml) for a three-node cluster with
 persistent data disks.
 
-`network.latency` defaults to `1ms`; `simulator.blocksPerProgressCall` defaults to
-`10000` and controls how often translated code charges simulation progress.
-Choose the backend, seed and execution limits with CLI flags.
-
-Set the timeslice and machine execution threads in `seedbox.yaml`:
+`network.latency` sets the one-way delay between machines and defaults to `1ms`.
+`simulator.quantum` sets the timeslice:
 
 ```yaml
+network:
+  latency: 2ms
 simulator:
-  quantum: 1ms
-  machineWorkers: 4
+  quantum: 500us
 ```
 
 `quantum` defaults to `1ms` and must be a positive duration in whole nanoseconds.
 Network latency, timers and scheduled events can shorten a parallel execution window.
-Replay and checkpoints retain the quantum. `machineWorkers` accepts 1–64 and
-defaults to 1; it affects host throughput without changing simulation results.
-Workers steal queued machine runs, so machines can outnumber threads. Each round
-still waits for all its running machines to reach the barrier.
+Replay and checkpoints retain the quantum.
+
+Choose the backend, seed, execution limits and machine threads with CLI flags.
+`run` and `replay` accept `--machine-workers 1..64`; the default is one thread per
+machine, with host CPUs shared across the server's execution slots. The count
+affects host throughput without changing simulation results. Workers steal queued
+machine runs, so machines can outnumber threads. Each round still waits for all
+its running machines to reach the barrier.

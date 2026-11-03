@@ -26,6 +26,9 @@ pub struct ContainerTransport {
     /// image yields the same bytes. `None` exports every time.
     pub export_cache: Option<ContentDigest>,
 }
+/// Keys cached image exports. Change it whenever export or layer merging
+/// changes the bytes produced for the same image.
+const EXPORT_FORMAT: &str = "image-export-v2";
 fn setup(error: impl std::fmt::Display) -> Error {
     Error::Setup(format!("container image preparation: {error}"))
 }
@@ -38,6 +41,64 @@ fn immutable_reference(info: bollard::models::ImageInspect) -> Result<String> {
         .next()
         .or(info.id)
         .ok_or_else(|| setup("image has no immutable reference"))
+}
+/// What an engine build's event stream has said so far.
+#[derive(Default)]
+struct BuildProgress {
+    id: Option<String>,
+    step_error: Option<String>,
+}
+impl BuildProgress {
+    fn observe(&mut self, event: bollard::models::BuildInfo, progress: fn(&str)) -> Result<()> {
+        if let Some(error) = event.error_detail {
+            return Err(setup(
+                error.message.unwrap_or_else(|| "image build failed".into()),
+            ));
+        }
+        match event.aux {
+            Some(BuildInfoAux::Default(aux)) => self.id = aux.id,
+            Some(BuildInfoAux::BuildKit(status)) => {
+                for vertex in status.vertexes {
+                    if !vertex.name.is_empty() {
+                        progress(&format!(
+                            "{}{}",
+                            if vertex.cached { "cached: " } else { "" },
+                            vertex.name
+                        ));
+                    }
+                    // A step's error is progress, not the build's result:
+                    // BuildKit shares a step among concurrent identical builds
+                    // and reports it cancelled to all but the one that runs it.
+                    // A failed build ends with error_detail.
+                    if !vertex.error.is_empty() {
+                        progress(&format!("{}: {}", vertex.name, vertex.error));
+                        self.step_error = Some(vertex.error);
+                    }
+                }
+                for log in status.logs {
+                    for line in String::from_utf8_lossy(&log.msg).lines() {
+                        progress(line);
+                    }
+                }
+            }
+            None => (),
+        }
+        if let Some(stream) = event.stream {
+            for line in stream.lines().filter(|line| !line.is_empty()) {
+                progress(line);
+            }
+        }
+        Ok(())
+    }
+    /// The built image's ID, once the stream has ended.
+    fn image(self) -> Result<String> {
+        self.id.ok_or_else(|| {
+            setup(
+                self.step_error
+                    .unwrap_or_else(|| "engine build completed without an image ID".into()),
+            )
+        })
+    }
 }
 impl ContainerTransport {
     fn check(&self) -> Result<()> {
@@ -180,44 +241,11 @@ impl ContainerTransport {
                         file,
                     ))),
                 );
-                let mut id = None;
+                let mut outcome = BuildProgress::default();
                 while let Some(event) = self.next(&mut build).await? {
-                    let event = event.map_err(setup)?;
-                    if let Some(error) = event.error_detail {
-                        return Err(setup(
-                            error.message.unwrap_or_else(|| "image build failed".into()),
-                        ));
-                    }
-                    match event.aux {
-                        Some(BuildInfoAux::Default(aux)) => id = aux.id,
-                        Some(BuildInfoAux::BuildKit(status)) => {
-                            for vertex in status.vertexes {
-                                if !vertex.name.is_empty() {
-                                    (self.progress)(&format!(
-                                        "{}{}",
-                                        if vertex.cached { "cached: " } else { "" },
-                                        vertex.name
-                                    ));
-                                }
-                                if !vertex.error.is_empty() {
-                                    return Err(setup(vertex.error));
-                                }
-                            }
-                            for log in status.logs {
-                                for line in String::from_utf8_lossy(&log.msg).lines() {
-                                    (self.progress)(line);
-                                }
-                            }
-                        }
-                        None => (),
-                    }
-                    if let Some(stream) = event.stream {
-                        for line in stream.lines().filter(|line| !line.is_empty()) {
-                            (self.progress)(line);
-                        }
-                    }
+                    outcome.observe(event.map_err(setup)?, self.progress)?;
                 }
-                id.ok_or_else(|| setup("engine build completed without an image ID"))?
+                outcome.image()?
             }
         };
         self.check()?;
@@ -281,7 +309,7 @@ impl ImageTransport for ContainerTransport {
         let (docker, image) = runtime.block_on(self.resolve(service, directory, architecture))?;
         let record = self.export_cache.as_ref().map(|engine| {
             ContentDigest::of(
-                serde_json::json!(["image-export", engine, architecture.platform(), image])
+                serde_json::json!([EXPORT_FORMAT, engine, architecture.platform(), image])
                     .to_string()
                     .as_bytes(),
             )
@@ -412,11 +440,32 @@ fn prefix_archive(input: &Path, output: &Path, check: &dyn Fn() -> Result<()>) -
     Ok(())
 }
 
+/// An overlayfs xattr that only records the build host's layer storage.
+fn overlay_bookkeeping(field: &str) -> bool {
+    [
+        "SCHILY.xattr.user.overlay.",
+        "SCHILY.xattr.trusted.overlay.",
+    ]
+    .iter()
+    .filter_map(|prefix| field.strip_prefix(prefix))
+    .any(|name| matches!(name, "origin" | "impure" | "nlink" | "uuid"))
+}
+
 pub(crate) fn export_header<R: std::io::Read>(
     entry: &mut tar::Entry<'_, R>,
     path: &Path,
 ) -> Result<tar::Header> {
     let mut header = entry.header().clone();
+    // Callers give the entry a new path and link target. The tar crate writes
+    // the USTAR prefix only when it splits a path longer than 100 bytes, so a
+    // source prefix would be read back in front of a new path that fits in
+    // `name` (`rootfs/DIR` + `DIR/NAME`). Clear every source path field.
+    if let Some(ustar) = header.as_ustar_mut() {
+        ustar.prefix.fill(0);
+    }
+    let fields = header.as_old_mut();
+    fields.name.fill(0);
+    fields.linkname.fill(0);
     header.set_size(entry.size());
     if let Some(extensions) = entry.pax_extensions()? {
         for extension in extensions {
@@ -447,6 +496,11 @@ pub(crate) fn export_header<R: std::io::Read>(
                     }
                 }
                 "path" | "linkpath" | "size" | "atime" | "ctime" | "uname" | "gname" => (),
+                // Rootless engines export the bookkeeping overlay storage keeps for
+                // itself. These describe the build host's layer storage, not the
+                // image. Overlay xattrs that change layer contents (opaque,
+                // whiteout, redirect, metacopy) are still refused below.
+                _ if overlay_bookkeeping(field) => {}
                 _ => {
                     return Err(setup(format!(
                         "exported filesystem {}: unsupported extended metadata {field}",
@@ -462,7 +516,109 @@ pub(crate) fn export_header<R: std::io::Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bollard::{
+        moby::buildkit::v1::{StatusResponse, Vertex},
+        models::{BuildInfo, ErrorDetail, ImageId},
+    };
     use std::io::{BufRead, Read, Write};
+    fn step(name: &str, error: &str) -> BuildInfo {
+        BuildInfo {
+            aux: Some(BuildInfoAux::BuildKit(StatusResponse {
+                vertexes: vec![Vertex {
+                    name: name.into(),
+                    error: error.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+    fn built(id: &str) -> BuildInfo {
+        BuildInfo {
+            aux: Some(BuildInfoAux::Default(ImageId {
+                id: Some(id.into()),
+            })),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn a_cancelled_shared_step_does_not_fail_a_build_that_completes() {
+        let mut outcome = BuildProgress::default();
+        for event in [
+            step(
+                "[2/2] COPY bin/blob /blob",
+                "context canceled: context canceled",
+            ),
+            step("[2/2] COPY bin/blob /blob", ""),
+            built("sha256:built"),
+        ] {
+            outcome.observe(event, |_| ()).unwrap();
+        }
+        assert_eq!(outcome.image().unwrap(), "sha256:built");
+    }
+    #[test]
+    fn a_build_without_an_image_reports_its_step_error() {
+        let mut outcome = BuildProgress::default();
+        outcome
+            .observe(step("[2/2] RUN exit 7", "process did not complete"), |_| ())
+            .unwrap();
+        let error = outcome.image().unwrap_err().to_string();
+        assert!(error.contains("process did not complete"), "{error}");
+    }
+    #[test]
+    fn an_error_detail_fails_the_build() {
+        let event = BuildInfo {
+            error_detail: Some(ErrorDetail {
+                message: Some("RUN exit 7: exit code 7".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let error = BuildProgress::default()
+            .observe(event, |_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exit code 7"), "{error}");
+    }
+    #[test]
+    fn overlay_bookkeeping_xattrs_are_ignored_and_content_xattrs_refused() {
+        let export = |key: &str| {
+            let mut tar = tar::Builder::new(Vec::new());
+            tar.append_pax_extensions([(key, &b"y"[..])]).unwrap();
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o755);
+            header.set_size(0);
+            tar.append_data(&mut header, "bin/app", std::io::empty())
+                .unwrap();
+            let bytes = tar.into_inner().unwrap();
+            let mut archive = tar::Archive::new(bytes.as_slice());
+            let mut entry = archive.entries().unwrap().next().unwrap().unwrap();
+            export_header(&mut entry, Path::new("bin/app")).map(|_| ())
+        };
+        // Opaque directories, whiteouts, redirects and metacopy change what a
+        // layer contains; dropping them would silently resurrect files.
+        for key in [
+            "SCHILY.xattr.trusted.overlay.opaque",
+            "SCHILY.xattr.user.overlay.opaque",
+            "SCHILY.xattr.trusted.overlay.whiteout",
+            "SCHILY.xattr.user.overlay.redirect",
+            "SCHILY.xattr.trusted.overlay.metacopy",
+            "SCHILY.xattr.trusted.overlay.origin2",
+        ] {
+            let error = export(key).unwrap_err().to_string();
+            assert!(error.contains(key), "{key}: {error}");
+        }
+        for key in [
+            "SCHILY.xattr.user.overlay.origin",
+            "SCHILY.xattr.trusted.overlay.origin",
+            "SCHILY.xattr.trusted.overlay.impure",
+            "SCHILY.xattr.user.overlay.nlink",
+            "SCHILY.xattr.trusted.overlay.uuid",
+        ] {
+            assert!(export(key).is_ok(), "{key}");
+        }
+    }
     #[test]
     fn unsupported_xattr_names_the_image_path_and_key() {
         let mut tar = tar::Builder::new(Vec::new());
@@ -719,5 +875,215 @@ mod tests {
         fs::remove_dir_all(directory.path().join("store/sha256")).unwrap();
         assert_eq!(import(b"engine", "fourth"), exported);
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    /// A path of exactly `length` bytes ending in a 30-byte name of `leaf`,
+    /// in components short enough for a USTAR split wherever one fits.
+    fn path_of(length: usize, leaf: char) -> String {
+        let directory: String = (0..length - 31)
+            .map(|i| {
+                if i % 20 == 19 && i + 1 < length - 31 {
+                    '/'
+                } else {
+                    'a'
+                }
+            })
+            .collect();
+        format!("{directory}/{}", leaf.to_string().repeat(30))
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct Entry {
+        path: std::path::PathBuf,
+        kind: tar::EntryType,
+        link: Option<std::path::PathBuf>,
+        data: Vec<u8>,
+    }
+
+    fn entries(archive: &Path) -> Vec<Entry> {
+        let mut archive = tar::Archive::new(fs::File::open(archive).unwrap());
+        archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let mut entry = entry.unwrap();
+                let mut data = vec![];
+                entry.read_to_end(&mut data).unwrap();
+                Entry {
+                    path: entry.path().unwrap().components().collect(),
+                    kind: entry.header().entry_type(),
+                    link: entry.link_name().unwrap().map(|link| link.into_owned()),
+                    data,
+                }
+            })
+            .collect()
+    }
+
+    /// How an engine might encode paths too long for the 100-byte `name`.
+    #[derive(Clone, Copy, Debug)]
+    enum Encoding {
+        /// USTAR prefix/name split, falling back to GNU long names.
+        Ustar,
+        /// GNU long name and long link records.
+        Gnu,
+        /// PAX `path`/`linkpath` records over truncated header fields.
+        Pax,
+    }
+
+    fn append(
+        tar: &mut tar::Builder<fs::File>,
+        encoding: Encoding,
+        kind: tar::EntryType,
+        path: &str,
+        link: Option<&str>,
+        data: &[u8],
+    ) {
+        let mut header = match encoding {
+            Encoding::Gnu => tar::Header::new_gnu(),
+            Encoding::Ustar | Encoding::Pax => tar::Header::new_ustar(),
+        };
+        header.set_entry_type(kind);
+        header.set_mode(if kind.is_dir() { 0o755 } else { 0o644 });
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_size(data.len() as u64);
+        if let Encoding::Pax = encoding {
+            let mut records = vec![];
+            if path.len() > 100 {
+                records.push(("path", path.as_bytes()));
+            }
+            if let Some(link) = link.filter(|link| link.len() > 100) {
+                records.push(("linkpath", link.as_bytes()));
+            }
+            if !records.is_empty() {
+                tar.append_pax_extensions(records).unwrap();
+            }
+            let raw = header.as_mut_bytes();
+            let path = &path.as_bytes()[..path.len().min(100)];
+            raw[..path.len()].copy_from_slice(path);
+            if let Some(link) = link {
+                let link = &link.as_bytes()[..link.len().min(100)];
+                raw[157..157 + link.len()].copy_from_slice(link);
+            }
+            header.set_cksum();
+            tar.append(&header, data).unwrap();
+        } else if let Some(link) = link {
+            tar.append_link(&mut header, path, link).unwrap();
+        } else {
+            tar.append_data(&mut header, path, data).unwrap();
+        }
+    }
+
+    #[test]
+    fn rerooting_keeps_every_path_and_link_target_through_the_transport_archive() {
+        let mut lengths: Vec<usize> = (90..=110).chain(254..=258).collect();
+        lengths.push(300);
+        for encoding in [Encoding::Ustar, Encoding::Gnu, Encoding::Pax] {
+            let directory = tempfile::tempdir().unwrap();
+            let export = directory.path().join("export.tar");
+            let mut tar = tar::Builder::new(fs::File::create(&export).unwrap());
+            let mut expected = vec![Entry {
+                path: ".".into(),
+                kind: tar::EntryType::Directory,
+                link: None,
+                data: vec![],
+            }];
+            let mut paths: Vec<_> = lengths
+                .iter()
+                .map(|length| (path_of(*length, 'f'), path_of(*length, 'd')))
+                .collect();
+            // One component longer than a header field cannot be split.
+            paths.push((format!("usr/{}", "f".repeat(120)), "d".repeat(120)));
+            for (file, dir) in paths {
+                let symlink = format!("{file}-symlink");
+                let hardlink = format!("{file}-hardlink");
+                let target = format!("/{file}");
+                append(
+                    &mut tar,
+                    encoding,
+                    tar::EntryType::Directory,
+                    &format!("{dir}/"),
+                    None,
+                    b"",
+                );
+                append(
+                    &mut tar,
+                    encoding,
+                    tar::EntryType::Regular,
+                    &file,
+                    None,
+                    file.as_bytes(),
+                );
+                append(
+                    &mut tar,
+                    encoding,
+                    tar::EntryType::Symlink,
+                    &symlink,
+                    Some(&target),
+                    b"",
+                );
+                append(
+                    &mut tar,
+                    encoding,
+                    tar::EntryType::Link,
+                    &hardlink,
+                    Some(&file),
+                    b"",
+                );
+                expected.extend(
+                    [
+                        (dir, tar::EntryType::Directory, None, vec![]),
+                        (
+                            file.clone(),
+                            tar::EntryType::Regular,
+                            None,
+                            file.clone().into_bytes(),
+                        ),
+                        (symlink, tar::EntryType::Symlink, Some(target), vec![]),
+                        (hardlink, tar::EntryType::Link, Some(file), vec![]),
+                    ]
+                    .map(|(path, kind, link, data)| Entry {
+                        path: path.into(),
+                        kind,
+                        link: link.map(Into::into),
+                        data,
+                    }),
+                );
+            }
+            tar.finish().unwrap();
+            drop(tar);
+
+            let transport = directory.path().join("rootfs.tar");
+            prefix_archive(&export, &transport, &|| Ok(())).unwrap();
+            let rooted = |path: &Path| Path::new("rootfs").join(path).components().collect();
+            let expected_transport: Vec<_> = expected
+                .iter()
+                .map(|entry| Entry {
+                    path: rooted(&entry.path),
+                    kind: entry.kind,
+                    link: entry.link.as_ref().map(|link| {
+                        if entry.kind.is_hard_link() {
+                            rooted(link)
+                        } else {
+                            link.clone()
+                        }
+                    }),
+                    data: entry.data.clone(),
+                })
+                .collect();
+            assert_eq!(entries(&transport), expected_transport, "{encoding:?}");
+
+            let guest = directory.path().join("guest.tar");
+            fs::write(
+                &guest,
+                crate::driver_preparation::logical_archive(&transport).unwrap(),
+            )
+            .unwrap();
+            for (actual, expected) in entries(&guest).iter().zip(&expected) {
+                assert_eq!(actual, expected, "{encoding:?}");
+            }
+            assert_eq!(entries(&guest).len(), expected.len(), "{encoding:?}");
+        }
     }
 }

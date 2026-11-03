@@ -176,6 +176,7 @@ impl Fixture {
                 full_state: None,
                 faults: vec![],
                 detail: None,
+                properties: None,
             },
             calls: AtomicUsize::new(0),
             fail: false,
@@ -269,7 +270,8 @@ fn run_retains_inputs_result_logs_and_replay_does_not_prepare_again() {
 #[test]
 fn reproduced_application_failure_is_separate_from_replay_mismatch() {
     let mut fixture = Fixture::new();
-    fixture.backend.report.workload_exit.as_mut().unwrap().code = 3;
+    // Exit 3 is an undecided oracle, so fail with 5.
+    fixture.backend.report.workload_exit.as_mut().unwrap().code = 5;
     let failed = fixture.run();
     let reproduced = fixture.replay(&failed);
     assert_eq!(reproduced.record.outcome, Outcome::Fail);
@@ -677,7 +679,7 @@ fn co_located_services_use_one_machine_state_digest_and_complete_placement() {
 }
 
 #[test]
-fn project_workers_change_capacity_without_changing_identity_and_quantum_is_retained() {
+fn run_workers_change_capacity_without_changing_identity_and_quantum_is_retained() {
     let mut fixture = Fixture::new();
     fixture.simulation.simulator.quantum_ns = std::num::NonZeroU64::new(2_500_000).unwrap();
     fixture
@@ -685,26 +687,26 @@ fn project_workers_change_capacity_without_changing_identity_and_quantum_is_reta
         .performance
         .insert("SEEDBOX_MACHINE_WORKERS".into(), "1".into());
     let first = fixture.run();
-    fixture.simulation.simulator.machine_workers = 4.try_into().unwrap();
     fixture
         .backend
         .performance
         .insert("SEEDBOX_MACHINE_WORKERS".into(), "4".into());
-    let parallel = fixture.run();
+    let parallel = fixture
+        .orchestrator
+        .run(
+            &fixture.simulation,
+            RunOptions {
+                machine_workers: Some(4),
+                ..Default::default()
+            },
+            &fixture.preparer,
+            &fixture.backend,
+        )
+        .unwrap();
     assert_eq!(first.record.run_id, parallel.record.run_id);
     assert_eq!(
         parallel.record.performance_parameters["SEEDBOX_MACHINE_WORKERS"],
         "4"
-    );
-    assert_eq!(
-        parallel
-            .record
-            .identity
-            .configuration
-            .simulator
-            .machine_workers
-            .get(),
-        1
     );
     let executor = fixture.executing(|request| {
         assert_eq!(request.quantum_ns.get(), 2_500_000);

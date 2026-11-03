@@ -5,6 +5,7 @@ use crate::{
 };
 use seedbox_engine_protocol::control::Action as Public;
 use seedbox_machine::clock::ClockRate;
+use seedbox_spec::{backend::CpuBackend, definition::Architecture};
 use std::{num::NonZeroI64, time::Duration};
 
 /// Translate a public action without resolving targets, sampling RNG or allocating IDs.
@@ -152,8 +153,93 @@ pub fn translate(
             };
             (action, Some(handle(alias)?))
         }
+        // No engine provides what these need yet, so no Driver action carries
+        // them out. Invalid arguments are reported as such first.
+        Public::DiskError { .. } | Public::DiskLatency { .. } | Public::Preempt { .. } => {
+            action.validate()?;
+            let capability = Capability::required_by(action)
+                .ok_or_else(|| format!("{} needs no capability", action.name()))?;
+            return Err(capability.unprovided(action.name()));
+        }
     };
     Ok((action, alias))
+}
+
+/// A CPU backend executing guests of one architecture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Engine {
+    pub backend: CpuBackend,
+    pub architecture: Architecture,
+}
+impl std::fmt::Display for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let architecture = match self.architecture {
+            Architecture::X86_64 => "x86_64",
+            Architecture::Aarch64 => "aarch64",
+        };
+        let backend = match self.backend {
+            CpuBackend::Pv => "PV",
+            CpuBackend::Tcg => "TCG",
+        };
+        write!(f, "{architecture} {backend}")
+    }
+}
+
+/// Machine support a fault needs beyond what every engine provides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Capability {
+    /// Selecting, failing and corrupting block requests at the device.
+    DiskSelection,
+    /// Completing block requests after their notification.
+    DelayedBlockCompletion,
+    /// Holding a block request at the device for a crash.
+    HeldBlockRequest,
+    /// The guest kernel's seeded yield at syscalls.
+    GuestYield,
+}
+impl Capability {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::DiskSelection => "disk request selection",
+            Self::DelayedBlockCompletion => "delayed block completion",
+            Self::HeldBlockRequest => "held block requests",
+            Self::GuestYield => "the guest yield hook",
+        }
+    }
+    /// Whether `engine` provides this capability. No engine's devices or
+    /// guest kernel provide any of them yet.
+    pub fn provided_by(self, _engine: Engine) -> bool {
+        false
+    }
+    /// The refusal of `name`, which needs this capability, while no engine
+    /// provides it.
+    pub(crate) fn unprovided(self, name: &str) -> String {
+        format!("{name} needs {}, which no engine provides", self.describe())
+    }
+    /// The capability a public action needs, if any.
+    pub fn required_by(action: &Public) -> Option<Self> {
+        match action {
+            Public::DiskError { .. } => Some(Self::DiskSelection),
+            Public::DiskLatency { .. } => Some(Self::DelayedBlockCompletion),
+            Public::Preempt { .. } => Some(Self::GuestYield),
+            _ => None,
+        }
+    }
+}
+fn require(engine: Engine, name: &str, capability: Option<Capability>) -> Result<(), String> {
+    match capability {
+        Some(capability) if !capability.provided_by(engine) => Err(format!(
+            "{name} needs {}, which {engine} does not provide",
+            capability.describe()
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Refuse an action `engine` cannot carry out. Every action main already
+/// implements runs on every engine.
+pub fn check_engine(action: &Public, engine: Engine) -> Result<(), String> {
+    require(engine, action.name(), Capability::required_by(action))
 }
 
 impl Action {

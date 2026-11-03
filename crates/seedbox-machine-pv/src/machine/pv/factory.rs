@@ -247,7 +247,11 @@ mod guest {
     pub(super) const LOADER: &str = "lib/ld-linux-aarch64.so.1";
     pub(super) const LAUNCHER_OPTIONS: &[&str] = &[];
     /// ARM exclusives become compare-and-swap with software reservations.
-    pub(super) const TRANSLATOR_OPTIONS: &[&str] = &["-ldstex2cas"];
+    /// The application's `IC IVAU` invalidates rewritten code, rather than
+    /// code-page write protection and sandboxing; reads of `CTR_EL0` clear
+    /// DIC, so applications cannot legally omit that `IC IVAU`.
+    pub(super) const TRANSLATOR_OPTIONS: &[&str] =
+        &["-ldstex2cas", "-no_hw_cache_consistency", "-fake_ctr_dic"];
     pub(super) fn kernel(bytes: &[u8]) -> std::io::Result<()> {
         seedbox_machine::machine::assets::kernel(bytes)
     }

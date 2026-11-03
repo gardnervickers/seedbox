@@ -44,6 +44,7 @@ fn disk_request(session: &NativeSession) -> SubmitRequest {
             volumes: vec![seedbox_spec::VolumeMount {
                 source: "data".into(),
                 target: "/data".into(),
+                size_bytes: None,
             }],
         },
     );

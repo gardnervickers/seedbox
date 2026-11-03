@@ -11,7 +11,6 @@ use std::{
     path::{Path, PathBuf},
 };
 pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
-pub const VOLUME_DISK_MIB: u64 = 1024;
 /// Only materialized, verified inputs reach the executor. Original Compose paths,
 /// registry references, and build contexts are deliberately absent.
 pub struct ExecutionRequest<'a> {

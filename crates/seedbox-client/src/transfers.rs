@@ -1,9 +1,7 @@
 //! Bounded binary transfers. Import is deliberately a single non-idempotent POST.
 use super::{Client, Error};
 use reqwest::{header, Method};
-use seedbox_api::{
-    BundleTransferQuery, Simulation, SimulationId, BUNDLE_CONTENT_TYPE, BUNDLE_MAX_BYTES,
-};
+use seedbox_api::{BundleTransferQuery, Simulation, SimulationId, BUNDLE_MAX_BYTES};
 use std::{future::Future, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
@@ -33,45 +31,6 @@ fn validate_limit(max_bytes: u64) -> Result<(), Error> {
 }
 
 impl Client {
-    /// Stream a completed simulation archive to an unpublished disk file.
-    /// The caller owns cleanup and atomic destination publication.
-    pub async fn export_bundle(
-        &self,
-        id: &SimulationId,
-        output: &mut tokio::fs::File,
-        max_bytes: u64,
-        cancelled: impl Fn() -> bool,
-    ) -> Result<u64, Error> {
-        validate_limit(max_bytes)?;
-        let request = self
-            .request(Method::GET, &format!("/v1/simulations/{id}/bundle"))
-            .query(&BundleTransferQuery { max_bytes });
-        cancellable(&cancelled, async {
-            let response = request.send().await?;
-            self.binary(response, output, max_bytes, BUNDLE_CONTENT_TYPE, None)
-                .await
-        })
-        .await
-    }
-
-    /// Upload one file once; cancellation/transport failure may leave an accepted
-    /// import. Never retry automatically: every accepted upload creates a fresh ID.
-    pub async fn import_bundle(
-        &self,
-        file: tokio::fs::File,
-        max_bytes: u64,
-        cancelled: impl Fn() -> bool,
-    ) -> Result<Simulation, Error> {
-        self.upload_bundle(
-            file,
-            max_bytes,
-            cancelled,
-            "/v1/bundles",
-            BUNDLE_CONTENT_TYPE,
-        )
-        .await
-    }
-
     /// Restore checkpoint inputs only. A caller then submits a new simulation.
     pub async fn import_checkpoint_bundle(
         &self,
@@ -312,6 +271,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seedbox_api::CHECKPOINT_CONTENT_TYPE;
     use std::{
         io::{BufRead, Read, Write},
         os::unix::net::UnixListener,
@@ -345,21 +305,21 @@ mod tests {
     #[tokio::test]
     async fn download_streams_limits_content_type_truncation_and_digest_are_checked() {
         for response in [
-            format!("HTTP/1.1 200 OK\r\nContent-Type: {BUNDLE_CONTENT_TYPE}\r\nContent-Length: 5\r\n\r\nhello"),
-            format!("HTTP/1.1 200 OK\r\nContent-Type: {BUNDLE_CONTENT_TYPE}\r\nContent-Length: 6\r\n\r\nhello!"),
+            format!("HTTP/1.1 200 OK\r\nContent-Type: {CHECKPOINT_CONTENT_TYPE}\r\nContent-Length: 5\r\n\r\nhello"),
+            format!("HTTP/1.1 200 OK\r\nContent-Type: {CHECKPOINT_CONTENT_TYPE}\r\nContent-Length: 6\r\n\r\nhello!"),
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 5\r\n\r\nhello".into(),
-            format!("HTTP/1.1 200 OK\r\nContent-Type: {BUNDLE_CONTENT_TYPE}\r\nContent-Length: 5\r\n\r\nhi"),
+            format!("HTTP/1.1 200 OK\r\nContent-Type: {CHECKPOINT_CONTENT_TYPE}\r\nContent-Length: 5\r\n\r\nhi"),
         ] {
             let root = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
             let socket = root.path().join("api.sock");
             let listener = UnixListener::bind(&socket).unwrap();
-            let valid = response.ends_with("hello") && response.contains(BUNDLE_CONTENT_TYPE);
+            let valid = response.ends_with("hello") && response.contains(CHECKPOINT_CONTENT_TYPE);
             let thread = std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap(); headers(&mut stream);
                 stream.write_all(response.as_bytes()).unwrap();
             });
             let mut output = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
-            let result = Client::connect_to(&socket).unwrap().export_bundle(&"k7m2p9qx".parse().unwrap(), &mut output, 5, || false).await;
+            let result = Client::connect_to(&socket).unwrap().export_checkpoint_bundle(&"k7m2p9qx".parse().unwrap(), "ckpt", &mut output, 5, || false).await;
             assert_eq!(result.is_ok(), valid, "{result:?}");
             if valid { output.rewind().await.unwrap(); let mut bytes = Vec::new(); output.read_to_end(&mut bytes).await.unwrap(); assert_eq!(bytes, b"hello"); }
             thread.join().unwrap();
@@ -408,7 +368,7 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 assert_eq!(headers(&mut stream), if import { 5 } else { 0 });
                 if !import {
-                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {BUNDLE_CONTENT_TYPE}\r\nContent-Length: 10\r\n\r\nhello").unwrap();
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {CHECKPOINT_CONTENT_TYPE}\r\nContent-Length: 10\r\n\r\nhello").unwrap();
                 }
                 flag.store(true, Ordering::Release);
                 // Keep the connection open until the client has returned; any
@@ -428,14 +388,18 @@ mod tests {
                 file.write_all(b"hello").await.unwrap();
                 file.rewind().await.unwrap();
                 client
-                    .import_bundle(file, 10, || cancelled.load(Ordering::Acquire))
+                    .import_checkpoint_bundle(file, 10, || cancelled.load(Ordering::Acquire))
                     .await
                     .map(|_| ())
             } else {
                 client
-                    .export_bundle(&"k7m2p9qx".parse().unwrap(), &mut file, 10, || {
-                        cancelled.load(Ordering::Acquire)
-                    })
+                    .export_checkpoint_bundle(
+                        &"k7m2p9qx".parse().unwrap(),
+                        "ckpt",
+                        &mut file,
+                        10,
+                        || cancelled.load(Ordering::Acquire),
+                    )
                     .await
                     .map(|_| ())
             };
@@ -509,7 +473,10 @@ mod tests {
         let client = Client::connect_to(&socket).unwrap();
         let mut file = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
         file.write_all(b"hello").await.unwrap();
-        let error = client.import_bundle(file, 10, || false).await.unwrap_err();
+        let error = client
+            .import_checkpoint_bundle(file, 10, || false)
+            .await
+            .unwrap_err();
         returned.send(()).unwrap();
         assert!(matches!(error, Error::ImportUncertain(_)), "{error}");
         assert!(error.to_string().contains("inspect simulations"));
@@ -523,24 +490,34 @@ mod tests {
         let mut file = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
         file.write_all(b"oversized").await.unwrap();
         file.rewind().await.unwrap();
-        let error = client.import_bundle(file, 1, || false).await.unwrap_err();
+        let error = client
+            .import_checkpoint_bundle(file, 1, || false)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("wire byte limit"));
         let file = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
         assert!(matches!(
-            client.import_bundle(file, 1, || true).await,
+            client.import_checkpoint_bundle(file, 1, || true).await,
             Err(Error::Cancelled)
         ));
         let mut file = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
         assert!(matches!(
             client
-                .export_bundle(&"k7m2p9qx".parse().unwrap(), &mut file, 0, || false)
+                .export_checkpoint_bundle(
+                    &"k7m2p9qx".parse().unwrap(),
+                    "ckpt",
+                    &mut file,
+                    0,
+                    || false
+                )
                 .await,
             Err(Error::Binary(_))
         ));
         assert!(matches!(
             client
-                .export_bundle(
+                .export_checkpoint_bundle(
                     &"k7m2p9qx".parse().unwrap(),
+                    "ckpt",
                     &mut file,
                     BUNDLE_MAX_BYTES + 1,
                     || false

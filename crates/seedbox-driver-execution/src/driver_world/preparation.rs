@@ -137,7 +137,8 @@ impl OciBootFactory {
                 FilesystemArchive::new(bytes).map_err(|e| Error::Integrity(e.to_string()))?;
             let retained_filesystem = store.put(filesystem.as_bytes())?;
             let launch = request.launch;
-            let volumes = super::volume_setup(launch.disk_volumes.iter());
+            let volumes = super::volume_setup(launch.disk_volumes.iter())
+                .map_err(|e| Error::Integrity(format!("machine volumes: {e}")))?;
             let number = machine_number(request.simulation, request.name)?;
             let network = NetworkInterface::new(
                 MacAddress::new([2, 0, 0, 0, 0, number])
@@ -249,7 +250,8 @@ pub fn retain_oci_prepared(
             .images
             .get(name)
             .ok_or_else(|| Error::Integrity(format!("prepared image missing for {name}")))?;
-        let volumes = super::volume_setup(image.launch.disk_volumes.iter());
+        let volumes = super::volume_setup(image.launch.disk_volumes.iter())
+            .map_err(|e| Error::Integrity(format!("machine volumes: {e}")))?;
         let boot = inputs
             .guests
             .get(name)
@@ -325,6 +327,10 @@ pub fn retain_oci_prepared(
                     address: std::net::Ipv4Addr::new(10, 0, 0, number),
                     prefix_len: PREFIX_LEN,
                 }),
+                allow_crashes: simulation
+                    .services
+                    .get(name)
+                    .is_some_and(|service| service.allow_crashes),
             },
         );
     }

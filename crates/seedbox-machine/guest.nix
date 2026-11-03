@@ -27,8 +27,9 @@ let
           zig cc -target ${triple} -std=c11 -O2 -Wall -Wextra -Werror -c guest_supervisor.c -o guest_supervisor.o
           zig cc -target ${triple} -std=c11 -O2 -Wall -Wextra -Werror -c guest_service.c -o guest_service.o
           zig cc -target ${triple} -std=c11 -O2 -Wall -Wextra -Werror -c guest_oracle.c -o guest_oracle.o
+          zig cc -target ${triple} -std=c11 -O2 -Wall -Wextra -Werror -c guest_properties.c -o guest_properties.o
           zig cc -target ${triple} -std=c11 -O2 -Wall -Wextra -Werror -c guest_application.c -o guest_application.o
-          zig ar rcs libseedbox-guest.a guest_supervisor.o guest_service.o guest_oracle.o guest_application.o
+          zig ar rcs libseedbox-guest.a guest_supervisor.o guest_service.o guest_oracle.o guest_properties.o guest_application.o
         '' + lib.optionalString withInit ''
           zig cc -target ${triple} -std=c11 -O2 -Wall -Wextra -Werror -static \
             guest_service_init.c libseedbox-guest.a -o init
@@ -45,7 +46,7 @@ let
           runHook preInstall
           mkdir -p "$out/lib" "$out/include"
           cp libseedbox-guest.a "$out/lib/"
-          cp guest_supervisor.h guest_service.h guest_oracle.h guest_application.h "$out/include/"
+          cp guest_supervisor.h guest_service.h guest_oracle.h guest_properties.h guest_application.h "$out/include/"
         '' + lib.optionalString withInit ''
           mkdir -p "$out/bin"
           cp init "$out/bin/init"

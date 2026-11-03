@@ -121,6 +121,7 @@ fn prepared_boot_cache_invalidates_every_machine_input() {
             "disk_volumes" => changed.disk_volumes.push(config::VolumeMount {
                 source: "data".into(),
                 target: "/data".into(),
+                size_bytes: None,
             }),
             _ => unreachable!(),
         }
@@ -403,11 +404,6 @@ fn prepared_boot_cache_matches_fresh_retention_and_cross_project_relative_files(
         store.verify(digest).unwrap();
         fresh_store.verify(digest).unwrap();
     }
-    // Host scheduling capacity is not a boot input.
-    let mut simulation = a.clone();
-    simulation.simulator.machine_workers = 4.try_into().unwrap();
-    assert_eq!(first, prepare(&simulation, &store));
-    assert_eq!(renders.get(), 3);
     // Replay/exports retain all bytes independently of project files and records.
     for name in ["a", "b", "same"] {
         fs::remove_dir_all(root.path().join(name)).unwrap();
@@ -448,6 +444,7 @@ fn prepared_boot_cache_matches_production_pv_and_tcg_archives() {
         launch.disk_volumes.push(config::VolumeMount {
             source: "disk".into(),
             target: "/data".into(),
+            size_bytes: None,
         });
         let configs = BTreeMap::from([("/config".into(), b"configuration".to_vec())]);
         let request = || OciBoot {

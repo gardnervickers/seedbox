@@ -165,6 +165,9 @@ impl Service {
     ) -> Result<Vec<Plan>, Failure> {
         self.finish_inner(fault, observed, at, result, None)
     }
+    /// A realtime step that settles without taking effect takes the heal
+    /// queued behind it along: the heal was never sent, and its handle
+    /// bookkeeping is returned first so the step's record can go.
     fn finish_inner(
         &mut self,
         fault: u32,
@@ -174,6 +177,56 @@ impl Service {
         forced: Option<SettlementStatus>,
     ) -> Result<Vec<Plan>, Failure> {
         self.valid()?;
+        let queued = match result {
+            Err(_) => self.queued_heal(fault),
+            Ok(()) => None,
+        };
+        if let Some((_, plan)) = &queued {
+            if let Err(e) = self.handles.rejected(plan) {
+                return Err(self.fatal(
+                    Some(fault),
+                    Some(observed),
+                    at,
+                    format!("handle completion: {e:?}"),
+                ));
+            }
+        }
+        let mut plans = self.complete(fault, observed, at, result, forced, true)?;
+        if let Some((heal, _)) = queued {
+            let detail = format!("sequenced behind fault {fault}, which was not applied");
+            let result = Err(error(ErrorCode::TargetUnavailable, detail));
+            match self.complete(heal, at, at, result, None, false) {
+                Ok(p) => plans.extend(p),
+                Err(mut failure) => {
+                    failure.retain_before(plans);
+                    return Err(failure);
+                }
+            }
+        }
+        Ok(plans)
+    }
+    /// The pending heal queued behind step `fault`, with its handle plan.
+    fn queued_heal(&self, fault: u32) -> Option<(u32, ExecutionPlan)> {
+        let start = self.pending.get(&fault)?.handle.as_ref()?;
+        if start.healing() || !self.handles.awaiting_start(start.record_id) {
+            return None;
+        }
+        self.pending.iter().find_map(|(&id, p)| {
+            p.handle
+                .as_ref()
+                .filter(|h| h.healing() && h.record_id == start.record_id)
+                .map(|h| (id, h.clone()))
+        })
+    }
+    fn complete(
+        &mut self,
+        fault: u32,
+        observed: u64,
+        at: u64,
+        result: Result<(), OperationError>,
+        forced: Option<SettlementStatus>,
+        handle_completion: bool,
+    ) -> Result<Vec<Plan>, Failure> {
         let p = self
             .pending
             .get(&fault)
@@ -197,7 +250,7 @@ impl Service {
             .map(|e| e.message.clone())
             .unwrap_or_else(|| p.note.unwrap_or("confirmed effect").into());
         let settlement = Self::settlement(fault, p, Some(observed), at, status, detail);
-        if let Some(handle) = &p.handle {
+        if let Some(handle) = p.handle.as_ref().filter(|_| handle_completion) {
             let completion = if result.is_ok() {
                 self.handles.applied(handle)
             } else {
@@ -286,6 +339,10 @@ impl Service {
             .collect();
         let mut plans = vec![];
         for id in ids {
+            // A queued heal may already have settled with its step.
+            if !self.pending.contains_key(&id) {
+                continue;
+            }
             match self.finish(
                 id,
                 observed,
@@ -304,15 +361,71 @@ impl Service {
         }
         Ok(plans)
     }
-    pub(crate) fn deadline(&mut self, fault: u32, at: u64) -> Result<(), Failure> {
+    /// A guest command still pending at its deadline fails the run, except
+    /// one never sent because its rebooted machine was not ready again in
+    /// time: like one for a down machine, it is unavailable. One waiting for
+    /// a first boot that never becomes ready still fails.
+    ///
+    /// Commands admitted after it for that boot were checked against its
+    /// effect and would follow it, so the unsent ones are unavailable with it:
+    /// a restart never reaches the guest without its stop.
+    ///
+    /// A heal still queued behind its unacknowledged step is unavailable too,
+    /// leaving the step for a later heal.
+    pub(crate) fn deadline(&mut self, fault: u32, at: u64) -> Result<Vec<Plan>, Failure> {
         self.valid()?;
         if let Some(p) = self.pending.get(&fault) {
             if at < p.deadline {
                 return Err("early effect deadline".into());
             }
+            let queued = (p.handle.as_ref())
+                .is_some_and(|h| h.healing() && self.handles.awaiting_start(h.record_id));
+            if queued && p.command.is_none() {
+                return self.finish(
+                    fault,
+                    at,
+                    at,
+                    Err(error(
+                        ErrorCode::TargetUnavailable,
+                        "realtime step was not acknowledged in time",
+                    )),
+                );
+            }
+            if p.command.is_none() && p.scope.machine().is_some_and(|(_, boot)| boot > 0) {
+                let behind: Vec<u32> = (self.pending.range(fault + 1..))
+                    .filter(|(_, q)| {
+                        q.scope == p.scope && q.effect.guest_command() && q.command.is_none()
+                    })
+                    .map(|(&id, _)| id)
+                    .collect();
+                let mut plans = self.finish(
+                    fault,
+                    at,
+                    at,
+                    Err(error(
+                        ErrorCode::TargetUnavailable,
+                        "target machine was not ready again in time",
+                    )),
+                )?;
+                for id in behind {
+                    if !self.pending.contains_key(&id) {
+                        continue;
+                    }
+                    let detail = format!("sequenced behind fault {fault}, which was not delivered");
+                    match self.finish(id, at, at, Err(error(ErrorCode::TargetUnavailable, detail)))
+                    {
+                        Ok(p) => plans.extend(p),
+                        Err(mut failure) => {
+                            failure.retain_before(plans);
+                            return Err(failure);
+                        }
+                    }
+                }
+                return Ok(plans);
+            }
             return Err(self.fatal(Some(fault), Some(at), at, "process effect deadline expired"));
         }
-        Ok(())
+        Ok(vec![])
     }
     fn settlement(
         fault: u32,

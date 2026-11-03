@@ -5,7 +5,7 @@ use super::{daemon, defaults, output, ProjectArg, MAC};
 use futures_util::StreamExt;
 use seedbox_api::{
     ExecutionTermination, InputSource, Phase, Simulation, SimulationDocument, SimulationId,
-    SimulationSpec, SubmitRequest,
+    SimulationSpec, SubmitRequest, TestVerdict,
 };
 use seedbox_application::{execution::CancellationToken, Error, Result};
 use seedbox_client::Client;
@@ -159,7 +159,7 @@ pub(super) fn run(
             backend,
             start_paused: paused,
             wall_time_ns,
-            machine_workers: None,
+            machine_workers: selection.machine_workers,
         },
         metadata,
         detach,
@@ -192,7 +192,7 @@ pub(super) fn run_checkpoint(
             backend,
             start_paused: paused,
             wall_time_ns: selection.wall_time,
-            machine_workers: None,
+            machine_workers: selection.machine_workers,
         },
         metadata,
         detach,
@@ -223,12 +223,12 @@ pub(super) fn run_count(
     {
         return Err(Error::Setup("seed range overflows u64".into()));
     }
-    let request = seedbox_api::SeedRangeRequest {
+    let mut request = seedbox_api::SeedRangeRequest {
         options: seedbox_api::ExecutionOptions {
             backend,
             start_paused: paused,
             wall_time_ns,
-            machine_workers: None,
+            machine_workers: selection.machine_workers,
         },
         metadata,
         request_id: Client::request_id().map_err(client_error)?,
@@ -240,6 +240,7 @@ pub(super) fn run_count(
     let _signals = super::signals::Signals::interrupt(&cancellation)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
+        default_machine_workers(&client, &mut request.options, &request.spec).await?;
         let mut range = client.submit_seeds(&request).await.map_err(client_error)?;
         if detach {
             if json {
@@ -383,6 +384,8 @@ fn report_comparison(comparison: &seedbox_api::SimulationComparison, json: bool)
 pub(super) fn replay(
     server: &ServerArgs,
     id: &SimulationId,
+    paused: bool,
+    detach: bool,
     json: bool,
     selection: super::BackendSelection,
 ) -> Result<u8> {
@@ -403,49 +406,14 @@ pub(super) fn replay(
         resource.spec,
         seedbox_api::ExecutionOptions {
             backend,
-            start_paused: false,
-            wall_time_ns,
-            machine_workers: resource.options.machine_workers,
-        },
-        metadata,
-        false,
-        json,
-        Some(id),
-    )
-}
-
-pub(super) fn run_from(
-    server: &ServerArgs,
-    id: &SimulationId,
-    paused: bool,
-    detach: bool,
-    json: bool,
-    selection: super::BackendSelection,
-) -> Result<u8> {
-    let wall_time_ns = selection.wall_time;
-    let client = daemon::connect(server)?;
-    let resource = runtime()?
-        .block_on(client.describe(id))
-        .map_err(client_error)?;
-    if !matches!(resource.spec.inputs, InputSource::Resolved { .. }) {
-        return Err(Error::Setup(format!(
-            "simulation {id} has no prepared inputs; run its project again"
-        )));
-    }
-    let metadata = resource_metadata(&resource);
-    let backend = Some(select_backend(&resource.spec, selection.backend)?);
-    submit(
-        server,
-        resource.spec,
-        seedbox_api::ExecutionOptions {
-            backend,
             start_paused: paused,
             wall_time_ns,
-            machine_workers: resource.options.machine_workers,
+            machine_workers: selection.machine_workers,
         },
         metadata,
         detach,
         json,
+        Some(id),
     )
 }
 
@@ -458,6 +426,22 @@ fn resource_metadata(resource: &Simulation) -> seedbox_spec::definition::Metadat
         annotations,
     }
 }
+/// Compute the omitted worker count from the server that will run the simulation.
+async fn default_machine_workers(
+    client: &Client,
+    options: &mut seedbox_api::ExecutionOptions,
+    spec: &SimulationSpec,
+) -> Result<()> {
+    if options.machine_workers.is_none() {
+        let slots = client.capacity().await.map_err(client_error)?.slots;
+        options.machine_workers = Some(defaults::machine_workers(
+            spec.configuration.services.len(),
+            slots,
+        ));
+    }
+    Ok(())
+}
+
 fn submit(
     server: &ServerArgs,
     spec: SimulationSpec,
@@ -478,7 +462,7 @@ fn submit_with_comparison(
     json: bool,
     baseline: Option<&SimulationId>,
 ) -> Result<u8> {
-    let request = SubmitRequest {
+    let mut request = SubmitRequest {
         options,
         metadata,
         request_id: Client::request_id().map_err(client_error)?,
@@ -489,6 +473,7 @@ fn submit_with_comparison(
     let _signals = super::signals::Signals::interrupt(&cancellation)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
+        default_machine_workers(&client, &mut request.options, &request.spec).await?;
         let resource = client.submit(&request).await.map_err(client_error)?;
         if detach {
             if json { output::json(&resource)?; } else { output::status("CREATED", &resource.metadata.id); }
@@ -603,6 +588,9 @@ pub(super) fn show_status(server: &ServerArgs, id: &SimulationId, json: bool) ->
         output::json(&resource)?;
     } else {
         simulation_table(vec![simulation_row(&resource)])?;
+        if let Some(properties) = &resource.status.properties {
+            property_fields(properties);
+        }
         if resource.status.phase == Phase::Queued {
             let capacity = runtime()?
                 .block_on(client.capacity())
@@ -783,6 +771,7 @@ pub(super) fn mutate_control(
     eprintln!("request: {request_id}");
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
+        let sent = command.clone();
         let request = ControlRequest {
             request_id,
             command,
@@ -802,7 +791,8 @@ pub(super) fn mutate_control(
         if mutation.json {
             output::json(&receipt)?;
         } else {
-            output::yaml(&receipt)?;
+            let (word, detail) = control_line(&mutation.id, &sent, &receipt.state);
+            output::status(word, detail);
         }
         Ok(match receipt.state {
             ControlState::Accepted | ControlState::Acknowledged { error: None, .. } => 0,
@@ -811,11 +801,56 @@ pub(super) fn mutate_control(
     })
 }
 
+/// The status word and detail for a control request; `--json` prints the whole receipt.
+fn control_line(
+    id: &SimulationId,
+    command: &seedbox_api::ControlCommand,
+    state: &seedbox_api::ControlState,
+) -> (&'static str, String) {
+    use seedbox_api::{ControlCommand, ControlState, FaultAction, PlaybackRate};
+    match state {
+        ControlState::Accepted => ("ACCEPTED", format!("{id} (not yet applied)")),
+        ControlState::Unsupported => ("UNSUPPORTED", id.to_string()),
+        ControlState::Interrupted => (
+            "INTERRUPTED",
+            format!("{id} (the request may have taken effect)"),
+        ),
+        ControlState::Acknowledged {
+            error: Some(error), ..
+        } => ("REJECTED", format!("{id}: {}", output::word(error))),
+        ControlState::Acknowledged { status, .. } => {
+            let word = match command {
+                ControlCommand::SetRate {
+                    rate: PlaybackRate::Paused,
+                } => "PAUSED",
+                ControlCommand::SetRate {
+                    rate: PlaybackRate::Unlimited,
+                } => "RESUMED",
+                ControlCommand::SetRate { .. } | ControlCommand::PauseBeforeNextFault { .. } => {
+                    "RATE_SET"
+                }
+                ControlCommand::Step => "STEPPED",
+                ControlCommand::Checkpoint => "CHECKPOINTED",
+                ControlCommand::InjectFault {
+                    action: FaultAction::Heal { .. },
+                } => "HEALED",
+                ControlCommand::InjectFault { .. } => "INJECTED",
+            };
+            let at = seedbox_tui::short_time(status.position.simulated_time_ns);
+            (word, format!("{id} at {at}"))
+        }
+    }
+}
+
+/// The verdict, which guest property findings qualify: a violation or an
+/// unmet requirement fails the run, and lost property evidence leaves a
+/// passing oracle's run incomplete.
 fn status_outcome(status: &seedbox_api::SimulationStatus) -> (&'static str, u8) {
-    match status.oracle_exit_code {
-        Some(0) => ("PASS", 0),
-        Some(_) => ("FAIL", 1),
-        None => match status.termination {
+    match (status.verdict(), status.oracle_exit_code) {
+        (TestVerdict::Passed, _) => ("PASS", 0),
+        (TestVerdict::Failed, _) => ("FAIL", 1),
+        (_, Some(_)) => ("INCOMPLETE", 3),
+        (_, None) => match status.termination {
             Some(ExecutionTermination::Error { .. }) => ("ERROR", 2),
             Some(
                 ExecutionTermination::SimulatedTimeLimit
@@ -833,11 +868,54 @@ fn report(resource: &Simulation, json: bool) -> Result<u8> {
         output::json(resource)?;
     } else {
         output::status(word, &resource.metadata.id);
+        if let Some(properties) = &resource.status.properties {
+            property_fields(properties);
+        }
     }
     if let Some(ExecutionTermination::Error { message }) = &resource.status.termination {
         eprintln!("execution: {message}");
     }
     Ok(code)
+}
+
+/// A run's property findings, the reason properties changed its verdict:
+/// each violation with its first example, each unmet requirement, and lost
+/// evidence with the reasons kept.
+fn property_fields(properties: &seedbox_api::PropertyAssessment) {
+    for violation in &properties.violations {
+        let example = &violation.example;
+        let mut value = format!(
+            "{} ({}) on {} at {}",
+            violation.id,
+            output::word(&violation.kind),
+            example.origin.machine,
+            seedbox_tui::short_time(example.origin.time_ns)
+        );
+        if let Some(details) = &example.details {
+            value.push_str(&format!(": {details}"));
+        } else if example.details_truncated {
+            value.push_str(": details truncated");
+        }
+        output::field("violated", value);
+    }
+    for id in &properties.unmet_requirements {
+        output::field("unmet requirement", id);
+    }
+    if properties.lost_count > 0 {
+        output::field("lost evidence", properties.lost_count);
+    }
+    for lost in &properties.lost_evidence {
+        match &lost.origin {
+            Some(o) => output::field(
+                "lost",
+                format!(
+                    "{} ({} session {} seq {})",
+                    lost.reason, o.machine, o.session, o.seq
+                ),
+            ),
+            None => output::field("lost", &lost.reason),
+        }
+    }
 }
 
 pub(super) fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -854,6 +932,46 @@ pub(super) fn client_error(error: seedbox_client::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_lines_name_the_action_and_simulated_time() {
+        use seedbox_api::{ControlCommand, ControlState, PlaybackRate};
+        let id: SimulationId = "k7m2p9qx".parse().unwrap();
+        let acknowledged = |error| ControlState::Acknowledged {
+            status: seedbox_api::PlaybackStatus {
+                position: seedbox_engine_protocol::host_control::BoundaryPosition {
+                    boundary_index: 3,
+                    completed_rounds: 2,
+                    simulated_time_ns: 12_300_000_000,
+                },
+                rate: PlaybackRate::Paused,
+                achieved_rate: None,
+                stepping: false,
+                before_next_fault: false,
+                terminal: false,
+                application_ready: true,
+            },
+            error,
+            intervention: None,
+            detail: None,
+            checkpoint: None,
+        };
+        let pause = ControlCommand::SetRate {
+            rate: PlaybackRate::Paused,
+        };
+        assert_eq!(
+            control_line(&id, &pause, &acknowledged(None)),
+            ("PAUSED", "k7m2p9qx at 12.3s".into())
+        );
+        assert_eq!(
+            control_line(&id, &ControlCommand::Step, &acknowledged(None)).0,
+            "STEPPED"
+        );
+        assert_eq!(
+            control_line(&id, &pause, &ControlState::Interrupted).0,
+            "INTERRUPTED"
+        );
+    }
 
     #[test]
     fn backend_selection_defaults_projects_but_preserves_retained_tcg() {
@@ -902,6 +1020,7 @@ mod tests {
                 },
                 volumes: Default::default(),
                 anonymous_volumes: vec![],
+                allow_crashes: false,
             },
             network: spec.configuration.network.clone(),
             simulator: d::Simulator {
@@ -956,7 +1075,7 @@ mod tests {
         let custom = tempfile::tempdir().unwrap();
         std::fs::write(
             custom.path().join("seedbox.yaml"),
-            "name: custom\noracle: {image: busybox}\nsimulator: {quantum: 2.5ms, machineWorkers: 4}\n",
+            "name: custom\noracle: {image: busybox}\nsimulator: {quantum: 2.5ms}\n",
         )
         .unwrap();
         let (spec, _) = load_spec(
@@ -969,7 +1088,6 @@ mod tests {
         let restored: SimulationSpec =
             serde_json::from_slice(&serde_json::to_vec(&spec).unwrap()).unwrap();
         assert_eq!(restored.configuration.simulator.quantum_ns.get(), 2_500_000);
-        assert_eq!(restored.configuration.simulator.machine_workers.get(), 4);
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../harness/acceptance/workloads");
@@ -1005,5 +1123,37 @@ mod tests {
             tested += 1;
         }
         assert!(tested >= 7);
+    }
+
+    #[test]
+    fn property_findings_decide_pass_fail_and_incomplete() {
+        use seedbox_api::PropertyAssessment;
+        let unmet = PropertyAssessment {
+            unmet_requirements: vec!["failover exercised".into()],
+            ..Default::default()
+        };
+        let lost = PropertyAssessment {
+            lost_count: 1,
+            ..Default::default()
+        };
+        for (exit, properties, expected) in [
+            (Some(0), None, ("PASS", 0)),
+            (Some(0), Some(&unmet), ("FAIL", 1)),
+            (Some(0), Some(&lost), ("INCOMPLETE", 3)),
+            (Some(1), None, ("FAIL", 1)),
+            (Some(3), None, ("INCOMPLETE", 3)),
+            (Some(3), Some(&unmet), ("FAIL", 1)),
+            (None, Some(&unmet), ("INCOMPLETE", 3)),
+            (None, None, ("INCOMPLETE", 3)),
+        ] {
+            let mut status = seedbox_api::SimulationStatus {
+                phase: Phase::Completed,
+                oracle_exit_code: exit,
+                properties: properties.cloned(),
+                ..Default::default()
+            };
+            status.verdict = seedbox_server::verdict::of(&status);
+            assert_eq!(status_outcome(&status), expected, "{exit:?} {properties:?}");
+        }
     }
 }

@@ -568,7 +568,9 @@ fn nameserver_replies_in_flight_survive_capture() {
     );
     advance(&mut d, 5);
     assert_eq!(d.execution.network.in_flight().len(), 2);
-    let c = d.checkpoint().unwrap();
+    // Through the encoded artifact, so restore validates the self-flights.
+    let (bytes, store) = artifact(d.checkpoint().unwrap());
+    let c = decode(&bytes, &store);
     reference_observer_session(&mut d);
     let expected = advance(&mut d, 20);
     let replies = |d: &Driver<Mock>| {

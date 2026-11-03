@@ -172,12 +172,103 @@ pub(crate) fn merge(
             }
         }
     }
-    let result = ocirender::overlay::merge_layers_into(layers, sink).map_err(error);
+    let result = merge_folded(layers, directory, sink, cancellation);
     if cancellation.is_cancelled() {
         return Err(Error::PreparationCancelled);
     }
     result?;
     Ok(config)
+}
+
+/// Merge `layers`, oldest first, as applying them in order would.
+///
+/// ocirender 0.2.3 resolves the whiteouts of every layer in one path trie that
+/// loses suppressions once more than one layer carries whiteouts: an older
+/// layer's marker replaces a newer one on the same path, and a directory made
+/// opaque in a layer hides newer whiteouts below it from that layer's own
+/// entries. Both bring deleted files back. Merging is exact while at most one
+/// layer has whiteouts, so such images keep the single merge. Otherwise apply
+/// the layers in groups that each end at a layer with whiteouts, each group
+/// over the merged result of those before.
+fn merge_folded(
+    layers: Vec<ocirender::image::LayerBlob>,
+    directory: &Path,
+    sink: Output<'_>,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    let mut marked = Vec::with_capacity(layers.len());
+    for layer in layers {
+        let whiteouts = has_whiteouts(&layer, cancellation)?;
+        marked.push((layer, whiteouts));
+    }
+    if marked.iter().filter(|(_, whiteouts)| *whiteouts).count() < 2 {
+        let layers = marked.into_iter().map(|(layer, _)| layer).collect();
+        return ocirender::overlay::merge_layers_into(layers, sink).map_err(error);
+    }
+    let mut groups = Vec::new();
+    let mut group = Vec::new();
+    for (layer, whiteouts) in marked {
+        group.push(layer);
+        if whiteouts {
+            groups.push(std::mem::take(&mut group));
+        }
+    }
+    if group.is_empty() {
+        group = groups.pop().unwrap_or_default();
+    }
+    // The merged result so far is the oldest layer of the next group.
+    let stack = |base: Option<&tempfile::NamedTempFile>,
+                 group: Vec<ocirender::image::LayerBlob>| {
+        let mut blobs: Vec<_> = base
+            .map(|merged| ocirender::image::LayerBlob {
+                path: merged.path().to_owned(),
+                media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+                index: 0,
+            })
+            .into_iter()
+            .collect();
+        let offset = blobs.len();
+        blobs.extend(group.into_iter().enumerate().map(|(index, mut layer)| {
+            layer.index = offset + index;
+            layer
+        }));
+        blobs
+    };
+    let mut base = None;
+    for earlier in groups {
+        // A fresh name never collides with an extracted envelope member.
+        let merged = tempfile::NamedTempFile::new_in(directory)?;
+        let output = Output {
+            file: std::io::BufWriter::new(merged.reopen()?),
+            remaining: LIMIT,
+            cancellation,
+        };
+        ocirender::overlay::merge_layers_into(stack(base.as_ref(), earlier), output)
+            .map_err(error)?;
+        base = Some(merged);
+    }
+    ocirender::overlay::merge_layers_into(stack(base.as_ref(), group), sink).map_err(error)
+}
+
+fn has_whiteouts(
+    layer: &ocirender::image::LayerBlob,
+    cancellation: &CancellationToken,
+) -> Result<bool> {
+    let mut archive =
+        ocirender::layers::open_layer(&layer.path, &layer.media_type).map_err(error)?;
+    for entry in archive.entries()? {
+        if cancellation.is_cancelled() {
+            return Err(Error::PreparationCancelled);
+        }
+        if entry?
+            .path()?
+            .file_name()
+            .is_some_and(|name| name.as_encoded_bytes().starts_with(b".wh."))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -299,6 +390,113 @@ mod tests {
         assert_eq!(entry.header().uid().unwrap(), 456);
         assert_eq!(entry.header().gid().unwrap(), 456);
         assert_eq!(entry.header().mtime().unwrap(), 456);
+    }
+
+    /// A layer of empty entries; a trailing `/` makes a directory.
+    fn layer(entries: &[&str]) -> Vec<u8> {
+        let mut layer = tar::Builder::new(Vec::new());
+        for entry in entries {
+            let mut header = tar::Header::new_ustar();
+            header.set_mode(0o755);
+            header.set_size(0);
+            if entry.ends_with('/') {
+                header.set_entry_type(tar::EntryType::Directory);
+            }
+            layer
+                .append_data(&mut header, entry, std::io::empty())
+                .unwrap();
+        }
+        layer.into_inner().unwrap()
+    }
+
+    fn merged_paths(layers: Vec<Vec<u8>>) -> Vec<String> {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("rootfs");
+        merge_image(layers, &output);
+        let mut paths: Vec<_> = tar::Archive::new(fs::File::open(output).unwrap())
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().path().unwrap().display().to_string())
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    /// Merge `layers`, oldest first, from a Docker-save envelope into `output`.
+    fn merge_image(layers: Vec<Vec<u8>>, output: &Path) {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("image.tar");
+        let names: Vec<_> = (0..layers.len()).map(|i| format!("l{i}.tar")).collect();
+        let mut image = tar::Builder::new(fs::File::create(&input).unwrap());
+        member(&mut image, "config.json", b"{}");
+        let manifest = serde_json::json!([{"Config": "config.json", "Layers": names}]);
+        member(&mut image, "manifest.json", manifest.to_string().as_bytes());
+        for (name, layer) in names.iter().zip(layers) {
+            member(&mut image, name, &layer);
+        }
+        image.finish().unwrap();
+        merge(
+            &input,
+            &root.path().join("blobs"),
+            output,
+            &CancellationToken::default(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn one_layer_with_whiteouts_keeps_the_single_merge_bytes() {
+        let layers = vec![
+            layer(&["d/", "d/old", "e/", "e/x"]),
+            layer(&[".wh.e", "d/", "d/.wh.old", "d/new"]),
+            layer(&["d/", "d/newest"]),
+        ];
+        let root = tempfile::tempdir().unwrap();
+        let blobs: Vec<_> = layers
+            .iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                let path = root.path().join(format!("l{index}.tar"));
+                fs::write(&path, bytes).unwrap();
+                ocirender::image::LayerBlob {
+                    path,
+                    media_type: "application/vnd.oci.image.layer.v1.tar".into(),
+                    index,
+                }
+            })
+            .collect();
+        let mut single = Vec::new();
+        ocirender::overlay::merge_layers_into(blobs, &mut single).unwrap();
+        let output = root.path().join("merged");
+        merge_image(layers, &output);
+        assert_eq!(fs::read(output).unwrap(), single);
+    }
+
+    #[test]
+    fn whiteouts_in_several_layers_all_stay_applied() {
+        // An older layer's whiteout must not undo a newer one on the same path.
+        assert_eq!(
+            merged_paths(vec![
+                layer(&["d/", "d/old"]),
+                layer(&[".wh.d", "d/", "d/new"]),
+                layer(&[".wh.d", "d/"]),
+            ]),
+            ["d/"]
+        );
+        // A directory made opaque in one layer keeps a later whiteout below it.
+        assert_eq!(
+            merged_paths(vec![
+                layer(&["d/", "d/f"]),
+                layer(&["d/", "d/.wh..wh..opq", "d/f", "d/g"]),
+                layer(&["d/", "d/.wh.f"]),
+            ]),
+            ["d/", "d/g"]
+        );
+        // Layers without whiteouts merge as before, newest entry first.
+        assert_eq!(
+            merged_paths(vec![layer(&["a/", "a/x"]), layer(&["a/", "a/y"])]),
+            ["a/", "a/x", "a/y"]
+        );
     }
 
     #[test]

@@ -113,6 +113,7 @@ impl Receiver {
                                     applied_time_ns,
                                     plan,
                                     input_key,
+                                    counts,
                                 } => event(
                                     last_time,
                                     EventKind::FaultChanged {
@@ -128,6 +129,7 @@ impl Receiver {
                                             )
                                         }),
                                         input_key,
+                                        counts,
                                     },
                                 ),
                                 Kind::Frames { frames: batch } => frames(last_time, batch),
@@ -296,6 +298,7 @@ mod tests {
                     applied_time_ns: None,
                     plan: Some(Box::new(stop.clone())),
                     input_key: None,
+                    counts: None,
                 },
             ),
             (
@@ -370,6 +373,7 @@ mod tests {
                         applied_time_ns: None,
                         plan: Some(Box::new(serde_json::to_value(stop).unwrap())),
                         input_key: None,
+                        counts: None,
                     }
                 ),
                 (30, EventKind::SourceUnavailable),

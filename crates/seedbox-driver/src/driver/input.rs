@@ -153,6 +153,11 @@ pub enum Action {
     /// zero-budget admission run; paused machines stay paused.
     Shutdown(Target),
     /// Stop the prepared application. Settled by the guest's acknowledgment.
+    ///
+    /// The guest carries out process commands in order, so each is admitted
+    /// against the process state once the process commands already admitted
+    /// for the boot land: a restart may follow a stop not yet acknowledged,
+    /// and a process pause behind that stop is refused.
     Stop { target: Target, deadline: Duration },
     /// Start the prepared application again. Settled by acknowledgment.
     Restart { target: Target, deadline: Duration },
@@ -210,7 +215,9 @@ pub enum Action {
     /// control deadline (5 s of simulation time from admission) bounding
     /// dispatch and acknowledgment. Linux refuses a step that would put
     /// realtime below `CLOCK_MONOTONIC`. The step ends with its boot; healing
-    /// it afterwards changes nothing.
+    /// it afterwards changes nothing. A heal requested before the step is
+    /// acknowledged is admitted and sends the inverse once the step lands; if
+    /// the step never takes effect, the heal settles Unavailable with it.
     StepRealtime {
         target: Target,
         nanoseconds: NonZeroI64,

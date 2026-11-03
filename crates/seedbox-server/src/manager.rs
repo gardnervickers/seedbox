@@ -7,6 +7,7 @@ use seedbox_api::{ControlReceipt, ControlRequest, ControlState, LogEntry};
 use seedbox_api::{EventKind, SimulationEvent};
 use seedbox_api::{ExecutionTermination, Phase, Simulation, SimulationId, SubmitRequest};
 use seedbox_application::execution::CancellationToken;
+use seedbox_application::store::ContentDigest;
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
@@ -234,7 +235,6 @@ struct State {
     live: BTreeMap<SimulationId, Live>,
     /// Observed worlds outlive their workers until the simulation is deleted.
     worlds: BTreeMap<SimulationId, crate::world::Tracker>,
-    imported_worlds: BTreeMap<SimulationId, seedbox_api::WorldState>,
     results: BTreeMap<SimulationId, ResultEvidence>,
     accepting: bool,
 }
@@ -563,7 +563,6 @@ impl Manager {
             live,
             accepting: true,
             worlds: BTreeMap::new(),
-            imported_worlds: BTreeMap::new(),
             results: BTreeMap::new(),
         }))
     }
@@ -571,6 +570,24 @@ impl Manager {
     pub fn read<T>(&self, read: impl FnOnce(&Catalogue) -> Result<T, Error>) -> Result<T, Error> {
         let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
         read(&state.catalogue)
+    }
+
+    pub(crate) fn reclaimed(
+        &self,
+        removed: impl IntoIterator<Item = (ContentDigest, crate::catalogue::Reclaimed)>,
+    ) -> Result<(), Error> {
+        let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        state.catalogue.reclaimed(removed);
+        Ok(())
+    }
+
+    pub(crate) fn restored(
+        &self,
+        digests: &std::collections::BTreeSet<ContentDigest>,
+    ) -> Result<(), Error> {
+        let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        state.catalogue.restored(digests);
+        Ok(())
     }
 
     /// Durations reflect the query instant; their projection does not change
@@ -658,7 +675,6 @@ impl Manager {
         state.live.remove(id);
         state.retained_logs.remove(id);
         state.worlds.remove(id);
-        state.imported_worlds.remove(id);
         state.results.remove(id);
         Ok(())
     }
@@ -697,115 +713,18 @@ impl Manager {
         Ok(state.results.get(id).cloned())
     }
 
-    pub(crate) fn import_bundle(
-        &self,
-        snapshot: &seedbox_artifacts::archive::Snapshot,
-        logs: Vec<seedbox_api::LogDelivery>,
-        machine_logs: BTreeMap<String, Vec<seedbox_api::LogDelivery>>,
-        events: Vec<seedbox_api::EventDelivery>,
-        prepare: impl FnOnce(&Simulation) -> Result<(), Error>,
-    ) -> Result<Simulation, Error> {
-        let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
-        if !state.accepting {
-            return Err(Error::Unavailable);
+    /// What each resource names content in, including its retained result.
+    pub(crate) fn content(&self) -> Result<Vec<(SimulationId, serde_json::Value)>, Error> {
+        let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
+        let mut values = state.catalogue.content()?;
+        for (id, result) in &state.results {
+            let value = serde_json::to_value((&result.definition, &result.record));
+            values.push((
+                id.clone(),
+                value.map_err(|e| Error::Invalid(e.to_string()))?,
+            ));
         }
-        let history = state.log_history.clone();
-        let event_history = state.event_history.clone();
-        let mut restored = None;
-        let resource = state.catalogue.import(snapshot, |resource| {
-            let live = Live::new(resource, &history, &event_history);
-            for delivery in logs {
-                match delivery {
-                    seedbox_api::LogDelivery::Entry { sequence, entry } => {
-                        live.all_logs
-                            .restore(sequence, Some(entry))
-                            .map_err(|e| Error::Invalid(e.to_string()))?;
-                    }
-                    seedbox_api::LogDelivery::Gap { last, .. } => {
-                        live.all_logs
-                            .restore(last, None)
-                            .map_err(|e| Error::Invalid(e.to_string()))?;
-                    }
-                    seedbox_api::LogDelivery::Closed => {}
-                }
-            }
-            for (name, stream) in &live.logs {
-                if let Some(deliveries) = machine_logs.get(name) {
-                    for delivery in deliveries {
-                        match delivery {
-                            seedbox_api::LogDelivery::Entry { sequence, entry } => {
-                                stream.restore(*sequence, Some(entry.clone()))
-                            }
-                            seedbox_api::LogDelivery::Gap { last, .. } => {
-                                stream.restore(*last, None)
-                            }
-                            seedbox_api::LogDelivery::Closed => Ok(()),
-                        }
-                        .map_err(|e| Error::Invalid(e.to_string()))?;
-                    }
-                } else {
-                    stream
-                        .publish(LogEntry::SourceUnavailable)
-                        .map_err(|e| Error::Invalid(e.to_string()))?;
-                }
-            }
-            for delivery in events {
-                match delivery {
-                    seedbox_api::EventDelivery::Event {
-                        sequence,
-                        mut observation,
-                    } => {
-                        observation.simulation = resource.metadata.id.clone();
-                        live.events
-                            .restore(sequence, Some(observation))
-                            .map_err(|e| Error::Invalid(e.to_string()))?;
-                    }
-                    seedbox_api::EventDelivery::Gap { last, .. } => {
-                        live.events
-                            .restore(last, None)
-                            .map_err(|e| Error::Invalid(e.to_string()))?;
-                    }
-                    seedbox_api::EventDelivery::Closed => {}
-                }
-            }
-            live.all_logs
-                .close()
-                .map_err(|e| Error::Invalid(e.to_string()))?;
-            live.events
-                .close()
-                .map_err(|e| Error::Invalid(e.to_string()))?;
-            for stream in live.logs.values() {
-                stream.close().map_err(|e| Error::Invalid(e.to_string()))?;
-            }
-            prepare(resource)?;
-            restored = Some(RetainedLogs {
-                machines: live.logs,
-                all: live.all_logs,
-                events: live.events,
-            });
-            Ok(())
-        })?;
-        if let (seedbox_api::InputSource::Resolved { definition }, Some(record)) =
-            (&resource.spec.inputs, &snapshot.record)
-        {
-            state.results.insert(
-                resource.metadata.id.clone(),
-                ResultEvidence {
-                    definition: definition.clone(),
-                    record: record.clone(),
-                },
-            );
-        }
-        let mut world = snapshot.world.clone();
-        world.simulation = resource.metadata.id.clone();
-        state
-            .imported_worlds
-            .insert(resource.metadata.id.clone(), world);
-        state.retained_logs.insert(
-            resource.metadata.id.clone(),
-            restored.expect("prepared before publication"),
-        );
-        Ok(resource)
+        Ok(values)
     }
 
     pub fn submit(&self, request: SubmitRequest) -> Result<(Simulation, bool), Error> {
@@ -902,12 +821,6 @@ impl Manager {
             .get(id)
             .map(|l| l.cancellation.clone())
             .ok_or_else(|| Error::NotFound(id.clone()))
-    }
-
-    pub(crate) fn observation_history_available(&self, id: &SimulationId) -> Result<bool, Error> {
-        let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
-        state.catalogue.get(id)?;
-        Ok(state.live.contains_key(id) || state.retained_logs.contains_key(id))
     }
 
     /// Live events after retained history; without `follow`, only the history.
@@ -1110,9 +1023,6 @@ impl Manager {
     pub fn world(&self, id: &SimulationId) -> Result<seedbox_api::WorldState, Error> {
         let state = self.0.lock().map_err(|_| Error::StorageFailed)?;
         let resource = state.catalogue.get(id)?;
-        if let Some(world) = state.imported_worlds.get(id) {
-            return Ok(world.clone());
-        }
         Ok(match state.worlds.get(id) {
             Some(world) => world.snapshot(),
             None => crate::world::Tracker::new(id.clone(), &resource.spec.configuration).snapshot(),

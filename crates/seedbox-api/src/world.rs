@@ -160,6 +160,9 @@ pub struct FaultState {
     pub plan: Option<serde_json::Value>,
     /// An applied effect that persists until healed, reversed, or ended by lifecycle.
     pub active: bool,
+    /// What the fault matched and did, once its engine reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counts: Option<crate::FaultCounts>,
 }
 
 /// One batch of routed frames on the live frame stream.

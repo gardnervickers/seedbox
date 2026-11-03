@@ -1,0 +1,10 @@
+# The oracle exits 0, but a process it starts dies of SIGABRT on a machine
+# without allowCrashes: seedbox.no_crashing_processes is violated, so FAIL.
+name: guest-unexpected-crash
+machines: {}
+oracle:
+  build:
+    context: "../../.."
+    dockerfile: harness/acceptance/images/properties/Dockerfile
+  command:
+  - unexpected-crash

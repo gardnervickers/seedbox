@@ -9,6 +9,7 @@ publish.workspace = true
 hex.workspace = true
 seedbox-artifacts.workspace = true
 seedbox-spec.workspace = true
+seedbox-engine-core.workspace = true
 seedbox-engine-protocol.workspace = true
 seedbox-driver-execution.workspace = true
 serde.workspace = true
@@ -26,6 +27,8 @@ ocirender = "0.2.2"
 
 
 [dev-dependencies]
+# Outcome tests classify the artifact crate's run-record fixture.
+seedbox-artifacts = { workspace = true, features = ["test-support"] }
 # Preparation tests use Driver execution's synthetic runtime package.
 seedbox-driver-execution = { workspace = true, features = ["test-support"] }
 libc.workspace = true

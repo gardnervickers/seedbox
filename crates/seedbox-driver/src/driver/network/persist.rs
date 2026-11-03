@@ -98,6 +98,10 @@ impl Network {
             if let Some(nic) = &d.network {
                 require(macs.insert(nic.mac()), "duplicate future MAC")?;
                 require(
+                    addresses.insert(nic.ipv4().octets()),
+                    "duplicate future address",
+                )?;
+                require(
                     !super::reserved(nic.mac(), nic.ipv4().octets()),
                     "future machine uses the nameserver",
                 )?;

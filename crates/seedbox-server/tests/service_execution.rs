@@ -159,6 +159,7 @@ impl ExecutionBackend for FixtureExecutor {
             faults: Vec::new(),
             host_wait_ns: 0,
             simulated_time_ns: Some(42),
+            properties: None,
         })
     }
 }
@@ -311,6 +312,7 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
                 faults: Vec::new(),
                 host_wait_ns: 0,
                 simulated_time_ns: None,
+                properties: None,
             }),
             error: None,
             logs: Default::default(),

@@ -84,6 +84,12 @@ pub(in crate::driver_world) fn encode(
                 Response::OutOfMemoryKill { kill } => {
                     json!({"type":"out_of_memory_kill", "kill":kill})
                 }
+                Response::Property { frame } => {
+                    json!({"type":"property","session":frame.session,"seq":frame.seq,"bytes":hex::encode(&frame.payload)})
+                }
+                Response::Crash { report } => {
+                    json!({"type":"crash", "report":report})
+                }
                 Response::ApplicationOutcome { code } => {
                     json!({"type":"application_outcome","code":code})
                 }

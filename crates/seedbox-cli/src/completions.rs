@@ -87,9 +87,6 @@ pub(super) fn complete(words: &[String]) -> Result<u8> {
     let mut candidates = Vec::new();
     if let Some(arg) = value_arg {
         values(arg, &mut candidates);
-        if path == ["run"] && arg.get_long() == Some("from") {
-            candidates.extend(dynamic_resource(Resource::Simulations, state.clone()));
-        }
     } else if options && prefix.starts_with('-') {
         for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
             if let Some(long) = arg.get_long() {

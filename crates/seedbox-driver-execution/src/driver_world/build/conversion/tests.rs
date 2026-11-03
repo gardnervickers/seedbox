@@ -30,6 +30,7 @@ fn prepared(root: &std::path::Path) -> wire::Prepared {
         },
         disk: None,
         interface: None,
+        allow_crashes: false,
     };
     wire::Prepared {
         inventory: wire::Inventory::Tcg {

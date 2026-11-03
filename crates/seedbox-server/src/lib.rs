@@ -27,6 +27,7 @@ mod preparation_budget;
 pub mod stream;
 #[cfg(unix)]
 mod timing;
+pub mod verdict;
 #[cfg(unix)]
 mod worker;
 #[cfg(unix)]

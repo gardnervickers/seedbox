@@ -3749,6 +3749,7 @@ pub(crate) mod tests {
                 serde_json::json!({"action":"partition","handle":"p1","left":["a"],"right":["b"]}),
             ),
             active: true,
+            counts: None,
         });
         app.apply(Update::World(w));
     }

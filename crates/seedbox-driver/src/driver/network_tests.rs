@@ -640,6 +640,29 @@ fn duplicate_macs_are_rejected_before_the_factory_runs() {
 }
 
 #[test]
+fn duplicate_addresses_are_rejected_before_the_factory_runs() {
+    let mut standby = definition(1);
+    standby.network = Some(
+        NetworkInterface::new(MacAddress::new(mac(2)).unwrap(), [10, 0, 0, 1].into(), 16).unwrap(),
+    );
+    let result = Driver::<Net>::new(
+        at(0),
+        Duration::from_nanos(10),
+        1,
+        crate::rng::SeededRng::new(0),
+        || Ok(()),
+        networked(0, Some(1)),
+        vec![],
+        vec![standby],
+        NetworkConfig::default(),
+        |_| panic!("factory ran"),
+    );
+    assert!(
+        matches!(result, Err(Error::DuplicateAddress(address)) if address.octets() == [10, 0, 0, 1])
+    );
+}
+
+#[test]
 fn definitions_cannot_claim_the_nameserver() {
     let nameserver = |mac: [u8; 6], address: [u8; 4]| {
         let mut definition = definition(1);

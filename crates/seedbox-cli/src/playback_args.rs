@@ -8,9 +8,9 @@ pub(super) struct Mutation {
     /// Short simulation ID.
     pub id: SimulationId,
     /// Reuse this ID to safely retry the same command [default: generated once].
-    #[arg(long, value_parser = request_id)]
+    #[arg(long, value_parser = request_id, hide = true)]
     pub request_id: Option<String>,
-    /// Print JSON instead of YAML.
+    /// Print the control receipt as JSON.
     #[arg(long)]
     pub json: bool,
 }
