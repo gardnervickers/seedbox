@@ -9,7 +9,3 @@ machines:
 oracle:
   build: {context: ./workload}
   command: [scenario, --control-address, "client:7001"]
-network: {latency: 1ms}
-simulator:
-  quantum: 1ms
-  machineWorkers: 1

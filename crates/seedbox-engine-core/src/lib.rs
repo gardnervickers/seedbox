@@ -6,4 +6,6 @@ pub mod network_counters;
 
 pub mod network_faults;
 
+pub mod properties;
+
 pub mod checkpoint;

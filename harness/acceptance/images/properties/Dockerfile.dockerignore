@@ -1,0 +1,5 @@
+*
+!Cargo.toml
+!crates/seedbox-guest
+!harness/acceptance/images/properties
+harness/acceptance/images/properties/target

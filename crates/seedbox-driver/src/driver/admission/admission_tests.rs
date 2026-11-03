@@ -75,6 +75,7 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         trigger_marker,
         definitions,
         network,
+        properties,
     } = execution;
     let ObservationState {
         staged_events,
@@ -109,7 +110,8 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         inputs,
         trigger_marker,
         definitions,
-        network
+        network,
+        properties
     );
     machines.len().put(&mut e).unwrap();
     for entry in machines {

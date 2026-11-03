@@ -57,6 +57,10 @@ static uint slot(uint word)
     return budget_offset + word * sizeof(reg_t);
 }
 
+/* The first argument of a progress getpid. The guest kernel counts timer
+ * ticks that interrupt such a call's charge as user time. */
+#define SEEDBOX_PROGRESS_MARK 0x5eedb0c5L
+
 static void checkpoint_and_dispatch(void)
 {
     byte *base = dr_get_dr_segment_base(budget_segment);
@@ -64,12 +68,12 @@ static void checkpoint_and_dispatch(void)
     *budget() = block_budget;
 #ifdef X86_64
     long result;
-    __asm__ volatile("syscall" : "=a"(result) : "a"(39L)
+    __asm__ volatile("syscall" : "=a"(result) : "a"(39L), "D"(SEEDBOX_PROGRESS_MARK)
                      : "rcx", "r11", "memory", "cc");
 #elif defined(AARCH64)
     register long number __asm__("x8") = 172;
-    register long result __asm__("x0");
-    __asm__ volatile("svc #0" : "=r"(result) : "r"(number) : "memory", "cc");
+    register long result __asm__("x0") = SEEDBOX_PROGRESS_MARK;
+    __asm__ volatile("svc #0" : "+r"(result) : "r"(number) : "memory", "cc");
 #else
 #error Unsupported progress architecture
 #endif

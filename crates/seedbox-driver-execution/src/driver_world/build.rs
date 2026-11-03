@@ -123,6 +123,9 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
         },
     )
     .map_err(|e| bad(e.to_string()))?;
+    driver
+        .allow_crashes(allow_crashes(&request.prepared))
+        .map_err(|e| bad(e.to_string()))?;
     if request.start_paused {
         driver
             .with_barrier(|barrier| barrier.set_rate(seedbox_driver::driver::PlaybackRate::Paused))
@@ -158,6 +161,16 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     )?;
     worker.flush()?;
     Ok(worker)
+}
+/// The machines with `allowCrashes`, by name. Restored Drivers keep the
+/// set their checkpoint captured.
+fn allow_crashes(prepared: &wire::Prepared) -> std::collections::BTreeSet<String> {
+    std::iter::once(&prepared.oracle)
+        .chain(&prepared.machines)
+        .chain(&prepared.spawnable)
+        .filter(|machine| machine.allow_crashes)
+        .map(|machine| machine.name.clone())
+        .collect()
 }
 pub(super) fn validate_policy_binding(expected: &Inventory, captured: &Inventory) -> Result<()> {
     super::policy::check_optional(expected.backend_policy()).map_err(bad)?;
@@ -332,6 +345,13 @@ fn program(
         request.simulated_time_ns,
     )
     .map_err(bad)?;
+    // Refuse what this engine cannot carry out before any machine boots,
+    // rather than failing when the input becomes due.
+    let engine = super::actions::engine(&request.prepared.inventory);
+    for input in &request.program {
+        seedbox_driver::driver::faults::check_engine(&input.action, engine)
+            .map_err(|error| Error::Setup(format!("input {}: {error}", input.key)))?;
+    }
     Ok(request.program.clone())
 }
 fn encode(snapshot: Snapshot, writer: &mut BufWriter<fs::File>) -> Result<()> {
@@ -350,20 +370,14 @@ fn materialize_factory(
 ) -> Result<Assets> {
     super::policy::check_optional(inventory.backend_policy()).map_err(bad)?;
     use crate::runtime_assets::Runtime;
-    use seedbox_spec::backend::CpuBackend;
-    use seedbox_spec::definition::Architecture;
-    let (archive, backend, architecture) = match inventory {
-        Inventory::Pv { runtime, .. } => (
-            runtime,
-            CpuBackend::Pv,
-            if cfg!(target_arch = "aarch64") {
-                Architecture::Aarch64
-            } else {
-                Architecture::X86_64
-            },
-        ),
-        Inventory::Tcg { runtime, .. } => (runtime, CpuBackend::Tcg, Architecture::X86_64),
-    };
+    let (Inventory::Pv {
+        runtime: archive, ..
+    }
+    | Inventory::Tcg {
+        runtime: archive, ..
+    }) = inventory;
+    let engine = super::actions::engine(inventory);
+    let (backend, architecture) = (engine.backend, engine.architecture);
     checkpoint::verified(archive)?;
     let (guest_assets, qemu, inputs) = if let Some(binding) = binding {
         binding.validate_archive(archive).map_err(bad)?;

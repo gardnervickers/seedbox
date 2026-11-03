@@ -7,6 +7,7 @@ use seedbox_api::{
     ControlReceipt, ControlRequest, ControlState, InputSource, Metadata, Phase, Simulation,
     SimulationId, SubmitRequest,
 };
+use seedbox_application::store::ContentDigest;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
@@ -40,6 +41,19 @@ pub enum Error {
     RevisionConflict,
     #[error("host randomness unavailable: {0}")]
     Random(String),
+    #[error("checkpoint state for {checkpoint} was reclaimed when simulation {deleted} was deleted; export a checkpoint file to keep it")]
+    Reclaimed {
+        checkpoint: String,
+        deleted: SimulationId,
+    },
+}
+
+/// Owned content a deletion reclaimed, by the checkpoint it held state for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Reclaimed {
+    /// `checkpoint NAME of simulation ID` when an export named the content.
+    pub(crate) checkpoint: Option<String>,
+    pub(crate) deleted: SimulationId,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -47,7 +61,6 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone)]
 struct Entry {
     range: Option<seeds::Range>,
-    imported_checkpoints: Option<BTreeMap<String, seedbox_spec::definition::Definition>>,
     request: SubmitRequest,
     resource: Simulation,
     controls: BTreeMap<String, ControlReceipt>,
@@ -58,14 +71,25 @@ pub struct Catalogue {
     entries: BTreeMap<SimulationId, Entry>,
     requests: BTreeMap<String, SimulationId>,
     pending: BTreeMap<SimulationId, String>,
+    /// Owned content deletions removed this session, so a submission that
+    /// names it fails with what happened instead of partway through preparation.
+    reclaimed: BTreeMap<ContentDigest, Reclaimed>,
 }
 
 impl Catalogue {
+    /// Every entry is stored through here, so its status always carries the
+    /// verdict the server derives, never one supplied with the resource.
+    fn store(&mut self, id: SimulationId, mut entry: Entry) {
+        crate::verdict::qualify(&mut entry.resource.status);
+        self.entries.insert(id, entry);
+    }
+
     pub fn in_memory() -> Self {
         Self {
             entries: BTreeMap::new(),
             requests: BTreeMap::new(),
             pending: BTreeMap::new(),
+            reclaimed: BTreeMap::new(),
         }
     }
 
@@ -113,7 +137,7 @@ impl Catalogue {
                 if let Some(range) = &mut entry.range {
                     range.stop_requested = true;
                 }
-                self.entries.insert(id.clone(), entry);
+                self.store(id.clone(), entry);
             }
         }
         ids.reverse();
@@ -144,85 +168,34 @@ impl Catalogue {
         Ok(())
     }
 
-    pub(crate) fn imported_checkpoint(
-        &self,
-        id: &SimulationId,
-        name: &str,
-    ) -> Result<Option<seedbox_spec::definition::Definition>> {
-        self.captured_checkpoint(id, name)?;
-        Ok(self
-            .entries
-            .get(id)
-            .and_then(|entry| entry.imported_checkpoints.as_ref())
-            .and_then(|captures| captures.get(name))
-            .cloned())
+    /// What each resource names content in: its submitted and resolved
+    /// specs.
+    pub(crate) fn content(&self) -> Result<Vec<(SimulationId, serde_json::Value)>> {
+        self.entries
+            .iter()
+            .map(|(id, entry)| {
+                let value = serde_json::to_value((&entry.request.spec, &entry.resource.spec));
+                Ok((
+                    id.clone(),
+                    value.map_err(|e| Error::Invalid(e.to_string()))?,
+                ))
+            })
+            .collect()
     }
 
-    pub(crate) fn is_imported(&self, id: &SimulationId) -> Result<bool> {
-        self.get(id)?;
-        Ok(self.entries[id].imported_checkpoints.is_some())
-    }
-
-    /// Prepare owned evidence before publishing one completed resource. No
-    /// queued intermediate resource or request queue entry is ever observable.
-    pub(crate) fn import(
+    /// Remember content a deletion reclaimed.
+    pub(crate) fn reclaimed(
         &mut self,
-        snapshot: &seedbox_artifacts::archive::Snapshot,
-        prepare: impl FnOnce(&Simulation) -> Result<()>,
-    ) -> Result<Simulation> {
-        resolve_program(&snapshot.simulation.spec)?;
-        let id = loop {
-            let id = random_id()?;
-            if !self.entries.contains_key(&id)
-                && !self.requests.contains_key(&format!("import-{id}"))
-            {
-                break id;
-            }
-        };
-        let mut resource = snapshot.simulation.clone();
-        resource
-            .metadata
-            .annotations
-            .insert("imported-from".into(), resource.metadata.id.to_string());
-        resource.metadata.id = id.clone();
-        resource.metadata.parent = None;
-        resource.metadata.checkpoint = None;
-        resource.metadata.deletion_requested_at_unix_ms = None;
-        resource.metadata.revision = 1;
-        resource.metadata.created_at_unix_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| Error::Invalid("host clock precedes epoch".into()))?
-            .as_millis()
-            .try_into()
-            .map_err(|_| Error::Invalid("host clock cannot be represented".into()))?;
-        resource.status.playback = None;
-        let request = SubmitRequest {
-            request_id: format!("import-{id}"),
-            options: resource.options.clone(),
-            metadata: seedbox_spec::definition::Metadata {
-                name: resource.metadata.name.clone(),
-                labels: resource.metadata.labels.clone(),
-                annotations: resource.metadata.annotations.clone(),
-            },
-            spec: resource.spec.clone(),
-        };
-        let entry = Entry {
-            request,
-            resource: resource.clone(),
-            controls: snapshot
-                .controls
-                .iter()
-                .map(|receipt| (receipt.request.request_id.clone(), receipt.clone()))
-                .collect(),
-            imported_checkpoints: Some(snapshot.checkpoints.clone()),
-            deleting: false,
-            range: None,
-        };
-        prepare(&resource)?;
-        self.requests
-            .insert(entry.request.request_id.clone(), id.clone());
-        self.entries.insert(id, entry);
-        Ok(resource)
+        removed: impl IntoIterator<Item = (ContentDigest, Reclaimed)>,
+    ) {
+        self.reclaimed.extend(removed);
+    }
+
+    /// Content an upload or export put back is no longer reclaimed.
+    pub(crate) fn restored(&mut self, digests: &BTreeSet<ContentDigest>) {
+        for digest in digests {
+            self.reclaimed.remove(digest);
+        }
     }
 
     /// Returns (resource, newly_created). Retrying after an uncertain response
@@ -262,10 +235,9 @@ impl Catalogue {
                 break id;
             }
         };
-        let mut spec = seeded_spec(&request.spec, range.as_ref())?;
+        let spec = seeded_spec(&request.spec, range.as_ref())?;
         let referenced_backend = self.referenced_backend(&spec)?;
         let parent = self.validate_source(&spec)?;
-        self.adopt_imported_definition(&mut spec)?;
         let recorded_backend = match &spec.inputs {
             InputSource::Resolved { definition } => definition
                 .runtime
@@ -311,7 +283,6 @@ impl Catalogue {
         resource.options.backend = Some(backend);
         let entry = Entry {
             request,
-            imported_checkpoints: None,
             resource: resource.clone(),
             controls: BTreeMap::new(),
             deleting: false,
@@ -319,7 +290,7 @@ impl Catalogue {
         };
         self.requests
             .insert(entry.request.request_id.clone(), id.clone());
-        self.entries.insert(id, entry);
+        self.store(id, entry);
         Ok((resource, true))
     }
 
@@ -349,6 +320,7 @@ impl Catalogue {
                     .start
                     .validate_overrides(&definition.overrides)
                     .map_err(Error::Invalid)?;
+                self.validate_unreclaimed(definition)?;
                 if definition.machines.contains_key(definition.oracle_name()) {
                     return Err(Error::Invalid(
                         "oracle must have its own dedicated declaration".into(),
@@ -378,34 +350,43 @@ impl Catalogue {
         }
     }
 
-    /// Imported resources own portable definitions, not executable attempt
-    /// paths. Existing reference validation still applies before this.
-    fn adopt_imported_definition(&self, spec: &mut seedbox_api::SimulationSpec) -> Result<()> {
-        let Some(source) = source_reference(spec) else {
-            return Ok(());
-        };
-        let entry = &self.entries[source];
-        if entry.imported_checkpoints.is_none() {
+    /// Refuse a definition that names reclaimed content before admission.
+    fn validate_unreclaimed(
+        &self,
+        definition: &seedbox_spec::definition::Definition,
+    ) -> Result<()> {
+        if self.reclaimed.is_empty() {
             return Ok(());
         }
-        let mut definition = match &entry.resource.spec.inputs {
-            InputSource::Resolved { definition } => definition.as_ref().clone(),
-            _ => return Err(Error::Invalid("imported definition unavailable".into())),
-        };
-        definition.start = seedbox_spec::definition::Start::Fresh;
-        definition.seed = spec.seed.expect("resolved above");
-        definition.overrides = spec.program.clone();
-        definition
-            .start
-            .validate_overrides(&definition.overrides)
-            .map_err(Error::Invalid)?;
-        *spec = seedbox_api::SimulationSpec::resolved(definition).map_err(Error::Invalid)?;
-        Ok(())
+        let mut digests = BTreeSet::new();
+        crate::execution::content::digests_in(
+            &serde_json::to_value(definition).map_err(|e| Error::Invalid(e.to_string()))?,
+            &mut digests,
+        );
+        let mut reclaimed = digests
+            .iter()
+            .filter_map(|digest| self.reclaimed.get(digest));
+        // Prefer a record that names the exported checkpoint.
+        match reclaimed
+            .clone()
+            .find(|reclaimed| reclaimed.checkpoint.is_some())
+            .or_else(|| reclaimed.next())
+        {
+            Some(reclaimed) => Err(Error::Reclaimed {
+                checkpoint: reclaimed
+                    .checkpoint
+                    .clone()
+                    .unwrap_or_else(|| "this definition".into()),
+                deleted: reclaimed.deleted.clone(),
+            }),
+            None => Ok(()),
+        }
     }
 
     /// Compare-and-swap prevents a late worker callback from overwriting newer
     /// control state.
     pub fn update(&mut self, mut resource: Simulation) -> Result<Simulation> {
+        crate::verdict::qualify(&mut resource.status);
         let original = self
             .entries
             .get(&resource.metadata.id)
@@ -464,7 +445,6 @@ impl Catalogue {
             .ok_or_else(|| Error::Invalid("resource revision exhausted".into()))?;
         let mut entry = Entry {
             request: original.request.clone(),
-            imported_checkpoints: original.imported_checkpoints.clone(),
             resource: resource.clone(),
             controls: original.controls.clone(),
             deleting: original.deleting,
@@ -481,7 +461,7 @@ impl Catalogue {
         if resource.status.phase == Phase::Completed {
             self.pending.remove(&resource.metadata.id);
         }
-        self.entries.insert(resource.metadata.id.clone(), entry);
+        self.store(resource.metadata.id.clone(), entry);
         Ok(resource)
     }
 
@@ -567,6 +547,7 @@ impl Catalogue {
             .entries
             .get(id)
             .ok_or_else(|| Error::NotFound(id.clone()))?;
+        check_injected(&request.command)?;
         if let Some(existing) = entry.controls.get(&request.request_id) {
             return if existing.request == request {
                 Ok((existing.clone(), false))
@@ -607,7 +588,7 @@ impl Catalogue {
             .insert(control.request.request_id.clone(), control.clone());
         self.pending
             .insert(id.clone(), control.request.request_id.clone());
-        self.entries.insert(id.clone(), entry);
+        self.store(id.clone(), entry);
         Ok((control, true))
     }
 
@@ -643,7 +624,7 @@ impl Catalogue {
             .controls
             .insert(request_id.to_owned(), control.clone());
         self.pending.remove(id);
-        self.entries.insert(id.clone(), entry);
+        self.store(id.clone(), entry);
         Ok(control)
     }
 }
@@ -749,7 +730,30 @@ pub(crate) fn resolve_program(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    // Shape and arguments are reported before targets are compiled.
+    seedbox_engine_protocol::input_program::validate_program(
+        &program,
+        spec.configuration.limits.simulated_time_ns,
+    )
+    .map_err(Error::Invalid)?;
+    for input in &program {
+        input
+            .action
+            .validate()
+            .map_err(|error| Error::Invalid(format!("program {}: {error}", input.key)))?;
+    }
     seedbox_application::fault_inputs::validate_input_program(&spec.configuration, &program)
         .map_err(|error| Error::Invalid(error.to_string()))?;
     Ok(program)
 }
+
+/// Refuse an injected fault with invalid arguments before it is journaled.
+fn check_injected(command: &seedbox_api::ControlCommand) -> Result<()> {
+    if let seedbox_api::ControlCommand::InjectFault { action } = command {
+        action.validate().map_err(Error::Invalid)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

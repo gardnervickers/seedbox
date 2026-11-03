@@ -170,7 +170,7 @@ fn failed_spawn_construction_reports_the_construction_error() {
 }
 
 #[test]
-fn authored_spawn_publishes_the_standby_name_and_input_plan() {
+fn authored_spawn_is_admitted_and_adds_the_standby() {
     let (_root, mut worker, _) = worker_with(1, false, vec![definition("standby")]);
     worker.step(Timestamp::from_nanos(10)).unwrap();
     worker.state.world.input_program.inputs =

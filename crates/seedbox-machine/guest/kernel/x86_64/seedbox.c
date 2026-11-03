@@ -15,6 +15,8 @@
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
+#include <linux/preempt.h>
+#include <linux/sched.h>
 #include <linux/stddef.h>
 #include <asm/cpufeature.h>
 #include <asm/fixmap.h>
@@ -153,12 +155,20 @@ void noinstr seedbox_cpu_relax(void)
 		(void)seedbox_read();
 }
 
-/* Charge syscall work through the bounded clock rendezvous. Load the charge
- * once; a price change at a rendezvous affects the next syscall only. */
-void seedbox_syscall_progress(void)
+/* A progress call: getpid with this first argument (guest/progress/progress.c). */
+#define SEEDBOX_PROGRESS_NR 39
+#define SEEDBOX_PROGRESS_MARK 0x5eedb0c5UL
+/* Time syscalls (gettimeofday, time, clock_gettime, clock_getres). */
+#define SEEDBOX_GETTIMEOFDAY_NR 96
+#define SEEDBOX_TIME_NR 201
+#define SEEDBOX_CLOCK_GETTIME_NR 228
+#define SEEDBOX_CLOCK_GETRES_NR 229
+
+/* Charge work through the bounded clock rendezvous. The remaining charge
+ * survives a rendezvous in guest registers or stack. */
+static void seedbox_charge(u64 remaining)
 {
-	struct seedbox_page *p = READ_ONCE(page);
-	u64 remaining = p ? READ_ONCE(p->syscall_ns) : 1000;
+	struct seedbox_page *p;
 
 	while (remaining) {
 		unsigned long flags;
@@ -186,6 +196,42 @@ void seedbox_syscall_progress(void)
 		}
 		arch_local_irq_restore(flags);
 	}
+}
+
+/* The task whose progress call is charging its translated compute, if any.
+ * Time moves only at rendezvous in the kernel, so every tick lands there; a
+ * tick that interrupts this charge samples user work. One guest CPU, and no
+ * preemption inside the charge. */
+static struct task_struct *user_charge;
+
+/* Account the current tick as user time (kernel/time/timer.c): it interrupted
+ * a progress charge directly, not a softirq or a nested interrupt. */
+bool seedbox_user_tick(void)
+{
+	return READ_ONCE(user_charge) == current && irq_count() == HARDIRQ_OFFSET;
+}
+
+/* Charge one syscall. Load its price once; a price change at a rendezvous
+ * affects the next syscall only. A progress call stands for the application's
+ * own compute: ticks during its charge are user time, at the same charge.
+ * Translator syscalls carry no mark on x86 and cost a whole syscall. */
+void seedbox_syscall_progress(struct pt_regs *regs, int nr)
+{
+	struct seedbox_page *p = READ_ONCE(page);
+	u64 ns = p ? READ_ONCE(p->syscall_ns) : 1000;
+
+	/* The PV clocksource leaves the vDSO without a clock, so time syscalls
+	 * stand in for vDSO reads and cost only the clock read they make. */
+	if (nr == SEEDBOX_GETTIMEOFDAY_NR || nr == SEEDBOX_TIME_NR ||
+	    nr == SEEDBOX_CLOCK_GETTIME_NR || nr == SEEDBOX_CLOCK_GETRES_NR)
+		return;
+	if (nr == SEEDBOX_PROGRESS_NR && regs->di == SEEDBOX_PROGRESS_MARK) {
+		WRITE_ONCE(user_charge, current);
+		seedbox_charge(ns);
+		WRITE_ONCE(user_charge, NULL);
+		return;
+	}
+	seedbox_charge(ns);
 }
 
 bool seedbox_emulate_user_tsc(struct pt_regs *regs)

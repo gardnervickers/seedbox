@@ -53,12 +53,16 @@ pub enum TestVerdict {
 }
 
 impl TestVerdict {
-    /// Only a committed exit from the designated workload oracle determines
-    /// pass/fail. Execution errors, evidence comparisons and cleanup cannot
-    /// alter an observed result.
+    /// The oracle's own verdict: only a committed exit from the designated
+    /// workload oracle determines it. Execution errors, evidence comparisons
+    /// and cleanup cannot alter an observed result; the server qualifies it
+    /// by the guest property findings into [`crate::SimulationStatus::verdict`].
+    /// Exit status 3 means the oracle could not decide, so it is incomplete.
     pub fn from_oracle(exit_code: Option<u8>, phase: Phase) -> Self {
         match exit_code {
             Some(0) => Self::Passed,
+            // The oracle could not decide: neither a pass nor a bug.
+            Some(3) => Self::Incomplete,
             Some(_) => Self::Failed,
             None if phase == Phase::Completed => Self::Incomplete,
             None => Self::Pending,
@@ -84,10 +88,12 @@ mod tests {
                 TestVerdict::Passed
             );
             for code in 1..=255 {
-                assert_eq!(
-                    TestVerdict::from_oracle(Some(code), phase),
+                let expected = if code == 3 {
+                    TestVerdict::Incomplete
+                } else {
                     TestVerdict::Failed
-                );
+                };
+                assert_eq!(TestVerdict::from_oracle(Some(code), phase), expected);
             }
         }
         assert_eq!(

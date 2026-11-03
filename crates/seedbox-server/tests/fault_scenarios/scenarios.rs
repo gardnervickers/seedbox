@@ -169,6 +169,9 @@ pub fn family(action: &Action) -> &'static str {
             "network"
         }
         Action::Heal { .. } => "recovery",
+        // The catalogue offers no form for them yet.
+        Action::DiskError { .. } | Action::DiskLatency { .. } => "disk",
+        Action::Preempt { .. } => "machine",
     }
 }
 

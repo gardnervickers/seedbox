@@ -6,7 +6,7 @@ use std::{fs, path::Path};
 // entry (and hard-link target). The SDK takes an application-root tar and
 // supplies its own rootfs/ prefix.
 // Rewrite metadata only; never extract guest paths onto the host.
-fn logical_archive(path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn logical_archive(path: &Path) -> Result<Vec<u8>> {
     fn relative(path: &Path) -> Result<&Path> {
         let path = path.strip_prefix("rootfs").map_err(|_| {
             Error::Integrity("OCI transport archive entry is outside rootfs".into())
@@ -147,6 +147,59 @@ mod tests {
             }
             tar.finish().unwrap();
             assert!(logical_archive(file.path()).is_err(), "{name} {link:?}");
+        }
+    }
+
+    #[test]
+    fn unrooting_a_path_split_across_the_ustar_prefix_drops_the_prefix() {
+        // `rootfs/` makes these 101 to 107 bytes, so the transport splits them
+        // into a USTAR prefix and name; without `rootfs/` they fit in name.
+        for length in 90..=110 {
+            let directory = format!("usr/{}", "a".repeat(length - 35));
+            let path = format!("{directory}/{}", "f".repeat(30));
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut tar = tar::Builder::new(file.reopen().unwrap());
+            for (name, link) in [
+                (format!("rootfs/{path}"), None),
+                (
+                    format!("rootfs/{path}.hardlink"),
+                    Some(format!("rootfs/{path}")),
+                ),
+            ] {
+                let mut header = tar::Header::new_ustar();
+                header.set_mode(0o644);
+                header.set_uid(0);
+                header.set_gid(0);
+                header.set_mtime(0);
+                header.set_size(0);
+                if let Some(target) = link {
+                    header.set_entry_type(tar::EntryType::Link);
+                    tar.append_link(&mut header, name, target).unwrap();
+                } else {
+                    tar.append_data(&mut header, name, std::io::empty())
+                        .unwrap();
+                }
+            }
+            tar.finish().unwrap();
+            let bytes = logical_archive(file.path()).unwrap();
+            let mut archive = tar::Archive::new(bytes.as_slice());
+            let entries: Vec<_> = archive
+                .entries()
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    let link = entry.link_name().unwrap().map(|link| link.into_owned());
+                    (entry.path().unwrap().into_owned(), link)
+                })
+                .collect();
+            assert_eq!(
+                entries,
+                [
+                    (path.clone().into(), None),
+                    (format!("{path}.hardlink").into(), Some(path.into())),
+                ],
+                "{length}"
+            );
         }
     }
 }

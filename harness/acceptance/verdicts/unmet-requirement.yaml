@@ -1,0 +1,10 @@
+# The oracle exits 0, but it requires a property that nothing evaluates:
+# the requirement is unmet, so FAIL.
+name: guest-unmet-requirement
+machines: {}
+oracle:
+  build:
+    context: "../../.."
+    dockerfile: harness/acceptance/images/properties/Dockerfile
+  command:
+  - unmet

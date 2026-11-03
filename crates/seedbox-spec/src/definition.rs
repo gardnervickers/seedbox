@@ -66,7 +66,11 @@ pub struct Process {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Volume {
     pub target: String,
-    pub size_bytes: u64,
+    /// Space this volume adds to its machine's disk. Without a size, the
+    /// volume shares one [`crate::project::DEFAULT_VOLUME_BYTES`] allotment
+    /// with the machine's other unsized volumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -89,6 +93,10 @@ pub struct Machine {
     pub volumes: BTreeMap<String, Volume>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub anonymous_volumes: Vec<String>,
+    /// The project's `allowCrashes` for this machine, retained so replay
+    /// and checkpoints judge crashes as the original run did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_crashes: bool,
     /// Not started at launch; the controller spawns it by name.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub standby: bool,
@@ -236,9 +244,11 @@ impl Definition {
                         .map(|(n, v)| crate::VolumeMount {
                             source: n.clone(),
                             target: v.target.clone(),
+                            size_bytes: v.size_bytes,
                         })
                         .collect(),
                     network: self.network.name.clone(),
+                    allow_crashes: machine.allow_crashes,
                     standby: machine.standby,
                 },
             );
@@ -271,7 +281,6 @@ impl Definition {
             simulator: crate::SimulatorOptions {
                 progress_budget: self.simulator.progress_budget,
                 quantum_ns: self.simulator.quantum_ns,
-                machine_workers: Default::default(),
             },
         })
     }
@@ -330,6 +339,27 @@ mod tests {
         assert!(serde_json::from_value::<Simulator>(wire.clone()).is_err());
         wire.as_object_mut().unwrap().remove("quantumNs");
         assert!(serde_json::from_value::<Simulator>(wire).is_err());
+    }
+
+    #[test]
+    fn retained_machines_keep_allow_crashes() {
+        let machine = json!({
+            "bootArchive": format!("sha256:{}", "0".repeat(64)),
+            "memoryBytes": 1,
+            "process": {"argv": [], "environment": {}, "workingDirectory": "/", "user": "0"},
+            "volumes": {},
+        });
+        let plain: Machine = serde_json::from_value(machine.clone()).unwrap();
+        assert!(!plain.allow_crashes);
+        assert!(serde_json::to_value(&plain)
+            .unwrap()
+            .get("allowCrashes")
+            .is_none());
+        let mut allowed = machine.clone();
+        allowed["allowCrashes"] = json!(true);
+        let retained: Machine = serde_json::from_value(allowed.clone()).unwrap();
+        assert!(retained.allow_crashes);
+        assert_eq!(serde_json::to_value(&retained).unwrap(), allowed);
     }
 
     #[test]

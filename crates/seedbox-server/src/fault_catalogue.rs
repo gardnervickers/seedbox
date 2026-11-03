@@ -11,6 +11,7 @@ pub(crate) fn category(name: &str) -> FaultCategory {
         "partition" | "shape" | "drop_connection" => FaultCategory::Network,
         "stop" | "restart" | "pause_process" | "resume_process" => FaultCategory::Application,
         "clock_skew" | "clock_drift" => FaultCategory::Clock,
+        "disk_error" | "disk_latency" => FaultCategory::Disk,
         "heal" => FaultCategory::Recovery,
         _ => FaultCategory::Machine,
     }
@@ -114,6 +115,9 @@ pub(crate) fn discover(world: &WorldState, minimum_latency_ns: u64) -> FaultCata
                 | seedbox_engine_protocol::control::Action::ClockSkew { handle, .. }
                 | seedbox_engine_protocol::control::Action::ClockDrift { handle, .. }
                 | seedbox_engine_protocol::control::Action::Throttle { handle, .. }
+                | seedbox_engine_protocol::control::Action::DiskError { handle, .. }
+                | seedbox_engine_protocol::control::Action::DiskLatency { handle, .. }
+                | seedbox_engine_protocol::control::Action::Preempt { handle, .. }
                 | seedbox_engine_protocol::control::Action::DropConnection { handle, .. } => {
                     Some(handle.clone())
                 }
@@ -296,6 +300,11 @@ mod tests {
             | Action::Reboot { .. }
             | Action::Spawn { .. }
             | Action::DropConnection { .. } => {}
+            // Programs and inject carry them; the catalogue (and so the
+            // TUI) offers no form for them yet.
+            Action::DiskError { .. } | Action::DiskLatency { .. } | Action::Preempt { .. } => {
+                panic!("catalogue offers no form for {}", action.name())
+            }
         }
     }
     fn example(schema: &Value) -> Value {

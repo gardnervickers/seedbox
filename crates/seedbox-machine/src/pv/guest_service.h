@@ -3,6 +3,7 @@
 #define SBX_GUEST_SERVICE_H
 #include "guest_supervisor.h"
 #include "guest_oracle.h"
+#include "guest_properties.h"
 #include <stdint.h>
 typedef int (*sbx_write)(void *sink, const void *bytes, size_t length);
 struct sbx_service {
@@ -13,6 +14,8 @@ struct sbx_service {
     void *sink;
     char frame[SBX_MANAGEMENT_FRAME_MAX];
     struct sbx_oracle *oracle;
+    /* SBX_GUEST1 replies go to this relay; NULL refuses them. */
+    struct sbx_properties *properties;
     size_t used;
     int shutdown_requested;
     int poisoned;
@@ -34,7 +37,8 @@ int sbx_service_start(struct sbx_service *s);
  * acknowledged as action=step (SEEDBOX_FAILURE when the kernel refuses it).
  * start/stop/freeze/thaw use optional nonzero decimal management IDs;
  * these IDs are not oracle RPC IDs. SBX_REPLY1 shares this sole frame parser
- * and routes to the configured oracle relay. Malformed input fails closed. */
+ * and routes to the configured oracle relay, SBX_GUEST1 to the property relay.
+ * Malformed input fails closed. */
 int sbx_service_feed(struct sbx_service *s, const void *bytes, size_t length);
 /* Natural exit emits SBX_EXIT1 status=N after draining logs; caller powers off.
  * Commanded Stop leaves init running and never emits SBX_EXIT1. */

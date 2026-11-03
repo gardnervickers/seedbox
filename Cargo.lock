@@ -1880,6 +1880,7 @@ dependencies = [
  "ocirender",
  "seedbox-artifacts",
  "seedbox-driver-execution",
+ "seedbox-engine-core",
  "seedbox-engine-protocol",
  "seedbox-machine",
  "seedbox-spec",
@@ -1986,6 +1987,7 @@ dependencies = [
  "seedbox-machine",
  "seedbox-machine-pv",
  "seedbox-machine-tcg",
+ "seedbox-spec",
  "seedbox-test",
  "seedbox-test-time",
  "serde",
@@ -2004,6 +2006,7 @@ dependencies = [
  "libc",
  "seedbox-artifacts",
  "seedbox-driver",
+ "seedbox-engine-core",
  "seedbox-engine-protocol",
  "seedbox-exec",
  "seedbox-machine",
@@ -2046,6 +2049,16 @@ dependencies = [
 [[package]]
 name = "seedbox-exec"
 version = "0.1.0"
+
+[[package]]
+name = "seedbox-guest"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "seedbox-engine-protocol",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "seedbox-machine"
@@ -2104,6 +2117,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-oracle"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "seedbox-engine-protocol",
+ "seedbox-guest",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "seedbox-server"
 version = "0.1.0"
 dependencies = [
@@ -2117,6 +2142,7 @@ dependencies = [
  "seedbox-client",
  "seedbox-driver",
  "seedbox-driver-execution",
+ "seedbox-engine-core",
  "seedbox-engine-protocol",
  "seedbox-machine",
  "seedbox-machine-pv",

@@ -25,7 +25,9 @@ void seedbox_cpu_relax(void);
 void seedbox_pic_update(u8 mask, u8 ack);
 void seedbox_pic_unmask(u8 mask);
 u32 seedbox_virtio_interrupt(unsigned long phys);
-void seedbox_syscall_progress(void);
+void seedbox_syscall_progress(struct pt_regs *regs, int nr);
+/* The current tick interrupted a progress charge: user time. */
+bool seedbox_user_tick(void);
 bool seedbox_emulate_user_tsc(struct pt_regs *regs);
 unsigned long seedbox_tsc_khz(void);
 void __init seedbox_time_init(void);

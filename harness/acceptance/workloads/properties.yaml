@@ -1,0 +1,15 @@
+name: guest-properties
+machines:
+  node:
+    build:
+      context: "../../.."
+      dockerfile: harness/acceptance/images/properties/Dockerfile
+    command:
+    - node
+oracle:
+  build:
+    context: "../../.."
+    dockerfile: harness/acceptance/images/properties/Dockerfile
+  command:
+  - pass
+  allowCrashes: true

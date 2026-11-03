@@ -44,6 +44,10 @@ pub fn resolve(
                 digest: format!("sha256:{}", image.manifest.hex()),
             }),
             anonymous_volumes: image.launch.volumes.clone(),
+            allow_crashes: configuration
+                .services
+                .get(name)
+                .is_some_and(|service| service.allow_crashes),
             standby: configuration
                 .services
                 .get(name)
@@ -66,7 +70,7 @@ pub fn resolve(
                         v.source.clone(),
                         Volume {
                             target: v.target.clone(),
-                            size_bytes: crate::execution::VOLUME_DISK_MIB * 1024 * 1024,
+                            size_bytes: v.size_bytes,
                         },
                     )
                 })
@@ -197,13 +201,10 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
         })?;
         crate::preparation::validate_machine_memory(&profile, name, memory_mb)?;
         machine_memory_mb.insert(name.into(), memory_mb);
-        for volume in machine.volumes.values() {
-            if volume.size_bytes != crate::execution::VOLUME_DISK_MIB * 1024 * 1024 {
-                return Err(Error::Setup(
-                    "volume sizeBytes must equal the supported 1 GiB disk size".into(),
-                ));
-            }
-        }
+        seedbox_spec::project::machine_disk_bytes(
+            machine.volumes.values().map(|volume| volume.size_bytes),
+        )
+        .map_err(|error| Error::Setup(format!("machine {name}: {error}")))?;
         let boot = digest(&machine.boot_archive)?;
         images.insert(
             name.into(),
@@ -223,6 +224,7 @@ pub fn prepared(definition: &Definition, store: &ContentStore) -> Result<Prepare
                         .map(|(n, v)| seedbox_spec::VolumeMount {
                             source: n.clone(),
                             target: v.target.clone(),
+                            size_bytes: v.size_bytes,
                         })
                         .collect(),
                 },
@@ -715,6 +717,7 @@ mod tests {
                 },
                 disk: None,
                 interface: None,
+                allow_crashes: false,
             },
             machines: vec![],
             spawnable: vec![],
@@ -815,6 +818,7 @@ mod tests {
             schedule: &simulation.schedule,
             control: simulation.control.as_ref(),
             check: &simulation.check,
+            services: &simulation.services,
             prepared: &edited,
             artifacts: &artifacts,
             output: &output,
@@ -1148,12 +1152,12 @@ mod tests {
             "data".into(),
             Volume {
                 target: "/var/lib/data".into(),
-                size_bytes: 10,
+                size_bytes: Some(10),
             },
         );
         assert!(prepared(&definition, &store)
             .unwrap_err()
             .to_string()
-            .contains("sizeBytes"));
+            .contains("volume size 10B must be a whole number of MiB"));
     }
 }

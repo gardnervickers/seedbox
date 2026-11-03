@@ -197,6 +197,17 @@ fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch
     assert!(help.contains("--seed"), "{help}");
     // Project files carry no seed; only the server or a document supplies one.
     assert!(!help.contains("project seed"), "{help}");
+
+    let replay_help = seedbox(&["help", "replay"], directory.path());
+    assert!(replay_help.status.success());
+    let help = String::from_utf8_lossy(&replay_help.stdout);
+    assert!(help.contains("--detach"), "{help}");
+    assert!(help.contains("--paused"), "{help}");
+    assert!(!help.contains("--seed"), "{help}");
+
+    let from = seedbox(&["run", "--from", "k7m2p9qx"], directory.path());
+    assert_eq!(from.status.code(), Some(2));
+    assert!(stderr(&from).contains("unexpected argument '--from'"));
 }
 
 #[test]
@@ -303,8 +314,7 @@ fn project_argument_defaults_to_the_project_directory() {
             &fs::read_to_string(directory.path().join(name).join("seedbox.yaml")).unwrap(),
         )
         .unwrap();
-        assert_eq!(document["simulator"]["quantum"].as_str(), Some("1ms"));
-        assert_eq!(document["simulator"]["machineWorkers"].as_u64(), Some(1));
+        assert!(document.get("simulator").is_none(), "{name}");
     }
     for args in [&["check"][..], &["check", "."], &["check", "seedbox.yaml"]] {
         let output = seedbox(args, &project);
@@ -976,6 +986,43 @@ fn native_project_discovery_prefers_seedbox_yaml_and_validates_oracle() {
 }
 
 #[test]
+fn volume_sizes_validate_before_host_admission() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = |volumes: &str| {
+        fs::write(
+            directory.path().join("seedbox.yaml"),
+            format!("name: sized\nmachines:\n  db:\n    image: app\n    volumes:\n{volumes}oracle: {{image: checker}}\n"),
+        )
+        .unwrap();
+        seedbox(&["check", "."], directory.path())
+    };
+    let output = project("      data: {target: /data, size: 4GiB}\n      wal: {target: /wal}\n");
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        unavailable_driver_stderr(&directory.path().join("assets"))
+    );
+    for size in ["4GB", "4096", "1.5GiB", "128GiB"] {
+        let output = project(&format!("      data: {{target: /data, size: {size}}}\n"));
+        assert_eq!(output.status.code(), Some(2), "{size}");
+        assert!(
+            stderr(&output).contains(&format!("size \"{size}\": expected a whole number of MiB or GiB such as 4GiB or 512MiB, from 16MiB to 64GiB")),
+            "{size}: {}",
+            stderr(&output)
+        );
+    }
+    let output = project(
+        "      data: {target: /data, size: 40GiB}\n      wal: {target: /wal, size: 30GiB}\n",
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("volume sizes total 70GiB, above the 64GiB limit for one machine"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn capacity_help_explains_resident_slots_and_accepts_json() {
     let directory = tempfile::tempdir().unwrap();
     let output = seedbox(&["server", "status", "--help"], directory.path());
@@ -989,23 +1036,40 @@ fn capacity_help_explains_resident_slots_and_accepts_json() {
 }
 
 #[test]
-fn machine_workers_is_only_configurable_in_the_project() {
+fn machine_workers_is_a_bounded_execution_option() {
     let root = tempfile::tempdir().unwrap();
     for command in ["run", "replay"] {
         let help = seedbox(&[command, "--help"], root.path());
         assert!(help.status.success(), "{command}: {}", stderr(&help));
         let text = String::from_utf8_lossy(&help.stdout);
-        assert!(!text.contains("--machine-workers"), "{command}: {text}");
-
-        let output = seedbox(&[command, "--machine-workers", "4"], root.path());
-        assert_eq!(output.status.code(), Some(2), "{command}");
-        assert!(output.stdout.is_empty());
-        assert!(
-            stderr(&output).contains("unexpected argument '--machine-workers'"),
-            "{command}: {}",
-            stderr(&output)
-        );
+        assert!(text.contains("--machine-workers"), "{command}: {text}");
+        for workers in ["0", "65"] {
+            let output = seedbox(
+                &[command, "k7m2p9qx", "--machine-workers", workers],
+                root.path(),
+            );
+            assert_eq!(output.status.code(), Some(2), "{command} {workers}");
+            assert!(output.stdout.is_empty());
+            assert!(
+                stderr(&output).contains("--machine-workers"),
+                "{command} {workers}: {}",
+                stderr(&output)
+            );
+        }
     }
+    let project = root.path().join("seedbox.yaml");
+    fs::write(
+        &project,
+        "name: demo\noracle: {image: test}\nsimulator: {machineWorkers: 4}\n",
+    )
+    .unwrap();
+    let output = seedbox(&["check", "seedbox.yaml"], root.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("machineWorkers"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]
@@ -1046,8 +1110,6 @@ fn backend_flag_is_typed_and_only_on_execution_commands() {
 #[cfg(unix)]
 mod checkpoint_history;
 #[cfg(unix)]
-mod checkpoint_version;
-
 #[test]
 fn show_world_prints_machine_and_link_tables() {
     use seedbox_api::{
@@ -1370,8 +1432,6 @@ fn checkpoint_output_is_checked_before_connecting_and_never_overwrites() {
 fn run_source_and_inspection_choices_are_validated_before_connecting() {
     let root = tempfile::tempdir().unwrap();
     for args in [
-        vec!["run", "project.yaml", "--from", "k7m2p9qx"],
-        vec!["run", "--from", "k7m2p9qx", "--count", "2"],
         vec!["show", "--view", "world"],
         vec!["show", "k7m2p9qx", "--view", "unknown"],
         vec!["show", "k7m2p9qx", "--file", "vmm.stderr"],
@@ -1389,7 +1449,7 @@ fn run_source_and_inspection_choices_are_validated_before_connecting() {
 }
 
 #[test]
-fn every_auto_start_command_exposes_the_explicit_server_configuration() {
+fn server_location_is_global_and_full_state_is_a_server_start_flag() {
     let root = tempfile::tempdir().unwrap();
     for command in [
         vec!["run"],
@@ -1417,10 +1477,23 @@ fn every_auto_start_command_exposes_the_explicit_server_configuration() {
         let output = seedbox(&args, root.path());
         assert!(output.status.success(), "{command:?}: {}", stderr(&output));
         let help = String::from_utf8(output.stdout).unwrap();
-        for flag in ["--state", "--full-state"] {
-            assert!(help.contains(flag), "{command:?} omits {flag}: {help}");
-        }
+        assert!(
+            help.contains("--state"),
+            "{command:?} omits --state: {help}"
+        );
+        assert_eq!(
+            help.contains("--full-state"),
+            command == ["server", "start"],
+            "--full-state belongs only to server start: {command:?}: {help}"
+        );
     }
+    let output = seedbox(&["show", "--full-state"], root.path());
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("--full-state"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]
@@ -1480,4 +1553,197 @@ fn fixture_diagnostics_explains_kernel_victim_and_memory_setting() {
         "BEGIN FIXTURE diagnostics-oom (HTTP FIXTURE, NOT LIVE)\n{text}END FIXTURE diagnostics-oom"
     );
     server.join().unwrap();
+}
+
+#[test]
+fn control_receipt_internals_stay_out_of_help_but_remain_usable() {
+    let root = tempfile::tempdir().unwrap();
+    for (args, hidden) in [
+        (vec!["control", "--help"], "receipt"),
+        (vec!["control", "pause", "--help"], "--request-id"),
+        (vec!["show", "--help"], "--max-bytes"),
+    ] {
+        let output = seedbox(&args, root.path());
+        assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(!help.contains(hidden), "{args:?} shows {hidden}: {help}");
+    }
+    let output = seedbox(&["control", "receipt", "k7m2p9qx", "bad/id"], root.path());
+    assert!(stderr(&output).contains("request ID must be"));
+}
+
+#[test]
+fn fixture_show_explains_a_failed_run_by_its_property_findings() {
+    use seedbox_api::{
+        LostPropertyEvidence, Phase, PropertyAssessment, PropertyExample, PropertyKind,
+        PropertyOrigin, PropertyViolation,
+    };
+    let origin = |machine: &str, session, seq, time_ns| PropertyOrigin {
+        machine: machine.into(),
+        incarnation: 0,
+        session,
+        seq,
+        time_ns,
+    };
+    let mut resource = seedbox_api::Simulation::queued(
+        seedbox_api::Metadata {
+            name: "properties".into(),
+            labels: Default::default(),
+            annotations: Default::default(),
+            id: "k7m2p9qx".parse().unwrap(),
+            revision: 3,
+            created_at_unix_ms: 0,
+            deletion_requested_at_unix_ms: None,
+            parent: None,
+            checkpoint: None,
+        },
+        seedbox_server::test_support::request().spec,
+    );
+    resource.status.phase = Phase::Completed;
+    resource.status.oracle_exit_code = Some(0);
+    resource.status.properties = Some(PropertyAssessment {
+        violations: vec![
+            PropertyViolation {
+                id: "acknowledged writes survive".into(),
+                kind: PropertyKind::Always,
+                example: PropertyExample {
+                    origin: origin("client", 1, 7, 4_200_000_000),
+                    details: Some(serde_json::json!({"key": 7})),
+                    details_truncated: false,
+                },
+            },
+            PropertyViolation {
+                id: "seedbox.no_crashing_processes".into(),
+                kind: PropertyKind::Never,
+                example: PropertyExample {
+                    origin: origin("n1", 0, 0, 1_500_000_000),
+                    details: None,
+                    details_truncated: true,
+                },
+            },
+        ],
+        unmet_requirements: vec!["failover exercised".into()],
+        lost_count: 2,
+        lost_evidence: vec![LostPropertyEvidence {
+            reason: "property sequence 5 where 3 was next".into(),
+            origin: Some(origin("n1", 2, 5, 9)),
+        }],
+    });
+    resource.status.verdict = seedbox_server::verdict::of(&resource.status);
+    let body = serde_json::to_string(&resource).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let server = stand_in_server(directory.path(), "GET /v1/simulations/k7m2p9qx ", body);
+    let output = seedbox(&["show", "k7m2p9qx"], directory.path());
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = String::from_utf8(output.stdout).unwrap();
+    let (table, reasons) = text.split_at(text.find("violated: ").unwrap());
+    assert!(table.starts_with("ID "), "{text}");
+    assert!(table.lines().nth(1).unwrap().contains("failed"), "{text}");
+    assert_eq!(
+        reasons,
+        "\
+violated: acknowledged writes survive (always) on client at 4.2s: {\"key\":7}
+violated: seedbox.no_crashing_processes (never) on n1 at 1.5s: details truncated
+unmet requirement: failover exercised
+lost evidence: 2
+lost: property sequence 5 where 3 was next (n1 session 2 seq 5)
+"
+    );
+    println!(
+        "BEGIN FIXTURE show-failed-properties (HTTP FIXTURE, NOT LIVE; AGE column varies)\n{text}END FIXTURE show-failed-properties"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn a_definition_whose_checkpoint_state_was_reclaimed_fails_at_submission() {
+    use seedbox_api::{InputSource, Simulation};
+    // A short state path keeps the server socket within the platform limit.
+    let root = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    let root = root.path();
+    let state = root.join("state");
+    let cli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_seedbox"))
+            .args(args)
+            .current_dir(root)
+            .env_clear()
+            .env("HOME", root)
+            .env("TMPDIR", root)
+            .env("SEEDBOX_STATE", &state)
+            .env("SEEDBOX_ASSET_DIR", root.join("assets"))
+            .env("PATH", "")
+            .guarded_output()
+            .unwrap()
+    };
+    // A checkpoint file, written without hardware.
+    let source = seedbox_application::store::ContentStore::new(root.join("source-cache"));
+    source.put(b"catalogue-only-binary").unwrap();
+    let InputSource::Resolved { definition } =
+        seedbox_server::test_support::resolved_request("file")
+            .spec
+            .inputs
+    else {
+        unreachable!()
+    };
+    let mut definition = *definition;
+    let ram = source.put(b"captured checkpoint RAM").unwrap();
+    definition.start = seedbox_spec::definition::Start::Checkpoint {
+        manifest: serde_json::json!({"state":{"world":{"input_program":{"inputs":[],"next":0,"admissions":[],"rejections":[]}}}, "ram":{"path":"asset:ram", "sha256":ram.hex()}}),
+        assets: std::collections::BTreeMap::from([(
+            "ram".into(),
+            seedbox_spec::definition::Asset(format!("sha256:{}", ram.hex())),
+        )]),
+    };
+    let file = root.join("capture.seedbox");
+    seedbox_artifacts::archive::export_checkpoint(
+        &definition,
+        &source,
+        &mut fs::File::create(&file).unwrap(),
+        &Default::default(),
+    )
+    .unwrap();
+
+    let started = cli(&["server", "start"]);
+    assert!(started.status.success(), "{}", stderr(&started));
+    let _server = ServerCleanup(state.join("server.sock"));
+    // Two runs name the uploaded state; neither can execute here.
+    let runs: Vec<Simulation> = (0..2)
+        .map(|_| {
+            let run = cli(&["run", file.to_str().unwrap(), "--json"]);
+            serde_json::from_slice(&run.stdout).unwrap_or_else(|e| panic!("{e}: {}", stderr(&run)))
+        })
+        .collect();
+    let shown = cli(&[
+        "show",
+        runs[1].metadata.id.as_str(),
+        "--view",
+        "definition",
+        "--json",
+    ]);
+    assert!(shown.status.success(), "{}", stderr(&shown));
+    let branch = root.join("branch.yaml");
+    fs::write(&branch, &shown.stdout).unwrap();
+    for run in &runs {
+        let deleted = cli(&["delete", run.metadata.id.as_str()]);
+        assert!(deleted.status.success(), "{}", stderr(&deleted));
+    }
+
+    let output = cli(&["run", branch.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(output.stdout.is_empty());
+    let text = stderr(&output);
+    assert_eq!(
+        text,
+        format!(
+            "error: server rejected request (InvalidRequest): checkpoint state for this definition was reclaimed when simulation {} was deleted; export a checkpoint file to keep it\n",
+            runs[1].metadata.id
+        )
+    );
+    println!("BEGIN TEST CAPTURE reclaimed-checkpoint\n$ seedbox run branch.yaml\n{text}END TEST CAPTURE reclaimed-checkpoint");
+    // Nothing was admitted.
+    let listed = cli(&["show", "--json"]);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&listed.stdout).unwrap(),
+        serde_json::json!([])
+    );
 }

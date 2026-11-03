@@ -7,8 +7,11 @@ use super::*;
 /// keep their defaults; a resolved definition carries anything else.
 pub fn validate_project(simulation: &Simulation) -> Result<()> {
     let services = &simulation.services;
-    if !services.contains_key("oracle") {
+    let Some(oracle) = services.get("oracle") else {
         return invalid("$.services.oracle", "the oracle machine is required");
+    };
+    if oracle.standby {
+        return invalid("$.oracle.standby", "the oracle always starts at launch");
     }
     if services.len() > 254 {
         return invalid(
@@ -204,10 +207,15 @@ mod tests {
             edit(simulation.services.get_mut("app").unwrap());
             simulation
         };
-        let cases: [(&str, Simulation); 12] = [
+        let cases: [(&str, Simulation); 13] = [
             ("$.services.oracle", {
                 let mut s = simulation.clone();
                 s.services.remove("oracle");
+                s
+            }),
+            ("$.oracle.standby", {
+                let mut s = simulation.clone();
+                s.services.get_mut("oracle").unwrap().standby = true;
                 s
             }),
             ("$.services.App", {

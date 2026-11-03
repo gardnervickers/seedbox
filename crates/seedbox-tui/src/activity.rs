@@ -469,6 +469,7 @@ mod tests {
             applied_time_ns: Some(at),
             plan: Some(plan),
             active,
+            counts: None,
         }
     }
 

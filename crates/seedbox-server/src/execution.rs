@@ -2,6 +2,7 @@
 //! injected by the executable; clients never own worker lifetimes or leases.
 
 mod bundles;
+pub(crate) mod content;
 mod diagnostics;
 
 use crate::{catalogue, manager::Manager};
@@ -13,7 +14,7 @@ use seedbox_application::{
     },
     orchestration::{Orchestrator, Run, RunOptions, RunProgress},
     preparation::PreparationContext,
-    store::{ContentDigest, ContentStore},
+    store::ContentStore,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -23,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
     },
     time::Duration,
 };
@@ -89,6 +90,10 @@ pub struct ExecutionService {
     backends: Arc<dyn BackendProvider>,
     preparation_limit: Duration,
     evidence: Mutex<()>,
+    /// Read while creating owned content until something names it; written by
+    /// reclamation (`content.rs`).
+    references: RwLock<()>,
+    pins: Mutex<content::Pins>,
     admission: Mutex<(usize, BTreeMap<tokio::task::Id, SimulationId>)>,
 }
 
@@ -130,6 +135,8 @@ impl ExecutionService {
             backends,
             preparation_limit: crate::preparation_budget::DEFAULT_LIMIT,
             evidence: Mutex::new(()),
+            references: RwLock::new(()),
+            pins: Mutex::default(),
             admission: Mutex::new((0, BTreeMap::new())),
         })
     }
@@ -145,7 +152,8 @@ impl ExecutionService {
     }
 
     /// Foreground cascading deletion: stop the frozen ownership tree, wait for
-    /// execution cleanup, then remove dependents before their parents.
+    /// execution cleanup, then remove dependents before their parents, and
+    /// finally the owned content no remaining resource references.
     pub fn delete(&self, id: &SimulationId) -> Result<(), Error> {
         let _evidence = self
             .evidence
@@ -184,6 +192,7 @@ impl ExecutionService {
             }
             self.manager.delete(&id)?;
         }
+        self.reclaim_unreferenced(Some(id))?;
         Ok(())
     }
 
@@ -262,17 +271,24 @@ impl ExecutionService {
         name: &str,
         progress: &mut impl FnMut(u64) -> std::io::Result<()>,
     ) -> Result<seedbox_api::Simulation, Error> {
+        // Deleting the source reclaims under this lock; an export must not
+        // return state a concurrent deletion is removing.
+        let _evidence = self
+            .evidence
+            .lock()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
+        self.checkpoint_definition_locked(id, name, progress)
+    }
+
+    /// `checkpoint_definition_observed` for a caller that holds the evidence lock.
+    pub(crate) fn checkpoint_definition_locked(
+        &self,
+        id: &SimulationId,
+        name: &str,
+        progress: &mut impl FnMut(u64) -> std::io::Result<()>,
+    ) -> Result<seedbox_api::Simulation, Error> {
         progress(0)?;
         self.manager.captured_checkpoint(id, name)?;
-        if let Some(definition) = self
-            .manager
-            .read(|catalogue| catalogue.imported_checkpoint(id, name))?
-        {
-            let mut resource = self.describe(id)?;
-            resource.spec =
-                seedbox_api::SimulationSpec::resolved(definition).map_err(Error::Bundle)?;
-            return Ok(resource);
-        }
         let mut resource = self.describe(id)?;
         let seedbox_api::InputSource::Resolved { definition } = &mut resource.spec.inputs else {
             return Err(Error::Evidence(seedbox_application::Error::Setup(
@@ -290,12 +306,17 @@ impl ExecutionService {
             .join("output")
             .join(seedbox_application::execution::MACHINE_OUTPUT_DIR)
             .join(format!("checkpoint-{name}.json"));
+        let _references = self
+            .references
+            .read()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
         definition.start = seedbox_application::definition::capture_start_observed(
             &path,
             &attempt,
             &self.store,
             progress,
         )?;
+        self.pin_export(id, name, &definition.start)?;
         progress(0)?;
         resource
             .metadata
@@ -448,6 +469,10 @@ impl ExecutionService {
             // its journal and checkpoint files. Later comparisons read only the
             // manager-owned record. A missing journal is an explicit completion
             // error, never an empty history or a failed owner task.
+            // Recapturing a start checkpoint stays owned until the result names it.
+            let _references = self.references.read().map_err(|_| {
+                seedbox_application::Error::Setup("content reference lock failed".into())
+            })?;
             let simulation = self.portable_simulation(&id)?;
             let InputSource::Resolved { definition } = simulation.spec.inputs else {
                 return Err(seedbox_application::Error::Integrity(
@@ -498,6 +523,7 @@ impl ExecutionService {
                         &mut s.status,
                         exit,
                         report.and_then(|r| r.simulated_time_ns),
+                        report.and_then(|r| r.properties.as_ref()),
                     );
                     s.status.termination = Some(termination);
                     s.status.phase = Phase::Completed;
@@ -530,18 +556,11 @@ impl ExecutionService {
         cancellation: &CancellationToken,
         preparation_expired: Arc<AtomicBool>,
     ) -> seedbox_application::Result<Run> {
-        let mut options = self
+        let options = self
             .manager
             .describe(id)
             .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?
             .options;
-        // Canonical definitions omit host performance settings. Retain the effective
-        // worker count in execution options for later members of this seed range.
-        options.machine_workers = Some(
-            options
-                .machine_workers
-                .unwrap_or(spec.configuration.simulator.machine_workers.get()),
-        );
         let mut resolved_spec = spec.clone();
         resolved_spec
             .resolve_project_architecture(
@@ -591,7 +610,6 @@ impl ExecutionService {
         self.manager
             .update(id, |s| {
                 s.spec = resolved_spec;
-                s.options.machine_workers = options.machine_workers;
                 s.status.phase = Phase::Running;
                 s.status.stage = Some(Stage::Booting);
             })
@@ -770,6 +788,7 @@ impl ExecutionService {
                     &mut s.status,
                     exit,
                     report.and_then(|r| r.simulated_time_ns),
+                    report.and_then(|r| r.properties.as_ref()),
                 );
             })
             .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
@@ -813,12 +832,17 @@ fn save_inputs(
 
 // Committed observations may be ahead of a late final report. Neither the
 // oracle's first exit nor the public timeline may move backwards during cleanup.
+// Property results come only with the report.
 fn merge_report_observation(
     status: &mut seedbox_api::SimulationStatus,
     exit: Option<u8>,
     time: Option<u64>,
+    properties: Option<&seedbox_engine_protocol::property::Assessment>,
 ) {
     status.oracle_exit_code = status.oracle_exit_code.or(exit);
+    if let Some(properties) = properties {
+        status.properties = Some(properties.clone().into());
+    }
     if let Some(time) = time {
         status.simulated_time_ns = status.simulated_time_ns.max(time);
     }
@@ -990,6 +1014,7 @@ mod tests {
                     full_state: None,
                     faults: vec![],
                     detail: None,
+                    properties: None,
                 })
             }
         }
@@ -1021,7 +1046,7 @@ mod tests {
         let architecture =
             platform::Host::current().project_architecture(seedbox_spec::backend::CpuBackend::Pv);
         let configuration = seedbox_application::config::parse_for_architecture(
-            "name: mixed\nmachines:\n  app: {image: example/app, memoryMiB: 2048}\n  helper: {image: example/helper}\noracle: {image: example/oracle, memoryMiB: 256}\nsimulator: {quantum: 2.5ms, machineWorkers: 4}\n",
+            "name: mixed\nmachines:\n  app: {image: example/app, memoryMiB: 2048}\n  helper: {image: example/helper}\noracle: {image: example/oracle, memoryMiB: 256}\nsimulator: {quantum: 2.5ms}\n",
             Path::new("/project/seedbox.yaml"), &Default::default(),
             if cfg!(target_arch = "aarch64") { seedbox_application::guest::Architecture::Arm64 } else { seedbox_application::guest::Architecture::Amd64 },
         ).unwrap();
@@ -1096,7 +1121,10 @@ mod tests {
         let resource = manager
             .submit_seeds(seedbox_api::SeedRangeRequest {
                 metadata: Default::default(),
-                options: Default::default(),
+                options: seedbox_api::ExecutionOptions {
+                    machine_workers: Some(4),
+                    ..Default::default()
+                },
                 request_id: "mixed-memory".into(),
                 spec,
                 count: 2,
@@ -1173,7 +1201,7 @@ mod tests {
         for phase in [Phase::Finalizing, Phase::Completed] {
             manager
                 .update(&id, |s| {
-                    merge_report_observation(&mut s.status, Some(7), Some(50));
+                    merge_report_observation(&mut s.status, Some(7), Some(50), None);
                     s.status.phase = phase;
                 })
                 .unwrap();

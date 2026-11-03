@@ -100,6 +100,10 @@ static int dispatch(struct sbx_service *s) {
         if (!s->oracle) { errno = EINVAL; return -1; }
         return sbx_oracle_reply(s->oracle, action);
     }
+    if (!strncmp(action, "SBX_GUEST1 ", 11)) {
+        if (!s->properties) { errno = EINVAL; return -1; }
+        return sbx_properties_reply(s->properties, action);
+    }
     if (!strcmp(action, "shutdown")) { s->shutdown_requested = 1; return 0; }
     if (!strncmp(action, "step ", 5)) return step(s, action + 5);
     uint64_t id = 0;

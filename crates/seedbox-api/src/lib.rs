@@ -26,7 +26,8 @@ pub use controls::{
 };
 
 pub use events::{
-    EventDelivery, EventKind, FaultStatus, MachineTransition, PreparationStage, SimulationEvent,
+    EventDelivery, EventKind, FaultCounts, FaultStatus, MachineTransition, PreparationStage,
+    SimulationEvent,
 };
 pub use http::{ApiError, ErrorCode, ServerInfo, SimulationList, SimulationSummary};
 pub use id::{InvalidSimulationId, SimulationId};
@@ -40,6 +41,11 @@ mod seeds;
 pub use seeds::{SeedRangeRequest, SeedRangeStatus};
 
 pub use seedbox_engine_protocol::out_of_memory::Kill as OutOfMemoryVictim;
+mod properties;
+pub use properties::{
+    LostPropertyEvidence, PropertyAssessment, PropertyAssessmentStatus, PropertyExample,
+    PropertyKind, PropertyOrigin, PropertyViolation,
+};
 mod world;
 pub use world::{
     ApplicationCondition, ApplicationState, FaultState, Frame, FrameDelivery, FrameFate,

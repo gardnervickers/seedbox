@@ -422,7 +422,7 @@ fn fixture_submission(
     let oracle = fixture.name;
     let filesystem = fixture.filesystem;
     let launch = fixture.launch;
-    let volumes = driver_world::volume_setup(&fixture.volumes);
+    let volumes = driver_world::volume_setup(&fixture.volumes).unwrap();
     let mut definition = MachineDefinition {
         name: oracle.into(),
         resources: Resources { memory_bytes: 0 },
@@ -591,6 +591,7 @@ fn fixture_submission(
             },
             disk: volumes.disk_bytes.map(|bytes| wire::Disk::Zero { bytes }),
             interface: None,
+            allow_crashes: false,
         },
         machines: vec![],
         spawnable: vec![],
@@ -1816,6 +1817,7 @@ fn network_world_submission(
                 address: address.into(),
                 prefix_len: 24,
             }),
+            allow_crashes: false,
         });
     }
     let mut inputs = PreparedInputs {

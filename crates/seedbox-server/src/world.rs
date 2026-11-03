@@ -42,6 +42,30 @@ fn pairs(from: &[String], to: &[String]) -> BTreeSet<Pair> {
 }
 
 impl Tracker {
+    /// The world a spec starts from. A checkpoint start already contains the
+    /// machines spawned before its capture, so they are members, not standby.
+    pub fn for_spec(simulation: SimulationId, spec: &seedbox_api::SimulationSpec) -> Self {
+        let mut tracker = Self::new(simulation, &spec.configuration);
+        if let seedbox_api::InputSource::Resolved { definition } = &spec.inputs {
+            if let seedbox_spec::definition::Start::Checkpoint { manifest, .. } = &definition.start
+            {
+                let names = manifest["state"]["world"]["machine_names"].as_array();
+                tracker.restored(names.into_iter().flatten().filter_map(|name| name.as_str()));
+            }
+        }
+        tracker
+    }
+
+    /// Admit standby machines a checkpoint already spawned.
+    fn restored<'a>(&mut self, names: impl IntoIterator<Item = &'a str>) {
+        for name in names {
+            if self.spawnable.contains(name) {
+                self.machine(name);
+            }
+        }
+        self.revision = 1;
+    }
+
     pub fn new(simulation: SimulationId, configuration: &seedbox_spec::Simulation) -> Self {
         let network = &configuration.network;
         let mut tracker = Self {
@@ -265,6 +289,7 @@ impl Tracker {
                 applied_time_ns,
                 plan,
                 input_key,
+                counts,
             } => {
                 // A standby joins only when its spawn applies, never on a
                 // requested, failed or cut-off spawn.
@@ -282,7 +307,11 @@ impl Tracker {
                     plan: None,
                     active: false,
                     input_key: input_key.clone(),
+                    counts: None,
                 });
+                if counts.is_some() {
+                    fault.counts = *counts;
+                }
                 if input_key.is_some() {
                     fault.input_key = input_key.clone();
                 }
@@ -384,6 +413,9 @@ impl Tracker {
             FaultAction::ClockSkew { handle, .. }
             | FaultAction::ClockDrift { handle, .. }
             | FaultAction::Throttle { handle, .. }
+            | FaultAction::DiskError { handle, .. }
+            | FaultAction::DiskLatency { handle, .. }
+            | FaultAction::Preempt { handle, .. }
             | FaultAction::DropConnection { handle, .. } => {
                 self.healable.insert(handle.clone(), id);
             }
@@ -633,6 +665,7 @@ mod tests {
             configs: Vec::new(),
             volumes: Vec::new(),
             network: "default".into(),
+            allow_crashes: false,
             standby: standby.contains(&name),
         };
         let mut spec = seedbox_spec::Simulation {
@@ -696,6 +729,7 @@ mod tests {
             applied_time_ns: (status == FaultStatus::Applied).then_some(10),
             plan: Some(Box::new(serde_json::to_value(plan).unwrap())),
             input_key: None,
+            counts: None,
         }
     }
 
@@ -739,6 +773,41 @@ mod tests {
             .faults
             .iter()
             .all(|f| f.name != "spawn"));
+    }
+
+    #[test]
+    fn checkpoint_starts_keep_machines_spawned_before_capture() {
+        let mut t = tracker_with(None, &["b"]);
+        t.restored(["a", "b", "unknown"]);
+        let world = t.snapshot();
+        assert!(world.spawnable.is_empty());
+        assert!(world.machines.iter().any(|m| m.name == "b"));
+        assert!(world.machines.iter().all(|m| m.name != "unknown"));
+    }
+
+    #[test]
+    fn fault_counts_are_kept_once_reported() {
+        let mut t = tracker();
+        let plan = FaultAction::Throttle {
+            handle: "slow".into(),
+            machine: "a".into(),
+            factor_permille: 2000,
+        };
+        t.event(10, &fault(1, FaultStatus::Applied, plan.clone()));
+        assert_eq!(t.snapshot().faults[0].counts, None);
+        let counts = seedbox_api::FaultCounts {
+            matched: 3,
+            affected: 1,
+        };
+        let mut counted = fault(1, FaultStatus::Applied, plan.clone());
+        if let EventKind::FaultChanged { counts: field, .. } = &mut counted {
+            *field = Some(counts);
+        }
+        t.event(11, &counted);
+        assert_eq!(t.snapshot().faults[0].counts, Some(counts));
+        // A later change that carries no counts keeps the reported ones.
+        t.event(12, &fault(1, FaultStatus::Applied, plan));
+        assert_eq!(t.snapshot().faults[0].counts, Some(counts));
     }
 
     #[test]
@@ -1011,6 +1080,7 @@ mod tests {
                     plan: Some(serde_json::to_value(plan).unwrap()),
                     input_key: None,
                     active: false,
+                    counts: None,
                 },
             );
         }

@@ -34,10 +34,14 @@ use std::{
 const EXIT_CODES: &str = "\
 Exit status:
   0    PASS, or a replay/compare MATCH
-  1    FAIL, replay MISMATCH, or compare MISMATCH
+  1    FAIL (the oracle failed, a guest property was violated, a required
+       property was never evaluated, or a process crashed on a machine
+       without allowCrashes), replay MISMATCH, or compare MISMATCH
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
-  3    INCOMPLETE (cancelled or otherwise incomplete)
+  3    INCOMPLETE (the oracle exited 3, cancelled, lost guest property
+       evidence, or otherwise incomplete)
        A cancelled or incomplete replay reports 2 (NOT_COMPARABLE)
+       A detached replay reports 0 once submitted; compare it later
   124  TIMEOUT";
 
 #[derive(Parser)]
@@ -77,11 +81,8 @@ enum Command {
     #[command(after_help = EXIT_CODES)]
     Run {
         /// Project file, project directory, or self-contained checkpoint [default: current directory].
-        #[arg(value_name = "PROJECT|CHECKPOINT", conflicts_with = "from")]
+        #[arg(value_name = "PROJECT|CHECKPOINT")]
         input: Option<PathBuf>,
-        /// Repeat the retained inputs of an existing simulation.
-        #[arg(long, conflicts_with_all = ["input", "seed", "count"])]
-        from: Option<seedbox_api::SimulationId>,
         #[command(flatten)]
         backend: BackendArgs,
         /// Simulation seed [default: a simulation document's seed, otherwise allocated by the server].
@@ -102,14 +103,20 @@ enum Command {
         #[command(flatten)]
         execution: ExecutionArgs,
     },
-    /// Repeat a simulation and verify matching results.
+    /// Repeat a simulation's retained inputs and compare the results.
     #[command(after_help = EXIT_CODES)]
     Replay {
-        /// Completed simulation ID.
+        /// Simulation ID whose retained inputs to repeat.
         id: seedbox_api::SimulationId,
         #[command(flatten)]
         backend: BackendArgs,
-        /// Print the comparison as JSON.
+        /// Pause before guest execution; use --detach to return immediately.
+        #[arg(long)]
+        paused: bool,
+        /// Return after submission without comparing; use seedbox compare later.
+        #[arg(long)]
+        detach: bool,
+        /// Print the comparison as JSON, or the new simulation with --detach.
         #[arg(long)]
         json: bool,
         #[command(flatten)]
@@ -301,6 +308,7 @@ enum ControlCommand {
         handle: String,
     },
     /// Inspect whether a control request was applied.
+    #[command(hide = true)]
     Receipt {
         /// Simulation ID.
         id: seedbox_api::SimulationId,
@@ -323,6 +331,8 @@ enum ServerCommand {
         /// Report readiness to the launching client.
         #[arg(long, hide = true)]
         startup_handshake: bool,
+        #[command(flatten)]
+        inputs: RuntimeInputs,
     },
     /// Show server availability, occupied capacity and queued work.
     Status {
@@ -416,6 +426,7 @@ struct BackendArgs {
 struct BackendSelection {
     backend: Option<seedbox_spec::backend::CpuBackend>,
     wall_time: Option<u64>,
+    machine_workers: Option<u32>,
 }
 impl BackendArgs {
     fn selection(self, execution: ExecutionArgs) -> BackendSelection {
@@ -425,6 +436,7 @@ impl BackendArgs {
                 BackendArg::Tcg => seedbox_spec::backend::CpuBackend::Tcg,
             }),
             wall_time: execution.wall_time,
+            machine_workers: execution.machine_workers,
         }
     }
 }
@@ -434,6 +446,9 @@ struct ExecutionArgs {
     /// Stop after this much active host time, excluding explicit pauses [default: unlimited].
     #[arg(long, value_parser = wall_time)]
     wall_time: Option<u64>,
+    /// Host threads that run machines; never changes results [default: one per machine, sharing CPUs across server slots].
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=64))]
+    machine_workers: Option<u32>,
 }
 
 fn wall_time(value: &str) -> std::result::Result<u64, String> {
@@ -461,7 +476,7 @@ Exit status:
 #[derive(Args)]
 struct Transfer {
     /// Maximum complete transfer bytes, including archive headers and padding.
-    #[arg(long, default_value_t = seedbox_api::BUNDLE_MAX_BYTES, value_parser = clap::value_parser!(u64).range(1..=seedbox_api::BUNDLE_MAX_BYTES))]
+    #[arg(long, hide = true, default_value_t = seedbox_api::BUNDLE_MAX_BYTES, value_parser = clap::value_parser!(u64).range(1..=seedbox_api::BUNDLE_MAX_BYTES))]
     max_bytes: u64,
 }
 
@@ -597,7 +612,6 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Check { project, json } => check(&project, json),
         Command::Run {
             input,
-            from,
             backend,
             seed,
             count,
@@ -607,9 +621,6 @@ fn run(cli: Cli) -> Result<u8> {
             execution,
         } => {
             let selection = backend.selection(execution);
-            if let Some(id) = from {
-                return simulations::run_from(server, &id, paused, detach, json, selection);
-            }
             let input = input.unwrap_or_else(|| PathBuf::from("."));
             if bundles::is_checkpoint(&input)? {
                 if seed.is_some() || count.is_some() {
@@ -632,9 +643,18 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Replay {
             id,
             backend,
+            paused,
+            detach,
             json,
             execution,
-        } => simulations::replay(server, &id, json, backend.selection(execution)),
+        } => simulations::replay(
+            server,
+            &id,
+            paused,
+            detach,
+            json,
+            backend.selection(execution),
+        ),
         Command::Compare {
             baseline,
             simulation,
@@ -700,7 +720,8 @@ fn run(cli: Cli) -> Result<u8> {
             ServerCommand::Start {
                 foreground,
                 startup_handshake,
-            } => daemon::start(server, foreground, startup_handshake),
+                inputs,
+            } => daemon::start(server, inputs, foreground, startup_handshake),
             ServerCommand::Status { json } => daemon::status(server, json),
             ServerCommand::Stop => daemon::shutdown(server.state.clone()),
         },
@@ -814,16 +835,13 @@ mod parser_tests {
         for (words, expected) in [
             (vec!["seedbox", "--state", "run", "show"], true),
             (
-                vec![
-                    "seedbox",
-                    "--state=/tmp/state",
-                    "--full-state",
-                    "server",
-                    "start",
-                ],
+                vec!["seedbox", "--state=/tmp/state", "server", "start"],
                 true,
             ),
-            (vec!["seedbox", "--full-state", "example.yaml"], false),
+            (
+                vec!["seedbox", "--state", "/tmp/state", "example.yaml"],
+                false,
+            ),
             (vec!["seedbox", "--state", "/tmp/state"], false),
             (vec!["seedbox", "--seed", "3"], false),
             (vec!["seedbox", "--state", "/tmp/state", "--help"], true),

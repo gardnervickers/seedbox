@@ -1102,7 +1102,8 @@ impl Machine for TcgMachine {
                     }
                     request @ (seedbox_machine::pv::Request::Application { .. }
                     | seedbox_machine::pv::Request::StepRealtime { .. }
-                    | seedbox_machine::pv::Request::SimulationReply { .. }) => {
+                    | seedbox_machine::pv::Request::SimulationReply { .. }
+                    | seedbox_machine::pv::Request::PropertyReply { .. }) => {
                         if !matches!(self.state, State::Exited(_)) || self.pending_boots > 0 {
                             self.input
                                 .extend(self.guest.request(request).map_err(Error)?);

@@ -1,0 +1,14 @@
+# A guest program that reports properties through seedbox-guest. Built by its
+# Dockerfile from the repository root; not a member of the Seedbox workspace.
+[package]
+name = "property-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+libc = "0.2"
+seedbox-guest = { path = "../../../../crates/seedbox-guest" }
+serde_json = "1"

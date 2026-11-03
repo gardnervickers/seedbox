@@ -26,6 +26,7 @@ pub(crate) fn incomplete(reason: StopReason) -> ExecutionReport {
         full_state: None,
         faults: Vec::new(),
         detail: None,
+        properties: None,
     }
 }
 

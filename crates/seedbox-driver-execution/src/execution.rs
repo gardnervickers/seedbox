@@ -2,7 +2,7 @@
 pub use seedbox_artifacts::evidence::MACHINE_OUTPUT_DIR;
 pub use seedbox_artifacts::execution::*;
 use seedbox_artifacts::{
-    config::{Check, Limits, Network, Schedule},
+    config::{Check, Limits, Network, Schedule, Service},
     store::ContentDigest,
     Result,
 };
@@ -11,7 +11,6 @@ use std::{
     path::{Path, PathBuf},
 };
 pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
-pub const VOLUME_DISK_MIB: u64 = 1024;
 /// Only materialized, verified inputs reach the executor. Original Compose paths,
 /// registry references, and build contexts are deliberately absent.
 pub struct ExecutionRequest<'a> {
@@ -32,6 +31,8 @@ pub struct ExecutionRequest<'a> {
     pub schedule: &'a Schedule,
     pub control: Option<&'a seedbox_artifacts::config::Control>,
     pub check: &'a Check,
+    /// Current services; their `standby` decides which machines boot at launch.
+    pub services: &'a BTreeMap<String, Service>,
     pub prepared: &'a PreparedInputs,
     pub artifacts: &'a BTreeMap<ContentDigest, PathBuf>,
     pub output: &'a Path,

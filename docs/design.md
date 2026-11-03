@@ -11,6 +11,7 @@ Neither host elapsed time nor watchdog interruptions count as guest progress.
 ## Replay and fresh execution answer different questions
 
 The oracle checks application behaviour; a witness comparison checks reproducibility, not correctness.
+Guest properties and crash reports qualify the oracle's verdict: violations, unmet requirements and lost evidence are the only property results kept, and they arrive with the final report ([properties](scenarios.md)).
 Replay uses retained runtime inputs, so MATCH alone cannot validate a changed engine.
 Independent fresh runs exercise the new engine; comparison first checks resolved input compatibility.
 [Comparison](../crates/seedbox-server/src/execution.rs) ignores image names and descriptive host/engine metadata,
@@ -38,6 +39,7 @@ The [capture boundary](internals.md#checkpoint-capture) preserves input cursors 
 ## Definitions do not borrow resource ownership
 
 A resolved definition owns its binary closure by digest; source IDs and image names are provenance.
-Deleting the source simulation does not invalidate a checkpoint branch, but YAML alone cannot move its bytes.
+A submitted checkpoint branch keeps its captured state when the source simulation is deleted; a fetched but unsubmitted branch definition does not, so submit it or export a bundle first. YAML alone cannot move its bytes.
 The catalogue and execution scratch are session-scoped; the binary cache is not.
+Deleting a simulation reclaims captured checkpoint state and imported binaries no remaining resource names; kernels and images stay cached.
 A [portable archive](../crates/seedbox-artifacts/src/archive.rs) carries the closure without restoring source ownership.

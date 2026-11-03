@@ -226,6 +226,35 @@ pub(crate) fn request(
             boot_archives
         }
     };
+    // A resolved definition's `standby` edits are authoritative too: re-split
+    // the retained non-oracle machines, keeping both lists in name order.
+    let mut others: Vec<_> = prepared
+        .machines
+        .drain(..)
+        .chain(prepared.spawnable.drain(..))
+        .collect();
+    others.sort_by(|a, b| a.name.cmp(&b.name));
+    for machine in others {
+        let standby = request
+            .services
+            .get(&machine.name)
+            .ok_or_else(|| bad(format!("prepared machine {} has no service", machine.name)))?
+            .standby;
+        if standby {
+            prepared.spawnable.push(machine);
+        } else {
+            prepared.machines.push(machine);
+        }
+    }
+    if request
+        .services
+        .get(&prepared.oracle.name)
+        .is_some_and(|service| service.standby)
+    {
+        return Err(Error::Setup(
+            "oracle.standby: the oracle always starts at launch".into(),
+        ));
+    }
     let mut imported = BTreeSet::new();
     // Resolved inline process/memory edits are authoritative, not the launch
     // fields in the original preparation manifest. Binary filesystem identity

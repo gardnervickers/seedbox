@@ -39,14 +39,12 @@ pub struct Simulation {
     pub disk: DiskOptions,
 }
 
-/// Resolved simulator semantics and host execution capacity.
+/// Resolved simulator semantics.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SimulatorOptions {
     pub progress_budget: progress::ProgressBudget,
     pub quantum_ns: std::num::NonZeroU64,
-    /// Host performance setting, excluded from semantic identity.
-    pub machine_workers: project::WorkerCount,
 }
 
 impl Default for SimulatorOptions {
@@ -54,7 +52,6 @@ impl Default for SimulatorOptions {
         Self {
             progress_budget: Default::default(),
             quantum_ns: std::num::NonZeroU64::new(1_000_000).expect("nonzero quantum"),
-            machine_workers: Default::default(),
         }
     }
 }
@@ -113,6 +110,9 @@ pub struct Service {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<VolumeMount>,
     pub network: String,
+    /// The machine's `allowCrashes`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_crashes: bool,
     /// Not started at launch; the controller spawns it by name.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub standby: bool,
@@ -144,6 +144,10 @@ pub struct VolumeMount {
     pub source: String,
     /// Absolute directory in the service's filesystem.
     pub target: String,
+    /// Space the volume adds to its machine's disk; `None` is
+    /// [`project::DEFAULT_VOLUME_BYTES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -199,3 +199,14 @@ fn native_projects_resolve_memory_per_machine_and_validate_the_architecture_rang
         .values()
         .all(|service| service.memory_mb.is_none()));
 }
+
+#[test]
+fn allow_crashes_reaches_the_submitted_configuration() {
+    let document = BASE.replace(
+        "    image: example/workload:v1\n",
+        "    image: example/workload:v1\n    allowCrashes: true\n",
+    );
+    let sim = parse(&document).unwrap();
+    assert!(sim.services["workload"].allow_crashes);
+    assert!(!sim.services["oracle"].allow_crashes);
+}

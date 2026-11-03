@@ -85,6 +85,7 @@ fn fixture_bytes(
             },
             disk: None,
             interface: None,
+            allow_crashes: false,
         },
         machines: vec![],
         spawnable: vec![],
@@ -172,6 +173,7 @@ fn backend_authority_checks_saved_inventory_in_runtime_and_both_launch_paths() {
             schedule: &simulation.schedule,
             control: None,
             check: &simulation.check,
+            services: &simulation.services,
             prepared: &inputs,
             artifacts: &artifacts,
             output: &output,
@@ -257,6 +259,7 @@ fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
             schedule: &simulation.schedule,
             control: None,
             check: &simulation.check,
+            services: &simulation.services,
             prepared: &inputs,
             artifacts: &artifacts,
             output: &output,
@@ -387,6 +390,7 @@ fn request_keeps_checksum_mapping_import_and_worker_option_error_order() {
             schedule: &simulation.schedule,
             control: None,
             check: &simulation.check,
+            services: &simulation.services,
             prepared: &inputs,
             artifacts: &artifacts,
             output: &output,
@@ -401,4 +405,116 @@ fn request_keeps_checksum_mapping_import_and_worker_option_error_order() {
             .join(crate::worker_process::WORKER_REQUEST_FILE)
             .exists());
     }
+}
+
+#[test]
+fn resolved_standby_edits_decide_which_machines_boot_at_launch() {
+    use crate::execution::PreparedImage;
+    use seedbox_artifacts::image::Launch;
+    let root = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(root.path().join("store"));
+    let (mut inputs, mut prepared, artifact) = fixture(root.path(), CpuBackend::Pv);
+    let digest = ContentDigest::try_from(artifact.sha256.clone()).unwrap();
+    inputs.wall_clock_epoch = Some(86400);
+    let mut machine = |name: &str| {
+        inputs.guests.insert(name.into(), digest.clone());
+        inputs.machine_memory_mb.insert(name.into(), 128);
+        inputs.images.insert(
+            name.into(),
+            PreparedImage {
+                manifest: digest.clone(),
+                config: digest.clone(),
+                layers: vec![],
+                launch: Launch {
+                    argv: prepared.oracle.process.argv.clone(),
+                    environment: Default::default(),
+                    working_dir: "/".into(),
+                    user: "".into(),
+                    volumes: vec![],
+                    disk_volumes: vec![],
+                },
+            },
+        );
+        wire::Machine {
+            name: name.into(),
+            ..prepared.oracle.clone()
+        }
+    };
+    let (oracle, a, b) = (machine("oracle"), machine("a"), machine("b"));
+    prepared.oracle = oracle;
+    // Prepared with `a` booting and `b` in standby; the resolved edit swaps them.
+    prepared.machines = vec![a];
+    prepared.spawnable = vec![b];
+    retain_prepared(&mut inputs, &prepared, &store).unwrap();
+    let artifacts = inputs
+        .digests()
+        .enumerate()
+        .map(|(index, digest)| {
+            let path = store
+                .materialize(digest, &root.path().join(format!("input-{index}")))
+                .unwrap();
+            (digest.clone(), path)
+        })
+        .collect();
+    let output = root.path().join("output");
+    fs::create_dir(&output).unwrap();
+    let mut simulation = crate::fixture_simulation("oracle");
+    let service = |standby| seedbox_spec::Service {
+        source: seedbox_spec::ImageSource::Registry {
+            reference: "fixture:v1".into(),
+        },
+        platform: "linux/amd64".into(),
+        entrypoint: None,
+        command: None,
+        environment: Default::default(),
+        working_dir: None,
+        user: None,
+        configs: vec![],
+        volumes: vec![],
+        network: "default".into(),
+        allow_crashes: false,
+        standby,
+        memory_mb: None,
+    };
+    simulation.services = BTreeMap::from([
+        ("oracle".into(), service(false)),
+        ("a".into(), service(true)),
+        ("b".into(), service(false)),
+    ]);
+    let cancellation = CancellationToken::default();
+    let performance = BTreeMap::new();
+    let mut request = ExecutionRequest {
+        start_paused: true,
+        resume_checkpoint: None,
+        intervention_history: None,
+        observations: None,
+        seed: 42,
+        program: &[],
+        quantum_ns: simulation.simulator.quantum_ns,
+        limits: &simulation.limits,
+        network: &simulation.network,
+        schedule: &simulation.schedule,
+        control: None,
+        check: &simulation.check,
+        services: &simulation.services,
+        prepared: &inputs,
+        artifacts: &artifacts,
+        output: &output,
+        cancellation: &cancellation,
+        performance_parameters: &performance,
+    };
+    let names = |machines: &[wire::Machine]| -> Vec<String> {
+        machines.iter().map(|m| m.name.clone()).collect()
+    };
+    let retained = super::request(&request, &output.join("host.sock"), None).unwrap();
+    assert_eq!(names(&retained.prepared.machines), ["b"]);
+    assert_eq!(names(&retained.prepared.spawnable), ["a"]);
+    let mut oracle_standby = simulation.services.clone();
+    oracle_standby.get_mut("oracle").unwrap().standby = true;
+    request.services = &oracle_standby;
+    let error = super::request(&request, &output.join("host.sock"), None)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("oracle.standby"), "{error}");
 }

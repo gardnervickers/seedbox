@@ -228,10 +228,18 @@ pub struct SimulationStatus {
     pub oracle_exit_code: Option<u8>,
     pub termination: Option<ExecutionTermination>,
     pub stop_requested: bool,
+    /// Guest property findings: violations, unmet requirements and lost
+    /// evidence. Absent until the final report carries them, and absent when
+    /// there are none.
+    pub properties: Option<crate::PropertyAssessment>,
+    /// The test verdict. The server derives it from the oracle's exit, the
+    /// phase and the property findings under the engine's policy
+    /// (`seedbox_engine_core::properties::verdict`) and recomputes it with
+    /// every change it stores, so a verdict a client supplies never stands.
+    /// This crate stays data-only: it neither computes nor checks it.
+    pub verdict: TestVerdict,
 }
 
-// Keep the derived verdict at the wire boundary, never in mutable status.
-// Supplied verdicts are ignored on input.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StatusDocument {
@@ -244,6 +252,8 @@ struct StatusDocument {
     oracle_exit_code: Option<u8>,
     termination: Option<ExecutionTermination>,
     stop_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    properties: Option<crate::PropertyAssessment>,
     verdict: TestVerdict,
 }
 
@@ -258,7 +268,8 @@ impl Serialize for SimulationStatus {
             oracle_exit_code: self.oracle_exit_code,
             termination: self.termination.clone(),
             stop_requested: self.stop_requested,
-            verdict: self.verdict(),
+            properties: self.properties.clone(),
+            verdict: self.verdict,
         }
         .serialize(serializer)
     }
@@ -276,6 +287,8 @@ impl<'de> Deserialize<'de> for SimulationStatus {
             oracle_exit_code: document.oracle_exit_code,
             termination: document.termination,
             stop_requested: document.stop_requested,
+            properties: document.properties,
+            verdict: document.verdict,
         })
     }
 }
@@ -291,15 +304,16 @@ impl Default for SimulationStatus {
             oracle_exit_code: None,
             termination: None,
             stop_requested: false,
+            properties: None,
+            verdict: TestVerdict::Pending,
         }
     }
 }
 
 impl SimulationStatus {
-    /// Derived rather than independently writable, so diagnostics cannot
-    /// accidentally replace an observed oracle verdict.
+    /// The verdict the server derived; see [`Self::verdict`]'s field.
     pub fn verdict(&self) -> TestVerdict {
-        TestVerdict::from_oracle(self.oracle_exit_code, self.phase)
+        self.verdict
     }
 }
 
@@ -348,6 +362,7 @@ mod tests {
             configs: Vec::new(),
             volumes: Vec::new(),
             network: "default".into(),
+            allow_crashes: false,
             standby: false,
         };
         SimulationSpec {
@@ -499,46 +514,57 @@ mod tests {
     }
 
     #[test]
-    fn status_serializes_derived_verdict_and_round_trips() {
-        for (phase, code, verdict) in [
-            (Phase::Running, None, "pending"),
-            (Phase::Completed, None, "incomplete"),
-            (Phase::Running, Some(0), "passed"),
-            (Phase::Completed, Some(23), "failed"),
+    fn status_serializes_the_stored_verdict_and_round_trips() {
+        for verdict in [
+            TestVerdict::Pending,
+            TestVerdict::Incomplete,
+            TestVerdict::Passed,
+            TestVerdict::Failed,
         ] {
             let status = SimulationStatus {
-                phase,
-                oracle_exit_code: code,
+                phase: Phase::Completed,
+                oracle_exit_code: Some(0),
                 termination: Some(ExecutionTermination::Error {
                     message: "cleanup failed".into(),
                 }),
+                verdict,
                 ..Default::default()
             };
-            let document = serde_json::to_value(&status).unwrap();
-            assert_eq!(document["verdict"], verdict);
+            let mut document = serde_json::to_value(&status).unwrap();
+            assert_eq!(document["verdict"], serde_json::to_value(verdict).unwrap());
             assert!(!document.as_object().unwrap().contains_key("playback"));
             assert!(document["stage"].is_null());
             assert_eq!(
-                serde_json::from_value::<SimulationStatus>(document).unwrap(),
+                serde_json::from_value::<SimulationStatus>(document.clone()).unwrap(),
                 status
             );
+            document["unknown"] = serde_json::json!(true);
+            assert!(serde_json::from_value::<SimulationStatus>(document).is_err());
         }
+        assert_eq!(SimulationStatus::default().verdict(), TestVerdict::Pending);
     }
 
     #[test]
-    fn input_verdict_cannot_override_oracle() {
+    fn property_findings_round_trip() {
         let status = SimulationStatus {
             phase: Phase::Completed,
-            oracle_exit_code: Some(5),
+            oracle_exit_code: Some(0),
+            properties: Some(crate::PropertyAssessment {
+                unmet_requirements: vec!["failover exercised".into()],
+                ..Default::default()
+            }),
             ..Default::default()
         };
-        let mut document = serde_json::to_value(&status).unwrap();
-        document["verdict"] = serde_json::json!("passed");
-        let decoded: SimulationStatus = serde_json::from_value(document.clone()).unwrap();
-        assert_eq!(decoded, status);
-        assert_eq!(decoded.verdict(), TestVerdict::Failed);
-        assert_eq!(serde_json::to_value(decoded).unwrap()["verdict"], "failed");
-        document["unknown"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<SimulationStatus>(document).is_err());
+        let document = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            document["properties"]["unmetRequirements"][0],
+            "failover exercised"
+        );
+        assert_eq!(
+            serde_json::from_value::<SimulationStatus>(document).unwrap(),
+            status
+        );
+        let plain = serde_json::to_value(SimulationStatus::default()).unwrap();
+        assert!(plain.get("properties").is_none());
     }
 }

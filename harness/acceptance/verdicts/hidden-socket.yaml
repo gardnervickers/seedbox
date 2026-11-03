@@ -1,0 +1,10 @@
+# A tmpfs over /run hides the guest socket's path; the guest library still
+# reaches the supervisor, so the oracle's violated `never` fails the run.
+name: guest-hidden-socket
+machines: {}
+oracle:
+  build:
+    context: "../../.."
+    dockerfile: harness/acceptance/images/properties/Dockerfile
+  command:
+  - hidden-socket

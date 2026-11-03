@@ -98,7 +98,7 @@ impl Service {
                 self.prepare_heal(adapter, mode, plan)?
             }
             Command::HealRecord { record_id } => {
-                if !self.handles.active_record(record_id) {
+                if !self.handles.healable_record(record_id) {
                     return Err(
                         error(ErrorCode::InvalidState, "input owns no active handle").into(),
                     );

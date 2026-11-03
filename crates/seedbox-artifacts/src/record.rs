@@ -48,6 +48,27 @@ pub struct RunIdentity {
     pub program: Vec<seedbox_engine_protocol::input_program::TimedInput>,
 }
 
+impl RunIdentity {
+    /// Whether full-state digests name every machine that boots at launch and
+    /// only prepared machines: a standby appears only if it was spawned.
+    pub fn full_state_covers(&self, state: &BTreeMap<String, ContentDigest>) -> bool {
+        let standby = |name: &String| {
+            self.configuration
+                .services
+                .get(name)
+                .is_some_and(|service| service.standby)
+        };
+        state
+            .keys()
+            .all(|name| self.inputs.guests.contains_key(name))
+            && self
+                .inputs
+                .guests
+                .keys()
+                .all(|name| standby(name) || state.contains_key(name))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRecord {
@@ -124,7 +145,7 @@ pub fn compare(
                 && (record.identity.inputs.profile.witness_mode != WitnessMode::FullState
                     || r.full_state
                         .as_ref()
-                        .is_some_and(|s| s.keys().eq(record.identity.inputs.guests.keys())))
+                        .is_some_and(|s| record.identity.full_state_covers(s)))
         })
     };
     let comparable = matches!(
@@ -148,7 +169,9 @@ pub fn compare(
                     _ => Some(false),
                 },
                 a.faults == b.faults,
-                a.workload_exit == b.workload_exit && a.reason == b.reason,
+                a.workload_exit == b.workload_exit
+                    && a.reason == b.reason
+                    && a.properties == b.properties,
             ),
             _ => (None, None, false, false),
         };
@@ -172,5 +195,36 @@ pub fn compare(
         witness_matches,
         full_state_matches,
         fault_history_matches,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_state_omits_only_unspawned_standby_machines() {
+        let mut identity = crate::test_support::fixture().identity;
+        let digest = ContentDigest::of(b"state");
+        let mut standby = identity.configuration.services["workload"].clone();
+        standby.standby = true;
+        identity
+            .configuration
+            .services
+            .insert("spare".into(), standby);
+        identity
+            .inputs
+            .guests
+            .insert("spare".into(), digest.clone());
+        let state = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| (name.to_string(), digest.clone()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert!(identity.full_state_covers(&state(&["workload"])));
+        assert!(identity.full_state_covers(&state(&["spare", "workload"])));
+        assert!(!identity.full_state_covers(&state(&["spare"])));
+        assert!(!identity.full_state_covers(&state(&["other", "workload"])));
     }
 }

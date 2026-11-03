@@ -68,6 +68,9 @@ pub enum Kind {
         /// machines it affects. Absent from workers that predate it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan: Option<Box<crate::control::Action>>,
+        /// What the fault matched and did, once its engine reports it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counts: Option<crate::control::FaultCounts>,
     },
     OverrideRejected {
         input_key: String,

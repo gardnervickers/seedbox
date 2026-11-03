@@ -81,10 +81,17 @@ impl Service {
             Ok(Operation::Sleep { duration_ns }) => return self.sleep(call, now, duration_ns),
             Ok(Operation::ArmTrigger {
                 source,
-                marker,
+                marker: Some(marker),
+                block_request: None,
                 match_timeout_ns,
                 fault,
             }) => self.arm_trigger(adapter, &source, marker, match_timeout_ns, fault, now),
+            // A held block request needs its machine's device to hold it.
+            Ok(Operation::ArmTrigger { .. }) => Err(error(
+                ErrorCode::Unsupported,
+                crate::driver::faults::Capability::HeldBlockRequest
+                    .unprovided("a block_request trigger"),
+            )),
             Ok(Operation::CancelTrigger { trigger_id }) => self.cancel_trigger(trigger_id, now),
             Ok(
                 op @ (Operation::Stop { .. }
@@ -182,6 +189,11 @@ impl Service {
                 // The same membership rules as an untriggered partition.
                 let (left, right) = Self::partition_sides(adapter, &left, &right)?;
                 (TriggerAction::Partition { left, right }, None)
+            }
+            TriggerFault::Crash { .. } => {
+                return Err(OperationError::invalid(
+                    "only a block_request trigger crashes its machine",
+                ))
             }
         };
         let id = self

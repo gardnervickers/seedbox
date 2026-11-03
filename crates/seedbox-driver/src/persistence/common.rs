@@ -10,7 +10,7 @@ wire_enum!(ApplicationCommand; units {0=>Start,1=>Stop,2=>Pause,3=>Resume} tuple
 wire_enum!(CommandResult; units {0=>Completed,1=>Rejected} tuples {} records {});
 wire_enum!(Stream; units {0=>Stdout,1=>Stderr} tuples {} records {});
 wire_struct!(SimulationControlId { session, request });
-wire_enum!(foreign Request; units {0=>Crash,1=>Reboot,2=>Shutdown} tuples {} records {3=>SimulationReply{id,payload},4=>Application{id,command},5=>StepRealtime{id,nanoseconds},6=>ReceiveFrame{bytes}});
+wire_enum!(foreign Request; units {0=>Crash,1=>Reboot,2=>Shutdown} tuples {} records {3=>SimulationReply{id,payload},4=>Application{id,command},5=>StepRealtime{id,nanoseconds},6=>ReceiveFrame{bytes},7=>PropertyReply{session,payload}});
 wire_enum!(EvidenceDisposition; units {0=>Live,1=>Crashed,2=>Shutdown} tuples {} records {3=>Exited{code}});
 use seedbox_engine_protocol::out_of_memory::Kill;
 wire_struct!(Kill {
@@ -19,7 +19,14 @@ wire_struct!(Kill {
     anon_rss_kib,
     application
 });
-wire_enum!(foreign Response; units {1=>Ready} tuples {} records {0=>SimulationControl{id,payload},2=>BootConsole{bytes},3=>ApplicationOutput{stream,bytes},4=>ApplicationOutcome{code},5=>CommandAcknowledged{id,result},6=>TransmitFrame{bytes},8=>OutOfMemoryKill{kill},7=>BootEnded{ended_boot,disposition,native_booted,disk_lost_sectors,surviving_disk,retired_state_digest}});
+use seedbox_engine_protocol::{crash, property::Frame};
+wire_struct!(Frame {
+    session,
+    seq,
+    payload
+});
+wire_struct!(crash::Report { message, signal });
+wire_enum!(foreign Response; units {1=>Ready} tuples {} records {0=>SimulationControl{id,payload},2=>BootConsole{bytes},3=>ApplicationOutput{stream,bytes},4=>ApplicationOutcome{code},5=>CommandAcknowledged{id,result},6=>TransmitFrame{bytes},8=>OutOfMemoryKill{kill},9=>Property{frame},10=>Crash{report},7=>BootEnded{ended_boot,disposition,native_booted,disk_lost_sectors,surviving_disk,retired_state_digest}});
 wire_struct!(Input { at, payload });
 wire_enum!(StopReason; units {0=>BoundaryReached} tuples {} records {1=>Blocked{reached,deadline},2=>Exited{reached,reason}});
 wire_enum!(ExitReason; units {0=>Shutdown,2=>Crashed} tuples {} records {1=>ProgramExit{code}});
@@ -132,5 +139,19 @@ impl Wire for DiskImage {
             }
             _ => Err(CodecError::Invalid("disk kind")),
         }
+    }
+}
+
+// Property evidence holds guest-supplied JSON details; its serde form is
+// canonical (every field ordered), so it travels as one JSON value.
+impl Wire for seedbox_engine_core::properties::Ledger {
+    fn put<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+        serde_json::to_value(self)
+            .map_err(|_| CodecError::Invalid("property ledger"))?
+            .put(e)
+    }
+    fn get<R: Read>(d: &mut Decoder<R>) -> Result<Self> {
+        serde_json::from_value(<serde_json::Value as Wire>::get(d)?)
+            .map_err(|_| CodecError::Invalid("property ledger"))
     }
 }
