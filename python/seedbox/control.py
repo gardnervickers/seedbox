@@ -2,7 +2,9 @@
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import json
+import re
 import socket
+import threading
 from typing import Optional
 
 MAX_FRAME = 16_384
@@ -48,6 +50,19 @@ class Trigger:
     """Armed trigger identity; no fault handle is reserved until it fires."""
     id: int
     effect: Effect
+
+
+@dataclass(frozen=True)
+class Hit:
+    """A breakpoint hit. Its machine stays suspended until resumed or crashed."""
+    id: int
+    machine: str
+    boot: int
+    name: str
+    at_ns: int
+
+
+_BREAK_NAME = re.compile(r"[a-z0-9_.-]{1,64}")
 
 
 @dataclass(frozen=True)
@@ -111,12 +126,16 @@ class World:
     survive graceful disconnects. There are no automatic retries or implicit heals.
     """
 
-    def __init__(self, channel):
+    def __init__(self, channel, path=None):
         self._socket = channel
         self._reader = channel.makefile("rb")
         self._next_id = 1
         self._closed = False
+        self._path = path
+        self._handlers = {}
+        self._breaks = None
         self.last_effect = None
+        self.break_error = None
 
     @classmethod
     def connect(cls, path=DEFAULT_SOCKET):
@@ -124,12 +143,13 @@ class World:
         channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             channel.connect(path)
-            return cls(channel)
+            return cls(channel, path)
         except BaseException:
             channel.close()
             raise
 
     def close(self):
+        """Close this connection. Suspended machines stay suspended."""
         if not self._closed:
             self._closed = True
             self._reader.close()
@@ -453,6 +473,77 @@ class World:
         if not isinstance(trigger, Trigger):
             raise TypeError("cancel expects the Trigger returned by arm_console_*()")
         return self._call("cancel_trigger", trigger_id=trigger.id)[1]
+
+    def declare_breaks(self, names):
+        """Replace the breakpoint names that suspend a machine, for later hits."""
+        names = sorted(set(names))
+        if any(not isinstance(n, str) or not _BREAK_NAME.fullmatch(n) for n in names):
+            raise ValueError("breakpoint names are 1..=64 bytes of [a-z0-9_.-]")
+        return self._call("declare_breaks", names=names)[1]
+
+    def wait_break(self, timeout):
+        """Return the oldest unreturned hit, or None once the timeout passes."""
+        result = self._call("wait_break", timeout_ns=_nanoseconds(timeout))[0]
+        if not result:
+            return None
+        try:
+            hit = Hit(result["break_id"], result["machine"], result["boot"], result["name"], result["at_ns"])
+        except KeyError as error:
+            self.close()
+            raise ProtocolError("invalid breakpoint hit") from error
+        if (type(hit.id) is not int or type(hit.boot) is not int or type(hit.at_ns) is not int
+                or not isinstance(hit.machine, str) or not isinstance(hit.name, str)):
+            self.close()
+            raise ProtocolError("invalid breakpoint hit")
+        return hit
+
+    def resume_break(self, hit):
+        """Let a suspended machine run again; its breakpoint write returns."""
+        if not isinstance(hit, Hit):
+            raise TypeError("resume_break expects a Hit returned by wait_break")
+        return self._call("resume_break", break_id=hit.id)[1]
+
+    def on_break(self, name, handler):
+        """Call handler(world, hit) whenever a machine hits breakpoint `name`.
+
+        The first registration opens a second connection and serves hits on a
+        background thread, so this connection stays free for other calls. The
+        handler runs while the machine is suspended and gets that thread's
+        World; the machine resumes when the handler returns, unless the
+        handler crashed it. A handler that raises stops serving: its machine
+        stays suspended and the exception is kept in break_error.
+        """
+        if not callable(handler):
+            raise TypeError("on_break expects a callable handler")
+        if self._path is None:
+            raise ValueError("on_break needs a World opened with connect()")
+        self.declare_breaks([*self._handlers, name])
+        self._handlers[name] = handler
+        if self._breaks is None:
+            self._breaks = World.connect(self._path)
+            threading.Thread(target=self._serve_breaks, daemon=True).start()
+
+    def _serve_breaks(self):
+        world = self._breaks
+        try:
+            while not self._closed:
+                hit = world.wait_break(1)
+                if hit is None:
+                    continue
+                handler = self._handlers.get(hit.name)
+                if handler is not None:
+                    handler(world, hit)
+                try:
+                    world.resume_break(hit)
+                except FaultError as error:
+                    # The handler crashed the machine, which ended the hit.
+                    if error.code != "invalid_state":
+                        raise
+        except BaseException as error:
+            if not self._closed:
+                self.break_error = error
+        finally:
+            world.close()
 
 
 # Descriptive controller name; retain World for existing scenarios.
