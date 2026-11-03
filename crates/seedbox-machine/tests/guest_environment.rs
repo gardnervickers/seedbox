@@ -754,6 +754,8 @@ fn c_setup_missing_image_target_uses_root_defaults_and_all_ordinary_devices_are_
         assert!(text.contains(&format!("mknod|/dev/{name}|020666|{major}|{minor}")));
         assert!(text.contains(&format!("chmod|/dev/{name}|0666")));
     }
+    assert!(text.contains("mknod|/dev/seedbox/break|020222|10|243"));
+    assert!(text.contains("chmod|/dev/seedbox/break|0222"));
     for (target, path) in [
         ("pts/ptmx", "ptmx"),
         ("/proc/self/fd", "fd"),
