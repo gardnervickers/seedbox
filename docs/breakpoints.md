@@ -1,9 +1,11 @@
 # Breakpoints
 
-This is a plan. Nothing here is implemented yet. Breakpoints replace the
-oracle's triggers (`arm_trigger`, `cancel_trigger`). A trigger welds a watch to
-one fault and reports nothing back. A breakpoint only suspends a machine and
-hands the decision to the oracle.
+Breakpoints let a program hand control to the oracle at a point it chooses. A
+breakpoint only suspends a machine; the oracle decides what to do. They will
+replace the oracle's triggers (`arm_trigger`, `cancel_trigger`), which weld a
+watch to one fault and report nothing back. Write-to-file breakpoints work on
+PV today; removing triggers and `break_on_block_request` are still to come
+(see [Order of work](#order-of-work)).
 
 ## The model
 
@@ -33,16 +35,17 @@ device is absent, so instrumented code checks for it once and skips the write.
   current time, as after any stall: overdue timers fire and overdue disk
   requests complete at once. A short handler is a short stall, and a slow one
   can, for example, cost a leader its lease.
-- Names are 1 to 64 bytes of `[a-z0-9_.-]`. Any other name fails the write with
-  `EINVAL`, and nothing is suspended.
+- Names are 1 to 64 bytes of `[a-z0-9_.-]`. One trailing newline is dropped,
+  so `echo leader > /dev/seedbox/break` works. Any other name fails the write
+  with `EINVAL`, and nothing is suspended.
 
 ## Hits
 
-Each hit has a `break_id`, a `source` (`program`, or `block_request` with its
-watch ID), the `machine` and its `boot`, and `at_ns`, the projected simulation
+Each hit has a `break_id`, a `source` (`program`; later also `block_request`), the `machine` and its `boot`, and `at_ns`, the projected simulation
 time of the hit. A hit becomes visible to the oracle after the round that
-contains it commits. Hits in one round are numbered in committed
-`(at_ns, machine)` order, not in the order workers reply.
+contains it commits. Hits are numbered in committed order, not in the order
+workers reply, and `wait_break` returns the oldest one not yet returned. Hits
+appear as `break_hit` and `break_ended` events.
 
 A hit ends in one of these ways, recorded on its `break_ended` event:
 
@@ -65,16 +68,19 @@ are not resumed and run no further guest work; their hits end with
 | `declare_breaks` | `names` | Replaces the declared set for future hits. |
 | `wait_break` | `timeout_ns` | Parks until a hit is pending or the timeout passes. Returns the oldest pending hit, or `{}` on timeout. |
 | `resume_break` | `break_id` | The machine runs again and its `write` returns. |
-| `break_on_block_request` | `machine`, `op`, `nth` | One-shot: holds that request unwritten and suspends the machine. Returns a `watch` ID. |
+| `break_on_block_request` | `machine`, `op`, `nth` | Planned (step 4). One-shot: holds that request unwritten and suspends the machine. |
 
 `wait_break` parks in Driver state the way `sleep` does. It never blocks the
-Driver thread. `inspect` lists each suspended machine with its hit.
+Driver thread, and its timeout counts from the commit that admitted it.
+`inspect` lists each live hit under `breaks`.
 
 The libraries wrap this in `on_break(name, handler)`, in Python's `World` and
 Rust's `GuestWorld`. The library declares the union of the handlers' names and
-runs a `wait_break` loop on its own connection. It calls the handler while the
-machine is suspended, and resumes the machine when the handler returns, unless
-the handler crashed it. The nemesis and other oracle calls keep using their
+runs a `wait_break` loop on a second connection, on a background thread. It
+calls the handler with that connection's world while the machine is suspended,
+and resumes the machine when the handler returns, unless the handler crashed
+it. A handler that raises stops the loop and leaves its machine suspended; the
+error is kept in `break_error`. The nemesis and other oracle calls keep using their
 own connections at the same time.
 
 ```python
@@ -86,16 +92,11 @@ world.on_break("leader-elected", crash_new_leader)
 
 ### Several oracle connections
 
-Today the guest oracle relay accepts one client and one request in flight
-(`guest_oracle.c`), and the host decoder and bridge each keep one pending
-request. Breakpoints need that lifted, so step 1 starts here. The relay accepts
-up to 8 connections. Each connection is a session, which the frame header
-already carries, with at most one request in flight, so a connection's calls
-stay sequential. The decoder and bridge keep one pending request per session.
-Replies are correlated by session and request ID, and snapshots record the
-pending request of each session. The Driver admits calls from different
-sessions in committed order, as it already does for calls from different
-machines.
+The guest oracle relay accepts up to 8 connections. Each connection is a
+session, with at most one request in flight, so a connection's calls stay
+sequential. Replies are correlated by session and request ID. The Driver admits
+calls from different sessions in committed order, as it does for calls from
+different machines.
 
 Two schedules deadlock, and both are oracle bugs: a handler that waits for
 something from its own suspended machine, and a handler for A that waits on a
@@ -105,55 +106,42 @@ B suspended behind it.
 
 | Allowed | Refused until resume |
 | --- | --- |
-| `crash`; network faults that involve it (`partition`, `shape`, `drop_connection`) and their heals | `reboot` (crash it, then reboot it), clock faults (they need a guest acknowledgement), `stop`, `restart`, `pause_process`, `resume_process`, `pause`, `resume`, `throttle` |
+| `crash`; network faults that involve it (`partition`, `shape`, `drop_connection`) and their heals | Every other command targeting it, with `invalid_state`: `reboot` (crash it, then reboot it), clock faults, `stop`, `restart`, `pause_process`, `resume_process`, `pause`, `resume`, `throttle` |
 
 ## Engine contract
 
-On PV, the guest kernel adds a misc device, `/dev/seedbox/break`. Its `write`
-copies the name into a reserved area of the shared page and signals the
-worker. On aarch64 it stores to a new offset in the `EVENT_IPA` window. On
-x86_64 it writes a new port, which needs an explicit decoder branch because
-unknown ports are ignored today. KVM finishes the port instruction before it
-stops. Both stops are the rendezvous before the syscall returns. PV is
-single-vCPU, so the whole machine is suspended.
+On PV, the guest kernel adds a misc device with fixed minor 243, which the
+init creates as `/dev/seedbox/break` (mode 0222). Its `write` copies the name
+to bytes 128..192 of the shared page and writes its length to event register
+48, on both architectures. The worker stops at that exit, before the syscall
+returns. PV is single-vCPU, so the whole machine is suspended.
 
-The worker checks the name against the declared set, which the Driver gives
-it. An undeclared name returns at once. A declared one is reported as
-`Response::Break {name}` at that guest time. The machine stays held until
-`Request::ResumeBreak` or a crash.
+The worker checks the name against the declared set, which it gets with each
+run. An undeclared name continues at once. A declared one ends the run, and the
+machine reports `Response::Break {name}` at that guest time, after the run's
+other output. The machine stays held, reporting `Blocked` with no deadline,
+until `Request::ResumeBreak`, a crash or a reboot. A held machine still takes
+its inputs, such as network frames, at the current time; the guest sees them
+in order when it runs again.
 
-Suspension is its own state, separate from `pause`. A `resume_break` never
-lifts an independent pause, and a pause never lifts a suspension. While a
-machine is suspended, the Driver sets incoming frames and inputs aside instead
-of queuing them ahead of the resume. It delivers them in order after the
-resume, and a crash discards them as it does today.
+Suspension is its own state, separate from `pause`: a `resume_break` never
+lifts a pause, and a pause can't be applied to a suspended machine.
 
-A held block request reuses this state. `ResumeBreak` on a held request
-finishes the interrupted queue processing in order: it executes the held
-request and the requests after it in that notification. It does not count the
-held request again. At first, each machine has at most one outstanding block
-watch, which avoids overlapping counts.
+`declare_breaks` sends the declared set to every machine, and the Driver sends
+it again to each spawned machine. The machine keeps it across reboots and
+captures it in its snapshot.
 
-TCG refuses `declare_breaks` and `break_on_block_request` with `unsupported`
-until a Seedbox QEMU device register exists, as it does for disk faults. On TCG
-the guest device is absent, so writes behave as they do outside Seedbox.
+TCG has no device register for breakpoints, so the Driver is built without
+breakpoint support there and the oracle calls return `unsupported`. The guest
+device still exists on TCG, but nothing listens to it.
 
 ### Checkpoints and replay
 
-The Driver owns all breakpoint state; there is no machine-side mirror. A
-checkpoint captures:
-
-- the declared set;
-- armed block watches and their counts;
-- break and watch ID allocation;
-- parked `wait_break` calls;
-- pending hits and replies.
-
-No checkpoint or fork is taken while any machine is suspended. Declarations,
-an armed but unmatched watch and a parked waiter don't prevent one. Restore
-reinstalls the declared set and the watches in each worker before it runs,
-including in machines that later reboot or spawn. On replay, hits and resumes
-are regenerated by the retained oracle and never injected as overrides.
+A checkpoint captures the declared set (in the Driver and in each machine),
+break ID allocation and parked `wait_break` calls. No checkpoint or fork is
+taken while any machine is suspended; declarations and a parked waiter don't
+prevent one. On replay, hits and resumes are regenerated by the retained oracle
+and never injected as overrides.
 
 Symbol breakpoints (`module!symbol`) are a later addition. They would go
 through the DynamoRIO client, which already sees every block before it runs,
@@ -180,16 +168,13 @@ fault the oracle used to arm ahead of time, it now applies in its handler.
 
 ## Order of work
 
-1. Several oracle connections: relay, decoder, bridge and their snapshots.
-2. Write-to-file breakpoints, end to end on PV: kernel device, worker,
-   suspension state and set-aside inbox, the Driver's hit queue and declared
-   set, the oracle calls, and `on_break` in both libraries.
+1. Done: several oracle connections.
+2. Done: write-to-file breakpoints, end to end on PV.
 3. Remove triggers.
 4. `break_on_block_request`, built on #375's held block request, with the
    continuation on resume.
 
 #375 implements the `block_request` trigger on PV, and step 3 removes the code
 it extends. Its device hold and held machine state carry over into step 4.
-That step adds the in-order continuation on resume and moves the hold mirror
-from the machine to the Driver. Its trigger-table and `arm_trigger` changes are
+That step adds the in-order continuation on resume. Its trigger-table and `arm_trigger` changes are
 replaced.
