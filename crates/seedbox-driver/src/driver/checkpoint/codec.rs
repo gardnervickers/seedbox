@@ -1,4 +1,4 @@
-//! Version 7: fixed header then closed, field-ordered binary records.
+//! Version 1: fixed header then closed, field-ordered binary records.
 //! Contains only continuing state; observation sessions are never encoded.
 use super::*;
 use crate::persistence::{
@@ -6,7 +6,7 @@ use crate::persistence::{
 };
 use std::io::{Read, Write};
 const MAGIC: [u8; 8] = *b"SBXDRVR\0";
-const VERSION: u32 = 7;
+const VERSION: u32 = 1;
 
 impl<S> Checkpoint<S> {
     /// Consume this capture, replacing opaque snapshots in insertion order.
@@ -152,7 +152,7 @@ impl Checkpoint<SnapshotReference> {
         )?;
         let mut d = Decoder::new(reader, limits.encoded_bytes, limits);
         require(<[u8; 8]>::get(&mut d)? == MAGIC, "magic")?;
-        require(u32::get(&mut d)? == VERSION, "checkpoint version was made by an older or incompatible engine; replay with its retained engine or run fresh")?;
+        require(u32::get(&mut d)? == VERSION, "version")?;
         let length = u64::get(&mut d)?;
         if length > d.remaining {
             return Err(CodecError::Limit("encoded bytes"));

@@ -69,7 +69,7 @@ impl<M> ExecutionState<M> {
         };
         output.write_all(b"SBXPOLE\0")?;
         let mut e = Encoder { output };
-        3u32.put(&mut e)?;
+        1u32.put(&mut e)?;
         Timestamp::from_nanos(clock.now()).put(&mut e)?;
         rng.put(&mut e)?;
         quantum_ns.put(&mut e)?;
