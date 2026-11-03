@@ -99,10 +99,11 @@ impl Bridge {
         }
         opt(&mut b, self.last);
         b.extend_from_slice(&[0, 0, u8::from(self.failed)]); // ready, outcome, failed
-        b.extend_from_slice(&[0; 12]);
-        b.extend_from_slice(&[0; 4]); // oracle relay/session/public, failed/time/pending/prepared
+        b.extend_from_slice(&[0; 8]); // oracle relay/session
+        b.extend_from_slice(&[0; 2]); // oracle failed/time
+        word(&mut b, 0); // oracle sessions
         b.extend_from_slice(&0u32.to_le_bytes());
-        b.push(0); // highwater and session map
+        word(&mut b, 0); // highwater and session maps
         marks.insert("prepared_count", b.len());
         word(&mut b, self.prepared);
         (b, marks)

@@ -274,9 +274,13 @@ fn superseded_reply_is_nonfatal_through_codec_and_snapshot() {
         .unwrap()
         .is_some());
     let events = codec
-        .receive(&write(2, b"SBX_RPC1 2 2 {\"version\":1,\"id\":1}\n"))
+        .receive(&write(
+            2,
+            b"SBX_CLOSE1 1\nSBX_RPC1 2 2 {\"version\":1,\"id\":1}\n",
+        ))
         .unwrap();
-    let Event::Oracle(new) = &events[0] else {
+    assert_eq!(events[0], Event::OracleClosed(NonZeroU32::new(1).unwrap()));
+    let Event::Oracle(new) = &events[1] else {
         panic!()
     };
     let mut restored: Codec = serde_json::from_slice(&serde_json::to_vec(&codec).unwrap()).unwrap();
@@ -317,6 +321,13 @@ fn public_reply_identity_payload_and_duplicate_acceptance_fail_closed() {
     codec
         .receive(&write(2, b"SBX_RPC1 2 2 {\"version\":1,\"id\":1}\n"))
         .unwrap();
+    // An open concurrent session leaves the first one deliverable.
+    assert!(codec
+        .clone()
+        .prepare_reply(id(1, 1), b"{}")
+        .unwrap()
+        .is_some());
+    codec.receive(&write(3, b"SBX_CLOSE1 1\n")).unwrap();
     assert!(codec.prepare_reply(id(1, 1), b"{}").unwrap().is_none());
     assert!(codec.prepare_reply(id(1, 1), b"invalid").is_err());
     let mut maximum = vec![b'a'; 16383];
