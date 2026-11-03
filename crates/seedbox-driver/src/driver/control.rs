@@ -883,7 +883,10 @@ impl Control {
         notice: crate::oracle::service::Notice,
     ) -> Result<(Timestamp, super::EventKind), String> {
         use super::{EventKind, TriggerResult};
-        use crate::oracle::{service::Notice, triggers::Status};
+        use crate::oracle::{
+            service::{breaks::BreakEnd, Notice},
+            triggers::Status,
+        };
         Ok(match notice {
             Notice::Admitted(a) => (
                 Timestamp::from_nanos(a.admitted_at),
@@ -948,6 +951,36 @@ impl Control {
                         }
                     },
                     fault: fault.map(super::FaultId),
+                },
+            ),
+            Notice::BreakHit {
+                break_id,
+                machine,
+                boot,
+                name,
+                at,
+            } => (
+                Timestamp::from_nanos(at),
+                EventKind::BreakHit {
+                    break_id,
+                    machine: self.named(&machine)?,
+                    boot,
+                    name,
+                },
+            ),
+            Notice::BreakEnded {
+                break_id,
+                at,
+                reason,
+            } => (
+                Timestamp::from_nanos(at),
+                EventKind::BreakEnded {
+                    break_id,
+                    reason: match reason {
+                        BreakEnd::Resumed => super::BreakEnd::Resumed,
+                        BreakEnd::Crashed => super::BreakEnd::Crashed,
+                        BreakEnd::RunEnded => super::BreakEnd::RunEnded,
+                    },
                 },
             ),
         })

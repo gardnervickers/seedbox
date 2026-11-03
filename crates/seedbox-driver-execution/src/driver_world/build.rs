@@ -126,6 +126,12 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     driver
         .allow_crashes(allow_crashes(&request.prepared))
         .map_err(|e| bad(e.to_string()))?;
+    // Only PV machines hold at a breakpoint; TCG has no guest device yet.
+    if super::actions::engine(&request.prepared.inventory).backend
+        == seedbox_spec::backend::CpuBackend::Pv
+    {
+        driver.enable_breakpoints();
+    }
     if request.start_paused {
         driver
             .with_barrier(|barrier| barrier.set_rate(seedbox_driver::driver::PlaybackRate::Paused))

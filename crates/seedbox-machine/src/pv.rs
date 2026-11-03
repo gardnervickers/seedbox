@@ -146,6 +146,29 @@ pub enum Request {
         /// FCS or a virtio-net header. The EtherType and payload are opaque.
         bytes: Vec<u8>,
     },
+    /// Replace the breakpoint names this machine suspends on, effective for
+    /// hits after this input. The set belongs to the machine, not to a boot:
+    /// it survives crash and reboot and is part of machine snapshots. Every
+    /// name satisfies [`break_name_valid`]; anything else fails the run.
+    DeclareBreaks {
+        /// Distinct names in ascending byte order.
+        names: Vec<String>,
+    },
+    /// Release the machine from a [`Response::Break`] hold: the guest's write
+    /// returns and execution continues from the current time, as after any
+    /// stall. Without a hold in the current boot it does nothing.
+    ResumeBreak,
+}
+
+/// Longest breakpoint name in bytes.
+pub const MAX_BREAK_NAME: usize = 64;
+
+/// A breakpoint name is 1 to [`MAX_BREAK_NAME`] bytes of `[a-z0-9_.-]`.
+pub fn break_name_valid(name: &[u8]) -> bool {
+    (1..=MAX_BREAK_NAME).contains(&name.len())
+        && name
+            .iter()
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-'))
 }
 
 pub use ethernet::frame_in_bounds;
@@ -280,6 +303,15 @@ pub enum Response {
         /// One Ethernet frame starting at the destination address, without
         /// FCS or a virtio-net header. The EtherType and payload are opaque.
         bytes: Vec<u8>,
+    },
+    /// The guest wrote a declared breakpoint name. The machine is held at
+    /// that write: it stops at this output's time and every later run admits
+    /// inputs without executing, reporting `Blocked` with no deadline, until
+    /// [`Request::ResumeBreak`], a crash or a reboot. Undeclared names never
+    /// produce this response. Capture is refused while held.
+    Break {
+        /// The name as written, satisfying [`break_name_valid`].
+        name: String,
     },
 }
 

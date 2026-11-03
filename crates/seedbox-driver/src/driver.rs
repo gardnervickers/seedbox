@@ -50,7 +50,7 @@ mod network_test_frames;
 pub(crate) use network::Network as NetworkState;
 mod playback;
 pub use event::{
-    Cause, Event, EventKind, FaultAction, FaultId, FaultOrigin, FaultRecord, FaultTarget,
+    BreakEnd, Cause, Event, EventKind, FaultAction, FaultId, FaultOrigin, FaultRecord, FaultTarget,
     SettlementStatus, Transition, TriggerResult,
 };
 pub use input::{
@@ -610,6 +610,14 @@ where
         self.observations.frames.set_capacity(capacity);
     }
 
+    /// Let the oracle declare breakpoints. Call this only when every machine
+    /// can hold at a breakpoint ([`crate::pv::Response::Break`]); otherwise
+    /// the breakpoint calls are refused as unsupported. The setting is part
+    /// of checkpoints.
+    pub fn enable_breakpoints(&mut self) {
+        self.execution.control.service.breaks.supported = true;
+    }
+
     /// Transfer committed bookkeeping, events and frame facts exactly once.
     ///
     /// This works in every state, including after a failed `step`, a
@@ -1047,7 +1055,11 @@ where
         let mut plans = vec![];
         let mut calls = vec![];
         let now = self.now();
+        let mut hits = vec![];
         for output in &outputs {
+            if let Response::Break { name } = &output.payload {
+                hits.push((output.machine, output.boot, name.clone(), output.at));
+            }
             plans.extend(
                 self.execution
                     .control
@@ -1093,11 +1105,28 @@ where
                 self.execution.finished = Some((self.now(), reason));
             }
         }
+        // Hits are numbered in committed (at, machine) order.
+        for (machine, boot, name, at) in hits {
+            let display = self.execution.control.display_name(machine);
+            plans.extend(
+                self.execution
+                    .control
+                    .service
+                    .break_hit(
+                        control::Control::source(machine),
+                        display,
+                        boot,
+                        name,
+                        at.as_nanos(),
+                        now.as_nanos(),
+                    )
+                    .map_err(|failure| Error::Control(failure.message))?,
+            );
+        }
         if self.execution.finished.is_some() {
-            self.execution
-                .control
-                .service
-                .cut_off_triggers(self.now().as_nanos());
+            let now = self.now().as_nanos();
+            self.execution.control.service.cut_off_triggers(now);
+            self.execution.control.service.cut_off_breaks(now);
         } else {
             // Replies follow the commit that reduced their requests, behind
             // every item already due now.
@@ -1323,7 +1352,9 @@ where
                 Plan::Effect { at, .. }
                 | Plan::Wake { at, .. }
                 | Plan::Deadline { at, .. }
-                | Plan::Reply { at, .. } => Timestamp::from_nanos(*at),
+                | Plan::Reply { at, .. }
+                | Plan::DeclareBreaks { at, .. }
+                | Plan::ResumeBreak { at, .. } => Timestamp::from_nanos(*at),
                 Plan::Settled(_) => unreachable!(),
             };
             if at < self.now() {
@@ -1669,9 +1700,15 @@ where
         self.execution.rng.fill_bytes(&mut bytes);
         let now = self.now();
         let seed = u64::from_le_bytes(bytes);
-        self.execution
-            .machines
-            .push(Entry::new(id, machine, seed, now));
+        let mut entry = Entry::new(id, machine, seed, now);
+        let names = self.execution.control.service.breaks.declared();
+        if !names.is_empty() {
+            entry.inbox.push_back(Input {
+                at: now,
+                payload: Request::DeclareBreaks { names },
+            });
+        }
+        self.execution.machines.push(entry);
         let definition = &self.execution.definitions[index];
         self.execution.network.admit(
             id,
@@ -2457,6 +2494,8 @@ pub enum StepOutcome {
     Finished { at: Timestamp, reason: ExitReason },
 }
 
+#[cfg(test)]
+mod break_tests;
 #[cfg(test)]
 mod external_work_tests;
 #[cfg(test)]

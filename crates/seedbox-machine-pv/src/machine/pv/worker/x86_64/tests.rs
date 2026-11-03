@@ -146,13 +146,13 @@ fn policy_fresh_arm_hook_draws_at_programming_not_wake_and_speed_is_published() 
         .exits
         .extend([event(32, 3), event(0, 100), event(0, 100), halt()]);
     assert!(matches!(
-        vm.run(0, 200, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(0, 200, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Blocked(Some(116))
     ));
     assert_eq!(vm.page.word(super::super::SYSCALL_COST), 985);
     let before = serde_json::to_vec(&vm.state.policy).unwrap();
     assert!(matches!(
-        vm.run(116, 116, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(116, 116, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Horizon
     ));
     assert_eq!(serde_json::to_vec(&vm.state.policy).unwrap(), before);
@@ -192,7 +192,7 @@ fn host_interruptions_neither_consume_time_nor_inject() {
         .exits
         .extend([Exit::Interrupted, Exit::Interrupted, event(32, 3), halt()]);
     assert!(matches!(
-        vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Blocked(None)
     ));
     assert_eq!(vm.state.now, 0);
@@ -200,7 +200,7 @@ fn host_interruptions_neither_consume_time_nor_inject() {
     assert!(vm.native.injected.is_empty());
     let entries = vm.native.entries;
     assert!(matches!(
-        vm.run(25, 25, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(25, 25, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Blocked(None)
     ));
     assert_eq!(vm.native.entries, entries);
@@ -213,7 +213,7 @@ fn zero_budget_adoption_marks_timer_without_entry_or_deferral() {
     vm.state.idle = true;
     vm.state.deadline = Some(5);
     assert!(matches!(
-        vm.run(20, 20, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(20, 20, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Horizon
     ));
     assert_eq!(vm.native.entries, 0);
@@ -231,13 +231,13 @@ fn timer_waits_for_an_interrupt_window_and_is_injected_once() {
     vm.native.exits.extend(pic_setup());
     vm.native.exits.extend([event(0, 5), halt()]);
     assert!(matches!(
-        vm.run(0, 100, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(0, 100, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Blocked(Some(5))
     ));
     assert_eq!(vm.state.devices.pic.imr, 0xce);
     // Zero-budget adoption raises the line without entering or injecting.
     assert!(matches!(
-        vm.run(5, 5, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(5, 5, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Horizon
     ));
     assert!(vm.native.injected.is_empty());
@@ -254,7 +254,7 @@ fn timer_waits_for_an_interrupt_window_and_is_injected_once() {
         halt(),
     ]);
     assert!(matches!(
-        vm.run(5, 100, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(5, 100, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Blocked(None)
     ));
     assert_eq!(vm.native.entries, entries + 6);
@@ -274,7 +274,7 @@ fn port_yield_advances_to_the_deadline_or_run_horizon() {
         vm.native
             .exits
             .extend([port(YIELD_PORT, true, 1), event(40, 1)]);
-        let stop = vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap();
+        let stop = vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).unwrap();
         assert_eq!(vm.state.now, deadline.unwrap_or(10).min(10));
         assert_eq!(vm.state.timer, deadline == Some(5));
         assert_eq!(vm.state.devices.lines & 1 != 0, deadline == Some(5));
@@ -316,7 +316,9 @@ fn clock_signal_ports_reject_invalid_accesses() {
                     value,
                 },
             ]);
-            let error = vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap_err();
+            let error = vm
+                .run(0, 10, 1000, false, &[], Vec::new(), &[])
+                .unwrap_err();
             assert_eq!(error, "PV clockevent port access");
             assert_eq!(vm.native.responses.len(), 1);
         }
@@ -363,7 +365,7 @@ fn ports_uart_and_power_off_are_stopped_rendezvous() {
         event(40, 1),
     ]);
     assert!(matches!(
-        vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::PoweredOff
     ));
     assert_eq!(vm.output, b"X");
@@ -377,12 +379,12 @@ fn terminal_exits_before_handshake_are_errors() {
     for exit in [Exit::Halt { interrupts: false }, Exit::Shutdown, halt()] {
         let mut vm = machine();
         vm.native.exits.extend([exit]);
-        assert!(vm.run(0, 10, 1000, false, &[], Vec::new()).is_err());
+        assert!(vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).is_err());
     }
     // A power-off event before the handshake is a setup failure too.
     let mut vm = machine();
     vm.native.exits.extend([event(40, 1)]);
-    assert!(vm.run(0, 10, 1000, false, &[], Vec::new()).is_err());
+    assert!(vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).is_err());
 }
 #[test]
 fn masked_halt_powers_off_and_triple_fault_resets_after_handshake() {
@@ -394,7 +396,7 @@ fn masked_halt_powers_off_and_triple_fault_resets_after_handshake() {
         vm.native
             .exits
             .extend([event(32, 3), port(0x3f8, true, b'Z' as u64), exit]);
-        let stop = vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap();
+        let stop = vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).unwrap();
         assert_eq!(stop, expected);
         use seedbox_machine::machine::execution_evidence::chain;
         let h = chain::record(
@@ -420,8 +422,8 @@ fn masked_halt_powers_off_and_triple_fault_resets_after_handshake() {
         assert_eq!(vm.output, b"Z");
         assert_eq!(vm.native.entries, 3);
         // The ended boot is never entered or captured again.
-        assert!(vm.run(0, 10, 1000, false, &[], Vec::new()).is_err());
-        assert!(vm.run(10, 10, 1000, false, &[], Vec::new()).is_err());
+        assert!(vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).is_err());
+        assert!(vm.run(10, 10, 1000, false, &[], Vec::new(), &[]).is_err());
         assert_eq!(vm.native.entries, 3);
         let directory = tempfile::tempdir().unwrap();
         assert!(vm.capture(&directory.path().join("capture")).is_err());
@@ -446,7 +448,9 @@ fn only_a_boot_with_a_disk_registers_and_maps_its_window() {
     let mut vm = machine();
     assert_eq!(command_line(&vm), b"console=ttyS0");
     vm.native.exits.extend([event(32, 3), disk_read(0)]);
-    let error = vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap_err();
+    let error = vm
+        .run(0, 10, 1000, false, &[], Vec::new(), &[])
+        .unwrap_err();
     assert!(error.contains("unmapped MMIO 0xb020000"), "{error}");
 
     let mut vm = machine_with(Some(
@@ -465,7 +469,7 @@ fn only_a_boot_with_a_disk_registers_and_maps_its_window() {
         Exit::Halt { interrupts: false },
     ]);
     assert_eq!(
-        vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::PoweredOff
     );
     assert_eq!(
@@ -485,7 +489,7 @@ fn ended_boot_exports_both_disk_layers_unchanged() {
         .exits
         .extend([event(32, 3), Exit::Halt { interrupts: false }]);
     assert_eq!(
-        vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::PoweredOff
     );
     let directory = tempfile::tempdir().unwrap();
@@ -503,7 +507,7 @@ fn interruptible_halt_stays_blocked_not_exited() {
     let mut vm = machine();
     vm.native.exits.extend([event(32, 3), event(0, 50), halt()]);
     assert!(matches!(
-        vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Blocked(Some(50))
     ));
     assert!(!vm.ended);
@@ -562,10 +566,12 @@ fn offer(vm: &Machine<Scripted>, queue: usize, buffer: u64, bytes: &[u8], writab
 fn only_a_boot_with_a_nic_registers_and_maps_its_window() {
     let mut vm = machine();
     vm.native.exits.extend([event(32, 3), nic(0, 4, false, 0)]);
-    let error = vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap_err();
+    let error = vm
+        .run(0, 10, 1000, false, &[], Vec::new(), &[])
+        .unwrap_err();
     assert!(error.contains("unmapped MMIO 0xb030000"), "{error}");
     assert!(machine()
-        .run(0, 0, 1000, false, &[], vec![vec![0; 60]])
+        .run(0, 0, 1000, false, &[], vec![vec![0; 60]], &[])
         .unwrap_err()
         .contains("without a NIC"));
 
@@ -589,7 +595,7 @@ fn only_a_boot_with_a_nic_registers_and_maps_its_window() {
         Exit::Halt { interrupts: false },
     ]);
     assert_eq!(
-        vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::PoweredOff
     );
     assert_eq!(
@@ -613,7 +619,7 @@ fn tx_frames_join_the_write_stream_at_the_notify_and_rx_raises_line_seven() {
         event(24, 0),
     ]);
     assert_eq!(
-        vm.run(5, 10, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(5, 10, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Horizon
     );
     use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
@@ -635,13 +641,13 @@ fn tx_frames_join_the_write_stream_at_the_notify_and_rx_raises_line_seven() {
     vm.native
         .exits
         .extend([nic(0x64, 4, true, 1), event(24, 0)]);
-    vm.run(10, 20, 1000, false, &[], Vec::new()).unwrap();
+    vm.run(10, 20, 1000, false, &[], Vec::new(), &[]).unwrap();
     assert_eq!(vm.state.devices.lines & 1 << NET, 0);
     offer(&vm, 0, 0x400_9000, &[], true);
     let entries = vm.native.entries;
     let received: Vec<u8> = (100..160).collect();
     assert_eq!(
-        vm.run(20, 20, 1000, false, &[], vec![received.clone()])
+        vm.run(20, 20, 1000, false, &[], vec![received.clone()], &[])
             .unwrap(),
         Stop::Horizon
     );
@@ -652,7 +658,9 @@ fn tx_frames_join_the_write_stream_at_the_notify_and_rx_raises_line_seven() {
     assert_eq!(&ram[0x400_9000 + 12..0x400_9000 + 72], &received[..]);
     assert!(vm.state.writes.is_empty());
     // Out-of-bounds host frames are caller errors.
-    assert!(vm.run(20, 20, 1000, false, &[], vec![vec![0; 13]]).is_err());
+    assert!(vm
+        .run(20, 20, 1000, false, &[], vec![vec![0; 13]], &[])
+        .is_err());
 }
 
 #[test]
@@ -677,7 +685,7 @@ fn actual_native_chain_excludes_host_landing_and_reads_ignore_returned_value() {
         Exit::Halt { interrupts: true },
     ]);
     assert!(matches!(
-        vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Blocked(_)
     ));
     let expected = chain::record(
@@ -775,7 +783,7 @@ fn shared_pic_mask_ack_waits_for_unmask_and_repeated_level_injects_once() {
         halt(),
     ]);
     assert_eq!(
-        vm.run(5, 100, 1000, false, &[], vec![]).unwrap(),
+        vm.run(5, 100, 1000, false, &[], vec![], &[]).unwrap(),
         Stop::Blocked(None)
     );
     assert_eq!(vm.native.injected, [0x30, 0x30]);
@@ -790,7 +798,7 @@ fn shared_pic_old_ack_is_consumed_before_due_time_and_new_receive() {
     vm.state.ready = true;
     vm.native.exits.extend(nic_setup());
     vm.native.exits.push_back(event(24, 0));
-    vm.run(0, 1, 1000, false, &[], vec![]).unwrap();
+    vm.run(0, 1, 1000, false, &[], vec![], &[]).unwrap();
     offer(&vm, 0, 0x400_9000, &[], true);
     vm.state.devices.pic.isr = 0x81;
     vm.state.deadline = Some(5);
@@ -798,7 +806,8 @@ fn shared_pic_old_ack_is_consumed_before_due_time_and_new_receive() {
     // Old PIC EOI may clear old in-service bits, never the newly admitted
     // timer or NIC level. Zero-budget adoption must consume it without entry.
     let entries = vm.native.entries;
-    vm.run(5, 5, 1000, false, &[], vec![vec![42; 60]]).unwrap();
+    vm.run(5, 5, 1000, false, &[], vec![vec![42; 60]], &[])
+        .unwrap();
     assert_eq!(vm.native.entries, entries);
     assert_eq!(vm.state.devices.lines & 0x81, 0x81);
     assert_eq!(vm.state.devices.pic.isr, 0);
@@ -838,9 +847,10 @@ fn shared_virtio_old_ack_precedes_zero_budget_receive_and_notify() {
     vm.state.ready = true;
     vm.native.exits.extend(nic_setup());
     vm.native.exits.push_back(event(24, 0));
-    vm.run(0, 1, 1000, false, &[], vec![]).unwrap();
+    vm.run(0, 1, 1000, false, &[], vec![], &[]).unwrap();
     offer(&vm, 0, 0x400_9000, &[], true);
-    vm.run(5, 5, 1000, false, &[], vec![vec![42; 60]]).unwrap();
+    vm.run(5, 5, 1000, false, &[], vec![vec![42; 60]], &[])
+        .unwrap();
     assert_eq!(vm.page.word(VIRTIO_IRQ + 16), 1);
     // Reoffer descriptor 0 in the next available slot, as a guest refill does.
     unsafe {
@@ -853,7 +863,8 @@ fn shared_virtio_old_ack_precedes_zero_budget_receive_and_notify() {
     vm.page.set_word(PIC_UPDATE, PIC_UPDATE_VALID | 0x807f);
     vm.state.devices.pic.isr = 0x80;
     let entries = vm.native.entries;
-    vm.run(5, 5, 1000, false, &[], vec![vec![43; 60]]).unwrap();
+    vm.run(5, 5, 1000, false, &[], vec![vec![43; 60]], &[])
+        .unwrap();
     assert_eq!(vm.native.entries, entries);
     assert_eq!(vm.page.word(VIRTIO_IRQ + 16), 1);
     assert_eq!(vm.state.devices.lines & 0x80, 0x80);
@@ -865,7 +876,8 @@ fn shared_virtio_old_ack_precedes_zero_budget_receive_and_notify() {
     let after = vm.native_execution().unwrap();
     assert_eq!(before.chain, after.chain);
     assert_eq!(before.pending, after.pending);
-    vm.run(5, 5, 1000, false, &[], vec![vec![44; 60]]).unwrap();
+    vm.run(5, 5, 1000, false, &[], vec![vec![44; 60]], &[])
+        .unwrap();
     assert_eq!(vm.page.word(VIRTIO_IRQ + 16), 1);
     let mut packet = vec![0; 12];
     packet.extend([45; 60]);
@@ -876,7 +888,7 @@ fn shared_virtio_old_ack_precedes_zero_budget_receive_and_notify() {
     vm.native
         .exits
         .extend([nic(0x50, 4, true, 1), event(24, 0)]);
-    vm.run(5, 6, 1000, false, &[], vec![]).unwrap();
+    vm.run(5, 6, 1000, false, &[], vec![], &[]).unwrap();
     // The old RX ACK was consumed before TX notify reasserted the same bit.
     assert_eq!(vm.page.word(VIRTIO_IRQ + 16), 1);
     let frames: Vec<_> = vm
@@ -927,7 +939,7 @@ fn shared_virtio_ack_bits_roundtrip_and_host_interrupts_are_invisible() {
             .native
             .exits
             .extend([Exit::Interrupted, event(24, 0)]);
-        machine.run(0, 10, 1000, false, &[], vec![]).unwrap();
+        machine.run(0, 10, 1000, false, &[], vec![], &[]).unwrap();
         assert_eq!(machine.page.word(VIRTIO_IRQ + 16), 0);
         assert_eq!(machine.native.nic_words_at_entry, [2 | (3 << 32); 2]);
         let witness = machine.state.witness;
@@ -936,4 +948,49 @@ fn shared_virtio_ack_bits_roundtrip_and_host_interrupts_are_invisible() {
     }
     assert_eq!(vm.state.witness, restored.state.witness);
     assert_eq!(unsafe { vm.page.bytes() }, unsafe { restored.page.bytes() });
+}
+#[test]
+fn a_declared_breakpoint_write_stops_the_run_and_others_return_at_once() {
+    let write = |vm: &Machine<Scripted>, name: &[u8]| unsafe {
+        vm.page.modify(|page| {
+            page[super::super::BREAK_NAME..super::super::BREAK_NAME + name.len()]
+                .copy_from_slice(name)
+        })
+    };
+    let breaks = ["leader".to_owned()];
+    let mut vm = machine();
+    write(&vm, b"leader");
+    vm.native
+        .exits
+        .extend([event(32, 3), event(48, 6), event(40, 1)]);
+    assert_eq!(
+        vm.run(0, 100, 1000, false, &[], Vec::new(), &breaks)
+            .unwrap(),
+        Stop::Break("leader".into())
+    );
+    // The write completed before the stop; the next run continues after it.
+    assert_eq!(vm.native.responses.len(), 2);
+    assert_eq!(
+        vm.run(0, 100, 1000, false, &[], Vec::new(), &breaks)
+            .unwrap(),
+        Stop::PoweredOff
+    );
+
+    let mut vm = machine();
+    write(&vm, b"follower");
+    vm.native
+        .exits
+        .extend([event(32, 3), event(48, 8), event(40, 1)]);
+    assert_eq!(
+        vm.run(0, 100, 1000, false, &[], Vec::new(), &breaks)
+            .unwrap(),
+        Stop::PoweredOff
+    );
+
+    let mut vm = machine();
+    write(&vm, b"Leader");
+    vm.native.exits.extend([event(32, 3), event(48, 6)]);
+    assert!(vm
+        .run(0, 100, 1000, false, &[], Vec::new(), &breaks)
+        .is_err());
 }
