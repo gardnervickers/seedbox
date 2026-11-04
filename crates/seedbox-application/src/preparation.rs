@@ -106,7 +106,6 @@ impl OciPreparer {
 
         context.setup_inputs(&auxiliary, &engine, &kernel)?;
 
-        let hosts = hosts_file(simulation);
         let temporary = tempfile::tempdir()?;
         let mut images = BTreeMap::new();
         let mut guests = BTreeMap::new();
@@ -143,7 +142,7 @@ impl OciPreparer {
             context.check()?;
 
             let (archive, filesystem) =
-                launch.boot(&driver_factory, &boot_cache, simulation, store, &hosts)?;
+                launch.boot(&driver_factory, &boot_cache, simulation, store)?;
             let imported = launch.imported;
             auxiliary.insert(
                 format!(
@@ -277,8 +276,9 @@ impl Launch<'_> {
         cache: &PreparedBootCache,
         simulation: &Simulation,
         store: &ContentStore,
-        hosts: &str,
     ) -> Result<(ContentDigest, ContentDigest)> {
+        let hosts =
+            seedbox_driver_execution::driver_world::preparation::hosts_file(simulation, self.name)?;
         cache.prepare(
             OciBoot {
                 name: self.name,
@@ -286,7 +286,7 @@ impl Launch<'_> {
                 launch: &self.imported.image.launch,
                 simulation,
                 configs: &self.mounts,
-                hosts,
+                hosts: &hosts,
             },
             store,
             |request, store| factory.boot(request, store),
@@ -324,21 +324,6 @@ fn read_configs<'a>(
         configs.insert(name, data);
     }
     Ok(configs)
-}
-
-/// The guest hosts file: loopback plus one address per service, in name order.
-fn hosts_file(simulation: &Simulation) -> String {
-    let addresses: BTreeMap<_, _> = simulation
-        .services
-        .keys()
-        .enumerate()
-        .map(|(index, name)| (name, format!("10.0.0.{}", index + 1)))
-        .collect();
-    let mut hosts = "127.0.0.1 localhost\n::1 localhost\n".to_owned();
-    for (name, address) in &addresses {
-        hosts.push_str(&format!("{address} {name}\n"));
-    }
-    hosts
 }
 
 /// Import each service's image, sharing verified bytes between identical sources.
@@ -453,6 +438,7 @@ fn validate_config_target(path: &str) -> Result<()> {
     // its own contract. Other paths remain inside the guest chroot.
     if path == "/"
         || path == "/etc/hosts"
+        || path == "/etc/resolv.conf"
         || ["/dev", "/proc", "/sys"]
             .iter()
             .any(|reserved| path == *reserved || path.starts_with(&format!("{reserved}/")))

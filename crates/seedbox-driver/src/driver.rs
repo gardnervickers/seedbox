@@ -521,10 +521,17 @@ where
             }
         }
         let mut macs = BTreeSet::new();
+        let mut addresses = BTreeSet::new();
         for definition in all() {
             if let Some(interface) = &definition.network {
                 if !macs.insert(interface.mac()) {
                     return Err(Error::DuplicateMac(interface.mac()));
+                }
+                if !addresses.insert(interface.ipv4()) {
+                    return Err(Error::DuplicateAddress(interface.ipv4()));
+                }
+                if network::reserved(interface.mac(), interface.ipv4().octets()) {
+                    return Err(Error::ReservedNameserver(definition.name.clone()));
                 }
             }
         }
@@ -573,7 +580,7 @@ where
                 MachineId(index),
                 &definition.name,
                 seed,
-                definition.network.as_ref().map(|i| i.mac()),
+                definition.network.as_ref(),
             );
         }
         let mut driver = Self {
@@ -1739,7 +1746,7 @@ where
         let mac = definition.network.as_ref().map(|i| i.mac());
         self.execution
             .network
-            .admit(id, &definition.name, seed, mac);
+            .admit(id, &definition.name, seed, definition.network.as_ref());
         self.execution
             .control
             .spawned(name, seed, mac.is_some())
@@ -2074,15 +2081,24 @@ where
             return Err(Error::DuplicateName(name.clone()));
         }
         if let Some(interface) = &prepared.definition.network {
-            let mac = interface.mac();
-            if driver.execution.network.has_mac(mac)
-                || driver
+            if network::reserved(interface.mac(), interface.ipv4().octets()) {
+                return Err(Error::ReservedNameserver(name.clone()));
+            }
+            let others = || {
+                driver
                     .execution
                     .definitions
                     .iter()
-                    .any(|d| d.definition.network.as_ref().map(|i| i.mac()) == Some(mac))
+                    .filter_map(|d| d.definition.network.as_ref())
+            };
+            let network = &driver.execution.network;
+            if network.has_mac(interface.mac()) || others().any(|o| o.mac() == interface.mac()) {
+                return Err(Error::DuplicateMac(interface.mac()));
+            }
+            if network.has_address(interface.ipv4())
+                || others().any(|o| o.ipv4() == interface.ipv4())
             {
-                return Err(Error::DuplicateMac(mac));
+                return Err(Error::DuplicateAddress(interface.ipv4()));
             }
         }
         driver.execution.definitions.push(prepared);
@@ -2413,6 +2429,10 @@ pub enum Error<E> {
     },
     /// Two definitions share one MAC address.
     DuplicateMac(crate::definition::MacAddress),
+    /// Two definitions share one IPv4 address, which the nameserver answers.
+    DuplicateAddress(std::net::Ipv4Addr),
+    /// A definition's interface claims the simulated nameserver's MAC or address.
+    ReservedNameserver(String),
     /// A machine emitted a frame without a network interface, or outside the
     /// frame bounds. The failed batch publishes nothing.
     InvalidFrame {
@@ -2494,6 +2514,13 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
                 )
             }
             Self::DuplicateMac(mac) => write!(f, "duplicate machine MAC address: {mac}"),
+            Self::DuplicateAddress(address) => {
+                write!(f, "duplicate machine IPv4 address: {address}")
+            }
+            Self::ReservedNameserver(name) => write!(
+                f,
+                "machine {name} uses the simulated nameserver's MAC or IPv4 address"
+            ),
             Self::InvalidFrame { id } => write!(
                 f,
                 "machine {} emitted a frame without an interface or outside frame bounds",
