@@ -44,10 +44,67 @@ pub fn machine_number(simulation: &Simulation, name: &str) -> Result<u8> {
 /// The guest hosts file names only loopback and the machine itself; peers
 /// resolve through the simulated nameserver so unspawned machines stay absent.
 pub fn hosts_file(simulation: &Simulation, name: &str) -> Result<String> {
-    let number = machine_number(simulation, name)?;
-    Ok(format!(
-        "127.0.0.1 localhost\n::1 localhost\n10.0.0.{number} {name}\n"
-    ))
+    Ok(hosts(name, machine_number(simulation, name)?))
+}
+fn hosts(name: &str, number: u8) -> String {
+    format!("127.0.0.1 localhost\n::1 localhost\n10.0.0.{number} {name}\n")
+}
+
+/// Everything the worker builds one machine from, with host paths for files.
+pub struct MachineInputs<'a> {
+    pub name: &'a str,
+    /// The last octet of the machine's address and MAC.
+    pub number: u8,
+    pub memory_bytes: u64,
+    /// The machine's logical filesystem view.
+    pub filesystem: &'a Path,
+    pub launch: &'a seedbox_artifacts::image::Launch,
+    /// Each initial file's guest path and the host file holding its contents.
+    pub configs: BTreeMap<String, std::path::PathBuf>,
+    pub allow_crashes: bool,
+    pub control_socket: bool,
+}
+impl MachineInputs<'_> {
+    pub fn wire(&self) -> Result<(wire::Machine, wire::Environment)> {
+        let volumes = super::volume_setup(self.launch.disk_volumes.iter())
+            .map_err(|e| Error::Integrity(format!("machine volumes: {e}")))?;
+        let limits = seedbox_machine::application::GuestLimits::default();
+        let environment = wire::Environment {
+            hostname: self.name.into(),
+            hosts: hosts(self.name, self.number),
+            anonymous_volumes: self.launch.volumes.clone(),
+            named_volumes: volumes.named_volumes,
+            configs: self
+                .configs
+                .iter()
+                .map(|(target, path)| Ok((target.clone(), artifact(path)?)))
+                .collect::<Result<_>>()?,
+            limits: wire::GuestLimits {
+                max_map_count: limits.max_map_count,
+                nofile: limits.nofile,
+            },
+            control_socket: self.control_socket,
+        };
+        let machine = wire::Machine {
+            name: self.name.into(),
+            memory_bytes: self.memory_bytes,
+            filesystem: artifact(self.filesystem)?,
+            process: wire::Process {
+                argv: self.launch.argv.clone(),
+                environment: self.launch.environment.clone(),
+                working_directory: self.launch.working_dir.clone(),
+                user: self.launch.user.clone(),
+            },
+            disk: volumes.disk_bytes.map(|bytes| wire::Disk::Zero { bytes }),
+            interface: Some(wire::Interface {
+                mac: [2, 0, 0, 0, 0, self.number],
+                address: std::net::Ipv4Addr::new(10, 0, 0, self.number),
+                prefix_len: PREFIX_LEN,
+            }),
+            allow_crashes: self.allow_crashes,
+        };
+        Ok((machine, environment))
+    }
 }
 
 pub struct OciBoot<'a> {
@@ -250,8 +307,6 @@ pub fn retain_oci_prepared(
             .images
             .get(name)
             .ok_or_else(|| Error::Integrity(format!("prepared image missing for {name}")))?;
-        let volumes = super::volume_setup(image.launch.disk_volumes.iter())
-            .map_err(|e| Error::Integrity(format!("machine volumes: {e}")))?;
         let boot = inputs
             .guests
             .get(name)
@@ -277,7 +332,6 @@ pub fn retain_oci_prepared(
             })?;
         let filesystem =
             store.materialize(filesystem, &scratch.path().join("filesystem").join(name))?;
-        let view = artifact(&filesystem)?;
         boots.insert(name.clone(), artifact(&boot)?);
         let mut configs = BTreeMap::new();
         for mount in &service.configs {
@@ -287,52 +341,24 @@ pub fn retain_oci_prepared(
                 .ok_or_else(|| Error::Integrity("prepared config content missing".into()))?;
             let path =
                 store.materialize(digest, &scratch.path().join("configs").join(&mount.source))?;
-            configs.insert(mount.target.clone(), artifact(&path)?);
+            configs.insert(mount.target.clone(), path);
         }
-        let limits = seedbox_machine::application::GuestLimits::default();
-        environments.insert(
-            name.clone(),
-            wire::Environment {
-                hostname: name.clone(),
-                hosts: hosts_file(simulation, name)?,
-                anonymous_volumes: image.launch.volumes.clone(),
-                named_volumes: volumes.named_volumes,
-                configs,
-                limits: wire::GuestLimits {
-                    max_map_count: limits.max_map_count,
-                    nofile: limits.nofile,
-                },
-                control_socket: simulation
-                    .control
-                    .as_ref()
-                    .is_some_and(|control| control.service == *name),
-            },
-        );
-        let number = machine_number(simulation, name)?;
-        machines.insert(
-            name.clone(),
-            wire::Machine {
-                name: name.clone(),
-                memory_bytes,
-                filesystem: view,
-                process: wire::Process {
-                    argv: image.launch.argv.clone(),
-                    environment: image.launch.environment.clone(),
-                    working_directory: image.launch.working_dir.clone(),
-                    user: image.launch.user.clone(),
-                },
-                disk: volumes.disk_bytes.map(|bytes| wire::Disk::Zero { bytes }),
-                interface: Some(wire::Interface {
-                    mac: [2, 0, 0, 0, 0, number],
-                    address: std::net::Ipv4Addr::new(10, 0, 0, number),
-                    prefix_len: PREFIX_LEN,
-                }),
-                allow_crashes: simulation
-                    .services
-                    .get(name)
-                    .is_some_and(|service| service.allow_crashes),
-            },
-        );
+        let (machine, environment) = MachineInputs {
+            name,
+            number: machine_number(simulation, name)?,
+            memory_bytes,
+            filesystem: &filesystem,
+            launch: &image.launch,
+            configs,
+            allow_crashes: service.allow_crashes,
+            control_socket: simulation
+                .control
+                .as_ref()
+                .is_some_and(|control| control.service == *name),
+        }
+        .wire()?;
+        environments.insert(name.clone(), environment);
+        machines.insert(name.clone(), machine);
     }
     let oracle = machines
         .remove(&simulation.check.service)

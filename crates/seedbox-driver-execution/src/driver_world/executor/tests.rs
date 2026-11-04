@@ -225,3 +225,122 @@ fn retained_profile_drift_is_refused_before_reading_runtime_or_launching_workers
         );
     }
 }
+
+struct Preparer;
+impl Spawner for Preparer {
+    fn prepare(
+        &self,
+        request: &seedbox_engine_protocol::driver_world::SpawnRequest,
+        directory: &std::path::Path,
+    ) -> Result<(
+        seedbox_engine_protocol::driver_world::Machine,
+        seedbox_engine_protocol::driver_world::Environment,
+    )> {
+        if request.name == "broken" {
+            return Err(Error::Setup("no such image".into()));
+        }
+        assert!(directory.ends_with(&request.name));
+        use seedbox_engine_protocol::driver_world as wire;
+        let artifact = wire::Artifact {
+            sha256: "0".repeat(64),
+            length: 0,
+            artifact: directory.join("filesystem").to_str().unwrap().into(),
+        };
+        Ok((
+            wire::Machine {
+                name: request.name.clone(),
+                memory_bytes: 128 << 20,
+                filesystem: artifact,
+                process: wire::Process {
+                    argv: vec!["/fixture".into()],
+                    environment: Default::default(),
+                    working_directory: "/".into(),
+                    user: "".into(),
+                },
+                disk: None,
+                interface: Some(wire::Interface {
+                    mac: [2, 0, 0, 0, 0, request.number],
+                    address: std::net::Ipv4Addr::new(10, 0, 0, request.number),
+                    prefix_len: 16,
+                }),
+                allow_crashes: false,
+            },
+            wire::Environment {
+                hostname: request.name.clone(),
+                hosts: String::new(),
+                anonymous_volumes: vec![],
+                named_volumes: vec![],
+                configs: Default::default(),
+                limits: wire::GuestLimits {
+                    max_map_count: std::num::NonZeroU32::MIN,
+                    nofile: std::num::NonZeroU32::MIN,
+                },
+                control_socket: false,
+            },
+        ))
+    }
+}
+
+#[test]
+fn each_spawn_request_gets_one_answer_and_failures_are_answers() {
+    use crate::driver_world::worker::spawn;
+    use seedbox_engine_protocol::driver_world::{SpawnRequest, SpawnResponse};
+    let output = tempfile::tempdir().unwrap();
+    let directory = output.path().join(spawn::DIRECTORY);
+    // Nothing to answer before the worker asks for anything.
+    serve_spawns(&directory, None).unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    for (name, number) in [("broken", 7), ("replica", 8)] {
+        let request = SpawnRequest {
+            name: name.into(),
+            spec: "{}".into(),
+            number,
+        };
+        spawn::publish(
+            &directory,
+            &format!("{name}.request.json"),
+            &serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap();
+    }
+    serve_spawns(&directory, Some(&Preparer)).unwrap();
+    let failed = |name| match spawn::answer(output.path(), name).unwrap() {
+        Some(SpawnResponse::Failed { error }) => error,
+        other => panic!("{other:?}"),
+    };
+    assert!(failed("broken").contains("no such image"));
+    let Some(SpawnResponse::Prepared {
+        spawned,
+        environment,
+    }) = spawn::answer(output.path(), "replica").unwrap()
+    else {
+        panic!("replica was not prepared");
+    };
+    assert_eq!(spawned.spec, "{}");
+    assert_eq!(spawned.machine.interface.unwrap().mac[5], 8);
+    assert_eq!(environment.hostname, "replica");
+    // An answered request is not prepared again.
+    serve_spawns(&directory, None).unwrap();
+    assert!(matches!(
+        spawn::answer(output.path(), "replica").unwrap(),
+        Some(SpawnResponse::Prepared { .. })
+    ));
+    // Without a spawner, a new request is answered with why.
+    spawn::publish(
+        &directory,
+        "late.request.json",
+        &serde_json::to_vec(&SpawnRequest {
+            name: "late".into(),
+            spec: "{}".into(),
+            number: 9,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    serve_spawns(&directory, None).unwrap();
+    assert!(failed("late").contains("cannot prepare new machines"));
+    // Only prepared machines are retained with the run.
+    let prepared = spawn::prepared(&directory).unwrap();
+    assert_eq!(prepared.len(), 1);
+    assert_eq!(prepared[0].0.machine.name, "replica");
+}
