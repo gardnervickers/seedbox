@@ -235,6 +235,7 @@ applications! {
     clock_reboot => "clock-reboot",
     clock_skew => "clock-skew",
     connections => "connections",
+    dns => "dns",
     exclusives => "exclusives",
     key_value => "key-value",
     mac_capabilities => "mac-capabilities",
