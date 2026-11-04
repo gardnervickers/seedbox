@@ -76,7 +76,6 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         definitions,
         network,
         properties,
-        engine: _,
     } = execution;
     let ObservationState {
         staged_events,

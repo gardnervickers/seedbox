@@ -15,8 +15,8 @@
 //! Network operations use the Driver-owned canonical network policies.
 //! The guest schema defines no disk RPC operation; disk policy is likewise
 //! unsupported, and this parser does not invent disk operation names. The one
-//! disk shape it knows is a `block_request` trigger, which crashes a machine on
-//! a request its device holds. Inspect
+//! disk shape it knows is `break_on_block_request`, which suspends a machine
+//! at a request its device holds. Inspect
 //! results use a generic typed serialization seam so the complete projection
 //! (services, machines, active handles, network counters, optional triggers) can
 //! be supplied by its owner without defining a misleading partial schema here.
@@ -52,20 +52,6 @@ pub(crate) enum TriggerFault {
         left: Vec<Target>,
         right: Vec<Target>,
     },
-    /// A `block_request` trigger's only fault: crash the trigger's own
-    /// machine, undelayed, while the held request is still unwritten.
-    Crash {
-        target: Target,
-    },
-}
-
-/// What a `block_request` trigger watches: the source machine's `nth` disk
-/// request of kind `op` from arming, which its device holds unwritten.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct BlockRequest {
-    pub(crate) op: DiskOp,
-    pub(crate) nth: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -124,18 +110,35 @@ pub(crate) enum Operation {
     Heal {
         handle: String,
     },
-    /// Watch `source` for an output `marker` or, instead, a `block_request`.
     ArmTrigger {
         source: Target,
-        #[serde(default)]
-        marker: Option<Vec<u8>>,
-        #[serde(default)]
-        block_request: Option<BlockRequest>,
+        marker: Vec<u8>,
         match_timeout_ns: u64,
         fault: TriggerFault,
     },
     CancelTrigger {
         trigger_id: u32,
+    },
+    /// Replace the breakpoint names that suspend a machine, for later hits.
+    DeclareBreaks {
+        names: Vec<String>,
+    },
+    /// Park until a breakpoint hit is pending or `timeout_ns` passes.
+    WaitBreak {
+        timeout_ns: u64,
+    },
+    /// Resume the machine suspended by a live hit.
+    ResumeBreak {
+        break_id: u32,
+    },
+    /// Suspend `target`'s machine at its `nth` disk request of kind `op`
+    /// from now on, holding that request unwritten. One-shot.
+    BreakOnBlockRequest {
+        target: Target,
+        /// On the wire `request`, since `op` names the operation.
+        #[serde(rename = "request")]
+        op: DiskOp,
+        nth: u64,
     },
     // These wire shapes are parsed, but no network policy is implemented here.
     Connections {
@@ -321,41 +324,28 @@ impl Operation {
             Self::Heal { handle } if handle.is_empty() => {
                 return Err(OperationError::invalid("handle must be nonempty string"));
             }
+            Self::DeclareBreaks { names }
+                if !names
+                    .iter()
+                    .all(|name| crate::pv::break_name_valid(name.as_bytes())) =>
+            {
+                return Err(OperationError::invalid(format!(
+                    "breakpoint names are 1 to {} bytes of [a-z0-9_.-]",
+                    crate::pv::MAX_BREAK_NAME
+                )));
+            }
+            Self::BreakOnBlockRequest { nth: 0, .. } => {
+                return Err(OperationError::invalid("nth counts from 1"));
+            }
             Self::ArmTrigger {
                 marker,
-                block_request,
                 match_timeout_ns,
-                fault,
                 ..
-            } => match (marker, block_request) {
-                (Some(marker), None)
-                    if marker.is_empty() || marker.len() > 256 || *match_timeout_ns == 0 =>
-                {
-                    return Err(OperationError::invalid(
-                        "trigger requires 1..=256 marker bytes and positive match timeout",
-                    ));
-                }
-                (Some(_), None) if matches!(fault, TriggerFault::Crash { .. }) => {
-                    return Err(OperationError::invalid(
-                        "only a block_request trigger crashes its machine",
-                    ));
-                }
-                (None, Some(request))
-                    if request.nth == 0
-                        || *match_timeout_ns == 0
-                        || !matches!(fault, TriggerFault::Crash { .. }) =>
-                {
-                    return Err(OperationError::invalid(
-                        "block_request trigger requires a positive nth and match timeout, and crashes its machine",
-                    ));
-                }
-                (Some(_), None) | (None, Some(_)) => {}
-                _ => {
-                    return Err(OperationError::invalid(
-                        "trigger watches exactly one of a marker or a block_request",
-                    ));
-                }
-            },
+            } if marker.is_empty() || marker.len() > 256 || *match_timeout_ns == 0 => {
+                return Err(OperationError::invalid(
+                    "trigger requires 1..=256 marker bytes and positive match timeout",
+                ));
+            }
             _ => {}
         }
         Ok(())
@@ -371,6 +361,9 @@ impl Operation {
             Self::Sleep { duration_ns } => {
                 admitted.checked_add(*duration_ns).ok_or("sleep overflow")
             }
+            Self::WaitBreak { timeout_ns } => admitted
+                .checked_add(*timeout_ns)
+                .ok_or("wait_break timeout overflow"),
             Self::ArmTrigger {
                 match_timeout_ns, ..
             } => admitted
@@ -380,7 +373,10 @@ impl Operation {
             Self::Now {}
             | Self::Inspect {}
             | Self::Connections { .. }
-            | Self::CancelTrigger { .. } => Ok(admitted),
+            | Self::CancelTrigger { .. }
+            | Self::DeclareBreaks { .. }
+            | Self::ResumeBreak { .. }
+            | Self::BreakOnBlockRequest { .. } => Ok(admitted),
             _ => admitted
                 .checked_add(PROCESS_EFFECT_TIMEOUT_NS)
                 .ok_or("fault deadline overflow"),

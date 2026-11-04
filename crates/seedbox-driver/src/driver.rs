@@ -50,7 +50,7 @@ mod network_test_frames;
 pub(crate) use network::Network as NetworkState;
 mod playback;
 pub use event::{
-    Cause, Event, EventKind, FaultAction, FaultId, FaultOrigin, FaultRecord, FaultTarget,
+    BreakEnd, Cause, Event, EventKind, FaultAction, FaultId, FaultOrigin, FaultRecord, FaultTarget,
     SettlementStatus, Transition, TriggerResult,
 };
 pub use input::{
@@ -270,9 +270,6 @@ struct ExecutionState<M> {
     network: network::Network,
     /// Guest property evidence reduced at commit, in commit order.
     properties: seedbox_engine_core::properties::Ledger,
-    /// The engine running the machines, which decides what oracle calls
-    /// may ask of them. Not checkpoint state: its owner declares it again.
-    engine: Option<faults::Engine>,
 }
 
 /// Already-committed descriptions owned by one observer session. These are
@@ -578,7 +575,6 @@ where
                 control,
                 inputs: BTreeMap::new(),
                 trigger_marker: None,
-                engine: None,
                 definitions: spawnable,
                 network,
                 properties: Default::default(),
@@ -612,6 +608,14 @@ where
     // or new observer, so this stays a telemetry-only setter.
     pub fn set_frame_capacity(&mut self, capacity: usize) {
         self.observations.frames.set_capacity(capacity);
+    }
+
+    /// Let the oracle declare breakpoints. Call this only when every machine
+    /// can hold at a breakpoint ([`crate::pv::Response::Break`]); otherwise
+    /// the breakpoint calls are refused as unsupported. The setting is part
+    /// of checkpoints.
+    pub fn enable_breakpoints(&mut self) {
+        self.execution.control.service.breaks.supported = true;
     }
 
     /// Transfer committed bookkeeping, events and frame facts exactly once.
@@ -674,13 +678,6 @@ where
             events: std::mem::take(&mut self.observations.published),
             frames: self.observations.frames.drain(),
         }
-    }
-
-    /// Declare the engine running the machines, so oracle calls that need a
-    /// capability, such as a `block_request` trigger's held request, are
-    /// checked against it. Its owner declares it again after a restore.
-    pub fn set_engine(&mut self, engine: faults::Engine) {
-        self.execution.engine = Some(engine);
     }
 
     fn stage_notices(&mut self) {
@@ -1058,7 +1055,20 @@ where
         let mut plans = vec![];
         let mut calls = vec![];
         let now = self.now();
+        let mut hits = vec![];
         for output in &outputs {
+            let source = match &output.payload {
+                Response::Break { name } => Some(
+                    crate::oracle::service::breaks::HitSource::Program(name.clone()),
+                ),
+                &Response::BlockRequestHeld { op, nth } => {
+                    Some(crate::oracle::service::breaks::HitSource::BlockRequest { op, nth })
+                }
+                _ => None,
+            };
+            if let Some(source) = source {
+                hits.push((output.machine, output.boot, source, output.at));
+            }
             plans.extend(
                 self.execution
                     .control
@@ -1104,11 +1114,28 @@ where
                 self.execution.finished = Some((self.now(), reason));
             }
         }
+        // Hits are numbered in committed (at, machine) order.
+        for (machine, boot, source, at) in hits {
+            let display = self.execution.control.display_name(machine);
+            plans.extend(
+                self.execution
+                    .control
+                    .service
+                    .break_hit(
+                        control::Control::source(machine),
+                        display,
+                        boot,
+                        source,
+                        at.as_nanos(),
+                        now.as_nanos(),
+                    )
+                    .map_err(|failure| Error::Control(failure.message))?,
+            );
+        }
         if self.execution.finished.is_some() {
-            self.execution
-                .control
-                .service
-                .cut_off_triggers(self.now().as_nanos());
+            let now = self.now().as_nanos();
+            self.execution.control.service.cut_off_triggers(now);
+            self.execution.control.service.cut_off_breaks(now);
         } else {
             // Replies follow the commit that reduced their requests, behind
             // every item already due now.
@@ -1282,57 +1309,6 @@ where
         }
     }
 
-    /// Send a block_request trigger's hold or release to its machine now,
-    /// ahead of anything the machine runs next. The match deadline becomes a
-    /// machine time at the rate the machine runs now.
-    fn send_hold(&mut self, plan: crate::oracle::service::Plan) -> Result<(), Error<M::Error>> {
-        use crate::oracle::service::Plan;
-        let now = self.now();
-        let (source, payload) = match plan {
-            Plan::Hold {
-                source,
-                trigger,
-                op,
-                nth,
-                until,
-            } => {
-                let id = self
-                    .execution
-                    .control
-                    .reply_target(&source)
-                    .map_err(Error::Control)?;
-                let until =
-                    self.execution.machines[id.0].machine_time(id, Timestamp::from_nanos(until))?;
-                (
-                    id,
-                    Request::HoldBlockRequest {
-                        trigger,
-                        op,
-                        nth,
-                        until: Some(until),
-                    },
-                )
-            }
-            Plan::Release { source, trigger } => (
-                self.execution
-                    .control
-                    .reply_target(&source)
-                    .map_err(Error::Control)?,
-                Request::ReleaseBlockRequest { trigger },
-            ),
-            _ => return Err(Error::Control("not a machine hold".into())),
-        };
-        self.execution
-            .events
-            .entry(now)
-            .or_default()
-            .push_back(Scheduled::Input {
-                id: source,
-                input: Input { at: now, payload },
-            });
-        Ok(())
-    }
-
     fn control_plans(
         &mut self,
         plans: Vec<crate::oracle::service::Plan>,
@@ -1381,16 +1357,15 @@ where
                     continue;
                 }
             }
-            if matches!(plan, Plan::Hold { .. } | Plan::Release { .. }) {
-                self.send_hold(plan)?;
-                continue;
-            }
             let at = match &plan {
                 Plan::Effect { at, .. }
                 | Plan::Wake { at, .. }
                 | Plan::Deadline { at, .. }
-                | Plan::Reply { at, .. } => Timestamp::from_nanos(*at),
-                Plan::Settled(_) | Plan::Hold { .. } | Plan::Release { .. } => unreachable!(),
+                | Plan::Reply { at, .. }
+                | Plan::DeclareBreaks { at, .. }
+                | Plan::ResumeBreak { at, .. }
+                | Plan::BreakOnBlockRequest { at, .. } => Timestamp::from_nanos(*at),
+                Plan::Settled(_) => unreachable!(),
             };
             if at < self.now() {
                 return Err(Error::Control("control plan scheduled in the past".into()));
@@ -1735,9 +1710,15 @@ where
         self.execution.rng.fill_bytes(&mut bytes);
         let now = self.now();
         let seed = u64::from_le_bytes(bytes);
-        self.execution
-            .machines
-            .push(Entry::new(id, machine, seed, now));
+        let mut entry = Entry::new(id, machine, seed, now);
+        let names = self.execution.control.service.breaks.declared();
+        if !names.is_empty() {
+            entry.inbox.push_back(Input {
+                at: now,
+                payload: Request::DeclareBreaks { names },
+            });
+        }
+        self.execution.machines.push(entry);
         let definition = &self.execution.definitions[index];
         self.execution.network.admit(
             id,
@@ -2524,6 +2505,8 @@ pub enum StepOutcome {
 }
 
 #[cfg(test)]
+mod break_tests;
+#[cfg(test)]
 mod external_work_tests;
 #[cfg(test)]
 mod network_tests;
@@ -2558,7 +2541,5 @@ mod guest_command_tests;
 mod oracle_correlation_tests;
 #[cfg(test)]
 mod properties_tests;
-#[cfg(test)]
-mod trigger_tests;
 
 mod persist;

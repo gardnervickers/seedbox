@@ -18,6 +18,7 @@ static int capture(void *opaque, const void *bytes, size_t length) {
     memcpy(c->bytes + c->used, bytes, length); c->used += length; return 0;
 }
 struct fixture { struct sbx_oracle oracle; struct captured captured; int peer; char path[104]; };
+#define C0 (f.oracle.clients[0])
 static int connect_peer(struct fixture *f) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0); assert(fd >= 0);
     struct sockaddr_un address = {.sun_family = AF_UNIX};
@@ -39,9 +40,10 @@ static void finish(struct fixture *f) {
 static void send_bytes(struct fixture *f, const void *bytes, size_t length) {
     assert(write(f->peer, bytes, length) == (ssize_t)length);
 }
+/* A reconnected peer reuses the slot its predecessor freed. */
 static void request(struct fixture *f) {
     static const char payload[] = "{\"version\":1,\"id\":1,\"op\":false}\n";
-    send_bytes(f, payload, sizeof(payload)-1); assert(sbx_oracle_read(&f->oracle) == 0);
+    send_bytes(f, payload, sizeof(payload)-1); assert(sbx_oracle_read(&f->oracle, 0) == 0);
 }
 static void receive_exact(int fd, const void *opaque, size_t length) {
     const unsigned char *expected = opaque; unsigned char bytes[2048];
@@ -56,18 +58,18 @@ int main(int argc, char **argv) {
     assert(argc == 2); assert(signal(SIGPIPE, SIG_IGN) != SIG_ERR); alarm(15);
     struct fixture f;
     start(&f, argv[1], 1);
-    send_bytes(&f, "{\"version\":1,", 13); assert(sbx_oracle_read(&f.oracle) == 0); assert(f.captured.used == 0);
+    send_bytes(&f, "{\"version\":1,", 13); assert(sbx_oracle_read(&f.oracle, 0) == 0); assert(f.captured.used == 0);
     static const char tail[] = "\"id\":1,\"op\":false}\n";
-    send_bytes(&f, tail, sizeof(tail)-1); assert(sbx_oracle_read(&f.oracle) == 0);
+    send_bytes(&f, tail, sizeof(tail)-1); assert(sbx_oracle_read(&f.oracle, 0) == 0);
     static const char forwarded[] = "SBX_RPC1 1 1 {\"version\":1,\"id\":1,\"op\":false}\n";
     assert(f.captured.used == sizeof(forwarded)-1 && !memcmp(f.captured.bytes, forwarded, sizeof(forwarded)-1));
     struct sbx_service service; sbx_service_init(&service, NULL, NULL, capture, &f.captured); service.oracle = &f.oracle;
     assert(sbx_service_feed(&service, "SBX_REPLY1 1 ", 13) == 0);
-    assert(f.oracle.pending == 1);
+    assert(C0.pending == 1);
     assert(sbx_service_feed(&service, "1 {\"error\":\"invalid op\"}\n", 25) == 0);
     receive_exact(f.peer, "{\"error\":\"invalid op\"}\n", 23);
-    assert(f.oracle.pending == 0);
-    close(f.peer); f.peer = -1; assert(sbx_oracle_read(&f.oracle) == 0); assert(f.oracle.client == -1);
+    assert(C0.pending == 0);
+    close(f.peer); f.peer = -1; assert(sbx_oracle_read(&f.oracle, 0) == 0); assert(C0.fd == -1);
     f.peer = connect_peer(&f); assert(f.oracle.session == 2); f.captured.used = 0; request(&f);
     assert(!memcmp(f.captured.bytes, "SBX_RPC1 2 2 ", 13));
     /* A reply larger than the old 64-byte app parser uses the same one parser. */
@@ -85,15 +87,15 @@ int main(int argc, char **argv) {
     }
     for (unsigned test = 4; test <= 5; ++test) {
         start(&f, argv[1], test);
-        if (test == 4) { send_bytes(&f, "{", 1); assert(sbx_oracle_read(&f.oracle) == 0); }
+        if (test == 4) { send_bytes(&f, "{", 1); assert(sbx_oracle_read(&f.oracle, 0) == 0); }
         else request(&f);
-        close(f.peer); f.peer = -1; assert(sbx_oracle_read(&f.oracle) == 0);
-        assert(!f.oracle.poisoned && f.oracle.client == -1 && !f.oracle.used && !f.oracle.pending);
+        close(f.peer); f.peer = -1; assert(sbx_oracle_read(&f.oracle, 0) == 0);
+        assert(!f.oracle.poisoned && C0.fd == -1 && !C0.used && !C0.pending);
         if (test == 5) assert(sbx_oracle_reply(&f.oracle, "SBX_REPLY1 1 1 {}") == 0);
         f.peer = connect_peer(&f); assert(f.oracle.session == 2);
         f.captured.used = 0; request(&f);
         unsigned relay = test == 4 ? 1 : 2;
-        assert(f.oracle.pending == relay);
+        assert(C0.pending == relay);
         if (test == 5) assert(sbx_oracle_reply(&f.oracle, "SBX_REPLY1 1 1 {}") == 0);
         char current[64];
         assert(snprintf(current, sizeof(current), "SBX_REPLY1 %u 2 {}", relay) > 0);
@@ -101,29 +103,29 @@ int main(int argc, char **argv) {
         receive_exact(f.peer, "{}\n", 3); finish(&f);
     }
     start(&f, argv[1], 6);
-    send_bytes(&f, "{}\n{}\n", 6); assert(sbx_oracle_read(&f.oracle) == -1 && errno == EBUSY);
-    assert(f.oracle.relay == 1 && f.oracle.pending == 1); finish(&f);
+    send_bytes(&f, "{}\n{}\n", 6); assert(sbx_oracle_read(&f.oracle, 0) == -1 && errno == EBUSY);
+    assert(f.oracle.relay == 1 && C0.pending == 1); finish(&f);
     start(&f, argv[1], 7); f.oracle.relay = UINT32_MAX;
-    send_bytes(&f, "{}\n", 3); assert(sbx_oracle_read(&f.oracle) == -1 && errno == EOVERFLOW); finish(&f);
-    start(&f, argv[1], 8); close(f.peer); f.peer = -1; assert(sbx_oracle_read(&f.oracle) == 0);
+    send_bytes(&f, "{}\n", 3); assert(sbx_oracle_read(&f.oracle, 0) == -1 && errno == EOVERFLOW); finish(&f);
+    start(&f, argv[1], 8); close(f.peer); f.peer = -1; assert(sbx_oracle_read(&f.oracle, 0) == 0);
     f.oracle.session = UINT32_MAX;
     int peer = socket(AF_UNIX, SOCK_STREAM, 0); assert(peer >= 0);
     struct sockaddr_un address = {.sun_family = AF_UNIX}; strcpy(address.sun_path, f.path);
     assert(connect(peer, (struct sockaddr *)&address, sizeof(address)) == 0);
     assert(sbx_oracle_accept(&f.oracle) == -1 && errno == EOVERFLOW); close(peer); finish(&f);
     start(&f, argv[1], 9); unsigned char nul = 0; send_bytes(&f, &nul, 1);
-    assert(sbx_oracle_read(&f.oracle) == -1 && errno == EINVAL); finish(&f);
+    assert(sbx_oracle_read(&f.oracle, 0) == -1 && errno == EINVAL); finish(&f);
     /* A client that does not read must not block management/lifecycle work. */
     start(&f, argv[1], 10); request(&f);
     int buffer = 1024;
-    assert(setsockopt(f.oracle.client, SOL_SOCKET, SO_SNDBUF, &buffer, sizeof(buffer)) == 0);
+    assert(setsockopt(C0.fd, SOL_SOCKET, SO_SNDBUF, &buffer, sizeof(buffer)) == 0);
     char full[SBX_ORACLE_FRAME_MAX], command[SBX_MANAGEMENT_FRAME_MAX];
     memset(full, 'a', sizeof(full)); full[sizeof(full)-1] = '\n';
     int prefix = snprintf(command, sizeof(command), "SBX_REPLY1 1 1 ");
     memcpy(command + prefix, full, sizeof(full)-1); command[prefix + sizeof(full)-1] = 0;
     assert(sbx_oracle_reply(&f.oracle, command) == 0);
-    assert(f.oracle.pending == 1 && f.oracle.reply_used == sizeof(full));
-    assert(f.oracle.reply_cursor > 0 && f.oracle.reply_cursor < f.oracle.reply_used);
+    assert(C0.pending == 1 && C0.reply_used == sizeof(full));
+    assert(C0.reply_cursor > 0 && C0.reply_cursor < C0.reply_used);
     sbx_service_init(&service, NULL, NULL, capture, &f.captured); service.oracle = &f.oracle;
     assert(sbx_service_feed(&service, "shutdown\n", 9) == 0 && service.shutdown_requested);
     size_t received = 0;
@@ -133,39 +135,72 @@ int main(int argc, char **argv) {
         unsigned char chunk[1024];
         ssize_t count = read(f.peer, chunk, sizeof(chunk)); assert(count > 0);
         assert(!memcmp(chunk, full + received, (size_t)count)); received += (size_t)count;
-        assert(sbx_oracle_flush(&f.oracle) == 0);
+        assert(sbx_oracle_flush(&f.oracle, 0) == 0);
     }
-    assert(f.oracle.pending == 0 && f.oracle.reply_used == 0 && f.oracle.reply_cursor == 0);
-    close(f.peer); f.peer = -1; assert(sbx_oracle_read(&f.oracle) == 0);
+    assert(C0.pending == 0 && C0.reply_used == 0 && C0.reply_cursor == 0);
+    close(f.peer); f.peer = -1; assert(sbx_oracle_read(&f.oracle, 0) == 0);
     f.peer = connect_peer(&f); assert(f.oracle.session == 2);
-    f.captured.used = 0; request(&f); assert(f.oracle.pending == 2);
+    f.captured.used = 0; request(&f); assert(C0.pending == 2);
     finish(&f);
     /* A broken reply destination abandons a partially sent reply. Its suffix
      * cannot leak into a replacement session, whose call remains independent. */
     start(&f, argv[1], 11); request(&f);
-    assert(setsockopt(f.oracle.client, SOL_SOCKET, SO_SNDBUF, &buffer, sizeof(buffer)) == 0);
+    assert(setsockopt(C0.fd, SOL_SOCKET, SO_SNDBUF, &buffer, sizeof(buffer)) == 0);
     assert(sbx_oracle_reply(&f.oracle, command) == 0);
-    assert(f.oracle.reply_cursor > 0 && f.oracle.reply_cursor < f.oracle.reply_used);
+    assert(C0.reply_cursor > 0 && C0.reply_cursor < C0.reply_used);
     close(f.peer); f.peer = -1;
-    struct pollfd disconnected = {.fd = f.oracle.client, .events = POLLIN | POLLOUT};
+    struct pollfd disconnected = {.fd = C0.fd, .events = POLLIN | POLLOUT};
     assert(poll(&disconnected, 1, 3000) == 1);
     assert(disconnected.revents & (POLLERR | POLLHUP));
-    assert(sbx_oracle_poll(&f.oracle, disconnected.revents) == 0);
-    assert(!f.oracle.poisoned && f.oracle.client == -1 && !f.oracle.pending &&
-           !f.oracle.reply_used && !f.oracle.reply_cursor);
+    assert(sbx_oracle_poll(&f.oracle, 0, disconnected.revents) == 0);
+    assert(!f.oracle.poisoned && C0.fd == -1 && !C0.pending &&
+           !C0.reply_used && !C0.reply_cursor);
     f.peer = connect_peer(&f); f.captured.used = 0; request(&f);
-    assert(f.oracle.pending == 2);
+    assert(C0.pending == 2);
     assert(sbx_oracle_reply(&f.oracle, "SBX_REPLY1 1 1 {}") == 0);
     assert(sbx_oracle_reply(&f.oracle, "SBX_REPLY1 2 2 {}") == 0);
     receive_exact(f.peer, "{}\n", 3); finish(&f);
     /* Syntax/issued-relay validation still precedes stale-session disposal. */
     start(&f, argv[1], 12); request(&f); close(f.peer); f.peer = -1;
-    assert(sbx_oracle_read(&f.oracle) == 0);
+    assert(sbx_oracle_read(&f.oracle, 0) == 0);
     assert(sbx_oracle_reply(&f.oracle, "SBX_REPLY1 1 1 ") == -1 && f.oracle.poisoned);
     finish(&f);
     start(&f, argv[1], 13); request(&f); close(f.peer); f.peer = -1;
-    assert(sbx_oracle_read(&f.oracle) == 0);
+    assert(sbx_oracle_read(&f.oracle, 0) == 0);
     assert(sbx_oracle_reply(&f.oracle, "SBX_REPLY1 2 1 {}") == -1 && f.oracle.poisoned);
+    finish(&f);
+    /* Sessions run side by side: each forwards its own sequential calls under
+     * the shared relay counter, replies route by session in any order, and a
+     * closed session tells the host once it has spoken. */
+    start(&f, argv[1], 14);
+    int second = connect_peer(&f); assert(f.oracle.session == 2 && f.oracle.clients[1].fd >= 0);
+    request(&f);
+    static const char call[] = "{\"version\":1,\"id\":1}\n";
+    assert(write(second, call, sizeof(call)-1) == (ssize_t)(sizeof(call)-1));
+    assert(sbx_oracle_read(&f.oracle, 1) == 0);
+    static const char both[] = "SBX_RPC1 1 1 {\"version\":1,\"id\":1,\"op\":false}\n"
+                               "SBX_RPC1 2 2 {\"version\":1,\"id\":1}\n";
+    assert(f.captured.used == sizeof(both)-1 && !memcmp(f.captured.bytes, both, sizeof(both)-1));
+    assert(sbx_oracle_reply(&f.oracle, "SBX_REPLY1 2 2 {\"b\":2}") == 0);
+    receive_exact(second, "{\"b\":2}\n", 8);
+    assert(C0.pending == 1 && f.oracle.clients[1].pending == 0);
+    assert(sbx_oracle_reply(&f.oracle, "SBX_REPLY1 1 2 {}") == -1 && f.oracle.poisoned);
+    close(second); finish(&f);
+    start(&f, argv[1], 15);
+    int second_peer = connect_peer(&f);
+    assert(write(second_peer, call, sizeof(call)-1) == (ssize_t)(sizeof(call)-1));
+    assert(sbx_oracle_read(&f.oracle, 1) == 0);
+    close(second_peer); f.captured.used = 0;
+    assert(sbx_oracle_read(&f.oracle, 1) == 0 && f.oracle.clients[1].fd == -1);
+    assert(f.captured.used == 13 && !memcmp(f.captured.bytes, "SBX_CLOSE1 2\n", 13));
+    /* A silent session closes without telling the host. */
+    close(f.peer); f.peer = -1; f.captured.used = 0;
+    assert(sbx_oracle_read(&f.oracle, 0) == 0 && f.captured.used == 0);
+    assert(sbx_oracle_reply(&f.oracle, "SBX_REPLY1 1 2 {}") == 0);
+    int peers[SBX_ORACLE_CLIENTS];
+    for (unsigned i = 0; i < SBX_ORACLE_CLIENTS; ++i) { assert(!sbx_oracle_full(&f.oracle)); peers[i] = connect_peer(&f); }
+    assert(sbx_oracle_full(&f.oracle) && f.oracle.session == 2 + SBX_ORACLE_CLIENTS);
+    for (unsigned i = 0; i < SBX_ORACLE_CLIENTS; ++i) close(peers[i]);
     finish(&f);
     puts("guest oracle host socket tests passed"); return 0;
 }

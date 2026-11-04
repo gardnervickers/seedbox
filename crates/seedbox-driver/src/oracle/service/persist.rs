@@ -17,7 +17,7 @@ wire_struct!(Admitted {
     requested_at,
     admitted_at
 });
-wire_enum!(Notice; units {} tuples {0=>Admitted(v0),1=>Settled(v0)} records {2=>TriggerArmed{trigger,source,target,at,deadline},3=>TriggerResolved{trigger,at,status,fault}});
+wire_enum!(Notice; units {} tuples {0=>Admitted(v0),1=>Settled(v0)} records {2=>TriggerArmed{trigger,source,target,at,deadline},3=>TriggerResolved{trigger,at,status,fault},4=>BreakHit{break_id,machine,boot,name,at},5=>BreakEnded{break_id,at,reason}});
 wire_struct!(Settlement {
     record_id,
     network,
@@ -35,7 +35,7 @@ wire_struct!(Settlement {
     command,
     detail
 });
-wire_enum!(Plan; units {} tuples {0=>Settled(v0)} records {1=>Effect{fault,scope,at,effect,command,handle},2=>Wake{token,at},3=>Deadline{fault,at},4=>Reply{boot,source,id,at,payload},5=>Hold{source,trigger,op,nth,until},6=>Release{source,trigger}});
+wire_enum!(Plan; units {} tuples {0=>Settled(v0)} records {1=>Effect{fault,scope,at,effect,command,handle},2=>Wake{token,at},3=>Deadline{fault,at},4=>Reply{boot,source,id,at,payload},5=>DeclareBreaks{names,at},6=>ResumeBreak{machine,boot,at},7=>BreakOnBlockRequest{machine,op,nth,at}});
 // The boxed immediate receipt has no extra wire tag. Charge its owned object
 // before constructing it even though persisted timelines reject this plan arm.
 impl crate::persistence::Wire for Box<Settlement> {
@@ -82,6 +82,7 @@ wire_struct!(Service {
     last_wake,
     pending,
     sleepers,
+    breaks,
     poisoned,
     notices
 });
@@ -225,6 +226,7 @@ impl Service {
         require(!self.poisoned, "poisoned service")?;
         self.handles.check_persist(exists)?;
         self.triggers.check_persist(now, exists)?;
+        self.breaks.check_persist(now, self.last_wake, exists)?;
         // Each record has one pending owner, except a step not yet
         // acknowledged and the unsent heal queued behind it.
         let mut owners = BTreeMap::<_, (bool, bool)>::new();
@@ -444,6 +446,19 @@ impl Service {
                     && fault.is_none_or(|f| self.token_persist(f)),
                 "resolved notice",
             ),
+            Notice::BreakHit {
+                break_id,
+                machine,
+                at,
+                ..
+            } => require(
+                self.breaks.allocated(*break_id) && known(machine) && *at <= now,
+                "break hit notice",
+            ),
+            Notice::BreakEnded { break_id, at, .. } => require(
+                self.breaks.allocated(*break_id) && *at <= now,
+                "break ended notice",
+            ),
         }
     }
     pub(crate) fn check_plan_persist(
@@ -457,9 +472,6 @@ impl Service {
             Plan::Settled(_) => Err(crate::persistence::CodecError::Invalid(
                 "settlement cannot be queued",
             )),
-            Plan::Hold { .. } | Plan::Release { .. } => Err(
-                crate::persistence::CodecError::Invalid("a hold is sent at once, never queued"),
-            ),
             Plan::Effect {
                 fault,
                 at: t,
@@ -497,6 +509,28 @@ impl Service {
                 "wake plan",
             ),
             Plan::Reply { source, at: t, .. } => require(known(source) && *t == at, "reply plan"),
+            Plan::DeclareBreaks { names, at: t } => require(
+                self.breaks.supported
+                    && *t == at
+                    && names.windows(2).all(|pair| pair[0] < pair[1])
+                    && names
+                        .iter()
+                        .all(|name| crate::pv::break_name_valid(name.as_bytes())),
+                "declare breaks plan",
+            ),
+            Plan::BreakOnBlockRequest {
+                machine,
+                nth,
+                at: t,
+                ..
+            } => require(
+                self.breaks.supported && known(machine) && *nth > 0 && *t == at,
+                "block request break plan",
+            ),
+            // No checkpoint is taken while a machine is suspended.
+            Plan::ResumeBreak { .. } => Err(crate::persistence::CodecError::Invalid(
+                "machine suspended at a breakpoint",
+            )),
         }
     }
 }

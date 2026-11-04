@@ -2,16 +2,20 @@
 /* Single-CPU PV ABI 3. Matches seedbox-machine stopped worker; no architectural timer. */
 #include <linux/clockchips.h>
 #include <linux/clocksource.h>
+#include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/irq.h>
+#include <linux/miscdevice.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
 #include <linux/preempt.h>
 #include <linux/sched.h>
 #include <linux/sched_clock.h>
 #include <linux/sizes.h>
+#include <linux/string.h>
+#include <linux/uaccess.h>
 #include <asm/ptrace.h>
 #include <asm/seedbox.h>
 #include <asm/sysreg.h>
@@ -293,3 +297,60 @@ void __init seedbox_time_init(void)
 	clockevents_config_and_register(&ce, 1000000000, 1, 0x7fffffff);
 	pr_info("seedbox: PV clock and SPI %u ready\n", irq);
 }
+
+/*
+ * Breakpoints (docs/breakpoints.md). A write of a name to /dev/seedbox/break
+ * copies it into the shared page and stops at the worker. The worker holds the
+ * machine there when the oracle declared the name, so the write returns only
+ * once the oracle resumes it. One trailing newline is ignored so that echo
+ * works; any other byte outside [a-z0-9_.-] fails the write with EINVAL.
+ */
+#define SEEDBOX_BREAK_NAME 128
+#define SEEDBOX_BREAK_MAX 64
+/* Fixed so that the supervisor can create the node in an application /dev
+ * (SBX_BREAK_MINOR in guest_environment.h); outside the dynamic range. */
+#define SEEDBOX_BREAK_MINOR 243
+static ssize_t break_write(struct file *file, const char __user *buf,
+			   size_t len, loff_t *pos)
+{
+	char name[SEEDBOX_BREAK_MAX + 1];
+	unsigned long flags;
+	size_t n, i;
+
+	if (len == 0 || len > SEEDBOX_BREAK_MAX + 1)
+		return -EINVAL;
+	if (copy_from_user(name, buf, len))
+		return -EFAULT;
+	n = name[len - 1] == '\n' ? len - 1 : len;
+	if (n == 0 || n > SEEDBOX_BREAK_MAX)
+		return -EINVAL;
+	for (i = 0; i < n; i++) {
+		char c = name[i];
+
+		if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+		      c == '_' || c == '.' || c == '-'))
+			return -EINVAL;
+	}
+	/* One CPU: nothing else writes the name between the copy and the stop. */
+	local_irq_save(flags);
+	memcpy((char *)page + SEEDBOX_BREAK_NAME, name, n);
+	writeq(n, event + 48);
+	local_irq_restore(flags);
+	return len;
+}
+static const struct file_operations break_fops = {
+	.write = break_write,
+	.llseek = noop_llseek,
+};
+static struct miscdevice break_device = {
+	.minor = SEEDBOX_BREAK_MINOR,
+	.name = "seedbox-break",
+	.nodename = "seedbox/break",
+	.mode = 0222,
+	.fops = &break_fops,
+};
+static int __init seedbox_break_init(void)
+{
+	return misc_register(&break_device);
+}
+device_initcall(seedbox_break_init);

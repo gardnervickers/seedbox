@@ -86,19 +86,14 @@ impl Faults {
         let index = self.healed.iter().position(|(h, _)| *h == id)?;
         Some(self.healed.remove(index).1)
     }
+    /// Add a hold. The live worker counts it from now; this mirror learns
+    /// its progress when the boot ends.
     pub(super) fn hold(&mut self, hold: Hold) -> Result<(), String> {
-        if self.holds.iter().any(|h| h.trigger == hold.trigger) || hold.nth == 0 {
-            return Err("PV block request hold reused or empty".into());
+        if hold.nth == 0 || hold.seen >= hold.nth {
+            return Err("PV block request hold empty".into());
         }
         self.holds.push(hold);
         Ok(())
-    }
-    pub(super) fn release(&mut self, trigger: u32) {
-        self.holds.retain(|h| h.trigger != trigger);
-    }
-    /// The hold of `trigger` took its request in the live boot.
-    pub(super) fn held(&mut self, trigger: u32) {
-        self.release(trigger);
     }
     /// Whether a live boot has anything to report: an installed fault or a
     /// hold still counting.
@@ -131,11 +126,7 @@ impl Faults {
                 .ok_or("PV worker counted an uninstalled fault")?;
             fault.ended = add(fault.ended, *counts)?;
         }
-        if report
-            .holds
-            .iter()
-            .any(|h| !self.holds.iter().any(|m| m.trigger == h.trigger))
-        {
+        if report.holds.len() > self.holds.len() {
             return Err("PV worker reported an unknown hold".into());
         }
         self.holds = report.holds.clone();
@@ -151,13 +142,7 @@ impl Faults {
             preempts += usize::from(matches!(f.fault, DeviceFault::Preempt { .. }));
             previous = Some(f.id);
         }
-        let mut triggers = std::collections::BTreeSet::new();
-        if preempts > 1
-            || self
-                .holds
-                .iter()
-                .any(|h| h.nth == 0 || h.seen >= h.nth || !triggers.insert(h.trigger))
-        {
+        if preempts > 1 || self.holds.iter().any(|h| h.nth == 0 || h.seen >= h.nth) {
             return Err("PV retained preempt or holds".into());
         }
         Ok(())
@@ -200,22 +185,18 @@ mod tests {
             .is_err());
         faults
             .hold(Hold {
-                trigger: 1,
                 op: DiskOp::Flush,
                 nth: 3,
                 seen: 0,
-                until: None,
             })
             .unwrap();
         let counts = |matched, affected| FaultCounts { matched, affected };
         let report = FaultReport {
             counts: vec![(2, counts(4, 1))],
             holds: vec![Hold {
-                trigger: 1,
                 op: DiskOp::Flush,
                 nth: 3,
                 seen: 2,
-                until: None,
             }],
             healed: None,
         };

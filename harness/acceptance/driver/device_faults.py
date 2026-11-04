@@ -4,8 +4,8 @@ Without a program this is the unfaulted baseline. The acceptance test adds a
 program that applies each phase's fault at the start of its window and heals
 it at the end. The oracle runs each phase inside its window and observes the
 fault from inside the guest; a phase whose fault is not active is observed
-unfaulted. Meanwhile the oracle crashes the victim on a held FLUSH and
-reboots it.
+unfaulted. Meanwhile the oracle suspends the victim at a held FLUSH, crashes
+it there and reboots it.
 """
 import re
 import subprocess
@@ -58,12 +58,15 @@ def check(phase, values, faulted):
         raise RuntimeError(f"{phase}: unexpected observation {values} (faulted={faulted})")
 
 
-def victim(world, trigger):
+def crash_victim(world, hit):
+    """Crash the victim while its held FLUSH is still unwritten."""
+    world.crash(VICTIM)
+
+
+def victim(world, armed):
     """Wait for the held FLUSH's crash, then reboot the victim."""
-    if trigger is None:
+    if not armed:
         return
-    while world.inspect()["triggers"][trigger.id - 1]["status"] != "fired":
-        world.sleep(0.001)
     while not any(m["name"] == "victim" and m["state"] == "Down" for m in world.inspect()["machines"]):
         world.sleep(0.001)
     world.reboot(VICTIM)
@@ -73,13 +76,15 @@ def victim(world, trigger):
 def main():
     with World.connect() as world:
         try:
-            trigger = world.arm_block_request_crash(VICTIM, "flush", 20, match_timeout=5)
+            world.on_break("block_request", crash_victim)
+            world.break_on_block_request(VICTIM, "flush", 20)
+            armed = True
         except FaultError as error:
-            # An engine without held block requests refuses it.
+            # An engine without breakpoints refuses them.
             if error.code != "unsupported":
                 raise
             print(f"VICTIM crash unavailable: {error}", flush=True)
-            trigger = None
+            armed = False
         run(["prepare", "/data/f"])
         faulted_phases = []
         for index, (phase, arguments) in enumerate(PHASES):
@@ -99,7 +104,7 @@ def main():
             sleep_until(world, end + SETTLE_NS)
             if active(world, phase):
                 raise RuntimeError(f"{phase}: the fault is still active after its heal")
-        victim(world, trigger)
+        victim(world, armed)
     print(f"RESULT pass device faults faulted={','.join(faulted_phases) or 'none'}", flush=True)
     return 0
 

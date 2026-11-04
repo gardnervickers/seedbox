@@ -45,11 +45,9 @@ fn faults_and_holds_outlive_a_guest_power_off_and_heal_with_their_counts() {
         })
         .unwrap();
     machine
-        .request(Request::HoldBlockRequest {
-            trigger: 1,
+        .request(Request::BreakOnBlockRequest {
             op: DiskOp::Flush,
             nth: 2,
-            until: None,
         })
         .unwrap();
     // The guest powers off without touching its disk; retiring the ended
@@ -63,7 +61,7 @@ fn faults_and_holds_outlive_a_guest_power_off_and_heal_with_their_counts() {
     ));
     let next = machine.aux.faults.boot(1);
     assert_eq!(next.installed.len(), 1);
-    assert_eq!((next.holds[0].trigger, next.holds[0].seen), (1, 0));
+    assert_eq!((next.holds[0].nth, next.holds[0].seen), (2, 0));
     // Without a worker the snapshot carries the mirror.
     let snapshot = machine.snapshot().unwrap();
     machine.request(Request::HealFault { id: 3 }).unwrap();

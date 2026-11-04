@@ -445,6 +445,15 @@ impl Checkpoint<SnapshotReference> {
                         nanoseconds.get().unsigned_abs() <= crate::oracle::MAX_CLOCK_OFFSET_NS,
                         "retained realtime step",
                     )?,
+                    Request::DeclareBreaks { names } => require(
+                        names.windows(2).all(|pair| pair[0] < pair[1])
+                            && names
+                                .iter()
+                                .all(|name| crate::pv::break_name_valid(name.as_bytes())),
+                        "retained breakpoint names",
+                    )?,
+                    // No checkpoint is taken while a machine is suspended.
+                    Request::ResumeBreak => require(false, "machine suspended at a breakpoint")?,
                     _ => {}
                 }
             }

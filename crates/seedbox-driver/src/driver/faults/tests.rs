@@ -441,7 +441,6 @@ fn new_faults_need_capabilities_pv_has_except_the_x86_yield_and_tcg_lacks() {
             let provided = pv && !(index == 2 && engine.architecture == Architecture::X86_64);
             assert_eq!(check_engine(action, engine).is_ok(), provided, "{action:?}");
         }
-        assert_eq!(Capability::HeldBlockRequest.provided_by(engine), pv);
     }
     assert_eq!(
         check_engine(&limited[2], engines[1]).unwrap_err(),

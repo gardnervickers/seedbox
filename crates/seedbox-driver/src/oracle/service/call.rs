@@ -65,49 +65,56 @@ impl Service {
             op.validate_at(now)?;
             Ok(op)
         });
-        // A machine hold a block_request trigger installs or releases.
-        let mut hold = None;
         let result = match operation {
             Err(e) => Err(e),
             Ok(Operation::Now {}) => Ok(json!({"now_ns":now})),
-            Ok(Operation::Inspect {}) => adapter.inspect(
-                &self
-                    .handles
-                    .active_handles()
-                    .map_err(|e| format!("handles: {e:?}"))?,
-                self.triggers.records(),
-            ),
+            Ok(Operation::Inspect {}) => adapter
+                .inspect(
+                    &self
+                        .handles
+                        .active_handles()
+                        .map_err(|e| format!("handles: {e:?}"))?,
+                    self.triggers.records(),
+                )
+                .map(|mut inspected| {
+                    // Suspended machines, each with its live hit.
+                    inspected["breaks"] = self
+                        .breaks
+                        .hits()
+                        .map(|(id, hit)| breaks::Breaks::json(id, hit))
+                        .collect();
+                    inspected
+                }),
             Ok(Operation::Connections { from, to, after }) => {
                 Self::connections(adapter, &from, &to, after)
             }
             Ok(Operation::Sleep { duration_ns }) => return self.sleep(call, now, duration_ns),
             Ok(Operation::ArmTrigger {
                 source,
-                marker: Some(marker),
-                block_request: None,
+                marker,
                 match_timeout_ns,
                 fault,
             }) => self.arm_trigger(adapter, &source, marker, match_timeout_ns, fault, now),
-            Ok(Operation::ArmTrigger {
-                source,
-                marker: None,
-                block_request: Some(request),
-                match_timeout_ns,
-                fault,
-            }) => self
-                .arm_block_request(adapter, &source, request, match_timeout_ns, fault, now)
-                .map(|(reply, plan)| {
-                    hold = Some(plan);
-                    reply
-                }),
-            Ok(Operation::ArmTrigger { .. }) => Err(OperationError::invalid(
-                "trigger watches exactly one of a marker or a block_request",
-            )),
-            Ok(Operation::CancelTrigger { trigger_id }) => {
-                self.cancel_trigger(trigger_id, now).inspect(|_| {
-                    hold = self.release(trigger_id);
-                })
+            Ok(Operation::CancelTrigger { trigger_id }) => self.cancel_trigger(trigger_id, now),
+            Ok(Operation::DeclareBreaks { names }) => return self.declare_breaks(call, now, names),
+            Ok(Operation::WaitBreak { timeout_ns }) => {
+                return self.wait_break(call, now, timeout_ns)
             }
+            Ok(Operation::BreakOnBlockRequest { target, op, nth }) => {
+                match self.break_on_block_request(adapter, &target, op, nth, now) {
+                    Ok(plan) => {
+                        return Ok(vec![plan, self.reply(call, now, Some(now), Ok(json!({})))?])
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Ok(Operation::ResumeBreak { break_id }) => match self.resume_break(break_id, now) {
+                Ok((result, mut plans)) => {
+                    plans.push(self.reply(call, now, Some(now), Ok(result))?);
+                    return Ok(plans);
+                }
+                Err(e) => Err(e),
+            },
             Ok(
                 op @ (Operation::Stop { .. }
                 | Operation::Restart { .. }
@@ -153,9 +160,7 @@ impl Service {
                 .as_ref()
                 .is_err_and(|e| e.code == ErrorCode::TargetUnavailable))
         .then_some(now);
-        let mut plans: Vec<_> = hold.into_iter().collect();
-        plans.push(self.reply(call, now, effect, result)?);
-        Ok(plans)
+        Ok(vec![self.reply(call, now, effect, result)?])
     }
     /// List the connections between two network members after `after`.
     fn connections(
@@ -207,11 +212,6 @@ impl Service {
                 let (left, right) = Self::partition_sides(adapter, &left, &right)?;
                 (TriggerAction::Partition { left, right }, None)
             }
-            TriggerFault::Crash { .. } => {
-                return Err(OperationError::invalid(
-                    "only a block_request trigger crashes its machine",
-                ))
-            }
         };
         let id = self
             .triggers
@@ -227,59 +227,6 @@ impl Service {
         });
         Ok(json!({"trigger_id":id}))
     }
-    /// Check the engine holds requests and the crash targets the source
-    /// itself, then arm a block_request trigger and plan its machine hold.
-    fn arm_block_request(
-        &mut self,
-        adapter: &impl Adapter,
-        source: &Target,
-        request: crate::oracle::BlockRequest,
-        match_timeout_ns: u64,
-        fault: TriggerFault,
-        now: u64,
-    ) -> Result<(Value, Plan), OperationError> {
-        adapter.require_capability(
-            "a block_request trigger",
-            crate::driver::faults::Capability::HeldBlockRequest,
-        )?;
-        let source = adapter.resolve(source)?;
-        let TriggerFault::Crash { target } = fault else {
-            return Err(OperationError::invalid(
-                "a block_request trigger's only fault is crash",
-            ));
-        };
-        if adapter.resolve(&target)?.name != source.name {
-            return Err(OperationError::invalid(
-                "a block_request trigger crashes its own machine",
-            ));
-        }
-        let id = self
-            .triggers
-            .arm_block_request(
-                source.name.clone(),
-                request.op,
-                request.nth,
-                now,
-                match_timeout_ns,
-            )
-            .map_err(|e| error(ErrorCode::InvalidState, e))?;
-        let until = self.triggers.records()[id as usize - 1].match_deadline;
-        self.notices.push(Notice::TriggerArmed {
-            trigger: id,
-            source: source.name.clone(),
-            target: Some(source.name.clone()),
-            at: now,
-            deadline: until,
-        });
-        let plan = Plan::Hold {
-            source: source.name,
-            trigger: id,
-            op: request.op,
-            nth: request.nth,
-            until,
-        };
-        Ok((json!({"trigger_id":id}), plan))
-    }
     fn cancel_trigger(&mut self, trigger_id: u32, now: u64) -> Result<Value, OperationError> {
         self.triggers
             .cancel(trigger_id, now)
@@ -294,14 +241,18 @@ impl Service {
             })
             .map_err(|e| error(ErrorCode::InvalidState, e))
     }
-    pub(crate) fn wake(&mut self, token: u32, at: u64) -> Result<Plan, Failure> {
+    /// A due sleep or `wait_break` timeout wake.
+    pub(crate) fn wake(&mut self, token: u32, at: u64) -> Result<Vec<Plan>, Failure> {
         self.valid()?;
+        if let Some(plans) = self.break_timeout(token, at) {
+            return plans;
+        }
         let (call, due) = self.sleepers.get(&token).ok_or("unknown sleep wake")?;
         if at < *due {
             return Err("early sleep wake".into());
         }
         let call = call.clone();
         self.sleepers.remove(&token);
-        self.reply(call, at, Some(at), Ok(json!({})))
+        Ok(vec![self.reply(call, at, Some(at), Ok(json!({})))?])
     }
 }
