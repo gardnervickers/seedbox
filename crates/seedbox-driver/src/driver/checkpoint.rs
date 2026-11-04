@@ -139,6 +139,9 @@ fn validate<T>(
     if !control.checkpoint_size(machines.len()) || !network.checkpoint_size(machines.len()) {
         return Err("machine identity tables differ");
     }
+    if control.service.breaks.hits().next().is_some() {
+        return Err("machine suspended at a breakpoint");
+    }
     for entry in machines {
         if entry.machine.is_none() || entry.rng.is_none() {
             return Err("machine or RNG is still owned by a worker");

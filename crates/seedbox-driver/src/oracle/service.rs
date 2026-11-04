@@ -437,6 +437,20 @@ pub(crate) enum Notice {
         status: super::triggers::Status,
         fault: Option<u32>,
     },
+    /// A committed hit suspended `machine` (a canonical key); `at` is the
+    /// hit's own time, before its commit.
+    BreakHit {
+        break_id: u32,
+        machine: String,
+        boot: u64,
+        name: String,
+        at: u64,
+    },
+    BreakEnded {
+        break_id: u32,
+        at: u64,
+        reason: breaks::BreakEnd,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Settlement {
@@ -546,6 +560,17 @@ pub(crate) enum Plan {
         at: u64,
         payload: Vec<u8>,
     },
+    /// Give every machine the declared breakpoint names.
+    DeclareBreaks {
+        names: Vec<String>,
+        at: u64,
+    },
+    /// Release `machine` (a canonical key) from its hold in `boot`.
+    ResumeBreak {
+        machine: String,
+        boot: u64,
+        at: u64,
+    },
 }
 #[derive(Clone)]
 struct Call {
@@ -581,6 +606,7 @@ pub(crate) struct Service {
     last_wake: u32,
     pending: BTreeMap<u32, Pending>,
     sleepers: BTreeMap<u32, (Call, u64)>,
+    pub(crate) breaks: breaks::Breaks,
     poisoned: bool,
     notices: Vec<Notice>,
 }
@@ -673,6 +699,7 @@ impl Service {
     }
 }
 
+pub(crate) mod breaks;
 mod call;
 mod install;
 mod prepare;

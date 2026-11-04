@@ -201,7 +201,7 @@ fn now_sleep_use_commit_and_survive_source_loss() {
     assert_eq!(at, 30);
     s.source_reset("caller").unwrap();
     let p = s.wake(token, 30).unwrap();
-    assert_eq!(reply(&[p])["result"], json!({}));
+    assert_eq!(reply(&p)["result"], json!({}));
 }
 #[test]
 fn process_waits_ready_and_exact_correlated_completion() {

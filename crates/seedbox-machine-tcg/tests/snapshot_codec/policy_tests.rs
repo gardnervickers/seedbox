@@ -322,9 +322,9 @@ mod process {
         value["codec"]["used_ids"] = serde_json::json!([9, 1, 7]);
         value["codec"]["pending"] = serde_json::json!([[1, "start"], [7, "step"]]);
         value["codec"]["last_time"] = serde_json::json!(0);
-        value["codec"]["oracle"] = serde_json::json!({"relay":7,"session":8,"public":9,"failed":false,"last_time":0,"pending":{"relay":7,"session":8,"request":9},"reply_prepared":false});
+        value["codec"]["oracle"] = serde_json::json!({"relay":7,"session":8,"failed":false,"last_time":0,"sessions":[{"id":8,"public":9,"pending":{"relay":7,"session":8,"request":9},"reply_prepared":false}]});
         value["session_highwater"] = serde_json::json!(1);
-        value["session"] = serde_json::json!({"wire":8,"public":1});
+        value["sessions"] = serde_json::json!([{"wire":8,"public":1}]);
         let bridge: GuestBridge = serde_json::from_value(value).unwrap();
         let mut bridge_bytes = Vec::new();
         bridge

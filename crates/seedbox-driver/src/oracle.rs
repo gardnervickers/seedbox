@@ -137,6 +137,18 @@ pub(crate) enum Operation {
     CancelTrigger {
         trigger_id: u32,
     },
+    /// Replace the breakpoint names that suspend a machine, for later hits.
+    DeclareBreaks {
+        names: Vec<String>,
+    },
+    /// Park until a breakpoint hit is pending or `timeout_ns` passes.
+    WaitBreak {
+        timeout_ns: u64,
+    },
+    /// Resume the machine suspended by a live hit.
+    ResumeBreak {
+        break_id: u32,
+    },
     // These wire shapes are parsed, but no network policy is implemented here.
     Connections {
         from: Target,
@@ -321,6 +333,16 @@ impl Operation {
             Self::Heal { handle } if handle.is_empty() => {
                 return Err(OperationError::invalid("handle must be nonempty string"));
             }
+            Self::DeclareBreaks { names }
+                if !names
+                    .iter()
+                    .all(|name| crate::pv::break_name_valid(name.as_bytes())) =>
+            {
+                return Err(OperationError::invalid(format!(
+                    "breakpoint names are 1 to {} bytes of [a-z0-9_.-]",
+                    crate::pv::MAX_BREAK_NAME
+                )));
+            }
             Self::ArmTrigger {
                 marker,
                 block_request,
@@ -371,6 +393,9 @@ impl Operation {
             Self::Sleep { duration_ns } => {
                 admitted.checked_add(*duration_ns).ok_or("sleep overflow")
             }
+            Self::WaitBreak { timeout_ns } => admitted
+                .checked_add(*timeout_ns)
+                .ok_or("wait_break timeout overflow"),
             Self::ArmTrigger {
                 match_timeout_ns, ..
             } => admitted
@@ -380,7 +405,9 @@ impl Operation {
             Self::Now {}
             | Self::Inspect {}
             | Self::Connections { .. }
-            | Self::CancelTrigger { .. } => Ok(admitted),
+            | Self::CancelTrigger { .. }
+            | Self::DeclareBreaks { .. }
+            | Self::ResumeBreak { .. } => Ok(admitted),
             _ => admitted
                 .checked_add(PROCESS_EFFECT_TIMEOUT_NS)
                 .ok_or("fault deadline overflow"),

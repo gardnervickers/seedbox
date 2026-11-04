@@ -54,6 +54,8 @@
 #define SBX_ENV_SETHOSTNAME sethostname
 #define SBX_ENV_SETRLIMIT setrlimit
 #endif
+/* The breakpoint device's misc minor; outside the dynamic range. */
+#define SBX_BREAK_MINOR 243
 #define SBX_ENV_PATH 4096u
 #define SBX_ENV_COUNT 65536u
 #define SBX_ENV_FILE_MAX UINT32_MAX
@@ -402,6 +404,8 @@ static inline int sbx_env_devices(struct sbx_guest_environment *e) {
         char path[64];snprintf(path,sizeof(path),"/dev/%s",nodes[i].name);
         if(SBX_ENV_MKNOD(path,S_IFCHR|0666,makedev(i==5?5:1,nodes[i].minor)) || SBX_ENV_CHMOD(path,0666))return sbx_env_error(e,"application device",path);
     }
+    /* Breakpoints: write-only misc device, fixed minor (seedbox.c in each guest kernel). */
+    if(sbx_env_directories("/dev/seedbox",0755) || SBX_ENV_MKNOD("/dev/seedbox/break",S_IFCHR|0222,makedev(10,SBX_BREAK_MINOR)) || SBX_ENV_CHMOD("/dev/seedbox/break",0222))return sbx_env_error(e,"application device","/dev/seedbox/break");
     if(sbx_env_directories("/dev/shm",01777) || SBX_ENV_MOUNT("tmpfs","/dev/shm","tmpfs",MS_NOSUID|MS_NODEV|MS_NOEXEC,"mode=1777,size=67108864"))return sbx_env_error(e,"application shm","/dev/shm");
     if(sbx_env_directories("/dev/pts",0755) || SBX_ENV_MOUNT("devpts","/dev/pts","devpts",MS_NOSUID|MS_NOEXEC,"newinstance,ptmxmode=0666,mode=0620,gid=5"))return sbx_env_error(e,"application pts","/dev/pts");
     const char *links[][2]={{"pts/ptmx","/dev/ptmx"},{"/proc/self/fd","/dev/fd"},{"/proc/self/fd/0","/dev/stdin"},{"/proc/self/fd/1","/dev/stdout"},{"/proc/self/fd/2","/dev/stderr"}};

@@ -489,7 +489,12 @@ impl<B: Backend> Machine<B> {
                     return Err("PV clockevent port access".into());
                 }
                 if port != PIC_UNMASK_PORT {
-                    return self.clock_event(if port == ACK_PORT { 8 } else { 24 }, value, upto);
+                    return self.clock_event(
+                        if port == ACK_PORT { 8 } else { 24 },
+                        value,
+                        upto,
+                        &[],
+                    );
                 }
                 // The run loop already consumed the shared PIC update.
             }

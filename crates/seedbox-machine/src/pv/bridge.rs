@@ -24,7 +24,8 @@ pub struct GuestBridge {
     codec: Codec,
     // Issued public identities belong to the machine lifetime, not a guest boot.
     session_highwater: u32,
-    session: Option<SessionMap>,
+    /// Open guest sessions in ascending wire order, each with its public ID.
+    sessions: Vec<SessionMap>,
     prepared_replies: Vec<oracle::Correlation>,
 }
 
@@ -33,7 +34,7 @@ impl GuestBridge {
     /// return to the available pool, including across empty/repeated resets.
     pub fn reset(&mut self) {
         self.codec = Codec::default();
-        self.session = None;
+        self.sessions.clear();
         self.prepared_replies.clear();
     }
 
@@ -41,9 +42,9 @@ impl GuestBridge {
         &mut self,
         key: oracle::Correlation,
     ) -> Result<super::SimulationControlId, String> {
-        let session = match self.session {
-            Some(session) if session.wire == key.session => session,
-            _ => {
+        let session = match self.sessions.iter().find(|s| s.wire == key.session) {
+            Some(session) => *session,
+            None => {
                 let next = self
                     .session_highwater
                     .checked_add(1)
@@ -54,7 +55,7 @@ impl GuestBridge {
                     public: next,
                 };
                 self.session_highwater = next.get();
-                self.session = Some(session);
+                self.sessions.push(session);
                 session
             }
         };
@@ -69,8 +70,8 @@ impl GuestBridge {
             self.codec
                 .validate_reply(payload)
                 .map_err(|error| format!("guest reply protocol: {error:?}"))?;
-            let session = match self.session {
-                Some(session) if session.public == id.session => session,
+            let session = match self.sessions.iter().find(|s| s.public == id.session) {
+                Some(session) => *session,
                 _ if id.session.get() <= self.session_highwater => return Ok(Vec::new()),
                 _ => {
                     return Err(format!(
@@ -189,6 +190,10 @@ impl GuestBridge {
                     })
                     .map_err(|_| "guest observation outside execution interval".to_owned())
             }
+            Event::OracleClosed(wire) => {
+                self.sessions.retain(|s| s.wire != wire);
+                Ok(())
+            }
         }
     }
 }
@@ -223,7 +228,7 @@ impl crate::snapshot::Record for SessionMap {
 impl crate::snapshot::Record for GuestBridge {
     const MIN: u64 = <Codec as crate::snapshot::Record>::MIN
         + <u32 as crate::snapshot::Record>::MIN
-        + <Option<SessionMap> as crate::snapshot::Record>::MIN
+        + <Vec<SessionMap> as crate::snapshot::Record>::MIN
         + <Vec<oracle::Correlation> as crate::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
@@ -232,12 +237,12 @@ impl crate::snapshot::Record for GuestBridge {
         let Self {
             codec,
             session_highwater,
-            session,
+            sessions,
             prepared_replies,
         } = self;
         codec.encode(w)?;
         session_highwater.encode(w)?;
-        session.encode(w)?;
+        sessions.encode(w)?;
         prepared_replies.encode(w)?;
         Ok(())
     }
@@ -286,15 +291,25 @@ impl GuestBridge {
         capture_boundary: bool,
     ) -> crate::snapshot::Result<()> {
         use crate::snapshot::CodecError::Invalid;
-        let (relay, session, _, pending, prepared) = self.codec.snapshot_oracle().snapshot_state();
-        if capture_boundary && (!self.prepared_replies.is_empty() || prepared) {
+        let oracle = self.codec.snapshot_oracle();
+        let open = oracle.snapshot_sessions();
+        let prepared = open.iter().filter(|s| s.reply_prepared).count();
+        if capture_boundary && (!self.prepared_replies.is_empty() || prepared != 0) {
             return Err(Invalid("prepared reply delivery ownership"));
         }
         self.codec.validate_snapshot(reached)?;
-        if self.session.is_some() != (session != 0)
-            || self.session.is_some_and(|m| {
-                m.wire.get() != session || m.public.get() != self.session_highwater
-            })
+        // Every mapped session is open in the decoder, and every open session
+        // is mapped, with public IDs issued in wire order.
+        if self.sessions.len() != open.len()
+            || self.sessions.iter().zip(open).any(|(m, s)| m.wire != s.id)
+            || self
+                .sessions
+                .windows(2)
+                .any(|pair| pair[0].public >= pair[1].public)
+            || self
+                .sessions
+                .last()
+                .is_some_and(|m| m.public.get() > self.session_highwater)
         {
             return Err(Invalid("bridge session mapping"));
         }
@@ -305,15 +320,18 @@ impl GuestBridge {
         if identities.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(Invalid("duplicate prepared reply"));
         }
-        let mut current = false;
+        let mut current = 0;
         for key in &self.prepared_replies {
-            if key.session.get() < session && key.relay.get() < relay {
+            if oracle.superseded(*key) {
                 continue;
             }
-            if current || pending != Some(*key) || !prepared {
+            if !open
+                .iter()
+                .any(|s| s.pending == Some(*key) && s.reply_prepared)
+            {
                 return Err(Invalid("prepared reply correlation"));
             }
-            current = true;
+            current += 1;
         }
         if current != prepared {
             return Err(Invalid("prepared reply delivery ownership"));
@@ -330,7 +348,7 @@ impl GuestBridge {
         use crate::snapshot::{charge_index, CodecError, Record};
         let codec = Record::decode(r)?;
         let session_highwater = Record::decode(r)?;
-        let session = Record::decode(r)?;
+        let sessions = Record::decode(r)?;
         let prepared_replies = if capture_boundary {
             if r.u64()? != 0 {
                 return Err(CodecError::Invalid("prepared reply delivery ownership"));
@@ -349,7 +367,7 @@ impl GuestBridge {
         Ok(Self {
             codec,
             session_highwater,
-            session,
+            sessions,
             prepared_replies,
         })
     }

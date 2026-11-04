@@ -54,6 +54,24 @@ impl Service {
             |target| adapter.network_member(target),
             || adapter.network_floor(),
         )?;
+        // A suspended machine may only crash; network faults name links.
+        if let Some(facts) = &compiled.machine {
+            if self.breaks.suspended(&facts.name)
+                && !matches!(
+                    command,
+                    Command::Effect {
+                        effect: Effect::Crash,
+                        ..
+                    }
+                )
+            {
+                return Err(error(
+                    ErrorCode::InvalidState,
+                    "machine is suspended at a breakpoint; resume or crash it first",
+                )
+                .into());
+            }
+        }
         let (subject, effect, handle, healing) =
             self.prepare_change(adapter, mode, command, compiled, name)?;
         self.install(

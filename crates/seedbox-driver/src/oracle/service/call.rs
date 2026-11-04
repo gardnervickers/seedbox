@@ -68,13 +68,23 @@ impl Service {
         let result = match operation {
             Err(e) => Err(e),
             Ok(Operation::Now {}) => Ok(json!({"now_ns":now})),
-            Ok(Operation::Inspect {}) => adapter.inspect(
-                &self
-                    .handles
-                    .active_handles()
-                    .map_err(|e| format!("handles: {e:?}"))?,
-                self.triggers.records(),
-            ),
+            Ok(Operation::Inspect {}) => adapter
+                .inspect(
+                    &self
+                        .handles
+                        .active_handles()
+                        .map_err(|e| format!("handles: {e:?}"))?,
+                    self.triggers.records(),
+                )
+                .map(|mut inspected| {
+                    // Suspended machines, each with its live hit.
+                    inspected["breaks"] = self
+                        .breaks
+                        .hits()
+                        .map(|(id, hit)| breaks::Breaks::json(id, hit))
+                        .collect();
+                    inspected
+                }),
             Ok(Operation::Connections { from, to, after }) => {
                 Self::connections(adapter, &from, &to, after)
             }
@@ -93,6 +103,17 @@ impl Service {
                     .unprovided("a block_request trigger"),
             )),
             Ok(Operation::CancelTrigger { trigger_id }) => self.cancel_trigger(trigger_id, now),
+            Ok(Operation::DeclareBreaks { names }) => return self.declare_breaks(call, now, names),
+            Ok(Operation::WaitBreak { timeout_ns }) => {
+                return self.wait_break(call, now, timeout_ns)
+            }
+            Ok(Operation::ResumeBreak { break_id }) => match self.resume_break(break_id, now) {
+                Ok((result, mut plans)) => {
+                    plans.push(self.reply(call, now, Some(now), Ok(result))?);
+                    return Ok(plans);
+                }
+                Err(e) => Err(e),
+            },
             Ok(
                 op @ (Operation::Stop { .. }
                 | Operation::Restart { .. }
@@ -224,14 +245,18 @@ impl Service {
             })
             .map_err(|e| error(ErrorCode::InvalidState, e))
     }
-    pub(crate) fn wake(&mut self, token: u32, at: u64) -> Result<Plan, Failure> {
+    /// A due sleep or `wait_break` timeout wake.
+    pub(crate) fn wake(&mut self, token: u32, at: u64) -> Result<Vec<Plan>, Failure> {
         self.valid()?;
+        if let Some(plans) = self.break_timeout(token, at) {
+            return plans;
+        }
         let (call, due) = self.sleepers.get(&token).ok_or("unknown sleep wake")?;
         if at < *due {
             return Err("early sleep wake".into());
         }
         let call = call.clone();
         self.sleepers.remove(&token);
-        self.reply(call, at, Some(at), Ok(json!({})))
+        Ok(vec![self.reply(call, at, Some(at), Ok(json!({})))?])
     }
 }
