@@ -98,6 +98,14 @@ where
                 control.waiting(true)?;
                 std::thread::sleep(CONTROL_POLL);
             }
+            // The host round trip that prepares a spawned machine comes next;
+            // until then a spawn without a retained machine ends the run.
+            StepOutcome::NeedsMachine { request, .. } => {
+                return Err(fail(format!(
+                    "spawn {} needs its machine prepared, which this worker cannot do yet",
+                    request.name
+                )));
+            }
             StepOutcome::Finished { .. } | StepOutcome::Stopped { .. } => {}
             StepOutcome::BarrierReached { .. } => {}
             StepOutcome::Blocked { at: reached } => {

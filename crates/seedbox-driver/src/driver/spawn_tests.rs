@@ -1,4 +1,5 @@
-//! Declared creation uses the control FIFO, not host construction or worker order.
+//! Spawns use the control FIFO, not host construction or worker order, and
+//! wait at their turn for a definition the host provides.
 use super::*;
 use crate::{
     pv::{Output, SimulationControlId, Stream},
@@ -22,7 +23,10 @@ fn call(n: u32, fields: &str) -> Response {
     }
 }
 fn spawn(n: u32, name: &str) -> Response {
-    call(n, &format!(r#""op":"spawn","machine":"{name}""#))
+    call(
+        n,
+        &format!(r#""op":"spawn","machine":"{name}","spec":{{}}"#),
+    )
 }
 #[derive(Clone, Default)]
 struct Probe {
@@ -105,6 +109,15 @@ fn build(
     rounds: Vec<Vec<Response>>,
     fail: Option<&'static str>,
 ) -> (Driver<Probe>, Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>) {
+    build_prepared(workers, rounds, fail, 1..=3)
+}
+/// A driver whose host has already prepared `prepared` fixture definitions.
+fn build_prepared(
+    workers: usize,
+    rounds: Vec<Vec<Response>>,
+    fail: Option<&'static str>,
+    prepared: impl IntoIterator<Item = usize>,
+) -> (Driver<Probe>, Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>) {
     let draws = Arc::new(AtomicUsize::new(0));
     let built = Arc::new(Mutex::new(vec![]));
     let captured = built.clone();
@@ -120,7 +133,10 @@ fn build(
         || Ok(()),
         fixture::definition(0),
         vec![],
-        (1..=3).map(fixture::definition).collect(),
+        prepared
+            .into_iter()
+            .map(|n| crate::test_support::spawn_definition(fixture::definition(n)))
+            .collect(),
         crate::driver::NetworkConfig::default(),
         move |definition| {
             captured.lock().unwrap().push(definition.name.clone());
@@ -210,7 +226,7 @@ fn unknown_duplicate_and_already_spawned_rejections_allocate_nothing() {
         2,
         vec![
             vec![
-                spawn(1, "unknown"),
+                spawn(1, "Not_A_Label"),
                 spawn(2, "fixture-0"),
                 spawn(3, "fixture-2"),
                 spawn(4, "fixture-2"),
@@ -282,7 +298,10 @@ fn duplicate_definitions_across_all_lists_fail_before_factories_or_rng() {
             || panic!("duplicate invoked context factory"),
             fixture::definition(0),
             initial.into_iter().map(fixture::definition).collect(),
-            spawnable.into_iter().map(fixture::definition).collect(),
+            spawnable
+                .into_iter()
+                .map(|n| crate::test_support::spawn_definition(fixture::definition(n)))
+                .collect(),
             crate::driver::NetworkConfig::default(),
             |_| panic!("duplicate invoked machine factory"),
         );
@@ -419,7 +438,8 @@ fn final_batch_and_stopped_pending_calls_never_create_or_draw_seed() {
                 request: NonZeroU32::new(1).unwrap(),
             },
             observed: 0,
-            payload: br#"{"version":1,"id":1,"op":"spawn","machine":"fixture-1"}"#.to_vec(),
+            payload: br#"{"version":1,"id":1,"op":"spawn","machine":"fixture-1","spec":{}}"#
+                .to_vec(),
         }));
     driver
         .with_barrier(|b| {
@@ -607,5 +627,121 @@ fn spawned_machine_has_equal_control_access() {
             .unwrap()
             .replies[0]["ok"],
         true
+    );
+}
+
+#[test]
+fn unprepared_spawn_waits_at_its_turn_and_then_matches_a_prepared_run() {
+    let rounds = || vec![vec![spawn(1, "fixture-2")], vec![]];
+    let run = |prepared: Vec<usize>| {
+        let (mut driver, draws, built) = build_prepared(2, rounds(), None, prepared);
+        let mut needed = vec![];
+        let mut now = at(0);
+        while now < at(30) {
+            match driver.step(at(now.as_nanos() + 10)).unwrap() {
+                StepOutcome::NeedsMachine { at: held, request } => {
+                    // Waiting changes nothing, however often it is asked.
+                    assert_eq!(driver.now(), held);
+                    assert_eq!(
+                        driver.step(at(held.as_nanos() + 10)).unwrap(),
+                        StepOutcome::NeedsMachine {
+                            at: held,
+                            request: request.clone()
+                        }
+                    );
+                    assert_eq!(draws.load(Ordering::SeqCst), 1);
+                    assert_eq!(*built.lock().unwrap(), ["fixture-0"]);
+                    needed.push((held, (*request).clone()));
+                    driver
+                        .with_barrier(|b| {
+                            b.provide(crate::test_support::spawn_definition(fixture::definition(
+                                2,
+                            )))
+                        })
+                        .unwrap();
+                }
+                StepOutcome::BarrierReached { at } => now = at,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        let randoms: Vec<_> = driver
+            .execution
+            .machines
+            .iter()
+            .map(|e| e.machine.as_ref().unwrap().random)
+            .collect();
+        (needed, driver.drain_events(), randoms)
+    };
+    let (needed, events, randoms) = run(vec![]);
+    assert_eq!(
+        needed,
+        [(
+            at(10),
+            SpawnRequest {
+                machine: MachineId(1),
+                name: "fixture-2".into(),
+                spec: crate::test_support::SPAWN_SPEC.into(),
+            }
+        )]
+    );
+    let (prepared, replayed, replayed_randoms) = run(vec![2]);
+    assert!(prepared.is_empty());
+    assert_eq!(events, replayed);
+    assert_eq!(randoms, replayed_randoms);
+    assert!(events.iter().any(|e| matches!(
+        e.kind,
+        EventKind::MachineAdded {
+            machine: MachineId(1),
+            cause: Cause::Fault(FaultId(1))
+        }
+    )));
+}
+
+#[test]
+fn provide_accepts_only_a_definition_answering_a_waiting_spawn() {
+    let (mut driver, _, _) = build_prepared(1, vec![vec![spawn(1, "fixture-2")]], None, [1]);
+    assert!(matches!(
+        driver.step(at(10)).unwrap(),
+        StepOutcome::NeedsMachine { .. }
+    ));
+    let mut provide = |definition: SpawnDefinition| driver.with_barrier(|b| b.provide(definition));
+    // No spawn reserved fixture-3.
+    assert!(matches!(
+        provide(crate::test_support::spawn_definition(fixture::definition(
+            3
+        ))),
+        Err(Error::UnknownName(_))
+    ));
+    let mut other = crate::test_support::spawn_definition(fixture::definition(2));
+    other.spec = r#"{"image":"other"}"#.into();
+    assert!(matches!(provide(other), Err(Error::Control(_))));
+    provide(crate::test_support::spawn_definition(fixture::definition(
+        2,
+    )))
+    .unwrap();
+    assert!(matches!(
+        provide(crate::test_support::spawn_definition(fixture::definition(
+            2
+        ))),
+        Err(Error::DuplicateName(_))
+    ));
+    assert!(matches!(
+        driver.step(at(10)).unwrap(),
+        StepOutcome::BarrierReached { .. }
+    ));
+    assert_eq!(driver.execution.machines.len(), 2);
+}
+
+#[test]
+fn spawned_definitions_can_allow_crashes() {
+    let (mut driver, _, _) = build_prepared(1, vec![vec![spawn(1, "fixture-2")]], None, []);
+    driver.step(at(10)).unwrap();
+    let mut prepared = crate::test_support::spawn_definition(fixture::definition(2));
+    prepared.allow_crashes = true;
+    driver.with_barrier(|b| b.provide(prepared)).unwrap();
+    driver.step(at(10)).unwrap();
+    assert_eq!(
+        driver.execution.properties,
+        seedbox_engine_core::properties::Ledger::new(["fixture-2".to_owned()].into())
     );
 }

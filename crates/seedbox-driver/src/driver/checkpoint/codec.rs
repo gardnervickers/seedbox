@@ -201,10 +201,9 @@ impl Checkpoint<SnapshotReference> {
                     Target::Machine(id) => {
                         require(id.0 < self.machines.len(), "partition input index")?
                     }
-                    Target::Name(name) => require(
-                        self.control.declared(name) || self.control.target(name).is_ok(),
-                        "partition input name",
-                    )?,
+                    Target::Name(name) => {
+                        require(self.control.target(name).is_ok(), "partition input name")?
+                    }
                 }
             }
         }
@@ -224,10 +223,7 @@ impl Checkpoint<SnapshotReference> {
                 "input connection",
             )?;
             for name in [&c.from, &c.to] {
-                require(
-                    self.control.declared(name) || self.control.target(name).is_ok(),
-                    "input connection member",
-                )?;
+                require(self.control.target(name).is_ok(), "input connection member")?;
             }
         }
         if let Some(deadline) = action.deadline() {

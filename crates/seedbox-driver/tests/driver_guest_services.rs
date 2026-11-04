@@ -982,7 +982,7 @@ where
         || Ok(()),
         oracle,
         vec![],
-        vec![definition],
+        vec![seedbox_driver::test_support::spawn_definition(definition)],
         seedbox_driver::driver::NetworkConfig::default(),
         factory,
     )

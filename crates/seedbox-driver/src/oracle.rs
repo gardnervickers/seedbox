@@ -72,8 +72,11 @@ pub(crate) struct BlockRequest {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Operation {
     Now {},
+    /// `spec` is the machine entry a `seedbox.yaml` would take; the Driver
+    /// keeps it opaque and the host prepares it.
     Spawn {
         machine: String,
+        spec: serde_json::Map<String, Value>,
     },
     Inspect {},
     Sleep {

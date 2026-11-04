@@ -79,6 +79,26 @@ impl MachineId {
     pub const ORACLE: Self = Self(0);
 }
 
+/// A spawned machine's definition, which the host prepared from the spec its
+/// spawn requested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnDefinition {
+    /// The spawn's opaque spec, exactly as requested.
+    pub spec: String,
+    pub definition: MachineDefinition,
+    /// Crashes and out-of-memory kills on this machine are not violations.
+    pub allow_crashes: bool,
+}
+
+/// An admitted spawn whose definition the host has not provided yet. Its
+/// identity is already reserved; the definition's name must be `name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnRequest {
+    pub machine: MachineId,
+    pub name: String,
+    pub spec: String,
+}
+
 /// One committed response, associated with the machine boot that emitted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineResponse {
@@ -266,7 +286,8 @@ struct ExecutionState<M> {
     control: control::Control,
     inputs: BTreeMap<InputKey, LiveInput>,
     trigger_marker: Option<Timestamp>,
-    definitions: Vec<MachineDefinition>,
+    /// Provided spawn definitions not yet built, by name.
+    definitions: Vec<SpawnDefinition>,
     network: network::Network,
     /// Guest property evidence reduced at commit, in commit order.
     properties: seedbox_engine_core::properties::Ledger,
@@ -368,16 +389,15 @@ where
     /// when a continuing simulation must be captured.
     ///
     /// The factory constructs the required oracle first, followed by the other
-    /// definitions in list order. `spawnable` contains definitions not started at
-    /// boot; any machine may request each name once through simulation control.
+    /// definitions in list order. Any machine may spawn a new machine through
+    /// simulation control by naming it and passing an opaque spec. `prepared`
+    /// holds definitions the host already prepared for such spawns, such as
+    /// those a replayed run retained; a spawn without one stops execution with
+    /// [`StepOutcome::NeedsMachine`] until [`Barrier::provide`] supplies it.
     /// Names must be unique across all three lists, checked before either factory.
     /// Spawns join at their FIFO effect turn and run from the next round. IDs and
     /// RNG streams follow spawn admission order. Construction failure publishes a
     /// Failed settlement and poisons the driver; confirmed events remain drainable.
-    /// The driver retains the factory and spawnable definitions, so future
-    /// machines are complete inputs: a factory alone cannot enumerate names for
-    /// pre-execution uniqueness checks, and retained definitions support
-    /// one-shot admission without template or override APIs.
     /// The factory must return newly configured machines without executing them. This order
     /// breaks scheduling ties and assigns
     /// independent machine RNG streams by drawing one little-endian u64 seed
@@ -445,7 +465,7 @@ where
         context: impl Fn() -> Result<M::Context, M::Error> + Send + Sync + 'static,
         oracle: MachineDefinition,
         machines: Vec<MachineDefinition>,
-        spawnable: Vec<MachineDefinition>,
+        prepared: Vec<SpawnDefinition>,
         network: NetworkConfig,
         factory: impl FnMut(&MachineDefinition) -> Result<M, M::Error> + Send + 'static,
     ) -> Result<Self, Error<M::Error>> {
@@ -457,7 +477,7 @@ where
             context,
             oracle,
             machines,
-            spawnable,
+            prepared,
             network.into(),
             factory,
         )
@@ -472,7 +492,7 @@ where
         context: impl Fn() -> Result<M::Context, M::Error> + Send + Sync + 'static,
         oracle: MachineDefinition,
         machines: Vec<MachineDefinition>,
-        spawnable: Vec<MachineDefinition>,
+        prepared: Vec<SpawnDefinition>,
         network: NetworkSetup,
         mut factory: impl FnMut(&MachineDefinition) -> Result<M, M::Error> + Send + 'static,
     ) -> Result<Self, Error<M::Error>> {
@@ -489,25 +509,27 @@ where
         if workers == 0 {
             return Err(Error::InvalidWorkerCount);
         }
+        let all = || {
+            std::iter::once(&oracle)
+                .chain(&machines)
+                .chain(prepared.iter().map(|p| &p.definition))
+        };
         let mut names = BTreeSet::new();
-        for definition in std::iter::once(&oracle).chain(&machines).chain(&spawnable) {
+        for definition in all() {
             if !names.insert(&definition.name) {
                 return Err(Error::DuplicateName(definition.name.clone()));
             }
         }
         let mut macs = BTreeSet::new();
-        for definition in std::iter::once(&oracle).chain(&machines).chain(&spawnable) {
+        for definition in all() {
             if let Some(interface) = &definition.network {
                 if !macs.insert(interface.mac()) {
                     return Err(Error::DuplicateMac(interface.mac()));
                 }
             }
         }
-        network::Network::validate_setup(
-            &network,
-            std::iter::once(&oracle).chain(&machines).chain(&spawnable),
-        )
-        .map_err(Error::NetworkConfiguration)?;
+        network::Network::validate_setup(&network, std::iter::once(&oracle).chain(&machines))
+            .map_err(Error::NetworkConfiguration)?;
         let controller = network.controller_setup();
         if let Some(ControllerSetup {
             controller: Some(id),
@@ -542,7 +564,6 @@ where
             .map(|(index, (machine, &seed))| Entry::new(MachineId(index), machine, seed, start))
             .collect();
         let mut control = control::Control::new(&definitions, &seeds);
-        control.declare_spawnable(&spawnable);
         control.controller = controller;
         control.service.reply_latency_ns = controller.map_or(0, |setup| setup.latency_ns);
         let frames = observation::FrameObservations::from_setup(&network);
@@ -575,7 +596,7 @@ where
                 control,
                 inputs: BTreeMap::new(),
                 trigger_marker: None,
-                definitions: spawnable,
+                definitions: prepared,
                 network,
                 properties: Default::default(),
             },
@@ -1375,11 +1396,8 @@ where
         host_now: Instant,
         external_work: bool,
     ) -> Result<StepOutcome, Error<M::Error>> {
-        if let Some(fault) = self.apply_due(host_now)? {
-            return Ok(StepOutcome::BeforeFault {
-                at: self.now(),
-                fault: Box::new(fault),
-            });
+        if let Some(hold) = self.apply_due(host_now)? {
+            return Ok(StepOutcome::held(self.now(), hold));
         }
         if self.execution.finished.is_some()
             || upto == self.now()
@@ -1466,11 +1484,8 @@ where
         if at != initial || ran {
             self.commit_boundary()?;
         }
-        if let Some(fault) = self.apply_due(host_now)? {
-            return Ok(StepOutcome::BeforeFault {
-                at,
-                fault: Box::new(fault),
-            });
+        if let Some(hold) = self.apply_due(host_now)? {
+            return Ok(StepOutcome::held(at, hold));
         }
         Ok(self.outcome())
     }
@@ -1677,25 +1692,36 @@ where
         }
     }
 
-    fn spawn(&mut self, name: &str, fault: u32) -> Result<(), Error<M::Error>> {
-        let index = self
-            .execution
+    /// The provided definition for a reserved spawn, if the host supplied one.
+    fn spawn_definition(&self, name: &str) -> Option<usize> {
+        self.execution
             .definitions
             .iter()
-            .position(|d| d.name == name)
-            .ok_or_else(|| Error::Control("spawn lacks declared definition".into()))?;
-        let id = self
+            .position(|d| d.definition.name == name)
+    }
+
+    fn spawn(&mut self, name: &str, fault: u32) -> Result<(), Error<M::Error>> {
+        let index = self
+            .spawn_definition(name)
+            .ok_or_else(|| Error::Control("spawn lacks a provided definition".into()))?;
+        let reservation = self
             .execution
             .control
-            .spawn_target(name)
-            .map_err(Error::Control)?;
+            .reservation(name)
+            .ok_or_else(|| Error::Control("unreserved spawn".into()))?;
+        if reservation.spec != self.execution.definitions[index].spec {
+            return Err(Error::Control(format!(
+                "spawn {name} requested a spec that differs from its provided definition"
+            )));
+        }
+        let id = reservation.id;
         if id.0 != self.execution.machines.len() {
             return Err(Error::Control(
                 "spawn identity out of insertion order".into(),
             ));
         }
-        let machine =
-            (self.factory)(&self.execution.definitions[index]).map_err(Error::Construction)?;
+        let machine = (self.factory)(&self.execution.definitions[index].definition)
+            .map_err(Error::Construction)?;
         let mut bytes = [0; 8];
         self.execution.rng.fill_bytes(&mut bytes);
         let now = self.now();
@@ -1709,17 +1735,18 @@ where
             });
         }
         self.execution.machines.push(entry);
-        let definition = &self.execution.definitions[index];
-        self.execution.network.admit(
-            id,
-            &definition.name,
-            seed,
-            definition.network.as_ref().map(|i| i.mac()),
-        );
+        let definition = &self.execution.definitions[index].definition;
+        let mac = definition.network.as_ref().map(|i| i.mac());
+        self.execution
+            .network
+            .admit(id, &definition.name, seed, mac);
         self.execution
             .control
-            .spawned(name, seed)
+            .spawned(name, seed, mac.is_some())
             .map_err(Error::Control)?;
+        if self.execution.definitions[index].allow_crashes {
+            self.execution.properties.allow_crashes(name.to_owned());
+        }
         self.execution.definitions.remove(index);
         self.stage(
             self.now(),
@@ -1820,7 +1847,7 @@ where
         }
         for name in &machines {
             let control = &self.execution.control;
-            if control.target(name).is_err() && !control.declared(name) {
+            if control.target(name).is_err() {
                 return Err(Error::UnknownName(name.clone()));
             }
         }
@@ -2022,6 +2049,44 @@ where
     /// at their FIFO turn after admission (see [`Barrier::schedule`]).
     pub fn paused(&self, id: MachineId) -> Result<bool, Error<M::Error>> {
         Ok(self.driver.entry(id)?.lifecycle.paused())
+    }
+
+    /// Supply the definition a [`StepOutcome::NeedsMachine`] requested. Its
+    /// name and spec must match an admitted spawn that has none yet, and its
+    /// MAC must be new. Nothing is constructed here and no time passes: the
+    /// spawn is applied at its FIFO turn by the next step. The definition is
+    /// part of checkpoints until then.
+    pub fn provide(&mut self, prepared: SpawnDefinition) -> Result<(), Error<M::Error>> {
+        self.check_running()?;
+        let driver = &mut *self.driver;
+        let name = &prepared.definition.name;
+        let reservation = driver
+            .execution
+            .control
+            .reservation(name)
+            .ok_or_else(|| Error::UnknownName(name.clone()))?;
+        if reservation.spec != prepared.spec {
+            return Err(Error::Control(format!(
+                "provided definition for {name} answers a different spec"
+            )));
+        }
+        if driver.spawn_definition(name).is_some() {
+            return Err(Error::DuplicateName(name.clone()));
+        }
+        if let Some(interface) = &prepared.definition.network {
+            let mac = interface.mac();
+            if driver.execution.network.has_mac(mac)
+                || driver
+                    .execution
+                    .definitions
+                    .iter()
+                    .any(|d| d.definition.network.as_ref().map(|i| i.mac()) == Some(mac))
+            {
+                return Err(Error::DuplicateMac(mac));
+            }
+        }
+        driver.execution.definitions.push(prepared);
+        Ok(())
     }
 
     /// Construct and admit a machine at this barrier's time. Construction
@@ -2259,7 +2324,8 @@ pub enum Error<E> {
     NetworkConfiguration(String),
     /// A machine factory failed before its machines were admitted.
     Construction(E),
-    /// Definition names must be unique across oracle, initial and spawnable machines.
+    /// Definition names must be unique across oracle, initial and provided spawn
+    /// definitions.
     DuplicateName(String),
     /// A reserved guest spawn identity prevents host machine addition until dispatch.
     SpawnPending,
@@ -2292,7 +2358,7 @@ pub enum Error<E> {
     InvalidRequest,
     /// The exact prepared position or projected admission outcome changed.
     PreparedInputMismatch,
-    /// No machine (or declared spawnable machine) has exactly this name.
+    /// No machine (or admitted spawn) has exactly this name.
     UnknownName(String),
     /// A process command deadline must be positive and representable after
     /// its scheduled time.
@@ -2478,6 +2544,14 @@ pub enum StepOutcome {
         at: Timestamp,
         fault: Box<FaultRecord>,
     },
+    /// An admitted spawn reached its effect turn without a definition. Time
+    /// has not advanced past `at` and the spawn has not been applied. Prepare
+    /// the requested spec, pass it to [`Barrier::provide`] and step again.
+    /// Repeated calls return the same request until then.
+    NeedsMachine {
+        at: Timestamp,
+        request: Box<SpawnRequest>,
+    },
     /// A permanent stop was requested at a barrier. No machine has been crashed.
     Stopped { at: Timestamp },
     /// Further work is runnable or has a known future scheduling time.
@@ -2492,6 +2566,21 @@ pub enum StepOutcome {
     /// Other machines and queued work remain stopped. This result is permanent;
     /// committed events remain available through `Driver::drain_observations`.
     Finished { at: Timestamp, reason: ExitReason },
+}
+
+impl StepOutcome {
+    fn held(at: Timestamp, hold: due::Hold) -> Self {
+        match hold {
+            due::Hold::Fault(fault) => Self::BeforeFault {
+                at,
+                fault: Box::new(fault),
+            },
+            due::Hold::Machine(request) => Self::NeedsMachine {
+                at,
+                request: Box::new(request),
+            },
+        }
+    }
 }
 
 #[cfg(test)]

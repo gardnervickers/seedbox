@@ -14,7 +14,10 @@ fn source_destroyed_capture_reused_workers_and_nonclone_snapshots() {
                 true,
                 vec![
                     (0, Response::Ready),
-                    (25, call(1, r#""op":"spawn","machine":"fixture-2""#)),
+                    (
+                        25,
+                        call(1, r#""op":"spawn","machine":"fixture-2","spec":{}"#),
+                    ),
                 ],
             ),
             spec(1, true, vec![(0, Response::Ready)]),
@@ -732,6 +735,7 @@ fn reserved_spawn_identity_is_retained_without_factory_or_seed_re_admission() {
         key("spawn"),
         Action::Spawn {
             name: "fixture-1".into(),
+            spec: crate::test_support::SPAWN_SPEC.into(),
         },
     )
     .unwrap();
@@ -785,6 +789,40 @@ fn reserved_spawn_identity_is_retained_without_factory_or_seed_re_admission() {
     assert!(failed.step(at(20)).is_err());
     assert!(matches!(failed.checkpoint(), Err(Error::Failed)));
     assert!(matches!(failed.step(at(20)), Err(Error::Failed)));
+}
+
+#[test]
+fn spawn_waiting_for_its_definition_is_captured_and_waits_again_after_restore() {
+    let mut d = build(
+        vec![spec(0, true, vec![])],
+        vec![spec(1, true, vec![(0, Response::Ready)])],
+        true,
+    );
+    // The host has prepared nothing yet.
+    let prepared = std::mem::take(&mut d.execution.definitions);
+    d.schedule(
+        at(0),
+        key("spawn"),
+        Action::Spawn {
+            name: "fixture-1".into(),
+            spec: crate::test_support::SPAWN_SPEC.into(),
+        },
+    )
+    .unwrap();
+    let waiting = d.step(at(10)).unwrap();
+    assert!(
+        matches!(&waiting, StepOutcome::NeedsMachine { at: held, request } if *held == at(0) && request.name == "fixture-1")
+    );
+    let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
+    d.with_barrier(|b| b.provide(prepared[0].clone())).unwrap();
+    let expected = advance(&mut d, 20);
+    assert_eq!(d.execution.machines.len(), 2);
+    drop(d);
+    let mut b = Driver::from_checkpoint(&c, 1, || Ok(Context(None)), Mock::restore, fresh).unwrap();
+    assert_eq!(b.step(at(10)).unwrap(), waiting);
+    b.with_barrier(|b| b.provide(prepared[0].clone())).unwrap();
+    assert_eq!(advance(&mut b, 20), expected);
 }
 
 #[test]
@@ -929,6 +967,7 @@ fn simulation_admission_rng_crosses_cache_boundary_after_three_captured_seeds() 
             key("later-spawn"),
             Action::Spawn {
                 name: "fixture-3".into(),
+                spec: crate::test_support::SPAWN_SPEC.into(),
             },
         )
         .unwrap();

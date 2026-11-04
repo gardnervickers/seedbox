@@ -449,7 +449,12 @@ fn visit(
     visit_inventory(&mut prepared.inventory, &mut apply)?;
     for machine in std::iter::once(&mut prepared.oracle)
         .chain(&mut prepared.machines)
-        .chain(&mut prepared.spawnable)
+        .chain(
+            prepared
+                .spawned
+                .iter_mut()
+                .map(|spawned| &mut spawned.machine),
+        )
     {
         apply(&mut machine.filesystem)?;
         if let Some(wire::Disk::Image { contents }) = &mut machine.disk {

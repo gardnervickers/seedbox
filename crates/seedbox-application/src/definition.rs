@@ -702,7 +702,7 @@ mod tests {
                 allow_crashes: false,
             },
             machines: vec![],
-            spawnable: vec![],
+            spawned: vec![],
             quantum_ns: 1000,
             network: wire::Network {
                 latency_ns: 1000,

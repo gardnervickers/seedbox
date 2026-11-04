@@ -62,8 +62,15 @@ fn streamed_nonclone_snapshots_keep_bytes_rng_publications_and_future_closure() 
             true,
         );
         for (time, name) in [(25, "fixture-3"), (26, "fixture-4")] {
-            d.schedule(at(time), key(name), Action::Spawn { name: name.into() })
-                .unwrap();
+            d.schedule(
+                at(time),
+                key(name),
+                Action::Spawn {
+                    name: name.into(),
+                    spec: crate::test_support::SPAWN_SPEC.into(),
+                },
+            )
+            .unwrap();
         }
         // Arbitrary fill widths [1,7,31,2,33] cross machine RNG caches;
         // three initial plus two future admissions cross the root RNG cache.
