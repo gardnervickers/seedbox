@@ -322,7 +322,8 @@ fn oversized_success_becomes_bounded_correlated_error_and_large_error_fails() {
 
 #[test]
 fn break_on_block_request_names_a_target_request_and_positive_nth() {
-    let call = json!({"op":"break_on_block_request","target":{"machine":"db"},"request":"flush","nth":20});
+    let call =
+        json!({"op":"break_on_block_request","target":{"machine":"db"},"request":"flush","nth":20});
     assert_eq!(
         operation(call.clone()),
         Operation::BreakOnBlockRequest {
