@@ -10,7 +10,10 @@
 //! A zero sector is ordinary data, never a hole that exposes older layers.
 //! Failed operations change nothing.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, OnceLock},
+};
 
 // Explicit canonical paths also support the standalone QEMU Rust FFI build.
 // The PV worker imports this store through its common library dependency.
@@ -45,7 +48,9 @@ pub enum Error {
 #[derive(Clone)]
 enum Base {
     Zero,
-    Image(Arc<[u8]>),
+    /// The image and its chunk digests for disk evidence (`policy.rs`),
+    /// computed at most once and shared by every capture.
+    Image(Arc<[u8]>, Arc<OnceLock<Box<[[u8; 32]]>>>),
 }
 
 // One backend-neutral store keeps durability semantics in a single place for
@@ -79,7 +84,7 @@ impl Store {
             return Err(Error::Alignment);
         }
         let sectors = (image.len() / SECTOR) as u64;
-        Ok(Self::over(Base::Image(image), sectors))
+        Ok(Self::over(Base::Image(image, Arc::default()), sectors))
     }
 
     fn over(base: Base, capacity: u64) -> Self {
@@ -116,7 +121,7 @@ impl Store {
         }
         match &self.base {
             Base::Zero => &[0; SECTOR],
-            Base::Image(image) => {
+            Base::Image(image, _) => {
                 let at = index as usize * SECTOR;
                 &image[at..at + SECTOR]
             }
