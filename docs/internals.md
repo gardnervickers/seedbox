@@ -41,6 +41,7 @@ value in reported contexts; stored translation tables alone do not.
 ## Reference TCG machine
 
 TCG budgets QEMU icount steps, not retired instructions: REP I/O costs per iteration plus a final check.
+The TSC and LAPIC timer both count guest nanoseconds, so the guest command line states both rates instead of calibrating them at boot: `tsc_early_khz`, and `lapic_timer_khz` from the TCG kernel's [patch](../crates/seedbox-machine/guest/kernel/tcg-x86_64.patch).
 Idle reports its next virtual timer but cannot jump time itself; the Driver advances the shared clock.
 A bounded run has no host read timeout; only test-support adds a 600-second stuck-process watchdog.
 The [adapter](../crates/seedbox-machine-tcg/src/machine/tcg.rs) merges frame, console and lifecycle output in occurrence order.

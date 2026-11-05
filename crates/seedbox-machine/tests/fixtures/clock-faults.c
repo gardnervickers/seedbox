@@ -1,10 +1,13 @@
-/* Native clock-fault acceptance, shared by TCG and PV. One executable, two roles:
+/* Native clock-fault acceptance, shared by TCG and PV. One executable, several roles:
  *   clock       reads CLOCK_REALTIME/MONOTONIC/MONOTONIC_RAW and the machine
  *               counter, sleeps, and arms absolute realtime timerfds.
  *   controller  applies drift, a realtime step, crash/reboot and heals to the
  *               machine named "clock" at fixed simulation times, then exits 0.
  *   idle        an oracle for host-driven runs: sleeps 12.5 s, then exits 0.
- * Every line is "<TAG> rt=<ns> mono=<ns> raw=<ns> cnt=<ns>". */
+ *   ticks       TCG only: stays busy for one guest second and prints
+ *               "TICKS loc=<count> mono=<ns>", the local APIC timer
+ *               interrupts counted in /proc/interrupts over that time.
+ * Every other line is "<TAG> rt=<ns> mono=<ns> raw=<ns> cnt=<ns>". */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -98,6 +101,38 @@ static void clock_role(void) {
     }
 }
 
+/* The LOC row of /proc/interrupts: local APIC timer interrupts so far. */
+static uint64_t local_timer_interrupts(void) {
+    static char text[65536];
+    int fd = open("/proc/interrupts", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) fail("open interrupts");
+    size_t used = 0;
+    for (;;) {
+        if (used + 1 == sizeof(text)) fail("interrupts size");
+        ssize_t count = read(fd, text + used, sizeof(text) - 1 - used);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) fail("read interrupts");
+        if (!count) break;
+        used += (size_t)count;
+    }
+    close(fd);
+    text[used] = 0;
+    const char *row = strstr(text, "LOC:");
+    if (!row) fail("LOC row");
+    return strtoull(row + 4, NULL, 10);
+}
+/* A busy CPU keeps the periodic tick running, one interrupt per 1/HZ. */
+static void ticks_role(void) {
+    uint64_t before = local_timer_interrupts(), start = ns(CLOCK_MONOTONIC), now;
+    do now = ns(CLOCK_MONOTONIC); while (now - start < 1000000000u);
+    uint64_t count = local_timer_interrupts() - before;
+    char text[128];
+    int size = snprintf(text, sizeof(text), "TICKS loc=%llu mono=%llu\n",
+                        (unsigned long long)count, (unsigned long long)(now - start));
+    if (size < 0 || (size_t)size >= sizeof(text)) fail("ticks line");
+    put(STDOUT_FILENO, text, (size_t)size);
+}
+
 static char reply[4096];
 static unsigned next_id;
 static const char *call(int fd, const char *operation) {
@@ -163,6 +198,7 @@ int main(int argc, char **argv) {
     if (argc != 2) fail("role");
     if (!strcmp(argv[1], "clock")) clock_role();
     else if (!strcmp(argv[1], "controller")) controller_role();
+    else if (!strcmp(argv[1], "ticks")) ticks_role();
     else if (!strcmp(argv[1], "idle")) {
         struct timespec rest = {.tv_sec = 12, .tv_nsec = 500000000};
         while (nanosleep(&rest, &rest)) if (errno != EINTR) fail("idle");

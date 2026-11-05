@@ -70,10 +70,12 @@
               init = "${guest}/bin/init";
               # The emulated TSC under icount counts exactly 1 GHz, the guest
               # counter's nanosecond units; this states the virtual hardware
-              # frequency instead of calibrating it.
+              # frequency instead of calibrating it. QEMU's LAPIC timer counts
+              # the same nanoseconds before its divider, so lapic_timer_khz
+              # (from the TCG kernel's patch) states its rate too.
               # The initramfs root uses guest RAM directly, without tmpfs's
               # separate quota while the boot archive is still reserved.
-              commandLine = "console=ttyS0 earlycon=uart8250,io,0x3f8 rdinit=/init rootfstype=ramfs nokaslr panic=-1 tsc_early_khz=1000000";
+              commandLine = "console=ttyS0 earlycon=uart8250,io,0x3f8 rdinit=/init rootfstype=ramfs nokaslr panic=-1 tsc_early_khz=1000000 lapic_timer_khz=1000000";
               # qboot loads the kernel and the ACPI tables from fw_cfg itself,
               # so with option ROMs disabled only owned firmware runs. (The
               # microvm ACPI default, bios-microvm.bin, needs QEMU's
