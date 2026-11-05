@@ -52,10 +52,13 @@ fn restore_pv(snapshot: &Snapshot) -> std::io::Result<PVMachine> {
 /// that snapshot, so the Driver continues on the restored machine. The
 /// oracle's stands in for a guest oracle: it asks for a breakpoint at the
 /// held machine's third FLUSH, waits for the hit and crashes the machine
-/// there. Only the oracle ever gets replies; its guest never sees them.
+/// there, or resumes it. Only the oracle ever gets replies; its guest never
+/// sees them.
 struct Migrating {
     machine: PVMachine,
     migrate: bool,
+    /// The oracle resumes the hit instead of crashing its machine.
+    resume: bool,
     /// The oracle's next call, emitted on its next run.
     call: Option<Vec<u8>>,
 }
@@ -76,8 +79,9 @@ fn break_held() -> Vec<u8> {
         }),
     )
 }
-/// The oracle's call after reply `id`: wait for the hit, then crash it.
-fn after_reply(id: u32, reply: &serde_json::Value) -> Option<Vec<u8>> {
+/// The oracle's call after reply `id`: wait for the hit, then crash its
+/// machine or resume it.
+fn after_reply(id: u32, reply: &serde_json::Value, resume: bool) -> Option<Vec<u8>> {
     match id {
         1 => Some(oracle_call(
             2,
@@ -91,16 +95,21 @@ fn after_reply(id: u32, reply: &serde_json::Value) -> Option<Vec<u8>> {
             assert_eq!(hit["nth"], 3, "{reply}");
             Some(oracle_call(
                 3,
-                serde_json::json!({"op": "crash", "target": {"machine": "held"}}),
+                if resume {
+                    serde_json::json!({"op": "resume_break", "break_id": hit["break_id"]})
+                } else {
+                    serde_json::json!({"op": "crash", "target": {"machine": "held"}})
+                },
             ))
         }
         _ => None,
     }
 }
-fn wrap(machine: PVMachine, migrate: bool, name: &str) -> Migrating {
+fn wrap(machine: PVMachine, migrate: bool, resume: bool, name: &str) -> Migrating {
     Migrating {
         machine,
         migrate,
+        resume,
         call: (name == "oracle").then(break_held),
     }
 }
@@ -119,7 +128,7 @@ impl Machine for Migrating {
             };
             let reply: serde_json::Value = serde_json::from_slice(payload).unwrap();
             assert_eq!(reply["ok"], true, "{reply}");
-            if let Some(call) = after_reply(id.request.get(), &reply) {
+            if let Some(call) = after_reply(id.request.get(), &reply, self.resume) {
                 self.call = Some(call);
             }
             context.inbox.take();
@@ -211,7 +220,12 @@ const DONE: [(&str, &str); 6] = [
     ("calm", "DISK threads switches="),
 ];
 
-fn driver(backend: &Backend<PVMachine>, workers: usize, migrate: bool) -> Driver<Migrating> {
+fn driver(
+    backend: &Backend<PVMachine>,
+    workers: usize,
+    migrate: bool,
+    resume: bool,
+) -> Driver<Migrating> {
     let mut definitions: Vec<_> = layout()
         .into_iter()
         .map(|(name, arguments, _)| {
@@ -235,7 +249,14 @@ fn driver(backend: &Backend<PVMachine>, workers: usize, migrate: bool) -> Driver
         definitions,
         Vec::new(),
         crate::driver::NetworkConfig::default(),
-        move |definition| Ok(wrap(factory(definition)?, migrate, &definition.name)),
+        move |definition| {
+            Ok(wrap(
+                factory(definition)?,
+                migrate,
+                resume,
+                &definition.name,
+            ))
+        },
     )
     .unwrap();
     driver.enable_breakpoints();
@@ -369,6 +390,12 @@ fn finished(events: &[Event]) -> bool {
         .all(|(name, marker)| stdout(events, name).contains(marker))
         && crashed(events)
 }
+/// Every machine, the resumed held one included, has finished its work.
+fn finished_resumed(events: &[Event]) -> bool {
+    DONE.iter()
+        .all(|(name, marker)| stdout(events, name).contains(marker))
+        && stdout(events, "held").contains("DISK faults done")
+}
 fn crashed(events: &[Event]) -> bool {
     events.iter().any(|e| {
         matches!(
@@ -412,17 +439,108 @@ fn heal(driver: &mut Driver<Migrating>, events: &mut Vec<Event>) {
     };
     advance(driver, events, None, healed);
 }
-fn run(backend: &Backend<PVMachine>, workers: usize, snapshot_every: Option<u64>) -> Vec<Event> {
-    let mut driver = driver(backend, workers, snapshot_every.is_some());
+fn run(
+    backend: &Backend<PVMachine>,
+    workers: usize,
+    snapshot_every: Option<u64>,
+    resume: bool,
+) -> Vec<Event> {
+    let mut driver = driver(backend, workers, snapshot_every.is_some(), resume);
     schedule(&mut driver);
     let mut events = Vec::new();
-    advance(&mut driver, &mut events, snapshot_every, finished);
+    let done = if resume { finished_resumed } else { finished };
+    advance(&mut driver, &mut events, snapshot_every, done);
     heal(&mut driver, &mut events);
     events
 }
 
-/// The guest-visible effect of each fault, and the counts its heal reports.
+/// The guest-visible effect of each fault, the counts its heal reports, and
+/// the held machine crashed at its hit.
 fn check(events: &[Event]) {
+    check_faults(events);
+    let out = |name| stdout(events, name);
+    // The held machine's third FLUSH after the oracle's breakpoint call never
+    // completed: the oracle crashed it there, so only two rounds report.
+    assert_eq!(rounds_after_arming(events), Some(2), "{}", out("held"));
+    assert!(!out("held").contains("DISK faults done"), "{}", out("held"));
+    let held = machine("held");
+    assert!(events.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::BreakHit { break_id: 1, machine, name, .. }
+            if *machine == held && name == "block_request"
+    )));
+    assert!(events.iter().any(|e| matches!(
+        e.kind,
+        EventKind::BreakEnded {
+            break_id: 1,
+            reason: BreakEnd::Crashed
+        }
+    )));
+    let fault = events
+        .iter()
+        .find_map(|e| match &e.kind {
+            EventKind::FaultAdmitted(record)
+                if matches!(record.origin, FaultOrigin::Control { .. }) =>
+            {
+                Some(record.fault)
+            }
+            _ => None,
+        })
+        .expect("the oracle's crash was admitted");
+    assert!(events.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::Transition { machine, change: Transition::Crashed, cause: Cause::Fault(id), .. }
+            if *id == fault && *machine == held
+    )));
+}
+/// The faults as [`check`] sees them, and the held machine resumed at its
+/// hit: its held FLUSH continued and it finished every round in order.
+fn check_resumed(events: &[Event]) {
+    check_faults(events);
+    let out = stdout(events, "held");
+    assert_eq!(out.matches("DISK round=").count(), ROUNDS, "{out}");
+    assert!(out.contains("DISK faults done"), "{out}");
+    let rounds: Vec<usize> = out
+        .match_indices("DISK round=")
+        .map(|(at, field)| {
+            out[at + field.len()..]
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        })
+        .collect();
+    assert!(rounds.windows(2).all(|pair| pair[0] < pair[1]), "{out}");
+    let held = machine("held");
+    let hit = events
+        .iter()
+        .find_map(|e| match &e.kind {
+            EventKind::BreakHit {
+                break_id: 1,
+                machine,
+                name,
+                ..
+            } if *machine == held && name == "block_request" => Some(e.at),
+            _ => None,
+        })
+        .expect("the held machine's hit");
+    let resumed = events
+        .iter()
+        .find_map(|e| match e.kind {
+            EventKind::BreakEnded {
+                break_id: 1,
+                reason: BreakEnd::Resumed,
+            } => Some(e.at),
+            _ => None,
+        })
+        .expect("the oracle resumed the hit");
+    assert!(hit < resumed);
+    assert!(!crashed(events), "nothing crashes");
+    eprintln!("held machine suspended at {hit:?} and resumed at {resumed:?}");
+}
+/// The guest-visible effect of each fault, and the counts its heal reports.
+fn check_faults(events: &[Event]) {
     let out = |name| stdout(events, name);
     let rounds = |name| out(name).matches("DISK round=").count();
     let number = |text: &str, field: &str| -> u64 {
@@ -467,39 +585,6 @@ fn check(events: &[Event]) {
         number(&out("slow"), "min_flush_ns="),
         number(&out("oracle"), "max_flush_ns="),
     );
-    // The held machine's third FLUSH after the oracle's breakpoint call never
-    // completed: the oracle crashed it there, so only two rounds report.
-    assert_eq!(rounds_after_arming(events), Some(2), "{}", out("held"));
-    assert!(!out("held").contains("DISK faults done"), "{}", out("held"));
-    let held = machine("held");
-    assert!(events.iter().any(|e| matches!(
-        &e.kind,
-        EventKind::BreakHit { break_id: 1, machine, name, .. }
-            if *machine == held && name == "block_request"
-    )));
-    assert!(events.iter().any(|e| matches!(
-        e.kind,
-        EventKind::BreakEnded {
-            break_id: 1,
-            reason: BreakEnd::Crashed
-        }
-    )));
-    let fault = events
-        .iter()
-        .find_map(|e| match &e.kind {
-            EventKind::FaultAdmitted(record)
-                if matches!(record.origin, FaultOrigin::Control { .. }) =>
-            {
-                Some(record.fault)
-            }
-            _ => None,
-        })
-        .expect("the oracle's crash was admitted");
-    assert!(events.iter().any(|e| matches!(
-        &e.kind,
-        EventKind::Transition { machine, change: Transition::Crashed, cause: Cause::Fault(id), .. }
-            if *id == fault && *machine == held
-    )));
     // Heals settle with what each disk fault matched and did.
     let counts: Vec<_> = events
         .iter()
@@ -552,19 +637,29 @@ fn check(events: &[Event]) {
 #[ignore = "requires native PV worker, rebuilt assets and disk fixtures"]
 fn pv_device_faults_take_effect_and_runs_match_across_workers_and_migration() {
     let backend = backend();
-    let serial = run(&backend, 1, None);
+    let serial = run(&backend, 1, None, false);
     check(&serial);
-    assert!(serial == run(&backend, 4, None), "workers=4");
+    assert!(serial == run(&backend, 4, None, false), "workers=4");
     // Snapshot-and-restore every machine but the held one each 7 quanta,
     // while latency completions, preempt streams and holds are live.
-    assert!(serial == run(&backend, 2, Some(7)), "migration");
+    assert!(serial == run(&backend, 2, Some(7), false), "migration");
+}
+
+#[test]
+#[ignore = "requires native PV worker, rebuilt assets and disk fixtures"]
+fn pv_block_request_breakpoint_resumes_the_held_flush_in_order() {
+    let backend = backend();
+    let serial = run(&backend, 1, None, true);
+    check_resumed(&serial);
+    assert!(serial == run(&backend, 4, None, true), "workers=4");
+    assert!(serial == run(&backend, 2, Some(7), true), "migration");
 }
 
 #[test]
 #[ignore = "requires native PV worker, rebuilt assets and disk fixtures"]
 fn pv_device_faults_and_holds_continue_from_a_driver_checkpoint() {
     let backend = backend();
-    let mut source = driver(&backend, 1, false);
+    let mut source = driver(&backend, 1, false, false);
     schedule(&mut source);
     let mut before = Vec::new();
     // Capture once the held machine's hold has counted a FLUSH, while
@@ -598,10 +693,11 @@ fn pv_device_faults_and_holds_continue_from_a_driver_checkpoint() {
             Ok(Migrating {
                 machine: restore_pv(snapshot)?,
                 migrate: false,
+                resume: false,
                 call: None,
             })
         },
-        move |definition| Ok(wrap(factory(definition)?, false, &definition.name)),
+        move |definition| Ok(wrap(factory(definition)?, false, false, &definition.name)),
     )
     .unwrap();
     assert!(
