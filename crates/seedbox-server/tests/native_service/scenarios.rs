@@ -594,7 +594,7 @@ fn fixture_submission(
             allow_crashes: false,
         },
         machines: vec![],
-        spawnable: vec![],
+        spawned: vec![],
         quantum_ns: 1_000_000,
         network: wire::Network::default(),
     };
@@ -1877,7 +1877,7 @@ fn network_world_submission(
         inventory,
         oracle,
         machines: wire_machines,
-        spawnable: vec![],
+        spawned: vec![],
         quantum_ns: 1_000_000,
         network: wire::Network::default(),
     };

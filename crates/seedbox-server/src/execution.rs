@@ -4,6 +4,7 @@
 mod bundles;
 pub(crate) mod content;
 mod diagnostics;
+mod spawn;
 
 use crate::{catalogue, manager::Manager};
 use seedbox_api::{ExecutionTermination, InputSource, Phase, SimulationId, Stage};
@@ -619,7 +620,18 @@ impl ExecutionService {
         if let Some(checkpoint) = checkpoint {
             orchestrator = orchestrator.with_checkpoint(checkpoint);
         }
-        orchestrator
+        // A run from its project can prepare machines the oracle spawns; a
+        // replay of a resolved definition has every one it needs retained.
+        if !matches!(spec.inputs, InputSource::Resolved { .. }) {
+            orchestrator = orchestrator.with_spawner(Arc::new(spawn::ProjectSpawner::new(
+                self.backends.clone(),
+                spec.configuration.clone(),
+                options.backend.unwrap_or_default(),
+                self.store.clone(),
+                cancellation.clone(),
+            )));
+        }
+        let run = orchestrator
             .with_start_paused(options.start_paused)
             .with_observations(observations.path())
             .with_program(program)
@@ -634,7 +646,24 @@ impl ExecutionService {
                 inputs,
                 executor.as_ref(),
                 |progress| self.observe_run_progress(id, spec, &mut retained, progress),
-            )
+            )?;
+        // Machines the run's spawns prepared join its retained inputs, so the
+        // definition replays without preparing them again.
+        if run.record.identity.inputs != retained.prepared {
+            retained.prepared = run.record.identity.inputs.clone();
+            save_inputs(&self.root.join("inputs"), id, &retained, true)?;
+            let execution = seedbox_application::definition::execution_settings_with_inputs(
+                &retained.prepared,
+            )?;
+            self.manager
+                .update(id, |s| {
+                    if let InputSource::Resolved { definition } = &mut s.spec.inputs {
+                        definition.runtime.execution = execution;
+                    }
+                })
+                .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
+        }
+        Ok(run)
     }
 
     /// Prepared inputs, start checkpoint and executor for

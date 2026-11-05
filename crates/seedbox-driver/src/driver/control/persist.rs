@@ -11,11 +11,10 @@ wire_struct!(Control {
     service,
     controller,
     entries,
-    spawnable,
-    attached_spawnable,
     spawning,
     calls
 });
+wire_struct!(Reservation { id, spec });
 wire_enum!(Event; units {3=>TriggerBoundary,4=>TriggerFinalize} tuples {1=>Plan(v0)} records {0=>Call{source,boot,id,observed,payload},2=>Input{key,action,handle},5=>Reply{target,boot,id,payload}});
 
 impl Control {
@@ -25,7 +24,7 @@ impl Control {
     pub(crate) fn check_persist<T>(
         &self,
         entries: &[Entry<T>],
-        definitions: &[MachineDefinition],
+        definitions: &[crate::driver::SpawnDefinition],
         network: &super::super::network::Network,
         now: u64,
     ) -> crate::persistence::Result<()> {
@@ -65,35 +64,23 @@ impl Control {
         }
         let mut names = BTreeSet::new();
         for d in definitions {
-            require(names.insert(d.name.clone()), "duplicate future definition")?;
+            let name = &d.definition.name;
+            require(names.insert(name.clone()), "duplicate future definition")?;
+            require(
+                self.entries.iter().all(|e| e.name.as_ref() != Some(name)),
+                "future definition names an added machine",
+            )?;
+            if let Some(reservation) = self.spawning.get(name) {
+                require(reservation.spec == d.spec, "future definition spec")?;
+            }
         }
-        let declared: BTreeSet<_> = self
-            .spawnable
-            .iter()
-            .chain(self.spawning.keys())
-            .cloned()
-            .collect();
-        require(
-            names == declared
-                && self
-                    .spawnable
-                    .iter()
-                    .all(|n| !self.spawning.contains_key(n)),
-            "future definition reservations",
-        )?;
-        let reserved: BTreeSet<_> = self.spawning.values().map(|id| id.0).collect();
+        let reserved: BTreeSet<_> = self.spawning.values().map(|r| r.id.0).collect();
         require(
             reserved
                 .into_iter()
                 .eq(entries.len()..self.slots_persist()?),
             "reserved machine identities",
         )?;
-        for definition in definitions {
-            require(
-                definition.network.is_some() == self.attached_spawnable.contains(&definition.name),
-                "future attachment",
-            )?;
-        }
         for (i, o) in self.entries.iter().enumerate() {
             require(
                 network.member_matches_persist(i, o.name.as_deref(), o.attached),
@@ -133,15 +120,23 @@ impl Control {
 impl Control {
     pub(crate) fn scratch_persist(
         &self,
-        defs: &[MachineDefinition],
+        defs: &[crate::driver::SpawnDefinition],
     ) -> crate::persistence::Result<u64> {
         let mut size = 0u64;
         for d in defs {
             size = size
-                .checked_add(2 * (d.name.len() as u64 + std::mem::size_of::<String>() as u64))
+                .checked_add(
+                    2 * (d.definition.name.len() as u64 + std::mem::size_of::<String>() as u64),
+                )
                 .ok_or(crate::persistence::CodecError::Limit("scratch overflow"))?;
         }
-        size.checked_add((self.spawning.len() * std::mem::size_of::<usize>()) as u64)
+        let reservations = self.spawning.iter().try_fold(0u64, |size, (name, r)| {
+            size.checked_add(
+                (name.len() + r.spec.len() + std::mem::size_of::<Reservation>()) as u64,
+            )
+        });
+        reservations
+            .and_then(|reservations| size.checked_add(reservations))
             .ok_or(crate::persistence::CodecError::Limit("scratch overflow"))
     }
 }

@@ -180,12 +180,13 @@ pub enum Action {
     /// bound to the target's boot at admission; if that boot ends first, the
     /// heal settles Unavailable and the handle stays active.
     Heal(HealTarget),
-    /// Create the declared spawnable machine with this definition name,
-    /// through the same admission path as a guest `spawn` call. Each name is
-    /// admitted at most once from any origin; a name that is unknown or already
-    /// admitted is rejected. The new identity is reserved at admission and the
-    /// machine is built at its FIFO effect turn.
-    Spawn { name: String },
+    /// Create a new machine named `name` from `spec`, the opaque JSON machine
+    /// entry the host prepares, through the same admission path as a guest
+    /// `spawn` call. A name already in use or reserved is rejected. The new
+    /// identity is reserved at admission and the machine is built at its FIFO
+    /// effect turn, once the host has provided its definition
+    /// ([`crate::driver::StepOutcome::NeedsMachine`]).
+    Spawn { name: String, spec: String },
     // Host clock faults share the guest control policy, handles and events
     // (`Transition::ClockRate`, `FaultAction::{Drift, StepRealtime}`); a raw
     // Driver setter would bypass admission, keys and settlement.

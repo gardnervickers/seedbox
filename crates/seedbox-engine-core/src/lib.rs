@@ -1,6 +1,7 @@
 //! Shared deterministic policies and guest-memory protocols, independent of CPU backends.
 //! Platform adapters supply committed events and actual transmitted bytes.
 pub mod connections;
+pub mod dns;
 pub mod links;
 pub mod network_counters;
 

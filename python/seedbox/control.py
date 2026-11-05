@@ -264,6 +264,21 @@ class World:
         """Boot a crashed machine again from its image; readiness is the application's own check."""
         return self._call("reboot", target=_target(target))[1]
 
+    def spawn(self, machine, spec):
+        """Prepare and boot a new machine named `machine`.
+
+        `spec` is the dict a `machines` entry of seedbox.yaml takes, such as
+        `{"build": {"context": "./workload"}}`; relative paths resolve against
+        the project's directory. The simulation waits while the host prepares
+        the image, and the run keeps it so a replay needs no preparation.
+        Readiness is the application's own check.
+        """
+        if not isinstance(machine, str) or not machine:
+            raise ValueError("spawn needs a machine name")
+        if not isinstance(spec, dict):
+            raise ValueError("spawn needs a machine spec dict")
+        return self._call("spawn", machine=machine, spec=spec)[1]
+
     def partition(self, left, right):
         """Cut traffic in both directions and return an independent handle."""
         if isinstance(left, str) or isinstance(right, str):

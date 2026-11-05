@@ -333,8 +333,9 @@ impl Action {
                 handle: handle.0.clone(),
             }),
             Self::Heal(HealTarget::Input(input)) => input_handle(input),
-            Self::Spawn { name } => Ok(Command::Spawn {
+            Self::Spawn { name, spec } => Ok(Command::Spawn {
                 machine: name.clone(),
+                spec: spec.clone(),
             }),
             Self::Partition { left, right } => Ok(Command::Partition {
                 left: left.iter().map(wire).collect(),

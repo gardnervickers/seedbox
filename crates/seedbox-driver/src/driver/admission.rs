@@ -25,6 +25,12 @@ pub enum DueOutcome {
         at: Timestamp,
         fault: Box<FaultRecord>,
     },
+    /// This admitted spawn waits at the FIFO front for its definition
+    /// ([`StepOutcome::NeedsMachine`]).
+    NeedsMachine {
+        at: Timestamp,
+        request: Box<SpawnRequest>,
+    },
     /// Zero-time work committed oracle completion; later work was not dispatched.
     /// Unconsumed step and arm state is preserved. The host may call `step(at)`
     /// at this returned time to perform ordinary finished-state cancellation;
@@ -316,11 +322,20 @@ where
 
     fn drain_due_now(&mut self, host_now: Instant) -> Result<DueOutcome, Error<M::Error>> {
         loop {
-            if let Some(fault) = self.apply_due_mode(host_now, true)? {
-                return Ok(DueOutcome::BeforeFault {
-                    at: self.now(),
-                    fault: Box::new(fault),
-                });
+            match self.apply_due_mode(host_now, true)? {
+                Some(super::due::Hold::Fault(fault)) => {
+                    return Ok(DueOutcome::BeforeFault {
+                        at: self.now(),
+                        fault: Box::new(fault),
+                    })
+                }
+                Some(super::due::Hold::Machine(request)) => {
+                    return Ok(DueOutcome::NeedsMachine {
+                        at: self.now(),
+                        request: Box::new(request),
+                    })
+                }
+                None => {}
             }
             if let Some((at, reason)) = self.execution.finished {
                 return Ok(DueOutcome::Finished { at, reason });
@@ -456,7 +471,7 @@ where
             }
             None => {}
         }
-        // Members may name declared machines spawned before admission.
+        // Members name machines already added; a reserved spawn is not one yet.
         if let Action::Partition { left, right }
         | Action::Shape {
             from: left,
@@ -470,9 +485,7 @@ where
                         self.entry(*id)?;
                     }
                     Target::Name(name) => {
-                        if self.execution.control.target(name).is_err()
-                            && !self.execution.control.declared(name)
-                        {
+                        if self.execution.control.target(name).is_err() {
                             return Err(Error::UnknownName(name.clone()));
                         }
                     }
@@ -491,9 +504,7 @@ where
         }
         if let Action::DropConnection { connection } = action {
             for name in [&connection.from, &connection.to] {
-                if self.execution.control.target(name).is_err()
-                    && !self.execution.control.declared(name)
-                {
+                if self.execution.control.target(name).is_err() {
                     return Err(Error::UnknownName(name.clone()));
                 }
             }
@@ -505,9 +516,11 @@ where
                 return Err(Error::InvalidRequest);
             }
         }
-        if let Action::Spawn { name } = action {
+        if let Action::Spawn { name, .. } = action {
             if !self.execution.control.spawnable(name) {
-                return Err(Error::UnknownName(name.clone()));
+                return Err(Error::Control(format!(
+                    "{name:?} is not a free lowercase DNS label for a new machine"
+                )));
             }
         }
         if let Action::StepRealtime { nanoseconds, .. } = action {

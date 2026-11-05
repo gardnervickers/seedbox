@@ -68,8 +68,9 @@ pub(crate) trait Adapter {
     fn draw(&mut self, _target: &str) -> Result<u64, OperationError> {
         Err(OperationError::unsupported())
     }
-    /// Reserve a declared machine once, without building it or drawing entropy.
-    fn reserve_spawn(&mut self, _: &str) -> Result<(), OperationError> {
+    /// Reserve a new machine name and its spec once, without building it or
+    /// drawing entropy.
+    fn reserve_spawn(&mut self, _name: &str, _spec: &str) -> Result<(), OperationError> {
         Err(OperationError::unsupported())
     }
     fn resolve(&self, target: &Target) -> Result<Facts, OperationError>;
@@ -316,9 +317,10 @@ pub(crate) enum Command {
     Heal {
         handle: String,
     },
-    /// Reserve and later build a declared machine by name.
+    /// Reserve a new machine name; the host prepares `spec` before it is built.
     Spawn {
         machine: String,
+        spec: String,
     },
     /// Step the target's guest realtime (`clock_skew`).
     StepRealtime {
@@ -380,7 +382,10 @@ impl Command {
                     .ok_or_else(|| OperationError::invalid("invalid execution factor"))?,
             }),
             Operation::Heal { handle } => Ok(Self::Heal { handle }),
-            Operation::Spawn { machine } => Ok(Self::Spawn { machine }),
+            Operation::Spawn { machine, spec } => Ok(Self::Spawn {
+                machine,
+                spec: Value::Object(spec).to_string(),
+            }),
             Operation::ClockSkew {
                 target,
                 offset_ns,
