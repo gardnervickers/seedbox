@@ -54,15 +54,24 @@ class Trigger:
 
 @dataclass(frozen=True)
 class Hit:
-    """A breakpoint hit. Its machine stays suspended until resumed or crashed."""
+    """A breakpoint hit. Its machine stays suspended until resumed or crashed.
+
+    source is "program" for a breakpoint write and "block_request" for a held
+    disk request, whose hit also carries the hold's request kind and nth.
+    """
     id: int
     machine: str
     boot: int
     name: str
     at_ns: int
+    source: str = "program"
+    request: Optional[str] = None
+    nth: Optional[int] = None
 
 
 _BREAK_NAME = re.compile(r"[a-z0-9_.-]{1,64}")
+# Every block request hit has this name; no program breakpoint can take it.
+BLOCK_REQUEST = "block_request"
 
 
 @dataclass(frozen=True)
@@ -479,6 +488,8 @@ class World:
         names = sorted(set(names))
         if any(not isinstance(n, str) or not _BREAK_NAME.fullmatch(n) for n in names):
             raise ValueError("breakpoint names are 1..=64 bytes of [a-z0-9_.-]")
+        if BLOCK_REQUEST in names:
+            raise ValueError("block_request names block request hits, not a program breakpoint")
         return self._call("declare_breaks", names=names)[1]
 
     def wait_break(self, timeout):
@@ -487,11 +498,17 @@ class World:
         if not result:
             return None
         try:
-            hit = Hit(result["break_id"], result["machine"], result["boot"], result["name"], result["at_ns"])
+            hit = Hit(result["break_id"], result["machine"], result["boot"], result["name"], result["at_ns"],
+                      result["source"], result.get("request"), result.get("nth"))
         except KeyError as error:
             self.close()
             raise ProtocolError("invalid breakpoint hit") from error
-        if (type(hit.id) is not int or type(hit.boot) is not int or type(hit.at_ns) is not int
+        if hit.source == BLOCK_REQUEST:
+            held = (hit.name == BLOCK_REQUEST and hit.request in ("read", "write", "flush", "any")
+                    and type(hit.nth) is int and hit.nth >= 1)
+        else:
+            held = hit.source == "program" and hit.request is None and hit.nth is None
+        if (not held or type(hit.id) is not int or type(hit.boot) is not int or type(hit.at_ns) is not int
                 or not isinstance(hit.machine, str) or not isinstance(hit.name, str)):
             self.close()
             raise ProtocolError("invalid breakpoint hit")
@@ -532,7 +549,8 @@ class World:
             raise TypeError("on_break expects a callable handler")
         if self._path is None:
             raise ValueError("on_break needs a World opened with connect()")
-        self.declare_breaks([*self._handlers, name])
+        # Block request hits need no declaration; their name is reserved.
+        self.declare_breaks([n for n in (*self._handlers, name) if n != BLOCK_REQUEST])
         self._handlers[name] = handler
         if self._breaks is None:
             self._breaks = World.connect(self._path)

@@ -13,6 +13,10 @@ pub(crate) enum BreakEnd {
     RunEnded,
 }
 
+/// The name of every block request hit. It is reserved: a program cannot
+/// declare it, so a hit with this name always comes from a held request.
+pub(crate) const BLOCK_REQUEST: &str = "block_request";
+
 /// What suspended a machine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum HitSource {
@@ -26,7 +30,7 @@ impl HitSource {
     pub(crate) fn name(&self) -> &str {
         match self {
             Self::Program(name) => name,
-            Self::BlockRequest { .. } => "block_request",
+            Self::BlockRequest { .. } => BLOCK_REQUEST,
         }
     }
 }
@@ -84,7 +88,7 @@ impl Breaks {
             "at_ns": hit.at,
         });
         if let HitSource::BlockRequest { op, nth } = hit.source {
-            value["source"] = json!("block_request");
+            value["source"] = json!(BLOCK_REQUEST);
             value["request"] = json!(op);
             value["nth"] = json!(nth);
         }

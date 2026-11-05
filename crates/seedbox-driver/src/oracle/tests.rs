@@ -339,3 +339,18 @@ fn break_on_block_request_names_a_target_request_and_positive_nth() {
     unknown["request"] = json!("trim");
     assert_eq!(invalid(unknown).code, ErrorCode::InvalidRequest);
 }
+
+#[test]
+fn programs_cannot_declare_the_block_request_hit_name() {
+    let declare = |names| json!({"op":"declare_breaks","names":names});
+    assert_eq!(
+        operation(declare(json!(["block_request.x", "leader"]))),
+        Operation::DeclareBreaks {
+            names: vec!["block_request.x".into(), "leader".into()]
+        }
+    );
+    assert_eq!(
+        invalid(declare(json!(["leader", "block_request"]))).message,
+        "block_request names block request hits, not a program breakpoint"
+    );
+}

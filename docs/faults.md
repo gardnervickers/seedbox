@@ -40,7 +40,11 @@ unwritten, or resume it and let the request continue.
 It is one-shot. The Python client asks for it with
 `world.break_on_block_request(target, op, nth)` and serves the hit with
 `world.on_break("block_request", handler)`; Rust's `Control` has the same
-call. No breakpoint watches guest property evidence or other application
+call. The handler's hit has `source`, `request` and `nth` (`hit.source`,
+`hit.request` and `hit.nth` in Python, `Hit::block_request` in Rust). No
+program can declare a breakpoint named `block_request`, so a hit with that
+name is always a held request, and `on_break("block_request", ...)` declares
+nothing. No breakpoint watches guest property evidence or other application
 state: the run is deterministic, so an oracle watches for such a condition
 itself and applies the fault then.
 

@@ -334,6 +334,16 @@ impl Operation {
                     crate::pv::MAX_BREAK_NAME
                 )));
             }
+            Self::DeclareBreaks { names }
+                if names
+                    .iter()
+                    .any(|name| name == service::breaks::BLOCK_REQUEST) =>
+            {
+                return Err(OperationError::invalid(format!(
+                    "{} names block request hits, not a program breakpoint",
+                    service::breaks::BLOCK_REQUEST
+                )));
+            }
             Self::BreakOnBlockRequest { nth: 0, .. } => {
                 return Err(OperationError::invalid("nth counts from 1"));
             }

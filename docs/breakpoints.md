@@ -66,7 +66,7 @@ are not resumed and run no further guest work; their hits end with
 
 | Op | Arguments | Result |
 | --- | --- | --- |
-| `declare_breaks` | `names` | Replaces the declared set for future hits. |
+| `declare_breaks` | `names` | Replaces the declared set for future hits. `block_request` is reserved for block request hits and refused. |
 | `wait_break` | `timeout_ns` | Parks until a hit is pending or the timeout passes. Returns the oldest pending hit, or `{}` on timeout. |
 | `resume_break` | `break_id` | The machine runs again and its `write` returns. |
 | `break_on_block_request` | `target`, `request`, `nth` | One-shot: holds the target's `nth` disk request of kind `request` (`read`, `write`, `flush`, `any`) unwritten and suspends the machine there. Its hit is named `block_request` and also carries `request` and `nth`; see [faults](faults.md#breakpoint-on-a-block-request). |

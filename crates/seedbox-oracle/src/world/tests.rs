@@ -196,7 +196,8 @@ fn on_break_serves_hits_on_its_own_connection_and_resumes_them() {
             machine: "n1".into(),
             boot: 0,
             name: "leader".into(),
-            at_ns: 25
+            at_ns: 25,
+            block_request: None
         }
     );
     drop(world);
@@ -225,4 +226,68 @@ fn break_on_block_request_names_its_machine_and_request() {
         json!({"version": 1, "id": 1, "op": "break_on_block_request",
                "target": {"machine": "n1"}, "request": "flush", "nth": 3})
     );
+}
+
+#[test]
+fn block_request_hits_carry_their_request_and_need_no_declaration() {
+    let hit = json!({"break_id": 2, "source": "block_request", "machine": "n1", "boot": 1,
+                     "name": "block_request", "request": "flush", "nth": 3, "at_ns": 40});
+    let delivered = std::sync::atomic::AtomicBool::new(false);
+    let (directory, server) =
+        serve_connections(2, move |request| match request["op"].as_str().unwrap() {
+            "wait_break" if !delivered.swap(true, Ordering::SeqCst) => ok(hit.clone()),
+            _ => ok(json!({})),
+        });
+    let mut world = GuestWorld::connect_to(directory.path().join("control.sock")).unwrap();
+    // The reserved name is refused before anything is sent.
+    assert!(world
+        .control()
+        .declare_breaks(["leader", "block_request"])
+        .is_err());
+    let (handled, seen) = std::sync::mpsc::channel();
+    world
+        .on_break("block_request", move |_, hit| {
+            handled.send(hit.clone()).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    world.on_break("leader", |_, _| Ok(())).unwrap();
+    let hit = seen.recv().unwrap();
+    assert_eq!(
+        hit,
+        Hit {
+            id: 2,
+            machine: "n1".into(),
+            boot: 1,
+            name: "block_request".into(),
+            at_ns: 40,
+            block_request: Some((crate::control::DiskOp::Flush, 3)),
+        }
+    );
+    drop(world);
+    let mut connections = server.join().unwrap().into_iter();
+    let main = connections.next().unwrap();
+    // Registering the block request handler declares nothing for it.
+    assert_eq!(main[0]["names"], json!([]));
+    assert_eq!(main[1]["names"], json!(["leader"]));
+    assert_eq!(main.len(), 2);
+}
+
+#[test]
+fn hits_whose_source_and_fields_disagree_are_refused() {
+    for invalid in [
+        json!({"break_id":1,"machine":"m","boot":0,"name":"leader","at_ns":5}),
+        json!({"break_id":1,"source":"block_request","machine":"m","boot":0,"name":"block_request","request":"flush","at_ns":5}),
+        json!({"break_id":1,"source":"block_request","machine":"m","boot":0,"name":"leader","request":"flush","nth":1,"at_ns":5}),
+        json!({"break_id":1,"source":"program","machine":"m","boot":0,"name":"leader","request":"flush","nth":1,"at_ns":5}),
+    ] {
+        let (directory, server) = serve(move |_| ok(invalid.clone()));
+        let mut world = GuestWorld::connect_to(directory.path().join("control.sock")).unwrap();
+        assert!(world
+            .control()
+            .wait_break(std::time::Duration::from_secs(1))
+            .is_err());
+        drop(world);
+        server.join().unwrap();
+    }
 }
