@@ -322,11 +322,13 @@ where
                     .control
                     .reply_target(&machine)
                     .map_err(Error::Control)?;
+                // A crash admitted at the same barrier, ahead of this resume,
+                // may already have ended the boot: nothing is left to resume.
                 let entry = &self.execution.machines[target.0];
                 if entry.lifecycle.boot() != boot
                     || matches!(entry.stopped, StopReason::Exited { .. })
                 {
-                    return Err(Error::Control("resumed a hit of an ended boot".into()));
+                    return Ok(None);
                 }
                 Ok(Some(DueItem::new(Scheduled::Input {
                     id: target,

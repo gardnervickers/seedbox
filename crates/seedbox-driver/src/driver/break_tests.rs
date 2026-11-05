@@ -575,3 +575,35 @@ fn a_block_request_hit_reached_on_resume_suspends_at_once() {
     );
     driver.checkpoint().unwrap();
 }
+
+#[test]
+fn a_resume_admitted_behind_a_crash_of_its_machine_does_nothing() {
+    // A nemesis crashes the machine while a handler resumes its hit, both
+    // admitted at one barrier: the crash runs first and ends the boot.
+    let mut driver = build(
+        vec![
+            (1, call(1, DECLARE)),
+            (
+                40,
+                call(2, r#""op":"crash","target":{"machine":"fixture-1"}"#),
+            ),
+            (40, call(3, r#""op":"resume_break","break_id":1"#)),
+        ],
+        vec![(25, hit("leader"))],
+    );
+    run_to(&mut driver, 100);
+    let r = replies(&driver);
+    assert_eq!(r[1]["ok"], true);
+    assert_eq!(r[2]["ok"], true);
+    let worker = guest(&driver, 1);
+    assert!(worker.crashed);
+    assert!(worker.resumed.is_empty());
+    let events = driver.drain_events();
+    assert_eq!(
+        break_events(&events)
+            .into_iter()
+            .filter(|(_, kind)| matches!(kind, EventKind::BreakEnded { .. }))
+            .count(),
+        1
+    );
+}
