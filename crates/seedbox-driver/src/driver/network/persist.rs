@@ -1,5 +1,5 @@
-//! Field and tag order is the checkpoint encoding; changing it needs a
-//! checkpoint `VERSION` bump.
+//! Field and tag order is the checkpoint encoding. While Seedbox is in
+//! development a change keeps `VERSION` at 1 rather than bumping it.
 use super::*;
 wire_struct!(Member {
     name,
