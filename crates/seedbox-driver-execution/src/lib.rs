@@ -10,6 +10,7 @@ pub mod execution;
 mod host;
 pub mod host_control;
 pub mod process_lifetime;
+mod readiness;
 pub mod runtime_assets;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
