@@ -9,6 +9,7 @@ it there and reboots it.
 """
 import re
 import subprocess
+import threading
 
 from seedbox import FaultError, Machine, World
 
@@ -58,15 +59,27 @@ def check(phase, values, faulted):
         raise RuntimeError(f"{phase}: unexpected observation {values} (faulted={faulted})")
 
 
+# Set once the breakpoint handler has crashed the victim at its held FLUSH.
+CRASHED_AT_HIT = threading.Event()
+
+
 def crash_victim(world, hit):
     """Crash the victim while its held FLUSH is still unwritten."""
+    if (hit.machine, hit.source, hit.request, hit.nth) != ("victim", "block_request", "flush", 20):
+        raise RuntimeError(f"unexpected breakpoint hit {hit}")
     world.crash(VICTIM)
+    CRASHED_AT_HIT.set()
 
 
 def victim(world, armed):
     """Wait for the held FLUSH's crash, then reboot the victim."""
     if not armed:
         return
+    # The victim must be down because the handler crashed it at the hit.
+    while not CRASHED_AT_HIT.is_set():
+        if world.break_error is not None:
+            raise world.break_error
+        world.sleep(0.001)
     while not any(m["name"] == "victim" and m["state"] == "Down" for m in world.inspect()["machines"]):
         world.sleep(0.001)
     world.reboot(VICTIM)
