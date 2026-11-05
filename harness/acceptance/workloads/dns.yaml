@@ -1,0 +1,31 @@
+name: dns
+machines:
+  glibc:
+    image: docker.io/library/python:3.13-slim
+    entrypoint:
+    - python3
+    - "/scenario/dns.py"
+    - glibc
+    files:
+    - source: "../driver/dns.py"
+      target: "/scenario/dns.py"
+  musl:
+    image: docker.io/library/python:3.13-alpine
+    entrypoint:
+    - python3
+    - "/scenario/dns.py"
+    - musl
+    files:
+    - source: "../driver/dns.py"
+      target: "/scenario/dns.py"
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint:
+  - python3
+  - "/scenario/dns.py"
+  - scenario
+  files:
+  - source: "../driver/dns.py"
+    target: "/scenario/dns.py"
+network:
+  latency: 1ms
