@@ -66,6 +66,34 @@ pub struct Network {
     #[serde(default)]
     pub links: Vec<Link>,
 }
+/// A machine prepared for a spawn, with the spec the spawn requested.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Spawned {
+    pub spec: String,
+    pub machine: Machine,
+}
+/// A worker's ask for the machine a spawn names, made while its run waits.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnRequest {
+    pub name: String,
+    pub spec: String,
+    /// The last octet of the machine's address and MAC.
+    pub number: u8,
+}
+/// The host's answer to a [`SpawnRequest`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum SpawnResponse {
+    Prepared {
+        spawned: Box<Spawned>,
+        environment: Box<super::Environment>,
+    },
+    Failed {
+        error: String,
+    },
+}
 /// Retained preparation output. Bootstrap authority and future definitions are
 /// supplied for fresh construction; restored Driver definitions remain owned by
 /// the closed Driver checkpoint and are not recreated from observations.
@@ -75,7 +103,10 @@ pub struct Prepared {
     pub inventory: Inventory,
     pub oracle: Machine,
     pub machines: Vec<Machine>,
-    pub spawnable: Vec<Machine>,
+    /// Machines this run's spawns prepared at runtime, kept so a replay builds
+    /// each one at its spawn without preparing it again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawned: Vec<Spawned>,
     pub quantum_ns: u64,
     pub network: Network,
 }

@@ -23,7 +23,14 @@ fn net(setup: NetworkSetup) -> Network {
             MachineId(i),
             &format!("m{i}"),
             7 + i as u64,
-            Some(MacAddress::new(frames::mac(i)).unwrap()),
+            Some(
+                &crate::definition::NetworkInterface::new(
+                    MacAddress::new(frames::mac(i)).unwrap(),
+                    std::net::Ipv4Addr::new(10, 0, 0, i as u8 + 1),
+                    16,
+                )
+                .unwrap(),
+            ),
         );
     }
     n
@@ -509,6 +516,21 @@ fn malformed_layers_reject_but_observer_fields_never_enter_continuation() {
     n.observations.omitted = u64::MAX;
     assert_eq!(serialized(&n), expected);
     assert!(n.check_persist(3, 0, &[]).is_ok());
+}
+
+#[test]
+fn restored_member_addresses_must_match_attachment_and_avoid_the_nameserver() {
+    let n = net(NetworkSetup::from(config()));
+    assert!(n.check_persist(3, 0, &[]).is_ok());
+    for case in 0..3 {
+        let mut bad = n.clone();
+        match case {
+            0 => bad.members[1].address = None,
+            1 => bad.members[1].address = bad.members[0].address,
+            _ => bad.members[1].address = Some(seedbox_engine_core::dns::ADDRESS),
+        }
+        assert!(bad.check_persist(3, 0, &[]).is_err(), "case {case}");
+    }
 }
 
 #[test]

@@ -37,6 +37,23 @@ pub struct ExecutionRequest<'a> {
     pub cancellation: &'a CancellationToken,
     /// Recorded per attempt, excluded from semantic identity/profile comparison.
     pub performance_parameters: &'a BTreeMap<String, String>,
+    /// Prepares machines the oracle spawns that `prepared` does not retain.
+    /// Without one, such a spawn ends the run with an error.
+    pub spawner: Option<&'a dyn Spawner>,
+}
+
+/// Prepares the machine an oracle spawn asks for, while its run waits.
+pub trait Spawner: Send + Sync {
+    /// Prepare `request`, writing any files under `directory`, which lasts as
+    /// long as the attempt's output.
+    fn prepare(
+        &self,
+        request: &seedbox_engine_protocol::driver_world::SpawnRequest,
+        directory: &Path,
+    ) -> Result<(
+        seedbox_engine_protocol::driver_world::Machine,
+        seedbox_engine_protocol::driver_world::Environment,
+    )>;
 }
 
 pub trait ExecutionBackend: Send + Sync {
@@ -79,4 +96,15 @@ pub trait ExecutionBackend: Send + Sync {
         BTreeMap::new()
     }
     fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport>;
+    /// Add the machines this attempt's spawns prepared to `inputs`, so a
+    /// replay builds them without preparing them again. Returns whether
+    /// anything was added.
+    fn retain_spawned(
+        &self,
+        _inputs: &mut PreparedInputs,
+        _output: &Path,
+        _store: &seedbox_artifacts::store::ContentStore,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 }

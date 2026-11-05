@@ -1,6 +1,7 @@
 //! One retained worker owns one Driver. This is service coordination, not a
 //! second scheduler: every positive or zero-time effect is delegated to Driver.
 mod run;
+pub(crate) mod spawn;
 #[cfg(test)]
 mod tests;
 use super::{
@@ -55,6 +56,7 @@ pub(super) struct Worker<M: Machine> {
     terminal: bool,
     failed: bool,
     measurement: Option<(u64, Instant)>,
+    environments: Option<super::native::Environments>,
     write_snapshot: fn(M::Snapshot, &mut BufWriter<File>) -> Result<()>,
 }
 #[derive(Default)]
@@ -102,8 +104,14 @@ where
             terminal: false,
             failed: false,
             measurement: None,
+            environments: None,
             write_snapshot,
         })
+    }
+    /// Share the factory's environments, so a spawned machine's can join them.
+    pub(super) fn with_environments(mut self, environments: super::native::Environments) -> Self {
+        self.environments = Some(environments);
+        self
     }
     pub(super) fn flush(&mut self) -> Result<Facts> {
         if self.failed {

@@ -293,6 +293,11 @@ fn environment(
     })
 }
 
+pub(super) type Environments = std::sync::Arc<
+    std::sync::Mutex<
+        std::collections::BTreeMap<String, seedbox_engine_protocol::driver_world::Environment>,
+    >,
+>;
 pub(super) struct Factory {
     inner: FactoryKind,
     // Selected paths include QEMU's adjacent loader/libraries. This ownership
@@ -300,8 +305,9 @@ pub(super) struct Factory {
     // None only for a launch-only binding whose parent retains Inputs through
     // worker/group shutdown. It is never authority recovered from a checkpoint.
     _runtime: Option<crate::runtime_assets::Inputs>,
-    environments:
-        std::collections::BTreeMap<String, seedbox_engine_protocol::driver_world::Environment>,
+    // Shared so a spawn's environment can join after the factory moves into
+    // the Driver's construction callback.
+    environments: Environments,
     boot_archives:
         std::collections::BTreeMap<String, seedbox_engine_protocol::driver_world::Artifact>,
 }
@@ -392,19 +398,28 @@ impl Factory {
                     boot_archives.clone()
                 }
             },
-            environments: match inventory {
+            environments: std::sync::Arc::new(std::sync::Mutex::new(match inventory {
                 Inventory::Pv { environments, .. } | Inventory::Tcg { environments, .. } => {
                     environments.clone()
                 }
-            },
+            })),
         })
+    }
+    pub(super) fn environments(&self) -> Environments {
+        self.environments.clone()
     }
     pub(super) fn create(
         &mut self,
         definition: &seedbox_machine::definition::MachineDefinition,
     ) -> Result<Native, String> {
         let name = definition.name.clone();
-        let environment = self.environments.get(&name).map(environment).transpose()?;
+        let environment = self
+            .environments
+            .lock()
+            .map_err(|_| "factory environments poisoned".to_owned())?
+            .get(&name)
+            .map(environment)
+            .transpose()?;
         let boot = self
             .boot_archives
             .get(&name)

@@ -71,15 +71,28 @@ pub(super) struct Control {
     pub(super) service: Service,
     pub(super) controller: Option<super::ControllerSetup>,
     entries: Vec<Observed>,
-    // Removing a declared name at admission rejects same-barrier duplicates.
-    spawnable: BTreeSet<String>,
-    /// Declared spawnable names whose definitions attach an interface.
-    attached_spawnable: BTreeSet<String>,
     // Reserved identities are not targetable until their FIFO construction turn.
-    // Failure retains this association for its Failed fault record.
-    spawning: BTreeMap<String, MachineId>,
+    // Reserving a name at admission rejects same-barrier duplicates. Failure
+    // retains this association for its Failed fault record.
+    spawning: BTreeMap<String, Reservation>,
     /// Boot of each admitted call awaiting its reply; live bookkeeping only.
     calls: BTreeMap<(MachineId, u32, u32), u64>,
+}
+/// An admitted spawn awaiting its FIFO construction turn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Reservation {
+    pub(super) id: MachineId,
+    /// The opaque machine spec the host prepares.
+    pub(super) spec: String,
+}
+/// The `seedbox.yaml` machine-name rule: a lowercase DNS label.
+fn dns_label(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 63
+        && s.as_bytes()[0].is_ascii_alphanumeric()
+        && s.as_bytes()[s.len() - 1].is_ascii_alphanumeric()
+        && s.bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
 }
 impl Control {
     pub(super) fn machine_names(&self) -> impl ExactSizeIterator<Item = (MachineId, Option<&str>)> {
@@ -106,53 +119,50 @@ impl Control {
             })
             .collect();
         Self {
-            attached_spawnable: BTreeSet::new(),
             service: Service::default(),
             controller: None,
             calls: BTreeMap::new(),
             entries,
-            spawnable: BTreeSet::new(),
             spawning: BTreeMap::new(),
         }
     }
-    pub(super) fn declare_spawnable(&mut self, definitions: &[MachineDefinition]) {
-        self.spawnable
-            .extend(definitions.iter().map(|d| d.name.clone()));
-        self.attached_spawnable.extend(
-            definitions
-                .iter()
-                .filter(|d| d.network.is_some())
-                .map(|d| d.name.clone()),
-        );
-    }
-    pub(super) fn spawned(&mut self, name: &str, seed: u64) -> Result<MachineId, String> {
-        let id = *self.spawning.get(name).ok_or("unreserved spawn")?;
+    /// Add a reserved spawn as the next identity. `attached` is whether its
+    /// provided definition has a network interface.
+    pub(super) fn spawned(
+        &mut self,
+        name: &str,
+        seed: u64,
+        attached: bool,
+    ) -> Result<MachineId, String> {
+        let id = self.spawning.get(name).ok_or("unreserved spawn")?.id;
         if id.0 != self.entries.len() {
             return Err("spawn identity out of insertion order".into());
         }
         self.entries.push(Observed {
             name: Some(name.into()),
-            attached: self.attached_spawnable.contains(name),
+            attached,
             commands: Commands::default(),
             clock: SeededRng::derived(seed, RngDomain::ClockFaults),
         });
         self.spawning.remove(name);
         Ok(id)
     }
+    /// A reserved spawn's request, for the host to prepare.
+    pub(super) fn reservation(&self, name: &str) -> Option<&Reservation> {
+        self.spawning.get(name)
+    }
     pub(super) fn spawn_target(&self, name: &str) -> Result<MachineId, String> {
         self.spawning
             .get(name)
-            .copied()
-            .map(Ok)
+            .map(|reservation| Ok(reservation.id))
             .unwrap_or_else(|| self.target(name).map_err(|e| e.message))
     }
-    /// Whether a declared name can still be admitted as a spawn.
+    /// Whether `name` is free for a new spawn: a DNS label that no machine
+    /// has and no admitted spawn has reserved.
     pub(super) fn spawnable(&self, name: &str) -> bool {
-        self.spawnable.contains(name)
-    }
-    /// A declared spawnable name, whether or not its spawn is reserved.
-    pub(super) fn declared(&self, name: &str) -> bool {
-        self.spawnable.contains(name) || self.spawning.contains_key(name)
+        dns_label(name)
+            && !self.spawning.contains_key(name)
+            && !self.entries.iter().any(|e| e.name.as_deref() == Some(name))
     }
     /// Describe a pending fault as it was admitted, for a pre-effect hold.
     pub(super) fn pending_record(&self, fault: u32) -> Result<super::FaultRecord, String> {
@@ -282,8 +292,7 @@ pub(super) struct View<'a, M> {
     network: Option<&'a super::network::Network>,
     entries: &'a mut [Observed],
     machines: &'a [Entry<M>],
-    spawnable: &'a mut BTreeSet<String>,
-    spawning: &'a mut BTreeMap<String, MachineId>,
+    spawning: &'a mut BTreeMap<String, Reservation>,
 }
 impl<M> View<'_, M> {
     fn index(&self, key: &str) -> Result<usize, String> {
@@ -321,12 +330,25 @@ impl<M> Adapter for View<'_, M> {
         self.entries[index].clock.fill_bytes(&mut bytes);
         Ok(u64::from_le_bytes(bytes))
     }
-    fn reserve_spawn(&mut self, name: &str) -> Result<(), OperationError> {
-        if !self.spawnable.remove(name) {
-            return Err(OperationError::invalid("unknown or already admitted spawn"));
+    fn reserve_spawn(&mut self, name: &str, spec: &str) -> Result<(), OperationError> {
+        if !dns_label(name) {
+            return Err(OperationError::invalid(
+                "machine names must be lowercase DNS labels (1 to 63 characters)",
+            ));
+        }
+        if self.spawning.contains_key(name)
+            || self.entries.iter().any(|e| e.name.as_deref() == Some(name))
+        {
+            return Err(OperationError::invalid("machine name is already in use"));
         }
         let id = MachineId(self.entries.len() + self.spawning.len());
-        self.spawning.insert(name.into(), id);
+        self.spawning.insert(
+            name.into(),
+            Reservation {
+                id,
+                spec: spec.into(),
+            },
+        );
         Ok(())
     }
     fn require_capability(
@@ -366,7 +388,7 @@ impl<M> Adapter for View<'_, M> {
         let index = match target {
             Target::Machine(name) | Target::Service(name) => {
                 Control::name_index(self.entries, name).map_err(|message| {
-                    if self.spawnable.contains(name) || self.spawning.contains_key(name) {
+                    if self.spawning.contains_key(name) {
                         OperationError {
                             code: crate::oracle::ErrorCode::TargetUnavailable,
                             message: "partition member is not spawned".into(),
@@ -619,7 +641,6 @@ impl Control {
                 network,
                 entries: &mut self.entries,
                 machines,
-                spawnable: &mut self.spawnable,
                 spawning: &mut self.spawning,
             },
         );

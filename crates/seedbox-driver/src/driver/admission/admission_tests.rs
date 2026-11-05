@@ -342,6 +342,7 @@ fn pure_prepare_and_aborted_journal_do_not_allocate_or_publish() {
         throttle(),
         Action::Spawn {
             name: "missing".into(),
+            spec: crate::test_support::SPAWN_SPEC.into(),
         },
     ] {
         no_change(&mut d, |d| {
@@ -627,7 +628,8 @@ fn schedule_shape_errors_match_prepare_without_mutation_or_journaling() {
         Action::Pause(Target::Machine(MachineId(100))),
         Action::Pause(Target::Name("unknown".into())),
         Action::Spawn {
-            name: "unknown".into(),
+            name: "Not_A_Label".into(),
+            spec: crate::test_support::SPAWN_SPEC.into(),
         },
         Action::Stop {
             target: Target::Machine(MachineId(1)),

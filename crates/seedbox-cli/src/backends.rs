@@ -136,6 +136,26 @@ impl PreparationBackend for Preparer {
         )?;
         Ok(prepared)
     }
+    fn prepare_spawn(
+        &self,
+        simulation: &Simulation,
+        store: &ContentStore,
+        cancellation: &CancellationToken,
+        request: &seedbox_engine_protocol::driver_world::SpawnRequest,
+        directory: &Path,
+    ) -> Result<(
+        seedbox_engine_protocol::driver_world::Machine,
+        seedbox_engine_protocol::driver_world::Environment,
+    )> {
+        let transport = seedbox_application::container_images::ContainerTransport {
+            docker: self.inputs.docker.clone(),
+            cancellation: cancellation.clone(),
+            progress: preparation_progress,
+            export_cache: Some(store.put_file(&self.inputs.engine)?),
+        };
+        self.inputs
+            .prepare_spawn(simulation, store, &transport, request, directory)
+    }
 }
 
 /// Complete Driver-package lookup beside the executable. Explicit asset

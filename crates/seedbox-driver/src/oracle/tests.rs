@@ -74,19 +74,24 @@ fn full_scoped_wire_vocabulary_preserves_targets_and_binary_marker() {
 }
 
 #[test]
-fn spawn_wire_contains_only_a_declared_name_not_guest_supplied_definitions() {
+fn spawn_wire_carries_a_name_and_an_opaque_object_spec() {
+    let spec = json!({"build":{"context":"./workload"},"environment":{"ROLE":"replica"}});
+    let Value::Object(map) = spec.clone() else {
+        unreachable!()
+    };
     assert_eq!(
-        operation(json!({"op":"spawn","machine":"replica-1"})),
+        operation(json!({"op":"spawn","machine":"replica-1","spec":spec})),
         Operation::Spawn {
-            machine: "replica-1".into()
+            machine: "replica-1".into(),
+            spec: map,
         }
     );
     for value in [
         json!({"op":"spawn"}),
-        json!({"op":"spawn","machine":{"name":"replica-1"}}),
-        json!({"op":"spawn","machine":"replica-1","resources":{}}),
-        json!({"op":"spawn","machine":"replica-1","application":{}}),
-        json!({"op":"spawn","target":{"machine":"replica-1"}}),
+        json!({"op":"spawn","machine":"replica-1"}),
+        json!({"op":"spawn","machine":{"name":"replica-1"},"spec":{}}),
+        json!({"op":"spawn","machine":"replica-1","spec":"image: x"}),
+        json!({"op":"spawn","machine":"replica-1","spec":{},"resources":{}}),
     ] {
         assert_eq!(invalid(value).code, ErrorCode::InvalidRequest);
     }

@@ -30,4 +30,21 @@ pub trait PreparationBackend: Send + Sync {
             "preparation backend does not support cancellation".into(),
         ))
     }
+    /// Prepare the machine an oracle spawn asks for during a run of
+    /// `simulation`, writing files the worker reads under `directory`.
+    fn prepare_spawn(
+        &self,
+        _simulation: &Simulation,
+        _store: &ContentStore,
+        _cancellation: &CancellationToken,
+        _request: &seedbox_engine_protocol::driver_world::SpawnRequest,
+        _directory: &std::path::Path,
+    ) -> Result<(
+        seedbox_engine_protocol::driver_world::Machine,
+        seedbox_engine_protocol::driver_world::Environment,
+    )> {
+        Err(crate::Error::Setup(
+            "preparation backend cannot prepare spawned machines".into(),
+        ))
+    }
 }

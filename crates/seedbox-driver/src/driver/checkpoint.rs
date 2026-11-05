@@ -38,7 +38,7 @@ pub struct Checkpoint<S> {
     control: control::Control,
     inputs: BTreeMap<InputKey, LiveInput>,
     trigger_marker: Option<Timestamp>,
-    definitions: Vec<MachineDefinition>,
+    definitions: Vec<SpawnDefinition>,
     network: network::Network,
     properties: seedbox_engine_core::properties::Ledger,
 }
@@ -191,7 +191,7 @@ where
         context: impl Fn() -> Result<M::Context, M::Error> + Send + Sync + 'static,
         oracle: MachineDefinition,
         machines: Vec<MachineDefinition>,
-        spawnable: Vec<MachineDefinition>,
+        prepared: Vec<SpawnDefinition>,
         network: impl Into<NetworkSetup>,
         factory: impl FnMut(&MachineDefinition) -> Result<M, M::Error> + Send + 'static,
     ) -> Result<Self, Error<M::Error>> {
@@ -203,7 +203,7 @@ where
             context,
             oracle,
             machines,
-            spawnable,
+            prepared,
             network.into(),
             factory,
         )

@@ -350,6 +350,19 @@ impl GuestWorld {
         &self.handles
     }
 
+    /// Prepare and boot a new machine named `machine`. `spec` is the object a
+    /// `machines` entry of seedbox.yaml takes; relative paths resolve against
+    /// the project's directory. The simulation waits while the host prepares
+    /// the image, and the run keeps it so a replay needs no preparation.
+    pub fn spawn(&mut self, machine: &str, spec: Value) -> Result<(), Error> {
+        if !spec.is_object() {
+            return Err(Error("spawn spec must be an object".into()));
+        }
+        self.control
+            .call("spawn", json!({ "machine": machine, "spec": spec }))
+            .map(drop)
+    }
+
     /// Apply an action that installs `handle`, refusing a name in use.
     fn install(&mut self, handle: &str, op: &str, arguments: Value) -> Result<(), Error> {
         if self.handles.contains_key(handle) {

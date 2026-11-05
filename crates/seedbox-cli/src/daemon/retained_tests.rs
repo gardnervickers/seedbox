@@ -126,7 +126,7 @@ fn retained_driver_acquires_only_recorded_runtime_once_per_session() {
             allow_crashes: false,
         },
         machines: vec![],
-        spawnable: vec![],
+        spawned: vec![],
         quantum_ns: 10,
         network: wire::Network::default(),
     };

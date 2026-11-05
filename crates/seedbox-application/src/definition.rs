@@ -702,7 +702,7 @@ mod tests {
                 allow_crashes: false,
             },
             machines: vec![],
-            spawnable: vec![],
+            spawned: vec![],
             quantum_ns: 1000,
             network: wire::Network {
                 latency_ns: 1000,
@@ -805,6 +805,7 @@ mod tests {
             output: &output,
             cancellation: &cancellation,
             performance_parameters: &performance,
+            spawner: None,
         };
         let worker = seedbox_driver_execution::driver_world::retained::adapt_request(
             &request,

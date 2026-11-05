@@ -92,6 +92,13 @@ transfers scale with written sectors, not the declared size.
 See [the etcd project](examples/etcd/seedbox.yaml) for a three-node cluster with
 persistent data disks.
 
+The oracle can add a machine during a run: the Python client's
+`World.spawn("replica", {"build": {"context": "./workload"}})` takes the same
+entry as `machines`, with paths relative to `seedbox.yaml`. The simulation
+waits while Seedbox prepares the image, and a failed preparation ends the run
+with its error. The run keeps the prepared machine, so `replay` boots it without
+building it again. See [the spawn project](examples/spawn/seedbox.yaml).
+
 `network.latency` sets the one-way delay between machines and defaults to `1ms`.
 `simulator.quantum` sets the timeslice:
 

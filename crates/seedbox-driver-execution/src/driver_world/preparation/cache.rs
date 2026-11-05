@@ -78,12 +78,7 @@ impl PreparedBootCache {
             .services
             .get(request.name)
             .ok_or_else(|| Error::Integrity("prepared machine has no network address".into()))?;
-        let index = simulation
-            .services
-            .keys()
-            .position(|name| name == request.name)
-            .ok_or_else(|| Error::Integrity("prepared machine has no network address".into()))?;
-        let number = u8::try_from(index + 1).map_err(|e| Error::Integrity(e.to_string()))?;
+        let number = super::machine_number(simulation, request.name)?;
         let configs: BTreeMap<_, _> = request
             .configs
             .iter()
@@ -99,7 +94,7 @@ impl PreparedBootCache {
                 "configs": configs,
                 "name": request.name,
                 "hosts": request.hosts,
-                "network": {"mac": [2, 0, 0, 0, 0, number], "address": [10, 0, 0, number], "prefix": 24},
+                "network": {"mac": [2, 0, 0, 0, 0, number], "address": [10, 0, 0, number], "prefix": super::PREFIX_LEN},
                 "control_socket": simulation.control.as_ref().is_some_and(|c| c.service == request.name),
                 "memory_mb": service.memory_mb.unwrap_or(simulation.machine.memory_mb),
                 "epoch": self.epoch,
