@@ -122,7 +122,7 @@ streams afresh and adds each boot's counts.
 
 `break_on_block_request` installs a hold that counts matching requests the
 same way, across boots. On the `nth`, earlier requests in that notification
-complete; the held one has no effect, used-ring entry or interrupt, stays
+are taken as usual, completing or queuing behind a delay; the held one has no effect, used-ring entry or interrupt, stays
 unconsumed in the avail ring, and nothing after it is processed. It has
 already drawn its latency and counts for that latency fault, even if the
 machine is then crashed at the hit, and later holds have counted it. The MMIO write

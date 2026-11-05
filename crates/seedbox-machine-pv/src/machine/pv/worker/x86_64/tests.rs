@@ -1170,6 +1170,15 @@ fn a_held_disk_request_waits_for_its_release_and_continues_in_order() {
         let mut stored = [0; 512];
         crashed.read(1, &mut stored).unwrap();
         assert_eq!(stored, [if eio { 0 } else { 9 }; 512]);
+        // The release was used up: a later zero-budget run keeps the write
+        // held.
+        assert!(!vm.resume);
+        assert_eq!(
+            vm.run(95, 95, 1000, false, &[], Vec::new(), &[]).unwrap(),
+            Stop::Horizon
+        );
+        assert_eq!(disk_used(&vm), 2);
+        assert!(vm.block.as_ref().unwrap().held());
         // The second release completes the last write; nothing is held.
         vm.resume = true;
         assert_eq!(
@@ -1179,5 +1188,9 @@ fn a_held_disk_request_waits_for_its_release_and_continues_in_order() {
         assert_eq!((disk_used(&vm), status(&vm, 2)), (3, 0));
         assert!(!vm.block.as_ref().unwrap().held());
         assert!(!vm.resume);
+        // A released machine is no longer refused as held: capture reaches
+        // the backend, which this script does not implement.
+        let error = vm.capture(&directory.path().join("released")).unwrap_err();
+        assert!(error.contains("script capture unused"), "{error}");
     }
 }
