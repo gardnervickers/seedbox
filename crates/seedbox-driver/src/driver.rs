@@ -103,26 +103,6 @@ pub struct SpawnRequest {
     pub spec: String,
 }
 
-/// A spawned machine's definition, which the host prepared from the spec its
-/// spawn requested.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpawnDefinition {
-    /// The spawn's opaque spec, exactly as requested.
-    pub spec: String,
-    pub definition: MachineDefinition,
-    /// Crashes and out-of-memory kills on this machine are not violations.
-    pub allow_crashes: bool,
-}
-
-/// An admitted spawn whose definition the host has not provided yet. Its
-/// identity is already reserved; the definition's name must be `name`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpawnRequest {
-    pub machine: MachineId,
-    pub name: String,
-    pub spec: String,
-}
-
 /// One committed response, associated with the machine boot that emitted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineResponse {
