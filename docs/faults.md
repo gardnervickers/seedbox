@@ -25,19 +25,29 @@ settlement (`counts` on `faultChanged` and in the world view, and in
 ## Breakpoint on a block request
 
 The oracle's `break_on_block_request` call suspends a machine at its `nth`
-disk request of kind `op` from now on, counted across boots. The device holds
-that request unwritten and the machine is suspended there, as at a
-[breakpoint](breakpoints.md). The hit arrives through `wait_break` with
-`source` and `name` `block_request`, and the request's `op` and `nth`. The
-oracle decides what happens: crash the machine while the request is still
-unwritten, or resume it and let the request continue.
+disk request of kind `request` (`read`, `write`, `flush` or `any`) from now
+on, counted across boots. The device holds that request unwritten and the
+machine is suspended there, as at a [breakpoint](breakpoints.md). The hit
+arrives through `wait_break` with `source` and `name` `block_request`, and the
+call's `request` and `nth`. The oracle decides what happens: crash the machine
+while the request is still unwritten, or resume it and let the request
+continue.
 
 ```json
 {"op": "break_on_block_request", "target": {"machine": "db"},
  "request": "flush", "nth": 20}
 ```
 
-It is one-shot. The Python client asks for it with
+It is one-shot and has no identity: the reply is empty, and the hit carries
+the call's `request` and `nth`. There is no cancel. A hold that has not
+reached its `nth` stays on the machine across boots, and a `wait_break` that
+times out does not remove it. Holds that reach their `nth` on the same request
+share one hit, which carries the earliest call's `request` and `nth`: after
+`break_on_block_request(db, any, 5)` and then `(db, flush, 2)`, a FLUSH that
+is both the fifth request and the second flush gives one hit with `request`
+`any` and `nth` 5, and both holds are gone.
+
+The Python client asks for it with
 `world.break_on_block_request(target, op, nth)` and serves the hit with
 `world.on_break("block_request", handler)`; Rust's `Control` has the same
 call. The handler's hit has `source`, `request` and `nth` (`hit.source`,
@@ -114,7 +124,8 @@ streams afresh and adds each boot's counts.
 same way, across boots. On the `nth`, earlier requests in that notification
 complete; the held one has no effect, used-ring entry or interrupt, stays
 unconsumed in the avail ring, and nothing after it is processed. It has
-already drawn its latency, and later holds have counted it. The MMIO write
+already drawn its latency and counts for that latency fault, even if the
+machine is then crashed at the hit, and later holds have counted it. The MMIO write
 completes and the machine stops held, exactly as at a breakpoint write: it
 reports the hold as an output, takes inputs without running, and refuses
 capture. The Driver numbers the hit at the barrier that commits that output.
@@ -123,7 +134,10 @@ before the guest runs again, with the arrival it drew: it completes then if
 its due time, counted from its original arrival, has passed, and otherwise at
 that due time. The requests behind it follow, and one of them may reach
 another hold before the guest runs. A crash or reboot drops it with the rest
-of the boot.
+of the boot. Requests the device took before the held one keep the due
+times they drew at arrival. While the machine is suspended, one that falls
+due completes the next time the machine admits an input, such as a network
+frame or a fault, or at the release, and the guest sees it when it runs.
 
 ### Asynchronous block completion
 
