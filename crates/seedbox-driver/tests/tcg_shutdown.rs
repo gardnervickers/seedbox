@@ -134,10 +134,11 @@ fn advance(
     now: Timestamp,
     progress: &mut GuestProgress,
 ) -> Timestamp {
+    // A timer due now fires in the machine's next run, which starts now.
     let upto = match stopped(driver, id) {
         StopReason::Blocked {
             deadline: Some(at), ..
-        } => at,
+        } if at > now => at,
         StopReason::Blocked { deadline: None, .. } => {
             panic!("guest has no wakeup: {}", output(driver, id))
         }

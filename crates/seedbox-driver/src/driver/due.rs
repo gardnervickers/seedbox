@@ -1,6 +1,7 @@
 //! Zero-time application of timeline items due at the current barrier:
-//! control events, effect plans, machine inputs, driver events, then
-//! timer wakeups.
+//! control events, effect plans, machine inputs and driver events, then
+//! arriving frames. Due timers and frames left for a running machine are
+//! taken by its next run, which starts at the barrier.
 use super::*;
 
 /// The dispatch check of a due effect plan: `None` when an earlier terminal
@@ -106,7 +107,7 @@ where
         let now = self.now();
         // Keep the front event until its effect is admitted, including across
         // a pre-fault stop. Driver controls and requests share one FIFO timeline.
-        // Frames due now follow every timeline item due now, then timers.
+        // Frames due now follow every timeline item due now.
         loop {
             while let Some(scheduled) = self.due_front(now) {
                 // Facts of the previous item that committed no barrier belong to
@@ -156,7 +157,6 @@ where
                 return Ok(None);
             }
         }
-        self.wake_due_timers(now)?;
         Ok(None)
     }
 
@@ -690,6 +690,17 @@ where
             healed,
         } = item;
         let cause = accepted_fault.map_or(Cause::Host, |fault| Cause::Fault(FaultId(fault)));
+        let target = match &scheduled {
+            Scheduled::Control(_) | Scheduled::PropertyReply { .. } => unreachable!(),
+            Scheduled::Input { id, .. }
+            | Scheduled::Driver(
+                DriverEvent::Pause(id)
+                | DriverEvent::Resume(id)
+                | DriverEvent::SetExecution { machine: id, .. }
+                | DriverEvent::SetClockRate { machine: id, .. },
+            ) => *id,
+        };
+        self.admit_frames(target, now)?;
         let mechanical = match scheduled {
             Scheduled::Control(_) | Scheduled::PropertyReply { .. } => unreachable!(),
             Scheduled::Input { id, input } => {
@@ -745,6 +756,26 @@ where
             self.control_plans(plans)?;
         }
         self.commit_boundary()
+    }
+
+    /// Give frames that arrived earlier at `now` and still wait for a running
+    /// machine's next run a zero-budget admission run, so that a later item
+    /// due at `now` follows them, as it follows their arrival.
+    fn admit_frames(&mut self, id: MachineId, now: Timestamp) -> Result<(), Error<M::Error>> {
+        let entry = &self.execution.machines[id.0];
+        if entry.lifecycle.paused()
+            || !entry
+                .inbox
+                .iter()
+                .any(|input| matches!(input.payload, Request::ReceiveFrame { .. }))
+        {
+            return Ok(());
+        }
+        if let Err(error) = self.run_batch(&[id], now) {
+            self.uncertain_failure();
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Queue a due machine request and give it a zero-budget admission run.
@@ -935,31 +966,5 @@ where
             DriverEvent::Resume(_) => {}
         }
         Ok(applied)
-    }
-
-    /// Give every running machine whose timer is due at `now` a zero-budget
-    /// run and commit.
-    fn wake_due_timers(&mut self, now: Timestamp) -> Result<(), Error<M::Error>> {
-        let mut waking = Vec::new();
-        for index in 0..self.execution.machines.len() {
-            let stopped = self.execution.machines[index].stopped;
-            if self.execution.machines[index].lifecycle.paused()
-                || matches!(stopped, StopReason::Exited { .. })
-            {
-                continue;
-            }
-            if matches!(stopped,
-                StopReason::Blocked { deadline: Some(at), .. } if at == now)
-            {
-                // Let the machine observe the new clock and deliver its timer,
-                // without executing beyond this barrier.
-                waking.push(MachineId(index));
-            }
-        }
-        self.run_batch(&waking, now)?;
-        if !waking.is_empty() {
-            self.commit_boundary()?;
-        }
-        Ok(())
     }
 }

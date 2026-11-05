@@ -324,9 +324,16 @@ fn idle_jump_respects_limit_and_delivers_timer_at_exact_boundary() {
         driver.step(at(50)).unwrap(),
         StepOutcome::BarrierReached { at: at(22) }
     );
+    // The timer due at the boundary is left for the next run, which starts there.
     let calls = driver
         .with_barrier(|barrier| {
-            assert_eq!(barrier.stopped(id)?, StopReason::BoundaryReached);
+            assert_eq!(
+                barrier.stopped(id)?,
+                StopReason::Blocked {
+                    reached: at(2),
+                    deadline: Some(at(22))
+                }
+            );
             Ok(barrier.machine(id)?.log.lock().unwrap().len())
         })
         .unwrap();
@@ -347,6 +354,13 @@ fn idle_jump_respects_limit_and_delivers_timer_at_exact_boundary() {
             reason: ExitReason::Shutdown
         }
     );
+    driver
+        .with_barrier(|barrier| {
+            let log = barrier.machine(id)?.log.lock().unwrap().clone();
+            assert_eq!(log[calls..], [(0, 22, 50)], "timer runs with a budget");
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]

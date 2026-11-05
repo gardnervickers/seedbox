@@ -360,9 +360,9 @@ struct ObservationState {
 /// The caller schedules host inputs (`Barrier::schedule`) between steps; they
 /// share one FIFO timeline with guest control work and are admitted through
 /// the same control policy, in insertion order at one timestamp and before
-/// timer wakeups. Execution settings apply in every machine state and survive
-/// lifecycle changes without executing the machine. Lifecycle effects receive
-/// zero-budget admission runs, and reboot admits a fresh boot.
+/// machines run from it. Execution settings apply in every machine state and
+/// survive lifecycle changes without executing the machine. Lifecycle effects
+/// receive zero-budget admission runs, and reboot admits a fresh boot.
 /// Paused machines remain unfinished and receive no positive execution budget.
 /// Due requests still receive zero-budget admission runs, which adopt shared
 /// time and make due timers eligible without executing program instructions.
@@ -455,8 +455,10 @@ where
     /// their sender's crash, reboot or exit.
     ///
     /// A frame arriving at `T` is offered exactly at `T`, after every timeline
-    /// item due at `T` and before timer wakeups, as [`Request::ReceiveFrame`]
-    /// to the receiver's current boot, including while paused. It is dropped if
+    /// item due at `T`, as [`Request::ReceiveFrame`] to the receiver's current
+    /// boot, including while paused. A running receiver takes it in its next
+    /// run, which starts at `T`; a paused or suspended one, or one with a later
+    /// item due at `T`, takes it in a zero-budget run first. It is dropped if
     /// that boot has exited. Delivery means offered to the NIC, not consumed.
     /// While an attached machine can execute, rounds end no later than its
     /// earliest execution time plus latency, so no frame arrives before the
@@ -886,8 +888,8 @@ where
     /// A pre-fault stop (`Barrier::pause_before_next_fault`) returns before the
     /// held fault's effect is applied, also for inputs scheduled at the
     /// initial/current timestamp. Selecting a running rate or admitting a
-    /// quantum applies that effect exactly once. Same-time FIFO order and
-    /// subsequent timer wakeups are preserved.
+    /// quantum applies that effect exactly once. Same-time FIFO order and the
+    /// frames and timers due after it are preserved.
     ///
     /// # Time and execution boundaries
     ///
@@ -1447,6 +1449,7 @@ where
         // Known events limit the whole round. A timer discovered during a run
         // can shorten another machine's next budget, but cannot invalidate the
         // round's final boundary. Intermediate local progress stays private.
+        let initial = self.now();
         let boundary = self
             .execution
             .machines
@@ -1456,6 +1459,9 @@ where
                 StopReason::Blocked { deadline, .. } => deadline,
                 _ => None,
             })
+            // A timer due now makes its machine runnable now: the loop below
+            // runs it with a positive budget instead of a zero-budget wake.
+            .filter(|&at| at > initial)
             .chain(self.execution.events.first_key_value().map(|(&at, _)| at))
             .chain(
                 self.execution
@@ -1467,7 +1473,6 @@ where
             .chain(self.controller_bound())
             .fold(upto.min(self.execution.quantum_end), Timestamp::min);
 
-        let initial = self.now();
         let mut ran = false;
         while let Some((_, now)) = self.next() {
             if now >= boundary {
@@ -1518,10 +1523,12 @@ where
     }
 
     /// Offer every frame arriving at `now` to its receiver's current boot, in
-    /// (sender, sequence, receiver) order, with one zero-budget admission batch
-    /// and commit. A receiver whose boot has exited drops the frame. Returns
-    /// whether any frame was due, so that newly generated timeline items at
-    /// `now` are processed before timers.
+    /// (sender, sequence, receiver) order. A receiver whose boot has exited
+    /// drops the frame. A running receiver takes its frames at the start of its
+    /// next run, which starts at `now`, so a blocked one becomes runnable here.
+    /// A paused or suspended receiver runs no guest work, so it admits them now
+    /// with one zero-budget batch and commit. Returns whether any frame was
+    /// due, so that newly generated timeline items at `now` are processed next.
     fn deliver_frames(&mut self, now: Timestamp) -> Result<bool, Error<M::Error>> {
         let due = self.execution.network.take_due(now.as_nanos());
         if due.is_empty() {
@@ -1560,11 +1567,26 @@ where
             });
             receivers.insert(delivery.to);
         }
-        if receivers.is_empty() {
-            return Ok(true);
+        // A zero-budget run would only store the frames and report the stop
+        // state; the next run, from `now`, does the same before executing.
+        let mut admitting = Vec::new();
+        for id in receivers {
+            let suspended = self
+                .execution
+                .control
+                .service
+                .breaks
+                .suspended(&control::Control::source(id));
+            let entry = &mut self.execution.machines[id.0];
+            if entry.lifecycle.paused() || suspended {
+                admitting.push(id);
+            } else if let StopReason::Blocked { .. } = entry.stopped {
+                entry.stopped = StopReason::BoundaryReached;
+                entry.reached = now;
+                entry.timer = None;
+            }
         }
-        let receivers: Vec<_> = receivers.into_iter().collect();
-        if let Err(error) = self.run_batch(&receivers, now) {
+        if let Err(error) = self.run_batch(&admitting, now) {
             self.uncertain_failure();
             return Err(error);
         }
@@ -1579,7 +1601,9 @@ where
                 &mut self.observations.frames,
             );
         }
-        self.commit_boundary()?;
+        if !admitting.is_empty() {
+            self.commit_boundary()?;
+        }
         Ok(true)
     }
 
@@ -2059,7 +2083,10 @@ where
     }
 
     /// The machine's last stop projected into simulation time. Unlike a
-    /// `Machine::run` result, a `Blocked` deadline may equal `reached`.
+    /// `Machine::run` result, a `Blocked` deadline may equal `reached`. A
+    /// deadline at the current time is due: the machine's next run starts
+    /// there, and a machine that frames arrived for reports `BoundaryReached`
+    /// until it runs.
     // The projection rounds machine times up to whole
     // simulation nanoseconds so nothing fires early; keeping the strict
     // inequality would need delaying the timer, so the Driver relaxes it here

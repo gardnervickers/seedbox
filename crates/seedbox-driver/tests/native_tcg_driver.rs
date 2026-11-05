@@ -215,11 +215,12 @@ fn console(driver: &mut Driver<TcgMachine>, id: MachineId) -> Vec<u8> {
 }
 
 fn step(driver: &mut Driver<TcgMachine>, id: MachineId, now: &mut Timestamp, quantum: u64) {
+    // A timer due now fires in the machine's next run, which starts now.
     let upto = match stopped(driver, id) {
         StopReason::Blocked {
             deadline: Some(deadline),
             ..
-        } => deadline,
+        } if deadline > *now => deadline,
         _ => at(now.as_nanos() + quantum),
     };
     *now = match driver.step(upto).unwrap() {
@@ -418,7 +419,7 @@ mod machine {
                         StopReason::Blocked {
                             deadline: Some(deadline),
                             ..
-                        } => deadline,
+                        } if deadline > *now => deadline,
                         _ => at(now.as_nanos() + quantum),
                     }
                     .min(limit);

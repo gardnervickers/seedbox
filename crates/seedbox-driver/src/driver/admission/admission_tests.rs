@@ -553,9 +553,9 @@ fn prepare_and_commit_refuse_due_work_but_apply_due_now_drains_it() {
 }
 
 #[test]
-fn due_detection_includes_frames_and_timers_and_drains_timer_generated_calls() {
-    // Explicit internal pre-dispatch states: these are not evidence that normal
-    // step leaves due work behind. The same router/timer owners decide refusal.
+fn due_frames_are_refused_work_but_runnable_machines_are_not() {
+    // Explicit internal pre-dispatch state: this is not evidence that normal
+    // step leaves due work behind. The router owner decides refusal.
     let mut d = build_network(
         (0..3).map(|i| spec(i, true, vec![])).collect(),
         vec![],
@@ -576,49 +576,62 @@ fn due_detection_includes_frames_and_timers_and_drains_timer_generated_calls() {
     assert_eq!(internal(&d), before);
     assert_eq!(due(&mut d), DueOutcome::Applied { at: at(arrival) });
     assert!(d.execution.network.next_arrival().is_none());
-    assert!(states(&d)[1]
-        .received
+    // The receiver takes the frame in its next run, which is not zero-time work.
+    assert!(states(&d)[1].received.is_empty());
+    assert!(d.execution.machines[1]
+        .inbox
         .iter()
         .any(|i| matches!(i.payload, Request::ReceiveFrame { .. })));
+    assert!(d
+        .with_barrier(|b| b.prepare_input(key("live"), pause()))
+        .is_ok());
 
+    // A step ending at a timer deadline leaves the timer to the next run.
     let mut d = build(
         vec![
-            spec(0, true, vec![]),
+            spec(0, false, vec![]),
             spec(
                 1,
                 false,
                 vec![(
-                    5,
+                    15,
                     call(1, r#""op":"pause","target":{"machine":"fixture-2"}"#),
                 )],
             ),
-            spec(2, true, vec![]),
+            spec(2, false, vec![]),
         ],
         vec![],
         true,
     );
-    d.execution.clock.set(5);
-    d.execution.machines[1].stopped = StopReason::Blocked {
-        reached: at(0),
-        deadline: Some(at(5)),
-    };
-    d.execution.machines[1].timer = Some(at(5));
+    assert_eq!(
+        d.step(at(100)).unwrap(),
+        StepOutcome::BarrierReached { at: at(10) }
+    );
+    assert_eq!(
+        d.step(at(100)).unwrap(),
+        StepOutcome::BarrierReached { at: at(15) }
+    );
+    assert_eq!(
+        d.execution.machines[1].stopped,
+        StopReason::Blocked {
+            reached: at(0),
+            deadline: Some(at(15))
+        }
+    );
     let before = internal(&d);
-    assert!(matches!(
-        d.with_barrier(|b| b.prepare_input(key("live"), pause())),
-        Err(Error::DueWorkPending)
-    ));
+    assert!(d
+        .with_barrier(|b| b.prepare_input(key("live"), pause()))
+        .is_ok());
     assert_eq!(internal(&d), before);
-    assert_eq!(due(&mut d), DueOutcome::Applied { at: at(5) });
-    assert!(
-        d.execution.machines[2].lifecycle.paused(),
-        "timer-generated same-time call was not drained"
+    assert_eq!(due(&mut d), DueOutcome::Applied { at: at(15) });
+    assert!(!d.execution.machines[2].lifecycle.paused());
+    // Its run starts at the deadline with a budget; the call it makes there
+    // is admitted when that round commits.
+    assert_eq!(
+        d.step(at(100)).unwrap(),
+        StepOutcome::Blocked { at: at(15) }
     );
-    assert!(!d.execution.events.contains_key(&at(5)));
-    assert!(
-        states(&d).iter().all(|s| s.entropy.is_empty()),
-        "zero-time drain executed positive budget"
-    );
+    assert!(d.execution.machines[2].lifecycle.paused());
 }
 
 #[test]

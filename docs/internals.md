@@ -70,7 +70,9 @@ memory checks and retention of the complete replay closure still run on every pr
 
 ## Same-time controls
 
-Committed outputs precede due timeline items, then frames, then timer wakeups; same-time items are FIFO.
+Committed outputs precede due timeline items, then arriving frames; same-time items are FIFO.
+A running machine takes frames and a timer due at the boundary in its next run, which starts there.
+A paused or suspended receiver, or one with a later item due then, admits its frames in a zero-budget run.
 A trigger found during commit can admit policy before a prequeued host input due at that same boundary.
 Plans created by admission append behind existing items; delayed guest replies belong only to the calling boot.
 The [Driver](../crates/seedbox-driver/src/driver.rs) assigns fault IDs at admission, never for future overrides.
