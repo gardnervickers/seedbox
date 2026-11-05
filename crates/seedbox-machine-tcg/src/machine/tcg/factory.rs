@@ -1,4 +1,4 @@
-use super::{Error, TcgMachine};
+use super::{Error, Initramfs, TcgMachine};
 use seedbox_machine::application::{GuestBootstrap, GuestEnvironment, Kernel};
 use seedbox_machine::definition::{BackendPolicy, MachineDefinition};
 use std::path::{Path, PathBuf};
@@ -161,7 +161,23 @@ impl Factory {
         definition: &MachineDefinition,
         archive: Vec<u8>,
     ) -> Result<TcgMachine, Error> {
-        self.create_with(definition, move |_, _| Ok(archive))
+        self.create_with(definition, move |_, _| Ok(archive.into()))
+    }
+    /// Construct like [`Self::create_boot_archive`] from a complete boot
+    /// archive file of `length` bytes that the caller retains unchanged while
+    /// the machine exists. Each boot hands the file to QEMU in place; nothing
+    /// reads it until a snapshot.
+    pub fn create_boot_archive_file(
+        &mut self,
+        definition: &MachineDefinition,
+        archive: &Path,
+        length: u64,
+    ) -> Result<TcgMachine, Error> {
+        let file = Initramfs::File {
+            path: archive.into(),
+            length,
+        };
+        self.create_with(definition, move |_, _| Ok(file))
     }
     fn create_selected(
         &mut self,
@@ -175,6 +191,7 @@ impl Factory {
         }
         self.create_with(definition, |application, bootstrap| {
             self.assemble_selected(application, bootstrap, environment)
+                .map(Initramfs::from)
         })
     }
     /// Construct with this factory's QEMU, firmware, bootstrap and scratch
@@ -185,7 +202,7 @@ impl Factory {
         package: impl FnOnce(
             &seedbox_machine::definition::PreparedApplication,
             &GuestBootstrap,
-        ) -> Result<Vec<u8>, seedbox_machine::definition::DefinitionError>,
+        ) -> Result<Initramfs, seedbox_machine::definition::DefinitionError>,
     ) -> Result<TcgMachine, Error> {
         let mut machine = TcgMachine::prepare(
             &self.qemu,

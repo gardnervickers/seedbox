@@ -552,7 +552,7 @@ fn copy(artifact: &Artifact, path: &Path) -> Result<()> {
 }
 /// Open one input of this run. Its digest was checked before this worker was
 /// given it, so only its recorded length is checked here.
-fn open_input(artifact: &Artifact) -> Result<fs::File> {
+pub(super) fn open_input(artifact: &Artifact) -> Result<fs::File> {
     artifact.validate().map_err(bad)?;
     let file = fs::File::open(&artifact.artifact)?;
     if file.metadata()?.len() != artifact.length {
