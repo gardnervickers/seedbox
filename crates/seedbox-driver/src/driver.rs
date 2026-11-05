@@ -2532,6 +2532,9 @@ mod break_tests;
 mod external_work_tests;
 #[cfg(test)]
 mod network_tests;
+// TEMPORARY round-overhead microbenchmark (not for merge).
+#[cfg(test)]
+mod perf_bench_tests;
 #[cfg(test)]
 mod queue_tests;
 #[cfg(test)]

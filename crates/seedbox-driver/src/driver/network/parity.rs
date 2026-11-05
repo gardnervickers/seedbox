@@ -532,7 +532,10 @@ impl Network {
             let arrival = depart
                 .checked_add(policy.latency_ns)
                 .and_then(|at| at.checked_add(jitter))
+                .map(crate::perf::grid)
                 .and_then(|at| match p.last {
+                    // TEMPORARY grid experiment: same-cell frames keep FIFO by sequence.
+                    Some(last) if crate::perf::grid_ns() > 1 => Some(at.max(last)),
                     Some(last) => last.checked_add(1).map(|next| at.max(next)),
                     None => Some(at),
                 })

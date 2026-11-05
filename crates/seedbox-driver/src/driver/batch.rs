@@ -71,6 +71,9 @@ where
         let perf_start = std::time::Instant::now();
         let reports = self.execute_batch(views, &bounds)?;
         crate::perf::add(&crate::perf::C.execute_ns, crate::perf::since(perf_start));
+        if upto == now {
+            crate::perf::add(&crate::perf::C.zero_execute_ns, crate::perf::since(perf_start));
+        }
         // Validate each stop in its machine's time base, then convert back.
         // The conversion returns the earliest simulation time whose machine
         // time reaches the reported one, so nothing is reported early, and a
@@ -297,7 +300,10 @@ where
                 StopReason::Blocked {
                     reached: simulation(reached)?,
                     // A timer no simulation time can reach never fires.
-                    deadline: deadline.and_then(|at| entry.simulation_time(now, at)),
+                    deadline: deadline
+                        .and_then(|at| entry.simulation_time(now, at))
+                        // TEMPORARY grid experiment (identity when unset).
+                        .map(|at| Timestamp::from_nanos(crate::perf::grid(at.as_nanos()))),
                 },
                 deadline,
             ),

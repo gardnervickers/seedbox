@@ -28,6 +28,7 @@ counters!(
     timer_wake_batches,
     frame_batches,
     execute_ns,
+    zero_execute_ns,
     run_ns_sum,
     run_ns_max_sum,
     commit_ns,
@@ -61,4 +62,20 @@ pub(crate) fn maybe_dump() {
 
 pub(crate) fn final_dump() {
     dump("final");
+}
+
+/// TEMPORARY experiment (not for merge): round frame arrivals and blocked
+/// timer wakeups up to this grid in nanoseconds, set at build time with
+/// SEEDBOX_PERF_GRID_NS. Unset or 0 leaves timing unchanged.
+pub fn grid_ns() -> u64 {
+    option_env!("SEEDBOX_PERF_GRID_NS")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+pub fn grid(at: u64) -> u64 {
+    match grid_ns() {
+        g if g > 1 => at.div_ceil(g).saturating_mul(g),
+        _ => at,
+    }
 }
