@@ -225,8 +225,10 @@ impl Block {
     }
     /// Continue the held request at machine time `now` with the arrival it
     /// drew, as if it had never been held, then the requests behind it. A
-    /// delay counts from its arrival, so one already due completes at once.
-    /// Returns the next hold reached, as a notify does.
+    /// delay counts from its arrival, so one already due completes at once,
+    /// before any request behind it is taken: a hold those reach stops the
+    /// machine before the guest runs again. Returns the next hold reached,
+    /// as a notify does.
     pub(super) fn resume(
         &mut self,
         ram: &mut [u8],
@@ -241,6 +243,9 @@ impl Block {
             .take_chain(ram, Direction::ReadThenWrite)?
             .ok_or("virtio block held request left the queue")?;
         self.admit(ram, head, chain, arrival, arrived, now, completed)?;
+        // Complete what is due by `now` in submission order: the resumed
+        // request if it is overdue and nothing ahead of it still waits.
+        self.complete_due(ram, now, completed)?;
         self.process(ram, now, completed)
     }
     /// Complete a request taken at the cursor now, or queue it to complete
