@@ -11,7 +11,8 @@
 //!
 //! The shared disk fault policy (`disk::fault`) sees each request when the
 //! notify takes it and when it executes (docs/faults.md). A held request
-//! stops processing where it is. A `disk_latency` fault consumes requests
+//! stops processing where it is, unconsumed, until [`Block::resume`]
+//! continues it with the arrival it drew. A `disk_latency` fault consumes requests
 //! into a pending queue instead, each with a due machine time, never before
 //! the request ahead of it; later requests queue behind them. At its due
 //! time a request is decoded again from guest RAM and completes exactly as
@@ -20,7 +21,7 @@
 use super::virtio::*;
 use super::Result;
 use seedbox_machine::machine::disk::{
-    fault::{Arrival, DiskFaults, Request},
+    fault::{Arrival, DiskFaults, Hold, Request},
     request::{representable, Buffers},
     Store,
 };
@@ -66,6 +67,9 @@ pub(super) struct Block {
     store: Store,
     /// Disk faults and holds of this boot; they survive a driver reset.
     faults: DiskFaults,
+    /// How the held request at the queue's cursor continues: its arrival
+    /// and arrival time. Never captured: a held machine is not snapshotted.
+    held: Option<(Arrival, u64)>,
 }
 
 /// A request completed by the device: its type, status and first sector.
@@ -81,6 +85,7 @@ impl Block {
             transport,
             store,
             faults,
+            held: None,
         }
     }
     pub(super) fn transport(&self) -> &Transport {
@@ -91,6 +96,10 @@ impl Block {
     }
     pub(super) fn faults_mut(&mut self) -> &mut DiskFaults {
         &mut self.faults
+    }
+    /// Whether a request is held.
+    pub(super) fn held(&self) -> bool {
+        self.held.is_some()
     }
     /// The machine time the earliest pending request completes.
     pub(super) fn next_due(&self) -> Option<u64> {
@@ -137,9 +146,9 @@ impl Block {
         self.write_traced(ram, offset, value, 0, &mut |_, _, _| {})
             .map(|_| ())
     }
-    /// A register write at machine time `now`. A notify returns the trigger
-    /// whose hold now holds a request; the device then processes nothing
-    /// more, and the machine must not be entered again.
+    /// A register write at machine time `now`. A notify returns the hold
+    /// that now holds a request; the device then processes nothing more,
+    /// and the machine must not be entered again before [`Self::resume`].
     pub(super) fn write_traced(
         &mut self,
         ram: &mut [u8],
@@ -147,7 +156,7 @@ impl Block {
         value: u32,
         now: u64,
         completed: Completed<'_>,
-    ) -> Result<Option<u32>> {
+    ) -> Result<Option<Hold>> {
         match offset {
             DEVICE_FEATURES_SEL => self.transport.feature_selector = value,
             DRIVER_FEATURES_SEL => self.transport.driver_selector = value,
@@ -190,40 +199,85 @@ impl Block {
         ram: &mut [u8],
         now: u64,
         completed: Completed<'_>,
-    ) -> Result<Option<u32>> {
+    ) -> Result<Option<Hold>> {
+        if self.held.is_some() {
+            return Err("virtio block notify while a request is held".into());
+        }
         if self.transport.status & STATUS_DRIVER_OK == 0 {
             return Ok(None);
         }
         while let Some((head, chain)) =
             self.transport.queue[0].take_chain(ram, Direction::ReadThenWrite)?
         {
-            let request = if self.faults.is_empty() {
-                None
+            let arrival = if self.faults.is_empty() {
+                Arrival::Now
             } else {
-                Some(classify(ram, &chain)?)
-            };
-            let arrival = match request {
-                Some(request) => self.faults.arrive(request, now),
-                None => Arrival::Now,
-            };
-            let last = self.transport.pending.back().map(|p| p.due);
-            let due = match arrival {
-                Arrival::Held(trigger) => return Ok(Some(trigger)),
-                Arrival::Now if last.is_none() => {
-                    self.complete(ram, head, chain, true, completed)?;
-                    continue;
+                let arrived = self.faults.arrive(classify(ram, &chain)?);
+                if let Some(hold) = arrived.held {
+                    self.held = Some((arrived.arrival, now));
+                    return Ok(Some(hold));
                 }
-                Arrival::Now => now,
-                Arrival::Delay(delay) => now
-                    .checked_add(delay)
-                    .ok_or("virtio block completion time overflow")?,
+                arrived.arrival
             };
-            // Completion order stays submission order.
-            let due = due.max(last.unwrap_or(due));
-            self.transport.queue[0].consume();
-            self.transport.pending.push_back(Pending { head, due });
+            self.admit(ram, head, chain, arrival, now, now, completed)?;
         }
         Ok(None)
+    }
+    /// Continue the held request at machine time `now` with the arrival it
+    /// drew, as if it had never been held, then the requests behind it. A
+    /// delay counts from its arrival, so one already due completes at once,
+    /// before any request behind it is taken: a hold those reach stops the
+    /// machine before the guest runs again. Returns the next hold reached,
+    /// as a notify does.
+    pub(super) fn resume(
+        &mut self,
+        ram: &mut [u8],
+        now: u64,
+        completed: Completed<'_>,
+    ) -> Result<Option<Hold>> {
+        let (arrival, arrived) = self
+            .held
+            .take()
+            .ok_or("virtio block resume without a hold")?;
+        let (head, chain) = self.transport.queue[0]
+            .take_chain(ram, Direction::ReadThenWrite)?
+            .ok_or("virtio block held request left the queue")?;
+        self.admit(ram, head, chain, arrival, arrived, now, completed)?;
+        // Complete what is due by `now` in submission order: the resumed
+        // request if it is overdue and nothing ahead of it still waits.
+        self.complete_due(ram, now, completed)?;
+        self.process(ram, now, completed)
+    }
+    /// Complete a request taken at the cursor now, or queue it to complete
+    /// at its due time behind every pending one. A delay counts from
+    /// `arrived`.
+    #[allow(clippy::too_many_arguments)]
+    fn admit(
+        &mut self,
+        ram: &mut [u8],
+        head: u16,
+        chain: Vec<Descriptor>,
+        arrival: Arrival,
+        arrived: u64,
+        now: u64,
+        completed: Completed<'_>,
+    ) -> Result<()> {
+        let last = self.transport.pending.back().map(|p| p.due);
+        let due = match arrival {
+            Arrival::Now if last.is_none() => {
+                return self.complete(ram, head, chain, true, completed);
+            }
+            Arrival::Now => now,
+            Arrival::Delay(delay) => arrived
+                .checked_add(delay)
+                .ok_or("virtio block completion time overflow")?
+                .max(now),
+        };
+        // Completion order stays submission order.
+        let due = due.max(last.unwrap_or(due));
+        self.transport.queue[0].consume();
+        self.transport.pending.push_back(Pending { head, due });
+        Ok(())
     }
     /// Complete every pending request due by machine time `now`, decoding
     /// each again from guest RAM, in submission order.

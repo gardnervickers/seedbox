@@ -1,7 +1,6 @@
-//! Trigger matching over committed bytes and held block requests, and
-//! admission of fired trigger faults.
+//! Trigger matching over committed bytes, and admission of fired trigger
+//! faults.
 use super::*;
-use crate::oracle::triggers::Watch;
 
 impl Service {
     pub(crate) fn committed_bytes(
@@ -16,28 +15,6 @@ impl Service {
             .committed(source, observed, bytes, commit)
             .map(|_| ())
             .map_err(Into::into)
-    }
-    /// `source` holds the disk request block_request trigger `id` watches.
-    pub(crate) fn block_held(
-        &mut self,
-        id: u32,
-        source: &str,
-        observed: u64,
-        commit: u64,
-    ) -> Result<(), Failure> {
-        self.valid()?;
-        self.triggers
-            .held(id, source, observed, commit)
-            .map(|_| ())
-            .map_err(Into::into)
-    }
-    /// The plan that stops `trigger`'s machine hold, if it watches one.
-    pub(super) fn release(&self, trigger: u32) -> Option<Plan> {
-        let record = self.triggers.record(trigger)?;
-        matches!(record.watch, Watch::BlockRequest { .. }).then(|| Plan::Release {
-            source: record.source.clone(),
-            trigger,
-        })
     }
     pub(crate) fn trigger_effects(
         &mut self,
@@ -69,11 +46,6 @@ impl Service {
                     TriggerAction::Partition { left, right } => Command::Partition {
                         left: left.into_iter().map(Target::Key).collect(),
                         right: right.into_iter().map(Target::Key).collect(),
-                    },
-                    // Undelayed, while the held request is still unwritten.
-                    TriggerAction::Crash(target) => Command::Effect {
-                        target: Target::Key(target),
-                        effect: Effect::Crash,
                     },
                 },
                 at,
@@ -125,10 +97,7 @@ impl Service {
         self.valid()?;
         self.triggers.reset_source(source).map_err(Into::into)
     }
-    /// Expire due unmatched triggers, returning the plans that release the
-    /// machine holds of expired block_request triggers.
-    pub(crate) fn expire_triggers(&mut self, at: u64) -> Vec<Plan> {
-        let mut releases = vec![];
+    pub(crate) fn expire_triggers(&mut self, at: u64) {
         for trigger in self.triggers.expire(at) {
             self.notices.push(Notice::TriggerResolved {
                 trigger,
@@ -136,9 +105,7 @@ impl Service {
                 status: crate::oracle::triggers::Status::Expired,
                 fault: None,
             });
-            releases.extend(self.release(trigger));
         }
-        releases
     }
     pub(crate) fn cut_off_triggers(&mut self, at: u64) {
         for trigger in self.triggers.cut_off(at) {
@@ -149,10 +116,6 @@ impl Service {
                 fault: None,
             });
         }
-    }
-    #[cfg(test)]
-    pub(crate) fn triggers(&self) -> &crate::oracle::triggers::Triggers {
-        &self.triggers
     }
     pub(crate) fn trigger_boundary(&self) -> Option<u64> {
         self.triggers.boundary()

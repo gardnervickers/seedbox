@@ -21,6 +21,8 @@ pub(crate) enum Event {
         response: Response,
     },
     Oracle(oracle::Request),
+    /// The guest dropped this oracle session; replies to it are discarded.
+    OracleClosed(NonZeroU32),
     /// Terminal supervisor setup/runtime error, separate from application exit.
     GuestError {
         time: u64,
@@ -115,8 +117,9 @@ impl Codec {
             | Request::ReceiveFrame { .. }
             | Request::InstallFault { .. }
             | Request::HealFault { .. }
-            | Request::HoldBlockRequest { .. }
-            | Request::ReleaseBlockRequest { .. } => Err(Error::Frame),
+            | Request::BreakOnBlockRequest { .. }
+            | Request::DeclareBreaks { .. }
+            | Request::ResumeBreak => Err(Error::Frame),
         }
     }
 
@@ -211,6 +214,11 @@ impl Codec {
         } else if line.starts_with(b"SBX_RPC1 ") {
             events.push(Event::Oracle(
                 self.oracle.receive(time, line).map_err(Error::Oracle)?,
+            ));
+            return Ok(());
+        } else if line.starts_with(b"SBX_CLOSE1 ") {
+            events.push(Event::OracleClosed(
+                self.oracle.close(time, line).map_err(Error::Oracle)?,
             ));
             return Ok(());
         } else {
@@ -465,7 +473,7 @@ impl Codec {
             }
         }
         oracle.validate_snapshot()?;
-        let (_, _, oracle_time, _, _) = oracle.snapshot_state();
+        let oracle_time = oracle.snapshot_time();
         if last_time.is_some_and(|t| t > reached)
             || oracle_time.is_some_and(|t| last_time.is_none_or(|last| t > last))
         {

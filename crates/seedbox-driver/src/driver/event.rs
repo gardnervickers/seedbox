@@ -119,6 +119,17 @@ pub enum EventKind {
         boot: u64,
         id: SimulationControlId,
     },
+    /// A breakpoint hit suspended `machine` at `at`, the time of its write;
+    /// the event publishes at the commit that reported it. The machine runs
+    /// no guest work until [`Self::BreakEnded`].
+    BreakHit {
+        break_id: u32,
+        machine: MachineId,
+        boot: u64,
+        name: String,
+    },
+    /// A breakpoint hit ended, published at the time it ended.
+    BreakEnded { break_id: u32, reason: BreakEnd },
 }
 
 /// A machine change applied by the driver at a barrier.
@@ -293,6 +304,17 @@ pub enum SettlementStatus {
     /// bookkeeping-only apply collision or unavailable TCP incarnation instead
     /// confirms no effect and does not poison the Driver; detail distinguishes it.
     Failed,
+}
+
+/// How a breakpoint hit ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakEnd {
+    /// The oracle resumed the machine.
+    Resumed,
+    /// The machine crashed while suspended.
+    Crashed,
+    /// The run ended with the machine still suspended.
+    RunEnded,
 }
 
 /// Final trigger state.

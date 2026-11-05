@@ -288,8 +288,11 @@ fn latency_delays_matching_requests_by_a_bounded_seeded_draw() {
         .unwrap();
     let mut delays = Vec::new();
     for _ in 0..32 {
-        assert_eq!(faults.arrive(classify(&mut read(0, 1)), 0), Arrival::Now);
-        match faults.arrive(classify(&mut flush()), 0) {
+        assert_eq!(
+            faults.arrive(classify(&mut read(0, 1))).arrival,
+            Arrival::Now
+        );
+        match faults.arrive(classify(&mut flush())).arrival {
             Arrival::Delay(delay) => delays.push(delay),
             other => panic!("{other:?}"),
         }
@@ -306,46 +309,60 @@ fn latency_delays_matching_requests_by_a_bounded_seeded_draw() {
 }
 
 #[test]
-fn holds_count_matching_arrivals_until_their_nth_or_deadline() {
+fn holds_count_matching_arrivals_until_their_nth() {
+    let mut faults = DiskFaults::new(0);
+    let hold = |op, nth, seen| Hold { op, nth, seen };
+    assert!(faults.hold(hold(DiskOp::Read, 2, 2)).is_err());
+    faults.hold(hold(DiskOp::Write, 3, 1)).unwrap();
+    faults.hold(hold(DiskOp::Any, 3, 0)).unwrap();
+    let w = classify(&mut write(0, &[0; SECTOR]));
+    let now = Arrived {
+        arrival: Arrival::Now,
+        held: None,
+    };
+    assert_eq!(faults.arrive(classify(&mut read(0, 1))), now);
+    assert_eq!(faults.arrive(w), now);
+    assert_eq!(
+        faults.holds(),
+        [hold(DiskOp::Write, 3, 2), hold(DiskOp::Any, 3, 2)]
+    );
+    // Both reach their nth together: the first one's hit holds the request.
+    assert_eq!(
+        faults.arrive(w),
+        Arrived {
+            arrival: Arrival::Now,
+            held: Some(hold(DiskOp::Write, 3, 3)),
+        }
+    );
+    assert!(faults.holds().is_empty());
+    assert_eq!(faults.arrive(w), now);
+}
+
+#[test]
+fn a_held_request_keeps_its_latency_draw() {
     let mut faults = DiskFaults::new(0);
     faults
-        .hold(Hold {
-            trigger: 4,
-            op: DiskOp::Write,
-            nth: 3,
-            seen: 1,
-            until: Some(100),
-        })
+        .install(
+            1,
+            2,
+            DeviceFault::DiskLatency {
+                op: DiskOp::Flush,
+                latency_ns: 7,
+                jitter_ns: 0,
+            },
+        )
         .unwrap();
-    assert!(faults
-        .hold(Hold {
-            trigger: 4,
-            op: DiskOp::Read,
-            nth: 1,
-            seen: 0,
-            until: None
-        })
-        .is_err());
-    let w = classify(&mut write(0, &[0; SECTOR]));
-    assert_eq!(faults.arrive(classify(&mut read(0, 1)), 0), Arrival::Now);
-    assert_eq!(faults.arrive(w, 10), Arrival::Now);
-    assert_eq!(faults.holds()[0].seen, 2);
-    // At the deadline nothing is counted.
-    assert_eq!(faults.arrive(w, 100), Arrival::Now);
-    assert_eq!(faults.holds()[0].seen, 2);
-    assert_eq!(faults.arrive(w, 99), Arrival::Held(4));
-    assert!(faults.holds().is_empty());
     faults
         .hold(Hold {
-            trigger: 5,
-            op: DiskOp::Any,
-            nth: 2,
+            op: DiskOp::Flush,
+            nth: 1,
             seen: 0,
-            until: None,
         })
         .unwrap();
-    assert_eq!(faults.release(5).map(|h| h.seen), Some(0));
-    assert_eq!(faults.arrive(w, 0), Arrival::Now);
+    let arrived = faults.arrive(classify(&mut flush()));
+    assert_eq!(arrived.arrival, Arrival::Delay(7));
+    assert!(arrived.held.is_some());
+    assert_eq!(faults.installed()[0].counts.matched, 1);
 }
 
 #[test]
@@ -372,11 +389,9 @@ fn closed_records_round_trip_and_restored_state_is_checked() {
         .unwrap();
     faults
         .hold(Hold {
-            trigger: 1,
             op: DiskOp::Flush,
             nth: 2,
             seen: 1,
-            until: None,
         })
         .unwrap();
     let mut store = Store::zeroed(8).unwrap();

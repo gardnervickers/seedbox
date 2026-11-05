@@ -223,6 +223,13 @@ pub struct Engine {
     pub backend: CpuBackend,
     pub architecture: Architecture,
 }
+impl Engine {
+    /// Whether every machine can hold at a breakpoint: only PV has the guest
+    /// device and the held machine state.
+    pub fn breakpoints(self) -> bool {
+        self.backend == CpuBackend::Pv
+    }
+}
 impl std::fmt::Display for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let architecture = match self.architecture {
@@ -244,8 +251,6 @@ pub enum Capability {
     DiskSelection,
     /// Completing block requests after their notification.
     DelayedBlockCompletion,
-    /// Holding a block request at the device for a crash.
-    HeldBlockRequest,
     /// The guest kernel's seeded yield at syscalls.
     GuestYield,
 }
@@ -254,7 +259,6 @@ impl Capability {
         match self {
             Self::DiskSelection => "disk request selection",
             Self::DelayedBlockCompletion => "delayed block completion",
-            Self::HeldBlockRequest => "held block requests",
             Self::GuestYield => "the guest yield hook",
         }
     }

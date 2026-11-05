@@ -55,10 +55,10 @@ fn prepared(duplicate: bool) -> Value {
     if duplicate {
         ids[MANY as usize - 1] = MANY;
     }
-    v["codec"]["oracle"] = json!({"relay":MANY+1,"session":MANY+1,"public":1,"failed":false,"last_time":1,"pending":null,"reply_prepared":false});
+    v["codec"]["oracle"] = json!({"relay":MANY+1,"session":MANY+1,"failed":false,"last_time":1,"sessions":[{"id":MANY+1,"public":1,"pending":null,"reply_prepared":false}]});
     v["codec"]["last_time"] = json!(1);
     v["session_highwater"] = json!(1);
-    v["session"] = json!({"wire":MANY+1,"public":1});
+    v["sessions"] = json!([{"wire":MANY+1,"public":1}]);
     v["prepared_replies"] = json!(ids
         .into_iter()
         .map(|id| json!({"relay":id,"session":1,"request":1}))

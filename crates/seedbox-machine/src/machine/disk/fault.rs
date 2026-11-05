@@ -2,7 +2,7 @@
 //! transport offers its requests to the same policy (docs/faults.md).
 //!
 //! A transport reads a request's header ([`Request::decode`]), offers it on
-//! arrival ([`DiskFaults::arrive`]) to the holds of `block_request` triggers
+//! arrival ([`DiskFaults::arrive`]) to the holds of `break_on_block_request`
 //! and to `disk_latency`, then executes it through [`DiskFaults::execute`],
 //! where `disk_error` selects it. Faults match by op, then by scope; each
 //! match draws once on that fault's stream for this boot,
@@ -119,16 +119,13 @@ pub struct Installed {
     pub counts: FaultCounts,
 }
 
-/// A `block_request` trigger's hold, counting matching requests across boots.
+/// A `break_on_block_request` hold, counting matching requests across boots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hold {
-    pub trigger: u32,
     pub op: DiskOp,
     pub nth: u64,
     /// Matching requests already counted, below `nth`.
     pub seen: u64,
-    /// Requests arriving at or after this machine time are not counted.
-    pub until: Option<u64>,
 }
 
 /// How a transport handles a request on arrival.
@@ -138,8 +135,15 @@ pub enum Arrival {
     Now,
     /// Complete it no earlier than this many nanoseconds after arrival.
     Delay(u64),
-    /// Hold it for this trigger: no effect, and nothing after it runs.
-    Held(u32),
+}
+
+/// A request's arrival, and the hold that reached its `nth` with it, if any.
+/// A held request has no effect and nothing after it runs until the
+/// transport continues it with this same arrival.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Arrived {
+    pub arrival: Arrival,
+    pub held: Option<Hold>,
 }
 
 /// The disk faults and holds of one boot.
@@ -199,36 +203,32 @@ impl DiskFaults {
         if hold.nth == 0 || hold.seen >= hold.nth {
             return Err("block request hold needs a positive remaining count".into());
         }
-        if self.holds.iter().any(|h| h.trigger == hold.trigger) {
-            return Err("block request hold reused its trigger".into());
-        }
         self.holds.push(hold);
         Ok(())
     }
-    /// Stop counting for `trigger`, returning its hold if it was installed.
-    pub fn release(&mut self, trigger: u32) -> Option<Hold> {
-        let index = self.holds.iter().position(|h| h.trigger == trigger)?;
-        Some(self.holds.remove(index))
-    }
-    /// Offer a request on arrival at machine time `now`: holds count it in
-    /// installation order and the one reaching its `nth` holds it, then every
-    /// matching latency fault delays it by its latency plus a jitter draw.
-    pub fn arrive(&mut self, request: Request, now: u64) -> Arrival {
+    /// Offer a request on arrival: every matching hold counts it, and one
+    /// reaching its `nth` holds it and ends (holds reaching it together
+    /// share the first one's hit); then every matching latency fault delays
+    /// it by its latency plus a jitter draw, held or not.
+    pub fn arrive(&mut self, request: Request) -> Arrived {
+        let mut held = None;
         if request.kind == Kind::Other {
-            return Arrival::Now;
+            return Arrived {
+                arrival: Arrival::Now,
+                held,
+            };
         }
-        for index in 0..self.holds.len() {
-            let hold = &mut self.holds[index];
-            if !selects(hold.op, request.kind) || hold.until.is_some_and(|until| now >= until) {
-                continue;
+        self.holds.retain_mut(|hold| {
+            if !selects(hold.op, request.kind) {
+                return true;
             }
             hold.seen += 1;
-            if hold.seen == hold.nth {
-                let trigger = hold.trigger;
-                self.holds.remove(index);
-                return Arrival::Held(trigger);
+            if hold.seen < hold.nth {
+                return true;
             }
-        }
+            held.get_or_insert(*hold);
+            false
+        });
         let mut delay = None;
         for fault in &mut self.installed {
             let DeviceFault::DiskLatency {
@@ -248,7 +248,10 @@ impl DiskFaults {
             let this = latency_ns.saturating_add(jitter);
             delay = Some(delay.map_or(this, |d: u64| d.max(this)));
         }
-        delay.map_or(Arrival::Now, Arrival::Delay)
+        Arrived {
+            arrival: delay.map_or(Arrival::Now, Arrival::Delay),
+            held,
+        }
     }
     /// Execute a request through [`request::execute`] after `disk_error`
     /// selection: each matching fault draws once, and the first hit acts.
@@ -500,11 +503,9 @@ crate::record!(Installed {
     counts: FaultCounts
 });
 crate::record!(Hold {
-    trigger: u32,
     op: DiskOp,
     nth: u64,
-    seen: u64,
-    until: Option<u64>
+    seen: u64
 });
 crate::record!(DiskFaults {
     boot: u64,
@@ -530,9 +531,8 @@ impl DiskFaults {
             }
             previous = Some(fault.id);
         }
-        let mut triggers = std::collections::BTreeSet::new();
         for hold in &self.holds {
-            if hold.nth == 0 || hold.seen >= hold.nth || !triggers.insert(hold.trigger) {
+            if hold.nth == 0 || hold.seen >= hold.nth {
                 return Err("PV snapshot block request hold".into());
             }
         }
