@@ -36,12 +36,13 @@ impl FixturePreparer {
         context: &PreparationContext,
         transport: &dyn ImageTransport,
     ) -> seedbox_application::Result<seedbox_application::execution::PreparedInputs> {
+        let runtime = self.digests(store)?;
         let mut inputs = self.inner.prepare_with_factory(
             simulation,
             store,
             context,
             transport,
-            &self.runtime,
+            &runtime,
             (
                 || Ok(()),
                 |epoch, blocks| TestBoot::new(&self.runtime, epoch, blocks),
@@ -50,11 +51,15 @@ impl FixturePreparer {
         seedbox_driver_execution::driver_world::preparation::retain_oci_prepared(
             &mut inputs,
             simulation,
-            &self.runtime,
+            &runtime,
             store,
             &|| context.check(),
         )?;
         Ok(inputs)
+    }
+    /// The runtime files one preparation stores, as the CLI computes them.
+    fn digests(&self, store: &ContentStore) -> Result<RuntimeDigests> {
+        RuntimeDigests::new(store.put_file(&self.engine)?, &self.runtime, store)
     }
 }
 
@@ -140,7 +145,7 @@ fn cancelled_preparation_never_imports_images() {
         &store,
         &context,
         &NoImport,
-        &preparer.runtime,
+        &preparer.digests(&store).unwrap(),
         (
             || panic!("cancellation must precede runtime validation"),
             |_, _| -> Result<TestBoot> { panic!("cancelled preparation must not build a factory") },
@@ -191,7 +196,7 @@ fn runtime_validation_failure_precedes_image_import_and_factory_construction() {
             &store,
             &context,
             &NoImport,
-            &preparer.runtime,
+            &preparer.digests(&store).unwrap(),
             (
                 || Err(Error::Setup("fixture runtime validation failed".into())),
                 |_, _| -> Result<TestBoot> { panic!("invalid runtime must not build a factory") },

@@ -2,7 +2,7 @@
 //! the same image import and filesystem view the project's machines get; the
 //! worker builds the boot archive from them.
 use super::*;
-use seedbox_driver_execution::driver_world::preparation::MachineInputs;
+use seedbox_driver_execution::driver_world::preparation::{artifact, MachineInputs};
 use seedbox_engine_protocol::driver_world as wire;
 
 impl OciPreparer {
@@ -47,7 +47,7 @@ impl OciPreparer {
             .map_err(|e| e.or_too_large(Error::Execution))?;
             let path = directory.join(format!("config-{index}"));
             fs::write(&path, bytes)?;
-            configs.insert(mount.target.clone(), path);
+            configs.insert(mount.target.clone(), artifact(&path)?);
         }
         let temporary = tempfile::tempdir()?;
         let imported = transport
@@ -62,7 +62,7 @@ impl OciPreparer {
             name,
             number: request.number,
             memory_bytes: u64::from(memory_mb) * 1024 * 1024,
-            filesystem: &filesystem,
+            filesystem: artifact(&filesystem)?,
             launch: &imported.image.launch,
             configs,
             allow_crashes: service.allow_crashes,

@@ -10,7 +10,7 @@ use crate::{
     Error, Result,
 };
 use seedbox_driver_execution::driver_world::preparation::{
-    BootArchive, OciBoot, OciBootFactory, PreparedBootCache,
+    BootArchive, OciBoot, OciBootFactory, PreparedBootCache, RuntimeDigests,
 };
 use std::{
     collections::BTreeMap,
@@ -50,6 +50,7 @@ pub use crate::preparation_command::{PreparationContext, PreparationStage};
 impl OciPreparer {
     /// Share normal image resolution/retention while the selected native SDK
     /// alone packages Driver boot bytes. Runtime formats are not interchangeable.
+    /// `digests` are this preparation's stored copies of `runtime`'s files.
     pub fn prepare_driver_with_transport(
         &self,
         simulation: &Simulation,
@@ -57,13 +58,14 @@ impl OciPreparer {
         context: &PreparationContext,
         transport: &dyn crate::oci::ImageTransport,
         runtime: &seedbox_driver_execution::runtime_assets::Inputs,
+        digests: &RuntimeDigests,
     ) -> Result<PreparedInputs> {
         self.prepare_with_factory(
             simulation,
             store,
             context,
             transport,
-            runtime,
+            digests,
             (
                 || crate::driver_preparation::validate_oci_runtime(self, runtime),
                 |epoch, blocks| OciBootFactory::new(&self.engine, runtime, epoch, blocks),
@@ -76,7 +78,7 @@ impl OciPreparer {
         store: &ContentStore,
         context: &PreparationContext,
         transport: &dyn crate::oci::ImageTransport,
-        runtime: &seedbox_driver_execution::runtime_assets::Inputs,
+        runtime: &RuntimeDigests,
         (validate, factory): (
             impl FnOnce() -> Result<()>,
             impl FnOnce(u32, seedbox_spec::progress::ProgressBudget) -> Result<F>,
@@ -92,19 +94,16 @@ impl OciPreparer {
         store: &ContentStore,
         context: &PreparationContext,
         transport: &dyn crate::oci::ImageTransport,
-        driver_runtime: &seedbox_driver_execution::runtime_assets::Inputs,
+        runtime: &RuntimeDigests,
         factory: impl FnOnce(u32, seedbox_spec::progress::ProgressBudget) -> Result<F>,
     ) -> Result<PreparedInputs> {
         let architecture = self.validate_services(simulation, context)?;
-        let kernel = store.put_file(&self.kernel)?;
-        let engine = store.put_file(&self.engine)?;
         architecture.validate_elf(&self.init)?;
         validate_volume_targets(simulation)?;
-        let mut auxiliary =
-            self.guest_auxiliary(simulation, store, architecture, driver_runtime)?;
+        let mut auxiliary = self.guest_auxiliary(simulation, architecture, runtime)?;
         let configs = read_configs(simulation, store, &mut auxiliary)?;
 
-        context.setup_inputs(&auxiliary, &engine, &kernel)?;
+        context.setup_inputs(&auxiliary, runtime.engine(), runtime.file("kernel")?)?;
 
         let temporary = tempfile::tempdir()?;
         let mut images = BTreeMap::new();
@@ -130,12 +129,10 @@ impl OciPreparer {
         };
         let driver_factory = factory(wall_clock_epoch, simulation.simulator.progress_budget)?;
         let boot_cache = PreparedBootCache::new(
-            &engine,
-            driver_runtime,
+            runtime,
             wall_clock_epoch,
             simulation.simulator.progress_budget,
-            store,
-        )?;
+        );
         for launch in launches {
             let Launch { name, service, .. } = launch;
             context.progress(name, PreparationStage::Guest);
@@ -173,7 +170,7 @@ impl OciPreparer {
 
             context.progress(name, PreparationStage::Ready);
         }
-        auxiliary.insert("driver-world/executable".into(), engine);
+        auxiliary.insert("driver-world/executable".into(), runtime.engine().clone());
         Ok(PreparedInputs {
             machine_memory_mb: simulation
                 .services
@@ -228,23 +225,22 @@ impl OciPreparer {
         Ok(architecture)
     }
 
-    /// Store the guest runtime binaries every machine boots with.
+    /// The stored guest runtime binaries every machine boots with.
     fn guest_auxiliary(
         &self,
         simulation: &Simulation,
-        store: &ContentStore,
         architecture: crate::guest::Architecture,
-        driver_runtime: &seedbox_driver_execution::runtime_assets::Inputs,
+        runtime: &RuntimeDigests,
     ) -> Result<BTreeMap<String, ContentDigest>> {
         let volumes = simulation.services.values().any(|s| !s.volumes.is_empty());
-        let mut auxiliary = BTreeMap::from([("guest-init".into(), store.put_file(&self.init)?)]);
-        if driver_runtime.qemu.is_some() {
-            auxiliary.insert(
-                "guest-firmware".into(),
-                store.put_file(&driver_runtime.guest_assets.join("firmware"))?,
-            );
+        let mut auxiliary = BTreeMap::from([("guest-init".into(), runtime.file("init")?.clone())]);
+        if runtime.tcg() {
+            auxiliary.insert("guest-firmware".into(), runtime.file("firmware")?.clone());
         } else {
-            auxiliary.insert("guest-progress".into(), store.put_file(&self.progress)?);
+            auxiliary.insert(
+                "guest-progress".into(),
+                runtime.file("progress.tar")?.clone(),
+            );
         }
         if volumes {
             let mke2fs = self.mke2fs.as_ref().ok_or_else(|| {
@@ -254,7 +250,7 @@ impl OciPreparer {
                 )
             })?;
             architecture.validate_elf(mke2fs)?;
-            auxiliary.insert("guest-mke2fs".into(), store.put_file(mke2fs)?);
+            auxiliary.insert("guest-mke2fs".into(), runtime.file("mke2fs")?.clone());
         }
         Ok(auxiliary)
     }

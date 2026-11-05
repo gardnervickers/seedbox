@@ -160,8 +160,21 @@ fn cold_driver_factory(backend: seedbox_spec::backend::CpuBackend) {
     preparer.profile = executor.profile();
     let context =
         PreparationContext::new(root.path().join("evidence"), Default::default()).unwrap();
+    let digests = driver_world::preparation::RuntimeDigests::new(
+        store.put_file(&preparer.engine).unwrap(),
+        &selected,
+        &store,
+    )
+    .unwrap();
     let mut inputs = preparer
-        .prepare_driver_with_transport(&simulation, &store, &context, &Transport, &selected)
+        .prepare_driver_with_transport(
+            &simulation,
+            &store,
+            &context,
+            &Transport,
+            &selected,
+            &digests,
+        )
         .unwrap();
     if backend == seedbox_spec::backend::CpuBackend::Tcg {
         assert!(
@@ -172,10 +185,10 @@ fn cold_driver_factory(backend: seedbox_spec::backend::CpuBackend) {
         assert!(inputs.auxiliary.contains_key("guest-firmware"));
     }
     let original_boots = inputs.guests.clone();
-    seedbox_driver_execution::driver_world::preparation::retain_oci_prepared(
+    driver_world::preparation::retain_oci_prepared(
         &mut inputs,
         &simulation,
-        &selected,
+        &digests,
         &store,
         &|| context.check(),
     )

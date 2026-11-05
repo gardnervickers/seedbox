@@ -112,13 +112,20 @@ impl PreparationBackend for Preparer {
         store: &ContentStore,
         context: &PreparationContext,
     ) -> Result<PreparedInputs> {
-        // prepare_driver_with_transport validates these runtime inputs before
-        // any OCI work.
+        use seedbox_driver_execution::driver_world::preparation;
+        // Store each runtime file once; the image export cache, boot cache and
+        // retained inventory share these digests. prepare_driver_with_transport
+        // validates these runtime inputs before any OCI work.
+        let runtime = preparation::RuntimeDigests::new(
+            store.put_file(&self.inputs.engine)?,
+            &self.driver_inputs,
+            store,
+        )?;
         let transport = seedbox_application::container_images::ContainerTransport {
             docker: self.inputs.docker.clone(),
             cancellation: context.cancellation.clone(),
             progress: preparation_progress,
-            export_cache: Some(store.put_file(&self.inputs.engine)?),
+            export_cache: Some(runtime.engine().clone()),
         };
         let mut prepared = self.inputs.prepare_driver_with_transport(
             simulation,
@@ -126,14 +133,11 @@ impl PreparationBackend for Preparer {
             context,
             &transport,
             &self.driver_inputs,
+            &runtime,
         )?;
-        seedbox_driver_execution::driver_world::preparation::retain_oci_prepared(
-            &mut prepared,
-            simulation,
-            &self.driver_inputs,
-            store,
-            &|| context.check(),
-        )?;
+        preparation::retain_oci_prepared(&mut prepared, simulation, &runtime, store, &|| {
+            context.check()
+        })?;
         Ok(prepared)
     }
     fn prepare_spawn(

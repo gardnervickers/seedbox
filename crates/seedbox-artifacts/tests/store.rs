@@ -163,6 +163,23 @@ fn cached_verification_rejects_same_length_edits_and_replaced_objects() {
 }
 
 #[test]
+fn prefix_reads_verify_the_whole_object() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(directory.path());
+    let digest = store.put(b"070701 and the rest of an archive").unwrap();
+    assert_eq!(store.read_prefix(&digest, 6).unwrap(), b"070701");
+    let short = store.put(b"07").unwrap();
+    assert_eq!(store.read_prefix(&short, 6).unwrap(), b"07");
+    // Damage past the prefix still fails the read.
+    let object = directory.path().join("sha256").join(digest.hex());
+    fs::write(&object, b"070701 and a corrupt tail").unwrap();
+    let error = store.read_prefix(&digest, 6).unwrap_err().to_string();
+    assert!(error.contains("hash mismatch"), "{error}");
+    fs::remove_file(object).unwrap();
+    assert!(store.read_prefix(&digest, 6).is_err());
+}
+
+#[test]
 fn put_file_hashes_same_length_source_rewrites() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source");

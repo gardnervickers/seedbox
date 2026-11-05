@@ -14,7 +14,8 @@ use std::{collections::BTreeMap, fs, path::Path};
 mod cache;
 pub use cache::PreparedBootCache;
 
-fn artifact(path: &Path) -> Result<wire::Artifact> {
+/// A host file the worker reads, by path, with the digest of its bytes now.
+pub fn artifact(path: &Path) -> Result<wire::Artifact> {
     let bytes = fs::read(path)?;
     Ok(wire::Artifact {
         sha256: ContentDigest::of(&bytes).hex().into(),
@@ -24,6 +25,77 @@ fn artifact(path: &Path) -> Result<wire::Artifact> {
             .ok_or_else(|| Error::Integrity("Driver input path is not UTF-8".into()))?
             .into(),
     })
+}
+/// An object the store already holds, by content as retention names inputs.
+fn stored(store: &ContentStore, digest: &ContentDigest) -> Result<wire::Artifact> {
+    Ok(wire::Artifact {
+        sha256: digest.hex().into(),
+        length: store.size(digest)?,
+        artifact: format!("asset:{}", digest.hex()),
+    })
+}
+
+/// The runtime files one preparation boots and retains, each stored once.
+/// `put_file` rereads a file on every call, so a preparation builds this once
+/// and its boot cache and retained inventory share the digests.
+#[derive(Clone, Debug)]
+pub struct RuntimeDigests {
+    engine: ContentDigest,
+    /// The complete package and each selected file, by its runtime name.
+    files: BTreeMap<String, ContentDigest>,
+    tcg: bool,
+}
+impl RuntimeDigests {
+    /// Fingerprint bytes, never host paths or timestamps. Include selected
+    /// files as well as the package: Inputs exposes their paths, and factories
+    /// consume those files rather than rereading the package.
+    pub fn new(engine: ContentDigest, runtime: &Inputs, store: &ContentStore) -> Result<Self> {
+        let mut files = BTreeMap::from([("package".into(), store.put_file(&runtime.archive())?)]);
+        for name in [
+            "kernel",
+            "init",
+            "command-line",
+            if runtime.qemu.is_some() {
+                "firmware"
+            } else {
+                "progress.tar"
+            },
+        ] {
+            files.insert(
+                name.into(),
+                store.put_file(&runtime.guest_assets.join(name))?,
+            );
+        }
+        let formatter = runtime.guest_assets.join("mke2fs");
+        match fs::metadata(&formatter) {
+            Ok(_) => {
+                files.insert("mke2fs".into(), store.put_file(&formatter)?);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        if let Some(qemu) = &runtime.qemu {
+            files.insert("qemu".into(), store.put_file(qemu)?);
+        }
+        Ok(Self {
+            engine,
+            files,
+            tcg: runtime.qemu.is_some(),
+        })
+    }
+    pub fn engine(&self) -> &ContentDigest {
+        &self.engine
+    }
+    /// Whether these are a TCG runtime's files, with QEMU and firmware.
+    pub fn tcg(&self) -> bool {
+        self.tcg
+    }
+    /// One stored file by its runtime name, such as `kernel` or `package`.
+    pub fn file(&self, name: &str) -> Result<&ContentDigest> {
+        self.files
+            .get(name)
+            .ok_or_else(|| Error::Integrity(format!("Driver runtime has no {name}")))
+    }
 }
 pub const FILESYSTEM: &str = "driver-world/filesystem/";
 /// Interface prefix wide enough that the simulated nameserver (engine-core
@@ -50,22 +122,22 @@ fn hosts(name: &str, number: u8) -> String {
     format!("127.0.0.1 localhost\n::1 localhost\n10.0.0.{number} {name}\n")
 }
 
-/// Everything the worker builds one machine from, with host paths for files.
+/// Everything the worker builds one machine from.
 pub struct MachineInputs<'a> {
     pub name: &'a str,
     /// The last octet of the machine's address and MAC.
     pub number: u8,
     pub memory_bytes: u64,
     /// The machine's logical filesystem view.
-    pub filesystem: &'a Path,
+    pub filesystem: wire::Artifact,
     pub launch: &'a seedbox_artifacts::image::Launch,
-    /// Each initial file's guest path and the host file holding its contents.
-    pub configs: BTreeMap<String, std::path::PathBuf>,
+    /// Each initial file's guest path and its contents.
+    pub configs: BTreeMap<String, wire::Artifact>,
     pub allow_crashes: bool,
     pub control_socket: bool,
 }
 impl MachineInputs<'_> {
-    pub fn wire(&self) -> Result<(wire::Machine, wire::Environment)> {
+    pub fn wire(self) -> Result<(wire::Machine, wire::Environment)> {
         let volumes = super::volume_setup(self.launch.disk_volumes.iter())
             .map_err(|e| Error::Integrity(format!("machine volumes: {e}")))?;
         let limits = seedbox_machine::application::GuestLimits::default();
@@ -74,11 +146,7 @@ impl MachineInputs<'_> {
             hosts: hosts(self.name, self.number),
             anonymous_volumes: self.launch.volumes.clone(),
             named_volumes: volumes.named_volumes,
-            configs: self
-                .configs
-                .iter()
-                .map(|(target, path)| Ok((target.clone(), artifact(path)?)))
-                .collect::<Result<_>>()?,
+            configs: self.configs,
             limits: wire::GuestLimits {
                 max_map_count: limits.max_map_count,
                 nofile: limits.nofile,
@@ -88,7 +156,7 @@ impl MachineInputs<'_> {
         let machine = wire::Machine {
             name: self.name.into(),
             memory_bytes: self.memory_bytes,
-            filesystem: artifact(self.filesystem)?,
+            filesystem: self.filesystem,
             process: wire::Process {
                 argv: self.launch.argv.clone(),
                 environment: self.launch.environment.clone(),
@@ -286,18 +354,17 @@ impl OciBootFactory {
 }
 /// Retain complete OCI boot archives, their logical filesystem views, and all
 /// stateless future-factory authority. No guest is constructed or executed.
+/// Every input is already a store object, so the manifest names it by digest.
 pub fn retain_oci_prepared(
     inputs: &mut PreparedInputs,
     simulation: &Simulation,
-    runtime: &Inputs,
+    runtime: &RuntimeDigests,
     store: &ContentStore,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     super::retained::validate_contract(&inputs.profile)?;
     check()?;
-    let scratch = tempfile::tempdir()?;
-    let engine = store.materialize(inputs.executable()?, &scratch.path().join("engine"))?;
-    let root = &runtime.guest_assets;
+    let file = |name: &str| -> Result<wire::Artifact> { stored(store, runtime.file(name)?) };
     let mut machines = BTreeMap::new();
     let mut environments = BTreeMap::new();
     let mut boots = BTreeMap::new();
@@ -311,15 +378,14 @@ pub fn retain_oci_prepared(
             .guests
             .get(name)
             .ok_or_else(|| Error::Integrity(format!("prepared boot missing for {name}")))?;
-        let boot = store.materialize(boot, &scratch.path().join("boot").join(name))?;
-        let bytes = fs::read(&boot)?;
-        if !super::boot::complete(&bytes) {
+        if !super::boot::complete(&store.read_prefix(boot, 6)?) {
             return Err(Error::Integrity(
                 "OCI preparation did not produce a complete Linux boot archive".into(),
             ));
         }
+        let boot = stored(store, boot)?;
         let memory_bytes = u64::from(inputs.memory_mb(name)?) * 1024 * 1024;
-        if memory_bytes < super::boot::minimum_memory(bytes.len() as u64)? {
+        if memory_bytes < super::boot::minimum_memory(boot.length)? {
             return Err(Error::Execution(format!(
                 "service {name}: guest RAM is below the actual Driver archive boot floor"
             )));
@@ -330,24 +396,20 @@ pub fn retain_oci_prepared(
             .ok_or_else(|| {
                 Error::Integrity("normal Driver OCI filesystem was not retained".into())
             })?;
-        let filesystem =
-            store.materialize(filesystem, &scratch.path().join("filesystem").join(name))?;
-        boots.insert(name.clone(), artifact(&boot)?);
+        boots.insert(name.clone(), boot);
         let mut configs = BTreeMap::new();
         for mount in &service.configs {
             let digest = inputs
                 .auxiliary
                 .get(&format!("config/{}", mount.source))
                 .ok_or_else(|| Error::Integrity("prepared config content missing".into()))?;
-            let path =
-                store.materialize(digest, &scratch.path().join("configs").join(&mount.source))?;
-            configs.insert(mount.target.clone(), path);
+            configs.insert(mount.target.clone(), stored(store, digest)?);
         }
         let (machine, environment) = MachineInputs {
             name,
             number: machine_number(simulation, name)?,
             memory_bytes,
-            filesystem: &filesystem,
+            filesystem: stored(store, filesystem)?,
             launch: &image.launch,
             configs,
             allow_crashes: service.allow_crashes,
@@ -363,16 +425,16 @@ pub fn retain_oci_prepared(
     let oracle = machines
         .remove(&simulation.check.service)
         .ok_or_else(|| Error::Integrity("prepared oracle machine missing".into()))?;
-    let inventory = if let Some(qemu) = &runtime.qemu {
+    let inventory = if runtime.tcg() {
         wire::Inventory::Tcg {
             policy: None,
-            executable: artifact(qemu)?,
-            kernel: artifact(&root.join("kernel"))?,
-            init: artifact(&root.join("init"))?,
-            command_line: artifact(&root.join("command-line"))?,
-            firmware: artifact(&root.join("firmware"))?,
-            runtime: artifact(&runtime.archive())?,
-            formatter: Some(artifact(&root.join("mke2fs"))?),
+            executable: file("qemu")?,
+            kernel: file("kernel")?,
+            init: file("init")?,
+            command_line: file("command-line")?,
+            firmware: file("firmware")?,
+            runtime: file("package")?,
+            formatter: Some(file("mke2fs")?),
             environments,
             boot_archives: boots,
             epoch_seconds: inputs
@@ -382,13 +444,13 @@ pub fn retain_oci_prepared(
     } else {
         wire::Inventory::Pv {
             policy: None,
-            executable: artifact(&engine)?,
-            kernel: artifact(&root.join("kernel"))?,
-            init: artifact(&root.join("init"))?,
-            command_line: artifact(&root.join("command-line"))?,
-            progress: artifact(&root.join("progress.tar"))?,
-            runtime: artifact(&runtime.archive())?,
-            formatter: Some(artifact(&root.join("mke2fs"))?),
+            executable: stored(store, inputs.executable()?)?,
+            kernel: file("kernel")?,
+            init: file("init")?,
+            command_line: file("command-line")?,
+            progress: file("progress.tar")?,
+            runtime: file("package")?,
+            formatter: Some(file("mke2fs")?),
             environments,
             boot_archives: boots,
             progress_budget: simulation.simulator.progress_budget,

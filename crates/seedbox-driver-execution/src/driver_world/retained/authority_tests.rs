@@ -512,3 +512,55 @@ fn spawned_machines_join_the_retained_manifest_once_by_name() {
     retain_spawned(&mut inputs, vec![(spawned(other), environment)], &store).unwrap();
     assert_eq!(inputs.auxiliary, before);
 }
+
+#[test]
+fn stored_artifacts_retain_by_reference_only_when_the_store_holds_them() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(root.path().join("store"));
+    let (inputs, prepared, artifact) = fixture(root.path(), CpuBackend::Pv);
+    let mut from_paths = inputs.clone();
+    retain_prepared(&mut from_paths, &prepared, &store).unwrap();
+    // A reference to a stored object retains the same closure without its source.
+    fs::remove_file(&artifact.artifact).unwrap();
+    let referenced = |artifact: Artifact| {
+        let mut prepared = prepared.clone();
+        visit(&mut prepared, |slot| {
+            *slot = artifact.clone();
+            Ok(())
+        })
+        .unwrap();
+        prepared
+    };
+    let stored = Artifact {
+        artifact: format!("asset:{}", artifact.sha256),
+        ..artifact.clone()
+    };
+    let mut from_store = inputs.clone();
+    retain_prepared(&mut from_store, &referenced(stored.clone()), &store).unwrap();
+    assert_eq!(from_store.auxiliary, from_paths.auxiliary);
+    // It must name a complete object of its encoded length.
+    let error = retain_prepared(
+        &mut inputs.clone(),
+        &referenced(Artifact {
+            length: stored.length + 1,
+            ..stored.clone()
+        }),
+        &store,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("encoded length differs"),
+        "{error}"
+    );
+    let absent = ContentDigest::of(b"never stored");
+    assert!(retain_prepared(
+        &mut inputs.clone(),
+        &referenced(Artifact {
+            sha256: absent.hex().into(),
+            artifact: format!("asset:{}", absent.hex()),
+            ..stored
+        }),
+        &store,
+    )
+    .is_err());
+}
