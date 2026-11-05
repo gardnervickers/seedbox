@@ -67,14 +67,22 @@ impl Worker {
             return Err("PV run requires a Run request".into());
         };
         *count = frames.len() as u64;
+        let perf_start = std::time::Instant::now();
         send(&mut self.input, &request)?;
         wire::send_frames(&mut self.input, frames)?;
-        match self.answer()? {
+        let result = match self.answer()? {
             Response::Stopped { time, stop, writes } => {
                 Ok((time, stop, wire::receive_writes(&mut self.output, writes)?))
             }
             _ => Err("PV worker returned unexpected run response".into()),
-        }
+        };
+        super::perf::add(&super::perf::C.client_runs, 1);
+        super::perf::add(
+            &super::perf::C.client_ipc_ns,
+            super::perf::since(perf_start),
+        );
+        super::perf::maybe_dump("pvclient");
+        result
     }
     pub(super) fn terminate(&mut self) -> Result<()> {
         if self

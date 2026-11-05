@@ -326,14 +326,22 @@ impl<B: Backend> Machine<B> {
         }
         self.state.idle = false;
         self.prepare()?;
+        let mut perf_handle = std::time::Instant::now();
         loop {
+            super::perf::add(&super::perf::C.handle_ns, super::perf::since(perf_handle));
+            let perf_enter = std::time::Instant::now();
             let exit = self.native.enter()?;
+            super::perf::add(&super::perf::C.enters, 1);
+            super::perf::add(&super::perf::C.enter_ns, super::perf::since(perf_enter));
+            perf_handle = std::time::Instant::now();
             // Host preemption/cancellation is invisible to simulated state.
             if matches!(exit, Exit::Interrupted) {
+                super::perf::add(&super::perf::C.exit_interrupted, 1);
                 continue;
             }
             // Backend maintenance exits are not guest rendezvous either.
             if self.maintenance(&exit)? {
+                super::perf::add(&super::perf::C.exit_maintenance, 1);
                 continue;
             }
             // Only a real semantic guest rendezvous invalidates reservations.
@@ -357,6 +365,16 @@ impl<B: Backend> Machine<B> {
                     if width != 8 || !write {
                         return Err("PV clockevent access".into());
                     }
+                    super::perf::add(
+                        match address - EVENT_MMIO {
+                            0 => &super::perf::C.exit_clock_arm,
+                            8 => &super::perf::C.exit_clock_ack,
+                            16 => &super::perf::C.exit_idle,
+                            24 => &super::perf::C.exit_yield,
+                            _ => &super::perf::C.exit_clock_other,
+                        },
+                        1,
+                    );
                     effect = self.clock_event(address - EVENT_MMIO, value, upto, breaks)?;
                 }
                 Exit::Mmio {
@@ -368,6 +386,7 @@ impl<B: Backend> Machine<B> {
                     if width != 4 {
                         return Err("virtio MMIO requires 32 bits".into());
                     }
+                    super::perf::add(&super::perf::C.exit_lifecycle, 1);
                     let offset = address - LIFECYCLE_MMIO;
                     if write {
                         unsafe {
@@ -391,6 +410,7 @@ impl<B: Backend> Machine<B> {
                     if width != 4 {
                         return Err("virtio MMIO requires 32 bits".into());
                     }
+                    super::perf::add(&super::perf::C.exit_disk, 1);
                     let offset = address - DISK_MMIO;
                     let block = self.block.as_mut().expect("disk window mapped");
                     if write {
@@ -413,6 +433,14 @@ impl<B: Backend> Machine<B> {
                 } if self.state.net.is_some() && (NET_MMIO..=NET_END).contains(&address) => {
                     let offset = address - NET_MMIO;
                     let net = self.state.net.as_mut().expect("NIC window mapped");
+                    super::perf::add(
+                        if write {
+                            &super::perf::C.exit_net_write
+                        } else {
+                            &super::perf::C.exit_net_read
+                        },
+                        1,
+                    );
                     if write {
                         let now = self.state.now;
                         unsafe {
@@ -424,7 +452,10 @@ impl<B: Backend> Machine<B> {
                         effect.response = Some(net.read(offset, width)? as u64);
                     }
                 }
-                exit => effect = self.platform(exit, upto)?,
+                exit => {
+                    super::perf::add(&super::perf::C.exit_platform, 1);
+                    effect = self.platform(exit, upto)?
+                }
             }
             self.interrupts()?;
             self.native.complete(effect.response)?;
@@ -756,7 +787,12 @@ pub(crate) fn serve() -> Result<()> {
     let mut input = stdin.lock();
     let mut output = stdout.lock();
     let mut machine: Option<Machine> = None;
+    let mut perf_wait = std::time::Instant::now();
     while let Some(request) = protocol::receive(&mut input)? {
+        super::perf::add(&super::perf::C.wait_ns, super::perf::since(perf_wait));
+        super::perf::add(&super::perf::C.requests, 1);
+        let perf_request = std::time::Instant::now();
+        let perf_run = matches!(request, Request::Run { .. });
         // A Run's frames follow it on the pipe; read them before running so
         // a failed run cannot desynchronize the protocol.
         let frames = match &request {
@@ -851,6 +887,12 @@ pub(crate) fn serve() -> Result<()> {
                 breaks,
             } => {
                 let vm = machine.as_mut().ok_or("PV run before boot")?;
+                super::perf::add(&super::perf::C.runs, 1);
+                if now == upto {
+                    super::perf::add(&super::perf::C.zero_runs, 1);
+                }
+                super::perf::add(&super::perf::C.frames_in, frames.len() as u64);
+                let perf_before = vm.state.now.max(now);
                 let stop = vm.run(
                     now,
                     upto,
@@ -860,6 +902,18 @@ pub(crate) fn serve() -> Result<()> {
                     frames,
                     &breaks,
                 )?;
+                super::perf::add(
+                    &super::perf::C.sim_ns,
+                    vm.state.now.saturating_sub(perf_before),
+                );
+                super::perf::add(
+                    match stop {
+                        Stop::Horizon => &super::perf::C.stop_horizon,
+                        Stop::Blocked(_) => &super::perf::C.stop_blocked,
+                        _ => &super::perf::C.stop_other,
+                    },
+                    1,
+                );
                 vm.output.clear();
                 let taken = std::mem::take(&mut vm.state.writes);
                 let count = taken.len() as u64;
@@ -903,8 +957,14 @@ pub(crate) fn serve() -> Result<()> {
         };
         protocol::send(&mut output, &response)?;
         if let Some(writes) = writes {
+            super::perf::add(&super::perf::C.writes_out, writes.len() as u64);
             super::wire::send_writes(&mut output, &writes)?;
         }
+        if perf_run {
+            super::perf::add(&super::perf::C.run_ns, super::perf::since(perf_request));
+            super::perf::maybe_dump("pvworker");
+        }
+        perf_wait = std::time::Instant::now();
     }
     Ok(())
 }

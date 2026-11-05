@@ -111,6 +111,7 @@ where
                 "Driver worker is unusable after a prior execution/publication failure",
             ));
         }
+        let perf_start = std::time::Instant::now();
         let result = (|| {
             let mut facts = Facts::default();
             let batch = self.driver.drain_observations();
@@ -179,6 +180,10 @@ where
             self.publisher.batch(&mut self.state, &self.names, batch)?;
             Ok(facts)
         })();
+        seedbox_driver::perf::add(
+            &seedbox_driver::perf::C.flush_ns,
+            seedbox_driver::perf::since(perf_start),
+        );
         if result.is_err() {
             self.failed = true;
             self.terminal = true;

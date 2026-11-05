@@ -62,7 +62,15 @@ where
         let offered_commands = self.offered_commands(ids);
         let offered_stops = self.offered_stops(ids);
         let (bounds, views) = self.batch_views(ids, now, upto)?;
+        crate::perf::add(&crate::perf::C.batches, 1);
+        crate::perf::add(&crate::perf::C.batch_machines, ids.len() as u64);
+        if upto == now {
+            crate::perf::add(&crate::perf::C.zero_batches, 1);
+            crate::perf::add(&crate::perf::C.zero_batch_machines, ids.len() as u64);
+        }
+        let perf_start = std::time::Instant::now();
         let reports = self.execute_batch(views, &bounds)?;
+        crate::perf::add(&crate::perf::C.execute_ns, crate::perf::since(perf_start));
         // Validate each stop in its machine's time base, then convert back.
         // The conversion returns the earliest simulation time whose machine
         // time reaches the reported one, so nothing is reported early, and a
@@ -168,6 +176,7 @@ where
             let mut outputs = Vec::new();
             let result = send.clone();
             if let Err(error) = self.workers.submit(id.0, move |context| {
+                let perf_run = std::time::Instant::now();
                 let stopped = catch_unwind(AssertUnwindSafe(|| {
                     machine.run(
                         &mut RunContext {
@@ -183,7 +192,8 @@ where
                 }))
                 .map_err(|_| Error::Panicked { id })
                 .and_then(|result| result.map_err(|source| Error::Machine { id, source }));
-                let _ = result.send((id, machine, rng, inbox.len(), outputs, stopped));
+                let perf_run = crate::perf::since(perf_run);
+                let _ = result.send((id, machine, rng, inbox.len(), outputs, (stopped, perf_run)));
             }) {
                 submission_error = Some(error);
                 break;
@@ -194,8 +204,12 @@ where
         // Results are ordered by identity, never by worker completion time.
         let mut results: Vec<_> = receive.into_iter().collect();
         results.sort_by_key(|(id, _, _, _, _, _)| *id);
+        let perf_max = results.iter().map(|r| r.5 .1).max().unwrap_or(0);
+        let perf_sum: u64 = results.iter().map(|r| r.5 .1).sum();
+        crate::perf::add(&crate::perf::C.run_ns_max_sum, perf_max);
+        crate::perf::add(&crate::perf::C.run_ns_sum, perf_sum);
         let mut reports = Vec::with_capacity(results.len());
-        for (id, machine, rng, remaining, outputs, stopped) in results {
+        for (id, machine, rng, remaining, outputs, (stopped, _)) in results {
             let entry = &mut self.execution.machines[id.0];
             entry.machine = Some(machine);
             entry.rng = Some(rng);

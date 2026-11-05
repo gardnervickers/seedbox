@@ -875,6 +875,9 @@ where
                 waking.push(MachineId(index));
             }
         }
+        if !waking.is_empty() {
+            crate::perf::add(&crate::perf::C.timer_wake_batches, 1);
+        }
         self.run_batch(&waking, now)?;
         if !waking.is_empty() {
             self.commit_boundary()?;

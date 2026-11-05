@@ -958,6 +958,8 @@ where
         external_work: bool,
     ) -> Result<StepOutcome, Error<M::Error>> {
         self.check_valid()?;
+        let perf_start = Instant::now();
+        let perf_at = self.now();
         let result = (|| {
             if upto < self.now() {
                 return Err(Error::PastTime {
@@ -995,7 +997,20 @@ where
             }
             Ok(outcome)
         })();
-        self.finish_execution(result)
+        let result = self.finish_execution(result);
+        crate::perf::add(&crate::perf::C.steps, 1);
+        crate::perf::add(&crate::perf::C.step_ns, crate::perf::since(perf_start));
+        crate::perf::add(
+            &crate::perf::C.sim_ns,
+            self.now().as_nanos().saturating_sub(perf_at.as_nanos()),
+        );
+        match &result {
+            Ok(StepOutcome::Finished { .. } | StepOutcome::Stopped { .. }) | Err(_) => {
+                crate::perf::final_dump()
+            }
+            _ => crate::perf::maybe_dump(),
+        }
+        result
     }
 
     /// Share the confirmed-prefix and poisoning policy with due-only admission.
@@ -1025,6 +1040,14 @@ where
     }
 
     fn commit_boundary(&mut self) -> Result<(), Error<M::Error>> {
+        let perf_start = Instant::now();
+        let result = self.commit_boundary_inner();
+        crate::perf::add(&crate::perf::C.commits, 1);
+        crate::perf::add(&crate::perf::C.commit_ns, crate::perf::since(perf_start));
+        result
+    }
+
+    fn commit_boundary_inner(&mut self) -> Result<(), Error<M::Error>> {
         self.execution.boundary_index = self
             .execution
             .boundary_index
@@ -1046,6 +1069,14 @@ where
         }
         // Stable sorting preserves each machine's emission order at one time.
         outputs.sort_by_key(|output| (output.at, output.machine));
+        crate::perf::add(&crate::perf::C.outputs, outputs.len() as u64);
+        crate::perf::add(
+            &crate::perf::C.frames_routed,
+            outputs
+                .iter()
+                .filter(|o| matches!(o.payload, Response::TransmitFrame { .. }))
+                .count() as u64,
+        );
         self.route_frames(&outputs)?;
         let terminal = self.oracle_terminal(&outputs);
         for output in &outputs {
@@ -1522,6 +1553,7 @@ where
             return Ok(true);
         }
         let receivers: Vec<_> = receivers.into_iter().collect();
+        crate::perf::add(&crate::perf::C.frame_batches, 1);
         if let Err(error) = self.run_batch(&receivers, now) {
             self.uncertain_failure();
             return Err(error);

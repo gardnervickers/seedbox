@@ -33,12 +33,14 @@
 //! Linux ARM64 KVM snapshots are unsupported.
 mod boot;
 mod client;
+// TEMPORARY measurement counters (not for merge).
 mod codec;
 mod evidence;
 mod execution;
 mod factory;
 #[cfg(test)]
 mod guest;
+pub(crate) mod perf;
 mod policy;
 mod protocol;
 mod retained;
