@@ -129,7 +129,7 @@ fn fresh_store() -> Store {
 impl Device {
     fn new() -> Self {
         Self {
-            block: Block::new(fresh_store()),
+            block: Block::new(fresh_store(), Default::default()),
             ram: vec![0; RAM],
         }
     }
@@ -173,7 +173,7 @@ impl Device {
         let mut store = fresh_store();
         store.replace_overlays(&saved.overlays).unwrap();
         let transport = serde_json::from_slice(&saved.transport).unwrap();
-        self.block = Block::restore(transport, store);
+        self.block = Block::restore(transport, store, Default::default());
         self.ram = saved.ram.clone();
     }
 }
@@ -733,7 +733,7 @@ fn single(
     spans: &[(usize, usize, bool)],
 ) -> (Device, Vec<u8>) {
     let mut device = Device::new();
-    device.block = Block::new(store.clone());
+    device.block = Block::new(store.clone(), Default::default());
     let l = LAYOUTS[0];
     device.negotiate(l);
     for (at, bytes) in stores {

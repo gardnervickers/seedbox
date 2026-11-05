@@ -21,6 +21,7 @@ fn header(memory: u64) -> Capture {
         },
         architecture: architecture(),
         block: None,
+        disk_faults: None,
     }
 }
 fn inputs(memory: u64) -> BootInputs {

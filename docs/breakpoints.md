@@ -3,8 +3,8 @@
 Breakpoints let a program hand control to the oracle at a point it chooses. A
 breakpoint only suspends a machine; the oracle decides what to do. They will
 replace the oracle's triggers (`arm_trigger`, `cancel_trigger`), which weld a
-watch to one fault and report nothing back. Write-to-file breakpoints work on
-PV today; removing triggers and `break_on_block_request` are still to come
+watch to one fault and report nothing back. Write-to-file breakpoints and
+`break_on_block_request` work on PV today; removing triggers is still to come
 (see [Order of work](#order-of-work)).
 
 ## The model
@@ -41,7 +41,8 @@ device is absent, so instrumented code checks for it once and skips the write.
 
 ## Hits
 
-Each hit has a `break_id`, a `source` (`program`; later also `block_request`), the `machine` and its `boot`, and `at_ns`, the projected simulation
+Each hit has a `break_id`, a `source` (`program` or `block_request`), its
+`name`, the `machine` and its `boot`, and `at_ns`, the projected simulation
 time of the hit. A hit becomes visible to the oracle after the round that
 contains it commits. Hits are numbered in committed order, not in the order
 workers reply, and `wait_break` returns the oldest one not yet returned. Hits
@@ -65,10 +66,10 @@ are not resumed and run no further guest work; their hits end with
 
 | Op | Arguments | Result |
 | --- | --- | --- |
-| `declare_breaks` | `names` | Replaces the declared set for future hits. |
+| `declare_breaks` | `names` | Replaces the declared set for future hits. `block_request` is reserved for block request hits and refused. |
 | `wait_break` | `timeout_ns` | Parks until a hit is pending or the timeout passes. Returns the oldest pending hit, or `{}` on timeout. |
 | `resume_break` | `break_id` | The machine runs again and its `write` returns. |
-| `break_on_block_request` | `machine`, `op`, `nth` | Planned (step 4). One-shot: holds that request unwritten and suspends the machine. |
+| `break_on_block_request` | `target`, `request`, `nth` | One-shot: holds the target's `nth` disk request of kind `request` (`read`, `write`, `flush`, `any`) unwritten and suspends the machine there. Its hit is named `block_request` and also carries `request` and `nth`; see [faults](faults.md#breakpoint-on-a-block-request). |
 
 `wait_break` parks in Driver state the way `sleep` does. It never blocks the
 Driver thread, and its timeout counts from the commit that admitted it.
@@ -170,11 +171,6 @@ fault the oracle used to arm ahead of time, it now applies in its handler.
 
 1. Done: several oracle connections.
 2. Done: write-to-file breakpoints, end to end on PV.
-3. Remove triggers.
-4. `break_on_block_request`, built on #375's held block request, with the
+3. Done: `break_on_block_request`, with the held request's in-order
    continuation on resume.
-
-#375 implements the `block_request` trigger on PV, and step 3 removes the code
-it extends. Its device hold and held machine state carry over into step 4.
-That step adds the in-order continuation on resume. Its trigger-table and `arm_trigger` changes are
-replaced.
+4. Remove triggers.

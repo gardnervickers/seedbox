@@ -64,7 +64,7 @@ fn cold_mode(full: bool) -> Snapshot {
     w.boolean(false).unwrap();
     w.boolean(false).unwrap();
     w.u64(0).unwrap(); // declared breakpoints
-                       // Independent version3 policy/owner/full+execution-cache record, not private Rust inclusion.
+                       // Independent version 1 policy/owner/full+execution-cache record, not private Rust inclusion.
     w.boolean(true).unwrap();
     w.string("node").unwrap();
     w.u64(42).unwrap();
@@ -82,7 +82,10 @@ fn cold_mode(full: bool) -> Snapshot {
     w.boolean(false).unwrap(); // full cache
     w.boolean(false).unwrap(); // actual execution endpoint
     w.boolean(false).unwrap(); // retiring witness
-    w.u64(0).unwrap();
+    w.u64(0).unwrap(); // pending reports
+    for _ in 0..3 {
+        w.u64(0).unwrap(); // device faults, holds and healed counts
+    }
     w.u8(0).unwrap();
     for n in [kernel.len() as u64, initrd.len() as u64, 0, 0, 0, 0] {
         w.u64(n).unwrap();
