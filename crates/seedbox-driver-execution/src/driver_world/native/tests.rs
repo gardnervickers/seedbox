@@ -157,7 +157,7 @@ fn tcg_codec_policy_and_name_refuse_before_native_reconstruction() {
                 allow_crashes: false,
             },
             machines: vec![],
-            spawnable: vec![],
+            spawned: vec![],
             quantum_ns: 1,
             network: Default::default(),
         },

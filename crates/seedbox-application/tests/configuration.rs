@@ -210,3 +210,50 @@ fn allow_crashes_reaches_the_submitted_configuration() {
     assert!(sim.services["workload"].allow_crashes);
     assert!(!sim.services["oracle"].allow_crashes);
 }
+
+#[test]
+fn a_spawn_spec_is_a_machines_entry_resolved_against_the_project() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join("workload")).unwrap();
+    std::fs::write(project.path().join("workload/Dockerfile"), "FROM scratch\n").unwrap();
+    std::fs::write(project.path().join("role"), "replica\n").unwrap();
+    let source = project.path().join("seedbox.yaml");
+    std::fs::write(&source, BASE).unwrap();
+    let simulation = config::load(&source, &BTreeMap::new()).unwrap();
+    let spec = serde_json::json!({
+        "build": {"context": "./workload"},
+        "environment": {"ROLE": "replica"},
+        "files": [{"source": "role", "target": "/etc/role"}],
+        "memoryMiB": 256,
+        "allowCrashes": true,
+    })
+    .to_string();
+    let architecture = seedbox_application::guest::Architecture::Amd64;
+    let (service, files) =
+        config::spawned_machine(&spec, "replica", &simulation, architecture).unwrap();
+    let root = project.path().canonicalize().unwrap();
+    match &service.source {
+        config::ImageSource::Build { context, .. } => assert_eq!(context, &root.join("workload")),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(service.environment["ROLE"].as_deref(), Some("replica"));
+    assert_eq!(service.memory_mb, Some(256));
+    assert!(service.allow_crashes);
+    assert_eq!(service.configs.len(), 1);
+    assert_eq!(service.configs[0].target, "/etc/role");
+    assert_eq!(files[&service.configs[0].source], root.join("role"));
+    for (name, spec) in [
+        (
+            "replica",
+            r#"{"image":"a","build":{"context":"./workload"}}"#,
+        ),
+        ("replica", r#"{"image":"a","standby":true}"#),
+        ("replica", r#""image""#),
+        ("Replica", r#"{"image":"a"}"#),
+    ] {
+        let error = config::spawned_machine(spec, name, &simulation, architecture)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&format!("spawn {name}")), "{error}");
+    }
+}

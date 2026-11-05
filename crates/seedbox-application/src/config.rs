@@ -50,6 +50,17 @@ pub fn parse_for_architecture(
     native_project::parse(doc, source, architecture)
 }
 
+/// Resolve the machine an oracle spawn asks for, with the files it names by
+/// config key. The spec is a `machines` entry of `simulation`'s seedbox.yaml.
+pub fn spawned_machine(
+    spec: &str,
+    name: &str,
+    simulation: &Simulation,
+    architecture: crate::guest::Architecture,
+) -> Result<(Service, BTreeMap<String, PathBuf>)> {
+    native_project::spawned(spec, name, simulation, architecture)
+}
+
 fn validation(path: &str, message: &str) -> Error {
     Error::Validation {
         path: path.into(),

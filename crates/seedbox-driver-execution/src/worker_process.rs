@@ -240,16 +240,29 @@ impl RunningWorker<crate::process_lifetime::OwnedExecution> {
     }
 }
 impl<P: ProcessLifetime> RunningWorker<P> {
+    #[cfg(test)]
     pub(crate) fn wait(
         self,
         cancellation: &CancellationToken,
         wall_time_ns: u64,
         parse_report: impl FnOnce(&[u8]) -> Result<ExecutionReport>,
     ) -> Result<ExecutionReport> {
+        self.wait_serving(cancellation, wall_time_ns, parse_report, || Ok(()))
+    }
+    /// Wait as [`Self::wait`] does, calling `serve` between samples to answer
+    /// requests the worker makes of its parent.
+    pub(crate) fn wait_serving(
+        self,
+        cancellation: &CancellationToken,
+        wall_time_ns: u64,
+        parse_report: impl FnOnce(&[u8]) -> Result<ExecutionReport>,
+        serve: impl FnMut() -> Result<()>,
+    ) -> Result<ExecutionReport> {
         self.wait_with_sampling(
             cancellation,
             wall_time_ns,
             parse_report,
+            serve,
             |worker| Ok(worker.started.elapsed()?),
             |worker| worker._endpoint.waited(),
         )
@@ -263,6 +276,7 @@ impl<P: ProcessLifetime> RunningWorker<P> {
         cancellation: &CancellationToken,
         wall_time_ns: u64,
         parse_report: impl FnOnce(&[u8]) -> Result<ExecutionReport>,
+        mut serve: impl FnMut() -> Result<()>,
         mut elapsed: impl FnMut(&Self) -> Result<Duration>,
         mut waited: impl FnMut(&Self) -> Result<Duration>,
     ) -> Result<ExecutionReport> {
@@ -291,6 +305,7 @@ impl<P: ProcessLifetime> RunningWorker<P> {
             if cancellation.is_cancelled() {
                 return Ok(incomplete(StopReason::Cancelled));
             }
+            serve()?;
             if elapsed(&self)?.saturating_sub(waited(&self)?) >= Duration::from_nanos(wall_time_ns)
             {
                 return Ok(incomplete(StopReason::WallTimeLimit));
@@ -650,6 +665,7 @@ mod tests {
                         token_ref,
                         100_000_000,
                         |_| panic!("unfinished worker report must not be read"),
+                        || Ok(()),
                         |_| {
                             let _ = sample_guard.remaining().expect("worker budget loop hung");
                             samples += 1;

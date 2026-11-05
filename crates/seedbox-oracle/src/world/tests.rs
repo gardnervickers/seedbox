@@ -221,6 +221,22 @@ fn disk_and_scheduler_faults_use_the_oracle_operations() {
 }
 
 #[test]
+fn spawn_sends_the_machine_name_and_its_seedbox_yaml_spec() {
+    let (directory, server) = serve(|_| ok(json!({})));
+    let mut world = GuestWorld::connect_to(directory.path().join("control.sock")).unwrap();
+    let spec = json!({"build": {"context": "./workload"}, "environment": {"ROLE": "replica"}});
+    world.spawn("replica", spec.clone()).unwrap();
+    // A spec that is not an object is refused before anything is sent.
+    assert!(world.spawn("other", json!("image")).is_err());
+    drop(world);
+    let requests = server.join().unwrap();
+    assert_eq!(
+        requests,
+        [json!({"version": 1, "id": 1, "op": "spawn", "machine": "replica", "spec": spec})]
+    );
+}
+
+#[test]
 fn an_uncorrelated_response_closes_the_connection() {
     let (directory, server) = serve(|_| {
         let mut response = ok(json!({"now_ns": 1}));

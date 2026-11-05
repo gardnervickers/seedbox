@@ -24,6 +24,8 @@ struct Log {
     runs: Vec<(usize, u64, u64)>,
     /// (machine, offered machine time, tag) of every accepted frame.
     received: Vec<(usize, u64, u8)>,
+    /// (machine, offered machine time, bytes) of every accepted frame.
+    frames: Vec<(usize, u64, Vec<u8>)>,
     /// (machine, offered machine time, payload) of every control reply.
     replies: Vec<(usize, u64, Vec<u8>)>,
 }
@@ -61,11 +63,10 @@ impl Machine for Net {
                 Request::ReceiveFrame { bytes } if !self.exited => {
                     assert_eq!(input.at.as_nanos(), start, "offered at adoption");
                     let tag = bytes[14];
-                    self.log
-                        .lock()
-                        .unwrap()
-                        .received
-                        .push((self.id, start, tag));
+                    let mut log = self.log.lock().unwrap();
+                    log.received.push((self.id, start, tag));
+                    log.frames.push((self.id, start, bytes.clone()));
+                    drop(log);
                     if let Some(to) = self.echo.filter(|_| tag < 60) {
                         let at = start + 1;
                         let index = self.sends.partition_point(|(t, _)| *t <= at);
@@ -222,7 +223,9 @@ fn world(
     let mut definitions = definitions.into_iter();
     let oracle = definitions.next().unwrap();
     let others: Vec<_> = definitions.by_ref().take(initial - 1).collect();
-    let spawnable: Vec<_> = definitions.collect();
+    let spawnable: Vec<_> = definitions
+        .map(crate::test_support::spawn_definition)
+        .collect();
     let driver = Driver::new(
         at(start),
         Duration::from_nanos(quantum),
@@ -497,6 +500,7 @@ fn spawned_machines_join_the_network_and_host_additions_stay_unattached() {
         MS,
         Action::Spawn {
             name: "fixture-1".into(),
+            spec: crate::test_support::SPAWN_SPEC.into(),
         },
     );
     barriers(&mut driver, 10 * MS);
@@ -532,6 +536,60 @@ fn spawned_machines_join_the_network_and_host_additions_stay_unattached() {
         .events
         .iter()
         .all(|event| !matches!(&event.kind, EventKind::Output(_))));
+}
+
+#[test]
+fn the_nameserver_answers_current_members_regardless_of_partitions() {
+    use super::fixture::owned::{dns_query, dns_reply};
+    let query = |id| dns_query(mac(1), [10, 0, 0, 1], "fixture-2", id);
+    let (mut driver, log) = world(
+        0,
+        10 * MS,
+        1,
+        NetworkConfig::default(),
+        vec![
+            spec(Some(1))
+                .send(MS, query(1))
+                .send(5 * MS, query(2))
+                .send(5 * MS, dns_query(mac(1), [10, 0, 0, 1], "FIXTURE-1", 3)),
+            spec(Some(2)),
+        ],
+        vec![spec(Some(3))],
+    )
+    .unwrap();
+    schedule(&mut driver, 0, partition(&[0], &[1]));
+    schedule(
+        &mut driver,
+        3 * MS,
+        Action::Spawn {
+            name: "fixture-2".into(),
+            spec: crate::test_support::SPAWN_SPEC.into(),
+        },
+    );
+    barriers(&mut driver, 10 * MS);
+    let replies: Vec<_> = log
+        .lock()
+        .unwrap()
+        .frames
+        .iter()
+        .map(|(machine, at, bytes)| (*machine, *at, dns_reply(bytes)))
+        .collect();
+    assert_eq!(
+        replies,
+        [
+            // Not yet spawned: NXDOMAIN after one network latency.
+            (0, 2 * MS, (1, 3, None)),
+            (0, 6 * MS, (2, 0, Some([10, 0, 0, 3]))),
+            // Partitioned from fixture-1, yet its name still resolves.
+            (0, 6 * MS, (3, 0, Some([10, 0, 0, 2]))),
+        ]
+    );
+    assert!(driver
+        .execution
+        .network
+        .counts()
+        .keys()
+        .all(|pair| pair.from != pair.to));
 }
 
 #[test]
@@ -578,11 +636,62 @@ fn duplicate_macs_are_rejected_before_the_factory_runs() {
         || Ok(()),
         oracle,
         vec![rest[0].clone()],
-        vec![rest[1].clone()],
+        vec![crate::test_support::spawn_definition(rest[1].clone())],
         NetworkConfig::default(),
         |_| panic!("factory ran"),
     );
     assert!(matches!(result, Err(Error::DuplicateMac(mac)) if mac.octets() == [2, 0, 0, 0, 0, 1]));
+}
+
+#[test]
+fn duplicate_addresses_are_rejected_before_the_factory_runs() {
+    let mut later = definition(1);
+    later.network = Some(
+        NetworkInterface::new(MacAddress::new(mac(2)).unwrap(), [10, 0, 0, 1].into(), 16).unwrap(),
+    );
+    let result = Driver::<Net>::new(
+        at(0),
+        Duration::from_nanos(10),
+        1,
+        crate::rng::SeededRng::new(0),
+        || Ok(()),
+        networked(0, Some(1)),
+        vec![],
+        vec![crate::test_support::spawn_definition(later)],
+        NetworkConfig::default(),
+        |_| panic!("factory ran"),
+    );
+    assert!(
+        matches!(result, Err(Error::DuplicateAddress(address)) if address.octets() == [10, 0, 0, 1])
+    );
+}
+
+#[test]
+fn definitions_cannot_claim_the_nameserver() {
+    let nameserver = |mac: [u8; 6], address: [u8; 4]| {
+        let mut definition = definition(1);
+        definition.network =
+            Some(NetworkInterface::new(MacAddress::new(mac).unwrap(), address.into(), 16).unwrap());
+        definition
+    };
+    for claimed in [
+        nameserver(seedbox_engine_core::dns::MAC, [10, 0, 0, 2]),
+        nameserver(mac(2), seedbox_engine_core::dns::ADDRESS),
+    ] {
+        let result = Driver::<Net>::new(
+            at(0),
+            Duration::from_nanos(10),
+            1,
+            crate::rng::SeededRng::new(0),
+            || Ok(()),
+            networked(0, Some(1)),
+            vec![],
+            vec![crate::test_support::spawn_definition(claimed)],
+            NetworkConfig::default(),
+            |_| panic!("factory ran"),
+        );
+        assert!(matches!(result, Err(Error::ReservedNameserver(name)) if name == "fixture-1"));
+    }
 }
 
 #[test]
@@ -878,31 +987,26 @@ fn partition_membership_is_rejected_before_allocation() {
             partition(&[0], &[2]),
             RejectionReason::InvalidRequest,
         ),
-        (
-            "unspawned",
-            Action::Partition {
-                left: vec![name("fixture-0")],
-                right: vec![name("fixture-3")],
-            },
-            RejectionReason::TargetUnavailable,
-        ),
     ];
     for (key, action, _) in &cases {
         named(&mut driver, 0, key, action.clone());
     }
     named(&mut driver, 0, "valid", partition(&[0], &[1]));
-    // Schedule-time validation still refuses unknown members.
-    assert!(matches!(
-        driver.with_barrier(|b| b.schedule(
-            at(0),
-            InputKey::new("unknown").unwrap(),
-            Action::Partition {
-                left: vec![name("nobody")],
-                right: vec![name("fixture-0")]
-            }
-        )),
-        Err(Error::UnknownName(_))
-    ));
+    // Schedule-time validation still refuses unknown members, including a
+    // provided spawn definition that no spawn has added yet.
+    for member in ["nobody", "fixture-3"] {
+        assert!(matches!(
+            driver.with_barrier(|b| b.schedule(
+                at(0),
+                InputKey::new("unknown").unwrap(),
+                Action::Partition {
+                    left: vec![name(member)],
+                    right: vec![name("fixture-0")]
+                }
+            )),
+            Err(Error::UnknownName(_))
+        ));
+    }
     driver.step(at(MS)).unwrap();
     let events = driver.drain_events();
     let rejected: Vec<_> = events

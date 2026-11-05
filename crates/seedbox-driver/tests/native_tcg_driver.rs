@@ -227,6 +227,7 @@ fn step(driver: &mut Driver<TcgMachine>, id: MachineId, now: &mut Timestamp, qua
         StepOutcome::Blocked { .. } => panic!("guest blocked without a timer"),
         StepOutcome::Waiting { .. }
         | StepOutcome::BeforeFault { .. }
+        | StepOutcome::NeedsMachine { .. }
         | StepOutcome::Stopped { .. } => panic!("unexpected playback control in test"),
     };
 }
@@ -614,6 +615,7 @@ mod machine {
                             }
                             StepOutcome::Waiting { .. }
                             | StepOutcome::BeforeFault { .. }
+                            | StepOutcome::NeedsMachine { .. }
                             | StepOutcome::Stopped { .. } => {
                                 panic!("unexpected playback control in test")
                             }

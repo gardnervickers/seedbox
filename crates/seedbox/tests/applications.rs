@@ -21,7 +21,8 @@ use support::{failure_capture, json_diff};
 // concurrent application behavior, guest property findings (with an allowed
 // crash and a machine's reboot), and an oracle's seeded fault profile as part
 // of the compared results.
-const REPEAT_WORKLOADS: [&str; 6] = [
+const REPEAT_WORKLOADS: [&str; 7] = [
+    "dns",
     "network-faults",
     "volume-crash",
     "clock-reboot",
@@ -238,6 +239,7 @@ applications! {
     clock_skew => "clock-skew",
     connections => "connections",
     device_faults => "device-faults",
+    dns => "dns",
     exclusives => "exclusives",
     key_value => "key-value",
     mac_capabilities => "mac-capabilities",

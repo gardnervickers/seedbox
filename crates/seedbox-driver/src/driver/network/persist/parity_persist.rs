@@ -248,12 +248,7 @@ impl Wire for Network {
 }
 
 impl Network {
-    pub(super) fn check_parity_persist(
-        &self,
-        n: usize,
-        _now: u64,
-        definitions: &[crate::definition::MachineDefinition],
-    ) -> Result<()> {
+    pub(super) fn check_parity_persist(&self, n: usize, _now: u64) -> Result<()> {
         require(
             self.global.latency_ns == self.config.latency_ns
                 && self.global.jitter_ns == self.config.jitter_ns
@@ -263,18 +258,13 @@ impl Network {
         self.global
             .validate(self.config.latency_ns)
             .map_err(|_| CodecError::Invalid("global network policy"))?;
-        let mut names: std::collections::BTreeSet<&str> = self
+        // Baselines name initial machines only, so their members exist.
+        let names: std::collections::BTreeSet<&str> = self
             .members
             .iter()
             .filter(|m| m.mac.is_some())
             .map(|m| m.name.as_str())
             .collect();
-        names.extend(
-            definitions
-                .iter()
-                .filter(|d| d.network.is_some())
-                .map(|d| d.name.as_str()),
-        );
         for ((a, b), policy) in &self.baselines {
             require(
                 a != b && names.contains(a.as_str()) && names.contains(b.as_str()),
