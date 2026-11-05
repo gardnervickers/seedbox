@@ -223,7 +223,9 @@ fn world(
     let mut definitions = definitions.into_iter();
     let oracle = definitions.next().unwrap();
     let others: Vec<_> = definitions.by_ref().take(initial - 1).collect();
-    let spawnable: Vec<_> = definitions.collect();
+    let spawnable: Vec<_> = definitions
+        .map(crate::test_support::spawn_definition)
+        .collect();
     let driver = Driver::new(
         at(start),
         Duration::from_nanos(quantum),
@@ -498,6 +500,7 @@ fn spawned_machines_join_the_network_and_host_additions_stay_unattached() {
         MS,
         Action::Spawn {
             name: "fixture-1".into(),
+            spec: crate::test_support::SPAWN_SPEC.into(),
         },
     );
     barriers(&mut driver, 10 * MS);
@@ -560,6 +563,7 @@ fn the_nameserver_answers_current_members_regardless_of_partitions() {
         3 * MS,
         Action::Spawn {
             name: "fixture-2".into(),
+            spec: crate::test_support::SPAWN_SPEC.into(),
         },
     );
     barriers(&mut driver, 10 * MS);
@@ -632,7 +636,7 @@ fn duplicate_macs_are_rejected_before_the_factory_runs() {
         || Ok(()),
         oracle,
         vec![rest[0].clone()],
-        vec![rest[1].clone()],
+        vec![crate::test_support::spawn_definition(rest[1].clone())],
         NetworkConfig::default(),
         |_| panic!("factory ran"),
     );
@@ -641,8 +645,8 @@ fn duplicate_macs_are_rejected_before_the_factory_runs() {
 
 #[test]
 fn duplicate_addresses_are_rejected_before_the_factory_runs() {
-    let mut standby = definition(1);
-    standby.network = Some(
+    let mut later = definition(1);
+    later.network = Some(
         NetworkInterface::new(MacAddress::new(mac(2)).unwrap(), [10, 0, 0, 1].into(), 16).unwrap(),
     );
     let result = Driver::<Net>::new(
@@ -653,7 +657,7 @@ fn duplicate_addresses_are_rejected_before_the_factory_runs() {
         || Ok(()),
         networked(0, Some(1)),
         vec![],
-        vec![standby],
+        vec![crate::test_support::spawn_definition(later)],
         NetworkConfig::default(),
         |_| panic!("factory ran"),
     );
@@ -682,7 +686,7 @@ fn definitions_cannot_claim_the_nameserver() {
             || Ok(()),
             networked(0, Some(1)),
             vec![],
-            vec![claimed],
+            vec![crate::test_support::spawn_definition(claimed)],
             NetworkConfig::default(),
             |_| panic!("factory ran"),
         );
@@ -983,31 +987,26 @@ fn partition_membership_is_rejected_before_allocation() {
             partition(&[0], &[2]),
             RejectionReason::InvalidRequest,
         ),
-        (
-            "unspawned",
-            Action::Partition {
-                left: vec![name("fixture-0")],
-                right: vec![name("fixture-3")],
-            },
-            RejectionReason::TargetUnavailable,
-        ),
     ];
     for (key, action, _) in &cases {
         named(&mut driver, 0, key, action.clone());
     }
     named(&mut driver, 0, "valid", partition(&[0], &[1]));
-    // Schedule-time validation still refuses unknown members.
-    assert!(matches!(
-        driver.with_barrier(|b| b.schedule(
-            at(0),
-            InputKey::new("unknown").unwrap(),
-            Action::Partition {
-                left: vec![name("nobody")],
-                right: vec![name("fixture-0")]
-            }
-        )),
-        Err(Error::UnknownName(_))
-    ));
+    // Schedule-time validation still refuses unknown members, including a
+    // provided spawn definition that no spawn has added yet.
+    for member in ["nobody", "fixture-3"] {
+        assert!(matches!(
+            driver.with_barrier(|b| b.schedule(
+                at(0),
+                InputKey::new("unknown").unwrap(),
+                Action::Partition {
+                    left: vec![name(member)],
+                    right: vec![name("fixture-0")]
+                }
+            )),
+            Err(Error::UnknownName(_))
+        ));
+    }
     driver.step(at(MS)).unwrap();
     let events = driver.drain_events();
     let rejected: Vec<_> = events

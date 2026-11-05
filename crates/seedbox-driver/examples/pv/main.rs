@@ -123,6 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             StepOutcome::Blocked { .. } => return Err("PV guests blocked without a timer".into()),
             StepOutcome::Waiting { .. }
             | StepOutcome::BeforeFault { .. }
+            | StepOutcome::NeedsMachine { .. }
             | StepOutcome::Stopped { .. } => {
                 return Err("unexpected playback control in example".into());
             }

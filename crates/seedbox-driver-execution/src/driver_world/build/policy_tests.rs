@@ -40,7 +40,7 @@ fn request(inventory: Inventory, output: PathBuf) -> wire::Request {
                 allow_crashes: false,
             },
             machines: vec![],
-            spawnable: vec![],
+            spawned: vec![],
             quantum_ns: 1,
             network: Default::default(),
         },

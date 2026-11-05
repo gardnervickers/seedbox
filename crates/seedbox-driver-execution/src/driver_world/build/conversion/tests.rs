@@ -48,7 +48,12 @@ fn prepared(root: &std::path::Path) -> wire::Prepared {
         },
         oracle: machine("z"),
         machines: vec![machine("a"), machine("b")],
-        spawnable: vec![machine("later-z"), machine("later-a")],
+        spawned: ["later-z", "later-a"]
+            .map(|name| wire::Spawned {
+                spec: format!("{{\"image\":\"{name}\"}}"),
+                machine: machine(name),
+            })
+            .into(),
         quantum_ns: 1_000_000,
         network: Default::default(),
     }
@@ -61,7 +66,8 @@ fn exact_definition_contents_and_roles_keep_original_order() {
     input.machines[0].disk = Some(wire::Disk::Image {
         contents: artifact(root.path(), "disk", &[7; 1024]),
     });
-    input.spawnable[0].disk = Some(wire::Disk::Zero { bytes: 512 });
+    input.spawned[0].machine.disk = Some(wire::Disk::Zero { bytes: 512 });
+    input.spawned[1].machine.allow_crashes = true;
     let expected = (
         super::super::definition(&input.oracle).unwrap(),
         input
@@ -71,11 +77,14 @@ fn exact_definition_contents_and_roles_keep_original_order() {
             .collect::<Result<Vec<_>>>()
             .unwrap(),
         input
-            .spawnable
+            .spawned
             .iter()
-            .map(super::super::definition)
-            .collect::<Result<Vec<_>>>()
-            .unwrap(),
+            .map(|spawned| SpawnDefinition {
+                spec: spawned.spec.clone(),
+                definition: super::super::definition(&spawned.machine).unwrap(),
+                allow_crashes: spawned.machine.allow_crashes,
+            })
+            .collect::<Vec<_>>(),
     );
     for workers in [1, 2, 5, 99] {
         assert_eq!(definitions(&input, workers).unwrap(), expected);
@@ -96,7 +105,7 @@ fn bounded_overlap_joins_every_occurrence_and_keeps_first_error_on_panic() {
     let input = prepared(root.path());
     let inputs: Vec<_> = std::iter::once(&input.oracle)
         .chain(&input.machines)
-        .chain(&input.spawnable)
+        .chain(input.spawned.iter().map(|spawned| &spawned.machine))
         .collect();
     for failure in [0, 1, 2] {
         let entered = (Mutex::new(0), Condvar::new());
@@ -161,7 +170,7 @@ fn unchanged_sha_archive_and_disk_validation_rejects_original_first_bad_input() 
     for input in cases {
         let expected = std::iter::once(&input.oracle)
             .chain(&input.machines)
-            .chain(&input.spawnable)
+            .chain(input.spawned.iter().map(|spawned| &spawned.machine))
             .map(super::super::definition)
             .collect::<Result<Vec<_>>>()
             .unwrap_err()

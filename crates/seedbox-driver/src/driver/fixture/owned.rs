@@ -229,7 +229,7 @@ pub(in crate::driver) fn build_network_workers(
     let mut definitions: Vec<_> = (0..specs.len()).map(definition).collect();
     let oracle = definitions.remove(0);
     let spawnable = (specs.len()..specs.len() + spawn.len())
-        .map(definition)
+        .map(|n| crate::test_support::spawn_definition(definition(n)))
         .collect();
     let all: BTreeMap<_, _> = specs
         .into_iter()

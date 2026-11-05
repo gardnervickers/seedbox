@@ -37,6 +37,11 @@ wire_struct!(MachineDefinition {
     disk,
     network
 });
+wire_struct!(crate::driver::SpawnDefinition {
+    spec,
+    definition,
+    allow_crashes
+});
 wire_struct!(Resources { memory_bytes });
 wire_struct!(PreparedApplication { filesystem, launch });
 wire_struct!(Launch {

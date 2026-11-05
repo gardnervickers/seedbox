@@ -24,7 +24,7 @@ pub struct NetworkPair {
 /// The entire policy replaces the global policy for this ordered pair (including
 /// an explicit absence of bandwidth), rather than inheriting individual fields.
 // Named so shared links can be set up independent of machine construction
-// order, including definitions that are spawned later.
+// order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkPolicy {
     pub from: String,

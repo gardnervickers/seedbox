@@ -138,7 +138,11 @@ fn world(
             .collect(),
         spawn
             .iter()
-            .map(|&n| seedbox_driver::test_support::definition(n))
+            .map(|&n| {
+                seedbox_driver::test_support::spawn_definition(
+                    seedbox_driver::test_support::definition(n),
+                )
+            })
             .collect(),
         seedbox_driver::driver::NetworkConfig::default(),
         move |definition| Ok(script(&definition.name)),
@@ -329,6 +333,7 @@ fn invalid_inputs_error_without_changing_the_queue() {
                     key("spawn"),
                     Action::Spawn {
                         name: "target".into(),
+                        spec: seedbox_driver::test_support::SPAWN_SPEC.into(),
                     },
                 ),
             ];
@@ -337,7 +342,8 @@ fn invalid_inputs_error_without_changing_the_queue() {
             assert!(matches!(&errors[2], Err(Error::UnknownName(n)) if n == "nobody"));
             assert!(matches!(errors[3], Err(Error::InvalidDeadline(_))));
             assert!(matches!(errors[4], Err(Error::InvalidDeadline(_))));
-            assert!(matches!(&errors[5], Err(Error::UnknownName(n)) if n == "target"));
+            // A spawn cannot reuse a machine's name.
+            assert!(matches!(&errors[5], Err(Error::Control(_))));
             Ok(())
         })
         .unwrap();
@@ -735,6 +741,7 @@ fn mixed(workers: usize, by_name: bool) -> Vec<Event> {
             "spawn",
             Action::Spawn {
                 name: "spare".into(),
+                spec: seedbox_driver::test_support::SPAWN_SPEC.into(),
             },
         ),
         (
@@ -742,6 +749,7 @@ fn mixed(workers: usize, by_name: bool) -> Vec<Event> {
             "spawn-again",
             Action::Spawn {
                 name: "spare".into(),
+                spec: seedbox_driver::test_support::SPAWN_SPEC.into(),
             },
         ),
         (

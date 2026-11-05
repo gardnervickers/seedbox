@@ -248,6 +248,16 @@ impl Network {
         });
     }
 
+    pub(crate) fn has_mac(&self, mac: MacAddress) -> bool {
+        self.members.iter().any(|m| m.mac == Some(mac))
+    }
+
+    pub(crate) fn has_address(&self, address: std::net::Ipv4Addr) -> bool {
+        self.members
+            .iter()
+            .any(|m| m.address == Some(address.octets()))
+    }
+
     pub(crate) fn attached(&self, id: MachineId) -> bool {
         self.members.get(id.0).is_some_and(|m| m.mac.is_some())
     }

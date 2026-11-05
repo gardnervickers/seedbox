@@ -49,3 +49,16 @@ pub fn definition(name: impl Into<String>) -> MachineDefinition {
         network: None,
     }
 }
+
+/// The spec fixture spawns request: a host prepares any spec, so its text
+/// only has to match between the spawn and its definition.
+pub const SPAWN_SPEC: &str = "{}";
+
+/// `definition` as the host's answer to a spawn of [`SPAWN_SPEC`].
+pub fn spawn_definition(definition: MachineDefinition) -> crate::driver::SpawnDefinition {
+    crate::driver::SpawnDefinition {
+        spec: SPAWN_SPEC.into(),
+        definition,
+        allow_crashes: false,
+    }
+}

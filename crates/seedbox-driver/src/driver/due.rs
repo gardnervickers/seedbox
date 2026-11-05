@@ -62,16 +62,21 @@ struct Applied {
     effective: Option<EventKind>,
 }
 
+/// Why due work stopped before applying the FIFO front.
+pub(super) enum Hold {
+    /// Playback holds this admitted fault before its effect.
+    Fault(FaultRecord),
+    /// This spawn's definition has not been provided.
+    Machine(SpawnRequest),
+}
+
 impl<M> Driver<M>
 where
     M: Machine + Send + 'static,
     M::Context: 'static,
     M::Error: Send + 'static,
 {
-    pub(super) fn apply_due(
-        &mut self,
-        host_now: Instant,
-    ) -> Result<Option<FaultRecord>, Error<M::Error>> {
+    pub(super) fn apply_due(&mut self, host_now: Instant) -> Result<Option<Hold>, Error<M::Error>> {
         self.apply_due_mode(host_now, false)
     }
 
@@ -79,7 +84,7 @@ where
         &mut self,
         host_now: Instant,
         hold_paused: bool,
-    ) -> Result<Option<FaultRecord>, Error<M::Error>> {
+    ) -> Result<Option<Hold>, Error<M::Error>> {
         let result = self.apply_due_inner(host_now, hold_paused);
         // Facts of a final uncommitted item belong to the current barrier.
         let flushed = self.flush_events();
@@ -91,7 +96,7 @@ where
         &mut self,
         host_now: Instant,
         hold_paused: bool,
-    ) -> Result<Option<FaultRecord>, Error<M::Error>> {
+    ) -> Result<Option<Hold>, Error<M::Error>> {
         if self.execution.finished.is_some() {
             return Ok(None);
         }
@@ -179,15 +184,35 @@ where
         scheduled: &Scheduled,
         host_now: Instant,
         hold_paused: bool,
-    ) -> Result<ControlFlow<FaultRecord, Option<DispatchCheck>>, Error<M::Error>> {
+    ) -> Result<ControlFlow<Hold, Option<DispatchCheck>>, Error<M::Error>> {
         let Scheduled::Control(control::Event::Plan(crate::oracle::service::Plan::Effect {
             fault,
+            scope,
+            effect,
             ..
         })) = scheduled
         else {
             return Ok(ControlFlow::Continue(None));
         };
         let fault = *fault;
+        // A spawn waits, without dispatching, for the host to prepare its
+        // definition. Nothing is held: the next step checks again.
+        if *effect == crate::oracle::service::Effect::Spawn {
+            if let Some((name, _)) = scope.machine() {
+                if self.spawn_definition(name).is_none() {
+                    let reservation = self
+                        .execution
+                        .control
+                        .reservation(name)
+                        .ok_or_else(|| Error::Control("unreserved spawn".into()))?;
+                    return Ok(ControlFlow::Break(Hold::Machine(SpawnRequest {
+                        machine: reservation.id,
+                        name: name.to_owned(),
+                        spec: reservation.spec.clone(),
+                    })));
+                }
+            }
+        }
         let check = self
             .execution
             .control
@@ -205,7 +230,7 @@ where
                     .map_err(Error::Control)?;
                 self.playback
                     .hold(record.clone(), self.position(), host_now);
-                return Ok(ControlFlow::Break(record));
+                return Ok(ControlFlow::Break(Hold::Fault(record)));
             }
             if hold_paused && !was_held && self.playback.holds_unarmed_effect() {
                 let record = self
@@ -214,7 +239,7 @@ where
                     .pending_record(fault)
                     .map_err(Error::Control)?;
                 self.playback.held = Some(record.clone());
-                return Ok(ControlFlow::Break(record));
+                return Ok(ControlFlow::Break(Hold::Fault(record)));
             }
         }
         Ok(ControlFlow::Continue(Some(check)))

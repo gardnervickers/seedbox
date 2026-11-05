@@ -14,7 +14,7 @@ mod environment;
 pub use environment::{Environment, GuestLimits, NamedVolume};
 mod request;
 pub use request::{
-    Disk, Interface, Link, Machine, Network, Prepared, Process, Request, RuntimeBinding,
+    Disk, Interface, Link, Machine, Network, Prepared, Process, Request, RuntimeBinding, Spawned,
 };
 #[cfg(test)]
 mod tests;

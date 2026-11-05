@@ -107,7 +107,7 @@ impl Service {
         name: Option<String>,
     ) -> Result<HandleAdmission, PreparationError> {
         Ok(match command {
-            Command::Spawn { machine } => Self::prepare_spawn(adapter, machine)?,
+            Command::Spawn { machine, spec } => Self::prepare_spawn(adapter, machine, &spec)?,
             Command::Named { .. } => {
                 return Err(OperationError::invalid("nested named admission").into())
             }
@@ -209,13 +209,14 @@ impl Service {
             ),
         })
     }
-    /// Reserve a declared machine's construction; it joins as a fresh, unready
-    /// boot zero.
+    /// Reserve a new machine's construction; it joins as a fresh, unready
+    /// boot zero once the host has prepared its spec.
     fn prepare_spawn(
         adapter: &mut impl Adapter,
         machine: String,
+        spec: &str,
     ) -> Result<HandleAdmission, PreparationError> {
-        adapter.reserve_spawn(&machine)?;
+        adapter.reserve_spawn(&machine, spec)?;
         Ok((
             Subject::Machine(Facts {
                 name: machine,

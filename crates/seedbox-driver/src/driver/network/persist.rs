@@ -80,7 +80,7 @@ impl Network {
         &self,
         n: usize,
         now: u64,
-        definitions: &[crate::definition::MachineDefinition],
+        definitions: &[crate::driver::SpawnDefinition],
     ) -> crate::persistence::Result<()> {
         use crate::persistence::require;
         require(self.members.len() == n, "network members")?;
@@ -95,7 +95,7 @@ impl Network {
             }
         }
         for d in definitions {
-            if let Some(nic) = &d.network {
+            if let Some(nic) = &d.definition.network {
                 require(macs.insert(nic.mac()), "duplicate future MAC")?;
                 require(
                     addresses.insert(nic.ipv4().octets()),
@@ -160,7 +160,7 @@ impl Network {
             }
         }
         require(cuts == self.cuts, "partition cuts")?;
-        self.check_parity_persist(n, now, definitions)
+        self.check_parity_persist(n, now)
     }
 }
 

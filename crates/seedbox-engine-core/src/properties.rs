@@ -100,6 +100,11 @@ impl Ledger {
         }
     }
 
+    /// Allow crashes on a machine added after the run started.
+    pub fn allow_crashes(&mut self, machine: String) {
+        self.allow_crashes.insert(machine);
+    }
+
     /// Check a ledger decoded from a checkpoint against the bounds reduction
     /// keeps, so a restored run reduces exactly as the original would.
     pub fn validate(&self) -> Result<(), &'static str> {
