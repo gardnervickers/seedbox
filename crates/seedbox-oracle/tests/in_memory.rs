@@ -386,9 +386,9 @@ faults:
   - {kind: clock_skew, duration_ns: {min: 500000000, max: 3000000000}, max_offset_ns: 5000000000}
   - {kind: clock_drift, duration_ns: {min: 500000000, max: 3000000000}, max_rate_ppb: 1000000}
   - {kind: throttle, duration_ns: {min: 500000000, max: 3000000000}, factor_permille: 4000}
-  - {kind: disk_error, duration_ns: {min: 500000000, max: 3000000000}, op: write, ppm: 1000,
+  - {kind: disk_error, duration_ns: {min: 500000000, max: 3000000000}, request: write, ppm: 1000,
      targets: [n1, n2]}
-  - {kind: disk_latency, duration_ns: {min: 500000000, max: 3000000000}, op: flush,
+  - {kind: disk_latency, duration_ns: {min: 500000000, max: 3000000000}, request: flush,
      latency_ns: {min: 1000000, max: 20000000}, targets: [n1, n2]}
   - {kind: preempt, duration_ns: {min: 500000000, max: 3000000000}, ppm: 10000}
 "#;
@@ -603,4 +603,76 @@ fn heal_tries_every_fault_and_reports_the_first_failure() {
     // The refused fault is still in force, and the next heal ends it.
     profile.heal(&mut world).unwrap();
     assert_eq!(world.in_force(), 0);
+}
+
+/// A world whose engine lacks the guest yield hook: it refuses every
+/// preempt as unsupported, as x86_64 PV does.
+struct NoYield(Modelled);
+
+impl World for NoYield {
+    fn now_ns(&mut self) -> Result<u64, Error> {
+        self.0.now_ns()
+    }
+    fn sleep(&mut self, duration: Duration) -> Result<(), Error> {
+        self.0.sleep(duration)
+    }
+    fn apply(&mut self, action: &Action) -> Result<(), Error> {
+        match action {
+            Action::Preempt { .. } => Err("preempt: unsupported: no guest yield hook".into()),
+            _ => self.0.apply(action),
+        }
+    }
+}
+
+#[test]
+fn a_profile_can_skip_the_kinds_its_world_does_not_support() {
+    let mut refused = 0;
+    for seed in 0..20 {
+        // Without the option, an unsupported kind fails the run.
+        let mut world = NoYield(Modelled::new(|_, _| false));
+        let mut strict = profile();
+        let failed = strict.run(&mut world, &mut Rng::new(seed));
+        let before = world.0.applied.clone();
+        strict.heal(&mut world).unwrap();
+        // With it, the same seed applies the same faults up to that start,
+        // skips it, and never draws the kind again.
+        let mut world = NoYield(Modelled::new(|_, _| false));
+        let mut skipping = profile();
+        skipping.skip_unsupported = true;
+        skipping.run(&mut world, &mut Rng::new(seed)).unwrap();
+        assert_eq!(world.0.in_force(), 0);
+        let applied = &world.0.applied;
+        assert!(applied.iter().all(|(_, action)| action.name() != "preempt"));
+        match failed {
+            Ok(()) => assert_eq!(*applied, before),
+            Err(error) => {
+                assert_eq!(error.0, "preempt: unsupported: no guest yield hook");
+                assert_eq!(applied[..before.len()], before);
+                refused += 1;
+            }
+        }
+    }
+    assert!(refused > 0, "some seed draws preempt");
+}
+
+#[test]
+fn skipping_unsupported_kinds_still_fails_on_other_refusals_and_when_none_is_left() {
+    let mut skipping = profile();
+    skipping.skip_unsupported = true;
+    let mut world = NoYield(Modelled::new(|attempt, _| attempt == 9));
+    let error = skipping.run(&mut world, &mut Rng::new(7)).unwrap_err();
+    assert!(error.0.ends_with("invalid_state: refused"), "{error}");
+    skipping.heal(&mut world).unwrap();
+    assert_eq!(world.0.in_force(), 0);
+
+    let mut only = profile();
+    only.skip_unsupported = true;
+    only.faults.retain(|fault| fault.name() == "preempt");
+    let mut world = NoYield(Modelled::new(|_, _| false));
+    let error = only.run(&mut world, &mut Rng::new(7)).unwrap_err();
+    assert_eq!(
+        error.0,
+        "fault profile has no supported fault kind left: preempt: unsupported: no guest yield hook"
+    );
+    assert!(world.0.applied.is_empty());
 }

@@ -14,26 +14,25 @@ reset and applies to every incarnation until healed.
 
 | Action | Arguments | While active | Heal |
 | --- | --- | --- | --- |
-| `disk_error` | `op` (`read`, `write`, `flush`, `any`); `ppm`; `effect` (`eio` default, or `corrupt`); `scope` (`all` default, or `data`) | Selected requests fail with EIO before any disk effect, or succeed with one sector of seeded bytes. `data` spares the metadata ext4 lays out at format time, not metadata it allocates later; neither `corrupt` nor `data` selects flushes | Stops selecting; settles with `matched` and `affected` counts |
-| `disk_latency` | `op`; `latency_ns` 1 µs–1 s; `jitter_ns` up to 1 s | Requests complete late, in submission order, with their disk effect at completion; a crash loses the pending ones | Stops delaying; queued requests still complete at their times; settles with counts |
+| `disk_error` | `request` (`read`, `write`, `flush`, `any`); `ppm`; `effect` (`eio` default, or `corrupt`); `scope` (`all` default, or `data`) | Selected requests fail with EIO before any disk effect, or succeed with one sector of seeded bytes. `data` spares the metadata ext4 lays out at format time, not metadata it allocates later; neither `corrupt` nor `data` selects flushes | Stops selecting; settles with `matched` and `affected` counts |
+| `disk_latency` | `request`; `latency_ns` 1 µs–1 s; `jitter_ns` up to 1 s | Requests complete late, in submission order, with their disk effect at completion; a crash loses the pending ones | Stops delaying; queued requests still complete at their times; settles with counts |
 | `preempt` | `ppm` | The guest kernel yields at that rate of syscalls and progress charges. One per machine | Restores ordinary scheduling |
 
 Disk faults stack: each selects on its own stream and the first hit acts.
 A disk fault's counts cover every boot it applied to and arrive on its heal's
 settlement (`counts` on `faultChanged` and in the world view, and in
-`seedbox observe`); a preempt heal has none.
+`seedbox observe`) and in the oracle's heal reply; a preempt heal has none.
 
 ## From the oracle
 
 The oracle's RPC ([schema](../crates/seedbox-driver/src/oracle.rs)) has an
 operation for each, named after its action. It takes the action's arguments
 and a `target`, as `throttle` does, and replies with a handle that `heal`
-ends. Because `op` names the operation, a disk fault's request kind is
-`disk_op`:
+ends:
 
 ```json
-{"op": "disk_error", "target": {"machine": "db"}, "disk_op": "read", "ppm": 1000000, "scope": "data"}
-{"op": "disk_latency", "target": {"machine": "db"}, "disk_op": "flush", "latency_ns": 20000000}
+{"op": "disk_error", "target": {"machine": "db"}, "request": "read", "ppm": 1000000, "scope": "data"}
+{"op": "disk_latency", "target": {"machine": "db"}, "request": "flush", "latency_ns": 20000000}
 {"op": "preempt", "target": {"machine": "db"}, "ppm": 100000}
 {"op": "heal", "handle": "p1"}
 ```
@@ -46,11 +45,12 @@ which x86_64 PV does not provide"). Admission then follows the action's rules:
 disk faults stack, and a second `preempt` on a machine is `invalid_state`.
 As for every oracle fault, the target is another machine: the oracle's own
 is outside the failure model. The reply comes once the machine has installed
-the fault. A disk fault's heal
-replies with no result; its counts are on the heal's settlement. The Python
-client has `world.disk_error(target, op, ppm, effect=..., scope=...)`,
-`world.disk_latency(target, op, latency_ns, jitter_ns=...)` and
-`world.preempt(target, ppm)`, each returning a handle for `world.heal`.
+the fault. A disk fault's heal replies with its counts,
+`{"matched": ..., "affected": ...}`. The Python client has
+`world.disk_error(target, request, ppm, effect=..., scope=...)`,
+`world.disk_latency(target, request, latency_ns, jitter_ns=...)` and
+`world.preempt(target, ppm)`, each returning a handle for `world.heal`, which
+returns a disk fault's counts, as Rust's `GuestWorld::heal` does.
 
 ## Breakpoint on a block request
 
@@ -78,7 +78,7 @@ is both the fifth request and the second flush gives one hit with `request`
 `any` and `nth` 5, and both holds are gone.
 
 The Python client asks for it with
-`world.break_on_block_request(target, op, nth)` and serves the hit with
+`world.break_on_block_request(target, request, nth)` and serves the hit with
 `world.on_break("block_request", handler)`; Rust's `Control` has the same
 call. The handler's hit has `source`, `request` and `nth` (`hit.source`,
 `hit.request` and `hit.nth` in Python, `Hit::block_request` in Rust). No
@@ -98,7 +98,7 @@ Besides the oracle's calls, the faults reach a run as a definition's
 ```yaml
 overrides:
   - {id: slow-fsync, atNs: 1000000000,
-     action: {action: disk_latency, handle: slow, machine: db, op: flush, latency_ns: 20000000}}
+     action: {action: disk_latency, handle: slow, machine: db, request: flush, latency_ns: 20000000}}
   - {id: fast-fsync, atNs: 2000000000, action: {action: heal, handle: slow}}
 ```
 
@@ -137,7 +137,7 @@ shared [fault policy](../crates/seedbox-machine/src/machine/disk/fault.rs)
 beside it selects. The Driver installs a disk fault in its machine as a
 request carrying the handle record's identity and a seed it derives from the
 machine and the fault ID, so admission draws nothing. A fault matches by
-`op`, then by `scope`. `data` uses only the static ext4 layout, which the
+`request`, then by `scope`. `data` uses only the static ext4 layout, which the
 [reader](../crates/seedbox-machine/src/machine/disk/ext4.rs) computes from the
 disk's current bytes whenever a request needs it: superblocks and their
 backups, group descriptors and reserved GDT blocks, bitmaps, inode tables and

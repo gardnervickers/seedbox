@@ -1,9 +1,10 @@
 //! Fault-profile acceptance oracle. Each node (`node`) answers `ping` with
 //! `pong` on port 7000, and syncs a heartbeat to its volume, if it has one. The oracle (`oracle`) pings random nodes while the
 //! fault profile in `profile.yaml` runs as its nemesis, heals, then reads
-//! every node. It prints every action the world applied, and two checks
-//! decide the run: every node serves after the heal, and the profile ran
-//! without a refusal.
+//! every node. It prints every action the world applied or refused, and two
+//! checks decide the run: every node serves after the heal, and the profile
+//! ran and healed without a failure. It skips the kinds the engine refuses
+//! as unsupported.
 use seedbox_oracle::{
     nemesis::Profile, Checker, Checkers, Client, Completion, Error, FinalRead, History, Nemesis,
     Random, RandomExt, Read, Record, Recorder, Scenario, Validity, Verdict, World,
@@ -241,7 +242,7 @@ struct Ran(Arc<Mutex<Outcome>>);
 
 impl Checker<usize, (), ()> for Ran {
     fn name(&self) -> &str {
-        "the fault profile runs and heals without a refusal"
+        "the fault profile runs and heals without a failure"
     }
     fn check(&self, _: &[Record<usize, ()>], _: &[Read<()>]) -> Verdict {
         let outcome = self.0.lock().unwrap();
@@ -278,11 +279,7 @@ impl Scenario for Profiled {
         vec![Pinger, Pinger]
     }
     fn nemesis(&mut self) -> Box<dyn Nemesis> {
-        let mut profile: Profile = serde_yaml_ng::from_str(PROFILE).expect("profile.yaml parses");
-        // x86_64 PV has no guest yield hook, so it refuses preempt.
-        if cfg!(target_arch = "x86_64") {
-            profile.faults.retain(|fault| fault.name() != "preempt");
-        }
+        let profile: Profile = serde_yaml_ng::from_str(PROFILE).expect("profile.yaml parses");
         Box::new(Logged {
             profile,
             outcome: self.outcome.clone(),
