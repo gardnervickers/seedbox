@@ -33,10 +33,10 @@ fn decode(bytes: &[u8], reached: u64) -> Result<GuestBridge, CodecError> {
 }
 fn active() -> Value {
     let mut v = fixture();
-    v["codec"]["oracle"] = json!({"relay":4,"session":2,"public":1,"failed":false,"last_time":7,"pending":{"relay":4,"session":2,"request":1},"reply_prepared":false});
+    v["codec"]["oracle"] = json!({"relay":4,"session":2,"failed":false,"last_time":7,"sessions":[{"id":2,"public":1,"pending":{"relay":4,"session":2,"request":1},"reply_prepared":false}]});
     v["codec"]["last_time"] = json!(9);
     v["session_highwater"] = json!(5);
-    v["session"] = json!({"wire":2,"public":5});
+    v["sessions"] = json!([{"wire":2,"public":5}]);
     v
 }
 #[test]
@@ -48,7 +48,7 @@ fn exact_continuations_partial_commands_oracle_reset_and_superseded_preparations
     let mut reset = fixture();
     reset["session_highwater"] = json!(99);
     let mut prepared = active();
-    prepared["codec"]["oracle"]["reply_prepared"] = json!(true);
+    prepared["codec"]["oracle"]["sessions"][0]["reply_prepared"] = json!(true);
     prepared["prepared_replies"] =
         json!([{"relay":1,"session":1,"request":1},{"relay":4,"session":2,"request":1}]);
     for v in [fixture(), commands, reset, active(), prepared] {
@@ -119,32 +119,48 @@ fn reject_poison_actions_duplicate_pending_partial_time_and_correlation_relation
         }),
         ("oracle tuple", {
             let mut v = active();
-            v["codec"]["oracle"]["public"] = json!(0);
+            v["codec"]["oracle"]["relay"] = json!(0);
+            v
+        }),
+        ("unissued session", {
+            let mut v = active();
+            v["codec"]["oracle"]["sessions"][0]["id"] = json!(3);
+            v["codec"]["oracle"]["sessions"][0]["pending"]["session"] = json!(3);
+            v["sessions"][0]["wire"] = json!(3);
+            v
+        }),
+        ("session order", {
+            let mut v = active();
+            v["codec"]["oracle"]["sessions"] = json!([
+                {"id":2,"public":1,"pending":null,"reply_prepared":false},
+                {"id":1,"public":1,"pending":null,"reply_prepared":false}
+            ]);
+            v["sessions"] = json!([{"wire":2,"public":4},{"wire":1,"public":5}]);
             v
         }),
         ("pending correlation", {
             let mut v = active();
-            v["codec"]["oracle"]["pending"]["request"] = json!(2);
+            v["codec"]["oracle"]["sessions"][0]["pending"]["request"] = json!(2);
             v
         }),
         ("session absent", {
             let mut v = active();
-            v["session"] = Value::Null;
+            v["sessions"] = json!([]);
             v
         }),
         ("wire mapping", {
             let mut v = active();
-            v["session"]["wire"] = json!(3);
+            v["sessions"][0]["wire"] = json!(3);
             v
         }),
         ("public highwater", {
             let mut v = active();
-            v["session"]["public"] = json!(4);
+            v["sessions"][0]["public"] = json!(6);
             v
         }),
         ("prepared missing", {
             let mut v = active();
-            v["codec"]["oracle"]["reply_prepared"] = json!(true);
+            v["codec"]["oracle"]["sessions"][0]["reply_prepared"] = json!(true);
             v
         }),
         ("unprepared key", {
@@ -163,7 +179,7 @@ fn reject_poison_actions_duplicate_pending_partial_time_and_correlation_relation
         assert!(decode(&encode(v), 9).is_err(), "{label}");
     }
     let mut v = active();
-    v["codec"]["oracle"]["reply_prepared"] = json!(true);
+    v["codec"]["oracle"]["sessions"][0]["reply_prepared"] = json!(true);
     v["prepared_replies"] = json!([{"relay":4,"session":2,"request":1}]);
     let b = decode(&encode(v), 9).unwrap();
     assert!(b.validate_snapshot(9, true).is_err());

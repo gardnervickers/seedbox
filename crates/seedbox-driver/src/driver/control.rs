@@ -277,8 +277,6 @@ impl Control {
 }
 pub(super) struct View<'a, M> {
     pub(super) guest_controller: Option<MachineId>,
-    /// The engine running the machines, which decides capabilities.
-    pub(super) engine: Option<crate::driver::faults::Engine>,
     network: Option<&'a super::network::Network>,
     entries: &'a mut [Observed],
     machines: &'a [Entry<M>],
@@ -331,19 +329,6 @@ impl<M> Adapter for View<'_, M> {
     }
     /// A service name is its machine's name, so both wire forms resolve the
     /// same display name; internal re-resolution uses canonical keys.
-    fn require_capability(
-        &self,
-        name: &str,
-        capability: crate::driver::faults::Capability,
-    ) -> Result<(), OperationError> {
-        crate::driver::faults::require_capability(self.engine, name, capability).map_err(
-            |message| OperationError {
-                code: crate::oracle::ErrorCode::Unsupported,
-                message,
-                handle: None,
-            },
-        )
-    }
     fn resolve(&self, target: &Target) -> Result<Facts, OperationError> {
         let index = match target {
             Target::Machine(name) | Target::Service(name) => {
@@ -467,7 +452,7 @@ impl<M> Adapter for View<'_, M> {
         use crate::oracle::{
             observation::ApplicationCondition,
             service::{Process, Vm},
-            triggers::{Status, TriggerAction, Watch},
+            triggers::{Status, TriggerAction},
         };
         let network = self
             .network
@@ -540,9 +525,6 @@ impl<M> Adapter for View<'_, M> {
                         };
                         serde_json::json!({"action":"partition","left":side(left)?,"right":side(right)?})
                     }
-                    TriggerAction::Crash(name) => {
-                        serde_json::json!({"action":"crash","machine":display(name)?})
-                    }
                 };
                 let status = match r.status {
                     Status::Armed => "armed",
@@ -553,18 +535,7 @@ impl<M> Adapter for View<'_, M> {
                     Status::Fired => "fired",
                     Status::CutOff => "cut_off",
                 };
-                let mut record = serde_json::json!({"id":r.id,"source":display(&r.source)?,"armed_at_ns":r.armed_at,"match_deadline_ns":r.match_deadline,"action":action,"matched_at_ns":r.matched_at,"effect_at_ns":r.effect_at,"fault_id":r.fault_id,"cancelled_at_ns":r.cancelled_at,"cut_off_at_ns":r.cut_off_at,"status":status});
-                match &r.watch {
-                    Watch::Output(marker) => {
-                        record["marker"] = serde_json::json!(marker);
-                        record["prefix"] = serde_json::json!(r.prefix);
-                        record["seen"] = serde_json::json!(r.seen);
-                        record["resets"] = serde_json::json!(r.resets);
-                    }
-                    Watch::BlockRequest { op, nth } => {
-                        record["block_request"] = serde_json::json!({"op":op,"nth":nth});
-                    }
-                }
+                let mut record = serde_json::json!({"id":r.id,"source":display(&r.source)?,"marker":r.marker,"armed_at_ns":r.armed_at,"match_deadline_ns":r.match_deadline,"action":action,"prefix":r.prefix,"seen":r.seen,"resets":r.resets,"matched_at_ns":r.matched_at,"effect_at_ns":r.effect_at,"fault_id":r.fault_id,"cancelled_at_ns":r.cancelled_at,"cut_off_at_ns":r.cut_off_at,"status":status});
                 // A trigger has no fault handle until ordinary admission at
                 // its effect. The retained handle is independent of fault_id.
                 if let Some(handle) = &r.handle {
@@ -629,7 +600,6 @@ impl Control {
             &mut self.service,
             &mut View {
                 guest_controller: None,
-                engine: None,
                 network,
                 entries: &mut self.entries,
                 machines,
@@ -730,10 +700,6 @@ impl Control {
             Response::ApplicationOutput { bytes, .. } | Response::BootConsole { bytes } => self
                 .service
                 .committed_bytes(&name, output.at.as_nanos(), bytes, commit.as_nanos())
-                .map_err(|e| e.message)?,
-            Response::BlockRequestHeld { trigger } => self
-                .service
-                .block_held(*trigger, &name, output.at.as_nanos(), commit.as_nanos())
                 .map_err(|e| e.message)?,
             _ => {}
         }
@@ -925,7 +891,10 @@ impl Control {
         notice: crate::oracle::service::Notice,
     ) -> Result<(Timestamp, super::EventKind), String> {
         use super::{EventKind, TriggerResult};
-        use crate::oracle::{service::Notice, triggers::Status};
+        use crate::oracle::{
+            service::{breaks::BreakEnd, Notice},
+            triggers::Status,
+        };
         Ok(match notice {
             Notice::Admitted(a) => (
                 Timestamp::from_nanos(a.admitted_at),
@@ -991,6 +960,36 @@ impl Control {
                         }
                     },
                     fault: fault.map(super::FaultId),
+                },
+            ),
+            Notice::BreakHit {
+                break_id,
+                machine,
+                boot,
+                name,
+                at,
+            } => (
+                Timestamp::from_nanos(at),
+                EventKind::BreakHit {
+                    break_id,
+                    machine: self.named(&machine)?,
+                    boot,
+                    name,
+                },
+            ),
+            Notice::BreakEnded {
+                break_id,
+                at,
+                reason,
+            } => (
+                Timestamp::from_nanos(at),
+                EventKind::BreakEnded {
+                    break_id,
+                    reason: match reason {
+                        BreakEnd::Resumed => super::BreakEnd::Resumed,
+                        BreakEnd::Crashed => super::BreakEnd::Crashed,
+                        BreakEnd::RunEnded => super::BreakEnd::RunEnded,
+                    },
                 },
             ),
         })

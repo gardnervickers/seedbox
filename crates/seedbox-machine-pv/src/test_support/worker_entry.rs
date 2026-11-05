@@ -99,7 +99,7 @@ pub fn preboot_requests(binary: &Path) {
     for value in [
         serde_json::json!({"Capture":"unused"}),
         serde_json::json!({"ExportDisk":"unused"}),
-        serde_json::json!({"Run":{"now":0,"upto":0,"syscall_cost_ns":1,"shutdown":false,"lifecycle":[],"frames":0}}),
+        serde_json::json!({"Run":{"now":0,"upto":0,"syscall_cost_ns":1,"shutdown":false,"lifecycle":[],"frames":0,"breaks":[]}}),
     ] {
         let body = serde_json::to_vec(&value).unwrap();
         input.extend_from_slice(&(body.len() as u32).to_le_bytes());

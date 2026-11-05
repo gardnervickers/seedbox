@@ -7,7 +7,8 @@ wire_struct!(Event {
     at,
     kind
 });
-wire_enum!(EventKind; units {} tuples {0=>Output(v0),3=>FaultAdmitted(v0)} records {1=>MachineAdded{machine,cause},2=>Transition{machine,boot,change,cause},4=>InputRejected{key,rejection},5=>FaultSettled{record,status,outcome_at,detail,network,counts},6=>TriggerArmed{trigger,source,target,deadline},7=>TriggerResolved{trigger,result,fault},8=>ReplyAdmitted{machine,boot,id}});
+wire_enum!(EventKind; units {} tuples {0=>Output(v0),3=>FaultAdmitted(v0)} records {1=>MachineAdded{machine,cause},2=>Transition{machine,boot,change,cause},4=>InputRejected{key,rejection},5=>FaultSettled{record,status,outcome_at,detail,network,counts},6=>TriggerArmed{trigger,source,target,deadline},7=>TriggerResolved{trigger,result,fault},8=>ReplyAdmitted{machine,boot,id},9=>BreakHit{break_id,machine,boot,name},10=>BreakEnded{break_id,reason}});
+wire_enum!(BreakEnd; units {0=>Resumed,1=>Crashed,2=>RunEnded} tuples {} records {});
 wire_enum!(Transition; units {0=>Paused,1=>Resumed,2=>Crashed,4=>ShutdownRequested} tuples {5=>ExecutionSet(v0),6=>ClockRate(v0)} records {3=>Rebooted{new_boot}});
 wire_enum!(Cause; units {0=>Initial,1=>Host} tuples {2=>Fault(v0)} records {});
 wire_tuple_struct!(FaultId);

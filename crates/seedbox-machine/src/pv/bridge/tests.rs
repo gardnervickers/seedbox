@@ -215,7 +215,10 @@ fn reconnect_publishes_both_requests_and_prepares_only_current_reply() {
     };
     for (time, bytes) in [
         (1, b"SBX_RPC1 1 1 {\"version\":1,\"id\":1}\n".as_slice()),
-        (2, b"SBX_RPC1 2 2 {\"version\":1,\"id\":1}\n".as_slice()),
+        (
+            2,
+            b"SBX_CLOSE1 1\nSBX_RPC1 2 2 {\"version\":1,\"id\":1}\n".as_slice(),
+        ),
     ] {
         bridge
             .observe(
@@ -377,6 +380,35 @@ fn call(
     };
     Ok(id)
 }
+fn close_session(bridge: &mut GuestBridge, wire_session: u32) {
+    let clock = SimulationClock::new(0);
+    let mut rng = SeededRng::new(1);
+    let mut inputs = VecDeque::new();
+    let mut outputs = Vec::new();
+    bridge
+        .observe(
+            &mut RunContext {
+                execution: Default::default(),
+                worker: &mut (),
+                clock: &clock,
+                rng: &mut rng,
+                inbox: Inbox::new(&mut inputs, Timestamp::from_nanos(0)),
+                outbox: Outbox::new(
+                    &mut outputs,
+                    Timestamp::from_nanos(0),
+                    Timestamp::from_nanos(0),
+                ),
+            },
+            vec![LifecycleWrite {
+                time: 0,
+                bytes: format!("SBX_CLOSE1 {wire_session}\n").into_bytes(),
+            }],
+            0,
+            Vec::new(),
+        )
+        .unwrap();
+    assert!(outputs.is_empty());
+}
 fn reply(
     bridge: &mut GuestBridge,
     id: super::super::SimulationControlId,
@@ -399,6 +431,7 @@ fn public_sessions_are_lazy_and_never_reused_by_boot_resets() {
     bridge.input_delivered().unwrap();
     let second = call(&mut bridge, 2, 7, 2).unwrap();
     assert_eq!(second.session, first.session);
+    close_session(&mut bridge, 7);
     let replaced = call(&mut bridge, 3, 9, 1).unwrap();
     assert_eq!(replaced.session.get(), 2);
     assert!(reply(&mut bridge, first).unwrap().is_empty());
@@ -436,7 +469,7 @@ fn snapshot_preserves_public_mapping_prepared_wire_keys_and_reset_highwater() {
     let (mut restored, queued): (GuestBridge, Vec<u8>) = serde_json::from_slice(&image).unwrap();
     assert_eq!(queued, b"SBX_REPLY1 1 7 {}\n");
     assert_eq!(restored.prepared_replies[0].session.get(), 7);
-    assert_eq!(restored.session.unwrap().public.get(), 1);
+    assert_eq!(restored.sessions[0].public.get(), 1);
     restored.input_delivered().unwrap();
     let new = call(&mut restored, 2, 8, 1).unwrap();
     assert_eq!(new.session.get(), 2);
@@ -467,7 +500,7 @@ fn session_exhaustion_fails_before_wrap_or_alias_but_existing_session_continues(
         "simulation-control session IDs exhausted"
     );
     assert_eq!(bridge.session_highwater, u32::MAX);
-    assert!(bridge.session.is_none());
+    assert!(bridge.sessions.is_empty());
 }
 
 #[test]
@@ -492,4 +525,27 @@ fn retired_reply_framing_and_current_identity_still_fail_closed() {
     let mut wrong = current;
     wrong.request = NonZeroU32::new(2).unwrap();
     assert!(reply(&mut bridge, wrong).is_err());
+}
+
+#[test]
+fn concurrent_sessions_keep_their_public_ids_until_closed() {
+    let mut bridge = GuestBridge::default();
+    let a = call(&mut bridge, 1, 1, 1).unwrap();
+    let b = call(&mut bridge, 2, 2, 1).unwrap();
+    assert_eq!((a.session.get(), b.session.get()), (1, 2));
+    assert_eq!(reply(&mut bridge, b).unwrap(), b"SBX_REPLY1 2 2 {}\n");
+    assert_eq!(reply(&mut bridge, a).unwrap(), b"SBX_REPLY1 1 1 {}\n");
+    let image = serde_json::to_vec(&bridge).unwrap();
+    bridge.validate_snapshot(0, false).unwrap();
+    assert!(bridge.validate_snapshot(0, true).is_err());
+    bridge.input_delivered().unwrap();
+    bridge.validate_snapshot(0, true).unwrap();
+    let mut restored: GuestBridge = serde_json::from_slice(&image).unwrap();
+    restored.input_delivered().unwrap();
+    assert_eq!(call(&mut restored, 3, 2, 2).unwrap().session, b.session);
+    close_session(&mut bridge, 1);
+    assert!(reply(&mut bridge, a).unwrap().is_empty());
+    let next = call(&mut bridge, 3, 3, 1).unwrap();
+    assert_eq!(next.session.get(), 3);
+    bridge.validate_snapshot(0, true).unwrap();
 }

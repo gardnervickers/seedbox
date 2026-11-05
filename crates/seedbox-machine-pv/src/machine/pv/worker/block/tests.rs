@@ -598,7 +598,11 @@ fn latency(op: seedbox_machine::pv::DiskOp, latency_ns: u64) -> DiskFaults {
     faults
 }
 
-fn notify_at(device: &mut Block, guest: &mut Guest, now: u64) -> Option<u32> {
+fn notify_at(
+    device: &mut Block,
+    guest: &mut Guest,
+    now: u64,
+) -> Option<seedbox_machine::machine::disk::fault::Hold> {
     device
         .write_traced(&mut guest.ram, QUEUE_NOTIFY, 0, now, &mut |_, _, _| {})
         .unwrap()
@@ -684,20 +688,20 @@ fn a_driver_reset_drops_pending_requests_but_keeps_the_faults() {
     );
 }
 
+fn flush_hold(faults: &mut DiskFaults) -> seedbox_machine::machine::disk::fault::Hold {
+    let hold = seedbox_machine::machine::disk::fault::Hold {
+        op: seedbox_machine::pv::DiskOp::Flush,
+        nth: 1,
+        seen: 0,
+    };
+    faults.hold(hold).unwrap();
+    hold
+}
+
 #[test]
 fn a_hold_stops_processing_at_its_request_without_any_effect() {
-    use seedbox_machine::machine::disk::fault::Hold;
-    use seedbox_machine::pv::DiskOp;
     let mut faults = DiskFaults::new(0);
-    faults
-        .hold(Hold {
-            trigger: 7,
-            op: DiskOp::Flush,
-            nth: 1,
-            seen: 0,
-            until: None,
-        })
-        .unwrap();
+    let hold = flush_hold(&mut faults);
     let mut device = Block::new(Store::zeroed(8).unwrap(), faults);
     let mut guest = Guest::new();
     setup(&mut device, &mut guest);
@@ -707,13 +711,55 @@ fn a_hold_stops_processing_at_its_request_without_any_effect() {
     for head in [write, flushed, after] {
         guest.offer(head);
     }
-    assert_eq!(notify_at(&mut device, &mut guest, 5), Some(7));
+    let reached = notify_at(&mut device, &mut guest, 5).unwrap();
+    assert_eq!((reached.op, reached.nth), (hold.op, hold.nth));
+    assert!(device.held());
     // The earlier write completed; the flush and everything after did not.
     assert_eq!(guest.used(), [(write, 1)]);
     let mut stored = [0; SECTOR];
     device.store().read(1, &mut stored).unwrap();
     assert_eq!(stored, [0; SECTOR]);
     assert!(device.faults().holds().is_empty());
+    // Resuming continues the flush and the write behind it, in order.
+    assert_eq!(
+        device.resume(&mut guest.ram, 9, &mut |_, _, _| {}).unwrap(),
+        None
+    );
+    assert!(!device.held());
+    assert_eq!(guest.used(), [(flushed, 1), (after, 1)]);
+    device.store().read(1, &mut stored).unwrap();
+    assert_eq!(stored, [9; SECTOR]);
+}
+
+#[test]
+fn a_resumed_request_keeps_its_delay_from_arrival() {
+    let mut faults = latency(seedbox_machine::pv::DiskOp::Flush, 40);
+    flush_hold(&mut faults);
+    let mut device = Block::new(Store::zeroed(8).unwrap(), faults);
+    let mut guest = Guest::new();
+    setup(&mut device, &mut guest);
+    let (flushed, _) = guest.chain(&flush());
+    guest.offer(flushed);
+    assert!(notify_at(&mut device, &mut guest, 10).is_some());
+    // Resumed before its due time, it still completes at arrival + 40.
+    device
+        .resume(&mut guest.ram, 30, &mut |_, _, _| {})
+        .unwrap();
+    assert_eq!(device.next_due(), Some(50));
+    assert!(guest.used().is_empty());
+    // Resumed after it, it is due at once.
+    let mut faults = latency(seedbox_machine::pv::DiskOp::Flush, 40);
+    flush_hold(&mut faults);
+    let mut device = Block::new(Store::zeroed(8).unwrap(), faults);
+    let mut guest = Guest::new();
+    setup(&mut device, &mut guest);
+    let (flushed, _) = guest.chain(&flush());
+    guest.offer(flushed);
+    assert!(notify_at(&mut device, &mut guest, 10).is_some());
+    device
+        .resume(&mut guest.ram, 90, &mut |_, _, _| {})
+        .unwrap();
+    assert_eq!(device.next_due(), Some(90));
 }
 
 #[test]

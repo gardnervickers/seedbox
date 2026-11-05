@@ -56,6 +56,10 @@ const SYSCALL_COST: usize = 48;
 // kernel's syscall hook reads; zero is off. See docs/faults.md.
 const PREEMPT_PPM: usize = 88;
 const PREEMPT_SEED: usize = 96;
+// Bytes 128..192 hold the name of a breakpoint write; the event register at
+// BREAK_EVENT carries its length (guest/kernel/*/seedbox.c).
+const BREAK_NAME: usize = 128;
+const BREAK_EVENT: u64 = 48;
 const EVENT_MMIO: u64 = 0x0a01_0000;
 const EVENT_END: u64 = EVENT_MMIO + PAGE_BYTES as u64 - 1;
 const LIFECYCLE_MMIO: u64 = 0x0b01_0000;
@@ -89,9 +93,6 @@ struct State {
     /// The installed preempt fault: its identity and the boot it draws for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     preempt: Option<(u64, u64)>,
-    /// The trigger whose hold holds a guest disk request; the boot can only end.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    held: Option<u32>,
 }
 /// Snapshot header. With a disk, the file ends with the store's encoded
 /// overlays after RAM; its base stays with the boot inputs.
@@ -115,6 +116,10 @@ struct Effect {
     idle: bool,
     /// A guest terminal request: [`Stop::PoweredOff`] or [`Stop::Reset`].
     terminal: Option<Stop>,
+    /// A write of a declared breakpoint name: [`Stop::Break`].
+    hit: Option<String>,
+    /// A disk notify that reached a hold: [`Stop::Held`].
+    held: Option<seedbox_machine::machine::disk::fault::Hold>,
 }
 struct Machine<B: Backend = Native> {
     native: B,
@@ -252,6 +257,36 @@ impl<B: Backend> Machine<B> {
             })
         }
     }
+    /// Continue a held disk request at the current time, recording its
+    /// completions as a notify does; the next hold it reaches, if any.
+    fn resume_disk(&mut self) -> Result<Option<seedbox_machine::machine::disk::fault::Hold>> {
+        let now = self.state.now;
+        if !self.block.as_ref().is_some_and(block::Block::held) {
+            return Ok(None);
+        }
+        self.boundary()?;
+        let block = self.block.as_mut().expect("held block");
+        let h = &mut self.state.witness;
+        let reached = unsafe {
+            self.ram.modify(|ram| {
+                block.resume(ram, now, &mut |kind, status, sector| {
+                    *h = seedbox_machine::machine::execution_evidence::chain::record(
+                        h,
+                        b'd',
+                        0,
+                        now,
+                        sector,
+                        kind as u64 | ((status as u64) << 32),
+                    );
+                })
+            })
+        }?;
+        if let Some(hold) = reached {
+            self.record_native(b'h', 0, now, hold.nth);
+        }
+        self.interrupts()?;
+        Ok(reached)
+    }
     /// Publish the preempt fault's words for this boot, or clear them.
     fn publish_preempt(&self, preempt: Option<(u64, u32)>) {
         let (ppm, seed) = match preempt {
@@ -305,11 +340,6 @@ impl<B: Backend> Machine<B> {
             FaultChange::Hold(hold) => {
                 if let Some(block) = &mut self.block {
                     block.faults_mut().hold(hold)?;
-                }
-            }
-            FaultChange::Release(trigger) => {
-                if let Some(block) = &mut self.block {
-                    block.faults_mut().release(trigger);
                 }
             }
             FaultChange::Report => {}
@@ -422,6 +452,7 @@ impl<B: Backend> Machine<B> {
     fn quiet(&self) -> bool {
         !self.state.timer && self.state.devices.quiet()
     }
+    #[allow(clippy::too_many_arguments)]
     fn run(
         &mut self,
         now: u64,
@@ -430,15 +461,13 @@ impl<B: Backend> Machine<B> {
         shutdown: bool,
         input: &[u8],
         frames: Vec<Vec<u8>>,
+        breaks: &[String],
     ) -> Result<Stop> {
         if now > upto || upto == u64::MAX || syscall_cost_ns == 0 {
             return Err("PV invalid run interval".into());
         }
         if self.ended {
             return Err("PV run after the guest ended its boot".into());
-        }
-        if self.state.held.is_some() {
-            return Err("PV run while a guest disk request is held".into());
         }
         // Guest syscall progress samples this word once into its remaining
         // charge. Existing partial work keeps its old price in captured CPU/RAM.
@@ -474,6 +503,14 @@ impl<B: Backend> Machine<B> {
             self.interrupts()?;
         }
         self.collect_lifecycle();
+        // A held disk request continues at the first run that can execute
+        // guest work: the client holds a machine with empty runs. It may
+        // reach the next hold before the guest runs.
+        if self.state.now < upto {
+            if let Some(hold) = self.resume_disk()? {
+                return Ok(Stop::Held(hold));
+            }
+        }
         self.publish(upto);
         if self.state.idle && self.quiet() {
             return Ok(Stop::Blocked(self.wake()));
@@ -515,7 +552,7 @@ impl<B: Backend> Machine<B> {
                     if width != 8 || !write {
                         return Err("PV clockevent access".into());
                     }
-                    effect = self.clock_event(address - EVENT_MMIO, value, upto)?;
+                    effect = self.clock_event(address - EVENT_MMIO, value, upto, breaks)?;
                 }
                 Exit::Mmio {
                     address,
@@ -554,15 +591,14 @@ impl<B: Backend> Machine<B> {
                     if write {
                         let h = &mut self.state.witness;
                         let now = self.state.now;
-                        let held = unsafe {
+                        let reached = unsafe {
                             self.ram.modify(|ram| block.write_traced(ram, offset, value as u32, now, &mut |kind, status, sector| {
                                 *h = seedbox_machine::machine::execution_evidence::chain::record(h, b'd', 0, now, sector, kind as u64 | ((status as u64) << 32));
                             }))
                         }?;
-                        if let Some(trigger) = held {
-                            self.record_native(b'h', 0, now, trigger.into());
-                            self.state.held = Some(trigger);
-                            effect.terminal = Some(Stop::Held(trigger));
+                        if let Some(hold) = reached {
+                            self.record_native(b'h', 0, now, hold.nth);
+                            effect.held = Some(hold);
                         }
                     } else {
                         effect.response = Some(block.read(offset)? as u64);
@@ -600,12 +636,17 @@ impl<B: Backend> Machine<B> {
                     return Err(format!("PV guest terminal {stop:?} before handshake"));
                 }
                 self.finish_stop()?;
-                // A held request leaves the boot stopped, not ended: its disk
-                // still belongs to it until the client ends the boot.
-                if !matches!(stop, Stop::Held(_)) {
-                    self.ended = true;
-                }
+                self.ended = true;
                 return Ok(stop);
+            }
+            // The write has completed; the client holds the machine here.
+            if let Some(name) = effect.hit {
+                self.finish_stop()?;
+                return Ok(Stop::Break(name));
+            }
+            if let Some(hold) = effect.held {
+                self.finish_stop()?;
+                return Ok(Stop::Held(hold));
             }
             if self.state.now == upto {
                 self.finish_stop()?;
@@ -620,7 +661,13 @@ impl<B: Backend> Machine<B> {
             self.prepare()?;
         }
     }
-    fn clock_event(&mut self, offset: u64, value: u64, upto: u64) -> Result<Effect> {
+    fn clock_event(
+        &mut self,
+        offset: u64,
+        value: u64,
+        upto: u64,
+        breaks: &[String],
+    ) -> Result<Effect> {
         let mut effect = Effect::default();
         match offset {
             0 => {
@@ -661,6 +708,12 @@ impl<B: Backend> Machine<B> {
                 }
                 self.state.ready = true;
             }
+            BREAK_EVENT => {
+                if !self.state.ready {
+                    return Err("PV breakpoint before handshake".into());
+                }
+                effect.hit = self.break_hit(value, breaks)?;
+            }
             offset => {
                 if self.event_register(offset, value)? {
                     effect.terminal = Some(Stop::PoweredOff);
@@ -669,12 +722,31 @@ impl<B: Backend> Machine<B> {
         }
         Ok(effect)
     }
+    /// The declared name of a breakpoint write of `length` bytes, or `None`
+    /// for an undeclared one. The guest kernel validates names, so an invalid
+    /// one is a protocol failure.
+    fn break_hit(&self, length: u64, breaks: &[String]) -> Result<Option<String>> {
+        let length = usize::try_from(length).map_err(|_| "PV breakpoint length")?;
+        if length > seedbox_machine::pv::MAX_BREAK_NAME {
+            return Err("PV breakpoint length".into());
+        }
+        // The guest is stopped; the page is only read here.
+        let name = unsafe { &self.page.bytes()[BREAK_NAME..BREAK_NAME + length] };
+        if !seedbox_machine::pv::break_name_valid(name) {
+            return Err("PV invalid breakpoint name".into());
+        }
+        let name = std::str::from_utf8(name).expect("validated ASCII");
+        Ok(breaks
+            .binary_search_by(|declared| declared.as_str().cmp(name))
+            .is_ok()
+            .then(|| name.to_owned()))
+    }
     fn capture(&mut self, path: &Path) -> Result<()> {
         // The client owns an ended boot's exit state without a live worker.
         if self.ended {
             return Err("PV capture after the guest ended its boot".into());
         }
-        if self.state.held.is_some() {
+        if self.block.as_ref().is_some_and(block::Block::held) {
             return Err("PV capture while a guest disk request is held".into());
         }
         let layout = self.ram.layout()?;
@@ -990,9 +1062,18 @@ pub(crate) fn serve() -> Result<()> {
                 shutdown,
                 lifecycle,
                 frames: _,
+                breaks,
             } => {
                 let vm = machine.as_mut().ok_or("PV run before boot")?;
-                let stop = vm.run(now, upto, syscall_cost_ns, shutdown, &lifecycle, frames)?;
+                let stop = vm.run(
+                    now,
+                    upto,
+                    syscall_cost_ns,
+                    shutdown,
+                    &lifecycle,
+                    frames,
+                    &breaks,
+                )?;
                 vm.output.clear();
                 let taken = std::mem::take(&mut vm.state.writes);
                 let count = taken.len() as u64;
@@ -1063,8 +1144,7 @@ impl seedbox_machine::snapshot::Record for State {
         + <Option<net::Net> as seedbox_machine::snapshot::Record>::MIN
         + <Vec<seedbox_machine::pv::transport::GuestWrite> as seedbox_machine::snapshot::Record>::MIN
         + <Option<super::policy::Runtime> as seedbox_machine::snapshot::Record>::MIN
-        + <Option<(u64, u64)> as seedbox_machine::snapshot::Record>::MIN
-        + <Option<u32> as seedbox_machine::snapshot::Record>::MIN;
+        + <Option<(u64, u64)> as seedbox_machine::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
         &self,
         w: &mut seedbox_machine::snapshot::Writer<'_, W>,
@@ -1085,7 +1165,6 @@ impl seedbox_machine::snapshot::Record for State {
             writes,
             policy,
             preempt,
-            held,
         } = self;
         witness.encode(w)?;
         witness_boot.encode(w)?;
@@ -1102,7 +1181,6 @@ impl seedbox_machine::snapshot::Record for State {
         writes.encode(w)?;
         policy.encode(w)?;
         preempt.encode(w)?;
-        held.encode(w)?;
         Ok(())
     }
     fn decode<R: std::io::Read>(
@@ -1124,7 +1202,6 @@ impl seedbox_machine::snapshot::Record for State {
             writes: seedbox_machine::snapshot::Record::decode(r)?,
             policy: seedbox_machine::snapshot::Record::decode(r)?,
             preempt: seedbox_machine::snapshot::Record::decode(r)?,
-            held: seedbox_machine::snapshot::Record::decode(r)?,
         })
     }
 }
@@ -1202,9 +1279,6 @@ impl Capture {
         }
         if self.block.is_some() != disk || self.disk_faults.is_some() != disk {
             return Err("PV snapshot disk differs from boot disk".into());
-        }
-        if self.state.held.is_some() {
-            return Err("PV snapshot with a held guest disk request".into());
         }
         if self.state.net.as_ref().map(net::Net::mac) != network {
             return Err("PV snapshot NIC differs from boot NIC".into());

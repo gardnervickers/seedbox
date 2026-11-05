@@ -59,6 +59,9 @@ pub(super) enum Request {
         shutdown: bool,
         lifecycle: Vec<u8>,
         frames: u64,
+        /// Declared breakpoint names, ascending. A guest write of one of
+        /// these stops the run with [`Stop::Break`]; any other returns at once.
+        breaks: Vec<String>,
     },
     ExecutionEvidence,
     Capture(PathBuf),
@@ -100,7 +103,6 @@ pub(super) enum FaultChange {
     Install(InstalledFault),
     Heal(u64),
     Hold(seedbox_machine::machine::disk::fault::Hold),
-    Release(u32),
     /// Report without a change.
     Report,
 }
@@ -148,17 +150,22 @@ pub(super) enum Response {
     Faults(FaultReport),
     Error(String),
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum Stop {
     Horizon,
+    /// The guest wrote this declared breakpoint name. Its write has completed
+    /// and the run stopped at it; the client holds the machine.
+    Break(String),
     Blocked(Option<u64>),
     /// The guest powered off or permanently halted.
     PoweredOff,
     /// The guest requested an architectural reset after its ready handshake:
     /// a deliberate reboot or a panic restart. The worker never resets itself.
     Reset,
-    /// A guest disk request is held for this trigger; the boot can only end.
-    Held(u32),
+    /// A guest disk request reached this hold's `nth` and is held unwritten.
+    /// The run stopped at it; the client holds the machine, and the next run
+    /// continues the request before the guest runs.
+    Held(seedbox_machine::machine::disk::fault::Hold),
 }
 
 /// Accept only a stopped worker that acknowledged this exact resource layout.

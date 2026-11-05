@@ -1,7 +1,7 @@
 # Disk and scheduler faults
 
 PV machines carry out `disk_error`, `disk_latency`, `preempt` and the
-oracle's `block_request` trigger along the contracts below. TCG refuses all
+oracle's `break_on_block_request` along the contracts below. TCG refuses all
 four and x86_64 PV refuses `preempt` (see
 [where each fault runs](#where-each-fault-runs)).
 
@@ -22,38 +22,34 @@ A disk fault's counts cover every boot it applied to and arrive on its heal's
 settlement (`counts` on `faultChanged` and in the world view, and in
 `seedbox observe`); a preempt heal has none.
 
-## Crash on a held block request
+## Breakpoint on a block request
 
-The oracle's [`arm_trigger`](../crates/seedbox-driver/src/oracle.rs) call arms
-a trigger on a machine's committed output that stops an application or
-partitions machines. Instead of a `marker`, it can take
-`block_request: {op, nth}`: the source machine's `nth` disk request of kind
-`op` after arming. The device holds that request unwritten, the trigger matches
-at the commit that reports the hold, and its only fault is an undelayed crash
-of the same machine:
+The oracle's `break_on_block_request` call suspends a machine at its `nth`
+disk request of kind `op` from now on, counted across boots. The device holds
+that request unwritten and the machine is suspended there, as at a
+[breakpoint](breakpoints.md). The hit arrives through `wait_break` with
+`source` and `name` `block_request`, and the request's `op` and `nth`. The
+oracle decides what happens: crash the machine while the request is still
+unwritten, or resume it and let the request continue.
 
 ```json
-{"op": "arm_trigger", "source": {"machine": "db"},
- "block_request": {"op": "flush", "nth": 20}, "match_timeout_ns": 10000000000,
- "fault": {"action": "crash", "target": {"machine": "db"}}}
+{"op": "break_on_block_request", "target": {"machine": "db"},
+ "request": "flush", "nth": 20}
 ```
 
-It shares the oracle triggers' budget (64 per run), match timeout,
-cancellation and lifecycle, and appears in `inspect` with its
-`block_request` in place of the marker. An expired or cancelled trigger
-releases its hold. The Python client arms it with
-`world.arm_block_request_crash(target, op, nth, match_timeout=...)`.
-No trigger watches guest property evidence or other application state: the
-run is deterministic, so an oracle watches for such a condition itself and
-applies the fault then.
+It is one-shot. The Python client asks for it with
+`world.break_on_block_request(target, op, nth)` and serves the hit with
+`world.on_break("block_request", handler)`; Rust's `Control` has the same
+call. No breakpoint watches guest property evidence or other application
+state: the run is deterministic, so an oracle watches for such a condition
+itself and applies the fault then.
 
 ## In the timeline
 
 `seedbox.yaml` declares no faults, so neither it nor the CLI's flags change.
 The new faults reach a run as a definition's `overrides` (a submission's
 `program`) or one at a time through `seedbox control inject`. The oracle's
-guest RPC carries none of the three actions: its operations are unchanged
-apart from the `block_request` trigger.
+guest RPC carries none of the three actions.
 
 ```yaml
 overrides:
@@ -72,7 +68,7 @@ fault's arguments are checked before it is journaled.
 | `disk_error` | disk request selection | yes | yes (type-checked only) | refused |
 | `disk_latency` | delayed block completion | yes | yes (type-checked only) | refused |
 | `preempt` | the guest yield hook | yes | refused | refused |
-| `block_request` trigger | held block requests | yes | yes (type-checked only) | refused |
+| `break_on_block_request` | breakpoints | yes | yes (type-checked only) | refused |
 | every other action and trigger | nothing | yes | yes | yes |
 
 The [Driver](../crates/seedbox-driver/src/driver/faults.rs) keys each
@@ -80,8 +76,9 @@ capability by backend and architecture. Before it launches the worker, the
 run refuses a program input its engine lacks with a setup error naming the
 input, the engine and what it lacks ("input race-on: preempt needs the guest
 yield hook, which x86_64 PV does not provide"); the worker checks again when
-it opens and refuses an injected fault when it is prepared. The oracle's
-`block_request` trigger is refused with `unsupported`. x86_64 PV shares the
+it opens and refuses an injected fault when it is prepared. Like every
+breakpoint call, `break_on_block_request` is refused with `unsupported` where
+the engine has no breakpoints. x86_64 PV shares the
 block device and worker with aarch64 but has only been type-checked; its
 kernel has the syscall hook point but no yield yet.
 
@@ -109,15 +106,18 @@ write; it counts as affected only if the request then completes. The
 machine keeps its faults across device resets and boots, starts each boot's
 streams afresh and adds each boot's counts.
 
-A `block_request` trigger installs a hold that counts matching requests the
-same way, across boots, until its match deadline in the machine's time. On the
-`nth`, earlier requests in that notification complete; the held one has no
-effect, used-ring entry or interrupt, and nothing after it is processed. The
-MMIO write completes and the machine stops held: it reports the hold as an
-output, neither runs nor takes inputs other than Crash, Reboot and fault
-requests, and refuses capture. The Driver records the match at the barrier
-that commits that output and admits the crash there. The held machine does
-nothing in between, so its state does not depend on where rounds end.
+`break_on_block_request` installs a hold that counts matching requests the
+same way, across boots. On the `nth`, earlier requests in that notification
+complete; the held one has no effect, used-ring entry or interrupt, stays
+unconsumed in the avail ring, and nothing after it is processed. It has
+already drawn its latency, and later holds have counted it. The MMIO write
+completes and the machine stops held, exactly as at a breakpoint write: it
+reports the hold as an output, takes inputs without running, and refuses
+capture. The Driver numbers the hit at the barrier that commits that output.
+On `resume_break` the request continues at the first run that executes guest
+work, with the arrival it drew: it completes then, or at its due time counted
+from its original arrival if that is later, followed by the requests behind
+it. A crash or reboot drops it with the rest of the boot.
 
 ### Asynchronous block completion
 
@@ -163,6 +163,6 @@ them on heal.
 | Contract | PV | TCG (later) |
 | --- | --- | --- |
 | Request selection and counts | `process` and `complete` in [block.rs](../crates/seedbox-machine-pv/src/machine/pv/worker/block.rs) over the shared policy; the machine keeps faults and counts across boots | `seedbox_blk_handle` in [seedbox-disk.patch](../crates/seedbox-machine-tcg/qemu/seedbox-disk.patch), policy by a QMP command and a new `abi.rs` entry |
-| Held request | the same loop, plus a held stop in the worker | the same handler, stopping the vCPU as a device error does |
+| Held request | the same loop, plus a held stop in the worker and `Block::resume` | the same handler, stopping the vCPU as a device error does |
 | Asynchronous completion | the queue in block.rs; the earliest due time folded into `BOUND` and `Stop::Blocked` in [the worker](../crates/seedbox-machine-pv/src/machine/pv/worker/mod.rs); the queue in its snapshot | a `QEMU_CLOCK_VIRTUAL` timer for the earliest due time, which icount and idle already honour; the queue in the device's vmstate |
 | Yield hook | page words 88 and 96; `seedbox_syscall_progress` in the [ARM](../crates/seedbox-machine/guest/kernel/arm64/seedbox.c) kernel; the [x86](../crates/seedbox-machine/guest/kernel/x86_64/seedbox.c) kernel still needs it | no PV page: it would need a register in a Seedbox QEMU device and a kernel hook that reads it |

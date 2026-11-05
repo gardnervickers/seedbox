@@ -102,6 +102,7 @@ pub(in crate::driver_world) fn encode(
                 Response::TransmitFrame { bytes } => {
                     json!({"type":"transmit_frame","bytes":hex::encode(bytes)})
                 }
+                Response::Break { name } => json!({"type":"break","name":name}),
                 _ => return Err(invalid("unknown Driver response evidence")),
             };
             json!({"type":"output","machine":name(names,output.machine)?,"boot":output.boot,"at":output.at.as_nanos(),"payload":payload})
@@ -165,6 +166,17 @@ pub(in crate::driver_world) fn encode(
             fault,
         } => {
             json!({"type":"trigger_resolved","trigger":trigger,"result":match result{driver::TriggerResult::Fired=>"fired",driver::TriggerResult::Rejected=>"rejected",driver::TriggerResult::Cancelled=>"cancelled",driver::TriggerResult::Expired=>"expired",driver::TriggerResult::CutOff=>"cut_off"},"fault":fault.map(|id|id.get())})
+        }
+        EventKind::BreakHit {
+            break_id,
+            machine,
+            boot,
+            name: break_name,
+        } => {
+            json!({"type":"break_hit","break_id":break_id,"machine":name(names,*machine)?,"boot":boot,"name":break_name})
+        }
+        EventKind::BreakEnded { break_id, reason } => {
+            json!({"type":"break_ended","break_id":break_id,"reason":match reason{driver::BreakEnd::Resumed=>"resumed",driver::BreakEnd::Crashed=>"crashed",driver::BreakEnd::RunEnded=>"run_ended"}})
         }
         EventKind::ReplyAdmitted { machine, boot, id } => {
             json!({"type":"reply_admitted","machine":name(names,*machine)?,"boot":boot,"session":id.session.get(),"request":id.request.get()})

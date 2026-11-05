@@ -275,25 +275,82 @@ where
                 Ok(None)
             }
             control::Event::TriggerFinalize => {
-                // An expired block_request trigger releases its machine hold.
-                let releases = self
-                    .execution
+                self.execution
                     .control
                     .service
                     .expire_triggers(now.as_nanos());
-                self.control_plans(releases)?;
                 self.sync_trigger_marker();
                 Ok(None)
             }
             control::Event::Plan(Plan::Wake { token, .. }) => {
-                let plan = self
+                let plans = self
                     .execution
                     .control
                     .service
                     .wake(token, now.as_nanos())
                     .map_err(|e| Error::Control(e.message))?;
-                self.control_plans(vec![plan])?;
+                self.control_plans(plans)?;
                 Ok(None)
+            }
+            control::Event::Plan(Plan::DeclareBreaks { names, .. }) => {
+                // Every machine but the controller, behind items already due.
+                let controller = self
+                    .execution
+                    .control
+                    .controller
+                    .and_then(|setup| setup.controller);
+                let events = self.execution.events.entry(now).or_default();
+                for index in 0..self.execution.machines.len() {
+                    if controller == Some(MachineId(index)) {
+                        continue;
+                    }
+                    events.push_back(Scheduled::Input {
+                        id: MachineId(index),
+                        input: Input {
+                            at: now,
+                            payload: Request::DeclareBreaks {
+                                names: names.clone(),
+                            },
+                        },
+                    });
+                }
+                Ok(None)
+            }
+            control::Event::Plan(Plan::ResumeBreak { machine, boot, .. }) => {
+                let target = self
+                    .execution
+                    .control
+                    .reply_target(&machine)
+                    .map_err(Error::Control)?;
+                let entry = &self.execution.machines[target.0];
+                if entry.lifecycle.boot() != boot
+                    || matches!(entry.stopped, StopReason::Exited { .. })
+                {
+                    return Err(Error::Control("resumed a hit of an ended boot".into()));
+                }
+                Ok(Some(DueItem::new(Scheduled::Input {
+                    id: target,
+                    input: Input {
+                        at: now,
+                        payload: Request::ResumeBreak,
+                    },
+                })))
+            }
+            control::Event::Plan(Plan::BreakOnBlockRequest {
+                machine, op, nth, ..
+            }) => {
+                let target = self
+                    .execution
+                    .control
+                    .reply_target(&machine)
+                    .map_err(Error::Control)?;
+                Ok(Some(DueItem::new(Scheduled::Input {
+                    id: target,
+                    input: Input {
+                        at: now,
+                        payload: Request::BreakOnBlockRequest { op, nth },
+                    },
+                })))
             }
             control::Event::Plan(Plan::Deadline { fault, .. }) => {
                 // A Failed settlement publishes through service notices.
@@ -344,12 +401,6 @@ where
                 // by control_plans; they are never executable work.
                 Err(Error::Control("settlement entered execution queue".into()))
             }
-            control::Event::Plan(Plan::Hold { .. } | Plan::Release { .. }) => {
-                // control_plans sends holds to their machine at once.
-                Err(Error::Control(
-                    "machine hold entered execution queue".into(),
-                ))
-            }
         }
     }
 
@@ -380,7 +431,6 @@ where
             .control
             .controller
             .and_then(|setup| setup.controller);
-        let engine = self.execution.engine;
         if !configured {
             self.execution.control.record_call(source, id, boot);
         }
@@ -392,7 +442,6 @@ where
                 Some(&self.execution.network),
                 |service, view| {
                     view.guest_controller = excluded;
-                    view.engine = engine;
                     if configured {
                         service.admit_for_boot(
                             view,
@@ -707,6 +756,12 @@ where
         };
         // The pause gate is cleared when this transition commits.
         let transition = transition.map(|transition| (id, transition));
+        if matches!(input.payload, Request::Reboot | Request::Crash) {
+            self.execution
+                .control
+                .service
+                .break_crashed(&control::Control::source(id), now.as_nanos());
+        }
         let entry = &mut self.execution.machines[id.0];
         match &input.payload {
             Request::Reboot | Request::Crash => {
@@ -715,6 +770,9 @@ where
                 }
                 entry.inbox.clear();
             }
+            // The declared set belongs to the machine, so an exited boot
+            // keeps it for the next one.
+            Request::DeclareBreaks { .. } => {}
             Request::Application { .. }
             | Request::StepRealtime { .. }
             | Request::SimulationReply { .. }
@@ -732,13 +790,13 @@ where
             | Request::SimulationReply { .. }
             | Request::PropertyReply { .. }
             | Request::ReceiveFrame { .. }
+            | Request::ResumeBreak
             | Request::Shutdown
             // Device faults and holds outlive the boot: an exited machine
             // keeps them for its next one.
             | Request::InstallFault { .. }
             | Request::HealFault { .. }
-            | Request::HoldBlockRequest { .. }
-            | Request::ReleaseBlockRequest { .. } => {}
+            | Request::BreakOnBlockRequest { .. } => {}
             // Request is non-exhaustive across the common crate boundary.
             _ => {
                 return Err(Error::Control("unsupported machine request".into()));
