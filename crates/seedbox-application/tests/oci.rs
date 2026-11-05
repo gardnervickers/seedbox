@@ -51,6 +51,23 @@ fn metadata_verifies_platform_descriptors_and_retains_original_manifest() {
         .unwrap_err()
         .to_string()
         .contains("descriptor size"));
+    // A transport that stored a blob itself leaves it out, and the store's
+    // copy is verified instead.
+    fs::remove_file(&layer_path).unwrap();
+    assert_eq!(import_metadata(raw, &service, &store).unwrap(), imported);
+    let object = raw.join("store/sha256").join(imported.layers[0].hex());
+    fs::write(&object, b"TEST LAYER BYTES").unwrap();
+    assert!(
+        import_metadata(raw, &service, &ContentStore::new(raw.join("store")))
+            .unwrap_err()
+            .to_string()
+            .contains("hash mismatch")
+    );
+    fs::remove_file(&object).unwrap();
+    assert!(import_metadata(raw, &service, &store)
+        .unwrap_err()
+        .to_string()
+        .contains("descriptor size"));
 }
 
 #[test]

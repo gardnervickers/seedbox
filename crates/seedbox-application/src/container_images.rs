@@ -314,61 +314,76 @@ impl ImageTransport for ContainerTransport {
                     .as_bytes(),
             )
         });
-        let raw = directory.join("metadata");
-        fs::create_dir(&raw)?;
-        let (config_bytes, layer, rootfs) = match record
+        let (config_bytes, layer, view) = match record
             .as_ref()
             .and_then(|record| cached_export(store, record))
         {
-            Some((config_bytes, layer)) => {
+            Some(cached) => {
                 (self.progress)("reusing exported image layers");
-                let rootfs = store.materialize(&layer, &raw)?;
-                (config_bytes, layer, rootfs)
+                cached
             }
             None => {
                 let mut config = runtime.block_on(self.export(&docker, &image, directory))?;
                 let rootfs = directory.join("filesystem.tar");
                 let layer = store.put_file(&rootfs)?;
+                // Machines boot this logical view of the export. It derives from
+                // the layer and this build alone, so it is recorded with them.
+                let archive = directory.join("rootfs.tar");
+                prefix_archive(&rootfs, &archive, &|| self.check())?;
+                let view = store.put(&crate::driver_preparation::logical_archive(&archive)?)?;
                 // This is an OCI-shaped snapshot of the engine's resolved filesystem,
                 // not a claim to be the registry's original layered manifest.
                 config["rootfs"] = serde_json::json!({"type":"layers", "diff_ids":[format!("sha256:{}", layer.hex())]});
                 let config_bytes = serde_json::to_vec(&config)?;
                 let config_digest = store.put(&config_bytes)?;
                 if let Some(record) = &record {
+                    store.set_record(&view_record(record, &layer), &view)?;
                     store.set_record(record, &config_digest)?;
                 }
-                // The exported filesystem is scratch in this directory; link it rather
-                // than copying it back out of the store.
-                let linked = raw.join(layer.hex());
-                fs::hard_link(&rootfs, &linked)?;
-                (config_bytes, layer, linked)
+                (config_bytes, layer, view)
             }
         };
+        // The store already holds the config and layer, so only the manifest
+        // is written; the import verifies the stored objects instead.
+        let raw = directory.join("metadata");
+        fs::create_dir(&raw)?;
         let config_digest = store.put(&config_bytes)?;
-        store.materialize(&config_digest, &raw)?;
         fs::write(
             raw.join("manifest.json"),
             serde_json::to_vec(&serde_json::json!({
                 "schemaVersion":2,
                 "config":{"mediaType":"application/vnd.oci.image.config.v1+json", "digest":format!("sha256:{}",config_digest.hex()), "size":config_bytes.len()},
-                "layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar", "digest":format!("sha256:{}",layer.hex()), "size":fs::metadata(&rootfs)?.len()}]
+                "layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar", "digest":format!("sha256:{}",layer.hex()), "size":store.size(&layer)?}]
             }))?,
         )?;
         let image = crate::oci::import_metadata_for_arch(&raw, service, store, architecture)?;
-        let archive = directory.join("rootfs.tar");
-        prefix_archive(&rootfs, &archive, &|| self.check())?;
         Ok(ImportedImage {
             image,
-            rootfs: RootFilesystem::Archive(archive),
+            rootfs: RootFilesystem::Stored(view),
             auxiliary: BTreeMap::new(),
             provenance: BTreeMap::new(),
         })
     }
 }
 
-/// The config bytes and filesystem object a recorded export points at, when both
-/// are still in the store. Anything else is a miss and exports again.
-fn cached_export(store: &ContentStore, record: &ContentDigest) -> Option<(Vec<u8>, ContentDigest)> {
+/// Names the filesystem view this build derived from one recorded export's
+/// layer. The export record already names this build, so a rebuilt Seedbox
+/// renders its own view instead of reusing an older one.
+fn view_record(export: &ContentDigest, layer: &ContentDigest) -> ContentDigest {
+    ContentDigest::of(
+        serde_json::json!(["filesystem-view", export, layer])
+            .to_string()
+            .as_bytes(),
+    )
+}
+
+/// The config bytes, filesystem object and filesystem view a recorded export
+/// points at, when all are still in the store. Anything else is a miss and
+/// exports again.
+fn cached_export(
+    store: &ContentStore,
+    record: &ContentDigest,
+) -> Option<(Vec<u8>, ContentDigest, ContentDigest)> {
     let config = store.read(&store.record(record)?).ok()?;
     let value: serde_json::Value = serde_json::from_slice(&config).ok()?;
     let [layer] = value["rootfs"]["diff_ids"].as_array()?.as_slice() else {
@@ -377,7 +392,9 @@ fn cached_export(store: &ContentStore, record: &ContentDigest) -> Option<(Vec<u8
     let layer =
         ContentDigest::try_from(layer.as_str()?.strip_prefix("sha256:")?.to_owned()).ok()?;
     store.size(&layer).ok()?;
-    Some((config, layer))
+    let view = store.record(&view_record(record, &layer))?;
+    store.size(&view).ok()?;
+    Some((config, layer, view))
 }
 
 /// Prefix metadata only. Guest filesystem paths are never extracted on the host.
@@ -760,12 +777,13 @@ mod tests {
             } else {
                 let imported = result.unwrap();
                 assert_eq!(imported.image.launch.argv, ["/app"]);
-                let RootFilesystem::Archive(path) = imported.rootfs else {
-                    panic!("expected archive")
+                let RootFilesystem::Stored(view) = imported.rootfs else {
+                    panic!("expected a stored view")
                 };
-                let mut archive = tar::Archive::new(fs::File::open(path).unwrap());
+                let view = store.read(&view).unwrap();
+                let mut archive = tar::Archive::new(view.as_slice());
                 let entry = archive.entries().unwrap().nth(1).unwrap().unwrap();
-                assert_eq!(entry.path().unwrap().as_ref(), Path::new("rootfs/app"));
+                assert_eq!(entry.path().unwrap().as_ref(), Path::new("app"));
                 assert_eq!(
                     (entry.header().uid().unwrap(), entry.header().gid().unwrap()),
                     (123, 456)
@@ -858,10 +876,10 @@ mod tests {
                     Architecture::Amd64,
                 )
                 .unwrap();
-            let RootFilesystem::Archive(path) = &imported.rootfs else {
-                panic!("expected archive")
+            let RootFilesystem::Stored(view) = &imported.rootfs else {
+                panic!("expected a stored view")
             };
-            (imported.image, fs::read(path).unwrap())
+            (imported.image, store.read(view).unwrap())
         };
         let exported = import(b"engine", "first");
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -875,6 +893,11 @@ mod tests {
         fs::remove_dir_all(directory.path().join("store/sha256")).unwrap();
         assert_eq!(import(b"engine", "fourth"), exported);
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 3);
+        // So is one whose filesystem view alone is gone.
+        let view = ContentDigest::of(&exported.1);
+        fs::remove_file(directory.path().join("store/sha256").join(view.hex())).unwrap();
+        assert_eq!(import(b"engine", "fifth"), exported);
+        assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 4);
     }
 
     /// A path of exactly `length` bytes ending in a 30-byte name of `leaf`,

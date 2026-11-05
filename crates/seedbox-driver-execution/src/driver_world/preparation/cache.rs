@@ -56,7 +56,7 @@ impl PreparedBootCache {
                 "kind": "prepared-oci-boot-v1",
                 "runtime": self.runtime,
                 "tcg": self.tcg,
-                "filesystem": ContentDigest::of(&request.filesystem),
+                "filesystem": request.filesystem,
                 "launch": request.launch,
                 "configs": configs,
                 "name": request.name,

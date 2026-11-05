@@ -12,14 +12,13 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-/// Linux filesystems stay on Linux; a container transport returns an archive.
+/// Linux filesystems stay on Linux; a container transport stores its view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootFilesystem {
     /// An application-root directory, without a transport prefix.
     Directory(PathBuf),
-    /// Transport tar with rootfs/ on entries and hard-link targets. SDK
-    /// builders need the logical root, so the prefix is stripped before use.
-    Archive(PathBuf),
+    /// The logical application-root tar, already in the store.
+    Stored(ContentDigest),
 }
 
 pub trait ImageTransport {
@@ -257,14 +256,27 @@ fn retain_descriptor(
         .strip_prefix("sha256:")
         .ok_or_else(|| Error::Integrity("only sha256 OCI descriptors are supported".into()))?;
     let expected = ContentDigest::try_from(hex.to_owned())?;
-    let path = raw.join(expected.hex());
-    if !fs::symlink_metadata(&path)?.file_type().is_file()
-        || fs::metadata(&path)?.len() != descriptor.size
-    {
-        return Err(Error::Integrity(format!(
+    let mismatch = || {
+        Error::Integrity(format!(
             "descriptor size/type mismatch: {}",
             descriptor.digest
-        )));
+        ))
+    };
+    let path = raw.join(expected.hex());
+    let metadata = match fs::symlink_metadata(&path) {
+        // A transport that stored a blob itself writes only the manifest;
+        // the store must then hold the whole object.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if store.size(&expected).ok() != Some(descriptor.size) {
+                return Err(mismatch());
+            }
+            store.verify(&expected)?;
+            return Ok(expected);
+        }
+        metadata => metadata?,
+    };
+    if !metadata.file_type().is_file() || fs::metadata(&path)?.len() != descriptor.size {
+        return Err(mismatch());
     }
     let actual = store.put_file(&path)?;
     if actual != expected {

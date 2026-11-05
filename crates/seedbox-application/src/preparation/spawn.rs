@@ -54,7 +54,7 @@ impl OciPreparer {
         let filesystem = directory.join("filesystem");
         fs::write(
             &filesystem,
-            crate::driver_preparation::filesystem(&imported.rootfs)?,
+            crate::driver_preparation::filesystem(&imported.rootfs, store)?,
         )?;
         MachineInputs {
             name,
