@@ -388,10 +388,8 @@ fn materialize_factory(
     }) = inventory;
     let engine = super::actions::engine(inventory);
     let (backend, architecture) = (engine.backend, engine.architecture);
-    checkpoint::verified(archive)?;
     let (guest_assets, qemu, inputs) = if let Some(binding) = binding {
         binding.validate_archive(archive).map_err(bad)?;
-        checkpoint::verified(&binding.archive)?;
         (binding.guest_assets.clone(), binding.qemu.clone(), None)
     } else {
         // An explicitly unbound standalone worker owns its own extraction. The
@@ -401,7 +399,6 @@ fn materialize_factory(
         // because machine QEMU and PV-worker spawns are not exec-file scoped
         // (see seedbox_exec): no fork can then copy its fd.
         let runtime = Runtime::from_archive(Path::new(&archive.artifact), output)?;
-        verify_at(archive, &runtime.archive())?;
         let inputs = runtime.select(backend, architecture)?;
         (
             inputs.guest_assets.clone(),
@@ -417,7 +414,6 @@ fn materialize_factory(
             init,
             command_line,
             progress,
-            runtime,
             formatter,
             ..
         } => {
@@ -429,7 +425,6 @@ fn materialize_factory(
             ] {
                 remap(artifact, &guest_assets.join(name))?;
             }
-            remap(runtime, Path::new(&archive.artifact))?;
             if let Some(formatter) = formatter {
                 remap(formatter, &guest_assets.join("mke2fs"))?;
             }
@@ -451,7 +446,6 @@ fn materialize_factory(
             init,
             command_line,
             firmware,
-            runtime,
             formatter,
             ..
         } => {
@@ -463,7 +457,6 @@ fn materialize_factory(
             ] {
                 remap(artifact, &guest_assets.join(name))?;
             }
-            remap(runtime, Path::new(&archive.artifact))?;
             if let Some(formatter) = formatter {
                 remap(formatter, &guest_assets.join("mke2fs"))?;
             }
@@ -497,17 +490,7 @@ fn materialize_factory(
         inventory,
     })
 }
-fn verify_at(artifact: &Artifact, path: &Path) -> Result<()> {
-    let mut reference = artifact.clone();
-    reference.artifact = path
-        .to_str()
-        .ok_or_else(|| bad("Driver factory path is not UTF-8"))?
-        .into();
-    checkpoint::verified(&reference)?;
-    Ok(())
-}
 fn remap(artifact: &mut Artifact, path: &Path) -> Result<()> {
-    verify_at(artifact, path)?;
     artifact.artifact = path
         .to_str()
         .ok_or_else(|| bad("Driver factory path is not UTF-8"))?
@@ -515,7 +498,7 @@ fn remap(artifact: &mut Artifact, path: &Path) -> Result<()> {
     Ok(())
 }
 fn copy(artifact: &Artifact, path: &Path) -> Result<()> {
-    let mut input = checkpoint::verified(artifact)?;
+    let mut input = open_input(artifact)?;
     let mut file = fs::File::options()
         .write(true)
         .create_new(true)
@@ -530,11 +513,24 @@ fn copy(artifact: &Artifact, path: &Path) -> Result<()> {
         ));
     }
     file.flush()?;
-    verify_at(artifact, path)
+    Ok(())
+}
+/// Open one input of this run. Its digest was checked before this worker was
+/// given it, so only its recorded length is checked here.
+fn open_input(artifact: &Artifact) -> Result<fs::File> {
+    artifact.validate().map_err(bad)?;
+    let file = fs::File::open(&artifact.artifact)?;
+    if file.metadata()?.len() != artifact.length {
+        return Err(bad("Driver artifact encoded length differs"));
+    }
+    Ok(file)
+}
+/// Read one input of this run whole, once.
+pub(super) fn read_input(artifact: &Artifact) -> Result<Vec<u8>> {
+    read(&mut open_input(artifact)?, artifact.length)
 }
 pub(super) fn definition(input: &wire::Machine) -> Result<MachineDefinition> {
-    let mut reader = checkpoint::verified(&input.filesystem)?;
-    let bytes = read(&mut reader, input.filesystem.length)?;
+    let bytes = read_input(&input.filesystem)?;
     let application = definition::PreparedApplication {
         filesystem: FilesystemArchive::new(bytes).map_err(|e| bad(e.to_string()))?,
         launch: definition::Launch {
@@ -549,13 +545,10 @@ pub(super) fn definition(input: &wire::Machine) -> Result<MachineDefinition> {
         Some(wire::Disk::Zero { bytes }) => {
             Some(definition::DiskImage::zeroed(*bytes).map_err(|e| bad(e.to_string()))?)
         }
-        Some(wire::Disk::Image { contents }) => {
-            let mut reader = checkpoint::verified(contents)?;
-            Some(
-                definition::DiskImage::from_bytes(read(&mut reader, contents.length)?)
-                    .map_err(|e| bad(e.to_string()))?,
-            )
-        }
+        Some(wire::Disk::Image { contents }) => Some(
+            definition::DiskImage::from_bytes(read_input(contents)?)
+                .map_err(|e| bad(e.to_string()))?,
+        ),
     };
     let network = input
         .interface
