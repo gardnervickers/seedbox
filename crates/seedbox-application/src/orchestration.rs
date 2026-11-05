@@ -37,6 +37,20 @@ pub struct Orchestrator {
     pub(crate) store: ContentStore,
     pub(crate) runs: PathBuf,
     pub(crate) log_policy: LogPolicy,
+    pub(crate) spawner: Option<SharedSpawner>,
+}
+
+/// Prepares machines the oracle spawns during a run.
+#[derive(Clone)]
+pub struct SharedSpawner(pub std::sync::Arc<dyn Spawner>);
+// The orchestrator only calls a spawner; a panic in it leaves nothing the
+// orchestrator reads afterwards half-updated.
+impl std::panic::RefUnwindSafe for SharedSpawner {}
+impl std::panic::UnwindSafe for SharedSpawner {}
+impl std::fmt::Debug for SharedSpawner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SharedSpawner")
+    }
 }
 
 impl Orchestrator {
@@ -66,7 +80,15 @@ impl Orchestrator {
             store,
             runs: runs.into(),
             log_policy: LogPolicy::default(),
+            spawner: None,
         }
+    }
+
+    /// Prepare machines the oracle spawns that the prepared inputs do not
+    /// retain. The run then retains them, so its replay needs no preparation.
+    pub fn with_spawner(mut self, spawner: std::sync::Arc<dyn Spawner>) -> Self {
+        self.spawner = Some(SharedSpawner(spawner));
+        self
     }
 
     pub fn with_log_policy(mut self, policy: LogPolicy) -> Self {
@@ -260,6 +282,7 @@ impl Orchestrator {
                 output: &output,
                 cancellation,
                 performance_parameters: &record.performance_parameters,
+                spawner: self.spawner.as_ref().map(|spawner| &*spawner.0),
             })?;
             // A backend must enforce its own deadline so blocking calls terminate.
             // This additional guard prevents a late return from being a success.
@@ -300,7 +323,9 @@ impl Orchestrator {
             }
         }
         // Seal semantic inputs independently of optional logs. The attempt path
-        // stays stable while its completed identity includes interactive actions.
+        // stays stable while its completed identity includes interactive actions
+        // and the machines its spawns prepared.
+        let mut sealed = false;
         if let Some(history) =
             seedbox_artifacts::interventions::read_optional(&directory.join("interventions.json"))?
         {
@@ -310,10 +335,16 @@ impl Orchestrator {
                     &history,
                 )
                 .map_err(Error::Integrity)?;
-                record.run_id = self
-                    .store
-                    .put_unsynced(&serde_json::to_vec(&record.identity)?)?;
+                sealed = true;
             }
+        }
+        if output.is_dir() {
+            sealed |= executor.retain_spawned(&mut record.identity.inputs, &output, &self.store)?;
+        }
+        if sealed {
+            record.run_id = self
+                .store
+                .put_unsynced(&serde_json::to_vec(&record.identity)?)?;
         }
         write_record(&directory, &record)?;
         Ok(Run { directory, record })

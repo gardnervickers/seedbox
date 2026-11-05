@@ -77,6 +77,10 @@ pub struct MachineId(usize);
 impl MachineId {
     /// The oracle is constructed first and retains this identity in checkpoints.
     pub const ORACLE: Self = Self(0);
+    /// Construction order: the oracle, the initial machines, then each spawn.
+    pub const fn index(self) -> usize {
+        self.0
+    }
 }
 
 /// A spawned machine's definition, which the host prepared from the spec its

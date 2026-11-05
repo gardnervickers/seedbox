@@ -805,6 +805,7 @@ mod tests {
             output: &output,
             cancellation: &cancellation,
             performance_parameters: &performance,
+            spawner: None,
         };
         let worker = seedbox_driver_execution::driver_world::retained::adapt_request(
             &request,

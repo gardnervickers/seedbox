@@ -101,6 +101,27 @@ pub(super) fn parse(
     Ok(simulation)
 }
 
+/// Resolve the machine an oracle spawn named `name` asks for. Its spec is a
+/// `machines` entry of seedbox.yaml; relative paths in it resolve against
+/// the project's directory, as they would there.
+pub(super) fn spawned(
+    spec: &str,
+    name: &str,
+    simulation: &Simulation,
+    architecture: crate::guest::Architecture,
+) -> Result<(Service, BTreeMap<String, PathBuf>)> {
+    let path = format!("spawn {name}");
+    if !dns_label(name) {
+        return invalid(&path, "expected a lowercase DNS label (1 to 63 characters)");
+    }
+    let machine: Machine =
+        serde_json::from_str(spec).map_err(|error| validation(&path, &error.to_string()))?;
+    let base = simulation.source.parent().unwrap_or(Path::new("."));
+    let mut configs = BTreeMap::new();
+    let service = resolve_machine(machine, name, &path, base, architecture, &mut configs)?;
+    Ok((service, configs))
+}
+
 fn resolve_machine(
     machine: Machine,
     name: &str,

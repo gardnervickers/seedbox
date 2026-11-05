@@ -60,6 +60,7 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
         &request.output.join(super::NATIVE_SCRATCH),
     )
     .map_err(bad)?;
+    let environments = factory.environments();
     let (oracle, machines, spawned) =
         conversion::definitions(&request.prepared, request.machine_workers)?;
     let mut initial: Vec<_> = std::iter::once(oracle.name.clone())
@@ -164,7 +165,8 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
         constructed,
         request.observations.as_deref(),
         encode,
-    )?;
+    )?
+    .with_environments(environments);
     worker.flush()?;
     Ok(worker)
 }
@@ -266,6 +268,7 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
         &request.output.join(super::NATIVE_SCRATCH),
     )
     .map_err(bad)?;
+    let environments = factory.environments();
     let constructed: Constructed = Arc::new(Mutex::new(VecDeque::new()));
     let ledger = constructed.clone();
     // Only verified open descriptors accumulate here, not decoded RAM images.
@@ -342,6 +345,7 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
         request.observations.as_deref(),
         encode,
     )
+    .map(|worker| worker.with_environments(environments))
 }
 fn program(
     request: &wire::Request,
@@ -528,7 +532,7 @@ fn copy(artifact: &Artifact, path: &Path) -> Result<()> {
     file.flush()?;
     verify_at(artifact, path)
 }
-fn definition(input: &wire::Machine) -> Result<MachineDefinition> {
+pub(super) fn definition(input: &wire::Machine) -> Result<MachineDefinition> {
     let mut reader = checkpoint::verified(&input.filesystem)?;
     let bytes = read(&mut reader, input.filesystem.length)?;
     let application = definition::PreparedApplication {

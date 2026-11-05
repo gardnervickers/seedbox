@@ -17,6 +17,8 @@ where
     M::Error: Send + std::fmt::Display + 'static,
 {
     worker.flush()?;
+    // A spawn that waits at its turn for the parent to prepare its machine.
+    let mut spawning: Option<driver::SpawnRequest> = None;
     loop {
         receive(worker, control)?;
         match worker.capture_pending() {
@@ -36,6 +38,28 @@ where
             std::thread::sleep(CONTROL_POLL);
             continue;
         }
+        if let Some(request) = &spawning {
+            use seedbox_engine_protocol::driver_world::SpawnResponse;
+            match super::spawn::answer(&worker.output, &request.name)? {
+                Some(SpawnResponse::Prepared {
+                    spawned,
+                    environment,
+                }) => {
+                    worker.provide_spawn(request, *spawned, *environment)?;
+                    spawning = None;
+                }
+                Some(SpawnResponse::Failed { error }) => {
+                    return Err(fail(format!("spawn {}: {error}", request.name)));
+                }
+                None => {
+                    // Preparing an image is host work; it never counts
+                    // against the run's wall-clock limit.
+                    control.waiting(true)?;
+                    std::thread::sleep(CONTROL_POLL);
+                }
+            }
+            continue;
+        }
         let playback = worker.playback()?;
         let at = playback.position.at.as_nanos();
         if at > until_ns {
@@ -51,6 +75,11 @@ where
                 StepOutcome::BeforeFault { .. } | StepOutcome::Waiting { .. } => {
                     control.waiting(true)?;
                     std::thread::sleep(CONTROL_POLL);
+                    continue;
+                }
+                StepOutcome::NeedsMachine { request, .. } => {
+                    super::spawn::ask(&worker.output, &request)?;
+                    spawning = Some(*request);
                     continue;
                 }
                 _ => continue,
@@ -98,13 +127,9 @@ where
                 control.waiting(true)?;
                 std::thread::sleep(CONTROL_POLL);
             }
-            // The host round trip that prepares a spawned machine comes next;
-            // until then a spawn without a retained machine ends the run.
             StepOutcome::NeedsMachine { request, .. } => {
-                return Err(fail(format!(
-                    "spawn {} needs its machine prepared, which this worker cannot do yet",
-                    request.name
-                )));
+                super::spawn::ask(&worker.output, &request)?;
+                spawning = Some(*request);
             }
             StepOutcome::Finished { .. } | StepOutcome::Stopped { .. } => {}
             StepOutcome::BarrierReached { .. } => {}
