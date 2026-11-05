@@ -448,8 +448,8 @@ impl ContentStore {
     /// the content store into a backend's writable execution workspace.
     ///
     /// An object this process already hashed, unchanged since, is cloned
-    /// (copy-on-write where the filesystem supports it) or copied in the
-    /// kernel without hashing again. Others stream through the hash as before.
+    /// (copy-on-write where the filesystem supports it) or copied without
+    /// hashing again. Others stream through the hash as before.
     /// The copy is scratch for one execution, so it is not synced: after a
     /// crash the run is INCOMPLETE and replay materializes from the store.
     pub fn materialize(&self, digest: &ContentDigest, directory: &Path) -> Result<PathBuf> {
@@ -459,7 +459,7 @@ impl ContentStore {
         let mut source = self.open(digest)?;
         match self.trusted(digest, &source)? {
             Some(stamp) => {
-                if !clone_file(&source, temp.as_file())? {
+                if !clone_file(&source, &mut temp)? {
                     io::copy(&mut source, temp.as_file_mut())?;
                 }
                 // Changed while copying: fall back to hashing the bytes.
@@ -500,13 +500,14 @@ fn remove_if_present(path: &Path) -> io::Result<bool> {
     }
 }
 
-/// Share `source`'s extents with the empty `destination` (FICLONE). False
-/// where the filesystem cannot, such as ext4 or across filesystems.
+/// Share `source`'s extents with the empty `temp` (FICLONE). False where the
+/// filesystem cannot, such as ext4 or across filesystems.
 #[cfg(target_os = "linux")]
-fn clone_file(source: &fs::File, destination: &fs::File) -> io::Result<bool> {
+fn clone_file(source: &fs::File, temp: &mut tempfile::NamedTempFile) -> io::Result<bool> {
     use std::os::fd::AsRawFd;
+    let destination = temp.as_file().as_raw_fd();
     // SAFETY: both descriptors are open for the duration of the call.
-    if unsafe { libc::ioctl(destination.as_raw_fd(), libc::FICLONE, source.as_raw_fd()) } == 0 {
+    if unsafe { libc::ioctl(destination, libc::FICLONE, source.as_raw_fd()) } == 0 {
         return Ok(true);
     }
     let error = io::Error::last_os_error();
@@ -518,8 +519,46 @@ fn clone_file(source: &fs::File, destination: &fs::File) -> io::Result<bool> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn clone_file(_: &fs::File, _: &fs::File) -> io::Result<bool> {
+/// Replace the empty `temp` with a copy-on-write clone of `source` (APFS
+/// `fclonefileat`) under a new temporary name beside it. False where the
+/// volume cannot clone or `source` is on another volume.
+#[cfg(target_os = "macos")]
+fn clone_file(source: &fs::File, temp: &mut tempfile::NamedTempFile) -> io::Result<bool> {
+    use std::{
+        ffi::CString,
+        os::{fd::AsRawFd, unix::ffi::OsStrExt},
+    };
+    let Some(directory) = temp.path().parent() else {
+        return Ok(false);
+    };
+    let source = source.as_raw_fd();
+    // fclonefileat creates its destination, so it cannot fill the open
+    // `temp`. A taken name fails with EEXIST and make_in tries another; the
+    // clone's name is removed with it unless it is persisted.
+    let clone = tempfile::Builder::new().make_in(directory, |path| {
+        let name = CString::new(path.as_os_str().as_bytes())?;
+        // SAFETY: the descriptor and the name outlive the call.
+        if unsafe { libc::fclonefileat(source, libc::AT_FDCWD, name.as_ptr(), 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        fs::File::open(path).inspect_err(|_| {
+            let _ = fs::remove_file(path);
+        })
+    });
+    match clone {
+        Ok(clone) => {
+            *temp = clone;
+            Ok(true)
+        }
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EXDEV)) => {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn clone_file(_: &fs::File, _: &mut tempfile::NamedTempFile) -> io::Result<bool> {
     Ok(false)
 }
 
@@ -550,5 +589,7 @@ fn transfer_observed(
     Ok(ContentDigest::finish(hash))
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod clone_tests;
 #[cfg(test)]
 mod observed_tests;
