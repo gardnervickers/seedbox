@@ -88,6 +88,23 @@ impl Machine for Native {
             }
         }
     }
+    fn take_fault_counts(
+        &mut self,
+        id: u64,
+    ) -> Result<Option<seedbox_machine::pv::FaultCounts>, String> {
+        match self {
+            #[cfg(any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+            ))]
+            Self::Pv { machine, .. } => machine
+                .take_fault_counts(id)
+                .map_err(|error| error.to_string()),
+            Self::Tcg { machine, .. } => machine
+                .take_fault_counts(id)
+                .map_err(|error| error.to_string()),
+        }
+    }
     fn snapshot(&mut self) -> Result<Snapshot, String> {
         match self {
             #[cfg(any(

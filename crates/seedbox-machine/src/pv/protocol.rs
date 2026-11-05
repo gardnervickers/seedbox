@@ -115,6 +115,9 @@ impl Codec {
             | Request::Shutdown
             | Request::SimulationReply { .. }
             | Request::ReceiveFrame { .. }
+            | Request::InstallFault { .. }
+            | Request::HealFault { .. }
+            | Request::BreakOnBlockRequest { .. }
             | Request::DeclareBreaks { .. }
             | Request::ResumeBreak => Err(Error::Frame),
         }

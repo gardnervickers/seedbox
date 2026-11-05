@@ -91,21 +91,22 @@ impl Service {
             Ok(Operation::Sleep { duration_ns }) => return self.sleep(call, now, duration_ns),
             Ok(Operation::ArmTrigger {
                 source,
-                marker: Some(marker),
-                block_request: None,
+                marker,
                 match_timeout_ns,
                 fault,
             }) => self.arm_trigger(adapter, &source, marker, match_timeout_ns, fault, now),
-            // A held block request needs its machine's device to hold it.
-            Ok(Operation::ArmTrigger { .. }) => Err(error(
-                ErrorCode::Unsupported,
-                crate::driver::faults::Capability::HeldBlockRequest
-                    .unprovided("a block_request trigger"),
-            )),
             Ok(Operation::CancelTrigger { trigger_id }) => self.cancel_trigger(trigger_id, now),
             Ok(Operation::DeclareBreaks { names }) => return self.declare_breaks(call, now, names),
             Ok(Operation::WaitBreak { timeout_ns }) => {
                 return self.wait_break(call, now, timeout_ns)
+            }
+            Ok(Operation::BreakOnBlockRequest { target, op, nth }) => {
+                match self.break_on_block_request(adapter, &target, op, nth, now) {
+                    Ok(plan) => {
+                        return Ok(vec![plan, self.reply(call, now, Some(now), Ok(json!({})))?])
+                    }
+                    Err(e) => Err(e),
+                }
             }
             Ok(Operation::ResumeBreak { break_id }) => match self.resume_break(break_id, now) {
                 Ok((result, mut plans)) => {
@@ -130,8 +131,13 @@ impl Service {
                 | Operation::Spawn { .. }
                 | Operation::Partition { .. }
                 | Operation::Shape { .. }
-                | Operation::DropConnection { .. }),
-            ) => match Command::from_operation(op) {
+                | Operation::DropConnection { .. }
+                | Operation::DiskError { .. }
+                | Operation::DiskLatency { .. }
+                | Operation::Preempt { .. }),
+            ) => match Self::require_capability(adapter, &op)
+                .and_then(|()| Command::from_operation(op))
+            {
                 Err(e) => Err(e),
                 Ok(command) => match self.prepare(
                     adapter,
@@ -160,6 +166,14 @@ impl Service {
                 .is_err_and(|e| e.code == ErrorCode::TargetUnavailable))
         .then_some(now);
         Ok(vec![self.reply(call, now, effect, result)?])
+    }
+    /// Refuse a device fault the engine running these machines cannot carry
+    /// out, after its arguments and before its target or handle.
+    fn require_capability(adapter: &impl Adapter, op: &Operation) -> Result<(), OperationError> {
+        match op.capability() {
+            Some((name, capability)) => adapter.require_capability(name, capability),
+            None => Ok(()),
+        }
     }
     /// List the connections between two network members after `after`.
     fn connections(
@@ -210,11 +224,6 @@ impl Service {
                 // The same membership rules as an untriggered partition.
                 let (left, right) = Self::partition_sides(adapter, &left, &right)?;
                 (TriggerAction::Partition { left, right }, None)
-            }
-            TriggerFault::Crash { .. } => {
-                return Err(OperationError::invalid(
-                    "only a block_request trigger crashes its machine",
-                ))
             }
         };
         let id = self

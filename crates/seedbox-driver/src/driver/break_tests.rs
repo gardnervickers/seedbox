@@ -29,6 +29,8 @@ struct Guest {
     held: bool,
     crashed: bool,
     replies: Vec<Value>,
+    /// Block request holds asked of this machine, in order.
+    holds: Vec<(crate::pv::DiskOp, u64)>,
     /// Every run: (now, upto, held on entry).
     runs: Vec<(u64, u64, bool)>,
     resumed: Vec<u64>,
@@ -50,6 +52,7 @@ impl Machine for Guest {
                     self.held = false;
                 }
                 Request::DeclareBreaks { names } => self.declared = names,
+                Request::BreakOnBlockRequest { op, nth } => self.holds.push((op, nth)),
                 Request::ResumeBreak => {
                     self.held = false;
                     self.resumed.push(now);
@@ -81,8 +84,13 @@ impl Machine for Guest {
             let (t, payload) = self.script.pop_front().unwrap();
             // An output scripted while held is written once the machine runs.
             let t = t.max(now);
-            if let Response::Break { name } = &payload {
-                if !self.declared.contains(name) {
+            let suspends = match &payload {
+                Response::Break { name } => Some(self.declared.contains(name)),
+                &Response::BlockRequestHeld { op, nth } => Some(self.holds.contains(&(op, nth))),
+                _ => None,
+            };
+            if let Some(suspends) = suspends {
+                if !suspends {
                     continue;
                 }
                 self.held = true;
@@ -121,8 +129,15 @@ fn build(oracle: Vec<(u64, Response)>, worker: Vec<(u64, Response)>) -> Driver<G
         },
     )
     .unwrap();
-    driver.enable_breakpoints();
+    driver.set_engine(pv());
     driver
+}
+/// A PV engine, whose machines hold at breakpoints.
+fn pv() -> faults::Engine {
+    faults::Engine {
+        backend: seedbox_spec::backend::CpuBackend::Pv,
+        architecture: seedbox_spec::definition::Architecture::Aarch64,
+    }
 }
 /// Step until `upto`, the oracle finishes or nothing can advance.
 fn run_to(driver: &mut Driver<Guest>, upto: u64) {
@@ -358,5 +373,254 @@ fn declarations_reach_machines_and_survive_a_checkpoint() {
     assert_eq!(
         restored.execution.control.service.breaks.declared(),
         ["leader"]
+    );
+}
+
+#[test]
+fn a_block_request_hit_suspends_until_resumed() {
+    use crate::pv::DiskOp;
+    let mut driver = build(
+        vec![
+            (
+                1,
+                call(
+                    1,
+                    r#""op":"break_on_block_request","target":{"machine":"fixture-1"},"request":"flush","nth":3"#,
+                ),
+            ),
+            (2, call(2, WAIT)),
+            (50, call(3, r#""op":"resume_break","break_id":1"#)),
+            (
+                51,
+                call(
+                    4,
+                    r#""op":"break_on_block_request","target":{"machine":"fixture-1"},"request":"flush","nth":0"#,
+                ),
+            ),
+        ],
+        vec![(
+            25,
+            Response::BlockRequestHeld {
+                op: DiskOp::Flush,
+                nth: 3,
+            },
+        )],
+    );
+    run_to(&mut driver, 100);
+    let r = replies(&driver);
+    assert_eq!(r[0]["result"], json!({}));
+    assert_eq!(
+        r[1]["result"],
+        json!({"break_id":1,"source":"block_request","machine":"fixture-1","boot":0,"name":"block_request","request":"flush","nth":3,"at_ns":25})
+    );
+    assert_eq!(r[2]["result"], json!({}));
+    assert_eq!(r[3]["error"]["code"], "invalid_request");
+    let worker = guest(&driver, 1);
+    assert_eq!(worker.holds, [(DiskOp::Flush, 3)]);
+    assert!(worker
+        .runs
+        .iter()
+        .filter(|(_, _, held)| *held)
+        .all(|(now, upto, _)| now == upto));
+    assert_eq!(worker.resumed, [50]);
+    assert!(!worker.held);
+    let events = driver.drain_events();
+    assert_eq!(
+        break_events(&events),
+        [
+            (
+                25,
+                EventKind::BreakHit {
+                    break_id: 1,
+                    machine: MachineId(1),
+                    boot: 0,
+                    name: "block_request".into()
+                }
+            ),
+            (
+                50,
+                EventKind::BreakEnded {
+                    break_id: 1,
+                    reason: BreakEnd::Resumed
+                }
+            ),
+        ]
+    );
+}
+
+#[test]
+fn block_request_breakpoints_need_an_engine_with_breakpoints() {
+    // Told no engine, or told TCG, which has no guest breakpoint device.
+    let tcg = faults::Engine {
+        backend: seedbox_spec::backend::CpuBackend::Tcg,
+        architecture: seedbox_spec::definition::Architecture::X86_64,
+    };
+    for engine in [None, Some(tcg)] {
+        let mut scripts = vec![
+        vec![(
+            1,
+            call(
+                1,
+                r#""op":"break_on_block_request","target":{"machine":"fixture-1"},"request":"any","nth":1"#,
+            ),
+        )],
+        vec![],
+    ]
+    .into_iter();
+        let mut driver = Driver::new_seeded(
+            at(0),
+            Duration::from_nanos(10),
+            1,
+            7,
+            || Ok(()),
+            fixture::definition(0),
+            vec![fixture::definition(1)],
+            vec![],
+            crate::driver::NetworkConfig::default(),
+            move |_| {
+                Ok(Guest {
+                    script: scripts.next().unwrap().into(),
+                    ..Default::default()
+                })
+            },
+        )
+        .unwrap();
+        if let Some(engine) = engine {
+            driver.set_engine(engine);
+        }
+        run_to(&mut driver, 20);
+        assert_eq!(replies(&driver)[0]["error"]["code"], "unsupported");
+        assert!(guest(&driver, 1).holds.is_empty());
+    }
+}
+
+#[test]
+fn a_block_request_hit_reached_on_resume_suspends_at_once() {
+    use crate::pv::DiskOp;
+    let mut driver = build(
+        vec![
+            (
+                1,
+                call(
+                    1,
+                    r#""op":"break_on_block_request","target":{"machine":"fixture-1"},"request":"flush","nth":3"#,
+                ),
+            ),
+            (
+                1,
+                call(
+                    2,
+                    r#""op":"break_on_block_request","target":{"machine":"fixture-1"},"request":"write","nth":1"#,
+                ),
+            ),
+            (2, call(3, WAIT)),
+            (50, call(4, r#""op":"resume_break","break_id":1"#)),
+            (51, call(5, WAIT)),
+            (80, call(6, r#""op":"resume_break","break_id":2"#)),
+        ],
+        // The resumed FLUSH lets the WRITE behind it reach the second hold
+        // before the guest runs again.
+        vec![
+            (
+                25,
+                Response::BlockRequestHeld {
+                    op: DiskOp::Flush,
+                    nth: 3,
+                },
+            ),
+            (
+                26,
+                Response::BlockRequestHeld {
+                    op: DiskOp::Write,
+                    nth: 1,
+                },
+            ),
+        ],
+    );
+    run_to(&mut driver, 60);
+    let r = replies(&driver);
+    assert_eq!(r[3]["result"], json!({}));
+    assert_eq!(
+        r[4]["result"],
+        json!({"break_id":2,"source":"block_request","machine":"fixture-1","boot":0,"name":"block_request","request":"write","nth":1,"at_ns":50})
+    );
+    // Suspended again at the release: still no checkpoint.
+    assert!(matches!(
+        driver.checkpoint(),
+        Err(Error::InvalidCheckpoint(_))
+    ));
+    run_to(&mut driver, 100);
+    assert_eq!(guest(&driver, 1).resumed, [50, 80]);
+    assert!(!guest(&driver, 1).held);
+    let events = driver.drain_events();
+    assert_eq!(
+        break_events(&events),
+        [
+            (
+                25,
+                EventKind::BreakHit {
+                    break_id: 1,
+                    machine: MachineId(1),
+                    boot: 0,
+                    name: "block_request".into()
+                }
+            ),
+            (
+                50,
+                EventKind::BreakEnded {
+                    break_id: 1,
+                    reason: BreakEnd::Resumed
+                }
+            ),
+            (
+                50,
+                EventKind::BreakHit {
+                    break_id: 2,
+                    machine: MachineId(1),
+                    boot: 0,
+                    name: "block_request".into()
+                }
+            ),
+            (
+                80,
+                EventKind::BreakEnded {
+                    break_id: 2,
+                    reason: BreakEnd::Resumed
+                }
+            ),
+        ]
+    );
+    driver.checkpoint().unwrap();
+}
+
+#[test]
+fn a_resume_admitted_behind_a_crash_of_its_machine_does_nothing() {
+    // A nemesis crashes the machine while a handler resumes its hit, both
+    // admitted at one barrier: the crash runs first and ends the boot.
+    let mut driver = build(
+        vec![
+            (1, call(1, DECLARE)),
+            (
+                40,
+                call(2, r#""op":"crash","target":{"machine":"fixture-1"}"#),
+            ),
+            (40, call(3, r#""op":"resume_break","break_id":1"#)),
+        ],
+        vec![(25, hit("leader"))],
+    );
+    run_to(&mut driver, 100);
+    let r = replies(&driver);
+    assert_eq!(r[1]["ok"], true);
+    assert_eq!(r[2]["ok"], true);
+    let worker = guest(&driver, 1);
+    assert!(worker.crashed);
+    assert!(worker.resumed.is_empty());
+    let events = driver.drain_events();
+    assert_eq!(
+        break_events(&events)
+            .into_iter()
+            .filter(|(_, kind)| matches!(kind, EventKind::BreakEnded { .. }))
+            .count(),
+        1
     );
 }

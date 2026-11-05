@@ -20,6 +20,8 @@ struct DueItem {
     service_effect: Option<u32>,
     /// The origin of a service-issued guest command.
     service_origin: Option<crate::oracle::observation::Origin>,
+    /// A healed device fault whose counts settle its heal.
+    healed: Option<(MachineId, u64)>,
 }
 
 impl DueItem {
@@ -30,6 +32,7 @@ impl DueItem {
             accepted_fault: None,
             service_effect: None,
             service_origin: None,
+            healed: None,
         }
     }
 
@@ -344,17 +347,35 @@ where
                     .control
                     .reply_target(&machine)
                     .map_err(Error::Control)?;
+                // A crash admitted at the same barrier, ahead of this resume,
+                // may already have ended the boot: nothing is left to resume.
                 let entry = &self.execution.machines[target.0];
                 if entry.lifecycle.boot() != boot
                     || matches!(entry.stopped, StopReason::Exited { .. })
                 {
-                    return Err(Error::Control("resumed a hit of an ended boot".into()));
+                    return Ok(None);
                 }
                 Ok(Some(DueItem::new(Scheduled::Input {
                     id: target,
                     input: Input {
                         at: now,
                         payload: Request::ResumeBreak,
+                    },
+                })))
+            }
+            control::Event::Plan(Plan::BreakOnBlockRequest {
+                machine, op, nth, ..
+            }) => {
+                let target = self
+                    .execution
+                    .control
+                    .reply_target(&machine)
+                    .map_err(Error::Control)?;
+                Ok(Some(DueItem::new(Scheduled::Input {
+                    id: target,
+                    input: Input {
+                        at: now,
+                        payload: Request::BreakOnBlockRequest { op, nth },
                     },
                 })))
             }
@@ -437,6 +458,7 @@ where
             .control
             .controller
             .and_then(|setup| setup.controller);
+        let engine = self.execution.engine;
         if !configured {
             self.execution.control.record_call(source, id, boot);
         }
@@ -448,6 +470,7 @@ where
                 Some(&self.execution.network),
                 |service, view| {
                     view.guest_controller = excluded;
+                    view.engine = engine;
                     if configured {
                         service.admit_for_boot(
                             view,
@@ -537,13 +560,20 @@ where
             .map_err(Error::Control)?;
         debug_assert_eq!(self.execution.machines[id.0].lifecycle.boot(), boot);
         let service_effect = (!effect.guest_command()).then_some(fault);
-        let (scheduled, service_origin) = Self::machine_effect(id, fault, effect, command, now)?;
+        let healed = match effect {
+            Effect::Unfault { record } => Some((id, record)),
+            _ => None,
+        };
+        let seed = self.execution.control.fault_seed(id, fault);
+        let (scheduled, service_origin) =
+            Self::machine_effect(id, fault, seed, effect, command, now)?;
         Ok(Some(DueItem {
             scheduled,
             reply_boot: None,
             accepted_fault: Some(fault),
             service_effect,
             service_origin,
+            healed,
         }))
     }
 
@@ -578,10 +608,11 @@ where
     }
 
     /// The machine work of a checked effect on machine `id`, with the origin
-    /// of a service-issued guest command.
+    /// of a service-issued guest command. `seed` keys a device fault's draws.
     fn machine_effect(
         id: MachineId,
         fault: u32,
+        seed: u64,
         effect: crate::oracle::service::Effect,
         command: Option<NonZeroU32>,
         now: Timestamp,
@@ -625,6 +656,15 @@ where
             ),
             Effect::Crash => (input(Request::Crash), None),
             Effect::Reboot => (input(Request::Reboot), None),
+            Effect::Fault { record, fault } => (
+                input(Request::InstallFault {
+                    id: record,
+                    seed,
+                    fault,
+                }),
+                None,
+            ),
+            Effect::Unfault { record } => (input(Request::HealFault { id: record }), None),
             Effect::Shutdown => (input(Request::Shutdown), None),
             Effect::Process(action) => (
                 input(Request::Application {
@@ -647,6 +687,7 @@ where
             accepted_fault,
             service_effect,
             service_origin,
+            healed,
         } = item;
         let cause = accepted_fault.map_or(Cause::Host, |fault| Cause::Fault(FaultId(fault)));
         let mechanical = match scheduled {
@@ -684,11 +725,21 @@ where
             self.control_plans(plans)?;
         }
         if let Some(fault) = service_effect {
+            // A healed device fault settles with what it did over every boot.
+            let counts = match healed {
+                Some((id, record)) => self.execution.machines[id.0]
+                    .machine
+                    .as_mut()
+                    .expect("stopped machine")
+                    .take_fault_counts(record)
+                    .map_err(|source| Error::Machine { id, source })?,
+                None => None,
+            };
             let plans = self
                 .execution
                 .control
                 .invoke_plans(&self.execution.machines, |service, _| {
-                    service.applied(fault, now.as_nanos(), now.as_nanos())
+                    service.applied_counts(fault, now.as_nanos(), counts)
                 })
                 .map_err(Error::Control)?;
             self.control_plans(plans)?;
@@ -769,7 +820,12 @@ where
             | Request::PropertyReply { .. }
             | Request::ReceiveFrame { .. }
             | Request::ResumeBreak
-            | Request::Shutdown => {}
+            | Request::Shutdown
+            // Device faults and holds outlive the boot: an exited machine
+            // keeps them for its next one.
+            | Request::InstallFault { .. }
+            | Request::HealFault { .. }
+            | Request::BreakOnBlockRequest { .. } => {}
             // Request is non-exhaustive across the common crate boundary.
             _ => {
                 return Err(Error::Control("unsupported machine request".into()));

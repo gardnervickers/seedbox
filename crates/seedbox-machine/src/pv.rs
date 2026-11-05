@@ -146,6 +146,30 @@ pub enum Request {
         /// FCS or a virtio-net header. The EtherType and payload are opaque.
         bytes: Vec<u8>,
     },
+    // Disk and scheduler faults act inside the machine's own devices and
+    // guest, so the Driver installs them through the timed inbox, like
+    // lifecycle requests, and reads their counts back after a heal.
+    /// Start a [`DeviceFault`] identified by `id`, with draws keyed by `seed`.
+    /// It applies to this boot and every later one, surviving guest device
+    /// resets, until [`Request::HealFault`]; each boot draws on a fresh
+    /// stream derived from `seed` and that boot. An exited machine keeps it
+    /// for its next boot. Reusing a live `id` is invalid caller input.
+    InstallFault {
+        id: u64,
+        seed: u64,
+        fault: DeviceFault,
+    },
+    /// Stop the fault `id`. Its final counts become readable once through
+    /// [`crate::machine::Machine::take_fault_counts`]. Requests a latency
+    /// fault already delayed still complete at their times.
+    HealFault { id: u64 },
+    /// Suspend at the `nth` guest disk request of kind `op` from now on,
+    /// counted across boots. The request is held unwritten with nothing after
+    /// it processed, and the machine reports [`Response::BlockRequestHeld`]
+    /// and stays held exactly as at a [`Response::Break`]. On
+    /// [`Request::ResumeBreak`] the request continues as if it had never been
+    /// held; a crash or reboot drops it with the rest of the boot. One-shot.
+    BreakOnBlockRequest { op: DiskOp, nth: u64 },
     /// Replace the breakpoint names this machine suspends on, effective for
     /// hits after this input. The set belongs to the machine, not to a boot:
     /// it survives crash and reboot and is part of machine snapshots. Every
@@ -154,10 +178,36 @@ pub enum Request {
         /// Distinct names in ascending byte order.
         names: Vec<String>,
     },
-    /// Release the machine from a [`Response::Break`] hold: the guest's write
-    /// returns and execution continues from the current time, as after any
-    /// stall. Without a hold in the current boot it does nothing.
+    /// Release the machine from a [`Response::Break`] or
+    /// [`Response::BlockRequestHeld`] hold: the guest's write returns, or its
+    /// held disk request continues, and execution continues from the current
+    /// time, as after any stall. Without a hold in the current boot it does
+    /// nothing.
     ResumeBreak,
+}
+
+pub use seedbox_engine_protocol::control::{DiskEffect, DiskOp, DiskScope, FaultCounts};
+
+/// A fault a machine carries out in its own devices or guest kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DeviceFault {
+    /// Select disk requests of kind `op` with probability `ppm` per million:
+    /// complete them with IOERR, or with one sector of seeded bytes.
+    DiskError {
+        op: DiskOp,
+        ppm: u32,
+        effect: DiskEffect,
+        scope: DiskScope,
+    },
+    /// Complete disk requests of kind `op` after `latency_ns` plus a draw of
+    /// at most `jitter_ns`, in submission order.
+    DiskLatency {
+        op: DiskOp,
+        latency_ns: u64,
+        jitter_ns: u64,
+    },
+    /// Yield the guest CPU at `ppm` per million syscalls and progress charges.
+    Preempt { ppm: u32 },
 }
 
 /// Longest breakpoint name in bytes.
@@ -313,6 +363,9 @@ pub enum Response {
         /// The name as written, satisfying [`break_name_valid`].
         name: String,
     },
+    /// The machine is held at its device's `nth` disk request of kind `op`
+    /// (see [`Request::BreakOnBlockRequest`]), as at a [`Response::Break`].
+    BlockRequestHeld { op: DiskOp, nth: u64 },
 }
 
 /// Application output pipe, distinct from boot console bytes.

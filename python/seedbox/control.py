@@ -10,6 +10,9 @@ from typing import Optional
 MAX_FRAME = 16_384
 MAX_CLOCK_OFFSET_NS = 365 * 86_400 * 1_000_000_000
 MAX_CLOCK_RATE_PPB = 100_000_000
+MAX_PPM = 1_000_000
+DISK_LATENCY_NS = (1_000, 1_000_000_000)
+DISK_OPS = ("read", "write", "flush", "any")
 DEFAULT_SOCKET = "/run/seedbox/control.sock"
 
 
@@ -54,15 +57,24 @@ class Trigger:
 
 @dataclass(frozen=True)
 class Hit:
-    """A breakpoint hit. Its machine stays suspended until resumed or crashed."""
+    """A breakpoint hit. Its machine stays suspended until resumed or crashed.
+
+    source is "program" for a breakpoint write and "block_request" for a held
+    disk request, whose hit also carries the hold's request kind and nth.
+    """
     id: int
     machine: str
     boot: int
     name: str
     at_ns: int
+    source: str = "program"
+    request: Optional[str] = None
+    nth: Optional[int] = None
 
 
 _BREAK_NAME = re.compile(r"[a-z0-9_.-]{1,64}")
+# Every block request hit has this name; no program breakpoint can take it.
+BLOCK_REQUEST = "block_request"
 
 
 @dataclass(frozen=True)
@@ -73,6 +85,24 @@ class Shape:
 
 @dataclass(frozen=True)
 class Throttle:
+    handle: str
+    effect: Effect
+
+
+@dataclass(frozen=True)
+class DiskError:
+    handle: str
+    effect: Effect
+
+
+@dataclass(frozen=True)
+class DiskLatency:
+    handle: str
+    effect: Effect
+
+
+@dataclass(frozen=True)
+class Preempt:
     handle: str
     effect: Effect
 
@@ -102,6 +132,18 @@ def _target(value):
     if not isinstance(name, str) or not name:
         raise ValueError("targets must be nonempty service names or Machine objects")
     return {kind: name}
+
+
+def _ppm(name, value):
+    if type(value) is not int or not 1 <= value <= MAX_PPM:
+        raise ValueError(f"{name} ppm must be an integer from 1 to {MAX_PPM}")
+    return value
+
+
+def _disk_op(op):
+    if op not in DISK_OPS:
+        raise ValueError("op must be read, write, flush or any")
+    return op
 
 
 def _nanoseconds(seconds):
@@ -411,9 +453,68 @@ class World:
             raise ProtocolError("throttle response lacks an opaque handle")
         return Throttle(result["handle"], effect)
 
+    def _device_fault(self, op, kind, **arguments):
+        result, effect = self._call(op, **arguments)
+        if not isinstance(result.get("handle"), str) or not result["handle"]:
+            self.close()
+            raise ProtocolError(f"{op} response lacks an opaque handle")
+        return kind(result["handle"], effect)
+
+    def disk_error(self, target, op, ppm, *, effect="eio", scope="all"):
+        """Fail or corrupt the target machine's disk requests of kind op until healed.
+
+        op is "read", "write", "flush" or "any"; each such request is selected
+        with probability ppm per million on a seeded stream. With effect "eio"
+        a selected request fails with EIO before any disk effect; with
+        "corrupt" it succeeds with one sector of seeded bytes. scope "data"
+        spares the ext4 metadata laid out at format time. Neither "corrupt"
+        nor "data" selects flushes. Engines without disk request selection
+        refuse it as unsupported. heal() stops selecting.
+        """
+        _disk_op(op)
+        _ppm("disk_error", ppm)
+        if effect not in ("eio", "corrupt") or scope not in ("all", "data"):
+            raise ValueError('effect must be "eio" or "corrupt" and scope "all" or "data"')
+        if op == "flush" and (effect == "corrupt" or scope == "data"):
+            raise ValueError("disk_error on flushes takes neither the corrupt effect nor the data scope")
+        arguments = {"target": _target(target), "disk_op": op, "ppm": ppm}
+        if effect != "eio":
+            arguments["effect"] = effect
+        if scope != "all":
+            arguments["scope"] = scope
+        return self._device_fault("disk_error", DiskError, **arguments)
+
+    def disk_latency(self, target, op, latency_ns, *, jitter_ns=0):
+        """Complete the target machine's disk requests of kind op late until healed.
+
+        Each takes latency_ns (1 µs to 1 s) plus a seeded draw up to jitter_ns
+        (at most 1 s), in submission order. Engines without delayed block
+        completion refuse it as unsupported. heal() stops delaying new
+        requests; queued ones still complete at their times.
+        """
+        _disk_op(op)
+        low, high = DISK_LATENCY_NS
+        if type(latency_ns) is not int or not low <= latency_ns <= high or type(jitter_ns) is not int or not 0 <= jitter_ns <= high:
+            raise ValueError(f"latency_ns must be {low} to {high} and jitter_ns 0 to {high}")
+        arguments = {"target": _target(target), "disk_op": op, "latency_ns": latency_ns}
+        if jitter_ns:
+            arguments["jitter_ns"] = jitter_ns
+        return self._device_fault("disk_latency", DiskLatency, **arguments)
+
+    def preempt(self, target, ppm):
+        """Yield the target machine's guest kernel at ppm per million syscalls until healed.
+
+        Runnable threads switch at points a single guest CPU rarely reaches. A
+        machine takes one preempt at a time. Engines without the guest yield
+        hook (x86_64 PV, TCG) refuse it as unsupported.
+        """
+        _ppm("preempt", ppm)
+        return self._device_fault("preempt", Preempt, target=_target(target), ppm=ppm)
+
     def heal(self, partition):
         """Release this handle only; prior shape layers or overlapping cuts remain."""
-        if not isinstance(partition, (Partition, Shape, ConnectionDrop, ClockSkew, ClockDrift, Throttle)):
+        if not isinstance(partition, (Partition, Shape, ConnectionDrop, ClockSkew, ClockDrift, Throttle,
+                                      DiskError, DiskLatency, Preempt)):
             raise TypeError("heal expects a fault handle returned by this API")
         result, effect = self._call("heal", handle=partition.handle)
         return result if isinstance(partition, ConnectionDrop) or "queue_counts" in result or "network_fault_counts" in result else effect
@@ -494,6 +595,8 @@ class World:
         names = sorted(set(names))
         if any(not isinstance(n, str) or not _BREAK_NAME.fullmatch(n) for n in names):
             raise ValueError("breakpoint names are 1..=64 bytes of [a-z0-9_.-]")
+        if BLOCK_REQUEST in names:
+            raise ValueError("block_request names block request hits, not a program breakpoint")
         return self._call("declare_breaks", names=names)[1]
 
     def wait_break(self, timeout):
@@ -502,11 +605,17 @@ class World:
         if not result:
             return None
         try:
-            hit = Hit(result["break_id"], result["machine"], result["boot"], result["name"], result["at_ns"])
+            hit = Hit(result["break_id"], result["machine"], result["boot"], result["name"], result["at_ns"],
+                      result["source"], result.get("request"), result.get("nth"))
         except KeyError as error:
             self.close()
             raise ProtocolError("invalid breakpoint hit") from error
-        if (type(hit.id) is not int or type(hit.boot) is not int or type(hit.at_ns) is not int
+        if hit.source == BLOCK_REQUEST:
+            held = (hit.name == BLOCK_REQUEST and hit.request in ("read", "write", "flush", "any")
+                    and type(hit.nth) is int and hit.nth >= 1)
+        else:
+            held = hit.source == "program" and hit.request is None and hit.nth is None
+        if (not held or type(hit.id) is not int or type(hit.boot) is not int or type(hit.at_ns) is not int
                 or not isinstance(hit.machine, str) or not isinstance(hit.name, str)):
             self.close()
             raise ProtocolError("invalid breakpoint hit")
@@ -517,6 +626,21 @@ class World:
         if not isinstance(hit, Hit):
             raise TypeError("resume_break expects a Hit returned by wait_break")
         return self._call("resume_break", break_id=hit.id)[1]
+
+    def break_on_block_request(self, target, op, nth):
+        """Suspend the target's machine at its nth disk request of kind op.
+
+        op is "read", "write", "flush" or "any", counted from now across
+        boots. The request is held unwritten, and its hit arrives like any
+        other, named "block_request", so on_break("block_request", handler)
+        serves it. Resuming lets the request continue; crashing the machine
+        drops it. It is one-shot.
+        """
+        if op not in ("read", "write", "flush", "any"):
+            raise ValueError("op must be read, write, flush or any")
+        if type(nth) is not int or nth < 1:
+            raise ValueError("nth must be a positive integer")
+        return self._call("break_on_block_request", target=_target(target), request=op, nth=nth)[1]
 
     def on_break(self, name, handler):
         """Call handler(world, hit) whenever a machine hits breakpoint `name`.
@@ -532,7 +656,8 @@ class World:
             raise TypeError("on_break expects a callable handler")
         if self._path is None:
             raise ValueError("on_break needs a World opened with connect()")
-        self.declare_breaks([*self._handlers, name])
+        # Block request hits need no declaration; their name is reserved.
+        self.declare_breaks([n for n in (*self._handlers, name) if n != BLOCK_REQUEST])
         self._handlers[name] = handler
         if self._breaks is None:
             self._breaks = World.connect(self._path)

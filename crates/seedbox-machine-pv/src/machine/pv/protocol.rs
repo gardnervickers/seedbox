@@ -45,6 +45,10 @@ pub(super) enum Request {
         network: Option<[u8; 6]>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         policy: Box<Option<BootPolicy>>,
+        /// Device faults and holds this boot starts with; ignored on restore,
+        /// whose image carries its own.
+        #[serde(default, skip_serializing_if = "BootFaults::is_empty")]
+        faults: Box<BootFaults>,
     },
     /// Followed by a host frames trailer with `frames` records
     /// ([`super::wire::send_frames`]), admitted in order at `now`.
@@ -58,6 +62,9 @@ pub(super) enum Request {
         /// Declared breakpoint names, ascending. A guest write of one of
         /// these stops the run with [`Stop::Break`]; any other returns at once.
         breaks: Vec<String>,
+        /// The client took ResumeBreak since the last run: a held disk
+        /// request continues at the start of this run, budget or not.
+        resume: bool,
     },
     ExecutionEvidence,
     Capture(PathBuf),
@@ -70,6 +77,46 @@ pub(super) enum Request {
     /// new file. Allowed after the guest ended its boot; it never flushes or
     /// discards, and leaves the boot-end policy to the client.
     ExportDisk(PathBuf),
+    /// Change the stopped boot's device faults; answered with [`Response::Faults`].
+    Fault(FaultChange),
+}
+/// The device faults a boot starts with. Streams draw on `boot`, the
+/// physical boot ordinal; counts start at zero, holds at their `seen`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BootFaults {
+    pub boot: u64,
+    pub installed: Vec<InstalledFault>,
+    pub holds: Vec<seedbox_machine::machine::disk::fault::Hold>,
+}
+impl BootFaults {
+    pub(super) fn is_empty(&self) -> bool {
+        self.installed.is_empty() && self.holds.is_empty()
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct InstalledFault {
+    pub id: u64,
+    pub seed: u64,
+    pub fault: seedbox_machine::pv::DeviceFault,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) enum FaultChange {
+    Install(InstalledFault),
+    Heal(u64),
+    Hold(seedbox_machine::machine::disk::fault::Hold),
+    /// Report without a change.
+    Report,
+}
+/// This boot's counts for each installed disk fault, the remaining holds,
+/// and the counts of a fault just healed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct FaultReport {
+    pub counts: Vec<(u64, seedbox_machine::pv::FaultCounts)>,
+    pub holds: Vec<seedbox_machine::machine::disk::fault::Hold>,
+    pub healed: Option<seedbox_machine::pv::FaultCounts>,
 }
 /// The one block device of a boot, owned by the worker until the boot ends.
 // Files keep multi-megabyte disks out of JSON frames; the client keeps the
@@ -103,6 +150,7 @@ pub(super) enum Response {
     Captured,
     Exported,
     Evidence(NativeEvidence),
+    Faults(FaultReport),
     Error(String),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +165,11 @@ pub(super) enum Stop {
     /// The guest requested an architectural reset after its ready handshake:
     /// a deliberate reboot or a panic restart. The worker never resets itself.
     Reset,
+    /// A guest disk request reached this hold's `nth` and is held unwritten.
+    /// The run stopped at it; the client holds the machine until it takes
+    /// ResumeBreak, and the run that carries that release continues the
+    /// request before the guest runs.
+    Held(seedbox_machine::machine::disk::fault::Hold),
 }
 
 /// Accept only a stopped worker that acknowledged this exact resource layout.

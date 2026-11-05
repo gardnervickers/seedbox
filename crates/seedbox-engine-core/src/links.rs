@@ -1,5 +1,5 @@
 //! Canonical link policy values shared by the executing Driver and public validation.
-use seedbox_engine_protocol::control::{NetworkFaults, MAX_LINK_DELAY_NS, MAX_PPM};
+use seedbox_engine_protocol::control::NetworkFaults;
 use sha2::{Digest, Sha256};
 
 /// Global link latency when the network config names none: one millisecond.
@@ -16,32 +16,20 @@ pub struct Policy {
 }
 impl Policy {
     pub fn validate_bandwidth(self) -> Result<(), String> {
-        if self.bandwidth_bps == Some(0) {
-            return Err("bandwidth_bps must be positive".into());
-        }
-        if self.queue_bound_ns.is_some() && self.bandwidth_bps.is_none() {
-            return Err("queue_bound_ns requires bandwidth_bps".into());
-        }
-        Ok(())
+        seedbox_engine_protocol::control::validate_bandwidth(
+            self.bandwidth_bps,
+            self.queue_bound_ns,
+        )
     }
     pub fn validate(self, floor: u64) -> Result<(), String> {
-        if self.latency_ns < floor {
-            return Err("latency_ns below global latency".into());
-        }
-        if self.jitter_ns >= self.latency_ns {
-            return Err("jitter_ns must be less than latency_ns".into());
-        }
-        if self
-            .latency_ns
-            .checked_add(self.jitter_ns)
-            .is_none_or(|n| n > MAX_LINK_DELAY_NS)
-        {
-            return Err("latency_ns + jitter_ns exceeds one hour".into());
-        }
-        if self.loss_ppm > MAX_PPM {
-            return Err(format!("loss_ppm exceeds {MAX_PPM}"));
-        }
-        self.validate_bandwidth()
+        seedbox_engine_protocol::control::validate_link(
+            self.latency_ns,
+            self.jitter_ns,
+            self.loss_ppm,
+            self.bandwidth_bps,
+            self.queue_bound_ns,
+            floor,
+        )
     }
     /// A shape layer's policy and impairments, checked against the global floor.
     pub fn validate_shape(self, floor: u64, network_faults: &NetworkFaults) -> Result<(), String> {
@@ -75,6 +63,7 @@ pub fn candidates(src: usize, mac: [u8; 6], macs: &[[u8; 6]]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seedbox_engine_protocol::control::{MAX_LINK_DELAY_NS, MAX_PPM};
     fn policy() -> Policy {
         Policy {
             latency_ns: 100,

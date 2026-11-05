@@ -1,0 +1,10 @@
+*
+!Cargo.toml
+!crates/seedbox-engine-core/build.rs
+!crates/seedbox-engine-protocol
+!crates/seedbox-guest
+!crates/seedbox-oracle
+!crates/seedbox-spec
+!harness/acceptance/images/profile
+harness/acceptance/images/profile/target
+crates/*/target

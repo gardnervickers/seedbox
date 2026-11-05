@@ -309,6 +309,128 @@ fn clock_skew_sends_one_offset_kind_and_returns_healable_handle() {
     );
 }
 #[test]
+fn device_faults_send_their_actions_arguments_and_heal_their_handles() {
+    let mut sdk = Sdk::open(replies(&[
+        (1, json!({"handle":"p1"}), json!({})),
+        (2, json!({"handle":"p2"}), json!({})),
+        (3, json!({"handle":"p3"}), json!({})),
+        (4, json!({"handle":"p4"}), json!({})),
+        (5, json!({"handle":"p5"}), json!({})),
+        (6, json!({}), json!({})),
+        (7, json!({}), json!({})),
+        (8, json!({}), json!({})),
+    ]));
+    let read = sdk.call("disk_error", json!(["db", "read", 1_000_000]), json!({}));
+    typed(ok(&read), "DiskError");
+    assert_eq!(read["value"]["fields"]["handle"], "p1");
+    effect(&read["value"]["fields"]["effect"], 10, 20, 30, 40);
+    let corrupt = sdk.exchange(json!({"action":"call","op":"disk_error","args":[machine("db-vm"), "write", 500],"kwargs":{"effect":"corrupt","scope":"data"},"save":"corrupt"}));
+    typed(ok(&corrupt), "DiskError");
+    let slow = sdk.call(
+        "disk_latency",
+        json!(["db", "flush", 20_000_000]),
+        json!({}),
+    );
+    typed(ok(&slow), "DiskLatency");
+    let jittery = sdk.exchange(json!({"action":"call","op":"disk_latency","args":["db", "any", 1_000],"kwargs":{"jitter_ns":7},"save":"jittery"}));
+    typed(ok(&jittery), "DiskLatency");
+    let race = sdk.call("preempt", json!([machine("db-vm"), 100_000]), json!({}));
+    typed(ok(&race), "Preempt");
+    assert_eq!(race["value"]["fields"]["handle"], "p5");
+    // A heal returns its effect; a disk fault's counts are in the world view.
+    for op in ["disk_error", "disk_latency", "preempt"] {
+        let healed = call(&mut sdk, "heal", json!([reference(op)]));
+        typed(ok(&healed), "Effect");
+    }
+    assert_eq!(
+        sdk.close()["requests"],
+        json!([
+        {"version":1,"id":1,"op":"disk_error","target":{"service":"db"},"disk_op":"read","ppm":1_000_000},
+        {"version":1,"id":2,"op":"disk_error","target":{"machine":"db-vm"},"disk_op":"write","ppm":500,"effect":"corrupt","scope":"data"},
+        {"version":1,"id":3,"op":"disk_latency","target":{"service":"db"},"disk_op":"flush","latency_ns":20_000_000},
+        {"version":1,"id":4,"op":"disk_latency","target":{"service":"db"},"disk_op":"any","latency_ns":1_000,"jitter_ns":7},
+        {"version":1,"id":5,"op":"preempt","target":{"machine":"db-vm"},"ppm":100_000},
+        {"version":1,"id":6,"op":"heal","handle":"p1"},
+        {"version":1,"id":7,"op":"heal","handle":"p3"},
+        {"version":1,"id":8,"op":"heal","handle":"p5"}])
+    );
+}
+#[test]
+fn device_faults_reject_invalid_local_values_and_keep_unsupported_errors() {
+    let mut sdk = Sdk::open(vec![]);
+    for (op, args, kwargs) in [
+        ("disk_error", json!(["db", "trim", 1]), json!({})),
+        ("disk_error", json!(["db", "read", 0]), json!({})),
+        ("disk_error", json!(["db", "read", 1_000_001]), json!({})),
+        ("disk_error", json!(["db", "read", true]), json!({})),
+        (
+            "disk_error",
+            json!(["db", "read", 1]),
+            json!({"effect":"zero"}),
+        ),
+        (
+            "disk_error",
+            json!(["db", "read", 1]),
+            json!({"scope":"meta"}),
+        ),
+        (
+            "disk_error",
+            json!(["db", "flush", 1]),
+            json!({"effect":"corrupt"}),
+        ),
+        (
+            "disk_error",
+            json!(["db", "flush", 1]),
+            json!({"scope":"data"}),
+        ),
+        ("disk_error", json!(["", "read", 1]), json!({})),
+        ("disk_latency", json!(["db", "read", 999]), json!({})),
+        (
+            "disk_latency",
+            json!(["db", "read", 1_000_000_001]),
+            json!({}),
+        ),
+        ("disk_latency", json!(["db", "read", 1.5e6]), json!({})),
+        (
+            "disk_latency",
+            json!(["db", "read", 1_000]),
+            json!({"jitter_ns":-1}),
+        ),
+        (
+            "disk_latency",
+            json!(["db", "read", 1_000]),
+            json!({"jitter_ns":1_000_000_001}),
+        ),
+        ("disk_latency", json!(["db", "trim", 1_000]), json!({})),
+        ("preempt", json!(["db", 0]), json!({})),
+        ("preempt", json!(["db", 1_000_001]), json!({})),
+        ("preempt", json!(["db", 0.5]), json!({})),
+    ] {
+        error(&sdk.call(op, args, kwargs), "ValueError");
+    }
+    assert_eq!(sdk.close()["requests"], json!([]));
+    // An engine without the capability refuses it; the error keeps its code.
+    let mut refused = Sdk::open(replies(&[
+        (
+            1,
+            json!({}),
+            json!({"ok":false,"effect_at_ns":null,"error":{"code":"unsupported","message":"preempt needs the guest yield hook, which x86_64 PV does not provide"}}),
+        ),
+        (2, json!({"now_ns":30}), json!({})),
+    ]));
+    let failure = call(&mut refused, "preempt", json!(["db", 10]));
+    error(&failure, "FaultError");
+    assert_eq!(failure["error"]["code"], "unsupported");
+    assert_eq!(ok(&call(&mut refused, "now_ns", json!([]))), 30);
+    refused.close();
+    let mut missing = Sdk::open(plain_reply());
+    error(
+        &call(&mut missing, "disk_latency", json!(["db", "read", 1_000])),
+        "ProtocolError",
+    );
+    missing.close();
+}
+#[test]
 fn clock_skew_rejects_invalid_local_values() {
     let mut sdk = Sdk::open(vec![]);
     for kwargs in [
@@ -722,6 +844,30 @@ fn inspection_exposes_protocol_result() {
     assert_eq!(sdk.close()["requests"][0]["op"], "inspect");
 }
 #[test]
+fn break_on_block_request_names_the_target_and_request() {
+    let mut sdk = Sdk::open(replies(&[(1, json!({}), json!({}))]));
+    ok(&sdk.call(
+        "break_on_block_request",
+        json!([machine("db-vm"), "flush", 20]),
+        json!({}),
+    ));
+    for args in [
+        json!(["db", "trim", 1]),
+        json!(["db", "flush", 0]),
+        json!(["db", "flush", true]),
+    ] {
+        error(
+            &sdk.call("break_on_block_request", args, json!({})),
+            "ValueError",
+        );
+    }
+    let closed = sdk.close();
+    assert_eq!(
+        closed["requests"],
+        json!([{"version":1,"id":1,"op":"break_on_block_request","target":{"machine":"db-vm"},"request":"flush","nth":20}])
+    );
+}
+#[test]
 fn arm_and_cancel_literal_wire_and_fired_partition_handle() {
     let mut sdk = Sdk::open(replies(&[
         (1, json!({"trigger_id":1}), json!({})),
@@ -916,6 +1062,45 @@ fn invalid_markers_timeouts_and_reply_identity() {
             ),
             "ProtocolError",
         );
+        sdk.close();
+    }
+}
+#[test]
+fn wait_break_returns_each_hit_source_and_block_request_is_reserved() {
+    let program = json!({"break_id":1,"source":"program","machine":"db-vm","boot":0,"name":"leader","at_ns":5});
+    let block = json!({"break_id":2,"source":"block_request","machine":"db-vm","boot":1,"name":"block_request","request":"flush","nth":20,"at_ns":25});
+    let mut sdk = Sdk::open(replies(&[(1, program, json!({})), (2, block, json!({}))]));
+    let hit = call(&mut sdk, "wait_break", json!([1]));
+    typed(ok(&hit), "Hit");
+    assert_eq!(
+        ok(&hit)["fields"],
+        json!({"id":1,"machine":"db-vm","boot":0,"name":"leader","at_ns":5,"source":"program","request":null,"nth":null})
+    );
+    let hit = call(&mut sdk, "wait_break", json!([1]));
+    assert_eq!(
+        ok(&hit)["fields"],
+        json!({"id":2,"machine":"db-vm","boot":1,"name":"block_request","at_ns":25,"source":"block_request","request":"flush","nth":20})
+    );
+    // A program cannot declare the block request hits' name.
+    error(
+        &call(
+            &mut sdk,
+            "declare_breaks",
+            json!([["leader", "block_request"]]),
+        ),
+        "ValueError",
+    );
+    assert_eq!(sdk.close()["requests"].as_array().unwrap().len(), 2);
+    // A hit whose source and fields disagree is a protocol error.
+    for invalid in [
+        json!({"break_id":1,"machine":"m","boot":0,"name":"leader","at_ns":5}),
+        json!({"break_id":1,"source":"block_request","machine":"m","boot":0,"name":"block_request","request":"flush","at_ns":5}),
+        json!({"break_id":1,"source":"block_request","machine":"m","boot":0,"name":"leader","request":"flush","nth":1,"at_ns":5}),
+        json!({"break_id":1,"source":"program","machine":"m","boot":0,"name":"leader","request":"flush","nth":1,"at_ns":5}),
+        json!({"break_id":1,"source":"disk","machine":"m","boot":0,"name":"leader","at_ns":5}),
+    ] {
+        let mut sdk = Sdk::open(reply(1, invalid, json!({})));
+        error(&call(&mut sdk, "wait_break", json!([1])), "ProtocolError");
         sdk.close();
     }
 }
