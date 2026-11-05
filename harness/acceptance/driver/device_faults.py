@@ -12,10 +12,13 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 LATENCY_NS = 20_000_000
 PORT = 9000
+# Set once the breakpoint handler has crashed the victim at its held FLUSH.
+CRASHED_AT_HIT = threading.Event()
 
 
 def faults(arguments):
@@ -80,6 +83,11 @@ def victim(world, armed, machine):
     """Wait for the held FLUSH's crash, then reboot the victim."""
     if not armed:
         return
+    # The victim must be down because the handler crashed it at the hit.
+    while not CRASHED_AT_HIT.is_set():
+        if world.break_error is not None:
+            raise world.break_error
+        world.sleep(0.001)
     while not any(m["name"] == "victim" and m["state"] == "Down" for m in world.inspect()["machines"]):
         world.sleep(0.001)
     world.reboot(machine)
@@ -112,7 +120,10 @@ def scenario():
 
     def crash_victim(world, hit):
         """Crash the victim while its held FLUSH is still unwritten."""
+        if (hit.machine, hit.source, hit.request, hit.nth) != ("victim", "block_request", "flush", 20):
+            raise RuntimeError(f"unexpected breakpoint hit {hit}")
         world.crash(victim_machine)
+        CRASHED_AT_HIT.set()
 
     with World.connect() as world:
         try:
