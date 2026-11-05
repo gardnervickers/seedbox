@@ -114,10 +114,12 @@ already drawn its latency, and later holds have counted it. The MMIO write
 completes and the machine stops held, exactly as at a breakpoint write: it
 reports the hold as an output, takes inputs without running, and refuses
 capture. The Driver numbers the hit at the barrier that commits that output.
-On `resume_break` the request continues at the first run that executes guest
-work, with the arrival it drew: it completes then, or at its due time counted
-from its original arrival if that is later, followed by the requests behind
-it. A crash or reboot drops it with the rest of the boot.
+On `resume_break` the request continues when the machine takes the release,
+before the guest runs again, with the arrival it drew: it completes then if
+its due time, counted from its original arrival, has passed, and otherwise at
+that due time. The requests behind it follow, and one of them may reach
+another hold before the guest runs. A crash or reboot drops it with the rest
+of the boot.
 
 ### Asynchronous block completion
 

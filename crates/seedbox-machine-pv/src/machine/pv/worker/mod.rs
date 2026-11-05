@@ -132,6 +132,9 @@ struct Machine<B: Backend = Native> {
     output: Vec<u8>,
     /// The guest ended this boot; it must never be entered again.
     ended: bool,
+    /// The client released the machine from a hold: the next run continues
+    /// a held disk request before anything else, even with no budget.
+    resume: bool,
 }
 impl<B: Backend> Machine<B> {
     #[cfg(test)]
@@ -195,6 +198,7 @@ impl<B: Backend> Machine<B> {
             block: disk.map(|store| block::Block::new(store, Default::default())),
             output: Vec::new(),
             ended: false,
+            resume: false,
         })
     }
     /// When the machine next has work of its own: its timer, or a pending
@@ -503,13 +507,16 @@ impl<B: Backend> Machine<B> {
             self.interrupts()?;
         }
         self.collect_lifecycle();
-        // A held disk request continues at the first run that can execute
-        // guest work: the client holds a machine with empty runs. It may
-        // reach the next hold before the guest runs.
-        if self.state.now < upto {
+        // A released disk request continues now, after this run's inputs
+        // and even in a zero-budget run, so a machine is never left released
+        // but still held. It may reach the next hold before the guest runs.
+        if std::mem::take(&mut self.resume) {
             if let Some(hold) = self.resume_disk()? {
                 return Ok(Stop::Held(hold));
             }
+        }
+        if upto > self.state.now && self.block.as_ref().is_some_and(block::Block::held) {
+            return Err("PV run with a held disk request".into());
         }
         self.publish(upto);
         if self.state.idle && self.quiet() {
@@ -1063,8 +1070,10 @@ pub(crate) fn serve() -> Result<()> {
                 lifecycle,
                 frames: _,
                 breaks,
+                resume,
             } => {
                 let vm = machine.as_mut().ok_or("PV run before boot")?;
+                vm.resume = resume;
                 let stop = vm.run(
                     now,
                     upto,

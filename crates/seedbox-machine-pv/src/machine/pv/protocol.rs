@@ -62,6 +62,9 @@ pub(super) enum Request {
         /// Declared breakpoint names, ascending. A guest write of one of
         /// these stops the run with [`Stop::Break`]; any other returns at once.
         breaks: Vec<String>,
+        /// The client took ResumeBreak since the last run: a held disk
+        /// request continues at the start of this run, budget or not.
+        resume: bool,
     },
     ExecutionEvidence,
     Capture(PathBuf),
@@ -163,8 +166,9 @@ pub(super) enum Stop {
     /// a deliberate reboot or a panic restart. The worker never resets itself.
     Reset,
     /// A guest disk request reached this hold's `nth` and is held unwritten.
-    /// The run stopped at it; the client holds the machine, and the next run
-    /// continues the request before the guest runs.
+    /// The run stopped at it; the client holds the machine until it takes
+    /// ResumeBreak, and the run that carries that release continues the
+    /// request before the guest runs.
     Held(seedbox_machine::machine::disk::fault::Hold),
 }
 

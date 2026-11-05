@@ -158,6 +158,9 @@ pub struct PVMachine {
     /// The current boot stopped at a declared breakpoint write or a held
     /// disk request and runs no guest work until ResumeBreak, Crash or Reboot.
     held: bool,
+    /// ResumeBreak released a hold this run: the worker continues a held
+    /// disk request at the start of its next run, which is this run's.
+    released: bool,
     /// The hit this run stopped at, a [`seedbox_machine::pv::Response::Break`]
     /// or [`seedbox_machine::pv::Response::BlockRequestHeld`], reported after
     /// its writes.
@@ -379,6 +382,7 @@ impl PVMachine {
             network,
             breaks: Vec::new(),
             held: false,
+            released: false,
             hit: None,
             aux: Default::default(),
         })
@@ -557,6 +561,7 @@ impl PVMachine {
             return Err(std::io::Error::other("PV crash requires valid machine"));
         }
         self.held = false;
+        self.released = false;
         if matches!(self.state, State::Exited | State::Crashed) && self.pending_boots == 0 {
             self.guest.reset();
             self.input.clear();
@@ -609,6 +614,7 @@ impl PVMachine {
         self.aux.logical = boot;
         self.pending_at = Some(at);
         self.held = false;
+        self.released = false;
         self.shutdown = false;
         self.guest.reset();
         self.input.clear();
@@ -701,6 +707,7 @@ impl PVMachine {
         let shutdown = false;
         let input = self.input.clone();
         let breaks = self.breaks.clone();
+        let resume = std::mem::take(&mut self.released);
         let (time, stop, writes) = self.worker()?.run(
             Request::Run {
                 now,
@@ -710,6 +717,7 @@ impl PVMachine {
                 lifecycle: input,
                 frames: 0,
                 breaks,
+                resume,
             },
             frames,
         )?;
@@ -796,7 +804,7 @@ impl PVMachine {
         if self.state == State::Invalid {
             return Err("cannot snapshot invalid PV machine".into());
         }
-        if self.held {
+        if self.held || self.released {
             return Err("cannot snapshot PV machine held at a breakpoint".into());
         }
         let live = self.worker.is_some();
@@ -1128,7 +1136,10 @@ impl Machine for PVMachine {
                         }
                         self.breaks = names.clone();
                     }
-                    seedbox_machine::pv::Request::ResumeBreak => self.held = false,
+                    seedbox_machine::pv::Request::ResumeBreak => {
+                        self.released |= self.held;
+                        self.held = false;
+                    }
                     // The common request is non-exhaustive across crate boundaries.
                     _ => return Err("unsupported machine request".into()),
                 }

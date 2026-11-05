@@ -476,3 +476,102 @@ fn block_request_breakpoints_need_an_engine_with_breakpoints() {
     assert_eq!(replies(&driver)[0]["error"]["code"], "unsupported");
     assert!(guest(&driver, 1).holds.is_empty());
 }
+
+#[test]
+fn a_block_request_hit_reached_on_resume_suspends_at_once() {
+    use crate::pv::DiskOp;
+    let mut driver = build(
+        vec![
+            (
+                1,
+                call(
+                    1,
+                    r#""op":"break_on_block_request","target":{"machine":"fixture-1"},"request":"flush","nth":3"#,
+                ),
+            ),
+            (
+                1,
+                call(
+                    2,
+                    r#""op":"break_on_block_request","target":{"machine":"fixture-1"},"request":"write","nth":1"#,
+                ),
+            ),
+            (2, call(3, WAIT)),
+            (50, call(4, r#""op":"resume_break","break_id":1"#)),
+            (51, call(5, WAIT)),
+            (80, call(6, r#""op":"resume_break","break_id":2"#)),
+        ],
+        // The resumed FLUSH lets the WRITE behind it reach the second hold
+        // before the guest runs again.
+        vec![
+            (
+                25,
+                Response::BlockRequestHeld {
+                    op: DiskOp::Flush,
+                    nth: 3,
+                },
+            ),
+            (
+                26,
+                Response::BlockRequestHeld {
+                    op: DiskOp::Write,
+                    nth: 1,
+                },
+            ),
+        ],
+    );
+    run_to(&mut driver, 60);
+    let r = replies(&driver);
+    assert_eq!(r[3]["result"], json!({}));
+    assert_eq!(
+        r[4]["result"],
+        json!({"break_id":2,"source":"block_request","machine":"fixture-1","boot":0,"name":"block_request","request":"write","nth":1,"at_ns":50})
+    );
+    // Suspended again at the release: still no checkpoint.
+    assert!(matches!(
+        driver.checkpoint(),
+        Err(Error::InvalidCheckpoint(_))
+    ));
+    run_to(&mut driver, 100);
+    assert_eq!(guest(&driver, 1).resumed, [50, 80]);
+    assert!(!guest(&driver, 1).held);
+    let events = driver.drain_events();
+    assert_eq!(
+        break_events(&events),
+        [
+            (
+                25,
+                EventKind::BreakHit {
+                    break_id: 1,
+                    machine: MachineId(1),
+                    boot: 0,
+                    name: "block_request".into()
+                }
+            ),
+            (
+                50,
+                EventKind::BreakEnded {
+                    break_id: 1,
+                    reason: BreakEnd::Resumed
+                }
+            ),
+            (
+                50,
+                EventKind::BreakHit {
+                    break_id: 2,
+                    machine: MachineId(1),
+                    boot: 0,
+                    name: "block_request".into()
+                }
+            ),
+            (
+                80,
+                EventKind::BreakEnded {
+                    break_id: 2,
+                    reason: BreakEnd::Resumed
+                }
+            ),
+        ]
+    );
+    driver.checkpoint().unwrap();
+}
