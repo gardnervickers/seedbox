@@ -86,6 +86,10 @@ pub fn malformed_streams(binary: &Path) {
         (&b"\x04\0\0\0{}"[..], "PV protocol body"),
         (&b"\x04\0\0\0null"[..], "PV protocol decode"),
         (&b"\xff\xff\xff\xff"[..], "PV protocol message too large"),
+        (
+            &b"\x0e\0\0\0{\"Capture\":\"\"}"[..],
+            "PV request before transport attach",
+        ),
     ] {
         let (status, stdout, stderr) = invoke(binary, &["--seedbox-pv-worker-v1".into()], bytes);
         assert_eq!(status.code(), Some(2));
@@ -94,31 +98,36 @@ pub fn malformed_streams(binary: &Path) {
         assert!(error.starts_with(diagnostic), "{error}");
     }
 }
+/// The client's own spawn attaches its shared region, and the worker answers
+/// requests that need a boot through it, frames trailer included.
+#[cfg(seedbox_pv)]
 pub fn preboot_requests(binary: &Path) {
-    let mut input = Vec::new();
-    for value in [
-        serde_json::json!({"Capture":"unused"}),
-        serde_json::json!({"ExportDisk":"unused"}),
-        serde_json::json!({"Run":{"now":0,"upto":0,"syscall_cost_ns":1,"shutdown":false,"lifecycle":[],"frames":0,"breaks":[],"resume":false}}),
-    ] {
-        let body = serde_json::to_vec(&value).unwrap();
-        input.extend_from_slice(&(body.len() as u32).to_le_bytes());
-        input.extend_from_slice(&body);
-    }
-    input.extend_from_slice(&[0, 0]); // Empty host-frame trailer, consumed before Run rejection.
-    let (status, stdout, stderr) = invoke(binary, &["--seedbox-pv-worker-v1".into()], &input);
-    assert_eq!(status.code(), Some(0));
-    assert!(stderr.is_empty());
-    let mut output = stdout.as_slice();
-    for message in [
-        "PV capture before boot",
-        "PV disk export before boot",
-        "PV run before boot",
-    ] {
-        let length = u32::from_le_bytes(output[..4].try_into().unwrap()) as usize;
-        let response: serde_json::Value = serde_json::from_slice(&output[4..4 + length]).unwrap();
-        assert_eq!(response, serde_json::json!({"Error":message}));
-        output = &output[4 + length..];
-    }
-    assert!(output.is_empty());
+    let binary = binary.to_owned();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || sender.send(crate::machine::pv::preboot_errors(&binary)));
+    let errors = seedbox_test_time::HangGuard::new(
+        "attached worker answers preboot requests",
+        Duration::from_secs(30),
+    )
+    .recv(&receiver)
+    .expect("attached worker did not answer")
+    .unwrap();
+    assert_eq!(
+        errors,
+        [
+            Some("PV capture before boot".into()),
+            Some("PV disk export before boot".into()),
+            Some("PV run before boot".into()),
+        ]
+    );
+}
+/// The worker's end of the client's shared region, for synthetic workers:
+/// answers `Attach { capacity }` on `wake` and returns the attached stream.
+#[cfg(seedbox_pv)]
+pub fn accept_transport<R: std::io::Read, W: Write>(
+    capacity: u64,
+    sleep: R,
+    wake: W,
+) -> Result<impl std::io::Read + Write, String> {
+    crate::machine::pv::accept(capacity, sleep, wake)
 }

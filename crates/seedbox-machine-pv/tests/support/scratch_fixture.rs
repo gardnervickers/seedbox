@@ -42,14 +42,21 @@ fn run(args: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
     let mode = argument(args, "--scratch-mode").unwrap_or_else(|| "ok".into());
     log(&record, json!({"kind":"start","pid":std::process::id()}))?;
     let mut input = std::io::stdin().lock();
-    let mut output = std::io::stdout().lock();
+    let output = std::io::stdout().lock();
+    // The client first attaches its shared region, which carries the rest.
+    let attach = receive(&mut input)?.expect("attach request");
+    let capacity = attach["Attach"]["capacity"]
+        .as_u64()
+        .expect("attach capacity");
+    let mut io =
+        seedbox_machine_pv::test_support::worker_entry::accept_transport(capacity, input, output)?;
     let mut root = None::<PathBuf>;
     let mut overlays = Vec::new();
     let mut now = 0;
     let mut policy = Value::Null;
     let mut memory = 0;
     let mut native_chain = Value::Null;
-    while let Some(command) = receive(&mut input)? {
+    while let Some(command) = receive(&mut io)? {
         log(&record, json!({"kind":"command", "command":command}))?;
         let response = if let Some(boot) = command.get("Boot") {
             native_chain = boot["witness"]["initial"].clone();
@@ -95,12 +102,12 @@ fn run(args: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
         } else if let Some(run) = command.get("Run") {
             for _ in 0..run["frames"].as_u64().unwrap() {
                 let mut length = [0; 2];
-                input.read_exact(&mut length)?;
+                io.read_exact(&mut length)?;
                 let mut bytes = vec![0; usize::from(u16::from_le_bytes(length))];
-                input.read_exact(&mut bytes)?;
+                io.read_exact(&mut bytes)?;
             }
             let mut end = [0; 2];
-            input.read_exact(&mut end)?;
+            io.read_exact(&mut end)?;
             assert_eq!(end, [0; 2]);
             assert_eq!(
                 run["now"], run["upto"],
@@ -108,11 +115,11 @@ fn run(args: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
             );
             now = run["upto"].as_u64().unwrap();
             send(
-                &mut output,
+                &mut io,
                 json!({"Stopped":{"time":now,"stop":match mode.to_string_lossy().as_ref(){"powered-off"|"psci-powered-off"=>"PoweredOff","reset"|"triplefault"=>"Reset",_=>"Horizon"},"writes":0}}),
             )?;
-            output.write_all(&[255])?;
-            output.flush()?;
+            io.write_all(&[255])?;
+            io.flush()?;
             continue;
         } else if command.as_str() == Some("ExecutionEvidence") {
             json!({"ExecutionEvidence":{"chain":native_chain,"pending":[0]}})
@@ -150,7 +157,7 @@ fn run(args: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             panic!("unexpected PV fixture command {command}");
         };
-        send(&mut output, response)?;
+        send(&mut io, response)?;
     }
     Ok(())
 }

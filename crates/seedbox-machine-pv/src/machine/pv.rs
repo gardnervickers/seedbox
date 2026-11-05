@@ -43,6 +43,7 @@ mod guest;
 mod policy;
 mod protocol;
 mod retained;
+mod shm;
 mod wire;
 mod worker;
 use client::Worker;
@@ -60,6 +61,8 @@ use std::{
 };
 use tempfile::TempDir;
 pub(crate) use worker::serve as serve_worker;
+#[cfg(feature = "test-support")]
+pub(crate) use {client::preboot_errors, shm::accept};
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq)]
 enum State {
     Ready,
