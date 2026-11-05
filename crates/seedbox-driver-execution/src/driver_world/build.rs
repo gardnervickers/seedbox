@@ -126,6 +126,7 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     driver
         .allow_crashes(allow_crashes(&request.prepared))
         .map_err(|e| bad(e.to_string()))?;
+    // The engine decides the oracle's device faults and breakpoints.
     driver.set_engine(super::actions::engine(&request.prepared.inventory));
     if request.start_paused {
         driver

@@ -4,8 +4,8 @@ The oracle's own machine is outside the failure model, so the `disk` machine
 runs each phase's work when the oracle asks (`probe`). The oracle applies the
 phase's fault to it, observes the fault there, heals it and observes the same
 work unfaulted. An engine that refuses a fault as unsupported has that phase
-observed unfaulted. Meanwhile the oracle crashes the victim on a held FLUSH
-and reboots it.
+observed unfaulted. Meanwhile the oracle suspends the victim at a held FLUSH,
+crashes it there and reboots it.
 """
 import json
 import re
@@ -76,12 +76,10 @@ def phases(disk):
     ]
 
 
-def victim(world, trigger, machine):
+def victim(world, armed, machine):
     """Wait for the held FLUSH's crash, then reboot the victim."""
-    if trigger is None:
+    if not armed:
         return
-    while world.inspect()["triggers"][trigger.id - 1]["status"] != "fired":
-        world.sleep(0.001)
     while not any(m["name"] == "victim" and m["state"] == "Down" for m in world.inspect()["machines"]):
         world.sleep(0.001)
     world.reboot(machine)
@@ -112,15 +110,21 @@ def scenario():
             print(f"PHASE {phase} unsupported: {error}", flush=True)
             return None
 
+    def crash_victim(world, hit):
+        """Crash the victim while its held FLUSH is still unwritten."""
+        world.crash(victim_machine)
+
     with World.connect() as world:
         try:
-            trigger = world.arm_block_request_crash(victim_machine, "flush", 20, match_timeout=5)
+            world.on_break("block_request", crash_victim)
+            world.break_on_block_request(victim_machine, "flush", 20)
+            armed = True
         except FaultError as error:
-            # An engine without held block requests refuses it.
+            # An engine without breakpoints refuses them.
             if error.code != "unsupported":
                 raise
             print(f"VICTIM crash unavailable: {error}", flush=True)
-            trigger = None
+            armed = False
         run(["prepare", "/data/f"])
         faulted_phases = []
         for phase, fault, arguments in phases(Machine("disk")):
@@ -135,7 +139,7 @@ def scenario():
             print(f"HEAL {phase}", flush=True)
             check(phase, run(arguments), False)
             faulted_phases.append(phase)
-        victim(world, trigger, victim_machine)
+        victim(world, armed, victim_machine)
     print(f"RESULT pass device faults faulted={','.join(faulted_phases) or 'none'}", flush=True)
     return 0
 

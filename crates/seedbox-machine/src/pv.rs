@@ -163,21 +163,27 @@ pub enum Request {
     /// [`crate::machine::Machine::take_fault_counts`]. Requests a latency
     /// fault already delayed still complete at their times.
     HealFault { id: u64 },
-    /// Hold the `nth` guest disk request of kind `op` from now on, counted
-    /// across boots, if it arrives before machine time `until`. The held
-    /// request has no effect and nothing after it is processed: the machine
-    /// emits [`Response::BlockRequestHeld`] and stays blocked, taking no
-    /// input but Crash, Reboot and fault requests, until its boot ends. The
-    /// hold survives reboots until it matches or is released.
-    HoldBlockRequest {
-        trigger: u32,
-        op: DiskOp,
-        nth: u64,
-        until: Option<Timestamp>,
+    /// Suspend at the `nth` guest disk request of kind `op` from now on,
+    /// counted across boots. The request is held unwritten with nothing after
+    /// it processed, and the machine reports [`Response::BlockRequestHeld`]
+    /// and stays held exactly as at a [`Response::Break`]. On
+    /// [`Request::ResumeBreak`] the request continues as if it had never been
+    /// held; a crash or reboot drops it with the rest of the boot. One-shot.
+    BreakOnBlockRequest { op: DiskOp, nth: u64 },
+    /// Replace the breakpoint names this machine suspends on, effective for
+    /// hits after this input. The set belongs to the machine, not to a boot:
+    /// it survives crash and reboot and is part of machine snapshots. Every
+    /// name satisfies [`break_name_valid`]; anything else fails the run.
+    DeclareBreaks {
+        /// Distinct names in ascending byte order.
+        names: Vec<String>,
     },
-    /// Stop counting for the hold of `trigger`; a request it already holds
-    /// stays held.
-    ReleaseBlockRequest { trigger: u32 },
+    /// Release the machine from a [`Response::Break`] or
+    /// [`Response::BlockRequestHeld`] hold: the guest's write returns, or its
+    /// held disk request continues, and execution continues from the current
+    /// time, as after any stall. Without a hold in the current boot it does
+    /// nothing.
+    ResumeBreak,
 }
 
 pub use seedbox_engine_protocol::control::{DiskEffect, DiskOp, DiskScope, FaultCounts};
@@ -202,6 +208,17 @@ pub enum DeviceFault {
     },
     /// Yield the guest CPU at `ppm` per million syscalls and progress charges.
     Preempt { ppm: u32 },
+}
+
+/// Longest breakpoint name in bytes.
+pub const MAX_BREAK_NAME: usize = 64;
+
+/// A breakpoint name is 1 to [`MAX_BREAK_NAME`] bytes of `[a-z0-9_.-]`.
+pub fn break_name_valid(name: &[u8]) -> bool {
+    (1..=MAX_BREAK_NAME).contains(&name.len())
+        && name
+            .iter()
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-'))
 }
 
 pub use ethernet::frame_in_bounds;
@@ -337,10 +354,18 @@ pub enum Response {
         /// FCS or a virtio-net header. The EtherType and payload are opaque.
         bytes: Vec<u8>,
     },
-    /// The hold of `trigger` (see [`Request::HoldBlockRequest`]) holds a
-    /// guest disk request: from this output on, the machine is blocked until
-    /// a Crash or Reboot ends its boot.
-    BlockRequestHeld { trigger: u32 },
+    /// The guest wrote a declared breakpoint name. The machine is held at
+    /// that write: it stops at this output's time and every later run admits
+    /// inputs without executing, reporting `Blocked` with no deadline, until
+    /// [`Request::ResumeBreak`], a crash or a reboot. Undeclared names never
+    /// produce this response. Capture is refused while held.
+    Break {
+        /// The name as written, satisfying [`break_name_valid`].
+        name: String,
+    },
+    /// The machine is held at its device's `nth` disk request of kind `op`
+    /// (see [`Request::BreakOnBlockRequest`]), as at a [`Response::Break`].
+    BlockRequestHeld { op: DiskOp, nth: u64 },
 }
 
 /// Application output pipe, distinct from boot console bytes.

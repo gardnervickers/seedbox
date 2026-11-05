@@ -511,6 +511,20 @@ pub(crate) enum Notice {
         status: super::triggers::Status,
         fault: Option<u32>,
     },
+    /// A committed hit suspended `machine` (a canonical key); `at` is the
+    /// hit's own time, before its commit.
+    BreakHit {
+        break_id: u32,
+        machine: String,
+        boot: u64,
+        name: String,
+        at: u64,
+    },
+    BreakEnded {
+        break_id: u32,
+        at: u64,
+        reason: breaks::BreakEnd,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Settlement {
@@ -622,21 +636,24 @@ pub(crate) enum Plan {
         at: u64,
         payload: Vec<u8>,
     },
-    /// Ask `source`'s machine, now, to hold its `nth` disk request of kind
-    /// `op` for `block_request` trigger `trigger`, if that request arrives
-    /// before the match deadline `until`. The owner sends it at once; it is
-    /// never queued.
-    Hold {
-        source: String,
-        trigger: u32,
-        op: seedbox_engine_protocol::control::DiskOp,
-        nth: u64,
-        until: u64,
+    /// Give every machine the declared breakpoint names.
+    DeclareBreaks {
+        names: Vec<String>,
+        at: u64,
     },
-    /// Ask `source`'s machine, now, to stop counting for `trigger`'s hold.
-    Release {
-        source: String,
-        trigger: u32,
+    /// Release `machine` (a canonical key) from its hold in `boot`.
+    ResumeBreak {
+        machine: String,
+        boot: u64,
+        at: u64,
+    },
+    /// Ask `machine` (a canonical key) to suspend at its `nth` disk request
+    /// of kind `op` from now on, counted across boots.
+    BreakOnBlockRequest {
+        machine: String,
+        op: crate::pv::DiskOp,
+        nth: u64,
+        at: u64,
     },
 }
 #[derive(Clone)]
@@ -673,6 +690,7 @@ pub(crate) struct Service {
     last_wake: u32,
     pending: BTreeMap<u32, Pending>,
     sleepers: BTreeMap<u32, (Call, u64)>,
+    pub(crate) breaks: breaks::Breaks,
     poisoned: bool,
     notices: Vec<Notice>,
 }
@@ -765,6 +783,7 @@ impl Service {
     }
 }
 
+pub(crate) mod breaks;
 mod call;
 mod install;
 mod prepare;

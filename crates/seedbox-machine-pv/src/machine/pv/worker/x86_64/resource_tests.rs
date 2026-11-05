@@ -96,11 +96,11 @@ fn native_shared_pic_handler_snapshot_preserves_mask_ack_and_exact_redelivery() 
     )
     .unwrap();
     assert_eq!(
-        vm.run(0, 5, 1000, false, &[], vec![]).unwrap(),
+        vm.run(0, 5, 1000, false, &[], vec![], &[]).unwrap(),
         Stop::Blocked(Some(5))
     );
     assert_eq!(
-        vm.run(5, 10, 1000, false, &[], vec![]).unwrap(),
+        vm.run(5, 10, 1000, false, &[], vec![], &[]).unwrap(),
         Stop::Horizon
     );
     assert!(vm.state.timer, "handler has not acknowledged the device");
@@ -122,7 +122,7 @@ fn native_shared_pic_handler_snapshot_preserves_mask_ack_and_exact_redelivery() 
     // if it ran, so a later HLT rendezvous cannot satisfy this assertion.
     for machine in [&mut vm, &mut restored] {
         assert_eq!(
-            machine.run(20, 21, 1000, false, &[], vec![]).unwrap(),
+            machine.run(20, 21, 1000, false, &[], vec![], &[]).unwrap(),
             Stop::PoweredOff
         );
         assert_eq!(machine.state.now, 20);
@@ -201,11 +201,12 @@ fn native_shared_virtio_handler_snapshot_preserves_ack_and_exact_redelivery() {
         })
     };
     assert_eq!(
-        vm.run(0, 5, 1000, false, &[], vec![]).unwrap(),
+        vm.run(0, 5, 1000, false, &[], vec![], &[]).unwrap(),
         Stop::Blocked(None)
     );
     assert_eq!(
-        vm.run(5, 10, 1000, false, &[], vec![vec![41; 60]]).unwrap(),
+        vm.run(5, 10, 1000, false, &[], vec![vec![41; 60]], &[])
+            .unwrap(),
         Stop::Horizon
     );
     assert!(!vm.state.net.as_ref().unwrap().irq());
@@ -221,14 +222,22 @@ fn native_shared_virtio_handler_snapshot_preserves_ack_and_exact_redelivery() {
         // New arrivals cross the stopped masked handler, first with no budget.
         assert_eq!(
             machine
-                .run(20, 20, 1000, false, &[], vec![vec![42; 60], vec![43; 60]])
+                .run(
+                    20,
+                    20,
+                    1000,
+                    false,
+                    &[],
+                    vec![vec![42; 60], vec![43; 60]],
+                    &[]
+                )
                 .unwrap(),
             Stop::Horizon
         );
         assert_eq!(machine.page.word(VIRTIO_IRQ + 16), 1);
         assert_eq!(machine.state.devices.lines & 0x80, 0x80);
         assert_eq!(
-            machine.run(20, 21, 1000, false, &[], vec![]).unwrap(),
+            machine.run(20, 21, 1000, false, &[], vec![], &[]).unwrap(),
             Stop::PoweredOff
         );
         assert_eq!(machine.state.now, 20);

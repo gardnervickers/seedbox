@@ -822,50 +822,28 @@ fn inspection_exposes_protocol_result() {
     assert_eq!(sdk.close()["requests"][0]["op"], "inspect");
 }
 #[test]
-fn block_request_crash_arms_on_the_target_itself() {
-    let mut sdk = Sdk::open(replies(&[
-        (1, json!({"trigger_id":3}), json!({})),
-        (2, json!({}), json!({})),
-    ]));
-    let out = sdk.call(
-        "arm_block_request_crash",
+fn break_on_block_request_names_the_target_and_request() {
+    let mut sdk = Sdk::open(replies(&[(1, json!({}), json!({}))]));
+    ok(&sdk.call(
+        "break_on_block_request",
         json!([machine("db-vm"), "flush", 20]),
-        json!({"match_timeout":5}),
-    );
-    typed(ok(&out), "Trigger");
-    ok(&call(
-        &mut sdk,
-        "cancel_trigger",
-        json!([reference("arm_block_request_crash")]),
+        json!({}),
     ));
-    for (args, kind) in [
-        (json!(["db", "trim", 1]), "ValueError"),
-        (json!(["db", "flush", 0]), "ValueError"),
-        (json!(["db", "flush", true]), "ValueError"),
+    for args in [
+        json!(["db", "trim", 1]),
+        json!(["db", "flush", 0]),
+        json!(["db", "flush", true]),
     ] {
         error(
-            &sdk.call("arm_block_request_crash", args, json!({"match_timeout":1})),
-            kind,
+            &sdk.call("break_on_block_request", args, json!({})),
+            "ValueError",
         );
     }
-    error(
-        &sdk.call(
-            "arm_block_request_crash",
-            json!(["db", "flush", 1]),
-            json!({"match_timeout":0}),
-        ),
-        "ValueError",
-    );
     let closed = sdk.close();
     assert_eq!(
-        closed["requests"][0],
-        json!({"version":1,"id":1,"op":"arm_trigger","source":{"machine":"db-vm"},"block_request":{"op":"flush","nth":20},"match_timeout_ns":5000000000u64,"fault":{"action":"crash","target":{"machine":"db-vm"}}})
+        closed["requests"],
+        json!([{"version":1,"id":1,"op":"break_on_block_request","target":{"machine":"db-vm"},"request":"flush","nth":20}])
     );
-    assert_eq!(
-        closed["requests"][1],
-        json!({"version":1,"id":2,"op":"cancel_trigger","trigger_id":3})
-    );
-    assert_eq!(closed["requests"].as_array().unwrap().len(), 2);
 }
 #[test]
 fn arm_and_cancel_literal_wire_and_fired_partition_handle() {
@@ -1062,6 +1040,45 @@ fn invalid_markers_timeouts_and_reply_identity() {
             ),
             "ProtocolError",
         );
+        sdk.close();
+    }
+}
+#[test]
+fn wait_break_returns_each_hit_source_and_block_request_is_reserved() {
+    let program = json!({"break_id":1,"source":"program","machine":"db-vm","boot":0,"name":"leader","at_ns":5});
+    let block = json!({"break_id":2,"source":"block_request","machine":"db-vm","boot":1,"name":"block_request","request":"flush","nth":20,"at_ns":25});
+    let mut sdk = Sdk::open(replies(&[(1, program, json!({})), (2, block, json!({}))]));
+    let hit = call(&mut sdk, "wait_break", json!([1]));
+    typed(ok(&hit), "Hit");
+    assert_eq!(
+        ok(&hit)["fields"],
+        json!({"id":1,"machine":"db-vm","boot":0,"name":"leader","at_ns":5,"source":"program","request":null,"nth":null})
+    );
+    let hit = call(&mut sdk, "wait_break", json!([1]));
+    assert_eq!(
+        ok(&hit)["fields"],
+        json!({"id":2,"machine":"db-vm","boot":1,"name":"block_request","at_ns":25,"source":"block_request","request":"flush","nth":20})
+    );
+    // A program cannot declare the block request hits' name.
+    error(
+        &call(
+            &mut sdk,
+            "declare_breaks",
+            json!([["leader", "block_request"]]),
+        ),
+        "ValueError",
+    );
+    assert_eq!(sdk.close()["requests"].as_array().unwrap().len(), 2);
+    // A hit whose source and fields disagree is a protocol error.
+    for invalid in [
+        json!({"break_id":1,"machine":"m","boot":0,"name":"leader","at_ns":5}),
+        json!({"break_id":1,"source":"block_request","machine":"m","boot":0,"name":"block_request","request":"flush","at_ns":5}),
+        json!({"break_id":1,"source":"block_request","machine":"m","boot":0,"name":"leader","request":"flush","nth":1,"at_ns":5}),
+        json!({"break_id":1,"source":"program","machine":"m","boot":0,"name":"leader","request":"flush","nth":1,"at_ns":5}),
+        json!({"break_id":1,"source":"disk","machine":"m","boot":0,"name":"leader","at_ns":5}),
+    ] {
+        let mut sdk = Sdk::open(reply(1, invalid, json!({})));
+        error(&call(&mut sdk, "wait_break", json!([1])), "ProtocolError");
         sdk.close();
     }
 }

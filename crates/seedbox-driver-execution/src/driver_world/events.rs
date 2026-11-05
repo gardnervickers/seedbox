@@ -328,7 +328,7 @@ impl Publisher {
                     | Response::Property { .. }
                     | Response::Crash { .. }
                     | Response::TransmitFrame { .. }
-                    // A held request is visible as its trigger's resolution.
+                    | Response::Break { .. }
                     | Response::BlockRequestHeld { .. } => {}
                     _ => return Err(invalid("unknown Driver output publication")),
                 }
@@ -406,7 +406,9 @@ impl Publisher {
             EventKind::MachineAdded { .. }
             | EventKind::TriggerArmed { .. }
             | EventKind::TriggerResolved { .. }
-            | EventKind::ReplyAdmitted { .. } => {}
+            | EventKind::ReplyAdmitted { .. }
+            | EventKind::BreakHit { .. }
+            | EventKind::BreakEnded { .. } => {}
             _ => return Err(invalid("unknown Driver event publication")),
         }
         Ok(())
