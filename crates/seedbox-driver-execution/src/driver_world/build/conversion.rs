@@ -1,5 +1,6 @@
 //! Independent retained data conversion before any native machine is created.
 use super::{wire, Error, MachineDefinition, Result};
+use seedbox_driver::driver::SpawnDefinition;
 use std::{panic::AssertUnwindSafe, thread};
 
 pub(super) fn definitions(
@@ -8,16 +9,24 @@ pub(super) fn definitions(
 ) -> Result<(
     MachineDefinition,
     Vec<MachineDefinition>,
-    Vec<MachineDefinition>,
+    Vec<SpawnDefinition>,
 )> {
     let inputs: Vec<_> = std::iter::once(&prepared.oracle)
         .chain(&prepared.machines)
-        .chain(&prepared.spawnable)
+        .chain(prepared.spawned.iter().map(|spawned| &spawned.machine))
         .collect();
     let mut converted = convert(&inputs, workers, &super::definition)?.into_iter();
     let oracle = converted.next().expect("converted oracle");
     let machines = converted.by_ref().take(prepared.machines.len()).collect();
-    Ok((oracle, machines, converted.collect()))
+    let spawned = converted
+        .zip(&prepared.spawned)
+        .map(|(definition, spawned)| SpawnDefinition {
+            spec: spawned.spec.clone(),
+            definition,
+            allow_crashes: spawned.machine.allow_crashes,
+        })
+        .collect();
+    Ok((oracle, machines, spawned))
 }
 
 fn convert<T: Send>(

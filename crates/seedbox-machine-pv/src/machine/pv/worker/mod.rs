@@ -54,6 +54,10 @@ const IRQ_DEFERRED: usize = 32;
 const SYSCALL_COST: usize = 48;
 // Words 88 and 96 are reserved for the preempt fault's rate and seed, which
 // the guest kernel's syscall hook reads; see docs/faults.md.
+// Bytes 128..192 hold the name of a breakpoint write; the event register at
+// BREAK_EVENT carries its length (guest/kernel/*/seedbox.c).
+const BREAK_NAME: usize = 128;
+const BREAK_EVENT: u64 = 48;
 const EVENT_MMIO: u64 = 0x0a01_0000;
 const EVENT_END: u64 = EVENT_MMIO + PAGE_BYTES as u64 - 1;
 const LIFECYCLE_MMIO: u64 = 0x0b01_0000;
@@ -104,6 +108,8 @@ struct Effect {
     idle: bool,
     /// A guest terminal request: [`Stop::PoweredOff`] or [`Stop::Reset`].
     terminal: Option<Stop>,
+    /// A write of a declared breakpoint name: [`Stop::Break`].
+    hit: Option<String>,
 }
 struct Machine<B: Backend = Native> {
     native: B,
@@ -260,6 +266,7 @@ impl<B: Backend> Machine<B> {
     fn quiet(&self) -> bool {
         !self.state.timer && self.state.devices.quiet()
     }
+    #[allow(clippy::too_many_arguments)]
     fn run(
         &mut self,
         now: u64,
@@ -268,6 +275,7 @@ impl<B: Backend> Machine<B> {
         shutdown: bool,
         input: &[u8],
         frames: Vec<Vec<u8>>,
+        breaks: &[String],
     ) -> Result<Stop> {
         if now > upto || upto == u64::MAX || syscall_cost_ns == 0 {
             return Err("PV invalid run interval".into());
@@ -349,7 +357,7 @@ impl<B: Backend> Machine<B> {
                     if width != 8 || !write {
                         return Err("PV clockevent access".into());
                     }
-                    effect = self.clock_event(address - EVENT_MMIO, value, upto)?;
+                    effect = self.clock_event(address - EVENT_MMIO, value, upto, breaks)?;
                 }
                 Exit::Mmio {
                     address,
@@ -432,6 +440,11 @@ impl<B: Backend> Machine<B> {
                 self.ended = true;
                 return Ok(stop);
             }
+            // The write has completed; the client holds the machine here.
+            if let Some(name) = effect.hit {
+                self.finish_stop()?;
+                return Ok(Stop::Break(name));
+            }
             if self.state.now == upto {
                 self.finish_stop()?;
                 return Ok(Stop::Horizon);
@@ -445,7 +458,13 @@ impl<B: Backend> Machine<B> {
             self.prepare()?;
         }
     }
-    fn clock_event(&mut self, offset: u64, value: u64, upto: u64) -> Result<Effect> {
+    fn clock_event(
+        &mut self,
+        offset: u64,
+        value: u64,
+        upto: u64,
+        breaks: &[String],
+    ) -> Result<Effect> {
         let mut effect = Effect::default();
         match offset {
             0 => {
@@ -486,6 +505,12 @@ impl<B: Backend> Machine<B> {
                 }
                 self.state.ready = true;
             }
+            BREAK_EVENT => {
+                if !self.state.ready {
+                    return Err("PV breakpoint before handshake".into());
+                }
+                effect.hit = self.break_hit(value, breaks)?;
+            }
             offset => {
                 if self.event_register(offset, value)? {
                     effect.terminal = Some(Stop::PoweredOff);
@@ -493,6 +518,25 @@ impl<B: Backend> Machine<B> {
             }
         }
         Ok(effect)
+    }
+    /// The declared name of a breakpoint write of `length` bytes, or `None`
+    /// for an undeclared one. The guest kernel validates names, so an invalid
+    /// one is a protocol failure.
+    fn break_hit(&self, length: u64, breaks: &[String]) -> Result<Option<String>> {
+        let length = usize::try_from(length).map_err(|_| "PV breakpoint length")?;
+        if length > seedbox_machine::pv::MAX_BREAK_NAME {
+            return Err("PV breakpoint length".into());
+        }
+        // The guest is stopped; the page is only read here.
+        let name = unsafe { &self.page.bytes()[BREAK_NAME..BREAK_NAME + length] };
+        if !seedbox_machine::pv::break_name_valid(name) {
+            return Err("PV invalid breakpoint name".into());
+        }
+        let name = std::str::from_utf8(name).expect("validated ASCII");
+        Ok(breaks
+            .binary_search_by(|declared| declared.as_str().cmp(name))
+            .is_ok()
+            .then(|| name.to_owned()))
     }
     fn capture(&mut self, path: &Path) -> Result<()> {
         // The client owns an ended boot's exit state without a live worker.
@@ -804,9 +848,18 @@ pub(crate) fn serve() -> Result<()> {
                 shutdown,
                 lifecycle,
                 frames: _,
+                breaks,
             } => {
                 let vm = machine.as_mut().ok_or("PV run before boot")?;
-                let stop = vm.run(now, upto, syscall_cost_ns, shutdown, &lifecycle, frames)?;
+                let stop = vm.run(
+                    now,
+                    upto,
+                    syscall_cost_ns,
+                    shutdown,
+                    &lifecycle,
+                    frames,
+                    &breaks,
+                )?;
                 vm.output.clear();
                 let taken = std::mem::take(&mut vm.state.writes);
                 let count = taken.len() as u64;

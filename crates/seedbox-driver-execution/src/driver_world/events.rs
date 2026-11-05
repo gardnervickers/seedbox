@@ -327,7 +327,8 @@ impl Publisher {
                     | Response::SimulationControl { .. }
                     | Response::Property { .. }
                     | Response::Crash { .. }
-                    | Response::TransmitFrame { .. } => {}
+                    | Response::TransmitFrame { .. }
+                    | Response::Break { .. } => {}
                     _ => return Err(invalid("unknown Driver output publication")),
                 }
             }
@@ -400,7 +401,9 @@ impl Publisher {
             EventKind::MachineAdded { .. }
             | EventKind::TriggerArmed { .. }
             | EventKind::TriggerResolved { .. }
-            | EventKind::ReplyAdmitted { .. } => {}
+            | EventKind::ReplyAdmitted { .. }
+            | EventKind::BreakHit { .. }
+            | EventKind::BreakEnded { .. } => {}
             _ => return Err(invalid("unknown Driver event publication")),
         }
         Ok(())

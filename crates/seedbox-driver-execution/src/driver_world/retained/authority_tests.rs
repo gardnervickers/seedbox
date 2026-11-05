@@ -88,7 +88,7 @@ fn fixture_bytes(
             allow_crashes: false,
         },
         machines: vec![],
-        spawnable: vec![],
+        spawned: vec![],
         quantum_ns: 1000,
         network: wire::Network {
             latency_ns: 1000,
@@ -178,6 +178,7 @@ fn backend_authority_checks_saved_inventory_in_runtime_and_both_launch_paths() {
             output: &output,
             cancellation: &cancellation,
             performance_parameters: &performance,
+            spawner: None,
         };
         mismatch(
             super::request(&request, &output.join("host.sock"), None)
@@ -263,6 +264,7 @@ fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
             output: &output,
             cancellation: &cancellation,
             performance_parameters: &performance,
+            spawner: None,
         };
         let launch =
             crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&request, None)
@@ -393,6 +395,7 @@ fn request_keeps_checksum_mapping_import_and_worker_option_error_order() {
             output: &output,
             cancellation: &cancellation,
             performance_parameters: &performance,
+            spawner: None,
         };
         let error = super::request(&request, &output.join("host.sock"), None)
             .expect_err("fixture must reject invalid input")
@@ -402,4 +405,75 @@ fn request_keeps_checksum_mapping_import_and_worker_option_error_order() {
             .join(crate::worker_process::WORKER_REQUEST_FILE)
             .exists());
     }
+}
+
+#[test]
+fn spawned_machines_join_the_retained_manifest_once_by_name() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(root.path().join("store"));
+    let (mut inputs, prepared, artifact) = fixture(root.path(), CpuBackend::Pv);
+    retain_prepared(&mut inputs, &prepared, &store).unwrap();
+    let file = |name: &str, bytes: &[u8]| {
+        let path = root.path().join(name);
+        fs::write(&path, bytes).unwrap();
+        Artifact {
+            sha256: ContentDigest::of(bytes).hex().into(),
+            length: bytes.len() as u64,
+            artifact: path.to_str().unwrap().into(),
+        }
+    };
+    let spawned = |filesystem: Artifact| wire::Spawned {
+        spec: r#"{"image":"replica"}"#.into(),
+        machine: wire::Machine {
+            name: "replica".into(),
+            filesystem,
+            ..prepared.oracle.clone()
+        },
+    };
+    let environment = wire::Environment {
+        hostname: "replica".into(),
+        hosts: "10.0.0.3 replica\n".into(),
+        anonymous_volumes: vec![],
+        named_volumes: vec![],
+        configs: BTreeMap::from([("/etc/role".into(), file("role", b"replica"))]),
+        limits: wire::GuestLimits {
+            max_map_count: std::num::NonZeroU32::MIN,
+            nofile: std::num::NonZeroU32::MIN,
+        },
+        control_socket: false,
+    };
+    let filesystem = file("replica-filesystem", b"replica filesystem");
+    retain_spawned(
+        &mut inputs,
+        vec![(spawned(filesystem.clone()), environment.clone())],
+        &store,
+    )
+    .unwrap();
+    let manifest = |inputs: &PreparedInputs| -> Prepared {
+        serde_json::from_slice(&store.read(&inputs.auxiliary[MANIFEST]).unwrap()).unwrap()
+    };
+    let retained = manifest(&inputs);
+    assert_eq!(retained.spawned.len(), 1);
+    assert_eq!(retained.spawned[0].spec, r#"{"image":"replica"}"#);
+    assert_eq!(
+        retained.spawned[0].machine.filesystem.artifact,
+        format!("asset:{}", filesystem.sha256)
+    );
+    let wire::Inventory::Pv { environments, .. } = &retained.inventory else {
+        panic!("fixture is PV");
+    };
+    assert_eq!(environments["replica"].hostname, "replica");
+    assert!(environments["replica"].configs["/etc/role"]
+        .artifact
+        .starts_with("asset:"));
+    // Every stored object stays in the closure, the initial ones included.
+    let objects = Closure::from_inputs(&inputs).unwrap().unwrap().objects;
+    for sha in [&artifact.sha256, &filesystem.sha256] {
+        assert!(objects.iter().any(|object| object.hex() == sha.as_str()));
+    }
+    // A machine the manifest already holds stays as it is.
+    let before = inputs.auxiliary.clone();
+    let other = file("other-filesystem", b"other filesystem");
+    retain_spawned(&mut inputs, vec![(spawned(other), environment)], &store).unwrap();
+    assert_eq!(inputs.auxiliary, before);
 }

@@ -99,10 +99,11 @@ impl Bridge {
         }
         opt(&mut b, self.last);
         b.extend_from_slice(&[0, 0, u8::from(self.failed)]); // ready, outcome, failed
-        b.extend_from_slice(&[0; 12]);
-        b.extend_from_slice(&[0; 4]); // oracle relay/session/public, failed/time/pending/prepared
+        b.extend_from_slice(&[0; 8]); // oracle relay/session
+        b.extend_from_slice(&[0; 2]); // oracle failed/time
+        word(&mut b, 0); // oracle sessions
         b.extend_from_slice(&0u32.to_le_bytes());
-        b.push(0); // highwater and session map
+        word(&mut b, 0); // highwater and session maps
         marks.insert("prepared_count", b.len());
         word(&mut b, self.prepared);
         (b, marks)
@@ -312,7 +313,7 @@ impl Fixture {
             b.extend_from_slice(body);
         }
         b[..8].copy_from_slice(b"SBXTCG01");
-        b[8..12].copy_from_slice(&3u32.to_le_bytes());
+        b[8..12].copy_from_slice(&1u32.to_le_bytes());
         b[12] = 1;
         b[13] = u8::from(self.image.is_some());
         let len = b.len() as u64 - 24;
@@ -526,7 +527,7 @@ fn malformed_header_version_architecture_native_and_tags_are_closed() {
     let (wire, m) = Fixture::default().wire();
     for (at, value, message) in [
         (0, 0, "format or version"),
-        (8, 1, "format or version"),
+        (8, 2, "format or version"),
         (12, 2, "architecture or native format"),
         (13, 2, "architecture or native format"),
         (14, 1, "architecture or native format"),
@@ -1202,7 +1203,7 @@ fn populated_native_cache_and_predecessor_roundtrip_preserves_actual_endpoint() 
         (3, i32::MIN, 3, true), // exact signed exit-code retention
     ] {
         let (bytes, marks) = synthetic_native_retirement(disposition, code, cause, older_owner);
-        assert_eq!(&bytes[8..12], &3u32.to_le_bytes());
+        assert_eq!(&bytes[8..12], &1u32.to_le_bytes());
         let snapshot = decode(&bytes);
         assert_eq!(encode(&snapshot), bytes);
         snapshot

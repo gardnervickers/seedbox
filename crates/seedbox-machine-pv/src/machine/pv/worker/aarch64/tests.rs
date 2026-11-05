@@ -128,7 +128,7 @@ fn host_interruptions_neither_consume_time_nor_invalidate_exclusives() {
         .exits
         .extend([Exit::Interrupted, Exit::Interrupted, ready(), idle()]);
     assert!(matches!(
-        vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Blocked(None)
     ));
     assert_eq!(vm.state.now, 0);
@@ -136,7 +136,7 @@ fn host_interruptions_neither_consume_time_nor_invalidate_exclusives() {
     assert_eq!(vm.native.entries, 4);
     let entries = vm.native.entries;
     assert!(matches!(
-        vm.run(25, 25, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(25, 25, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Blocked(None)
     ));
     assert_eq!(vm.page.word(EXCLUSIVE_EPOCH), 2);
@@ -150,7 +150,7 @@ fn zero_budget_adoption_coalesces_due_timer_without_guest_entry() {
     vm.state.idle = true;
     vm.state.deadline = Some(5);
     assert!(matches!(
-        vm.run(20, 20, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(20, 20, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Horizon
     ));
     assert_eq!(vm.native.entries, 0);
@@ -167,13 +167,13 @@ fn early_shutdown_buffers_once_and_does_not_invent_wakeup() {
     vm.state.ready = true;
     vm.state.idle = true;
     assert!(matches!(
-        vm.run(10, 10, 1000, true, &[], Vec::new()).unwrap(),
+        vm.run(10, 10, 1000, true, &[], Vec::new(), &[]).unwrap(),
         Stop::Blocked(None)
     ));
     let state = serde_json::to_vec(&vm.state).unwrap();
     let epoch = vm.page.word(EXCLUSIVE_EPOCH);
     assert!(matches!(
-        vm.run(10, 11, 1000, true, &[], Vec::new()).unwrap(),
+        vm.run(10, 11, 1000, true, &[], Vec::new(), &[]).unwrap(),
         Stop::Blocked(None)
     ));
     assert_eq!(vm.native.entries, 0);
@@ -185,7 +185,7 @@ fn zero_budget_republishes_next_price_without_guest_entry_or_progress() {
     let mut vm = machine();
     vm.page.set_word(SYSCALL_COST, 4000);
     assert!(matches!(
-        vm.run(0, 0, 1001, false, &[], Vec::new()).unwrap(),
+        vm.run(0, 0, 1001, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Horizon
     ));
     assert_eq!(vm.page.word(SYSCALL_COST), 1001);
@@ -196,7 +196,8 @@ fn zero_budget_republishes_next_price_without_guest_entry_or_progress() {
     vm.state.idle = true;
     vm.state.deadline = Some(500);
     assert!(matches!(
-        vm.run(100, 100, 1_000_000, false, &[], Vec::new()).unwrap(),
+        vm.run(100, 100, 1_000_000, false, &[], Vec::new(), &[])
+            .unwrap(),
         Stop::Blocked(Some(500))
     ));
     assert_eq!(vm.page.word(SYSCALL_COST), 1_000_000);
@@ -215,14 +216,14 @@ fn psci_system_off_and_reset_end_the_boot_only_after_handshake() {
         vm.native.core[0] = function;
         vm.native.exits.extend([Exit::Call]);
         assert!(
-            vm.run(0, 10, 1000, false, &[], Vec::new()).is_err(),
+            vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).is_err(),
             "{function:#x} before handshake"
         );
         let mut vm = machine();
         vm.native.core[0] = function;
         vm.native.exits.extend([ready(), Exit::Call]);
         assert_eq!(
-            vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap(),
+            vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).unwrap(),
             expected
         );
         use seedbox_machine::machine::execution_evidence::chain;
@@ -237,7 +238,7 @@ fn psci_system_off_and_reset_end_the_boot_only_after_handshake() {
         assert_eq!(vm.state.witness, chain::record(&h, b'k', 0, 0, function, 0));
         assert_eq!(vm.native.entries, 2);
         // The ended boot is never entered or captured again.
-        assert!(vm.run(0, 10, 1000, false, &[], Vec::new()).is_err());
+        assert!(vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).is_err());
         assert_eq!(vm.native.entries, 2);
         let directory = tempfile::tempdir().unwrap();
         assert!(vm.capture(&directory.path().join("capture")).is_err());
@@ -251,7 +252,7 @@ fn unknown_psci_call_returns_not_supported_and_wfi_stays_blocked() {
         .exits
         .extend([ready(), Exit::Call, Exit::Wait { event: false }]);
     assert_eq!(
-        vm.run(0, 10, 1000, false, &[], Vec::new()).unwrap(),
+        vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).unwrap(),
         Stop::Blocked(None)
     );
     assert_eq!(vm.native.core[0], u64::MAX);

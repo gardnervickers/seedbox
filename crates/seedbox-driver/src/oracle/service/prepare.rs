@@ -54,6 +54,24 @@ impl Service {
             |target| adapter.network_member(target),
             || adapter.network_floor(),
         )?;
+        // A suspended machine may only crash; network faults name links.
+        if let Some(facts) = &compiled.machine {
+            if self.breaks.suspended(&facts.name)
+                && !matches!(
+                    command,
+                    Command::Effect {
+                        effect: Effect::Crash,
+                        ..
+                    }
+                )
+            {
+                return Err(error(
+                    ErrorCode::InvalidState,
+                    "machine is suspended at a breakpoint; resume or crash it first",
+                )
+                .into());
+            }
+        }
         let (subject, effect, handle, healing) =
             self.prepare_change(adapter, mode, command, compiled, name)?;
         self.install(
@@ -89,7 +107,7 @@ impl Service {
         name: Option<String>,
     ) -> Result<HandleAdmission, PreparationError> {
         Ok(match command {
-            Command::Spawn { machine } => Self::prepare_spawn(adapter, machine)?,
+            Command::Spawn { machine, spec } => Self::prepare_spawn(adapter, machine, &spec)?,
             Command::Named { .. } => {
                 return Err(OperationError::invalid("nested named admission").into())
             }
@@ -191,13 +209,14 @@ impl Service {
             ),
         })
     }
-    /// Reserve a declared machine's construction; it joins as a fresh, unready
-    /// boot zero.
+    /// Reserve a new machine's construction; it joins as a fresh, unready
+    /// boot zero once the host has prepared its spec.
     fn prepare_spawn(
         adapter: &mut impl Adapter,
         machine: String,
+        spec: &str,
     ) -> Result<HandleAdmission, PreparationError> {
-        adapter.reserve_spawn(&machine)?;
+        adapter.reserve_spawn(&machine, spec)?;
         Ok((
             Subject::Machine(Facts {
                 name: machine,

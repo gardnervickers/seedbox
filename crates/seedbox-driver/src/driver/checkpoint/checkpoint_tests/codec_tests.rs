@@ -91,6 +91,7 @@ fn all_stopped_boundary_families_roundtrip_after_source_destruction() {
         key("spawn3"),
         Action::Spawn {
             name: "fixture-3".into(),
+            spec: crate::test_support::SPAWN_SPEC.into(),
         },
     )
     .unwrap();
@@ -99,6 +100,7 @@ fn all_stopped_boundary_families_roundtrip_after_source_destruction() {
         key("spawn4"),
         Action::Spawn {
             name: "fixture-4".into(),
+            spec: crate::test_support::SPAWN_SPEC.into(),
         },
     )
     .unwrap();
@@ -111,7 +113,10 @@ fn all_stopped_boundary_families_roundtrip_after_source_destruction() {
                 true,
                 vec![
                     (0, Response::Ready),
-                    (25, call(1, r#""op":"spawn","machine":"fixture-2""#)),
+                    (
+                        25,
+                        call(1, r#""op":"spawn","machine":"fixture-2","spec":{}"#),
+                    ),
                 ],
             ),
             spec(1, true, vec![]),
@@ -377,6 +382,7 @@ fn all_stopped_boundary_families_roundtrip_after_source_destruction() {
         key("spawn"),
         Action::Spawn {
             name: "fixture-1".into(),
+            spec: crate::test_support::SPAWN_SPEC.into(),
         },
     )
     .unwrap();
@@ -406,11 +412,16 @@ fn future_binary_closure_is_exact_and_invalid_resources_remain_deferred() {
             .append_data(&mut header, "file", &b"data"[..])
             .unwrap();
         let original = archive.into_inner().unwrap();
-        d.execution.definitions[0].application.filesystem =
+        d.execution.definitions[0].definition.application.filesystem =
             FilesystemArchive::new(original.clone()).unwrap();
-        d.execution.definitions[0].resources.memory_bytes = 0;
-        d.execution.definitions[0].application.launch.argv.clear();
-        d.execution.definitions[0].disk = Some(if image {
+        d.execution.definitions[0].definition.resources.memory_bytes = 0;
+        d.execution.definitions[0]
+            .definition
+            .application
+            .launch
+            .argv
+            .clear();
+        d.execution.definitions[0].definition.disk = Some(if image {
             DiskImage::from_bytes(vec![7; 512]).unwrap()
         } else {
             DiskImage::zeroed(1u64 << 40).unwrap()
@@ -426,17 +437,35 @@ fn future_binary_closure_is_exact_and_invalid_resources_remain_deferred() {
             .unwrap();
         file.write_all(&original).unwrap();
         drop(file);
-        d.execution.definitions[0].application.filesystem =
+        d.execution.definitions[0].definition.application.filesystem =
             FilesystemArchive::new(std::fs::read(&source_file).unwrap()).unwrap();
         let (bytes, store) = artifact(d.checkpoint().unwrap());
         drop(d);
         std::fs::remove_file(source_file).unwrap();
         let c = decode(&bytes, &store);
-        assert_eq!(c.definitions[0].application.filesystem.as_bytes(), original);
-        assert_eq!(c.definitions[0].resources.memory_bytes, 0);
-        assert!(c.definitions[0].application.launch.argv.is_empty());
         assert_eq!(
-            c.definitions[0].disk.as_ref().unwrap().image().is_some(),
+            c.definitions[0]
+                .definition
+                .application
+                .filesystem
+                .as_bytes(),
+            original
+        );
+        assert_eq!(c.definitions[0].definition.resources.memory_bytes, 0);
+        assert!(c.definitions[0]
+            .definition
+            .application
+            .launch
+            .argv
+            .is_empty());
+        assert_eq!(
+            c.definitions[0]
+                .definition
+                .disk
+                .as_ref()
+                .unwrap()
+                .image()
+                .is_some(),
             image
         );
         let calls = Arc::new(AtomicUsize::new(0));
@@ -460,6 +489,7 @@ fn future_binary_closure_is_exact_and_invalid_resources_remain_deferred() {
             key("future"),
             Action::Spawn {
                 name: "fixture-1".into(),
+                spec: crate::test_support::SPAWN_SPEC.into(),
             },
         )
         .unwrap();
@@ -576,9 +606,9 @@ fn decoded_invariants_reject_untrusted_complete_objects() {
         let mut e = Encoder { output: Vec::new() };
         c.put(&mut e).unwrap();
         let mut bad = b"SBXDRVR\0".to_vec();
-        // Use current v7 framing so the intended state invariant, not version,
+        // Use current version 1 framing so the intended state invariant, not version,
         // is what rejects these deliberately malformed imported bodies.
-        bad.extend(7u32.to_le_bytes());
+        bad.extend(1u32.to_le_bytes());
         bad.extend((e.output.len() as u64).to_le_bytes());
         bad.extend(e.output);
         assert!(
@@ -850,13 +880,13 @@ fn closed_codec_version_and_orphaned_network_ownership_fail_before_restore() {
     let mut d = net(initial(), setup(8), 1);
     advance(&mut d, 1);
     let (bytes, _) = artifact(d.checkpoint().unwrap());
-    assert_eq!(&bytes[8..12], &7u32.to_le_bytes());
-    for version in [0u32, 1, 2, 3, 4, 5, 6, 8, u32::MAX] {
+    assert_eq!(&bytes[8..12], &1u32.to_le_bytes());
+    for version in [0u32, 2, u32::MAX] {
         let mut old = bytes.clone();
         old[8..12].copy_from_slice(&version.to_le_bytes());
         assert!(matches!(
             Checkpoint::read_from(&mut &old[..], limits()),
-            Err(CodecError::Invalid(message)) if message.contains("replay with its retained engine or run fresh")
+            Err(CodecError::Invalid(message)) if message == "version"
         ));
     }
     for shape_layer in [false, true] {

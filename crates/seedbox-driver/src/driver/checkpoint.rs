@@ -38,7 +38,7 @@ pub struct Checkpoint<S> {
     control: control::Control,
     inputs: BTreeMap<InputKey, LiveInput>,
     trigger_marker: Option<Timestamp>,
-    definitions: Vec<MachineDefinition>,
+    definitions: Vec<SpawnDefinition>,
     network: network::Network,
     properties: seedbox_engine_core::properties::Ledger,
 }
@@ -139,6 +139,9 @@ fn validate<T>(
     if !control.checkpoint_size(machines.len()) || !network.checkpoint_size(machines.len()) {
         return Err("machine identity tables differ");
     }
+    if control.service.breaks.hits().next().is_some() {
+        return Err("machine suspended at a breakpoint");
+    }
     for entry in machines {
         if entry.machine.is_none() || entry.rng.is_none() {
             return Err("machine or RNG is still owned by a worker");
@@ -188,7 +191,7 @@ where
         context: impl Fn() -> Result<M::Context, M::Error> + Send + Sync + 'static,
         oracle: MachineDefinition,
         machines: Vec<MachineDefinition>,
-        spawnable: Vec<MachineDefinition>,
+        prepared: Vec<SpawnDefinition>,
         network: impl Into<NetworkSetup>,
         factory: impl FnMut(&MachineDefinition) -> Result<M, M::Error> + Send + 'static,
     ) -> Result<Self, Error<M::Error>> {
@@ -200,7 +203,7 @@ where
             context,
             oracle,
             machines,
-            spawnable,
+            prepared,
             network.into(),
             factory,
         )

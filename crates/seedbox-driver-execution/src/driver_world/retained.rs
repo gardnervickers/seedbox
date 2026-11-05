@@ -78,19 +78,7 @@ pub fn retain_prepared(
     let mut prepared = prepared.clone();
     let mut objects = BTreeSet::new();
     visit(&mut prepared, |artifact| {
-        artifact.validate().map_err(bad)?;
-        // `put_file` hashes the source and only reads, never rewrites or syncs,
-        // an object the store already holds; the result is the stored digest.
-        let path = Path::new(&artifact.artifact);
-        if fs::metadata(path)?.len() != artifact.length {
-            return Err(bad("Driver artifact encoded length differs"));
-        }
-        let digest = store.put_file(path)?;
-        if digest.hex() != artifact.sha256 {
-            return Err(bad("Driver input changed while retaining its content"));
-        }
-        objects.insert(digest);
-        artifact.artifact = format!("asset:{}", artifact.sha256);
+        objects.insert(retain_artifact(artifact, store)?);
         Ok(())
     })?;
     let manifest = store.put(&serde_json::to_vec(&prepared)?)?;
@@ -98,6 +86,68 @@ pub fn retain_prepared(
         inputs,
         Closure {
             executable: inputs.executable()?.clone(),
+            manifest,
+            objects: objects.into_iter().collect(),
+        },
+    )
+}
+/// Store one host-path artifact and refer to it by content from now on.
+fn retain_artifact(artifact: &mut Artifact, store: &ContentStore) -> Result<ContentDigest> {
+    artifact.validate().map_err(bad)?;
+    // `put_file` hashes the source and only reads, never rewrites or syncs,
+    // an object the store already holds; the result is the stored digest.
+    let path = Path::new(&artifact.artifact);
+    if fs::metadata(path)?.len() != artifact.length {
+        return Err(bad("Driver artifact encoded length differs"));
+    }
+    let digest = store.put_file(path)?;
+    if digest.hex() != artifact.sha256 {
+        return Err(bad("Driver input changed while retaining its content"));
+    }
+    artifact.artifact = format!("asset:{}", artifact.sha256);
+    Ok(digest)
+}
+/// Add the machines a run's spawns prepared, with their environments, to
+/// the retained manifest, so a replay builds each one at its spawn. A machine
+/// the manifest already holds stays as it is.
+pub fn retain_spawned(
+    inputs: &mut PreparedInputs,
+    spawned: Vec<(wire::Spawned, wire::Environment)>,
+    store: &ContentStore,
+) -> Result<()> {
+    let closure = Closure::from_inputs(inputs)?
+        .ok_or_else(|| bad("spawned machines need a retained Driver manifest"))?;
+    let mut prepared: Prepared = serde_json::from_slice(&store.read(&closure.manifest)?)?;
+    let mut objects: BTreeSet<_> = closure.objects.into_iter().collect();
+    for (mut machine, mut environment) in spawned {
+        let name = machine.machine.name.clone();
+        if prepared
+            .spawned
+            .iter()
+            .any(|retained| retained.machine.name == name)
+        {
+            continue;
+        }
+        objects.insert(retain_artifact(&mut machine.machine.filesystem, store)?);
+        if let Some(wire::Disk::Image { contents }) = &mut machine.machine.disk {
+            objects.insert(retain_artifact(contents, store)?);
+        }
+        for artifact in environment.configs.values_mut() {
+            objects.insert(retain_artifact(artifact, store)?);
+        }
+        match &mut prepared.inventory {
+            wire::Inventory::Pv { environments, .. }
+            | wire::Inventory::Tcg { environments, .. } => {
+                environments.insert(name, environment);
+            }
+        }
+        prepared.spawned.push(machine);
+    }
+    let manifest = store.put(&serde_json::to_vec(&prepared)?)?;
+    put_closure(
+        inputs,
+        Closure {
+            executable: closure.executable,
             manifest,
             objects: objects.into_iter().collect(),
         },
@@ -449,7 +499,12 @@ fn visit(
     visit_inventory(&mut prepared.inventory, &mut apply)?;
     for machine in std::iter::once(&mut prepared.oracle)
         .chain(&mut prepared.machines)
-        .chain(&mut prepared.spawnable)
+        .chain(
+            prepared
+                .spawned
+                .iter_mut()
+                .map(|spawned| &mut spawned.machine),
+        )
     {
         apply(&mut machine.filesystem)?;
         if let Some(wire::Disk::Image { contents }) = &mut machine.disk {

@@ -63,7 +63,8 @@ fn cold_mode(full: bool) -> Snapshot {
     GuestBridge::default().write_snapshot(&mut w).unwrap();
     w.boolean(false).unwrap();
     w.boolean(false).unwrap();
-    // Independent version3 policy/owner/full+execution-cache record, not private Rust inclusion.
+    w.u64(0).unwrap(); // declared breakpoints
+                       // Independent version3 policy/owner/full+execution-cache record, not private Rust inclusion.
     w.boolean(true).unwrap();
     w.string("node").unwrap();
     w.u64(42).unwrap();
@@ -91,7 +92,7 @@ fn cold_mode(full: bool) -> Snapshot {
     let mut out = Vec::new();
     let mut w = Writer::new(&mut out);
     w.raw(b"SBXPVS01").unwrap();
-    w.u32(3).unwrap();
+    w.u32(1).unwrap();
     w.u8(1).unwrap();
     w.u8(0).unwrap();
     w.u16(0).unwrap();

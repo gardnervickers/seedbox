@@ -20,7 +20,8 @@ use support::failure_capture;
 // network faults, volume durability across crashes, clock state across reboot,
 // concurrent application behavior, and guest property findings (with an
 // allowed crash and a machine's reboot) as part of the compared results.
-const REPEAT_WORKLOADS: [&str; 5] = [
+const REPEAT_WORKLOADS: [&str; 6] = [
+    "dns",
     "network-faults",
     "volume-crash",
     "clock-reboot",
@@ -41,6 +42,7 @@ applications! {
     clock_skew => "clock-skew",
     clock_step => "clock-step",
     connections => "connections",
+    dns => "dns",
     enospc => "enospc",
     exclusives => "exclusives",
     key_value => "key-value",

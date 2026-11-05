@@ -5,14 +5,19 @@
 //! newline, numbered from 1 per connection, as `python/seedbox/control.py`
 //! speaks it. Each call blocks until the world confirms its effect; there
 //! are no retries, and a transport or protocol failure closes the
-//! connection. Only the calls [`World`] needs are here.
+//! connection. Only the calls [`World`] needs are here, plus breakpoints
+//! ([`GuestWorld::on_break`]).
 use crate::{control::Action, Error, World};
 use serde_json::{json, Map, Value};
 use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Read, Write},
     os::unix::net::UnixStream,
-    path::Path,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -120,6 +125,78 @@ impl Control {
     }
 }
 
+/// A breakpoint hit. Its machine stays suspended until it is resumed or
+/// crashed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hit {
+    pub id: u32,
+    /// The machine's name, as actions target it.
+    pub machine: String,
+    pub boot: u64,
+    pub name: String,
+    /// The simulated time of the breakpoint write.
+    pub at_ns: u64,
+}
+
+impl Control {
+    /// Replace the breakpoint names that suspend a machine, for later hits.
+    pub fn declare_breaks<'a>(
+        &mut self,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), Error> {
+        let names: std::collections::BTreeSet<&str> = names.into_iter().collect();
+        self.call("declare_breaks", json!({ "names": names }))
+            .map(drop)
+    }
+
+    /// The oldest hit not yet returned, or `None` once `timeout` of
+    /// simulated time passes without one.
+    pub fn wait_break(&mut self, timeout: Duration) -> Result<Option<Hit>, Error> {
+        let timeout_ns = u64::try_from(timeout.as_nanos())
+            .map_err(|_| Error("wait_break timeout exceeds u64 nanoseconds".into()))?;
+        let result = self.call("wait_break", json!({ "timeout_ns": timeout_ns }))?;
+        if result.is_empty() {
+            return Ok(None);
+        }
+        let number = |key: &str| result.get(key).and_then(Value::as_u64);
+        let text = |key: &str| result.get(key).and_then(Value::as_str).map(str::to_owned);
+        match (
+            number("break_id").and_then(|id| u32::try_from(id).ok()),
+            text("machine"),
+            number("boot"),
+            text("name"),
+            number("at_ns"),
+        ) {
+            (Some(id), Some(machine), Some(boot), Some(name), Some(at_ns)) => Ok(Some(Hit {
+                id,
+                machine,
+                boot,
+                name,
+                at_ns,
+            })),
+            _ => self.fail("invalid breakpoint hit".into()),
+        }
+    }
+
+    /// Let a suspended machine run again; its breakpoint write returns.
+    pub fn resume_break(&mut self, hit: &Hit) -> Result<(), Error> {
+        self.call("resume_break", json!({ "break_id": hit.id }))
+            .map(drop)
+    }
+}
+
+/// Handles a breakpoint hit while its machine is suspended.
+pub type BreakHandler = Box<dyn FnMut(&mut GuestWorld, &Hit) -> Result<(), Error> + Send>;
+
+/// The breakpoint handlers and the thread that serves them.
+#[derive(Default)]
+struct Breaks {
+    handlers: Arc<Mutex<BTreeMap<String, BreakHandler>>>,
+    serving: bool,
+    stop: Arc<AtomicBool>,
+    error: Arc<Mutex<Option<Error>>>,
+}
+
 fn target(machine: &str) -> Value {
     json!({ "machine": machine })
 }
@@ -134,6 +211,8 @@ fn targets(machines: &[String]) -> Value {
 pub struct GuestWorld {
     control: Control,
     handles: BTreeMap<String, String>,
+    path: PathBuf,
+    breaks: Breaks,
 }
 
 impl GuestWorld {
@@ -144,9 +223,70 @@ impl GuestWorld {
 
     pub fn connect_to(path: impl AsRef<Path>) -> Result<Self, Error> {
         Ok(Self {
-            control: Control::connect(path)?,
+            control: Control::connect(path.as_ref())?,
             handles: BTreeMap::new(),
+            path: path.as_ref().to_owned(),
+            breaks: Breaks::default(),
         })
+    }
+
+    /// Call `handler` whenever a machine hits breakpoint `name`.
+    ///
+    /// The first registration opens a second connection and serves hits on a
+    /// background thread, so this world stays free for other calls. The
+    /// handler runs while the machine is suspended and gets that thread's
+    /// world; the machine resumes when the handler returns, unless the handler
+    /// crashed it. A handler error stops serving: its machine stays suspended
+    /// and [`Self::break_error`] reports the error.
+    pub fn on_break(
+        &mut self,
+        name: &str,
+        handler: impl FnMut(&mut GuestWorld, &Hit) -> Result<(), Error> + Send + 'static,
+    ) -> Result<(), Error> {
+        let mut handlers = self.breaks.handlers.lock().unwrap();
+        let names = handlers.keys().map(String::as_str).chain([name]);
+        self.control.declare_breaks(names)?;
+        handlers.insert(name.to_owned(), Box::new(handler));
+        drop(handlers);
+        if !self.breaks.serving {
+            let mut world = GuestWorld::connect_to(&self.path)?;
+            let handlers = self.breaks.handlers.clone();
+            let stop = self.breaks.stop.clone();
+            let error = self.breaks.error.clone();
+            std::thread::spawn(move || {
+                if let Err(failure) = world.serve_breaks(&handlers, &stop) {
+                    *error.lock().unwrap() = Some(failure);
+                }
+            });
+            self.breaks.serving = true;
+        }
+        Ok(())
+    }
+
+    /// The error that stopped serving breakpoints, if any.
+    pub fn break_error(&self) -> Option<Error> {
+        self.breaks.error.lock().unwrap().clone()
+    }
+
+    fn serve_breaks(
+        &mut self,
+        handlers: &Mutex<BTreeMap<String, BreakHandler>>,
+        stop: &AtomicBool,
+    ) -> Result<(), Error> {
+        while !stop.load(Ordering::Relaxed) {
+            let Some(hit) = self.control.wait_break(Duration::from_secs(1))? else {
+                continue;
+            };
+            if let Some(handler) = handlers.lock().unwrap().get_mut(&hit.name) {
+                handler(self, &hit)?;
+            }
+            match self.control.resume_break(&hit) {
+                // The handler crashed the machine, which ended the hit.
+                Err(Error(message)) if message.starts_with("resume_break: invalid_state:") => {}
+                result => result?,
+            }
+        }
+        Ok(())
     }
 
     /// The underlying RPC, for calls outside [`World`] (`inspect`,
@@ -160,6 +300,19 @@ impl GuestWorld {
         &self.handles
     }
 
+    /// Prepare and boot a new machine named `machine`. `spec` is the object a
+    /// `machines` entry of seedbox.yaml takes; relative paths resolve against
+    /// the project's directory. The simulation waits while the host prepares
+    /// the image, and the run keeps it so a replay needs no preparation.
+    pub fn spawn(&mut self, machine: &str, spec: Value) -> Result<(), Error> {
+        if !spec.is_object() {
+            return Err(Error("spawn spec must be an object".into()));
+        }
+        self.control
+            .call("spawn", json!({ "machine": machine, "spec": spec }))
+            .map(drop)
+    }
+
     /// Apply an action that installs `handle`, refusing a name in use.
     fn install(&mut self, handle: &str, op: &str, arguments: Value) -> Result<(), Error> {
         if self.handles.contains_key(handle) {
@@ -168,6 +321,12 @@ impl GuestWorld {
         let world = self.control.handle(op, arguments)?;
         self.handles.insert(handle.to_owned(), world);
         Ok(())
+    }
+}
+
+impl Drop for GuestWorld {
+    fn drop(&mut self) {
+        self.breaks.stop.store(true, Ordering::Relaxed);
     }
 }
 

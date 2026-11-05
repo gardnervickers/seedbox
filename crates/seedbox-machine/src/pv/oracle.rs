@@ -40,17 +40,32 @@ pub(crate) enum Error {
     Outstanding,
     StaleReply,
     Time,
+    Sessions,
+}
+
+/// Most oracle connections one guest relay serves at once (`guest_oracle.h`).
+pub(crate) const MAX_SESSIONS: usize = 8;
+
+/// One open guest connection. Its calls are sequential: at most one request
+/// is outstanding, and public request IDs count from 1 within the session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Session {
+    pub(crate) id: NonZeroU32,
+    public: NonZeroU32,
+    pub(crate) pending: Option<Correlation>,
+    pub(crate) reply_prepared: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Decoder {
     relay: u32,
+    /// Highest session the guest has issued; issued sessions are never reused.
     session: u32,
-    public: u32,
     failed: bool,
     last_time: Option<u64>,
-    pending: Option<Correlation>,
-    reply_prepared: bool,
+    /// Open sessions in ascending ID order. A closed session's replies are
+    /// discarded; a session that sent nothing yet is unknown here.
+    sessions: Vec<Session>,
 }
 
 #[derive(Deserialize)]
@@ -65,38 +80,60 @@ impl Decoder {
         Err(error)
     }
 
-    /// Validate one completed SBX_RPC1 frame, without its newline. The shared
-    /// management codec owns fragmentation/demultiplexing and supplies the
-    /// canonical observation time of the final byte. No generic console bytes
-    /// belong here. Equal timestamps preserve input order.
-    pub(crate) fn receive(&mut self, observed: u64, line: &[u8]) -> Result<Request, Error> {
+    fn open(&self, session: NonZeroU32) -> Option<usize> {
+        self.sessions.iter().position(|s| s.id == session)
+    }
+
+    /// True when `session` was issued and has since closed or not yet spoken,
+    /// so a reply addressed to it has lost its destination.
+    fn issued(&self, session: NonZeroU32) -> bool {
+        session.get() <= self.session && self.open(session).is_none()
+    }
+
+    fn observe(&mut self, observed: u64) -> Result<(), Error> {
         if self.failed {
             return Err(Error::Failed);
         }
         if self.last_time.is_some_and(|last| observed < last) {
             return self.fail(Error::Time);
         }
+        Ok(())
+    }
+
+    /// Validate one completed SBX_RPC1 frame, without its newline. The shared
+    /// management codec owns fragmentation/demultiplexing and supplies the
+    /// canonical observation time of the final byte. No generic console bytes
+    /// belong here. Equal timestamps preserve input order. Requests from
+    /// different sessions interleave; each session stays sequential.
+    pub(crate) fn receive(&mut self, observed: u64, line: &[u8]) -> Result<Request, Error> {
+        self.observe(observed)?;
         if line.len() > MAX_TRANSPORT_FRAME || line.contains(&0) || line.contains(&b'\n') {
             return self.fail(Error::Frame);
         }
-        let key = match self.parse(line) {
-            Ok(key) => key,
+        let (key, index) = match self.parse(line) {
+            Ok(parsed) => parsed,
             Err(error) => return self.fail(error),
         };
-        if self.pending.is_some() && key.session.get() == self.session {
-            return self.fail(Error::Outstanding);
-        }
         let payload = line
             .splitn(4, |byte| *byte == b' ')
             .nth(3)
             .ok_or(Error::Frame)?
             .to_vec();
         self.relay = key.relay.get();
-        self.session = key.session.get();
-        self.public = key.request.get();
         self.last_time = Some(observed);
-        self.pending = Some(key);
-        self.reply_prepared = false;
+        let session = Session {
+            id: key.session,
+            public: key.request,
+            pending: Some(key),
+            reply_prepared: false,
+        };
+        match index {
+            Some(i) => self.sessions[i] = session,
+            None => {
+                self.session = key.session.get();
+                self.sessions.push(session);
+            }
+        }
         Ok(Request {
             correlation: key,
             observed,
@@ -104,7 +141,7 @@ impl Decoder {
         })
     }
 
-    fn parse(&self, line: &[u8]) -> Result<Correlation, Error> {
+    fn parse(&self, line: &[u8]) -> Result<(Correlation, Option<usize>), Error> {
         let text = std::str::from_utf8(line).map_err(|_| Error::Frame)?;
         let tail = text.strip_prefix("SBX_RPC1 ").ok_or(Error::Frame)?;
         let (relay, tail) = tail.split_once(' ').ok_or(Error::Frame)?;
@@ -112,8 +149,15 @@ impl Decoder {
         let session = session
             .parse::<NonZeroU32>()
             .map_err(|_| Error::StaleSession)?;
-        if session.get() < self.session {
+        let index = self.open(session);
+        if index.is_none() && session.get() <= self.session {
             return Err(Error::StaleSession);
+        }
+        if index.is_some_and(|i| self.sessions[i].pending.is_some()) {
+            return Err(Error::Outstanding);
+        }
+        if index.is_none() && self.sessions.len() >= MAX_SESSIONS {
+            return Err(Error::Sessions);
         }
         if payload.len() + 1 > MAX_FRAME {
             return Err(Error::Frame);
@@ -126,23 +170,41 @@ impl Decoder {
         if header.version != 1 {
             return Err(Error::Identity);
         }
-        let expected = if session.get() > self.session {
-            Some(1)
-        } else {
-            self.public.checked_add(1)
+        let expected = match index {
+            Some(i) => self.sessions[i].public.checked_add(1),
+            None => NonZeroU32::new(1),
         };
-        if Some(header.id.get()) != expected {
+        if Some(header.id) != expected {
             return Err(Error::PublicId);
         }
-        Ok(Correlation {
-            relay,
-            session,
-            request: header.id,
-        })
+        Ok((
+            Correlation {
+                relay,
+                session,
+                request: header.id,
+            },
+            index,
+        ))
+    }
+
+    /// Validate one SBX_CLOSE1 frame: the guest dropped a session that had
+    /// sent a request. Its outstanding call, if any, keeps its host effects;
+    /// only reply delivery is abandoned. Returns the closed session.
+    pub(crate) fn close(&mut self, observed: u64, line: &[u8]) -> Result<NonZeroU32, Error> {
+        self.observe(observed)?;
+        let session = std::str::from_utf8(line)
+            .ok()
+            .and_then(|text| text.strip_prefix("SBX_CLOSE1 "))
+            .and_then(|id| id.parse::<NonZeroU32>().ok());
+        let Some(index) = session.and_then(|session| self.open(session)) else {
+            return self.fail(Error::StaleSession);
+        };
+        self.last_time = Some(observed);
+        Ok(self.sessions.remove(index).id)
     }
 
     /// Resolve a public reply identity without exposing the boot relay cursor.
-    /// Older sessions have lost their destination. Live mismatches remain fatal.
+    /// Closed sessions have lost their destination. Live mismatches remain fatal.
     pub(crate) fn resolve(
         &mut self,
         id: super::SimulationControlId,
@@ -150,11 +212,11 @@ impl Decoder {
         if self.failed {
             return Err(Error::Failed);
         }
-        if id.session.get() < self.session {
+        if self.issued(id.session) {
             return Ok(None);
         }
-        match self.pending {
-            Some(key) if key.session == id.session && key.request == id.request => Ok(Some(key)),
+        match self.open(id.session).and_then(|i| self.sessions[i].pending) {
+            Some(key) if key.request == id.request => Ok(Some(key)),
             _ => self.fail(Error::StaleReply),
         }
     }
@@ -175,9 +237,9 @@ impl Decoder {
     }
 
     /// Encode exactly the outstanding call's reply. Keep the call outstanding
-    /// until delivery commits, so another request cannot overtake queued RX.
-    /// A superseded session returns None without poisoning the decoder.
-    /// Bridge write failure is terminal; it must not fabricate delivery.
+    /// until delivery commits, so another request on that session cannot
+    /// overtake queued RX. A closed session returns None without poisoning the
+    /// decoder. Bridge write failure is terminal; it must not fabricate delivery.
     pub(crate) fn reply(
         &mut self,
         key: Correlation,
@@ -187,36 +249,42 @@ impl Decoder {
             return Err(Error::Failed);
         }
         self.validate_reply(payload)?;
-        // Supersession abandons only reply delivery; returned host requests
-        // and their accepted effects remain owned by their caller.
-        if key.session.get() < self.session && key.relay.get() < self.relay {
+        // Closure abandons only reply delivery; returned host requests and
+        // their accepted effects remain owned by their caller.
+        if self.issued(key.session) && key.relay.get() <= self.relay {
             return Ok(None);
         }
-        if self.pending != Some(key) || self.reply_prepared {
+        let Some(i) = self.open(key.session) else {
+            return self.fail(Error::StaleReply);
+        };
+        if self.sessions[i].pending != Some(key) || self.sessions[i].reply_prepared {
             return self.fail(Error::StaleReply);
         }
         let mut frame = format!("SBX_REPLY1 {} {} ", key.relay, key.session).into_bytes();
         frame.extend_from_slice(payload);
         frame.push(b'\n');
-        self.reply_prepared = true;
+        self.sessions[i].reply_prepared = true;
         Ok(Some(frame))
     }
 
     /// Called at committed delivery of the prepared reply to the guest transport.
     /// Correlation survives snapshots and is never inferred from completion order.
-    /// False means the reply destination was superseded, not host work cancelled.
+    /// False means the session closed, not that host work was cancelled.
     pub(crate) fn delivered(&mut self, key: Correlation) -> Result<bool, Error> {
         if self.failed {
             return Err(Error::Failed);
         }
-        if key.session.get() < self.session && key.relay.get() < self.relay {
+        if self.issued(key.session) && key.relay.get() <= self.relay {
             return Ok(false);
         }
-        if self.pending != Some(key) || !self.reply_prepared {
+        let Some(i) = self.open(key.session) else {
+            return self.fail(Error::StaleReply);
+        };
+        if self.sessions[i].pending != Some(key) || !self.sessions[i].reply_prepared {
             return self.fail(Error::StaleReply);
         }
-        self.pending = None;
-        self.reply_prepared = false;
+        self.sessions[i].pending = None;
+        self.sessions[i].reply_prepared = false;
         Ok(true)
     }
 }
@@ -255,12 +323,9 @@ impl crate::snapshot::Record for Correlation {
 }
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
-impl crate::snapshot::Record for Decoder {
-    const MIN: u64 = <u32 as crate::snapshot::Record>::MIN
-        + <u32 as crate::snapshot::Record>::MIN
-        + <u32 as crate::snapshot::Record>::MIN
-        + <bool as crate::snapshot::Record>::MIN
-        + <Option<u64> as crate::snapshot::Record>::MIN
+impl crate::snapshot::Record for Session {
+    const MIN: u64 = <NonZeroU32 as crate::snapshot::Record>::MIN
+        + <NonZeroU32 as crate::snapshot::Record>::MIN
         + <Option<Correlation> as crate::snapshot::Record>::MIN
         + <bool as crate::snapshot::Record>::MIN;
     fn encode<W: std::io::Write>(
@@ -268,19 +333,13 @@ impl crate::snapshot::Record for Decoder {
         w: &mut crate::snapshot::Writer<'_, W>,
     ) -> crate::snapshot::Result<()> {
         let Self {
-            relay,
-            session,
+            id,
             public,
-            failed,
-            last_time,
             pending,
             reply_prepared,
         } = self;
-        relay.encode(w)?;
-        session.encode(w)?;
+        id.encode(w)?;
         public.encode(w)?;
-        failed.encode(w)?;
-        last_time.encode(w)?;
         pending.encode(w)?;
         reply_prepared.encode(w)?;
         Ok(())
@@ -289,50 +348,91 @@ impl crate::snapshot::Record for Decoder {
         r: &mut crate::snapshot::Reader<'_, R>,
     ) -> crate::snapshot::Result<Self> {
         Ok(Self {
-            relay: crate::snapshot::Record::decode(r)?,
-            session: crate::snapshot::Record::decode(r)?,
+            id: crate::snapshot::Record::decode(r)?,
             public: crate::snapshot::Record::decode(r)?,
-            failed: crate::snapshot::Record::decode(r)?,
-            last_time: crate::snapshot::Record::decode(r)?,
             pending: crate::snapshot::Record::decode(r)?,
             reply_prepared: crate::snapshot::Record::decode(r)?,
         })
     }
 }
 
+// Closed persisted record: exhaustive destructuring prevents silently omitting new fields.
+impl crate::snapshot::Record for Decoder {
+    const MIN: u64 = <u32 as crate::snapshot::Record>::MIN
+        + <u32 as crate::snapshot::Record>::MIN
+        + <bool as crate::snapshot::Record>::MIN
+        + <Option<u64> as crate::snapshot::Record>::MIN
+        + <Vec<Session> as crate::snapshot::Record>::MIN;
+    fn encode<W: std::io::Write>(
+        &self,
+        w: &mut crate::snapshot::Writer<'_, W>,
+    ) -> crate::snapshot::Result<()> {
+        let Self {
+            relay,
+            session,
+            failed,
+            last_time,
+            sessions,
+        } = self;
+        relay.encode(w)?;
+        session.encode(w)?;
+        failed.encode(w)?;
+        last_time.encode(w)?;
+        sessions.encode(w)?;
+        Ok(())
+    }
+    fn decode<R: std::io::Read>(
+        r: &mut crate::snapshot::Reader<'_, R>,
+    ) -> crate::snapshot::Result<Self> {
+        Ok(Self {
+            relay: crate::snapshot::Record::decode(r)?,
+            session: crate::snapshot::Record::decode(r)?,
+            failed: crate::snapshot::Record::decode(r)?,
+            last_time: crate::snapshot::Record::decode(r)?,
+            sessions: crate::snapshot::Record::decode(r)?,
+        })
+    }
+}
+
 impl Decoder {
-    pub(super) fn snapshot_state(&self) -> (u32, u32, Option<u64>, Option<Correlation>, bool) {
-        (
-            self.relay,
-            self.session,
-            self.last_time,
-            self.pending,
-            self.reply_prepared,
-        )
+    pub(super) fn snapshot_time(&self) -> Option<u64> {
+        self.last_time
+    }
+    pub(super) fn snapshot_sessions(&self) -> &[Session] {
+        &self.sessions
+    }
+    /// True when a reply for `key` would be discarded as addressed to a
+    /// closed session.
+    pub(super) fn superseded(&self, key: Correlation) -> bool {
+        self.issued(key.session) && key.relay.get() <= self.relay
     }
     pub(super) fn validate_snapshot(&self) -> crate::snapshot::Result<()> {
         use crate::snapshot::CodecError::Invalid;
         let Self {
             relay,
             session,
-            public,
             failed,
             last_time,
-            pending,
-            reply_prepared,
+            sessions,
         } = self;
         if *failed {
             return Err(Invalid("poisoned oracle"));
         }
         let zero = *relay == 0;
-        if zero != (*session == 0) || zero != (*public == 0) || zero != last_time.is_none() {
+        if zero != (*session == 0) || zero != last_time.is_none() {
             return Err(Invalid("oracle identity tuple"));
         }
-        if pending.is_some_and(|p| {
-            p.relay.get() != *relay || p.session.get() != *session || p.request.get() != *public
-        }) || (*reply_prepared && pending.is_none())
+        if sessions.len() > MAX_SESSIONS
+            || sessions.windows(2).any(|pair| pair[0].id >= pair[1].id)
+            || sessions.iter().any(|s| {
+                s.id.get() > *session
+                    || (s.reply_prepared && s.pending.is_none())
+                    || s.pending.is_some_and(|p| {
+                        p.relay.get() > *relay || p.session != s.id || p.request != s.public
+                    })
+            })
         {
-            return Err(Invalid("oracle pending correlation"));
+            return Err(Invalid("oracle session state"));
         }
         Ok(())
     }

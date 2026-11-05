@@ -1317,3 +1317,88 @@ mod admission_ordering {
         assert_eq!(prepare.0.load(Ordering::SeqCst), 0);
     }
 }
+
+#[test]
+fn machines_a_run_spawns_are_sealed_into_its_identity_and_replayed() {
+    struct Spawns(AtomicUsize);
+    impl Spawner for Spawns {
+        fn prepare(
+            &self,
+            request: &seedbox_engine_protocol::driver_world::SpawnRequest,
+            _: &std::path::Path,
+        ) -> Result<(
+            seedbox_engine_protocol::driver_world::Machine,
+            seedbox_engine_protocol::driver_world::Environment,
+        )> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(Error::Setup(format!(
+                "fixture cannot prepare {}",
+                request.name
+            )))
+        }
+    }
+    /// Asks the spawner once, and retains a spawned machine each attempt
+    /// whose inputs do not hold one yet.
+    struct Spawning<'a>(&'a Backend);
+    impl ExecutionBackend for Spawning<'_> {
+        fn profile(&self) -> ExecutionProfile {
+            self.0.profile()
+        }
+        fn performance_parameters(&self) -> BTreeMap<String, String> {
+            self.0.performance_parameters()
+        }
+        fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+            if let Some(spawner) = request.spawner {
+                let ask = seedbox_engine_protocol::driver_world::SpawnRequest {
+                    name: "replica".into(),
+                    spec: "{}".into(),
+                    number: 2,
+                };
+                assert!(spawner.prepare(&ask, request.output).is_err());
+            }
+            Ok(self.0.report.clone())
+        }
+        fn retain_spawned(
+            &self,
+            inputs: &mut PreparedInputs,
+            _: &std::path::Path,
+            store: &ContentStore,
+        ) -> Result<bool> {
+            let key = "driver-world/spawned-fixture".to_owned();
+            if inputs.auxiliary.contains_key(&key) {
+                return Ok(false);
+            }
+            inputs.auxiliary.insert(key, store.put(b"replica")?);
+            Ok(true)
+        }
+    }
+    let fixture = Fixture::new();
+    let backend = Spawning(&fixture.backend);
+    let spawns = std::sync::Arc::new(Spawns(AtomicUsize::new(0)));
+    let first = fixture
+        .orchestrator
+        .clone()
+        .with_spawner(spawns.clone())
+        .run(
+            &fixture.simulation,
+            RunOptions::default(),
+            &fixture.preparer,
+            &backend,
+        )
+        .unwrap();
+    assert_eq!(spawns.0.load(Ordering::SeqCst), 1);
+    assert!(first
+        .record
+        .identity
+        .inputs
+        .auxiliary
+        .contains_key("driver-world/spawned-fixture"));
+    assert_eq!(inspect(&first.directory).unwrap(), first.record);
+    let unsealed = fixture.run();
+    assert_ne!(first.record.run_id, unsealed.record.run_id);
+    // The replay finds the machine retained and its identity unchanged.
+    let replayed = replay_retained(&fixture.orchestrator, &first.directory, &backend).unwrap();
+    assert_eq!(replayed.record.run_id, first.record.run_id);
+    assert_eq!(replayed.comparison.status, ComparisonStatus::Match);
+    assert_eq!(spawns.0.load(Ordering::SeqCst), 1);
+}

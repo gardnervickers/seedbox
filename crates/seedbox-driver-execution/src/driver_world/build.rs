@@ -60,7 +60,8 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
         &request.output.join(super::NATIVE_SCRATCH),
     )
     .map_err(bad)?;
-    let (oracle, machines, spawnable) =
+    let environments = factory.environments();
+    let (oracle, machines, spawned) =
         conversion::definitions(&request.prepared, request.machine_workers)?;
     let mut initial: Vec<_> = std::iter::once(oracle.name.clone())
         .chain(machines.iter().map(|machine| machine.name.clone()))
@@ -111,7 +112,7 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
         || Ok(()),
         oracle,
         machines,
-        spawnable,
+        spawned,
         network,
         move |definition| {
             let machine = factory.create(definition)?;
@@ -126,6 +127,12 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     driver
         .allow_crashes(allow_crashes(&request.prepared))
         .map_err(|e| bad(e.to_string()))?;
+    // Only PV machines hold at a breakpoint; TCG has no guest device yet.
+    if super::actions::engine(&request.prepared.inventory).backend
+        == seedbox_spec::backend::CpuBackend::Pv
+    {
+        driver.enable_breakpoints();
+    }
     if request.start_paused {
         driver
             .with_barrier(|barrier| barrier.set_rate(seedbox_driver::driver::PlaybackRate::Paused))
@@ -158,16 +165,17 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
         constructed,
         request.observations.as_deref(),
         encode,
-    )?;
+    )?
+    .with_environments(environments);
     worker.flush()?;
     Ok(worker)
 }
-/// The machines with `allowCrashes`, by name. Restored Drivers keep the
-/// set their checkpoint captured.
+/// The initial machines with `allowCrashes`, by name. A spawned machine's
+/// definition carries its own, and restored Drivers keep the set their
+/// checkpoint captured.
 fn allow_crashes(prepared: &wire::Prepared) -> std::collections::BTreeSet<String> {
     std::iter::once(&prepared.oracle)
         .chain(&prepared.machines)
-        .chain(&prepared.spawnable)
         .filter(|machine| machine.allow_crashes)
         .map(|machine| machine.name.clone())
         .collect()
@@ -260,6 +268,7 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
         &request.output.join(super::NATIVE_SCRATCH),
     )
     .map_err(bad)?;
+    let environments = factory.environments();
     let constructed: Constructed = Arc::new(Mutex::new(VecDeque::new()));
     let ledger = constructed.clone();
     // Only verified open descriptors accumulate here, not decoded RAM images.
@@ -336,6 +345,7 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
         request.observations.as_deref(),
         encode,
     )
+    .map(|worker| worker.with_environments(environments))
 }
 fn program(
     request: &wire::Request,
@@ -522,7 +532,7 @@ fn copy(artifact: &Artifact, path: &Path) -> Result<()> {
     file.flush()?;
     verify_at(artifact, path)
 }
-fn definition(input: &wire::Machine) -> Result<MachineDefinition> {
+pub(super) fn definition(input: &wire::Machine) -> Result<MachineDefinition> {
     let mut reader = checkpoint::verified(&input.filesystem)?;
     let bytes = read(&mut reader, input.filesystem.length)?;
     let application = definition::PreparedApplication {

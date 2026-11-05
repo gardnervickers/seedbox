@@ -586,7 +586,9 @@ fn isolation(workers: usize, perturb: bool) -> Vec<Observed> {
         || Ok(()),
         fixture::definition(0),
         vec![fixture::definition(1), fixture::definition(2)],
-        vec![fixture::definition(3)],
+        vec![crate::test_support::spawn_definition(fixture::definition(
+            3,
+        ))],
         crate::driver::NetworkConfig::default(),
         move |definition| {
             let index: usize = definition
@@ -613,6 +615,7 @@ fn isolation(workers: usize, perturb: bool) -> Vec<Observed> {
                 InputKey::new("spawn").unwrap(),
                 Action::Spawn {
                     name: "fixture-3".into(),
+                    spec: crate::test_support::SPAWN_SPEC.into(),
                 },
             )
         })

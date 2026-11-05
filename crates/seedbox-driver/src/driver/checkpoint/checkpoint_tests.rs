@@ -14,7 +14,10 @@ fn source_destroyed_capture_reused_workers_and_nonclone_snapshots() {
                 true,
                 vec![
                     (0, Response::Ready),
-                    (25, call(1, r#""op":"spawn","machine":"fixture-2""#)),
+                    (
+                        25,
+                        call(1, r#""op":"spawn","machine":"fixture-2","spec":{}"#),
+                    ),
                 ],
             ),
             spec(1, true, vec![(0, Response::Ready)]),
@@ -549,6 +552,53 @@ fn causal_network_flights_pair_cursors_fifo_and_stacked_cuts_continue() {
 }
 
 #[test]
+fn nameserver_replies_in_flight_survive_capture() {
+    let query = |name: &str, id| Response::TransmitFrame {
+        bytes: dns_query(mac(0), [10, 0, 0, 1], name, id),
+    };
+    let mut d = build_network(
+        vec![
+            spec(
+                0,
+                true,
+                vec![(2, query("fixture-1", 1)), (4, query("missing", 2))],
+            ),
+            spec(1, true, vec![]),
+        ],
+        vec![],
+        true,
+        true,
+    );
+    advance(&mut d, 5);
+    assert_eq!(d.execution.network.in_flight().len(), 2);
+    // Through the encoded artifact, so restore validates the self-flights.
+    let (bytes, store) = artifact(d.checkpoint().unwrap());
+    let c = decode(&bytes, &store);
+    reference_observer_session(&mut d);
+    let expected = advance(&mut d, 20);
+    let replies = |d: &Driver<Mock>| {
+        states(d)[0]
+            .received
+            .iter()
+            .filter_map(|input| match &input.payload {
+                Request::ReceiveFrame { bytes } => Some((input.at, dns_reply(bytes))),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        replies(&d),
+        [(at(7), (1, 0, Some([10, 0, 0, 2]))), (at(9), (2, 3, None))]
+    );
+    for workers in [1, 4] {
+        let mut b = restore(&c, workers);
+        assert_eq!(advance(&mut b, 20), expected);
+        assert_eq!(states(&b), states(&d));
+        assert_eq!(replies(&b), replies(&d));
+    }
+}
+
+#[test]
 fn finished_oracle_and_permanent_stop_are_capturable_but_not_resumed() {
     for permanent in [false, true] {
         let mut d = build(
@@ -732,6 +782,7 @@ fn reserved_spawn_identity_is_retained_without_factory_or_seed_re_admission() {
         key("spawn"),
         Action::Spawn {
             name: "fixture-1".into(),
+            spec: crate::test_support::SPAWN_SPEC.into(),
         },
     )
     .unwrap();
@@ -785,6 +836,40 @@ fn reserved_spawn_identity_is_retained_without_factory_or_seed_re_admission() {
     assert!(failed.step(at(20)).is_err());
     assert!(matches!(failed.checkpoint(), Err(Error::Failed)));
     assert!(matches!(failed.step(at(20)), Err(Error::Failed)));
+}
+
+#[test]
+fn spawn_waiting_for_its_definition_is_captured_and_waits_again_after_restore() {
+    let mut d = build(
+        vec![spec(0, true, vec![])],
+        vec![spec(1, true, vec![(0, Response::Ready)])],
+        true,
+    );
+    // The host has prepared nothing yet.
+    let prepared = std::mem::take(&mut d.execution.definitions);
+    d.schedule(
+        at(0),
+        key("spawn"),
+        Action::Spawn {
+            name: "fixture-1".into(),
+            spec: crate::test_support::SPAWN_SPEC.into(),
+        },
+    )
+    .unwrap();
+    let waiting = d.step(at(10)).unwrap();
+    assert!(
+        matches!(&waiting, StepOutcome::NeedsMachine { at: held, request } if *held == at(0) && request.name == "fixture-1")
+    );
+    let c = d.checkpoint().unwrap();
+    reference_observer_session(&mut d);
+    d.with_barrier(|b| b.provide(prepared[0].clone())).unwrap();
+    let expected = advance(&mut d, 20);
+    assert_eq!(d.execution.machines.len(), 2);
+    drop(d);
+    let mut b = Driver::from_checkpoint(&c, 1, || Ok(Context(None)), Mock::restore, fresh).unwrap();
+    assert_eq!(b.step(at(10)).unwrap(), waiting);
+    b.with_barrier(|b| b.provide(prepared[0].clone())).unwrap();
+    assert_eq!(advance(&mut b, 20), expected);
 }
 
 #[test]
@@ -929,6 +1014,7 @@ fn simulation_admission_rng_crosses_cache_boundary_after_three_captured_seeds() 
             key("later-spawn"),
             Action::Spawn {
                 name: "fixture-3".into(),
+                spec: crate::test_support::SPAWN_SPEC.into(),
             },
         )
         .unwrap();

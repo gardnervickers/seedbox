@@ -5,7 +5,7 @@ mod tests;
 use crate::{
     execution::{
         ExecutionBackend, ExecutionProfile, ExecutionReport, ExecutionRequest, PreparedInputs,
-        StopReason,
+        Spawner, StopReason,
     },
     worker_process::{incomplete, WorkerLaunch},
     Error, Result,
@@ -250,12 +250,57 @@ impl ExecutionBackend for DriverExecutor {
         if let Some((_, injector)) = &self.failure_test {
             worker = worker.with_failure_injector(injector)?;
         }
-        worker.wait(
+        let spawns = request.output.join(super::worker::spawn::DIRECTORY);
+        let spawner = request.spawner;
+        worker.wait_serving(
             request.cancellation,
             request.limits.wall_time_ns,
             decode_report,
+            || serve_spawns(&spawns, spawner),
         )
     }
+    fn retain_spawned(
+        &self,
+        inputs: &mut PreparedInputs,
+        output: &std::path::Path,
+        store: &crate::store::ContentStore,
+    ) -> Result<bool> {
+        let prepared =
+            super::worker::spawn::prepared(&output.join(super::worker::spawn::DIRECTORY))?;
+        if prepared.is_empty() {
+            return Ok(false);
+        }
+        super::retained::retain_spawned(inputs, prepared, store)?;
+        Ok(true)
+    }
+}
+
+/// Answer each spawn the worker is waiting on. A preparation failure is an
+/// answer too: the worker ends the run with it.
+fn serve_spawns(directory: &std::path::Path, spawner: Option<&dyn Spawner>) -> Result<()> {
+    use seedbox_engine_protocol::driver_world::{SpawnResponse, Spawned};
+    for (name, request) in super::worker::spawn::unanswered(directory)? {
+        let prepared = match spawner {
+            Some(spawner) => spawner.prepare(&request, &directory.join(&name)),
+            None => Err(Error::Setup(
+                "this run cannot prepare new machines; start it from its project".into(),
+            )),
+        };
+        let response = match prepared {
+            Ok((machine, environment)) => SpawnResponse::Prepared {
+                spawned: Box::new(Spawned {
+                    spec: request.spec,
+                    machine,
+                }),
+                environment: Box::new(environment),
+            },
+            Err(error) => SpawnResponse::Failed {
+                error: error.to_string(),
+            },
+        };
+        super::worker::spawn::respond(directory, &name, &response)?;
+    }
+    Ok(())
 }
 
 // Decode the report from an exited owned worker. WorkerProcess::wait still owns

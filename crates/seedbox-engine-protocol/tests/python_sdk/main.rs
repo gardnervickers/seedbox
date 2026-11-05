@@ -111,6 +111,28 @@ fn machine_lifecycle_invalid_targets_do_not_send() {
     assert_eq!(sdk.close()["requests"], json!([]));
 }
 #[test]
+fn spawn_sends_the_machine_name_and_its_seedbox_yaml_spec() {
+    let mut sdk = Sdk::open(reply(
+        1,
+        json!({}),
+        json!({"effect_at_ns":20,"replied_at_ns":30}),
+    ));
+    let spec = json!({"build":{"context":"./workload"},"environment":{"ROLE":"replica"}});
+    let out = call(&mut sdk, "spawn", json!(["replica", spec]));
+    effect(ok(&out), 10, 20, 20, 30);
+    for invalid in [json!(["", {}]), json!(["replica", "image"])] {
+        error(&call(&mut sdk, "spawn", invalid), "ValueError");
+    }
+    assert_eq!(
+        sdk.close()["requests"],
+        json!([request(
+            1,
+            "spawn",
+            json!({"machine":"replica","spec":spec})
+        )])
+    );
+}
+#[test]
 fn throttle_sends_permille_and_heals_its_handle() {
     let mut sdk = Sdk::open(replies(&[
         (1, json!({"handle":"p3"}), json!({})),

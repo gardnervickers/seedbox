@@ -4,29 +4,49 @@ use std::{io::BufRead, os::unix::net::UnixListener, thread};
 /// A stand-in controller: answers each request with `reply(request)`, and
 /// returns every request it read once the client disconnects.
 fn serve(
-    reply: impl Fn(&Value) -> Value + Send + 'static,
+    reply: impl Fn(&Value) -> Value + Send + Sync + 'static,
 ) -> (tempfile::TempDir, thread::JoinHandle<Vec<Value>>) {
+    let (directory, server) = serve_connections(1, reply);
+    let server = thread::spawn(move || server.join().unwrap().pop().unwrap());
+    (directory, server)
+}
+
+/// [`serve`] for `connections` connections, each answered on its own
+/// thread; returns their requests in accept order.
+fn serve_connections(
+    connections: usize,
+    reply: impl Fn(&Value) -> Value + Send + Sync + 'static,
+) -> (tempfile::TempDir, thread::JoinHandle<Vec<Vec<Value>>>) {
     // macOS bounds Unix socket paths, so keep them short.
     let directory = tempfile::Builder::new()
         .prefix("sbx-ctl-")
         .tempdir_in("/tmp")
         .unwrap();
     let listener = UnixListener::bind(directory.path().join("control.sock")).unwrap();
+    let reply = std::sync::Arc::new(reply);
     let server = thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        let mut writer = stream.try_clone().unwrap();
-        let mut requests = Vec::new();
-        for line in BufReader::new(stream).lines() {
-            let Ok(line) = line else { break };
-            let request: Value = serde_json::from_str(&line).unwrap();
-            let mut response = reply(&request);
-            if response.get("id").is_none() {
-                response["id"] = request["id"].clone();
-            }
-            requests.push(request);
-            writeln!(writer, "{response}").unwrap();
-        }
-        requests
+        let servers: Vec<_> = (0..connections)
+            .map(|_| {
+                let (stream, _) = listener.accept().unwrap();
+                let reply = reply.clone();
+                thread::spawn(move || {
+                    let mut writer = stream.try_clone().unwrap();
+                    let mut requests = Vec::new();
+                    for line in BufReader::new(stream).lines() {
+                        let Ok(line) = line else { break };
+                        let request: Value = serde_json::from_str(&line).unwrap();
+                        let mut response = reply(&request);
+                        if response.get("id").is_none() {
+                            response["id"] = request["id"].clone();
+                        }
+                        requests.push(request);
+                        writeln!(writer, "{response}").unwrap();
+                    }
+                    requests
+                })
+            })
+            .collect();
+        servers.into_iter().map(|s| s.join().unwrap()).collect()
     });
     (directory, server)
 }
@@ -127,6 +147,22 @@ fn actions_become_rpc_calls_and_handles_map_to_the_worlds() {
 }
 
 #[test]
+fn spawn_sends_the_machine_name_and_its_seedbox_yaml_spec() {
+    let (directory, server) = serve(|_| ok(json!({})));
+    let mut world = GuestWorld::connect_to(directory.path().join("control.sock")).unwrap();
+    let spec = json!({"build": {"context": "./workload"}, "environment": {"ROLE": "replica"}});
+    world.spawn("replica", spec.clone()).unwrap();
+    // A spec that is not an object is refused before anything is sent.
+    assert!(world.spawn("other", json!("image")).is_err());
+    drop(world);
+    let requests = server.join().unwrap();
+    assert_eq!(
+        requests,
+        [json!({"version": 1, "id": 1, "op": "spawn", "machine": "replica", "spec": spec})]
+    );
+}
+
+#[test]
 fn an_uncorrelated_response_closes_the_connection() {
     let (directory, server) = serve(|_| {
         let mut response = ok(json!({"now_ns": 1}));
@@ -141,4 +177,52 @@ fn an_uncorrelated_response_closes_the_connection() {
     );
     drop(world);
     assert_eq!(server.join().unwrap().len(), 1);
+}
+
+#[test]
+fn on_break_serves_hits_on_its_own_connection_and_resumes_them() {
+    let hit = json!({"break_id": 1, "source": "program", "machine": "n1", "boot": 0,
+                     "name": "leader", "at_ns": 25});
+    let delivered = std::sync::atomic::AtomicBool::new(false);
+    let (directory, server) = serve_connections(2, move |request| {
+        match request["op"].as_str().unwrap() {
+            // The first wait returns the hit, later ones time out.
+            "wait_break" if !delivered.swap(true, Ordering::SeqCst) => ok(hit.clone()),
+            _ => ok(json!({})),
+        }
+    });
+    let mut world = GuestWorld::connect_to(directory.path().join("control.sock")).unwrap();
+    let (handled, seen) = std::sync::mpsc::channel();
+    world
+        .on_break("leader", move |world, hit| {
+            world.apply(&Action::Stop {
+                machine: hit.machine.clone(),
+            })?;
+            handled.send(hit.clone()).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    // Registering a second name declares both, ascending.
+    world.on_break("commit", |_, _| Ok(())).unwrap();
+    let hit = seen.recv().unwrap();
+    assert_eq!(
+        hit,
+        Hit {
+            id: 1,
+            machine: "n1".into(),
+            boot: 0,
+            name: "leader".into(),
+            at_ns: 25
+        }
+    );
+    drop(world);
+    let mut connections = server.join().unwrap().into_iter();
+    let main = connections.next().unwrap();
+    assert_eq!(main[0]["names"], json!(["leader"]));
+    assert_eq!(main[1]["names"], json!(["commit", "leader"]));
+    let served: Vec<_> = connections.next().unwrap();
+    let ops: Vec<_> = served.iter().map(|r| r["op"].as_str().unwrap()).collect();
+    assert_eq!(ops[..3], ["wait_break", "stop", "resume_break"]);
+    assert_eq!(served[2]["break_id"], 1);
+    assert!(ops[3..].iter().all(|op| *op == "wait_break"));
 }

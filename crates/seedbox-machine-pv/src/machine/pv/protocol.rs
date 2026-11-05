@@ -55,6 +55,9 @@ pub(super) enum Request {
         shutdown: bool,
         lifecycle: Vec<u8>,
         frames: u64,
+        /// Declared breakpoint names, ascending. A guest write of one of
+        /// these stops the run with [`Stop::Break`]; any other returns at once.
+        breaks: Vec<String>,
     },
     ExecutionEvidence,
     Capture(PathBuf),
@@ -102,9 +105,12 @@ pub(super) enum Response {
     Evidence(NativeEvidence),
     Error(String),
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum Stop {
     Horizon,
+    /// The guest wrote this declared breakpoint name. Its write has completed
+    /// and the run stopped at it; the client holds the machine.
+    Break(String),
     Blocked(Option<u64>),
     /// The guest powered off or permanently halted.
     PoweredOff,

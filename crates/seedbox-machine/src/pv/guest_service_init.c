@@ -359,16 +359,19 @@ int main(void) {
         /* Natural application exit is an observation, not guest shutdown.
          * The retained recipe remains available for a later Start. */
         if (terminating && service.supervisor.child <= 0) poweroff();
-        enum { SERVICES = 6, POLLED = SERVICES + SBX_PROPERTY_POLLED };
+        enum { CLIENTS = 5, SERVICES = CLIENTS + SBX_ORACLE_CLIENTS,
+               POLLED = SERVICES + SBX_PROPERTY_POLLED };
         struct pollfd fds[POLLED] = {
             {.fd = terminating ? -1 : management, .events = POLLIN},
             {.fd = service.supervisor.output[0], .events = POLLIN},
             {.fd = service.supervisor.output[1], .events = POLLIN},
-            {.fd = terminating || oracle.client >= 0 ? -1 : oracle.listener, .events = POLLIN},
-            {.fd = terminating ? -1 : oracle.client,
-             .events = POLLIN | (oracle.reply_used ? POLLOUT : 0)},
+            {.fd = terminating || sbx_oracle_full(&oracle) ? -1 : oracle.listener, .events = POLLIN},
             {.fd = kernel_log, .events = POLLIN}
         };
+        for (unsigned i = 0; i < SBX_ORACLE_CLIENTS; ++i)
+            fds[CLIENTS + i] = (struct pollfd){
+                .fd = terminating ? -1 : oracle.clients[i].fd,
+                .events = POLLIN | (oracle.clients[i].reply_used ? POLLOUT : 0)};
         for (unsigned i = SERVICES; i < POLLED; ++i)
             fds[i] = (struct pollfd){.fd = sbx_properties_fd(&properties, i - SERVICES), .events = POLLIN};
         failure_phase = "poll services"; failure_path = "management/output/control";
@@ -386,7 +389,8 @@ int main(void) {
         if (fds[3].revents & (POLLERR | POLLHUP | POLLNVAL)) failed();
         if (fds[3].revents & POLLIN) if (sbx_oracle_accept(&oracle)) failed();
         failure_phase = "read control request";
-        if (sbx_oracle_poll(&oracle, fds[4].revents)) failed();
+        for (unsigned i = 0; i < SBX_ORACLE_CLIENTS; ++i)
+            if (sbx_oracle_poll(&oracle, i, fds[CLIENTS + i].revents)) failed();
         for (unsigned stream = 0; stream < 2; ++stream) {
             failure_phase = "relay application output"; failure_path = stream ? "stderr" : "stdout";
             if (fds[stream + 1].revents & (POLLERR | POLLNVAL)) failed();
