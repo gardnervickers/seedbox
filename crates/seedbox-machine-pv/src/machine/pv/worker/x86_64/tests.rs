@@ -994,3 +994,190 @@ fn a_declared_breakpoint_write_stops_the_run_and_others_return_at_once() {
         .run(0, 100, 1000, false, &[], Vec::new(), &breaks)
         .is_err());
 }
+fn disk_write(offset: u64, value: u64) -> Exit {
+    Exit::Mmio {
+        address: super::super::DISK_MMIO + offset,
+        width: 4,
+        write: true,
+        value,
+    }
+}
+// Guest-physical split rings for the block queue, and its buffers.
+const DISK_RINGS: [u64; 3] = [0x500_0000, 0x500_1000, 0x500_2000];
+const DISK_BUFFERS: u64 = 0x500_8000;
+/// Negotiate the block device like Linux and enable its 16-entry queue.
+fn disk_setup() -> Vec<Exit> {
+    let mut exits = vec![
+        disk_write(0x70, 3),
+        disk_write(0x24, 0),
+        disk_write(0x20, (1 << 2) | (1 << 9)),
+        disk_write(0x24, 1),
+        disk_write(0x20, 1),
+        disk_write(0x70, 11),
+        disk_write(0x30, 0),
+        disk_write(0x38, 16),
+    ];
+    for (low, address) in [0x80, 0x90, 0xa0].into_iter().zip(DISK_RINGS) {
+        exits.extend([disk_write(low, address), disk_write(low + 4, 0)]);
+    }
+    exits.extend([disk_write(0x44, 1), disk_write(0x70, 15)]);
+    exits
+}
+/// Offer block requests, each `(type, sector, data)`, as chains of a header,
+/// optional data and a status byte; returns each request's status address.
+fn offer_disk(vm: &Machine<Scripted>, requests: &[(u32, u64, Option<u8>)]) -> Vec<usize> {
+    let [descriptors, available, _] = DISK_RINGS.map(|a| a as usize);
+    let mut statuses = Vec::new();
+    unsafe {
+        vm.ram.modify(|ram| {
+            let mut next = 0usize;
+            let mut buffer = DISK_BUFFERS as usize;
+            let mut heads = Vec::new();
+            for &(kind, sector, data) in requests {
+                let mut parts = vec![(16usize, false)];
+                let mut header = kind.to_le_bytes().to_vec();
+                header.extend([0; 4]);
+                header.extend(sector.to_le_bytes());
+                ram[buffer..buffer + 16].copy_from_slice(&header);
+                if data.is_some() {
+                    parts.push((512, false));
+                }
+                parts.push((1, true));
+                heads.push(next as u16);
+                for (index, &(length, writable)) in parts.iter().enumerate() {
+                    if let (1, Some(value)) = (index, data) {
+                        ram[buffer..buffer + 512].fill(value);
+                    }
+                    if writable {
+                        ram[buffer] = 0xff;
+                        statuses.push(buffer);
+                    }
+                    let at = descriptors + next * 16;
+                    let last = index + 1 == parts.len();
+                    let flags = (!last as u16) | (writable as u16 * 2);
+                    ram[at..at + 8].copy_from_slice(&(buffer as u64).to_le_bytes());
+                    ram[at + 8..at + 12].copy_from_slice(&(length as u32).to_le_bytes());
+                    ram[at + 12..at + 14].copy_from_slice(&flags.to_le_bytes());
+                    ram[at + 14..at + 16].copy_from_slice(&(next as u16 + 1).to_le_bytes());
+                    buffer += 0x1000;
+                    next += 1;
+                }
+            }
+            for (slot, head) in heads.iter().enumerate() {
+                ram[available + 4 + slot * 2..available + 6 + slot * 2]
+                    .copy_from_slice(&head.to_le_bytes());
+            }
+            ram[available + 2..available + 4].copy_from_slice(&(heads.len() as u16).to_le_bytes());
+        })
+    }
+    statuses
+}
+fn disk_used(vm: &Machine<Scripted>) -> u16 {
+    let ram = unsafe { vm.ram.bytes() };
+    let at = DISK_RINGS[2] as usize + 2;
+    u16::from_le_bytes([ram[at], ram[at + 1]])
+}
+#[test]
+fn a_held_disk_request_waits_for_its_release_and_continues_in_order() {
+    use seedbox_machine::machine::disk::fault::Hold;
+    use seedbox_machine::pv::{DeviceFault, DiskEffect, DiskOp, DiskScope};
+    for eio in [false, true] {
+        let mut vm = machine_with(Some(
+            seedbox_machine::machine::disk::Store::zeroed(8).unwrap(),
+        ));
+        let faults = vm.block.as_mut().unwrap().faults_mut();
+        let latency = DeviceFault::DiskLatency {
+            op: DiskOp::Flush,
+            latency_ns: 40,
+            jitter_ns: 0,
+        };
+        faults.install(1, 3, latency).unwrap();
+        if eio {
+            let error = DeviceFault::DiskError {
+                op: DiskOp::Flush,
+                ppm: 1_000_000,
+                effect: DiskEffect::Eio,
+                scope: DiskScope::All,
+            };
+            faults.install(2, 5, error).unwrap();
+        }
+        for (op, nth) in [(DiskOp::Flush, 1), (DiskOp::Write, 2)] {
+            faults.hold(Hold { op, nth, seen: 0 }).unwrap();
+        }
+        // A write, the FLUSH that makes it durable, and a write behind it.
+        let statuses = offer_disk(&vm, &[(1, 1, Some(9)), (4, 0, None), (1, 2, Some(7))]);
+        vm.native.exits.push_back(event(32, 3));
+        vm.native.exits.extend(disk_setup());
+        vm.native.exits.push_back(disk_write(0x50, 0));
+        let stop = vm.run(10, 20, 1000, false, &[], Vec::new(), &[]).unwrap();
+        assert_eq!(
+            stop,
+            Stop::Held(Hold {
+                op: DiskOp::Flush,
+                nth: 1,
+                seen: 1
+            })
+        );
+        let status =
+            |vm: &Machine<Scripted>, index: usize| unsafe { vm.ram.bytes() }[statuses[index]];
+        assert_eq!((disk_used(&vm), status(&vm, 0)), (1, 0));
+        // Held, a zero-budget run admits time without continuing it, a run
+        // with budget is refused and so is a capture.
+        let entries = vm.native.entries;
+        assert_eq!(
+            vm.run(60, 60, 1000, false, &[], Vec::new(), &[]).unwrap(),
+            Stop::Horizon
+        );
+        assert_eq!((disk_used(&vm), status(&vm, 1)), (1, 0xff));
+        assert!(vm
+            .run(60, 70, 1000, false, &[], Vec::new(), &[])
+            .unwrap_err()
+            .contains("held"));
+        let directory = tempfile::tempdir().unwrap();
+        assert!(vm
+            .capture(&directory.path().join("held"))
+            .unwrap_err()
+            .contains("held"));
+        assert_eq!(vm.native.entries, entries);
+        // Released at 90, past its due time of 50: the FLUSH completes at
+        // once with its own fault applied, then the write behind it reaches
+        // the second hold before the guest runs.
+        vm.resume = true;
+        let stop = vm.run(90, 90, 1000, false, &[], Vec::new(), &[]).unwrap();
+        assert_eq!(
+            stop,
+            Stop::Held(Hold {
+                op: DiskOp::Write,
+                nth: 2,
+                seen: 2
+            })
+        );
+        assert_eq!(vm.native.entries, entries);
+        assert_eq!((disk_used(&vm), status(&vm, 1)), (2, eio as u8));
+        assert_eq!(status(&vm, 2), 0xff);
+        let block = vm.block.as_ref().unwrap();
+        let installed = block.faults().installed();
+        let counts = |index: usize| {
+            let c = installed[index].counts;
+            (c.matched, c.affected)
+        };
+        // The latency drew once, at arrival; the error once, at completion.
+        assert_eq!(counts(0), (1, 1));
+        if eio {
+            assert_eq!(counts(1), (1, 1));
+        }
+        let (crashed, _) = block.store().crashed_keeping(|_, _| false);
+        let mut stored = [0; 512];
+        crashed.read(1, &mut stored).unwrap();
+        assert_eq!(stored, [if eio { 0 } else { 9 }; 512]);
+        // The second release completes the last write; nothing is held.
+        vm.resume = true;
+        assert_eq!(
+            vm.run(100, 100, 1000, false, &[], Vec::new(), &[]).unwrap(),
+            Stop::Horizon
+        );
+        assert_eq!((disk_used(&vm), status(&vm, 2)), (3, 0));
+        assert!(!vm.block.as_ref().unwrap().held());
+        assert!(!vm.resume);
+    }
+}
