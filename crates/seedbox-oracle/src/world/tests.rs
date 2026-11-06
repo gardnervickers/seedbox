@@ -158,7 +158,7 @@ fn disk_and_scheduler_faults_use_the_oracle_operations() {
         Action::DiskError {
             handle: "eio".into(),
             machine: "db".into(),
-            op: DiskOp::Write,
+            request: DiskOp::Write,
             ppm: 10,
             effect: DiskEffect::Eio,
             scope: DiskScope::All,
@@ -166,7 +166,7 @@ fn disk_and_scheduler_faults_use_the_oracle_operations() {
         Action::DiskError {
             handle: "rot".into(),
             machine: "db".into(),
-            op: DiskOp::Read,
+            request: DiskOp::Read,
             ppm: 20,
             effect: DiskEffect::Corrupt,
             scope: DiskScope::Data,
@@ -174,14 +174,14 @@ fn disk_and_scheduler_faults_use_the_oracle_operations() {
         Action::DiskLatency {
             handle: "slow".into(),
             machine: "db".into(),
-            op: DiskOp::Flush,
+            request: DiskOp::Flush,
             latency_ns: 3_000_000,
             jitter_ns: 0,
         },
         Action::DiskLatency {
             handle: "jittery".into(),
             machine: "db".into(),
-            op: DiskOp::Any,
+            request: DiskOp::Any,
             latency_ns: 3_000_000,
             jitter_ns: 500,
         },
@@ -207,17 +207,45 @@ fn disk_and_scheduler_faults_use_the_oracle_operations() {
     assert_eq!(
         requests,
         [
-            json!({"op": "disk_error", "target": db, "disk_op": "write", "ppm": 10}),
-            json!({"op": "disk_error", "target": db, "disk_op": "read", "ppm": 20,
+            json!({"op": "disk_error", "target": db, "request": "write", "ppm": 10}),
+            json!({"op": "disk_error", "target": db, "request": "read", "ppm": 20,
                    "effect": "corrupt", "scope": "data"}),
-            json!({"op": "disk_latency", "target": db, "disk_op": "flush",
+            json!({"op": "disk_latency", "target": db, "request": "flush",
                    "latency_ns": 3_000_000}),
-            json!({"op": "disk_latency", "target": db, "disk_op": "any",
+            json!({"op": "disk_latency", "target": db, "request": "any",
                    "latency_ns": 3_000_000, "jitter_ns": 500}),
             json!({"op": "preempt", "target": db, "ppm": 1_000}),
             json!({"op": "heal", "handle": "p3"}),
         ]
     );
+}
+
+#[test]
+fn heal_returns_the_worlds_reply_and_forgets_the_name() {
+    use crate::control::{DiskEffect, DiskOp, DiskScope};
+    let (directory, server) = serve(|request| match request["op"].as_str() {
+        Some("heal") => ok(json!({"matched": 8, "affected": 2})),
+        _ => ok(json!({"handle": "p1"})),
+    });
+    let mut world = GuestWorld::connect_to(directory.path().join("control.sock")).unwrap();
+    world
+        .apply(&Action::DiskError {
+            handle: "eio".into(),
+            machine: "db".into(),
+            request: DiskOp::Write,
+            ppm: 10,
+            effect: DiskEffect::Eio,
+            scope: DiskScope::All,
+        })
+        .unwrap();
+    let counts = world.heal("eio").unwrap();
+    assert_eq!(Value::Object(counts), json!({"matched": 8, "affected": 2}));
+    let refused = world.heal("eio").unwrap_err();
+    assert_eq!(refused.0, "no fault with handle \"eio\" is in force");
+    drop(world);
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1]["handle"], "p1");
 }
 
 #[test]

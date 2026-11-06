@@ -24,14 +24,19 @@ pub const DEFAULT_MAX_FAULTS: u32 = 64;
 /// begins, one gap apart; each gap is drawn uniformly from half to one and a
 /// half times `interval_ns`. Each start draws an entry by weight, then a
 /// target among `targets` (or the entry's own, for the disk kinds) with no
-/// fault of this profile in force (a start with none free is skipped), then the entry's ranges, and holds the fault
-/// for its drawn duration before ending it. At most `max_faults` start. `run`
-/// returns at `end_ns`, or once the last fault ends if that is later; faults
-/// still in force when a failure cuts it short are ended by
-/// [`Nemesis::heal`].
+/// fault of this profile in force (a start with none free is skipped), then
+/// the entry's ranges, and holds the fault for its drawn duration before
+/// ending it. At most `max_faults` start. `run` returns at `end_ns`, or once
+/// the last fault ends if that is later; faults still in force when a failure
+/// cuts it short are ended by [`Nemesis::heal`].
 ///
 /// Every draw comes from the scenario's [`Random`] in that order, so a seed
 /// fixes the applied sequence.
+///
+/// A fault the world refuses fails `run`. With `skip_unsupported`, a refusal
+/// whose code is `unsupported` (an engine that lacks the fault, such as
+/// `preempt` on x86_64 PV) skips that start instead, and no entry of that
+/// kind is drawn again; `run` fails once no kind is left.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
@@ -49,6 +54,11 @@ pub struct Profile {
     pub targets: Vec<String>,
     /// The kinds of fault to draw, by weight.
     pub faults: Vec<Fault>,
+    /// Drop the kinds the world refuses as `unsupported` rather than fail. A
+    /// refusal counts when its message has the form the guest control RPC
+    /// gives one, `{op}: unsupported: {message}`, where `op` names the action.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skip_unsupported: bool,
     #[serde(skip)]
     state: State,
 }
@@ -61,6 +71,9 @@ fn is_default_max_faults(value: &u32) -> bool {
 }
 fn is_zero(value: &u64) -> bool {
     *value == 0
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 fn weight() -> u32 {
     1
@@ -76,6 +89,8 @@ struct State {
     ending: Vec<Ending>,
     /// Targets with a fault of this profile in force.
     busy: BTreeSet<String>,
+    /// Kinds the world refused as unsupported.
+    unsupported: BTreeSet<&'static str>,
     pace: Box<dyn Pace>,
 }
 
@@ -85,6 +100,7 @@ impl Default for State {
             faults: InForce::default(),
             ending: Vec::new(),
             busy: BTreeSet::new(),
+            unsupported: BTreeSet::new(),
             pace: Box::new(Sleep),
         }
     }
@@ -96,6 +112,7 @@ impl std::fmt::Debug for State {
             .field("faults", &self.faults)
             .field("ending", &self.ending)
             .field("busy", &self.busy)
+            .field("unsupported", &self.unsupported)
             .finish_non_exhaustive()
     }
 }
@@ -163,15 +180,30 @@ impl Profile {
         )
     }
 
-    /// Draw and apply one fault; false when every target is busy.
+    /// The kinds skipped because the world refused them as unsupported.
+    pub fn unsupported(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.state.unsupported.iter().copied()
+    }
+
+    /// Draw and apply one fault; false when every target is busy, or when
+    /// the world refuses the fault as unsupported and the profile skips it.
     fn start(&mut self, world: &mut dyn World, random: &mut dyn Random) -> Result<bool, Error> {
-        let total: u64 = self.faults.iter().map(|f| u64::from(f.weight())).sum();
-        let mut pick = random.below(total);
-        let fault = self
+        let weights: Vec<u64> = self
             .faults
             .iter()
-            .find(|fault| {
-                let weight = u64::from(fault.weight());
+            .map(|fault| {
+                if self.state.unsupported.contains(fault.name()) {
+                    0
+                } else {
+                    u64::from(fault.weight())
+                }
+            })
+            .collect();
+        let total: u64 = weights.iter().sum();
+        let mut pick = random.below(total);
+        let index = weights
+            .iter()
+            .position(|&weight| {
                 if pick < weight {
                     return true;
                 }
@@ -179,6 +211,7 @@ impl Profile {
                 false
             })
             .expect("a draw below the total weight lands on an entry");
+        let fault = &self.faults[index];
         let free: Vec<String> = fault
             .targets(&self.targets)
             .iter()
@@ -190,7 +223,29 @@ impl Profile {
         }
         let target = random.choice(&free).clone();
         let drawn = fault.draw(&target, &self.targets, random, &mut self.state.faults);
-        self.state.faults.apply(world, &drawn.action)?;
+        match self.state.faults.apply(world, &drawn.action) {
+            Err(Error(message))
+                if self.skip_unsupported
+                    && message.starts_with(&format!("{}: unsupported: ", drawn.action.name())) =>
+            {
+                let kind = fault.name();
+                self.state.unsupported.insert(kind);
+                let left: u64 = self
+                    .faults
+                    .iter()
+                    .zip(&weights)
+                    .filter(|(entry, _)| entry.name() != kind)
+                    .map(|(_, weight)| weight)
+                    .sum();
+                if left == 0 {
+                    return Err(Error(format!(
+                        "fault profile has no supported fault kind left: {message}"
+                    )));
+                }
+                return Ok(false);
+            }
+            result => result?,
+        }
         let applied = world.now_ns()?;
         self.state.busy.insert(target.clone());
         self.state.ending.push(Ending {
@@ -357,14 +412,14 @@ pub enum Fault {
         duration_ns: Range,
         factor_permille: u64,
     },
-    /// A `disk_error` on one target, then heal. As in the action, `op` and
+    /// A `disk_error` on one target, then heal. As in the action, `request` and
     /// `ppm` are required. Only machines with a retained disk can take it,
     /// so `targets` narrows the profile's targets to those.
     DiskError {
         #[serde(default = "weight", skip_serializing_if = "is_one")]
         weight: u32,
         duration_ns: Range,
-        op: DiskOp,
+        request: DiskOp,
         ppm: u64,
         #[serde(default, skip_serializing_if = "DiskEffect::is_eio")]
         effect: DiskEffect,
@@ -374,14 +429,14 @@ pub enum Fault {
         targets: Vec<String>,
     },
     /// A `disk_latency` on one target with a latency drawn from `latency_ns`,
-    /// then heal. As in the action, `op` is required; `targets` narrows the
+    /// then heal. As in the action, `request` is required; `targets` narrows the
     /// profile's targets.
     DiskLatency {
         #[serde(default = "weight", skip_serializing_if = "is_one")]
         weight: u32,
         duration_ns: Range,
         latency_ns: Range,
-        op: DiskOp,
+        request: DiskOp,
         #[serde(default, skip_serializing_if = "is_zero")]
         jitter_ns: u64,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -538,7 +593,7 @@ impl Fault {
             }
             Self::DiskError {
                 duration_ns,
-                op,
+                request,
                 ppm,
                 effect,
                 scope,
@@ -547,7 +602,7 @@ impl Fault {
             } => {
                 duration_ns.validate("duration_ns")?;
                 narrows(own, targets)?;
-                control::validate_disk_error(*op, *ppm, *effect, *scope)
+                control::validate_disk_error(*request, *ppm, *effect, *scope)
             }
             Self::DiskLatency {
                 duration_ns,
@@ -704,7 +759,7 @@ impl Fault {
             }
             Self::DiskError {
                 duration_ns,
-                op,
+                request,
                 ppm,
                 effect,
                 scope,
@@ -717,7 +772,7 @@ impl Fault {
                     action: Action::DiskError {
                         handle,
                         machine,
-                        op: *op,
+                        request: *request,
                         ppm: *ppm,
                         effect: *effect,
                         scope: *scope,
@@ -727,7 +782,7 @@ impl Fault {
             Self::DiskLatency {
                 duration_ns,
                 latency_ns,
-                op,
+                request,
                 jitter_ns,
                 ..
             } => {
@@ -738,7 +793,7 @@ impl Fault {
                     action: Action::DiskLatency {
                         handle,
                         machine,
-                        op: *op,
+                        request: *request,
                         latency_ns: latency_ns.draw(random),
                         jitter_ns: *jitter_ns,
                     },

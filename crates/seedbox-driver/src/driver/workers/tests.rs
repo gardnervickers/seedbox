@@ -14,11 +14,27 @@ impl Drop for LocalContext {
     }
 }
 
+/// Queue a job straight onto the pool, for the pool's own mechanics.
+fn submit<C: 'static>(workers: &Workers<C>, job: impl FnOnce(&mut C) + Send + 'static) {
+    workers
+        .pool
+        .as_ref()
+        .expect("a pool beside the calling thread")
+        .spawn(move || execute(Box::new(job)));
+}
+
+fn guard(waiting_for: &str) -> seedbox_test_time::HangGuard {
+    seedbox_test_time::HangGuard::new(
+        format!("worker {waiting_for}; retain the existing loaded-host deadlock budget, never timed absence"),
+        std::time::Duration::from_secs(30),
+    )
+}
+
 #[test]
 fn non_send_contexts_persist_and_drop_on_their_own_threads() {
     let dropped = Arc::new(Mutex::new(Vec::new()));
     let record = dropped.clone();
-    let workers = Workers::new(2, move || {
+    let mut workers = Workers::new(3, move || {
         Ok::<_, io::Error>(LocalContext {
             owner: thread::current().id(),
             calls: Rc::new(Cell::new(0)),
@@ -26,44 +42,114 @@ fn non_send_contexts_persist_and_drop_on_their_own_threads() {
         })
     })
     .unwrap();
-    for machine in 0..8 {
-        workers
-            .submit::<io::Error>(machine, |context| {
-                assert_eq!(context.owner, thread::current().id());
-                context.calls.set(context.calls.get() + 1);
+    for _ in 0..4 {
+        let jobs = (0..4)
+            .map(|machine| {
+                (machine, |context: &mut LocalContext| {
+                    assert_eq!(context.owner, thread::current().id());
+                    context.calls.set(context.calls.get() + 1);
+                })
             })
-            .unwrap();
+            .collect();
+        workers.run(jobs);
     }
     drop(workers); // All queued work and context destruction must finish.
     let calls = dropped.lock().unwrap();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls.iter().sum::<usize>(), 8);
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls.iter().sum::<usize>(), 16);
+}
+
+#[test]
+fn one_job_batches_and_one_worker_stay_on_the_calling_thread() {
+    let here = thread::current().id();
+    let job = |machine| (machine, move |_: &mut ()| (machine, thread::current().id()));
+    let mut pooled = Workers::new(2, || Ok::<_, io::Error>(())).unwrap();
+    assert_eq!(pooled.run(vec![job(0)]), [(0, here)]);
+    let mut single = Workers::new(1, || Ok::<_, io::Error>(())).unwrap();
+    assert!(single.pool.is_none());
+    assert_eq!(
+        single.run((0..4).map(job).collect()),
+        (0..4).map(|machine| (machine, here)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn pool_threads_run_the_rest_of_a_batch_beside_the_calling_thread() {
+    let mut workers = Workers::new(2, || Ok::<_, io::Error>(())).unwrap();
+    let (started, pooled) = mpsc::channel();
+    // The first job holds the calling thread until another thread has taken
+    // the second, so only the pool can run it.
+    let first: Box<dyn FnOnce(&mut ()) -> thread::ThreadId + Send> = Box::new(move |_| {
+        guard("pool entry on pooled").recv(&pooled).unwrap();
+        thread::current().id()
+    });
+    let second: Box<dyn FnOnce(&mut ()) -> thread::ThreadId + Send> = Box::new(move |_| {
+        started.send(()).unwrap();
+        thread::current().id()
+    });
+    let threads = workers.run(vec![(0, first), (1, second)]);
+    assert_eq!(threads[0], thread::current().id());
+    assert_ne!(threads[1], threads[0]);
+}
+
+#[test]
+fn the_calling_thread_runs_every_job_no_pool_thread_has_claimed() {
+    let mut workers = Workers::new(2, || Ok::<_, io::Error>(())).unwrap();
+    let (release, wait) = mpsc::channel::<()>();
+    let (ready, entered) = mpsc::channel();
+    submit(&workers, move |_| {
+        ready.send(()).unwrap();
+        guard("hold on wait").recv(&wait).unwrap();
+    });
+    guard("hold entry on entered").recv(&entered).unwrap();
+    // The only pool thread is busy, so the batch finishes without it.
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let jobs = (0..3)
+        .map(|machine| {
+            let order = order.clone();
+            (machine, move |_: &mut ()| {
+                order.lock().unwrap().push(machine);
+                thread::current().id()
+            })
+        })
+        .collect();
+    let (finished, done) = mpsc::channel();
+    let batch = thread::spawn(move || {
+        let threads = workers.run(jobs);
+        finished
+            .send(threads.iter().all(|&id| id == thread::current().id()))
+            .unwrap();
+        workers
+    });
+    let result = guard("batch completion on done").recv(&done);
+    release.send(()).unwrap();
+    drop(batch.join().unwrap());
+    assert_eq!(result, Ok(true));
+    assert_eq!(*order.lock().unwrap(), [0, 2, 1]);
 }
 
 #[test]
 fn an_idle_worker_steals_jobs_from_an_occupied_workers_local_queue() {
-    let workers = Workers::new(2, || Ok::<_, io::Error>(())).unwrap();
+    let workers = Workers::new(3, || Ok::<_, io::Error>(())).unwrap();
     let (release, wait) = mpsc::channel();
     let (ready, entered) = mpsc::channel();
     let (finished, stolen) = mpsc::channel();
-    workers
-        .submit::<io::Error>(0, move |_| {
-            let owner = thread::current().id();
-            for _ in 0..8 {
-                let finished = finished.clone();
-                // Spawn from inside the pool to put jobs on this worker's
-                // local deque. Its peer must steal them while it is blocked.
-                rayon::spawn(move || {
-                    execute(Box::new(move |_: &mut ()| {
-                        finished.send(thread::current().id() != owner).unwrap();
-                    }));
-                });
-            }
-            ready.send(()).unwrap();
-            seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on wait; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&wait)
-                .unwrap();
-        })
-        .unwrap();
+    submit(&workers, move |_| {
+        let owner = thread::current().id();
+        for _ in 0..8 {
+            let finished = finished.clone();
+            // Spawn from inside the pool to put jobs on this worker's
+            // local deque. Its peer must steal them while it is blocked.
+            rayon::spawn(move || {
+                execute(Box::new(move |_: &mut ()| {
+                    finished.send(thread::current().id() != owner).unwrap();
+                }));
+            });
+        }
+        ready.send(()).unwrap();
+        seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on wait; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&wait)
+            .unwrap();
+    });
     seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on entered; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&entered)
         .unwrap();
     let results = (0..8)
@@ -76,31 +162,27 @@ fn an_idle_worker_steals_jobs_from_an_occupied_workers_local_queue() {
 
 #[test]
 fn reentrant_rayon_work_defers_context_use_until_the_outer_call_returns() {
-    let workers = Workers::new(1, || Ok::<_, io::Error>(Rc::new(Cell::new(0)))).unwrap();
+    let workers = Workers::new(2, || Ok::<_, io::Error>(Rc::new(Cell::new(0)))).unwrap();
     let (ready, entered) = mpsc::channel();
     let (release, wait) = mpsc::channel();
     let (finished, done) = mpsc::channel();
-    workers
-        .submit::<io::Error>(0, move |context| {
-            context.set(1);
-            ready.send(()).unwrap();
-            seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on wait; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&wait)
-                .unwrap();
-            assert_eq!(rayon::yield_now(), Some(rayon::Yield::Executed));
-            // The yielded driver job ran its dispatcher, but cannot borrow
-            // this context until this callback returns.
-            assert_eq!(context.get(), 1);
-            context.set(2);
-        })
-        .unwrap();
+    submit(&workers, move |context| {
+        context.set(1);
+        ready.send(()).unwrap();
+        seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on wait; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&wait)
+            .unwrap();
+        assert_eq!(rayon::yield_now(), Some(rayon::Yield::Executed));
+        // The yielded driver job ran its dispatcher, but cannot borrow
+        // this context until this callback returns.
+        assert_eq!(context.get(), 1);
+        context.set(2);
+    });
     seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on entered; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&entered)
         .unwrap();
-    workers
-        .submit::<io::Error>(1, move |context| {
-            assert_eq!(context.get(), 2);
-            finished.send(()).unwrap();
-        })
-        .unwrap();
+    submit(&workers, move |context| {
+        assert_eq!(context.get(), 2);
+        finished.send(()).unwrap();
+    });
     release.send(()).unwrap();
     let result = seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on done; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&done);
     drop(workers);
@@ -109,24 +191,25 @@ fn reentrant_rayon_work_defers_context_use_until_the_outer_call_returns() {
 
 #[test]
 fn nested_pools_use_their_own_thread_local_contexts() {
-    let workers = Workers::new(1, || Ok::<_, io::Error>(Rc::new(Cell::new(7)))).unwrap();
+    let workers = Workers::new(2, || Ok::<_, io::Error>(Rc::new(Cell::new(7)))).unwrap();
     let (finished, done) = mpsc::channel();
-    workers
-        .submit::<io::Error>(0, move |outer| {
-            let nested = Workers::new(2, || {
-                Ok::<_, io::Error>(Rc::new(RefCell::new(String::from("inner"))))
-            })
-            .unwrap();
-            for id in 0..4 {
-                nested
-                    .submit::<io::Error>(id, |inner| assert_eq!(&*inner.borrow(), "inner"))
-                    .unwrap();
-            }
-            drop(nested);
-            assert_eq!(outer.get(), 7);
-            finished.send(()).unwrap();
+    submit(&workers, move |outer| {
+        let mut nested = Workers::new(2, || {
+            Ok::<_, io::Error>(Rc::new(RefCell::new(String::from("inner"))))
         })
         .unwrap();
+        let jobs = (0..4)
+            .map(|id| {
+                (id, |inner: &mut Rc<RefCell<String>>| {
+                    assert_eq!(&*inner.borrow(), "inner")
+                })
+            })
+            .collect();
+        nested.run(jobs);
+        drop(nested);
+        assert_eq!(outer.get(), 7);
+        finished.send(()).unwrap();
+    });
     let result = seedbox_test_time::HangGuard::new("Rayon worker entry/proceed/completion on done; retain the existing loaded-host deadlock budget, never timed absence", std::time::Duration::from_secs(30)).recv(&done);
     drop(workers);
     assert_eq!(result, Ok(()));
@@ -135,7 +218,7 @@ fn nested_pools_use_their_own_thread_local_contexts() {
 #[test]
 fn unwinding_drains_a_large_reentrant_backlog_without_recursing() {
     const COUNT: usize = 4096;
-    let workers = Workers::new(1, || Ok::<_, io::Error>(Rc::new(Cell::new(0usize)))).unwrap();
+    let workers = Workers::new(2, || Ok::<_, io::Error>(Rc::new(Cell::new(0usize)))).unwrap();
     let (finished, done) = mpsc::channel();
     workers.pool.as_ref().unwrap().spawn(move || {
         let panic = catch_unwind(AssertUnwindSafe(|| {

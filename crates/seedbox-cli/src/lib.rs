@@ -527,11 +527,7 @@ impl RuntimeInputs {
         let selected = runtime.select(cpu_backend, architecture)?;
         let inputs = OciPreparer {
             docker: backends::container_engine()?,
-            kernel: selected.guest_assets.join("kernel"),
             engine: engine.to_owned(),
-            init: selected.guest_assets.join("init"),
-            progress: selected.guest_assets.join("progress.tar"),
-            mke2fs: Some(selected.guest_assets.join("mke2fs")),
             profile: executor.profile(),
         };
         Ok((

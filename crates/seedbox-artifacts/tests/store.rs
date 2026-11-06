@@ -38,6 +38,22 @@ fn content_store_never_silently_repairs_corruption_or_accepts_path_digests() {
 }
 
 #[test]
+fn materialize_never_replaces_a_copy_or_leaves_a_temporary_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(directory.path().join("store"));
+    let digest = store.put(b"input").unwrap();
+    let inputs = directory.path().join("inputs");
+    let path = store.materialize(&digest, &inputs).unwrap();
+    fs::write(&path, b"backend changed its private input").unwrap();
+    assert!(store.materialize(&digest, &inputs).is_err());
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"backend changed its private input"
+    );
+    assert_eq!(fs::read_dir(&inputs).unwrap().count(), 1);
+}
+
+#[test]
 fn large_artifacts_stream_with_bounded_reads_and_corrupt_copies_are_not_published() {
     use std::io::{self, Read};
     struct BoundedSource(usize);
@@ -160,6 +176,23 @@ fn cached_verification_rejects_same_length_edits_and_replaced_objects() {
     assert!(store.clone().verify(&digest).is_err());
     fs::remove_file(object).unwrap();
     assert!(store.verify(&digest).is_err());
+}
+
+#[test]
+fn prefix_reads_verify_the_whole_object() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(directory.path());
+    let digest = store.put(b"070701 and the rest of an archive").unwrap();
+    assert_eq!(store.read_prefix(&digest, 6).unwrap(), b"070701");
+    let short = store.put(b"07").unwrap();
+    assert_eq!(store.read_prefix(&short, 6).unwrap(), b"07");
+    // Damage past the prefix still fails the read.
+    let object = directory.path().join("sha256").join(digest.hex());
+    fs::write(&object, b"070701 and a corrupt tail").unwrap();
+    let error = store.read_prefix(&digest, 6).unwrap_err().to_string();
+    assert!(error.contains("hash mismatch"), "{error}");
+    fs::remove_file(object).unwrap();
+    assert!(store.read_prefix(&digest, 6).is_err());
 }
 
 #[test]
