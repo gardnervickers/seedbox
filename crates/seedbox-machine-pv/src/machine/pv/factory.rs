@@ -250,8 +250,16 @@ mod guest {
     /// The application's `IC IVAU` invalidates rewritten code, rather than
     /// code-page write protection and sandboxing; reads of `CTR_EL0` clear
     /// DIC, so applications cannot legally omit that `IC IVAU`.
-    pub(super) const TRANSLATOR_OPTIONS: &[&str] =
-        &["-ldstex2cas", "-no_hw_cache_consistency", "-fake_ctr_dic"];
+    /// DynamoRIO keeps its thread-local base in x18, which Linux leaves free
+    /// and Go never uses, instead of the default x28, Go's `g` register,
+    /// whose every use would be mangled through a spill.
+    pub(super) const TRANSLATOR_OPTIONS: &[&str] = &[
+        "-ldstex2cas",
+        "-no_hw_cache_consistency",
+        "-fake_ctr_dic",
+        "-steal_reg",
+        "18",
+    ];
     pub(super) fn kernel(bytes: &[u8]) -> std::io::Result<()> {
         seedbox_machine::machine::assets::kernel(bytes)
     }
