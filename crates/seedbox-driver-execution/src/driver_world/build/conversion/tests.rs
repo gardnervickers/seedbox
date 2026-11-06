@@ -151,7 +151,7 @@ fn bounded_overlap_joins_every_occurrence_and_keeps_first_error_on_panic() {
 }
 
 #[test]
-fn unchanged_sha_archive_and_disk_validation_rejects_original_first_bad_input() {
+fn unchanged_length_archive_and_disk_validation_rejects_original_first_bad_input() {
     let root = tempfile::tempdir().unwrap();
     let original = prepared(root.path());
     let mut invalid = original.clone();
