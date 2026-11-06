@@ -38,6 +38,22 @@ fn content_store_never_silently_repairs_corruption_or_accepts_path_digests() {
 }
 
 #[test]
+fn materialize_never_replaces_a_copy_or_leaves_a_temporary_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(directory.path().join("store"));
+    let digest = store.put(b"input").unwrap();
+    let inputs = directory.path().join("inputs");
+    let path = store.materialize(&digest, &inputs).unwrap();
+    fs::write(&path, b"backend changed its private input").unwrap();
+    assert!(store.materialize(&digest, &inputs).is_err());
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"backend changed its private input"
+    );
+    assert_eq!(fs::read_dir(&inputs).unwrap().count(), 1);
+}
+
+#[test]
 fn large_artifacts_stream_with_bounded_reads_and_corrupt_copies_are_not_published() {
     use std::io::{self, Read};
     struct BoundedSource(usize);
