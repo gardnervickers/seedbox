@@ -182,7 +182,8 @@ impl MachineInputs<'_> {
 
 pub struct OciBoot<'a> {
     pub name: &'a str,
-    pub filesystem: Vec<u8>,
+    /// The machine's logical filesystem view, in the store.
+    pub filesystem: ContentDigest,
     pub launch: &'a seedbox_artifacts::image::Launch,
     pub simulation: &'a Simulation,
     pub configs: &'a BTreeMap<String, Vec<u8>>,
@@ -262,10 +263,10 @@ impl OciBootFactory {
                     NetworkInterface, PreparedApplication, Resources,
                 },
             };
-            let bytes = request.filesystem;
+            let mut bytes = Vec::new();
+            store.copy_to(&request.filesystem, &mut bytes)?;
             let filesystem =
                 FilesystemArchive::new(bytes).map_err(|e| Error::Integrity(e.to_string()))?;
-            let retained_filesystem = store.put(filesystem.as_bytes())?;
             let launch = request.launch;
             let volumes = super::volume_setup(launch.disk_volumes.iter())
                 .map_err(|e| Error::Integrity(format!("machine volumes: {e}")))?;
@@ -336,7 +337,7 @@ impl OciBootFactory {
             };
             Ok(BootArchive {
                 bytes,
-                filesystem: retained_filesystem,
+                filesystem: request.filesystem,
             })
         }
         #[cfg(not(any(

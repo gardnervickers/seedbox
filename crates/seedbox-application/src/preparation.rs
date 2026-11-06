@@ -276,7 +276,10 @@ impl Launch<'_> {
         cache.prepare(
             OciBoot {
                 name: self.name,
-                filesystem: crate::driver_preparation::filesystem(&self.imported.rootfs)?,
+                filesystem: crate::driver_preparation::stored_filesystem(
+                    &self.imported.rootfs,
+                    store,
+                )?,
                 launch: &self.imported.image.launch,
                 simulation,
                 configs: &self.mounts,

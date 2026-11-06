@@ -32,7 +32,7 @@
 // microvm keeps the legacy virtio-mmio devices shared by
 // lifecycle, disk and NIC; ACPI is its only guest power-off path, so
 // `Shutdown` stays distinct from a reset; qboot is the firmware that boots
-// Linux without option ROMs, keeping every guest input owned by the machine.
+// Linux without option ROMs, so the machine supplies every guest input.
 //!
 //! A definition with a network interface adds the patched QEMU's
 //! `seedbox-net-device` (`eth0`) with its MAC, and its kernel arguments carry
@@ -96,6 +96,7 @@ use seedbox_machine::{
 use serde_json::Value;
 use std::fmt;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -109,7 +110,7 @@ const COMMAND_LINE_SIZE: usize = 2048;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) const PROGRAM_BYTES: usize = 64 * 1024;
 
-/// Owned boot inputs, independent of their original files.
+/// Boot inputs. All are owned bytes except a retained initramfs file.
 #[derive(Clone, Debug)]
 pub(crate) enum Boot {
     /// Exactly [`PROGRAM_BYTES`] of test BIOS image, mapped as the firmware
@@ -121,15 +122,62 @@ pub(crate) enum Boot {
     /// An x86-64 bzImage, initramfs, and the BIOS image that boots them.
     Linux {
         kernel: Arc<[u8]>,
-        /// Kept in the allocation it was read or packaged into: boot archives
-        /// can be hundreds of MB, and an `Arc<[u8]>` would copy each one.
-        initramfs: Arc<Vec<u8>>,
+        initramfs: Initramfs,
         firmware: Arc<[u8]>,
         command_line: String,
         /// Realtime epoch of every boot. The supervisor sets realtime from it;
         /// the board RTC derives from it too, so no host wall clock is read.
         epoch_seconds: u32,
     },
+}
+
+/// A Linux initramfs. Boot archives can be hundreds of MB, so neither form is
+/// ever copied in memory.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Initramfs {
+    /// Bytes packaged here or decoded from a snapshot, kept in the allocation
+    /// they were made in. Each boot writes them to a file for QEMU.
+    Bytes(Arc<Vec<u8>>),
+    /// A retained file of exactly `length` bytes that its owner keeps
+    /// unchanged while this machine exists. QEMU reads it in place; only a
+    /// snapshot reads it here.
+    File { path: Arc<Path>, length: u64 },
+}
+
+impl Initramfs {
+    pub(crate) fn len(&self) -> u64 {
+        match self {
+            Self::Bytes(bytes) => bytes.len() as u64,
+            Self::File { length, .. } => *length,
+        }
+    }
+    /// The bytes themselves, read from a retained file.
+    fn load(&self) -> Result<Arc<Vec<u8>>, Error> {
+        match self {
+            Self::Bytes(bytes) => Ok(bytes.clone()),
+            Self::File { path, length } => {
+                let failed = |e: String| Error(format!("TCG initramfs {}: {e}", path.display()));
+                let mut bytes: Vec<u8> = Vec::new();
+                usize::try_from(*length)
+                    .ok()
+                    .and_then(|capacity| bytes.try_reserve_exact(capacity).ok())
+                    .ok_or_else(|| failed("allocation failed".into()))?;
+                fs::File::open(path)
+                    .and_then(|file| file.take(length.saturating_add(1)).read_to_end(&mut bytes))
+                    .map_err(|e| failed(e.to_string()))?;
+                if bytes.len() as u64 != *length {
+                    return Err(failed(format!("no longer {length} bytes")));
+                }
+                Ok(Arc::new(bytes))
+            }
+        }
+    }
+}
+
+impl From<Vec<u8>> for Initramfs {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Bytes(Arc::new(bytes))
+    }
 }
 
 /// Complete initial configuration of this single-CPU machine.
@@ -349,7 +397,10 @@ impl TcgMachine {
             bootstrap,
             &definition,
             None,
-            seedbox_machine::application::boot_archive,
+            |application, bootstrap| {
+                seedbox_machine::application::boot_archive(application, bootstrap)
+                    .map(Initramfs::from)
+            },
         )
     }
 
@@ -370,7 +421,7 @@ impl TcgMachine {
         package: impl FnOnce(
             &seedbox_machine::definition::PreparedApplication,
             &seedbox_machine::application::GuestBootstrap,
-        ) -> Result<Vec<u8>, seedbox_machine::definition::DefinitionError>,
+        ) -> Result<Initramfs, seedbox_machine::definition::DefinitionError>,
     ) -> Result<Self, Error> {
         const MIB: u64 = 1024 * 1024;
         let memory = definition.resources.memory_bytes;
@@ -411,7 +462,7 @@ impl TcgMachine {
                 memory_mib: (memory / MIB) as u32,
                 boot: Boot::Linux {
                     kernel: Arc::from(bootstrap.kernel.image.as_slice()),
-                    initramfs: Arc::new(initramfs),
+                    initramfs,
                     firmware: firmware.into(),
                     command_line,
                     epoch_seconds: bootstrap.epoch_seconds,
@@ -457,7 +508,7 @@ impl TcgMachine {
                 seedbox_machine::machine::assets::bzimage(kernel).map_err(invalid)?;
                 seedbox_machine::machine::assets::bios(firmware).map_err(invalid)?;
                 let memory = u64::from(manifest.memory_mib) * 1024 * 1024;
-                if initramfs.len() as u64 > memory {
+                if initramfs.len() > memory {
                     return Err(Error(format!(
                         "TCG initramfs ({} bytes) must fit in guest RAM ({memory} bytes)",
                         initramfs.len()
@@ -1260,6 +1311,14 @@ impl Machine for TcgMachine {
         if self.state == State::Invalid {
             return Err(Error("cannot snapshot an invalid machine".into()));
         }
+        // A snapshot owns its boot inputs, independent of retained files.
+        // They are loaded first so a bad file fails before any migration.
+        let mut manifest = self.manifest.clone();
+        match &mut manifest.boot {
+            Boot::Linux { initramfs, .. } => *initramfs = Initramfs::Bytes(initramfs.load()?),
+            #[cfg(any(test, feature = "test-support"))]
+            Boot::Program(_) => {}
+        }
         let image = self.process.as_mut().map(Process::snapshot).transpose()?;
         let disk = match (&self.disk, &image) {
             (Some(_), Some(_)) | (None, _) => None,
@@ -1272,7 +1331,7 @@ impl Machine for TcgMachine {
         };
         Ok(Snapshot {
             disk,
-            manifest: self.manifest.clone(),
+            manifest,
             reached: self.reached,
             state: self.state,
             image,
