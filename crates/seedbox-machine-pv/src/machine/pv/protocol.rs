@@ -28,6 +28,11 @@ pub(super) struct NativeExecution {
 }
 #[derive(Serialize, Deserialize)]
 pub(super) enum Request {
+    /// The first request on the pipes: map the client's shared region (see
+    /// [`super::shm`]), whose rings then carry every later message.
+    Attach {
+        capacity: u64,
+    },
     Boot {
         /// Required structural resource contract; old fixed-size workers cannot acknowledge it.
         witness: Box<BootWitness>,
@@ -132,6 +137,7 @@ pub(super) struct BootDisk {
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) enum Response {
+    Attached,
     Ready {
         witness: BootWitness,
         memory_bytes: u64,

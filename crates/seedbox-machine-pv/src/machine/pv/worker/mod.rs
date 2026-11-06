@@ -973,17 +973,25 @@ pub(crate) fn serve() -> Result<()> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut input = stdin.lock();
-    let mut output = stdout.lock();
+    // Start-up is on the pipes: the client's first request attaches its shared
+    // region, whose rings then carry every message while the pipes carry wakeups.
+    let capacity = match protocol::receive(&mut input)? {
+        None => return Ok(()),
+        Some(Request::Attach { capacity }) => capacity,
+        Some(_) => return Err("PV request before transport attach".into()),
+    };
+    let mut io = std::io::BufReader::new(super::shm::accept(capacity, input, stdout.lock())?);
     let mut machine: Option<Machine> = None;
-    while let Some(request) = protocol::receive(&mut input)? {
-        // A Run's frames follow it on the pipe; read them before running so
+    while let Some(request) = protocol::receive(&mut io)? {
+        // A Run's frames follow it on the stream; read them before running so
         // a failed run cannot desynchronize the protocol.
         let frames = match &request {
-            Request::Run { frames, .. } => super::wire::receive_frames(&mut input, *frames)?,
+            Request::Run { frames, .. } => super::wire::receive_frames(&mut io, *frames)?,
             _ => Vec::new(),
         };
         let mut writes = None;
         let result: Result<Response> = (|| match request {
+            Request::Attach { .. } => Err("PV transport already attached".into()),
             Request::Boot {
                 witness,
                 memory_bytes,
@@ -1130,9 +1138,9 @@ pub(crate) fn serve() -> Result<()> {
             Ok(answer) => answer,
             Err(error) => Response::Error(error),
         };
-        protocol::send(&mut output, &response)?;
+        protocol::send(io.get_mut(), &response)?;
         if let Some(writes) = writes {
-            super::wire::send_writes(&mut output, &writes)?;
+            super::wire::send_writes(io.get_mut(), &writes)?;
         }
     }
     Ok(())

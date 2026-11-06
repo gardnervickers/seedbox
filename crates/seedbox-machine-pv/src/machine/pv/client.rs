@@ -1,25 +1,29 @@
 use super::protocol::{receive, send, Request, Response, Result, Stop};
-use super::wire;
+use super::{shm, wire};
 use seedbox_machine::pv::transport::GuestWrite;
 use std::{
-    io::{BufReader, BufWriter},
+    io::BufReader,
     path::Path,
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
 
+/// The attached region, buffered for reads; writes go to the stream inside.
+type Stream = BufReader<shm::Stream<ChildStdout, ChildStdin>>;
+
 pub(super) struct Worker {
     child: Child,
-    input: BufWriter<ChildStdin>,
-    output: BufReader<ChildStdout>,
+    stream: Stream,
 }
 impl Worker {
     pub(super) fn spawn(executable: &Path) -> Result<Self> {
+        let (region, descriptor) = shm::Region::create(shm::CAPACITY)?;
         let mut command = Command::new(executable);
         if seedbox_machine::process_lease::inherit(&mut command)
             .map_err(|error| format!("PV worker execution lease: {error}"))?
         {
             command.arg(seedbox_machine::process_lease::ENTRY);
         }
+        shm::inherit(descriptor, &mut command)?;
         command
             .arg("--seedbox-pv-worker-v1")
             .stdin(Stdio::piped())
@@ -31,27 +35,46 @@ impl Worker {
         // Child-only descriptor copies must not survive in this Command.
         drop(command);
         let mut child = spawned.map_err(|e| format!("PV worker {}: {e}", executable.display()))?;
-        let input = BufWriter::new(child.stdin.take().ok_or("PV worker stdin unavailable")?);
-        let output = BufReader::new(child.stdout.take().ok_or("PV worker stdout unavailable")?);
-        Ok(Self {
-            child,
-            input,
-            output,
-        })
+        match Self::attach(&mut child, region) {
+            Ok(stream) => Ok(Self { child, stream }),
+            Err(error) => {
+                // Not yet a Worker, so Drop would not reap it.
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(error)
+            }
+        }
+    }
+    /// Start-up on the pipes: attach the shared region, which then carries
+    /// every message while the pipes carry wakeups.
+    fn attach(child: &mut Child, region: shm::Region) -> Result<Stream> {
+        let mut input = child.stdin.take().ok_or("PV worker stdin unavailable")?;
+        let mut output = child.stdout.take().ok_or("PV worker stdout unavailable")?;
+        send(
+            &mut input,
+            &Request::Attach {
+                capacity: shm::CAPACITY,
+            },
+        )?;
+        match receive(&mut output)?.ok_or("PV worker closed its protocol")? {
+            Response::Attached => Ok(BufReader::new(shm::Stream::client(region, output, input))),
+            Response::Error(error) => Err(error),
+            _ => Err("PV worker returned unexpected attach response".into()),
+        }
     }
     /// One request without trailers; `Run` goes through [`Worker::run`].
     pub(super) fn call(&mut self, request: Request) -> Result<Response> {
         if matches!(request, Request::Run { .. }) {
             return Err("PV run requires its frame trailer".into());
         }
-        send(&mut self.input, &request)?;
+        send(self.stream.get_mut(), &request)?;
         match self.answer()? {
             Response::Stopped { .. } => Err("PV unexpected run response".into()),
             other => Ok(other),
         }
     }
     fn answer(&mut self) -> Result<Response> {
-        match receive(&mut self.output)?.ok_or("PV worker closed its protocol")? {
+        match receive(&mut self.stream)?.ok_or("PV worker closed its protocol")? {
             Response::Error(error) => Err(error),
             other => Ok(other),
         }
@@ -67,11 +90,11 @@ impl Worker {
             return Err("PV run requires a Run request".into());
         };
         *count = frames.len() as u64;
-        send(&mut self.input, &request)?;
-        wire::send_frames(&mut self.input, frames)?;
+        send(self.stream.get_mut(), &request)?;
+        wire::send_frames(self.stream.get_mut(), frames)?;
         match self.answer()? {
             Response::Stopped { time, stop, writes } => {
-                Ok((time, stop, wire::receive_writes(&mut self.output, writes)?))
+                Ok((time, stop, wire::receive_writes(&mut self.stream, writes)?))
             }
             _ => Err("PV worker returned unexpected run response".into()),
         }
@@ -99,4 +122,27 @@ impl Drop for Worker {
             eprintln!("{error}");
         }
     }
+}
+
+/// Spawn `executable` as a worker and return its errors for requests that
+/// need a boot, all through the shared region.
+#[cfg(feature = "test-support")]
+pub(crate) fn preboot_errors(executable: &Path) -> Result<Vec<Option<String>>> {
+    let mut worker = Worker::spawn(executable)?;
+    let unused = std::path::PathBuf::from("/nonexistent");
+    let run = Request::Run {
+        now: 0,
+        upto: 1,
+        syscall_cost_ns: 1,
+        shutdown: false,
+        lifecycle: Vec::new(),
+        frames: 0,
+        breaks: Vec::new(),
+        resume: false,
+    };
+    Ok(vec![
+        worker.call(Request::Capture(unused.clone())).err(),
+        worker.call(Request::ExportDisk(unused)).err(),
+        worker.run(run, &[vec![0; 60]]).err(),
+    ])
 }
