@@ -1429,3 +1429,35 @@ fn machines_run_whole_windows_and_take_frames_at_their_arrival() {
     }
     assert_eq!(seen[0], seen[1]);
 }
+
+#[test]
+fn a_frame_dropped_inside_a_lane_still_holds_the_quiescent_end() {
+    let (mut driver, _log) = simple(
+        10 * MS,
+        NetworkConfig::default(),
+        vec![
+            spec(None),
+            spec(Some(1)).send(0, frame(mac(2), 7)),
+            spec(Some(2)),
+        ],
+    );
+    driver.set_frame_capacity(8);
+    schedule(
+        &mut driver,
+        MS / 2,
+        Action::Crash(Target::Machine(MachineId(2))),
+    );
+    // The receiver has exited when the frame arrives at 1 ms and drops it in
+    // its lane; the simulation still blocks only after that arrival.
+    assert_eq!(
+        barriers(&mut driver, 5 * MS).last(),
+        Some(&StepOutcome::Blocked { at: at(MS) })
+    );
+    let facts = driver.drain_observations().frames.facts;
+    let dropped: Vec<_> = facts
+        .iter()
+        .filter(|fact| matches!(fact.fate, FrameFate::ReceiverDropped))
+        .map(|fact| fact.due)
+        .collect();
+    assert_eq!(dropped, [Some(at(MS))]);
+}

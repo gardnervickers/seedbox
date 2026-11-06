@@ -1503,6 +1503,7 @@ where
         // Known events limit the whole round, and so do frames for receivers
         // that take them only at a boundary. Every other machine takes its
         // timers and frames inside its lane. Intermediate progress stays private.
+        let receivers = self.lane_receivers();
         let boundary = self
             .execution
             .events
@@ -1512,23 +1513,25 @@ where
             .chain(
                 self.execution
                     .network
-                    .next_arrival_to(|to| !self.lane_receiver(to))
+                    .next_arrival_to(|to| !receivers[to.0])
                     .map(Timestamp::from_nanos),
             )
-            .chain(self.causal_bound())
-            .chain(self.controller_bound())
+            .chain(self.causal_bound(&receivers))
+            .chain(self.controller_bound(&receivers))
             .fold(upto.min(self.execution.quantum_end), Timestamp::min);
 
         let initial = self.now();
-        let ran = self.run_lanes(boundary)?;
+        let (ran, arrived) = self.run_lanes(boundary, &receivers)?;
 
         // Finish early if all machines exited or became indefinitely blocked.
-        // A queued input still keeps time moving toward its own barrier.
+        // A queued input still keeps time moving toward its own barrier, and
+        // so does a frame a lane took, even one its exited receiver dropped.
         let at = if self.is_quiescent() && !external_work {
             self.execution
                 .machines
                 .iter()
                 .map(|entry| entry.reached)
+                .chain(arrived)
                 .max()
                 .unwrap_or(self.now())
                 .max(self.now())
@@ -1849,7 +1852,11 @@ where
 
     /// The earliest time a machine can execute in the round: its own next
     /// start, or the arrival of a frame that wakes it inside its lane.
-    fn earliest_producer(&self, include: impl Fn(MachineId) -> bool) -> Option<Timestamp> {
+    fn earliest_producer(
+        &self,
+        receivers: &[bool],
+        include: impl Fn(MachineId) -> bool,
+    ) -> Option<Timestamp> {
         let started = self
             .execution
             .machines
@@ -1861,7 +1868,14 @@ where
         let woken = self
             .execution
             .network
-            .next_arrival_to(|to| include(to) && self.lane_receiver(to))
+            .next_arrival_to(|to| {
+                receivers[to.0]
+                    && !matches!(
+                        self.execution.machines[to.0].stopped,
+                        StopReason::Exited { .. }
+                    )
+                    && include(to)
+            })
             .map(Timestamp::from_nanos);
         let earliest = started.into_iter().chain(woken).min()?;
         debug_assert!(earliest >= self.now(), "eligible producer behind now");
@@ -1873,21 +1887,21 @@ where
     /// Positive-budget runs start only at `Entry::next` or at an arrival in
     /// the receiver's lane, so every send in the round is at or after the
     /// earliest of them. Blocked machines that no frame wakes, paused and
-    /// exited machines impose none. An unrepresentable bound imposes none:
+    /// exited machines impose none, even with frames arriving for them. An unrepresentable bound imposes none:
     /// no such arrival exists.
-    fn causal_bound(&self) -> Option<Timestamp> {
-        self.earliest_producer(|id| self.execution.network.attached(id))?
+    fn causal_bound(&self, receivers: &[bool]) -> Option<Timestamp> {
+        self.earliest_producer(receivers, |id| self.execution.network.attached(id))?
             .as_nanos()
             .checked_add(self.execution.network.latency_ns())
             .map(Timestamp::from_nanos)
     }
 
-    fn controller_bound(&self) -> Option<Timestamp> {
+    fn controller_bound(&self, receivers: &[bool]) -> Option<Timestamp> {
         let setup = self.execution.control.controller?;
         setup.controller?;
         // Target acknowledgements carry an observed effect time too. Bound all
         // runnable producers so their effect+latency cannot precede commit.
-        self.earliest_producer(|_| true)?
+        self.earliest_producer(receivers, |_| true)?
             .as_nanos()
             .checked_add(setup.latency_ns)
             .map(Timestamp::from_nanos)

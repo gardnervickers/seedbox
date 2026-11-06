@@ -49,26 +49,33 @@ where
     M::Context: 'static,
     M::Error: Send + 'static,
 {
-    /// Whether frames for `id` can arrive inside its lane. A paused or
-    /// suspended receiver admits them at a round boundary instead, in a
-    /// zero-budget run. Its state cannot change before the round commits.
-    pub(super) fn lane_receiver(&self, id: MachineId) -> bool {
-        let entry = &self.execution.machines[id.0];
-        matches!(entry.stopped, StopReason::Exited { .. })
-            || !entry.lifecycle.paused()
-                && !self
-                    .execution
-                    .control
-                    .service
-                    .breaks
-                    .suspended(&control::Control::source(id))
+    /// Whether frames for each machine can arrive inside its lane: an exited
+    /// receiver drops them there. A paused or suspended receiver admits them
+    /// at a round boundary instead, in a zero-budget run. These states cannot
+    /// change before the round commits.
+    pub(super) fn lane_receivers(&self) -> Vec<bool> {
+        let breaks = &self.execution.control.service.breaks;
+        let any_suspended = breaks.hits().next().is_some();
+        self.execution
+            .machines
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                matches!(entry.stopped, StopReason::Exited { .. })
+                    || !entry.lifecycle.paused()
+                        && !(any_suspended
+                            && breaks.suspended(&control::Control::source(MachineId(index))))
+            })
+            .collect()
     }
 
-    /// Run every machine's lane to `end`. Returns whether any machine ran.
-    pub(super) fn run_lanes(&mut self, end: Timestamp) -> Result<bool, Error<M::Error>> {
-        let receivers: Vec<bool> = (0..self.execution.machines.len())
-            .map(|index| self.lane_receiver(MachineId(index)))
-            .collect();
+    /// Run every machine's lane to `end`, taking the frames for `receivers`.
+    /// Returns whether any machine ran, and the latest arrival taken.
+    pub(super) fn run_lanes(
+        &mut self,
+        end: Timestamp,
+        receivers: &[bool],
+    ) -> Result<(bool, Option<Timestamp>), Error<M::Error>> {
         let taken = self
             .execution
             .network
@@ -111,6 +118,7 @@ where
         if let Some((_, error)) = errors.pop_first() {
             return Err(error);
         }
+        let arrived = window.arrivals.last().map(|arrival| arrival.at);
         // Frame facts follow network order, as at a boundary.
         let position = self.position();
         for arrival in window.arrivals {
@@ -128,7 +136,7 @@ where
                 &mut self.observations.frames,
             );
         }
-        Ok(window.ran)
+        Ok((window.ran, arrived))
     }
 
     fn fail_lane(
