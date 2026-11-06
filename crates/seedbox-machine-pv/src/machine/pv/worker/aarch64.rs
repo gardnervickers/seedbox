@@ -127,9 +127,10 @@ impl<B: Backend> Machine<B> {
     fn irq(&mut self, number: u32, level: bool) -> Result<()> {
         if !level {
             self.state.devices.deferred.remove(&number);
-            let was_asserted = self.state.devices.asserted.remove(&number);
-            self.native.irq(number, false)?;
-            if was_asserted {
+            // A line goes high only together with its `asserted` entry, so a
+            // line without one is already low and needs no hypervisor call.
+            if self.state.devices.asserted.remove(&number) {
+                self.native.irq(number, false)?;
                 self.record_native(b'j', 0, number.into(), 0);
             }
             return Ok(());
