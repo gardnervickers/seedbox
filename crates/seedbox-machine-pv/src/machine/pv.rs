@@ -186,9 +186,9 @@ fn command_line(
     }
 }
 #[cfg(all(any(test, feature = "test-support"), target_arch = "aarch64"))]
-const TEST_COMMAND_LINE: &str = "console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init nokaslr nosmp maxcpus=1 random.trust_cpu=off random.trust_bootloader=on mitigations=off panic=-1 loglevel=4 virtio_net.napi_tx=0";
+const TEST_COMMAND_LINE: &str = "console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init nokaslr nosmp maxcpus=1 random.trust_cpu=off random.trust_bootloader=on mitigations=off panic=-1 loglevel=4";
 #[cfg(all(any(test, feature = "test-support"), target_arch = "x86_64"))]
-const TEST_COMMAND_LINE: &str = "console=ttyS0 earlycon=uart8250,io,0x3f8 rdinit=/init random.trust_cpu=off random.trust_bootloader=on panic=-1 loglevel=4 virtio_net.napi_tx=0";
+const TEST_COMMAND_LINE: &str = "console=ttyS0 earlycon=uart8250,io,0x3f8 rdinit=/init random.trust_cpu=off random.trust_bootloader=on panic=-1 loglevel=4";
 
 impl Snapshot {
     /// Validate the retained optional named policy before native restore.

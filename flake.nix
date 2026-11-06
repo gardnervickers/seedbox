@@ -100,8 +100,9 @@
               # Avoid a second, smaller tmpfs quota during initramfs unpacking;
               # the VM's configured physical RAM remains the memory limit.
               # virtio_net.napi_tx=0 leaves TX completion interrupts off until
-              # the ring is nearly full; with TX NAPI the driver re-enables
-              # them before every send, an interrupt per transmitted frame.
+              # the ring is nearly full, and the devices complete TX at the
+              # notify, so it rarely fills; with TX NAPI the driver re-enables
+              # them before every send, an interrupt per TX notify.
               commandLine = if arm
                 then "console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init rootfstype=ramfs nokaslr nosmp maxcpus=1 random.trust_cpu=off random.trust_bootloader=on mitigations=off panic=-1 loglevel=4 virtio_net.napi_tx=0"
                 else "console=ttyS0 rdinit=/init rootfstype=ramfs random.trust_cpu=off random.trust_bootloader=on panic=-1 loglevel=4 virtio_net.napi_tx=0";
