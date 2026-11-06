@@ -309,7 +309,7 @@ impl<R: Read, W: Write> Stream<R, W> {
     }
     /// Wait until control word `position` differs from `seen`: spin, then
     /// set the `mark` word and sleep on this side's pipe. Returns the new
-    /// position, or `None` if the peer's end of the pipe closed first.
+    /// position, or `None` if the peer exited without moving it.
     fn wait(&mut self, position: usize, seen: u64, mark: usize) -> io::Result<Option<u64>> {
         let position = self.region.word(position);
         let start = Instant::now();
@@ -342,7 +342,9 @@ impl<R: Read, W: Write> Stream<R, W> {
                 return Ok(Some(now));
             }
             if !doorbell(&mut self.sleep)? {
-                return Ok(None);
+                // The peer exited, perhaps after publishing but before its wakeup.
+                let now = position.load(SeqCst);
+                return Ok((now != seen).then_some(now));
             }
         }
     }

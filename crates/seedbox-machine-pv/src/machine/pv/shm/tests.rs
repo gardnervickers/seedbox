@@ -106,6 +106,34 @@ fn a_closed_peer_ends_reads_and_breaks_writes() {
 }
 
 #[test]
+fn bytes_a_peer_published_before_exiting_stay_readable() {
+    // The peer publishes and claims the sleeping reader's mark, then exits
+    // before its wakeup byte: the reader still gets the bytes, then EOF.
+    let (mut client, mut worker) = pair(64, Duration::ZERO);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = [0; 8];
+        let count = client.read(&mut bytes).unwrap();
+        let first = bytes[..count].to_vec();
+        sender.send((first, client.read(&mut bytes).unwrap()))
+    });
+    worker.write_all(&[1, 2, 3]).unwrap();
+    let guard =
+        seedbox_test_time::HangGuard::new("reader sleeps, then reads", Duration::from_secs(30));
+    let mark = worker.region.word(Ring::Responses.word(READER_ASLEEP));
+    guard
+        .wait_for(|| (mark.load(SeqCst) != 0).then_some(()))
+        .unwrap();
+    worker
+        .region
+        .word(Ring::Responses.word(WRITTEN))
+        .store(3, SeqCst);
+    mark.swap(0, SeqCst);
+    drop(worker);
+    assert_eq!(guard.recv(&receiver).unwrap(), (vec![1, 2, 3], 0));
+}
+
+#[test]
 fn positions_outside_the_ring_are_errors_not_reads() {
     let (mut client, worker) = pair(64, SPIN);
     let written = worker.region.word(Ring::Responses.word(WRITTEN));
