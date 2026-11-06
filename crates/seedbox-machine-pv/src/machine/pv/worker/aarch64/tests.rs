@@ -414,3 +414,15 @@ fn each_component_mutation_changes_exactly_its_comparison_fields() {
         assert_eq!(changed, expected, "{name}");
     }
 }
+#[test]
+fn only_raised_lines_are_lowered() {
+    let mut vm = machine();
+    vm.interrupts().unwrap();
+    vm.lower(TIMER).unwrap();
+    assert!(vm.native.irqs.is_empty());
+    vm.native.core[PSTATE as usize] &= !PSTATE_I;
+    vm.irq(UART, true).unwrap();
+    vm.irq(UART, false).unwrap();
+    vm.irq(UART, false).unwrap();
+    assert_eq!(vm.native.irqs, [(UART, true), (UART, false)]);
+}
