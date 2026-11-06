@@ -191,7 +191,7 @@ impl Factory {
             &self.qemu,
             self.firmware.clone(),
             &self.bootstrap,
-            definition.clone(),
+            definition,
             self.scratch_root.as_deref(),
             package,
         )?;
