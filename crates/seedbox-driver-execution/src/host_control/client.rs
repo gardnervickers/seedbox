@@ -263,4 +263,36 @@ mod tests {
         assert_eq!(client.execute(Command::Status, budget).unwrap(), reply(1));
         assert!(client.pending().is_none());
     }
+
+    // A worker that missed a request answers its retransmission, so the
+    // client's wait must also end when the next send is due.
+    #[test]
+    fn a_request_the_worker_missed_is_sent_again() {
+        let guard = seedbox_test_time::HangGuard::new(
+            "the client resends a request until the worker answers",
+            Duration::from_secs(30),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = directory.path().join("control");
+        let peer = UnixDatagram::bind(&endpoint).unwrap();
+        peer.set_read_timeout(Some(guard.remaining().unwrap()))
+            .unwrap();
+        let mut client = Client::connect(&endpoint).unwrap();
+        let address = client.socket.local_addr().unwrap();
+        let reply_to = address.as_pathname().unwrap();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let mut buffer = [0; MAX_DATAGRAM + 1];
+                let size = peer.recv(&mut buffer).unwrap();
+                let missed = buffer[..size].to_vec();
+                let size = peer.recv(&mut buffer).unwrap();
+                assert_eq!(buffer[..size], missed[..]);
+                peer.send_to(&serde_json::to_vec(&reply(1)).unwrap(), reply_to)
+                    .unwrap();
+            });
+            let budget = guard.remaining().unwrap();
+            assert_eq!(client.execute(Command::Status, budget).unwrap(), reply(1));
+            worker.join().unwrap();
+        });
+    }
 }
