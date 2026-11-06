@@ -3,7 +3,7 @@
 use seedbox_engine_protocol::host_control::{Command, Reply, Request, INVALID, MAX_DATAGRAM};
 use std::{
     fmt, io,
-    os::unix::net::UnixDatagram,
+    os::{fd::AsRawFd, unix::net::UnixDatagram},
     path::Path,
     time::{Duration, Instant},
 };
@@ -161,11 +161,12 @@ impl Client {
                 }
                 next_send = elapsed.saturating_add(Duration::from_millis(20));
             }
-            std::thread::sleep(
-                timeout
-                    .saturating_sub(started.elapsed())
-                    .min(Duration::from_millis(2)),
-            );
+            // Wake for the reply, the next retransmission or the deadline.
+            let now = started.elapsed();
+            crate::readiness::wait(
+                &[self.socket.as_raw_fd()],
+                Some(next_send.min(timeout).saturating_sub(now)),
+            )?;
         }
     }
 }
@@ -261,5 +262,37 @@ mod tests {
         let budget = Duration::from_millis(250);
         assert_eq!(client.execute(Command::Status, budget).unwrap(), reply(1));
         assert!(client.pending().is_none());
+    }
+
+    // A worker that missed a request answers its retransmission, so the
+    // client's wait must also end when the next send is due.
+    #[test]
+    fn a_request_the_worker_missed_is_sent_again() {
+        let guard = seedbox_test_time::HangGuard::new(
+            "the client resends a request until the worker answers",
+            Duration::from_secs(30),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = directory.path().join("control");
+        let peer = UnixDatagram::bind(&endpoint).unwrap();
+        peer.set_read_timeout(Some(guard.remaining().unwrap()))
+            .unwrap();
+        let mut client = Client::connect(&endpoint).unwrap();
+        let address = client.socket.local_addr().unwrap();
+        let reply_to = address.as_pathname().unwrap();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let mut buffer = [0; MAX_DATAGRAM + 1];
+                let size = peer.recv(&mut buffer).unwrap();
+                let missed = buffer[..size].to_vec();
+                let size = peer.recv(&mut buffer).unwrap();
+                assert_eq!(buffer[..size], missed[..]);
+                peer.send_to(&serde_json::to_vec(&reply(1)).unwrap(), reply_to)
+                    .unwrap();
+            });
+            let budget = guard.remaining().unwrap();
+            assert_eq!(client.execute(Command::Status, budget).unwrap(), reply(1));
+            worker.join().unwrap();
+        });
     }
 }

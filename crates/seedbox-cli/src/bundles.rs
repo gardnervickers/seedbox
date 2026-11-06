@@ -924,22 +924,24 @@ mod tests {
         std::fs::create_dir(&staging_path).unwrap();
         std::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(staging_path.join("bundle"), b"preexisting payload").unwrap();
-        assert!(std::process::Command::new("/bin/chmod")
-            .args([
-                "+a",
-                "everyone allow read,write,execute,file_inherit,directory_inherit"
-            ])
-            .arg(&root)
-            .status()
-            .unwrap()
-            .success());
+        assert!(seedbox_exec::status(
+            std::process::Command::new("/bin/chmod")
+                .args([
+                    "+a",
+                    "everyone allow read,write,execute,file_inherit,directory_inherit"
+                ])
+                .arg(&root)
+        )
+        .unwrap()
+        .success());
         // Apply an inherited ACL as mkdir beneath this parent would receive.
-        assert!(std::process::Command::new("/bin/chmod")
-            .args(["+a", "everyone allow read,write,execute"])
-            .arg(&staging_path)
-            .status()
-            .unwrap()
-            .success());
+        assert!(seedbox_exec::status(
+            std::process::Command::new("/bin/chmod")
+                .args(["+a", "everyone allow read,write,execute"])
+                .arg(&staging_path)
+        )
+        .unwrap()
+        .success());
         assert!(!owner_controlled_namespace(&File::open(&root).unwrap()));
         assert!(PrivateStaging::open_created(
             File::open(&root).unwrap(),

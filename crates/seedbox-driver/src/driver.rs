@@ -295,6 +295,9 @@ struct ExecutionState<M> {
     network: network::Network,
     /// Guest property evidence reduced at commit, in commit order.
     properties: seedbox_engine_core::properties::Ledger,
+    /// The engine running the machines, which decides what oracle calls
+    /// may ask of them. Not checkpoint state: its owner declares it again.
+    engine: Option<faults::Engine>,
 }
 
 /// Already-committed descriptions owned by one observer session. These are
@@ -610,6 +613,7 @@ where
                 definitions: prepared,
                 network,
                 properties: Default::default(),
+                engine: None,
             },
             observations: ObservationState {
                 frames,
@@ -642,12 +646,14 @@ where
         self.observations.frames.set_capacity(capacity);
     }
 
-    /// Let the oracle declare breakpoints. Call this only when every machine
-    /// can hold at a breakpoint ([`crate::pv::Response::Break`]); otherwise
-    /// the breakpoint calls are refused as unsupported. The setting is part
-    /// of checkpoints.
-    pub fn enable_breakpoints(&mut self) {
-        self.execution.control.service.breaks.supported = true;
+    /// Declare the engine running the machines, which decides what oracle
+    /// calls may ask of them: the device faults it provides, and breakpoints
+    /// only where every machine can hold at one ([`crate::pv::Response::Break`],
+    /// PV). Without it, both are refused as unsupported. Its owner declares it
+    /// after construction and again after a restore.
+    pub fn set_engine(&mut self, engine: faults::Engine) {
+        self.execution.engine = Some(engine);
+        self.execution.control.service.breaks.supported = engine.breakpoints();
     }
 
     /// Transfer committed bookkeeping, events and frame facts exactly once.
@@ -1089,8 +1095,17 @@ where
         let now = self.now();
         let mut hits = vec![];
         for output in &outputs {
-            if let Response::Break { name } = &output.payload {
-                hits.push((output.machine, output.boot, name.clone(), output.at));
+            let source = match &output.payload {
+                Response::Break { name } => Some(
+                    crate::oracle::service::breaks::HitSource::Program(name.clone()),
+                ),
+                &Response::BlockRequestHeld { op, nth } => {
+                    Some(crate::oracle::service::breaks::HitSource::BlockRequest { op, nth })
+                }
+                _ => None,
+            };
+            if let Some(source) = source {
+                hits.push((output.machine, output.boot, source, output.at));
             }
             plans.extend(
                 self.execution
@@ -1138,7 +1153,7 @@ where
             }
         }
         // Hits are numbered in committed (at, machine) order.
-        for (machine, boot, name, at) in hits {
+        for (machine, boot, source, at) in hits {
             let display = self.execution.control.display_name(machine);
             plans.extend(
                 self.execution
@@ -1148,7 +1163,7 @@ where
                         control::Control::source(machine),
                         display,
                         boot,
-                        name,
+                        source,
                         at.as_nanos(),
                         now.as_nanos(),
                     )
@@ -1386,7 +1401,8 @@ where
                 | Plan::Deadline { at, .. }
                 | Plan::Reply { at, .. }
                 | Plan::DeclareBreaks { at, .. }
-                | Plan::ResumeBreak { at, .. } => Timestamp::from_nanos(*at),
+                | Plan::ResumeBreak { at, .. }
+                | Plan::BreakOnBlockRequest { at, .. } => Timestamp::from_nanos(*at),
                 Plan::Settled(_) => unreachable!(),
             };
             if at < self.now() {
@@ -2641,6 +2657,8 @@ mod clock_tests;
 mod control_failure_tests;
 #[cfg(test)]
 mod control_timer_tests;
+#[cfg(test)]
+mod device_fault_tests;
 #[cfg(test)]
 mod evidence_tests;
 #[cfg(test)]

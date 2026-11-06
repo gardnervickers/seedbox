@@ -30,31 +30,24 @@ fn refusal(action: serde_json::Value) -> String {
 }
 
 #[test]
-fn submitted_programs_check_arguments_then_refuse_faults_no_engine_provides() {
-    for (action, message) in [
-        (
-            json!({"action":"disk_error","handle":"eio","machine":"db","op":"write","ppm":10}),
-            "disk_error needs disk request selection",
-        ),
-        (
-            json!({"action":"disk_latency","handle":"slow","machine":"db","op":"any","latency_ns":20_000_000}),
-            "disk_latency needs delayed block completion",
-        ),
-        (
-            json!({"action":"preempt","handle":"race","machine":"db","ppm":10_000}),
-            "preempt needs the guest yield hook",
-        ),
+fn submitted_programs_accept_disk_and_scheduler_faults_after_argument_checks() {
+    for action in [
+        json!({"action":"disk_error","handle":"eio","machine":"db","op":"write","ppm":10}),
+        json!({"action":"disk_latency","handle":"slow","machine":"db","op":"any","latency_ns":20_000_000}),
+        json!({"action":"preempt","handle":"race","machine":"db","ppm":10_000}),
     ] {
-        assert_eq!(
-            refusal(action),
-            format!("program fault: {message}, which no engine provides")
-        );
+        let program = resolve_program(&spec(action.clone())).unwrap();
+        assert_eq!(serde_json::to_value(&program[0].action).unwrap(), action);
     }
     // Argument errors come first, from the same schema.
     assert!(
         refusal(json!({"action":"preempt","handle":"race","machine":"db","ppm":0}))
             .contains("preempt ppm")
     );
+    assert!(refusal(
+        json!({"action":"disk_error","handle":"eio","machine":"nobody","op":"write","ppm":10})
+    )
+    .contains("unknown machine"));
 }
 
 #[test]
@@ -64,6 +57,10 @@ fn injected_faults_are_checked_before_journaling() {
     };
     check_injected(&inject(json!({"action":"crash","machine":"db"}))).unwrap();
     check_injected(&seedbox_api::ControlCommand::Step).unwrap();
+    check_injected(&inject(
+        json!({"action":"preempt","handle":"p","machine":"db","ppm":10}),
+    ))
+    .unwrap();
     assert!(matches!(
         check_injected(&inject(json!({"action":"preempt","handle":"p","machine":"db","ppm":0}))),
         Err(Error::Invalid(message)) if message.contains("preempt ppm")

@@ -1,0 +1,44 @@
+name: crash-peer
+machines:
+  server:
+    image: docker.io/library/python:3.13-alpine
+    entrypoint:
+    - python3
+    - "/scenario/crash_peer.py"
+    - server
+    files:
+    - source: "../driver/crash_peer.py"
+      target: "/scenario/crash_peer.py"
+  peer:
+    image: docker.io/library/python:3.13-alpine
+    entrypoint:
+    - python3
+    - "/scenario/crash_peer.py"
+    - peer
+    files:
+    - source: "../driver/crash_peer.py"
+      target: "/scenario/crash_peer.py"
+  witness:
+    image: docker.io/library/python:3.13-alpine
+    entrypoint:
+    - python3
+    - "/scenario/crash_peer.py"
+    - witness
+    files:
+    - source: "../driver/crash_peer.py"
+      target: "/scenario/crash_peer.py"
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint:
+  - python3
+  - "/scenario/crash_peer.py"
+  - oracle
+  files:
+  - source: "../driver/crash_peer.py"
+    target: "/scenario/crash_peer.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms

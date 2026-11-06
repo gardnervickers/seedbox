@@ -121,7 +121,9 @@ pub(crate) enum Boot {
     /// An x86-64 bzImage, initramfs, and the BIOS image that boots them.
     Linux {
         kernel: Arc<[u8]>,
-        initramfs: Arc<[u8]>,
+        /// Kept in the allocation it was read or packaged into: boot archives
+        /// can be hundreds of MB, and an `Arc<[u8]>` would copy each one.
+        initramfs: Arc<Vec<u8>>,
         firmware: Arc<[u8]>,
         command_line: String,
         /// Realtime epoch of every boot. The supervisor sets realtime from it;
@@ -345,7 +347,7 @@ impl TcgMachine {
             qemu,
             firmware,
             bootstrap,
-            definition,
+            &definition,
             None,
             seedbox_machine::application::boot_archive,
         )
@@ -363,7 +365,7 @@ impl TcgMachine {
         qemu: &Path,
         firmware: Vec<u8>,
         bootstrap: &seedbox_machine::application::GuestBootstrap,
-        definition: seedbox_machine::definition::MachineDefinition,
+        definition: &seedbox_machine::definition::MachineDefinition,
         scratch_root: Option<&Path>,
         package: impl FnOnce(
             &seedbox_machine::definition::PreparedApplication,
@@ -409,12 +411,12 @@ impl TcgMachine {
                 memory_mib: (memory / MIB) as u32,
                 boot: Boot::Linux {
                     kernel: Arc::from(bootstrap.kernel.image.as_slice()),
-                    initramfs: initramfs.into(),
+                    initramfs: Arc::new(initramfs),
                     firmware: firmware.into(),
                     command_line,
                     epoch_seconds: bootstrap.epoch_seconds,
                 },
-                disk: definition.disk,
+                disk: definition.disk.clone(),
                 network: definition
                     .network
                     .as_ref()

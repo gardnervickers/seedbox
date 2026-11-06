@@ -120,31 +120,21 @@ mod program_tests {
     }
 
     #[test]
-    fn faults_no_engine_provides_are_refused_before_preparation() {
+    fn disk_faults_check_their_machine_before_preparation() {
         let config = crate::config::parse(
             "name: test\nmachines:\n  db: {image: example:v1}\noracle: {image: example/oracle}\n",
             std::path::Path::new("/fixture/seedbox.yaml"),
             &Default::default(),
         )
         .unwrap();
-        let input = TimedInput {
-            timeout_ns: seedbox_engine_protocol::input_program::default_timeout_ns(),
-            key: "eio".into(),
-            at_ns: 10,
-            action: Action::DiskError {
-                handle: "eio".into(),
-                machine: "db".into(),
-                op: seedbox_engine_protocol::control::DiskOp::Write,
-                ppm: 1_000_000,
-                effect: Default::default(),
-                scope: Default::default(),
-            },
+        let eio = |machine: &str| -> TimedInput {
+            serde_json::from_value(serde_json::json!({
+                "key": "eio", "at_ns": 10,
+                "action": {"action": "disk_error", "handle": "eio", "machine": machine, "op": "write", "ppm": 1_000_000},
+            }))
+            .unwrap()
         };
-        assert_eq!(
-            validate_input_program(&config, &[input])
-                .unwrap_err()
-                .to_string(),
-            "program eio: disk_error needs disk request selection, which no engine provides"
-        );
+        validate_input_program(&config, &[eio("db")]).unwrap();
+        assert!(validate_input_program(&config, &[eio("missing")]).is_err());
     }
 }

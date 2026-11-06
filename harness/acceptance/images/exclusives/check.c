@@ -1,7 +1,5 @@
 #include <stdatomic.h>
 #include <stdio.h>
-
-#ifdef __aarch64__
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -28,7 +26,6 @@ static int check_fixture(const char *path)
     }
     return 0;
 }
-#endif
 
 int main(void)
 {
@@ -45,6 +42,8 @@ int main(void)
         fprintf(stderr, "atomic counter: %u\n", result);
         return 1;
     }
+    if (check_fixture("/cputime") != 0)
+        return 1;
 #ifdef __aarch64__
     const char *fixtures[] = {
         "/exclusive-epoch", "/exclusive-overlap", "/exclusive-consume",

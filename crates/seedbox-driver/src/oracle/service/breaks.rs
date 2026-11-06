@@ -13,7 +13,30 @@ pub(crate) enum BreakEnd {
     RunEnded,
 }
 
-/// A live hit: its machine is suspended at a breakpoint write.
+/// The name of every block request hit. It is reserved: a program cannot
+/// declare it, so a hit with this name always comes from a held request.
+pub(crate) const BLOCK_REQUEST: &str = "block_request";
+
+/// What suspended a machine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HitSource {
+    /// The guest wrote this declared name to `/dev/seedbox/break`.
+    Program(String),
+    /// Its device holds the `nth` disk request of kind `op`, unwritten.
+    BlockRequest { op: crate::pv::DiskOp, nth: u64 },
+}
+impl HitSource {
+    /// The name the hit carries; a block request hit is named `block_request`.
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Program(name) => name,
+            Self::BlockRequest { .. } => BLOCK_REQUEST,
+        }
+    }
+}
+
+/// A live hit: its machine is suspended at a breakpoint write or a held
+/// block request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Hit {
     /// The machine's canonical key.
@@ -21,7 +44,7 @@ pub(crate) struct Hit {
     /// The machine's display name, as replies name it.
     pub(crate) display: String,
     pub(crate) boot: u64,
-    pub(crate) name: String,
+    pub(crate) source: HitSource,
     pub(crate) at: u64,
     /// A `wait_break` call has returned this hit.
     pub(crate) delivered: bool,
@@ -56,14 +79,20 @@ impl Breaks {
         self.hits.iter().map(|(&id, hit)| (id, hit))
     }
     pub(super) fn json(id: u32, hit: &Hit) -> Value {
-        json!({
+        let mut value = json!({
             "break_id": id,
             "source": "program",
             "machine": hit.display,
             "boot": hit.boot,
-            "name": hit.name,
+            "name": hit.source.name(),
             "at_ns": hit.at,
-        })
+        });
+        if let HitSource::BlockRequest { op, nth } = hit.source {
+            value["source"] = json!(BLOCK_REQUEST);
+            value["request"] = json!(op);
+            value["nth"] = json!(nth);
+        }
+        value
     }
 }
 
@@ -124,6 +153,27 @@ impl Service {
             at: now + timeout_ns,
         }])
     }
+    /// Plan a one-shot hold of `target`'s `nth` disk request of kind `op`,
+    /// counted from this barrier across boots. The hit arrives like any
+    /// other, with source `block_request`.
+    pub(super) fn break_on_block_request(
+        &mut self,
+        adapter: &mut impl Adapter,
+        target: &Target,
+        op: crate::pv::DiskOp,
+        nth: u64,
+        now: u64,
+    ) -> Result<Plan, OperationError> {
+        self.breaks_supported()?;
+        adapter.check_control_target(target)?;
+        let machine = adapter.resolve(target)?.name;
+        Ok(Plan::BreakOnBlockRequest {
+            machine,
+            op,
+            nth,
+            at: now,
+        })
+    }
     /// End a live hit and let its machine run again.
     pub(super) fn resume_break(
         &mut self,
@@ -161,7 +211,7 @@ impl Service {
         machine: String,
         display: String,
         boot: u64,
-        name: String,
+        source: HitSource,
         at: u64,
         now: u64,
     ) -> Result<Vec<Plan>, Failure> {
@@ -182,7 +232,7 @@ impl Service {
             machine,
             display,
             boot,
-            name,
+            source,
             at,
             delivered: false,
         };
@@ -190,7 +240,7 @@ impl Service {
             break_id: id,
             machine: hit.machine.clone(),
             boot,
-            name: hit.name.clone(),
+            name: hit.source.name().to_owned(),
             at,
         });
         let waiter = self
@@ -255,11 +305,12 @@ impl Service {
 }
 
 wire_enum!(BreakEnd; units {0=>Resumed,1=>Crashed,2=>RunEnded} tuples {} records {});
+wire_enum!(HitSource; units {} tuples {0=>Program(v0)} records {1=>BlockRequest{op,nth}});
 wire_struct!(Hit {
     machine,
     display,
     boot,
-    name,
+    source,
     at,
     delivered
 });

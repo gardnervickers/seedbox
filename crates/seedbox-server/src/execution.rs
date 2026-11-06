@@ -616,7 +616,11 @@ impl ExecutionService {
             })
             .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
         let observations = crate::observations::Receiver::start(self.manager.clone(), id.clone())?;
-        let mut orchestrator = Orchestrator::new(self.store.clone(), directory.join("attempts"));
+        // The session's runs share one engine copy (see
+        // `Orchestrator::with_executables`). Monitors hold the session lease,
+        // so session cleanup never removes it under a running execution.
+        let mut orchestrator = Orchestrator::new(self.store.clone(), directory.join("attempts"))
+            .with_executables(self.root.join("executables"));
         if let Some(checkpoint) = checkpoint {
             orchestrator = orchestrator.with_checkpoint(checkpoint);
         }

@@ -1837,6 +1837,7 @@ dependencies = [
 name = "seedbox"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "libc",
  "seedbox-api",
  "seedbox-application",
@@ -2125,6 +2126,7 @@ dependencies = [
  "seedbox-guest",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "tempfile",
 ]
 

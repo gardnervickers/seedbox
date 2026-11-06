@@ -1,0 +1,35 @@
+name: fault-profile
+# The oracle runs a seedbox-oracle fault profile (images/profile/profile.yaml).
+machines:
+  n1:
+    build:
+      context: "../../.."
+      dockerfile: harness/acceptance/images/profile/Dockerfile
+    command:
+    - node
+    volumes:
+      data:
+        target: "/data"
+  n2:
+    build:
+      context: "../../.."
+      dockerfile: harness/acceptance/images/profile/Dockerfile
+    command:
+    - node
+    volumes:
+      data:
+        target: "/data"
+  n3:
+    build:
+      context: "../../.."
+      dockerfile: harness/acceptance/images/profile/Dockerfile
+    command:
+    - node
+oracle:
+  build:
+    context: "../../.."
+    dockerfile: harness/acceptance/images/profile/Dockerfile
+  command:
+  - oracle
+network:
+  latency: 1ms

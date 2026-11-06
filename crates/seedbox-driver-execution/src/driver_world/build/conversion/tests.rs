@@ -151,7 +151,7 @@ fn bounded_overlap_joins_every_occurrence_and_keeps_first_error_on_panic() {
 }
 
 #[test]
-fn unchanged_sha_archive_and_disk_validation_rejects_original_first_bad_input() {
+fn unchanged_length_archive_and_disk_validation_rejects_original_first_bad_input() {
     let root = tempfile::tempdir().unwrap();
     let original = prepared(root.path());
     let mut invalid = original.clone();
@@ -164,9 +164,9 @@ fn unchanged_sha_archive_and_disk_validation_rejects_original_first_bad_input() 
     cases.push(invalid.clone());
     invalid.machines[1].disk = Some(wire::Disk::Zero { bytes: 0 });
     cases.push(invalid);
-    let mut bad_sha = original;
-    bad_sha.oracle.filesystem.sha256 = "00".repeat(32);
-    cases.push(bad_sha);
+    let mut bad_length = original;
+    bad_length.oracle.filesystem.length += 1;
+    cases.push(bad_length);
     for input in cases {
         let expected = std::iter::once(&input.oracle)
             .chain(&input.machines)

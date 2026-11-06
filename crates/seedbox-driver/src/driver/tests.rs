@@ -3,7 +3,7 @@ use super::*;
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Mutex,
     },
 };
@@ -458,23 +458,43 @@ fn execution_and_invalid_stop_failures_prevent_all_further_dispatch() {
 
 #[test]
 fn crash_failure_and_backwards_step_prevent_retry() {
-    let mut driver = super::fixture::driver(
-        at(3),
-        std::time::Duration::from_nanos(1000),
-        2,
-        crate::rng::SeededRng::new(0),
-        || Ok(()),
-        || {
-            let mut guest = machine(0, &[Op::Fail]);
-            guest.fail_crash = true;
-            Ok(vec![guest])
-        },
-    )
-    .unwrap();
-    let id = ids(&mut driver)[0];
-    schedule(&mut driver, 3, Action::Crash(Target::Machine(id))).unwrap();
-    assert!(matches!(driver.step(at(3)), Err(Error::Machine { .. })));
-    assert!(matches!(driver.step(at(4)), Err(Error::Failed)));
+    // Any pool, even one larger than the world, fails the crash the same way,
+    // and a retry is refused before any machine runs again.
+    for workers in [1, 2, 8] {
+        let peer = Arc::new(Mutex::new(Vec::new()));
+        let log = peer.clone();
+        let mut driver = super::fixture::driver(
+            at(3),
+            std::time::Duration::from_nanos(1000),
+            workers,
+            crate::rng::SeededRng::new(0),
+            || Ok(()),
+            move || {
+                let mut guest = machine(0, &[Op::Fail]);
+                guest.fail_crash = true;
+                let mut peer = machine(1, &[Op::Park]);
+                peer.log = log;
+                Ok(vec![guest, peer])
+            },
+        )
+        .unwrap();
+        let id = ids(&mut driver)[0];
+        schedule(&mut driver, 3, Action::Crash(Target::Machine(id))).unwrap();
+        assert!(
+            matches!(
+                driver.step(at(3)),
+                Err(Error::Machine {
+                    id: MachineId(0),
+                    ..
+                })
+            ),
+            "{workers} workers"
+        );
+        let runs = peer.lock().unwrap().len();
+        assert!(matches!(driver.step(at(4)), Err(Error::Failed)));
+        assert!(matches!(driver.step(at(3)), Err(Error::Failed)));
+        assert_eq!(peer.lock().unwrap().len(), runs, "{workers} workers");
+    }
     let mut driver = build(3, &[&[Op::Park]]);
     assert!(matches!(driver.step(at(2)), Err(Error::PastTime { .. })));
     assert!(matches!(driver.step(at(3)), Err(Error::Failed)));
@@ -781,6 +801,66 @@ fn calls_overlap_clock_stays_fixed_and_failure_joins_the_whole_batch() {
     }
 }
 
+/// A machine that panics on a pool thread fails its round like an error, on
+/// pools smaller than, equal to and larger than the world: every submitted call
+/// finishes, the round is not committed, and the lowest failing machine is
+/// reported whether it panicked or failed.
+#[test]
+fn a_panicking_machine_fails_its_round_on_every_pool_size() {
+    for (panicking, failing, reported) in [(2, None, 2), (2, Some(1), 1), (1, Some(2), 1)] {
+        for workers in [1, 2, 4, 8] {
+            let ran = Arc::new(AtomicUsize::new(0));
+            let calls = ran.clone();
+            let mut driver = super::fixture::driver(
+                at(0),
+                Duration::from_nanos(10),
+                workers,
+                crate::rng::SeededRng::new(0),
+                || Ok(()),
+                || {
+                    Ok((0..4)
+                        .map(|index| {
+                            let calls = calls.clone();
+                            ProbeMachine(Box::new(move || {
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                if index == panicking {
+                                    panic!("fixture panic in machine {index}");
+                                }
+                                if Some(index) == failing {
+                                    return Err(std::io::Error::other("fixture failure"));
+                                }
+                                Ok(StopReason::Blocked {
+                                    reached: at(0),
+                                    deadline: None,
+                                })
+                            }))
+                        })
+                        .collect())
+                },
+            )
+            .unwrap();
+            let before = driver.position();
+            let error = driver.step(at(10)).unwrap_err();
+            let label = format!("panic {panicking}, fail {failing:?}, {workers} workers");
+            if reported == panicking {
+                assert!(
+                    matches!(error, Error::Panicked { id } if id == MachineId(reported)),
+                    "{label}: {error}"
+                );
+            } else {
+                assert!(
+                    matches!(error, Error::Machine { id, .. } if id == MachineId(reported)),
+                    "{label}: {error}"
+                );
+            }
+            assert_eq!(ran.load(Ordering::SeqCst), 4, "{label}");
+            assert_eq!(driver.position(), before, "{label}");
+            assert!(matches!(driver.step(at(10)), Err(Error::Failed)), "{label}");
+            assert_eq!(ran.load(Ordering::SeqCst), 4, "{label}");
+        }
+    }
+}
+
 #[test]
 fn a_failed_step_waits_for_a_still_running_peer() {
     let (entered, running) = mpsc::channel();
@@ -959,7 +1039,6 @@ fn machine_rng_cursors_follow_identity_across_work_stealing_and_failed_addition(
 
 #[test]
 fn stale_adoption_reports_are_rejected_and_poison_before_another_dispatch() {
-    use std::sync::atomic::AtomicUsize;
     // Only resume admits a zero-budget run of an unchanged program now that
     // host wakeups (Action::Wake) are removed.
     for resume in [true] {

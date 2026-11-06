@@ -292,17 +292,50 @@ fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
         assert!(!output.join("world.json").exists());
         drop(launch);
         assert!(!output.join("host-control").exists());
+        // An input this engine cannot carry out is the launch's own refusal,
+        // naming the input, before any worker request is written.
+        fs::remove_file(output.join(crate::worker_process::WORKER_REQUEST_FILE)).unwrap();
+        let program: Vec<seedbox_engine_protocol::input_program::TimedInput> =
+            serde_json::from_value(serde_json::json!([{
+                "key": "race-on",
+                "at_ns": 0,
+                "action": {"action": "preempt", "handle": "race", "machine": "oracle", "ppm": 10},
+            }]))
+            .unwrap();
+        let refused = ExecutionRequest {
+            program: &program,
+            ..request
+        };
+        let yields = backend == CpuBackend::Pv && cfg!(target_arch = "aarch64");
+        match crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&refused, None) {
+            Ok(_) => assert!(yields, "{backend:?} launched a preempt program"),
+            Err(error) => {
+                assert!(!yields, "{error}");
+                let (engine, lacks) = match backend {
+                    CpuBackend::Pv => ("x86_64 PV", "the guest yield hook"),
+                    CpuBackend::Tcg => ("x86_64 TCG", "the guest yield hook"),
+                };
+                assert!(matches!(error, crate::Error::Setup(_)), "{error:?}");
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "input race-on: preempt needs {lacks}, which {engine} does not provide"
+                    )
+                );
+                assert!(!output
+                    .join(crate::worker_process::WORKER_REQUEST_FILE)
+                    .exists());
+            }
+        }
     }
 }
 
 #[test]
-fn request_keeps_checksum_mapping_import_and_worker_option_error_order() {
+fn request_keeps_mapping_import_and_worker_option_error_order() {
     use crate::execution::PreparedImage;
     use seedbox_artifacts::image::Launch;
-    use std::os::unix::fs::PermissionsExt;
 
     for (case, expected) in [
-        ("checksum_before_mapping", "SHA-256 differs"),
         ("mapping_before_workers", "was not retained/materialized"),
         (
             "import_before_workers",
@@ -343,14 +376,9 @@ fn request_keeps_checksum_mapping_import_and_worker_option_error_order() {
             sha256: "f".repeat(64),
             ..artifact
         };
-        if let wire::Inventory::Tcg {
-            kernel, formatter, ..
-        } = &mut prepared.inventory
-        {
-            match case {
-                "checksum_before_mapping" => *formatter = Some(missing),
-                "mapping_before_workers" => *kernel = missing,
-                _ => {}
+        if let wire::Inventory::Tcg { kernel, .. } = &mut prepared.inventory {
+            if case == "mapping_before_workers" {
+                *kernel = missing;
             }
         }
         let manifest = store.put(&serde_json::to_vec(&prepared).unwrap()).unwrap();
@@ -365,13 +393,6 @@ fn request_keeps_checksum_mapping_import_and_worker_option_error_order() {
                 (digest.clone(), path)
             })
             .collect();
-        if case == "checksum_before_mapping" {
-            let path = &artifacts[&digest];
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
-            let mut changed = bytes.to_vec();
-            changed[0] ^= 1;
-            fs::write(path, changed).unwrap();
-        }
         let output = root.path().join("out");
         fs::create_dir(&output).unwrap();
         let simulation = crate::fixture_simulation("oracle");

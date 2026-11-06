@@ -157,6 +157,24 @@ jobs:
       - name: Portable prerequisites and PV application acceptance
         if: env.SUITE == 'pv'
         run: nix develop --command bash harness/check.sh linux-apps
+      # linux-apps runs no ignored native driver tests, so run the x86_64 KVM
+      # disk fault and block request breakpoint cases here.
+      - name: Native PV disk faults and block request breakpoints
+        if: env.SUITE == 'pv'
+        run: |
+          seedbox_flake="$(bash tools/dev-flake.sh)?submodules=1"
+          inputs=$(nix build --impure --no-link --print-out-paths \
+            --file nix/build-inputs.nix --argstr flake "$seedbox_flake" \
+            --arg names '[ "machinePvAssets" "machinePvTestFixtures" ]')
+          nix develop --command cargo build --locked -p seedbox-machine-pv --bin seedbox-pv-worker
+          export SEEDBOX_PV_WORKER=$PWD/target/debug/seedbox-pv-worker
+          export SEEDBOX_PV_ASSETS=$inputs/machinePvAssets
+          export SEEDBOX_PV_DISK_PROBE=$inputs/machinePvTestFixtures/bin/disk-probe
+          export SEEDBOX_PV_DISK_IMAGE=$inputs/machinePvTestFixtures/disk/ext4.img
+          nix develop --command cargo test --locked -p seedbox-driver --test native_driver -- \
+            --ignored --test-threads 1 pv_device_faults pv_block_request_breakpoint
+          nix develop --command cargo test --locked -p seedbox-machine-pv --lib -- \
+            --ignored faults_and_holds_outlive
       - name: Native TCG machine and public-service acceptance
         if: env.SUITE == 'tcg'
         run: nix develop --command bash harness/check-machine-tcg.sh --skip-portable

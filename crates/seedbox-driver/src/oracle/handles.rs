@@ -56,6 +56,7 @@ pub(crate) enum Error {
     AttemptsExhausted,
     AlreadyThrottled,
     AlreadyDrifting,
+    AlreadyPreempted,
     InactiveHandle,
     Unsettled,
     UnexpectedEffect,
@@ -92,7 +93,8 @@ impl Phase {
 }
 /// The change a handle installed. Execution and drift are Driver-owned
 /// dependencies that survive crash and reboot; a realtime step is guest kernel
-/// state that ends with the machine's boot.
+/// state that ends with the machine's boot. A device fault lives in the
+/// machine, which carries it across boots until healed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Change {
     Execution(ExecutionConfig),
@@ -106,6 +108,10 @@ pub(crate) enum Change {
     Unshape,
     Select,
     Unselect,
+    /// A disk or scheduler fault the machine carries out.
+    Fault(crate::pv::DeviceFault),
+    /// The inverse of a device fault: remove that record's fault.
+    Unfault,
 }
 /// What a handle's change acts on: one machine's canonical name, or both
 /// directions of every link between two disjoint, sorted sets of names.
@@ -125,10 +131,28 @@ pub(crate) enum HandleTarget {
 impl Change {
     /// Whether this change installs a handle rather than restoring one.
     pub(crate) fn installs(self) -> bool {
-        !matches!(self, Self::Unpartition | Self::Unshape | Self::Unselect)
+        !matches!(
+            self,
+            Self::Unpartition | Self::Unshape | Self::Unselect | Self::Unfault
+        )
     }
     fn same_kind(self, other: Self) -> bool {
-        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+        match (self, other) {
+            (Self::Fault(a), Self::Fault(b)) => {
+                std::mem::discriminant(&a) == std::mem::discriminant(&b)
+            }
+            _ => std::mem::discriminant(&self) == std::mem::discriminant(&other),
+        }
+    }
+    /// One machine runs at one rate and yields at one rate: these changes do
+    /// not stack, including pending ones. Disk faults stack.
+    fn is_exclusive(self) -> bool {
+        matches!(
+            self,
+            Self::Execution(_)
+                | Self::Drift(_)
+                | Self::Fault(crate::pv::DeviceFault::Preempt { .. })
+        )
     }
 }
 #[derive(Clone)]
@@ -230,7 +254,7 @@ impl Handles {
         self.exclusive(target, Change::Drift(ClockRate::NOMINAL))
     }
     fn exclusive(&self, target: &str, change: Change) -> bool {
-        matches!(change, Change::Execution(_) | Change::Drift(_))
+        change.is_exclusive()
             && self.records.values().any(|record| {
                 record.target == HandleTarget::Machine(target.into())
                     && record.change.same_kind(change)
@@ -286,6 +310,7 @@ impl Handles {
         if matches!(&target,HandleTarget::Machine(name) if self.exclusive(name,change)) {
             return Err(match change {
                 Change::Drift(_) => Error::AlreadyDrifting,
+                Change::Fault(_) => Error::AlreadyPreempted,
                 _ => Error::AlreadyThrottled,
             });
         }
@@ -374,7 +399,10 @@ impl Handles {
             Change::Partition => Change::Unpartition,
             Change::Shape(..) => Change::Unshape,
             Change::Select => Change::Unselect,
-            Change::Unpartition | Change::Unshape | Change::Unselect => return None,
+            Change::Fault(_) => Change::Unfault,
+            Change::Unpartition | Change::Unshape | Change::Unselect | Change::Unfault => {
+                return None
+            }
         })
     }
     /// Healing is a distinct operation on an existing active handle; it does
