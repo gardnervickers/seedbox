@@ -271,6 +271,44 @@ impl Network {
         self.in_flight.keys().next().map(|&(at, ..)| at)
     }
 
+    /// Earliest arrival still in flight for a receiver that `to` selects.
+    pub(crate) fn next_arrival_to(&self, to: impl Fn(MachineId) -> bool) -> Option<u64> {
+        self.in_flight
+            .keys()
+            .find(|&&(_, _, _, receiver)| to(receiver))
+            .map(|&(at, ..)| at)
+    }
+
+    /// Remove every frame arriving before `end` for a receiver that `to`
+    /// selects, in (arrival, sender, sequence, receiver) order, with its
+    /// arrival.
+    pub(crate) fn take_before(
+        &mut self,
+        end: u64,
+        to: impl Fn(MachineId) -> bool,
+    ) -> Vec<(u64, Delivery)> {
+        let keys: Vec<_> = self
+            .in_flight
+            .range(..(end, MachineId(0), 0, MachineId(0)))
+            .map(|(&key, _)| key)
+            .filter(|&(_, _, _, receiver)| to(receiver))
+            .collect();
+        keys.into_iter()
+            .map(|key @ (arrival, from, _, to)| {
+                let frame = self.in_flight.remove(&key).expect("frame in flight");
+                (
+                    arrival,
+                    Delivery {
+                        from,
+                        to,
+                        sent: frame.sent,
+                        bytes: frame.bytes,
+                    },
+                )
+            })
+            .collect()
+    }
+
     pub(crate) fn is_idle(&self) -> bool {
         self.in_flight.is_empty()
     }

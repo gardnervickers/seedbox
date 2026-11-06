@@ -280,22 +280,16 @@ fn blocked_networked_machines_jump_to_their_next_event() {
             spec(Some(2)),
         ],
     );
-    // Only the initial runnable round is bounded by latency; blocked machines
-    // impose no bound, so the next barrier is the 10 s send deadline. The send
-    // runs from there and that round ends when both machines block, before
-    // the frame routes; the receiver then takes it in its next run.
+    // Only the initial runnable round is bounded by latency from now; a
+    // blocked machine bounds the next one from its 10 s send deadline. The
+    // send runs in the sender's lane and that round ends when both machines
+    // block, before the frame routes; the receiver takes it in its lane.
     assert_eq!(
         barriers(&mut driver, 20_000 * MS),
         [
             StepOutcome::BarrierReached { at: at(MS) },
             StepOutcome::BarrierReached {
                 at: at(10_000 * MS)
-            },
-            StepOutcome::BarrierReached {
-                at: at(10_000 * MS)
-            },
-            StepOutcome::BarrierReached {
-                at: at(10_000 * MS + MS)
             },
             StepOutcome::Blocked {
                 at: at(10_000 * MS + MS)
@@ -1387,4 +1381,51 @@ fn down_members_can_be_partitioned_and_stay_cut_after_reboot() {
     assert!(settled(&events)
         .iter()
         .any(|(r, s)| r.action == FaultAction::Partition && *s == SettlementStatus::Applied));
+}
+
+#[test]
+fn machines_run_whole_windows_and_take_frames_at_their_arrival() {
+    let mut seen = Vec::new();
+    for workers in [1, 3] {
+        let (mut driver, log) = world(
+            0,
+            MS,
+            workers,
+            NetworkConfig::default(),
+            vec![
+                spec(Some(1)).busy().send(MS / 10, frame(mac(2), 7)),
+                spec(Some(2)),
+                spec(Some(3)).busy(),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        // The frame arrives inside the second window: the round does not end
+        // there, the receiver takes it at its arrival and the others run
+        // the whole window in one run.
+        assert_eq!(
+            barriers(&mut driver, 2 * MS),
+            [
+                StepOutcome::BarrierReached { at: at(MS) },
+                StepOutcome::BarrierReached { at: at(2 * MS) },
+            ]
+        );
+        let log = log.lock().unwrap();
+        assert_eq!(log.received, [(1, MS + MS / 10, 7)]);
+        let mut runs = log.runs.clone();
+        runs.sort();
+        assert_eq!(
+            runs,
+            [
+                (0, 0, MS),
+                (0, MS, 2 * MS),
+                (1, 0, MS),
+                (1, MS + MS / 10, 2 * MS),
+                (2, 0, MS),
+                (2, MS, 2 * MS),
+            ]
+        );
+        seen.push((log.received.clone(), runs));
+    }
+    assert_eq!(seen[0], seen[1]);
 }

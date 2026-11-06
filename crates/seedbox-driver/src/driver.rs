@@ -29,6 +29,7 @@ mod boot_end;
 mod checkpoint;
 mod evidence;
 mod execution_evidence;
+mod lanes;
 pub use crate::persistence::{CodecError, DecodeLimits, SnapshotReference};
 pub use checkpoint::{Checkpoint, CheckpointMapError};
 pub use execution_evidence::ExecutionEvidenceRead;
@@ -482,6 +483,11 @@ where
     /// round that sent it commits. Blocked or paused machines impose no limit;
     /// a blocked receiver can execute from a frame's arrival, even if the frame
     /// does not wake it, which also tightens the controller latency bound.
+    /// Inside a round, each machine runs to the round's end on its own lane and
+    /// takes its timers and frames at their exact times; lanes run side by side.
+    /// Only frames for a paused or suspended receiver end a round at their
+    /// arrival. Effects decided at commit, such as control replies, trigger
+    /// effects and the finish time, therefore take the round's end.
     // Blocked machines impose no bound, so idle simulations still jump to their
     // next event.
     #[allow(clippy::too_many_arguments)]
@@ -916,8 +922,8 @@ where
     /// `upto` must be at or after the current shared time. Returned times never
     /// move backwards or exceed `upto`. A step may stop earlier for a scheduled
     /// event or execution boundary, or because work becomes blocked or finishes.
-    /// A call never crosses the next fixed quantum boundary. A shorter `upto`,
-    /// timer, or action may produce an intermediate barrier, but the unfinished
+    /// A call never crosses the next fixed quantum boundary. A shorter `upto`
+    /// or a timeline item may produce an intermediate barrier, but the unfinished
     /// quantum retains its original end. Repeated short calls therefore visit
     /// the same quantum boundaries as larger calls. Quantum changes require a
     /// new driver; there is no runtime setter.
@@ -1494,23 +1500,19 @@ where
             );
         }
 
-        // Known events limit the whole round. A timer discovered during a run
-        // can shorten another machine's next budget, but cannot invalidate the
-        // round's final boundary. Intermediate local progress stays private.
+        // Known events limit the whole round, and so do frames for receivers
+        // that take them only at a boundary. Every other machine takes its
+        // timers and frames inside its lane. Intermediate progress stays private.
         let boundary = self
             .execution
-            .machines
-            .iter()
-            .filter(|entry| !entry.lifecycle.paused())
-            .filter_map(|entry| match entry.stopped {
-                StopReason::Blocked { deadline, .. } => deadline,
-                _ => None,
-            })
-            .chain(self.execution.events.first_key_value().map(|(&at, _)| at))
+            .events
+            .first_key_value()
+            .map(|(&at, _)| at)
+            .into_iter()
             .chain(
                 self.execution
                     .network
-                    .next_arrival()
+                    .next_arrival_to(|to| !self.lane_receiver(to))
                     .map(Timestamp::from_nanos),
             )
             .chain(self.causal_bound())
@@ -1518,31 +1520,7 @@ where
             .fold(upto.min(self.execution.quantum_end), Timestamp::min);
 
         let initial = self.now();
-        let mut ran = false;
-        while let Some((_, now)) = self.next() {
-            if now >= boundary {
-                break;
-            }
-            self.execution.clock.set(now.as_nanos());
-            let limit = self
-                .execution
-                .machines
-                .iter()
-                .filter_map(Entry::next)
-                .filter(|&at| at > now)
-                .min()
-                .map_or(boundary, |at| at.min(boundary));
-            let ready = self
-                .execution
-                .machines
-                .iter()
-                .enumerate()
-                .filter(|(_, entry)| entry.next() == Some(now))
-                .map(|(index, _)| MachineId(index))
-                .collect::<Vec<_>>();
-            self.run_batch(&ready, limit)?;
-            ran = true;
-        }
+        let ran = self.run_lanes(boundary)?;
 
         // Finish early if all machines exited or became indefinitely blocked.
         // A queued input still keeps time moving toward its own barrier.
@@ -1869,22 +1847,36 @@ where
             && self.execution.network.is_idle()
     }
 
-    /// The latest round boundary at which no frame sent in the round can be
-    /// due: the earliest time an attached machine can execute, plus latency.
-    /// Positive-budget runs start only at `Entry::next`, so every send in the
-    /// round is at or after it. Blocked, paused and exited machines impose
-    /// none. An unrepresentable bound imposes none: no such arrival exists.
-    fn causal_bound(&self) -> Option<Timestamp> {
-        let earliest = self
+    /// The earliest time a machine can execute in the round: its own next
+    /// start, or the arrival of a frame that wakes it inside its lane.
+    fn earliest_producer(&self, include: impl Fn(MachineId) -> bool) -> Option<Timestamp> {
+        let started = self
             .execution
             .machines
             .iter()
             .enumerate()
-            .filter(|&(index, _)| self.execution.network.attached(MachineId(index)))
+            .filter(|&(index, _)| include(MachineId(index)))
             .filter_map(|(_, entry)| entry.next())
-            .min()?;
+            .min();
+        let woken = self
+            .execution
+            .network
+            .next_arrival_to(|to| include(to) && self.lane_receiver(to))
+            .map(Timestamp::from_nanos);
+        let earliest = started.into_iter().chain(woken).min()?;
         debug_assert!(earliest >= self.now(), "eligible producer behind now");
-        earliest
+        Some(earliest)
+    }
+
+    /// The latest round boundary at which no frame sent in the round can be
+    /// due: the earliest time an attached machine can execute, plus latency.
+    /// Positive-budget runs start only at `Entry::next` or at an arrival in
+    /// the receiver's lane, so every send in the round is at or after the
+    /// earliest of them. Blocked machines that no frame wakes, paused and
+    /// exited machines impose none. An unrepresentable bound imposes none:
+    /// no such arrival exists.
+    fn causal_bound(&self) -> Option<Timestamp> {
+        self.earliest_producer(|id| self.execution.network.attached(id))?
             .as_nanos()
             .checked_add(self.execution.network.latency_ns())
             .map(Timestamp::from_nanos)
@@ -1895,11 +1887,7 @@ where
         setup.controller?;
         // Target acknowledgements carry an observed effect time too. Bound all
         // runnable producers so their effect+latency cannot precede commit.
-        self.execution
-            .machines
-            .iter()
-            .filter_map(Entry::next)
-            .min()?
+        self.earliest_producer(|_| true)?
             .as_nanos()
             .checked_add(setup.latency_ns)
             .map(Timestamp::from_nanos)
