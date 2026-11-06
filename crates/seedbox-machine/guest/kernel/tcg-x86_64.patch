@@ -1,0 +1,31 @@
+Seedbox changes to the standard x86-64 TCG kernel. build.sh applies them to
+the pristine source without fuzz.
+
+QEMU's emulated local APIC timer counts guest nanoseconds before its divider.
+lapic_timer_khz= states that rate on the command line, as tsc_early_khz= does
+for the TSC, so boot skips the busy-wait loop in calibrate_APIC_clock().
+
+--- a/arch/x86/kernel/apic/apic.c
++++ b/arch/x86/kernel/apic/apic.c
+@@ -2624,6 +2624,21 @@
+ }
+ early_param("nolapic_timer", parse_nolapic_timer);
+ 
++/*
++ * Seedbox: the local APIC timer's input clock in kHz, stated rather than
++ * calibrated. Under QEMU TCG it counts guest nanoseconds.
++ */
++static int __init parse_lapic_timer_khz(char *arg)
++{
++	unsigned int khz;
++
++	if (!arg || kstrtouint(arg, 0, &khz) || !khz)
++		return -EINVAL;
++	lapic_timer_period = div_u64((u64)khz * 1000, HZ);
++	return 0;
++}
++early_param("lapic_timer_khz", parse_lapic_timer_khz);
++
+ static int __init apic_set_verbosity(char *arg)
+ {
+ 	if (!arg)  {

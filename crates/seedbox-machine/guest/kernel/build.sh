@@ -3,9 +3,11 @@
 set -euo pipefail
 source_archive=$1
 fragment=$2
-output=$3
+changes=$3
+output=$4
 mkdir source build "$output"
 tar -xf "$source_archive" -C source --strip-components=1
+patch --batch --fuzz=0 -s -d source -p1 -i "$changes"
 make() { command make -s -C source O="$PWD/build" ARCH=x86_64 LLVM=1 HOSTCC="${HOST_CC:-cc}" HOSTCXX="${HOST_CXX:-c++}" HOSTLD="${HOST_LD:-ld}" "$@"; }
 make defconfig
 source/scripts/kconfig/merge_config.sh -m -O "$PWD/build" build/.config "$fragment"
