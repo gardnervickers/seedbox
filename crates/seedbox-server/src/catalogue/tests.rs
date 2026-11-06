@@ -32,8 +32,8 @@ fn refusal(action: serde_json::Value) -> String {
 #[test]
 fn submitted_programs_accept_disk_and_scheduler_faults_after_argument_checks() {
     for action in [
-        json!({"action":"disk_error","handle":"eio","machine":"db","op":"write","ppm":10}),
-        json!({"action":"disk_latency","handle":"slow","machine":"db","op":"any","latency_ns":20_000_000}),
+        json!({"action":"disk_error","handle":"eio","machine":"db","request":"write","ppm":10}),
+        json!({"action":"disk_latency","handle":"slow","machine":"db","request":"any","latency_ns":20_000_000}),
         json!({"action":"preempt","handle":"race","machine":"db","ppm":10_000}),
     ] {
         let program = resolve_program(&spec(action.clone())).unwrap();
@@ -45,7 +45,7 @@ fn submitted_programs_accept_disk_and_scheduler_faults_after_argument_checks() {
             .contains("preempt ppm")
     );
     assert!(refusal(
-        json!({"action":"disk_error","handle":"eio","machine":"nobody","op":"write","ppm":10})
+        json!({"action":"disk_error","handle":"eio","machine":"nobody","request":"write","ppm":10})
     )
     .contains("unknown machine"));
 }

@@ -205,7 +205,7 @@ impl Control {
         }
     }
 
-    /// Suspend `machine` at its `nth` disk request of kind `op` from now
+    /// Suspend `machine` at its `nth` disk request of kind `request` from now
     /// on, counted across boots, with that request held unwritten. It is
     /// one-shot; its hit is named `block_request`, so
     /// [`GuestWorld::on_break`] with that name serves it. Resuming lets the
@@ -213,12 +213,12 @@ impl Control {
     pub fn break_on_block_request(
         &mut self,
         machine: &str,
-        op: crate::control::DiskOp,
+        request: crate::control::DiskOp,
         nth: u64,
     ) -> Result<(), Error> {
         self.call(
             "break_on_block_request",
-            json!({ "target": { "machine": machine }, "request": op, "nth": nth }),
+            json!({ "target": { "machine": machine }, "request": request, "nth": nth }),
         )
         .map(drop)
     }
@@ -363,6 +363,20 @@ impl GuestWorld {
             .map(drop)
     }
 
+    /// Heal the fault the caller named `handle`, returning the world's reply.
+    /// A disk fault's reply holds its `matched` and `affected` counts, which
+    /// cover every boot it applied to; [`World::apply`] drops them.
+    pub fn heal(&mut self, handle: &str) -> Result<Map<String, Value>, Error> {
+        let Some(world) = self.handles.remove(handle) else {
+            return Err(Error(format!(
+                "no fault with handle {handle:?} is in force"
+            )));
+        };
+        // A refused heal names a handle the world no longer has in force;
+        // forget it either way rather than keep a stale name.
+        self.control.call("heal", json!({ "handle": world }))
+    }
+
     /// Apply an action that installs `handle`, refusing a name in use.
     fn install(&mut self, handle: &str, op: &str, arguments: Value) -> Result<(), Error> {
         if self.handles.contains_key(handle) {
@@ -490,12 +504,13 @@ impl World for GuestWorld {
             Action::DiskError {
                 handle,
                 machine,
-                op,
+                request,
                 ppm,
                 effect,
                 scope,
             } => {
-                let mut arguments = json!({"target": target(machine), "disk_op": op, "ppm": ppm});
+                let mut arguments =
+                    json!({"target": target(machine), "request": request, "ppm": ppm});
                 if !effect.is_eio() {
                     arguments["effect"] = json!(effect);
                 }
@@ -507,12 +522,13 @@ impl World for GuestWorld {
             Action::DiskLatency {
                 handle,
                 machine,
-                op,
+                request,
                 latency_ns,
                 jitter_ns,
             } => {
-                let mut arguments =
-                    json!({"target": target(machine), "disk_op": op, "latency_ns": latency_ns});
+                let mut arguments = json!({
+                    "target": target(machine), "request": request, "latency_ns": latency_ns
+                });
                 if *jitter_ns != 0 {
                     arguments["jitter_ns"] = json!(jitter_ns);
                 }
@@ -527,18 +543,7 @@ impl World for GuestWorld {
                 "preempt",
                 json!({"target": target(machine), "ppm": ppm}),
             ),
-            Action::Heal { handle } => {
-                let Some(world) = self.handles.remove(handle) else {
-                    return Err(Error(format!(
-                        "no fault with handle {handle:?} is in force"
-                    )));
-                };
-                // A refused heal names a handle the world no longer has in
-                // force; forget it either way rather than keep a stale name.
-                self.control
-                    .call("heal", json!({ "handle": world }))
-                    .map(drop)
-            }
+            Action::Heal { handle } => self.heal(handle).map(drop),
         }
     }
 }

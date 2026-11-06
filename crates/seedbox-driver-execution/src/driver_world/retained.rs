@@ -90,9 +90,18 @@ pub fn retain_prepared(
         },
     )
 }
-/// Store one host-path artifact and refer to it by content from now on.
+/// Store one host-path artifact and refer to it by content from now on. An
+/// `asset:` reference names an object the store must already hold in full.
 fn retain_artifact(artifact: &mut Artifact, store: &ContentStore) -> Result<ContentDigest> {
     artifact.validate().map_err(bad)?;
+    if artifact.artifact == format!("asset:{}", artifact.sha256) {
+        let digest = ContentDigest::try_from(artifact.sha256.clone())?;
+        if store.size(&digest)? != artifact.length {
+            return Err(bad("Driver artifact encoded length differs"));
+        }
+        store.verify(&digest)?;
+        return Ok(digest);
+    }
     // `put_file` hashes the source and only reads, never rewrites or syncs,
     // an object the store already holds; the result is the stored digest.
     let path = Path::new(&artifact.artifact);

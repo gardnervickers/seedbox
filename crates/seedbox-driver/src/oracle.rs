@@ -14,10 +14,10 @@
 //!
 //! Network operations use the Driver-owned canonical network policies.
 //! `disk_error`, `disk_latency` and `preempt` carry the control actions'
-//! arguments, checked by the same validators; the request kind a disk fault
-//! selects is `disk_op` here, because `op` names the operation. Whether the
-//! engine provides them is checked at admission. `break_on_block_request`
-//! suspends a machine at a request its device holds; its kind is `request`.
+//! arguments, checked by the same validators. Whether the engine provides
+//! them is checked at admission. `break_on_block_request` suspends a machine
+//! at a request its device holds. Every disk call names the request kind it
+//! selects `request`, as the actions do.
 //! Inspect
 //! results use a generic typed serialization seam so the complete projection
 //! (services, machines, active handles, network counters, optional triggers) can
@@ -117,20 +117,20 @@ pub(crate) enum Operation {
         target: Target,
         factor_permille: u64,
     },
-    /// Fail or corrupt the target's disk requests of kind `disk_op`.
+    /// Fail or corrupt the target's disk requests of kind `request`.
     DiskError {
         target: Target,
-        disk_op: DiskOp,
+        request: DiskOp,
         ppm: u64,
         #[serde(default)]
         effect: DiskEffect,
         #[serde(default)]
         scope: DiskScope,
     },
-    /// Complete the target's disk requests of kind `disk_op` late.
+    /// Complete the target's disk requests of kind `request` late.
     DiskLatency {
         target: Target,
-        disk_op: DiskOp,
+        request: DiskOp,
         latency_ns: u64,
         #[serde(default)]
         jitter_ns: u64,
@@ -354,12 +354,12 @@ impl Operation {
                     .map_err(OperationError::invalid)?;
             }
             Self::DiskError {
-                disk_op,
+                request,
                 ppm,
                 effect,
                 scope,
                 ..
-            } => validate_disk_error(*disk_op, *ppm, *effect, *scope)
+            } => validate_disk_error(*request, *ppm, *effect, *scope)
                 .map_err(OperationError::invalid)?,
             Self::DiskLatency {
                 latency_ns,

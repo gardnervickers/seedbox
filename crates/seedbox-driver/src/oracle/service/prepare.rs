@@ -88,7 +88,7 @@ impl Service {
                         if e == crate::oracle::handles::Error::DuplicateActive {
                             "duplicate active handle".into()
                         } else {
-                            format!("handle: {e:?}")
+                            format!("handle: {e}")
                         },
                     )
                 })?;
@@ -324,7 +324,7 @@ impl Service {
             if name.is_none() {
                 self.handles
                     .reserve()
-                    .map_err(|e| error(ErrorCode::InvalidState, format!("clock_drift: {e:?}")))?;
+                    .map_err(|e| error(ErrorCode::InvalidState, format!("clock_drift: {e}")))?;
             }
             return Err(error(
                 ErrorCode::InvalidState,
@@ -382,7 +382,7 @@ impl Service {
                 (target, change) => self.handles.network(target, change),
             }
         };
-        result.map_err(|e| error(ErrorCode::InvalidState, format!("{label}: {e:?}")))
+        result.map_err(|e| error(ErrorCode::InvalidState, format!("{label}: {e}")))
     }
     fn prepare_heal(
         &mut self,
@@ -390,7 +390,7 @@ impl Service {
         mode: AdmissionMode,
         plan: Result<ExecutionPlan, crate::oracle::handles::Error>,
     ) -> Result<HandleAdmission, PreparationError> {
-        let plan = plan.map_err(|e| error(ErrorCode::InvalidState, format!("heal: {e:?}")))?;
+        let plan = plan.map_err(|e| error(ErrorCode::InvalidState, format!("heal: {e}")))?;
         let subject = match Self::heal_subject(adapter, mode, &plan) {
             Ok(s) => s,
             Err(e) => {

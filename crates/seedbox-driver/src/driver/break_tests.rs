@@ -34,6 +34,8 @@ struct Guest {
     /// Every run: (now, upto, held on entry).
     runs: Vec<(u64, u64, bool)>,
     resumed: Vec<u64>,
+    /// The time of every accepted frame.
+    frames: Vec<u64>,
 }
 impl Machine for Guest {
     type Context = ();
@@ -60,6 +62,7 @@ impl Machine for Guest {
                 Request::SimulationReply { payload, .. } => {
                     self.replies.push(serde_json::from_slice(&payload).unwrap())
                 }
+                Request::ReceiveFrame { .. } => self.frames.push(now),
                 _ => {}
             }
         }
@@ -110,6 +113,34 @@ impl Machine for Guest {
 }
 
 fn build(oracle: Vec<(u64, Response)>, worker: Vec<(u64, Response)>) -> Driver<Guest> {
+    build_with(oracle, worker, false)
+}
+
+/// Both machines on a network with a 5 ns latency when `networked`.
+fn build_with(
+    oracle: Vec<(u64, Response)>,
+    worker: Vec<(u64, Response)>,
+    networked: bool,
+) -> Driver<Guest> {
+    let definition = |index: u8| {
+        let mut definition = fixture::definition(index.into());
+        if networked {
+            definition.network = Some(
+                crate::definition::NetworkInterface::new(
+                    crate::definition::MacAddress::new([2, 0, 0, 0, 0, index + 1]).unwrap(),
+                    std::net::Ipv4Addr::new(10, 0, 0, index + 1),
+                    24,
+                )
+                .unwrap(),
+            );
+        }
+        definition
+    };
+    let network = if networked {
+        crate::driver::NetworkConfig::new(Duration::from_nanos(5), Duration::ZERO, 0).unwrap()
+    } else {
+        crate::driver::NetworkConfig::default()
+    };
     let mut scripts = vec![oracle, worker].into_iter();
     let mut driver = Driver::new_seeded(
         at(0),
@@ -117,10 +148,10 @@ fn build(oracle: Vec<(u64, Response)>, worker: Vec<(u64, Response)>) -> Driver<G
         1,
         7,
         || Ok(()),
-        fixture::definition(0),
-        vec![fixture::definition(1)],
+        definition(0),
+        vec![definition(1)],
         vec![],
-        crate::driver::NetworkConfig::default(),
+        network,
         move |_| {
             Ok(Guest {
                 script: scripts.next().unwrap().into(),
@@ -238,6 +269,31 @@ fn declared_hit_suspends_until_the_oracle_resumes_it() {
         driver.checkpoint(),
         Err(Error::InvalidCheckpoint(_))
     ));
+}
+
+#[test]
+fn a_suspended_receiver_admits_frames_at_arrival_without_a_budget() {
+    let frame = Response::TransmitFrame {
+        bytes: vec![2, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 1, 0x88, 0xb5, 9],
+    };
+    let mut driver = build_with(
+        vec![
+            (1, call(1, DECLARE)),
+            (30, frame),
+            (50, call(2, r#""op":"resume_break","break_id":1"#)),
+        ],
+        vec![(25, hit("leader"))],
+        true,
+    );
+    run_to(&mut driver, 100);
+    let worker = guest(&driver, 1);
+    assert_eq!(worker.frames, [35]);
+    assert!(worker
+        .runs
+        .iter()
+        .filter(|(_, _, held)| *held)
+        .all(|(now, upto, _)| now == upto));
+    assert_eq!(worker.resumed, [50]);
 }
 
 #[test]

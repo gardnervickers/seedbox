@@ -13,7 +13,7 @@ faults:
   - {kind: crash, downtime_ns: {min: 500000000, max: 3000000000}}
   - {kind: clock_skew, duration_ns: {min: 1000000000, max: 5000000000},
      max_offset_ns: 30000000000}
-  - {kind: disk_latency, op: flush, targets: [db1], duration_ns: {min: 1000000000, max: 5000000000},
+  - {kind: disk_latency, request: flush, targets: [db1], duration_ns: {min: 1000000000, max: 5000000000},
      latency_ns: {min: 1000000, max: 50000000}}
 "#;
 
@@ -79,7 +79,7 @@ fn entries_are_refused_with_their_actions_own_errors() {
             action(control::validate_throttle(10)),
         ),
         (
-            json!({"kind": "disk_error", "op": "flush", "ppm": 10, "effect": "corrupt",
+            json!({"kind": "disk_error", "request": "flush", "ppm": 10, "effect": "corrupt",
                    "duration_ns": range}),
             action(control::validate_disk_error(
                 DiskOp::Flush,
@@ -89,7 +89,7 @@ fn entries_are_refused_with_their_actions_own_errors() {
             )),
         ),
         (
-            json!({"kind": "disk_error", "op": "write", "ppm": 0, "duration_ns": range}),
+            json!({"kind": "disk_error", "request": "write", "ppm": 0, "duration_ns": range}),
             action(control::validate_disk_error(
                 DiskOp::Write,
                 0,
@@ -98,7 +98,7 @@ fn entries_are_refused_with_their_actions_own_errors() {
             )),
         ),
         (
-            json!({"kind": "disk_latency", "op": "any", "duration_ns": range,
+            json!({"kind": "disk_latency", "request": "any", "duration_ns": range,
                    "latency_ns": {"min": 1, "max": 2}}),
             action(control::validate_disk_latency(1, 0)),
         ),
@@ -150,14 +150,14 @@ fn entries_are_refused_with_their_actions_own_errors() {
     with(json!({"kind": "partition", "duration_ns": range, "from": ["db1", "client"]})).unwrap();
     assert_eq!(
         with(
-            json!({"kind": "disk_error", "op": "write", "ppm": 10, "duration_ns": range,
+            json!({"kind": "disk_error", "request": "write", "ppm": 10, "duration_ns": range,
                     "targets": ["db1", "client"]})
         )
         .unwrap_err()
         .0,
         "fault profile disk_error: targets must be profile targets, not \"client\""
     );
-    let disk = json!({"kind": "disk_error", "op": "write", "ppm": 1_000_000,
+    let disk = json!({"kind": "disk_error", "request": "write", "ppm": 1_000_000,
                       "scope": "data", "duration_ns": range});
     with(disk.clone()).unwrap();
     let parsed: Fault = serde_json::from_value(disk.clone()).unwrap();
@@ -170,8 +170,8 @@ fn entries_are_refused_with_their_actions_own_errors() {
             ..
         }
     ));
-    // As in the actions, the disk op and the error rate are required.
-    for field in ["op", "ppm"] {
+    // As in the actions, the request kind and the error rate are required.
+    for field in ["request", "ppm"] {
         let mut partial = disk.clone();
         partial.as_object_mut().unwrap().remove(field);
         let error = serde_json::from_value::<Fault>(partial)

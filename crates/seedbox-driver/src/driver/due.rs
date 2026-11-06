@@ -1,6 +1,8 @@
 //! Zero-time application of timeline items due at the current barrier:
-//! control events, effect plans, machine inputs, driver events, then
-//! timer wakeups.
+//! control events, effect plans, machine inputs and driver events, then
+//! arriving frames, then due timers. A running machine takes its frames and
+//! due timer at the start of its next run, which starts at the barrier; a
+//! later item for it gives it a zero-budget run first.
 use super::*;
 
 /// The dispatch check of a due effect plan: `None` when an earlier terminal
@@ -156,7 +158,7 @@ where
                 return Ok(None);
             }
         }
-        self.wake_due_timers(now)?;
+        self.defer_due_timers(now);
         Ok(None)
     }
 
@@ -690,6 +692,17 @@ where
             healed,
         } = item;
         let cause = accepted_fault.map_or(Cause::Host, |fault| Cause::Fault(FaultId(fault)));
+        let target = match &scheduled {
+            Scheduled::Control(_) | Scheduled::PropertyReply { .. } => unreachable!(),
+            Scheduled::Input { id, .. }
+            | Scheduled::Driver(
+                DriverEvent::Pause(id)
+                | DriverEvent::Resume(id)
+                | DriverEvent::SetExecution { machine: id, .. }
+                | DriverEvent::SetClockRate { machine: id, .. },
+            ) => *id,
+        };
+        self.admit_waiting(target, now)?;
         let mechanical = match scheduled {
             Scheduled::Control(_) | Scheduled::PropertyReply { .. } => unreachable!(),
             Scheduled::Input { id, input } => {
@@ -745,6 +758,38 @@ where
             self.control_plans(plans)?;
         }
         self.commit_boundary()
+    }
+
+    /// Give a running machine that still owes zero-time work at `now` a
+    /// zero-budget admission run: frames that arrived earlier at `now`, or a
+    /// timer that came due at `now`. A later item due at `now` then follows
+    /// them, as it follows their arrival.
+    fn admit_waiting(&mut self, id: MachineId, now: Timestamp) -> Result<(), Error<M::Error>> {
+        let entry = &self.execution.machines[id.0];
+        if entry.lifecycle.paused() || !entry.waiting() {
+            return Ok(());
+        }
+        if let Err(error) = self.run_batch(&[id], now) {
+            self.uncertain_failure();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Timers due at `now` come due after every item and frame due at `now`.
+    /// A running machine takes its timer at the start of its next run, which
+    /// starts at `now`, so it becomes runnable here and keeps the pending
+    /// timer until then.
+    fn defer_due_timers(&mut self, now: Timestamp) {
+        for entry in &mut self.execution.machines {
+            if !entry.lifecycle.paused()
+                && matches!(entry.stopped,
+                    StopReason::Blocked { deadline: Some(at), .. } if at == now)
+            {
+                entry.stopped = StopReason::BoundaryReached;
+                entry.reached = now;
+            }
+        }
     }
 
     /// Queue a due machine request and give it a zero-budget admission run.
@@ -935,31 +980,5 @@ where
             DriverEvent::Resume(_) => {}
         }
         Ok(applied)
-    }
-
-    /// Give every running machine whose timer is due at `now` a zero-budget
-    /// run and commit.
-    fn wake_due_timers(&mut self, now: Timestamp) -> Result<(), Error<M::Error>> {
-        let mut waking = Vec::new();
-        for index in 0..self.execution.machines.len() {
-            let stopped = self.execution.machines[index].stopped;
-            if self.execution.machines[index].lifecycle.paused()
-                || matches!(stopped, StopReason::Exited { .. })
-            {
-                continue;
-            }
-            if matches!(stopped,
-                StopReason::Blocked { deadline: Some(at), .. } if at == now)
-            {
-                // Let the machine observe the new clock and deliver its timer,
-                // without executing beyond this barrier.
-                waking.push(MachineId(index));
-            }
-        }
-        self.run_batch(&waking, now)?;
-        if !waking.is_empty() {
-            self.commit_boundary()?;
-        }
-        Ok(())
     }
 }

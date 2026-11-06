@@ -308,44 +308,44 @@ where
     M::Context: 'static,
     M::Error: Send + 'static,
 {
-    /// Same dispatch owners/order as apply_due: timeline, frames, eligible timers.
-    /// CPU-runnable machines alone are not zero-time work.
+    /// Same dispatch owners/order as apply_due: timeline, then frames.
+    /// Runnable machines are not zero-time work, including those whose timer
+    /// is due now or whose arrived frames wait for their next run.
     fn has_due_work(&self) -> bool {
         let now = self.now();
-        self.execution.events.first_key_value().is_some_and(|(at, events)| *at <= now && !events.is_empty())
-            || self.execution.network.next_arrival().is_some_and(|at| at <= now.as_nanos())
-            || self.execution.machines.iter().any(|entry| {
-                !entry.lifecycle.paused()
-                    && matches!(entry.stopped, StopReason::Blocked { deadline: Some(at), .. } if at == now)
-            })
+        self.execution
+            .events
+            .first_key_value()
+            .is_some_and(|(at, events)| *at <= now && !events.is_empty())
+            || self
+                .execution
+                .network
+                .next_arrival()
+                .is_some_and(|at| at <= now.as_nanos())
     }
 
+    /// Apply due work, including same-time work that its zero-budget
+    /// admission runs generate, without positive budgets or pacing calls.
     fn drain_due_now(&mut self, host_now: Instant) -> Result<DueOutcome, Error<M::Error>> {
-        loop {
-            match self.apply_due_mode(host_now, true)? {
-                Some(super::due::Hold::Fault(fault)) => {
-                    return Ok(DueOutcome::BeforeFault {
-                        at: self.now(),
-                        fault: Box::new(fault),
-                    })
-                }
-                Some(super::due::Hold::Machine(request)) => {
-                    return Ok(DueOutcome::NeedsMachine {
-                        at: self.now(),
-                        request: Box::new(request),
-                    })
-                }
-                None => {}
+        match self.apply_due_mode(host_now, true)? {
+            Some(super::due::Hold::Fault(fault)) => {
+                return Ok(DueOutcome::BeforeFault {
+                    at: self.now(),
+                    fault: Box::new(fault),
+                })
             }
-            if let Some((at, reason)) = self.execution.finished {
-                return Ok(DueOutcome::Finished { at, reason });
+            Some(super::due::Hold::Machine(request)) => {
+                return Ok(DueOutcome::NeedsMachine {
+                    at: self.now(),
+                    request: Box::new(request),
+                })
             }
-            // A timer's zero-budget outputs can generate new same-time control
-            // work. Drain that too, without positive budgets or pacing calls.
-            if !self.has_due_work() {
-                return Ok(DueOutcome::Applied { at: self.now() });
-            }
+            None => {}
         }
+        if let Some((at, reason)) = self.execution.finished {
+            return Ok(DueOutcome::Finished { at, reason });
+        }
+        Ok(DueOutcome::Applied { at: self.now() })
     }
 
     fn input_rejection(error: crate::oracle::OperationError) -> InputRejection {

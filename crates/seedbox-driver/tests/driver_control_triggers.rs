@@ -326,7 +326,10 @@ fn split_union_marker_admits_stop_at_discovery_commit_and_acknowledges_once() {
         );
         assert!(!peer.stopped);
         assert!(peer.acknowledgments.is_empty());
+        // The ACK is due at 33: the peer publishes it in its run from there.
         world.advance(33);
+        assert!(!world.peer().stopped);
+        world.advance(40);
         let peer = world.peer();
         assert!(peer.stopped);
         assert_eq!(peer.acknowledgments, [(command, 33)]);
@@ -334,7 +337,6 @@ fn split_union_marker_admits_stop_at_discovery_commit_and_acknowledges_once() {
             && matches!(event.payload, Response::CommandAcknowledged { id, result: CommandResult::Completed } if id == command)));
         // The last byte is the only remaining work: a fired trigger must not
         // keep the driver runnable toward its obsolete timeout at 110.
-        world.advance(40);
         assert_eq!(world.step(50), StepOutcome::Blocked { at: at(42) });
         assert_eq!(
             world.peer().commands,
@@ -508,6 +510,9 @@ fn accepted_peer_effect_finishes_after_its_caller_exits() {
         .unwrap();
     world.advance(11);
     world.advance(13);
+    // The ACK is due at 13: the peer publishes it in its run from there. The
+    // pending stop keeps that round going to its quantum end.
+    assert_eq!(world.step(100), StepOutcome::Blocked { at: at(20) });
     assert!(world.peer().stopped);
     assert_eq!(world.peer().acknowledgments, [(command, 13)]);
     assert!(world
@@ -515,7 +520,7 @@ fn accepted_peer_effect_finishes_after_its_caller_exits() {
         .with_barrier(|b| Ok(b.machine(world.caller)?.replies.is_empty()))
         .unwrap());
     for _ in 0..3 {
-        assert_eq!(world.step(100), StepOutcome::Blocked { at: at(13) });
+        assert_eq!(world.step(100), StepOutcome::Blocked { at: at(20) });
     }
     assert_eq!(world.peer().commands, [(command, 10)]);
 }
