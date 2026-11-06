@@ -46,7 +46,7 @@ fn prepared_boot_cache_invalidates_every_machine_input() {
     let boot = TestBoot::new(&preparer.runtime, epoch, blocks).unwrap();
     let launch = launch();
     let configs = BTreeMap::from([("/config".into(), b"one".to_vec())]);
-    let fs = filesystem(b"application");
+    let fs = store.put(&filesystem(b"application")).unwrap();
     let request = || OciBoot {
         name: "oracle",
         filesystem: fs.clone(),
@@ -84,7 +84,7 @@ fn prepared_boot_cache_invalidates_every_machine_input() {
     miss(
         &cache,
         OciBoot {
-            filesystem: filesystem(b"APPLICATION"),
+            filesystem: store.put(&filesystem(b"APPLICATION")).unwrap(),
             ..request()
         },
     );
@@ -240,9 +240,10 @@ fn prepared_boot_cache_requires_verified_complete_content() {
     .unwrap();
     let launch = launch();
     let configs = BTreeMap::new();
+    // Each preparation stores its filesystem view before asking for a boot.
     let request = || OciBoot {
         name: "oracle",
-        filesystem: filesystem(b"application"),
+        filesystem: store.put(&filesystem(b"application")).unwrap(),
         launch: &launch,
         simulation: &simulation,
         configs: &configs,
@@ -258,7 +259,8 @@ fn prepared_boot_cache_requires_verified_complete_content() {
         fs::remove_file(root.path().join("store/sha256").join(digest.hex())).unwrap();
         let before = renders.get();
         assert_eq!(cache.prepare(request(), &store, render).unwrap(), expected);
-        assert_eq!(renders.get(), before + 1);
+        // A view stored again completes the cached boot; a lost archive renders.
+        assert_eq!(renders.get(), before + usize::from(digest == &expected.0));
     }
     let records = root.path().join("store/records");
     let record = fs::read_dir(&records)
@@ -298,24 +300,15 @@ impl ImageTransport for Transport {
         let config = store.put(&serde_json::to_vec(&serde_json::json!({
             "os": "linux", "architecture": architecture.oci_name(), "config": {"Cmd": ["/app"]},
         }))?)?;
-        let archive = directory.join("rootfs.tar");
-        let mut tar = tar::Builder::new(fs::File::create(&archive)?);
-        let mut header = tar::Header::new_gnu();
-        header.set_uid(0);
-        header.set_gid(0);
-        header.set_mtime(0);
-        header.set_mode(0o755);
-        header.set_size(11);
-        tar.append_data(&mut header, "rootfs/app", b"application".as_slice())?;
-        tar.finish()?;
+        let view = store.put(&filesystem(b"application"))?;
         Ok(ImportedImage {
             image: crate::execution::PreparedImage {
                 manifest: store.put(b"manifest")?,
                 config,
-                layers: vec![store.put_file(&archive)?],
+                layers: vec![view.clone()],
                 launch: launch(),
             },
-            rootfs: RootFilesystem::Archive(archive),
+            rootfs: RootFilesystem::Stored(view),
             auxiliary: BTreeMap::new(),
             provenance: BTreeMap::new(),
         })
@@ -456,9 +449,10 @@ fn prepared_boot_cache_matches_production_pv_and_tcg_archives() {
             size_bytes: None,
         });
         let configs = BTreeMap::from([("/config".into(), b"configuration".to_vec())]);
+        let view = store.put(&filesystem(b"application")).unwrap();
         let request = || OciBoot {
             name: "oracle",
-            filesystem: filesystem(b"application"),
+            filesystem: view.clone(),
             launch: &launch,
             simulation: &simulation,
             configs: &configs,

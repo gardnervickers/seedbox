@@ -13,7 +13,7 @@
 //! u64-length UTF-8; booleans/options use only 0/1; states use 0=Ready,
 //! 1=Blocked(optional deadline), 2=Shutdown, 3=Crashed. Unknown tags, reserved
 //! bits and trailing bytes reject. No host paths or executable identity occur.
-use super::{Boot, ExitReason, Manifest, Snapshot, State, Timestamp, COMMAND_LINE_SIZE};
+use super::{Boot, ExitReason, Initramfs, Manifest, Snapshot, State, Timestamp, COMMAND_LINE_SIZE};
 use seedbox_machine::definition::{DiskImage, MacAddress};
 use seedbox_machine::snapshot::{reserve, CodecError, DecodeLimits, Reader, Result, Writer};
 use std::io::{Read, Write};
@@ -123,7 +123,13 @@ fn boot(boot: &Boot) -> Result<BootParts<'_>> {
             firmware,
             command_line,
             epoch_seconds,
-        } => Ok((kernel, initramfs, firmware, command_line, *epoch_seconds)),
+        } => match initramfs {
+            Initramfs::Bytes(initramfs) => {
+                Ok((kernel, initramfs, firmware, command_line, *epoch_seconds))
+            }
+            // TcgMachine::snapshot reads a retained initramfs file.
+            Initramfs::File { .. } => Err(invalid("unread initramfs file")),
+        },
         #[cfg(any(test, feature = "test-support"))]
         Boot::Program(_) => Err(invalid("unsupported persisted boot kind")),
     }
@@ -390,7 +396,7 @@ impl Snapshot {
             manifest: Manifest {
                 boot: Boot::Linux {
                     kernel: [].into(),
-                    initramfs: Default::default(),
+                    initramfs: Vec::new().into(),
                     firmware: [].into(),
                     command_line,
                     epoch_seconds,

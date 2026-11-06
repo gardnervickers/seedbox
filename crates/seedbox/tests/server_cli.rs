@@ -139,6 +139,8 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
     );
     assert!(simulation.spec.seed.is_some());
     assert!(simulation.options.start_paused);
+    // Omitted --machine-workers defaults to one per machine, at least one.
+    assert_eq!(simulation.options.machine_workers, Some(1));
     let described = cli(root)
         .args([
             "show",
