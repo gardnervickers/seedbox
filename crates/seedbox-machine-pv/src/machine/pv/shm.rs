@@ -6,16 +6,19 @@
 //! through two byte rings in the region, one per direction. The pipes carry
 //! only wakeups, and their EOF still means the peer exited.
 //!
-//! A side waiting for bytes or room spins for a bounded time, then marks that
-//! wait in the ring and blocks reading one byte from its pipe. A side that
+//! A side waiting for bytes or room may spin for a bounded time, then marks
+//! that wait in the ring and blocks reading one byte from its pipe. A side that
 //! publishes bytes or frees room and finds the matching mark clears it and
 //! writes that byte, so every sleep takes exactly one wakeup.
 // While the peer answers within the spin, a call costs a cache-line handoff
 // instead of two cross-process wakeups and several pipe syscalls. The spin
 // never yields: a thread that yields without marking its wait is owed no
 // wakeup, so on a busy host it can stay descheduled long after its peer
-// publishes, while a thread asleep on its pipe wakes when the byte lands. On a
-// host with no idle core the bounded spin delays its peer by at most SPIN.
+// publishes, while a thread asleep on its pipe wakes when the byte lands.
+// A spin pays only while the peer runs on another core. On a host with no idle
+// core the spinner holds the core its peer needs and its spins run out, so
+// after FUTILE such spins in a row a side sleeps at once, spinning again only
+// on every PROBE-th wait to notice a core coming free.
 use super::protocol::{self, Response};
 use std::{
     io::{self, Read, Write},
@@ -39,6 +42,10 @@ pub(super) const CAPACITY: u64 = 256 << 10;
 /// How long a waiting side spins before it sleeps. Most waits for a guest run
 /// or for the client's next call end within it.
 const SPIN: Duration = Duration::from_micros(200);
+/// Spins in a row that ran out before a side stops spinning, and how often a
+/// side that stopped spins anyway.
+const FUTILE: u32 = 4;
+const PROBE: u64 = 64;
 /// Control words, each on its own 128-byte line, fill the first 16 KiB. The
 /// request ring follows, then the response ring.
 const LINE: usize = 128;
@@ -278,6 +285,9 @@ pub(crate) struct Stream<R, W> {
     sleep: R,
     wake: W,
     spin: Duration,
+    /// Waits so far, and spins in a row that ran out.
+    waits: u64,
+    futile: u32,
     /// Incoming bytes read, and the peer's written position as last seen.
     read: u64,
     readable: u64,
@@ -297,6 +307,8 @@ impl<R: Read, W: Write> Stream<R, W> {
             sleep,
             wake,
             spin,
+            waits: 0,
+            futile: 0,
             read: 0,
             readable: 0,
             written: 0,
@@ -308,23 +320,28 @@ impl<R: Read, W: Write> Stream<R, W> {
     pub(super) fn client(region: Region, sleep: R, wake: W) -> Self {
         Self::new(region, Side::Client, sleep, wake, SPIN)
     }
-    /// Wait until control word `position` differs from `seen`: spin, then
-    /// set the `mark` word and sleep on this side's pipe. Returns the new
+    /// Wait until control word `position` differs from `seen`: perhaps spin,
+    /// then set the `mark` word and sleep on this side's pipe. Returns the new
     /// position, or `None` if the peer exited without moving it.
     fn wait(&mut self, position: usize, seen: u64, mark: usize) -> io::Result<Option<u64>> {
         let position = self.region.word(position);
-        let start = Instant::now();
-        loop {
-            for _ in 0..64 {
-                let now = position.load(SeqCst);
-                if now != seen {
-                    return Ok(Some(now));
+        self.waits += 1;
+        if self.futile < FUTILE || self.waits.is_multiple_of(PROBE) {
+            let start = Instant::now();
+            loop {
+                for _ in 0..64 {
+                    let now = position.load(SeqCst);
+                    if now != seen {
+                        self.futile = 0;
+                        return Ok(Some(now));
+                    }
+                    std::hint::spin_loop();
                 }
-                std::hint::spin_loop();
+                if start.elapsed() >= self.spin {
+                    break;
+                }
             }
-            if start.elapsed() >= self.spin {
-                break;
-            }
+            self.futile = self.futile.saturating_add(1);
         }
         let mark = self.region.word(mark);
         loop {

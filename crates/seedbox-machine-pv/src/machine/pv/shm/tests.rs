@@ -123,6 +123,45 @@ fn a_closed_peer_ends_reads_and_breaks_writes() {
 }
 
 #[test]
+fn a_side_whose_spins_run_out_spins_again_only_on_probes() {
+    // The peer publishes only once the reader marks its wait, so every spin
+    // runs out.
+    bounded("each wait whose spin runs out", || {
+        let (mut client, mut worker) = pair(64, Duration::ZERO);
+        let waits = PROBE as u32;
+        let peer = std::thread::spawn(move || {
+            let guard = seedbox_test_time::HangGuard::new("reader sleeps", Duration::from_secs(60));
+            for _ in 0..waits {
+                let mark = worker.region.word(Ring::Responses.word(READER_ASLEEP));
+                guard
+                    .wait_for(|| (mark.load(SeqCst) != 0).then_some(()))
+                    .unwrap();
+                worker.write_all(&[0]).unwrap();
+                worker.flush().unwrap();
+            }
+        });
+        let futile: Vec<u32> = (0..waits)
+            .map(|_| {
+                assert_eq!(client.read(&mut [0]).unwrap(), 1);
+                client.futile
+            })
+            .collect();
+        peer.join().unwrap();
+        // FUTILE spins run out; then only the PROBE-th wait spins.
+        let expected: Vec<u32> = (1..=waits)
+            .map(|wait| {
+                if wait == waits {
+                    FUTILE + 1
+                } else {
+                    wait.min(FUTILE)
+                }
+            })
+            .collect();
+        assert_eq!(futile, expected);
+    })
+}
+
+#[test]
 fn bytes_a_peer_published_before_exiting_stay_readable() {
     // The peer publishes and claims the sleeping reader's mark, then exits
     // before its wakeup byte: the reader still gets the bytes, then EOF.
