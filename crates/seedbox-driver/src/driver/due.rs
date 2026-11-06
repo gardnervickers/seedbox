@@ -1,7 +1,8 @@
 //! Zero-time application of timeline items due at the current barrier:
 //! control events, effect plans, machine inputs and driver events, then
-//! arriving frames. Due timers and frames left for a running machine are
-//! taken by its next run, which starts at the barrier.
+//! arriving frames, then due timers. A running machine takes its frames and
+//! due timer at the start of its next run, which starts at the barrier; a
+//! later item for it gives it a zero-budget run first.
 use super::*;
 
 /// The dispatch check of a due effect plan: `None` when an earlier terminal
@@ -107,7 +108,7 @@ where
         let now = self.now();
         // Keep the front event until its effect is admitted, including across
         // a pre-fault stop. Driver controls and requests share one FIFO timeline.
-        // Frames due now follow every timeline item due now.
+        // Frames due now follow every timeline item due now, then timers.
         loop {
             while let Some(scheduled) = self.due_front(now) {
                 // Facts of the previous item that committed no barrier belong to
@@ -157,6 +158,7 @@ where
                 return Ok(None);
             }
         }
+        self.defer_due_timers(now);
         Ok(None)
     }
 
@@ -700,7 +702,7 @@ where
                 | DriverEvent::SetClockRate { machine: id, .. },
             ) => *id,
         };
-        self.admit_frames(target, now)?;
+        self.admit_waiting(target, now)?;
         let mechanical = match scheduled {
             Scheduled::Control(_) | Scheduled::PropertyReply { .. } => unreachable!(),
             Scheduled::Input { id, input } => {
@@ -758,17 +760,13 @@ where
         self.commit_boundary()
     }
 
-    /// Give frames that arrived earlier at `now` and still wait for a running
-    /// machine's next run a zero-budget admission run, so that a later item
-    /// due at `now` follows them, as it follows their arrival.
-    fn admit_frames(&mut self, id: MachineId, now: Timestamp) -> Result<(), Error<M::Error>> {
+    /// Give a running machine that still owes zero-time work at `now` a
+    /// zero-budget admission run: frames that arrived earlier at `now`, or a
+    /// timer that came due at `now`. A later item due at `now` then follows
+    /// them, as it follows their arrival.
+    fn admit_waiting(&mut self, id: MachineId, now: Timestamp) -> Result<(), Error<M::Error>> {
         let entry = &self.execution.machines[id.0];
-        if entry.lifecycle.paused()
-            || !entry
-                .inbox
-                .iter()
-                .any(|input| matches!(input.payload, Request::ReceiveFrame { .. }))
-        {
+        if entry.lifecycle.paused() || !entry.waiting() {
             return Ok(());
         }
         if let Err(error) = self.run_batch(&[id], now) {
@@ -776,6 +774,22 @@ where
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Timers due at `now` come due after every item and frame due at `now`.
+    /// A running machine takes its timer at the start of its next run, which
+    /// starts at `now`, so it becomes runnable here and keeps the pending
+    /// timer until then.
+    fn defer_due_timers(&mut self, now: Timestamp) {
+        for entry in &mut self.execution.machines {
+            if !entry.lifecycle.paused()
+                && matches!(entry.stopped,
+                    StopReason::Blocked { deadline: Some(at), .. } if at == now)
+            {
+                entry.stopped = StopReason::BoundaryReached;
+                entry.reached = now;
+            }
+        }
     }
 
     /// Queue a due machine request and give it a zero-budget admission run.

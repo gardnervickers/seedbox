@@ -611,13 +611,11 @@ fn due_frames_are_refused_work_but_runnable_machines_are_not() {
         d.step(at(100)).unwrap(),
         StepOutcome::BarrierReached { at: at(15) }
     );
-    assert_eq!(
-        d.execution.machines[1].stopped,
-        StopReason::Blocked {
-            reached: at(0),
-            deadline: Some(at(15))
-        }
-    );
+    // Its next run starts at the deadline and takes the timer there.
+    let entry = &d.execution.machines[1];
+    assert_eq!(entry.stopped, StopReason::BoundaryReached);
+    assert_eq!(entry.reached, at(15));
+    assert!(entry.timer.is_some());
     let before = internal(&d);
     assert!(d
         .with_barrier(|b| b.prepare_input(key("live"), pause()))

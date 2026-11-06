@@ -509,6 +509,30 @@ fn a_later_same_time_item_for_a_receiver_follows_its_frames() {
 }
 
 #[test]
+fn final_admission_takes_frames_waiting_at_the_barrier() {
+    let (mut driver, log) = simple(
+        10 * MS,
+        NetworkConfig::default(),
+        vec![spec(Some(1)).send(0, frame(mac(2), 1)), spec(Some(2))],
+    );
+    assert_eq!(
+        barriers(&mut driver, MS).last(),
+        Some(&StepOutcome::BarrierReached { at: at(MS) })
+    );
+    assert!(received(&log).is_empty());
+    let commits = driver.execution.boundary_index;
+    driver.admit_waiting_work().unwrap();
+    // One zero-budget run at the arrival admits it, and its round commits.
+    assert_eq!(received(&log), [(1, MS, 1)]);
+    assert_eq!(log.lock().unwrap().runs.last(), Some(&(1, MS, MS)));
+    assert_eq!(driver.execution.boundary_index, commits + 1);
+    let runs = log.lock().unwrap().runs.len();
+    driver.admit_waiting_work().unwrap();
+    assert_eq!(log.lock().unwrap().runs.len(), runs);
+    assert_eq!(driver.execution.boundary_index, commits + 1);
+}
+
+#[test]
 fn simultaneous_sends_arrive_together_in_sender_order() {
     let (mut driver, log) = simple(
         10 * MS,

@@ -70,9 +70,10 @@ memory checks and retention of the complete replay closure still run on every pr
 
 ## Same-time controls
 
-Committed outputs precede due timeline items, then arriving frames; same-time items are FIFO.
-A running machine takes frames and a timer due at the boundary in its next run, which starts there.
-A paused or suspended receiver, or one with a later item due then, admits its frames in a zero-budget run.
+Committed outputs precede due timeline items, then frames, then timer wakeups; same-time items are FIFO.
+A running machine takes those frames and its due timer at the start of its next run, which starts there.
+A paused or suspended receiver admits frames in a zero-budget run. So does a running machine, with its
+due timer, before a later item due then for it and before final evidence is read.
 A trigger found during commit can admit policy before a prequeued host input due at that same boundary.
 Plans created by admission append behind existing items; delayed guest replies belong only to the calling boot.
 The [Driver](../crates/seedbox-driver/src/driver.rs) assigns fault IDs at admission, never for future overrides.
@@ -82,6 +83,7 @@ The [Driver](../crates/seedbox-driver/src/driver.rs) assigns fault IDs at admiss
 Partitions survive reboots and stack by handle, but do not retract frames already routed.
 A frame stamped T by the round ending at T routes before a partition/heal due at T.
 Admission-run output after that effect sees the changed policy; zero-budget receive can wake a paused machine.
+A blocked receiver is runnable from a frame's arrival, so rounds end within one latency even if it does not wake.
 The [network policy](../crates/seedbox-driver/src/driver/network.rs) checks cuts before random draws and FIFO reservation.
 
 ## Simulated DNS

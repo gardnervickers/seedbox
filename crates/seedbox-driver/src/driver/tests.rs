@@ -324,16 +324,11 @@ fn idle_jump_respects_limit_and_delivers_timer_at_exact_boundary() {
         driver.step(at(50)).unwrap(),
         StepOutcome::BarrierReached { at: at(22) }
     );
-    // The timer due at the boundary is left for the next run, which starts there.
+    // The timer due at the boundary fires at the start of the next run, which
+    // starts there, without a zero-budget wake.
     let calls = driver
         .with_barrier(|barrier| {
-            assert_eq!(
-                barrier.stopped(id)?,
-                StopReason::Blocked {
-                    reached: at(2),
-                    deadline: Some(at(22))
-                }
-            );
+            assert_eq!(barrier.stopped(id)?, StopReason::BoundaryReached);
             Ok(barrier.machine(id)?.log.lock().unwrap().len())
         })
         .unwrap();
@@ -361,6 +356,73 @@ fn idle_jump_respects_limit_and_delivers_timer_at_exact_boundary() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn a_later_same_time_item_follows_a_timer_due_at_the_barrier() {
+    // Scheduled at a timer deadline after a step ends there, a crash finds the
+    // timer still waiting for the machine's next run. The machine serves it
+    // first, in a zero-budget run, as when the barrier woke it.
+    let mut driver = build(
+        0,
+        &[
+            &[Op::Park],
+            &[Op::Work(2), Op::Sleep(20), Op::Work(1), Op::Exit],
+        ],
+    );
+    let id = ids(&mut driver)[1];
+    assert_eq!(
+        driver.step(at(22)).unwrap(),
+        StepOutcome::BarrierReached { at: at(22) }
+    );
+    schedule(&mut driver, 22, Action::Crash(Target::Machine(id))).unwrap();
+    driver.step(at(50)).unwrap();
+    driver
+        .with_barrier(|barrier| {
+            assert_eq!(
+                barrier.stopped(id)?,
+                StopReason::Exited {
+                    reached: at(22),
+                    reason: ExitReason::Crashed
+                }
+            );
+            assert_eq!(
+                *barrier.machine(id)?.log.lock().unwrap(),
+                [(1, 0, 22), (1, 22, 22)]
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn final_admission_serves_a_timer_due_at_the_barrier_once() {
+    let mut driver = build(
+        0,
+        &[
+            &[Op::Park],
+            &[Op::Work(2), Op::Sleep(20), Op::Work(1), Op::Exit],
+        ],
+    );
+    let id = ids(&mut driver)[1];
+    assert_eq!(
+        driver.step(at(22)).unwrap(),
+        StepOutcome::BarrierReached { at: at(22) }
+    );
+    let log = |driver: &mut Driver<TestMachine>| {
+        driver
+            .with_barrier(|barrier| Ok(barrier.machine(id)?.log.lock().unwrap().clone()))
+            .unwrap()
+    };
+    assert_eq!(log(&mut driver), [(1, 0, 22)]);
+    let commits = driver.execution.boundary_index;
+    driver.admit_waiting_work().unwrap();
+    assert_eq!(log(&mut driver), [(1, 0, 22), (1, 22, 22)]);
+    assert_eq!(driver.execution.boundary_index, commits + 1);
+    driver.admit_waiting_work().unwrap();
+    assert_eq!(log(&mut driver), [(1, 0, 22), (1, 22, 22)]);
+    assert_eq!(driver.execution.boundary_index, commits + 1);
+    assert_eq!(driver.now(), at(22));
 }
 
 #[test]
