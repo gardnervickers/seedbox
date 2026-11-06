@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     fs,
     io::{self, Read, Seek, Write},
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -464,8 +464,20 @@ impl ContentStore {
     /// The copy is scratch for one execution, so it is not synced: after a
     /// crash the run is INCOMPLETE and replay materializes from the store.
     pub fn materialize(&self, digest: &ContentDigest, directory: &Path) -> Result<PathBuf> {
-        fs::create_dir_all(directory)?;
         let path = directory.join(digest.hex());
+        self.temporary_copy(digest, directory)?
+            .persist_noclobber(&path)
+            .map_err(|e| e.error)?;
+        Ok(path)
+    }
+
+    /// A copy of `digest` in a new temporary file in `directory`.
+    fn temporary_copy(
+        &self,
+        digest: &ContentDigest,
+        directory: &Path,
+    ) -> Result<tempfile::NamedTempFile> {
+        fs::create_dir_all(directory)?;
         let mut temp = tempfile::NamedTempFile::new_in(directory)?;
         let mut source = self.open(digest)?;
         match self.trusted(digest, &source)? {
@@ -482,8 +494,7 @@ impl ContentStore {
             }
             None => self.copy_to(digest, &mut temp)?,
         }
-        temp.persist_noclobber(&path).map_err(|e| e.error)?;
-        Ok(path)
+        Ok(temp)
     }
 
     /// `materialize` for a file this process (or one it launches) will execute,
@@ -493,12 +504,13 @@ impl ContentStore {
     /// execution fail with ETXTBSY. Only executables pay the exclusion; guest
     /// inputs are read as bytes and use plain `materialize`.
     ///
-    /// A digest this process already materialized into `directory` is not
-    /// copied again: while that file is the same file, unchanged since, the
-    /// call returns it. Executions only read and execute it, so callers may
-    /// share one directory between them. macOS assesses an executable on the
-    /// first launch through each new path, so a stable path also keeps later
-    /// launches fast, where a fresh copy or link per execution would not.
+    /// The file is published executable (mode 0o500). A digest this process
+    /// already materialized into `directory` is not copied again: while that
+    /// file is the same file, unchanged since, the call returns it. Executions
+    /// only read and execute it, so callers may share one directory between
+    /// them. macOS assesses an executable on the first launch through each new
+    /// path, so a stable path also keeps later launches fast, where a fresh
+    /// copy or link per execution would not.
     pub fn materialize_executable(
         &self,
         digest: &ContentDigest,
@@ -507,19 +519,24 @@ impl ContentStore {
         let path = directory.join(digest.hex());
         // Held throughout, so concurrent calls for one path copy it once.
         let mut materialized = self.executables.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(stamp) = materialized.remove(&path) {
+        if let Some(stamp) = materialized.get(&path) {
             let unchanged = fs::metadata(&path)
-                .is_ok_and(|metadata| Stamp::of_metadata(&metadata).same_unmodified_file(&stamp));
+                .is_ok_and(|metadata| Stamp::of_metadata(&metadata).same_unmodified_file(stamp));
             if unchanged {
-                materialized.insert(path.clone(), stamp);
                 return Ok(path);
             }
-            remove_if_present(&path)?;
         }
-        let path = {
+        // A changed, removed or unknown file is replaced in one rename by a
+        // copy already executable, so an execution that holds the path finds
+        // the old file or the whole new one: never no file, or one it may not
+        // execute.
+        {
             let _writing = seedbox_exec::writing();
-            self.materialize(digest, directory)?
-        };
+            let temp = self.temporary_copy(digest, directory)?;
+            temp.as_file()
+                .set_permissions(fs::Permissions::from_mode(0o500))?;
+            temp.persist(&path).map_err(|e| e.error)?;
+        }
         materialized.insert(path.clone(), Stamp::of_metadata(&fs::metadata(&path)?));
         Ok(path)
     }
