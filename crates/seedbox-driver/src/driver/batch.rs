@@ -16,6 +16,8 @@ struct RunReport<E> {
     stopped: Result<StopReason, Error<E>>,
     /// Whether the run accepted a Crash or Reboot input.
     admitted_end: bool,
+    /// TEMPORARY trace: run wall, backend execute wall and execute calls.
+    perf: (u64, u64, u64),
 }
 
 /// A validated batch run, converted back to simulation time.
@@ -68,9 +70,13 @@ where
             crate::perf::add(&crate::perf::C.zero_batches, 1);
             crate::perf::add(&crate::perf::C.zero_batch_machines, ids.len() as u64);
         }
+        let perf_kind = crate::perf::take_kind();
+        let perf_batch = crate::perf::BATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let perf_t0 = crate::perf::host_ns();
         let perf_start = std::time::Instant::now();
         let reports = self.execute_batch(views, &bounds)?;
-        crate::perf::add(&crate::perf::C.execute_ns, crate::perf::since(perf_start));
+        let perf_wall = crate::perf::since(perf_start);
+        crate::perf::add(&crate::perf::C.execute_ns, perf_wall);
         if upto == now {
             crate::perf::add(&crate::perf::C.zero_execute_ns, crate::perf::since(perf_start));
         }
@@ -79,9 +85,45 @@ where
         // time reaches the reported one, so nothing is reported early, and a
         // machine time at most the mapped bound maps to at most `upto`.
         let mut accepted = Vec::with_capacity(reports.len());
+        let mut perf_trace = String::new();
         for report in reports {
-            let (start, bound, _) = bounds[&report.id];
-            accepted.push(self.accept_run(report, start, bound, now, upto)?);
+            let (start, bound, offered) = bounds[&report.id];
+            let perf_id = report.id.0;
+            let (perf_run, perf_exec, perf_execs) = report.perf;
+            let perf_outs = report.outputs.len();
+            let perf_frames = report
+                .outputs
+                .iter()
+                .filter(|o| matches!(o.payload, Response::TransmitFrame { .. }))
+                .count();
+            let run = self.accept_run(report, start, bound, now, upto)?;
+            let (perf_stop, perf_deadline) = match run.stopped {
+                StopReason::BoundaryReached => ('B', 0),
+                StopReason::Blocked { deadline, .. } => {
+                    ('K', deadline.map_or(u64::MAX, |at| at.as_nanos()))
+                }
+                StopReason::Exited { .. } => ('X', 0),
+            };
+            use std::fmt::Write as _;
+            let _ = writeln!(
+                perf_trace,
+                "SEEDBOX-TRACE run b={perf_batch} m={perf_id} start={} limit={} reached={} stop={perf_stop} deadline={perf_deadline} wall={perf_run} exec={perf_exec} execs={perf_execs} offered={offered} outs={perf_outs} frames={perf_frames}",
+                now.as_nanos(),
+                upto.as_nanos(),
+                run.reached.as_nanos(),
+            );
+            accepted.push(run);
+        }
+        {
+            use std::fmt::Write as _;
+            let _ = writeln!(
+                perf_trace,
+                "SEEDBOX-TRACE batch b={perf_batch} kind={perf_kind} n={} now={} upto={} wall={perf_wall} t={perf_t0}",
+                ids.len(),
+                now.as_nanos(),
+                upto.as_nanos(),
+            );
+            eprint!("{perf_trace}");
         }
         self.confirm_offered_commands(&offered_commands, upto, rebooting)?;
         self.commit_runs(accepted, &offered_stops, rebooting);
@@ -179,6 +221,8 @@ where
             let mut outputs = Vec::new();
             let result = send.clone();
             if let Err(error) = self.workers.submit(id.0, move |context| {
+                seedbox_machine::perf_trace::EXEC_NS.with(|c| c.set(0));
+                seedbox_machine::perf_trace::EXECS.with(|c| c.set(0));
                 let perf_run = std::time::Instant::now();
                 let stopped = catch_unwind(AssertUnwindSafe(|| {
                     machine.run(
@@ -195,7 +239,11 @@ where
                 }))
                 .map_err(|_| Error::Panicked { id })
                 .and_then(|result| result.map_err(|source| Error::Machine { id, source }));
-                let perf_run = crate::perf::since(perf_run);
+                let perf_run = (
+                    crate::perf::since(perf_run),
+                    seedbox_machine::perf_trace::EXEC_NS.with(|c| c.get()),
+                    seedbox_machine::perf_trace::EXECS.with(|c| c.get()),
+                );
                 let _ = result.send((id, machine, rng, inbox.len(), outputs, (stopped, perf_run)));
             }) {
                 submission_error = Some(error);
@@ -207,12 +255,12 @@ where
         // Results are ordered by identity, never by worker completion time.
         let mut results: Vec<_> = receive.into_iter().collect();
         results.sort_by_key(|(id, _, _, _, _, _)| *id);
-        let perf_max = results.iter().map(|r| r.5 .1).max().unwrap_or(0);
-        let perf_sum: u64 = results.iter().map(|r| r.5 .1).sum();
+        let perf_max = results.iter().map(|r| r.5 .1 .0).max().unwrap_or(0);
+        let perf_sum: u64 = results.iter().map(|r| r.5 .1 .0).sum();
         crate::perf::add(&crate::perf::C.run_ns_max_sum, perf_max);
         crate::perf::add(&crate::perf::C.run_ns_sum, perf_sum);
         let mut reports = Vec::with_capacity(results.len());
-        for (id, machine, rng, remaining, outputs, (stopped, _)) in results {
+        for (id, machine, rng, remaining, outputs, (stopped, perf)) in results {
             let entry = &mut self.execution.machines[id.0];
             entry.machine = Some(machine);
             entry.rng = Some(rng);
@@ -232,6 +280,7 @@ where
                 outputs,
                 stopped,
                 admitted_end,
+                perf,
             });
         }
         if let Some(error) = submission_error {
@@ -255,6 +304,7 @@ where
             outputs,
             stopped: result,
             admitted_end,
+            perf: _,
         } = report;
         let stopped = result?;
         let entry = &self.execution.machines[id.0];

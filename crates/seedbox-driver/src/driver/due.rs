@@ -778,6 +778,7 @@ where
         };
         entry.inbox.push_back(input);
         // A Reboot admission run executes the prospective boot.
+        crate::perf::set_kind(4);
         self.run_batch_as(&[id], now, new_boot)?;
         Ok(Applied {
             transition,
@@ -849,6 +850,7 @@ where
             DriverEvent::Resume(_)
                 if transition.is_some() && !matches!(entry.stopped, StopReason::Exited { .. }) =>
             {
+                crate::perf::set_kind(5);
                 self.run_batch(&[id], now)?;
             }
             DriverEvent::Resume(_) => {}
@@ -878,6 +880,7 @@ where
         if !waking.is_empty() {
             crate::perf::add(&crate::perf::C.timer_wake_batches, 1);
         }
+        crate::perf::set_kind(3);
         self.run_batch(&waking, now)?;
         if !waking.is_empty() {
             self.commit_boundary()?;

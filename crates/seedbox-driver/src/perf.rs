@@ -48,6 +48,25 @@ pub fn since(start: Instant) -> u64 {
 
 static LAST: Mutex<Option<Instant>> = Mutex::new(None);
 
+/// TEMPORARY trace: who asked for the next batch (1 step, 2 frames,
+/// 3 timers, 4 admission, 5 resume), batch and step indices, host clock.
+pub static KIND: AtomicU64 = AtomicU64::new(0);
+pub static BATCH: AtomicU64 = AtomicU64::new(0);
+pub static STEP: AtomicU64 = AtomicU64::new(0);
+static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+pub fn host_ns() -> u64 {
+    EPOCH.get_or_init(Instant::now).elapsed().as_nanos() as u64
+}
+
+pub fn set_kind(kind: u64) {
+    KIND.store(kind, Relaxed);
+}
+
+pub fn take_kind() -> u64 {
+    KIND.swap(0, Relaxed)
+}
+
 pub(crate) fn maybe_dump() {
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();

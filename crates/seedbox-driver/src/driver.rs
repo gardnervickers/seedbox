@@ -960,6 +960,7 @@ where
         self.check_valid()?;
         let perf_start = Instant::now();
         let perf_at = self.now();
+        let perf_t0 = crate::perf::host_ns();
         let result = (|| {
             if upto < self.now() {
                 return Err(Error::PastTime {
@@ -998,6 +999,14 @@ where
             Ok(outcome)
         })();
         let result = self.finish_execution(result);
+        eprintln!(
+            "SEEDBOX-TRACE step s={} from={} to={} upto={} wall={} t={perf_t0}",
+            crate::perf::STEP.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            perf_at.as_nanos(),
+            self.now().as_nanos(),
+            upto.as_nanos(),
+            crate::perf::since(perf_start),
+        );
         crate::perf::add(&crate::perf::C.steps, 1);
         crate::perf::add(&crate::perf::C.step_ns, crate::perf::since(perf_start));
         crate::perf::add(
@@ -1476,6 +1485,7 @@ where
                 .filter(|(_, entry)| entry.next() == Some(now))
                 .map(|(index, _)| MachineId(index))
                 .collect::<Vec<_>>();
+            crate::perf::set_kind(1);
             self.run_batch(&ready, limit)?;
             ran = true;
         }
@@ -1554,6 +1564,7 @@ where
         }
         let receivers: Vec<_> = receivers.into_iter().collect();
         crate::perf::add(&crate::perf::C.frame_batches, 1);
+        crate::perf::set_kind(2);
         if let Err(error) = self.run_batch(&receivers, now) {
             self.uncertain_failure();
             return Err(error);

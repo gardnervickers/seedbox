@@ -1192,7 +1192,12 @@ impl Machine for TcgMachine {
             }
         }
         if self.reached < upto && self.state == State::Ready {
-            if let Err(error) = self.execute(upto, context.execution) {
+            let perf_exec = std::time::Instant::now();
+            let perf_result = self.execute(upto, context.execution);
+            let perf_exec = perf_exec.elapsed().as_nanos() as u64;
+            seedbox_machine::perf_trace::EXEC_NS.with(|c| c.set(c.get() + perf_exec));
+            seedbox_machine::perf_trace::EXECS.with(|c| c.set(c.get() + 1));
+            if let Err(error) = perf_result {
                 self.state = State::Invalid;
                 // A transport failure may leave QEMU executing. Reap it before
                 // returning so the failed machine cannot keep producing effects.
