@@ -792,3 +792,40 @@ fn exclusive_barrier(probe: &File, timeout: Duration) -> io::Result<()> {
 
 /// Initialize a private execution worker before dispatching its backend entry.
 pub use seedbox_machine::process_lease::worker_arguments;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The monitor drains, checks its children, then waits. A child that
+    // exits after the check has already raised SIGCHLD when the wait starts,
+    // so only the byte the handler wrote can end that wait.
+    #[test]
+    fn a_child_exit_before_the_wait_leaves_the_wake_readable() {
+        let guard = seedbox_test_time::HangGuard::new(
+            "a child's exit makes the child-exit wake readable",
+            Duration::from_secs(30),
+        );
+        let exits = ChildExits::install().unwrap();
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        let mut child = seedbox_exec::spawn(&mut command).unwrap();
+        // Exited but not reaped, so its signal was raised before the wait.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        while unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id(),
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        } != 0
+        {
+            let error = io::Error::last_os_error();
+            assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{error}");
+        }
+        let wake = [exits.read.as_raw_fd()];
+        while !crate::readiness::wait(&wake, Some(guard.remaining().unwrap())).unwrap() {}
+        assert!(child.wait().unwrap().success());
+    }
+}
