@@ -237,6 +237,17 @@ impl<M> Entry<M> {
             StopReason::Exited { .. } => None,
         }
     }
+
+    /// Whether zero-time work waits for this machine's next run: frames that
+    /// arrived for it, or a timer that came due while it was blocked. A run
+    /// that reaches a boundary leaves no pending timer.
+    fn waiting(&self) -> bool {
+        matches!(self.stopped, StopReason::BoundaryReached) && self.timer.is_some()
+            || self
+                .inbox
+                .iter()
+                .any(|input| matches!(input.payload, Request::ReceiveFrame { .. }))
+    }
 }
 
 /// Driver bookkeeping for a live host input key. Only live keys are kept;
@@ -461,11 +472,16 @@ where
     ///
     /// A frame arriving at `T` is offered exactly at `T`, after every timeline
     /// item due at `T` and before timer wakeups, as [`Request::ReceiveFrame`]
-    /// to the receiver's current boot, including while paused. It is dropped if
-    /// that boot has exited. Delivery means offered to the NIC, not consumed.
+    /// to the receiver's current boot, including while paused. A running
+    /// receiver takes it in its next run, which starts at `T`; a paused or
+    /// suspended one, or one with a later item due at `T`, takes it in a
+    /// zero-budget run first. It is dropped if that boot has exited. Delivery
+    /// means offered to the NIC, not consumed.
     /// While an attached machine can execute, rounds end no later than its
     /// earliest execution time plus latency, so no frame arrives before the
-    /// round that sent it commits. Blocked or paused machines impose no limit.
+    /// round that sent it commits. Blocked or paused machines impose no limit;
+    /// a blocked receiver can execute from a frame's arrival, even if the frame
+    /// does not wake it, which also tightens the controller latency bound.
     // Blocked machines impose no bound, so idle simulations still jump to their
     // next event.
     #[allow(clippy::too_many_arguments)]
@@ -984,6 +1000,35 @@ where
         upto: Timestamp,
     ) -> Result<StepOutcome, Error<M::Error>> {
         self.step_at_with_external(upto, Instant::now(), true)
+    }
+
+    /// Admit, without executing, the zero-time work that still waits at the
+    /// current barrier for a machine's next run: frames that arrived for it
+    /// and a timer that came due. Call it once where execution ends, before
+    /// reading final evidence, so that the evidence covers every frame and
+    /// timer due by then, also after completion or a permanent stop.
+    pub fn admit_waiting_work(&mut self) -> Result<(), Error<M::Error>> {
+        self.check_valid()?;
+        let waiting = self
+            .execution
+            .machines
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.waiting())
+            .map(|(index, _)| MachineId(index))
+            .collect::<Vec<_>>();
+        if waiting.is_empty() {
+            return Ok(());
+        }
+        let now = self.now();
+        let result = match self.run_batch(&waiting, now) {
+            Ok(()) => self.commit_boundary(),
+            Err(error) => {
+                self.uncertain_failure();
+                Err(error)
+            }
+        };
+        self.finish_execution(result)
     }
 
     fn step_at(
@@ -1523,10 +1568,12 @@ where
     }
 
     /// Offer every frame arriving at `now` to its receiver's current boot, in
-    /// (sender, sequence, receiver) order, with one zero-budget admission batch
-    /// and commit. A receiver whose boot has exited drops the frame. Returns
-    /// whether any frame was due, so that newly generated timeline items at
-    /// `now` are processed before timers.
+    /// (sender, sequence, receiver) order. A receiver whose boot has exited
+    /// drops the frame. A running receiver takes its frames at the start of its
+    /// next run, which starts at `now`, so a blocked one becomes runnable here.
+    /// A paused or suspended receiver runs no guest work, so it admits them now
+    /// with one zero-budget batch and commit. Returns whether any frame was
+    /// due, so that newly generated timeline items at `now` are processed next.
     fn deliver_frames(&mut self, now: Timestamp) -> Result<bool, Error<M::Error>> {
         let due = self.execution.network.take_due(now.as_nanos());
         if due.is_empty() {
@@ -1565,11 +1612,26 @@ where
             });
             receivers.insert(delivery.to);
         }
-        if receivers.is_empty() {
-            return Ok(true);
+        // A zero-budget run would only store the frames and report the stop
+        // state; the next run, from `now`, does the same before executing.
+        let mut admitting = Vec::new();
+        for id in receivers {
+            let suspended = self
+                .execution
+                .control
+                .service
+                .breaks
+                .suspended(&control::Control::source(id));
+            let entry = &mut self.execution.machines[id.0];
+            if entry.lifecycle.paused() || suspended {
+                admitting.push(id);
+            } else if let StopReason::Blocked { .. } = entry.stopped {
+                entry.stopped = StopReason::BoundaryReached;
+                entry.reached = now;
+                entry.timer = None;
+            }
         }
-        let receivers: Vec<_> = receivers.into_iter().collect();
-        if let Err(error) = self.run_batch(&receivers, now) {
+        if let Err(error) = self.run_batch(&admitting, now) {
             self.uncertain_failure();
             return Err(error);
         }
@@ -1584,7 +1646,9 @@ where
                 &mut self.observations.frames,
             );
         }
-        self.commit_boundary()?;
+        if !admitting.is_empty() {
+            self.commit_boundary()?;
+        }
         Ok(true)
     }
 
@@ -2064,7 +2128,10 @@ where
     }
 
     /// The machine's last stop projected into simulation time. Unlike a
-    /// `Machine::run` result, a `Blocked` deadline may equal `reached`.
+    /// `Machine::run` result, a `Blocked` deadline may equal `reached`. A
+    /// machine whose timer came due at the current barrier, or that frames
+    /// arrived for, reports `BoundaryReached`: its next run starts there and
+    /// takes them first.
     // The projection rounds machine times up to whole
     // simulation nanoseconds so nothing fires early; keeping the strict
     // inequality would need delaying the timer, so the Driver relaxes it here
@@ -2177,8 +2244,9 @@ where
     /// execution configuration and pause flag observed through `paused`, its
     /// time-base mapping (a pure function of its addition time and its
     /// `Transition::ClockRate` events), its last accepted position and pending
-    /// timer in machine time, global RNG cursor, the independently continuing
-    /// RNG cursor and clock-fault stream cursor of every machine, and the
+    /// timer in machine time, frames that arrived for it and wait for its next
+    /// run, global RNG cursor, the independently continuing RNG cursor and
+    /// clock-fault stream cursor of every machine, and the
     /// control timeline: host inputs
     /// scheduled but not yet admitted, live input keys (with the handles they
     /// own), and admitted faults awaiting their effect or settlement. It also

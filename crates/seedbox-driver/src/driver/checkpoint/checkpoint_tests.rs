@@ -599,6 +599,80 @@ fn nameserver_replies_in_flight_survive_capture() {
 }
 
 #[test]
+fn frames_waiting_for_the_receivers_next_run_survive_capture() {
+    let mut d = build_network(
+        vec![
+            spec(0, true, vec![(2, frame(mac(1), 5))]),
+            spec(1, false, vec![]),
+        ],
+        vec![],
+        true,
+        true,
+    );
+    advance(&mut d, 3);
+    let arrival = at(d.execution.network.next_arrival().unwrap());
+    while d.now() < arrival {
+        d.step(arrival).unwrap();
+    }
+    // Captured at the arrival, before the receiver's next run takes the frame.
+    assert!(d.execution.machines[1]
+        .inbox
+        .iter()
+        .any(|input| matches!(input.payload, Request::ReceiveFrame { .. })));
+    assert!(states(&d)[1].received.is_empty());
+    let (bytes, store) = artifact(d.checkpoint().unwrap());
+    let c = decode(&bytes, &store);
+    reference_observer_session(&mut d);
+    let expected = advance(&mut d, 30);
+    assert_eq!(states(&d)[1].received.len(), 1);
+    for workers in [1, 4] {
+        let mut b = restore(&c, workers);
+        assert_eq!(advance(&mut b, 30), expected);
+        assert_eq!(states(&b), states(&d));
+    }
+}
+
+#[test]
+fn a_timer_due_at_the_capture_barrier_survives_capture() {
+    let mut d = build(
+        vec![
+            spec(0, true, vec![]),
+            spec(1, false, vec![(15, output(b"due"))]),
+        ],
+        vec![],
+        true,
+    );
+    while d.now() < at(15) {
+        d.step(at(15)).unwrap();
+    }
+    // Captured at the deadline, before the machine's next run takes the timer.
+    let entry = &d.execution.machines[1];
+    assert_eq!(entry.stopped, StopReason::BoundaryReached);
+    assert!(entry.timer.is_some());
+    let (bytes, store) = artifact(d.checkpoint().unwrap());
+    let c = decode(&bytes, &store);
+    reference_observer_session(&mut d);
+    // A crash due at the deadline still follows the timer after restore.
+    let crash = |d: &mut Driver<Mock>| {
+        d.schedule(
+            at(15),
+            key("crash"),
+            Action::Crash(Target::Machine(MachineId(1))),
+        )
+        .unwrap();
+        advance(d, 30)
+    };
+    let expected = crash(&mut d);
+    assert!(states(&d)[1].dead);
+    assert!(states(&d)[1].sends.is_empty());
+    for workers in [1, 4] {
+        let mut b = restore(&c, workers);
+        assert_eq!(crash(&mut b), expected);
+        assert_eq!(states(&b), states(&d));
+    }
+}
+
+#[test]
 fn finished_oracle_and_permanent_stop_are_capturable_but_not_resumed() {
     for permanent in [false, true] {
         let mut d = build(
