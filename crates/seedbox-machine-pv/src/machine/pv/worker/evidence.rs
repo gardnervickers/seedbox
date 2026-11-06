@@ -8,8 +8,19 @@ use sha2::{Digest, Sha256};
 // Native ARM adapters are still target-gated and never executed by these tests.
 #[cfg(any(target_arch = "aarch64", test))]
 pub(super) mod arm;
+// PROBE ONLY (never merged): raw values of every evidence part.
+thread_local! {
+    pub(super) static PROBE_PARTS: std::cell::RefCell<Vec<(String, serde_json::Value)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+pub(super) fn probe_record(name: &str, value: serde_json::Value) {
+    PROBE_PARTS.with(|p| p.borrow_mut().push((name.into(), value)));
+}
 pub(super) fn part(name: &str, value: &impl Serialize) -> Result<(String, String)> {
     let b = serde_json::to_vec(value).map_err(|e| format!("PV evidence {name}: {e}"))?;
+    if let Ok(v) = serde_json::from_slice(&b) {
+        probe_record(name, v);
+    }
     Ok((name.into(), hex(&Sha256::digest(b))))
 }
 impl<B: Backend> Machine<B> {
@@ -59,6 +70,9 @@ impl<B: Backend> Machine<B> {
             .create_new(true)
             .open(path)
             .map_err(|e| format!("PV evidence page file {}: {e}", path.display()))?;
+        // PROBE ONLY: the full RAM image beside the page digests.
+        let mut probe_ram = File::create(path.with_extension("probe-ram"))
+            .map_err(|e| format!("probe ram: {e}"))?;
         let mut ram = Sha256::new();
         let mut region_hash = Sha256::new();
         let mut pages = Sha256::new();
@@ -78,6 +92,9 @@ impl<B: Backend> Machine<B> {
                 unsafe { &self.ram.bytes()[offset..offset + len as usize] }
             };
             ram.update(bytes);
+            probe_ram
+                .write_all(bytes)
+                .map_err(|e| format!("probe ram write: {e}"))?;
             for chunk in bytes.chunks(4096) {
                 let digest = Sha256::digest(chunk);
                 file.write_all(&digest[..8])
@@ -89,6 +106,15 @@ impl<B: Backend> Machine<B> {
         parts.push(("ram".into(), hex(&ram.finalize())));
         parts.push(("ram_regions".into(), hex(&region_hash.finalize())));
         parts.push(("ram_pages".into(), hex(&pages.finalize())));
+        // PROBE ONLY: raw part values and the digests reported.
+        let raw: Vec<_> = PROBE_PARTS.with(|p| std::mem::take(&mut *p.borrow_mut()));
+        let regions_json: Vec<_> = regions.iter().map(|(b, l, s)| json!([b, l, s])).collect();
+        std::fs::write(
+            path.with_extension("probe-parts.json"),
+            serde_json::to_vec_pretty(&json!({"raw": raw, "digests": parts, "regions": regions_json}))
+                .map_err(|e| format!("probe parts: {e}"))?,
+        )
+        .map_err(|e| format!("probe parts write: {e}"))?;
         Ok(protocol::NativeEvidence {
             parts,
             regions: regions

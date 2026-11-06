@@ -1,0 +1,76 @@
+# PROBE ONLY (never merged): reproduce the Intel-only stopped-state mismatch.
+name: Intel determinism probe
+on:
+  push:
+    branches: [claude/intel-determinism-probe]
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4, 5, 6]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      DOCKER_HOST: unix:///var/run/docker.sock
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+    steps:
+      - name: Keep only Intel runners
+        id: cpu
+        run: |
+          grep -m1 '^model name' /proc/cpuinfo
+          if grep -q -m1 GenuineIntel /proc/cpuinfo; then echo "intel=true" >> "$GITHUB_OUTPUT"; else echo "Not Intel; nothing to do."; fi
+      - uses: actions/checkout@v7
+        if: steps.cpu.outputs.intel == 'true'
+        with:
+          persist-credentials: false
+          submodules: true
+      - name: Prepare host
+        if: steps.cpu.outputs.intel == 'true'
+        run: |
+          grep -m1 '^flags' /proc/cpuinfo
+          uname -r
+          sudo chmod a+rw /dev/kvm
+          available=$(df --output=avail -B1 / | tail -n 1)
+          if (( available < 60 * 1024 * 1024 * 1024 )); then
+            sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift
+          fi
+          df -h /
+      - uses: cachix/install-nix-action@v31
+        if: steps.cpu.outputs.intel == 'true'
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: nix-community/cache-nix-action/restore@v7
+        if: steps.cpu.outputs.intel == 'true'
+        with:
+          primary-key: probe-${{ github.run_id }}
+          restore-prefixes-first-match: |
+            pv-nix-v3-${{ runner.os }}-${{ runner.arch }}-
+      - uses: Swatinem/rust-cache@v2
+        if: steps.cpu.outputs.intel == 'true'
+        with:
+          key: pv-${{ hashFiles('flake.lock', 'flake.nix') }}
+          cmd-format: nix develop --command {0}
+          save-if: false
+          workspaces: |
+            . -> target
+            . -> build/cargo
+          cache-bin: false
+      - name: Build the release CLI
+        if: steps.cpu.outputs.intel == 'true'
+        run: nix develop --command cargo xtask build --release
+      - name: Run the workloads twice and compare raw evidence
+        if: steps.cpu.outputs.intel == 'true'
+        run: nix develop --command bash tools/probe/run.sh
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.cpu.outputs.intel == 'true'
+        with:
+          name: intel-probe-${{ matrix.slot }}
+          path: |
+            target/probe-out/**/*.txt
+            target/probe-out/**/*.json
+            target/probe-out/**/*.log
+          retention-days: 7

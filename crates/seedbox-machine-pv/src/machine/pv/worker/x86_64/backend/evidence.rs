@@ -180,6 +180,11 @@ impl Native {
     }
     fn vector_evidence(&self) -> Result<String> {
         let bytes = self.read_xsave()?;
+        // PROBE ONLY: the raw XSAVE area.
+        crate::machine::pv::worker::evidence::probe_record(
+            "xsave_raw",
+            serde_json::Value::String(hex(&bytes)),
+        );
         let cpuid = checked(
             "evidence KVM_GET_CPUID2",
             self.cpu.get_cpuid2(KVM_MAX_CPUID_ENTRIES),
