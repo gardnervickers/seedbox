@@ -327,8 +327,8 @@ where
 
     /// Construct a new stopped Driver by borrowing an independently owned capture.
     ///
-    /// Worker count may differ from the source. Contexts are constructed and
-    /// destroyed on their worker threads. Structural validation precedes all
+    /// Worker count may differ from the source. Contexts are constructed as
+    /// for [`Self::new`]. Structural validation precedes all
     /// callbacks. The restore callback is called once per snapshot in identity
     /// order and must reconstruct it without executing guest work or changing
     /// the capture. No initial machine factory is called and no seed is drawn.

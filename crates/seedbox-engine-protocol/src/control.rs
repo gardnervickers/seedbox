@@ -211,7 +211,7 @@ pub enum Action {
         machine: String,
         factor_permille: u64,
     },
-    /// Select the machine's disk requests of kind `op`, each with probability
+    /// Select the machine's disk requests of kind `request`, each with probability
     /// `ppm` per million on its own seeded stream, until the handle is healed.
     /// With `eio` a selected request completes with an I/O error before any
     /// disk effect: a failed write changes nothing, a failed flush makes
@@ -225,14 +225,14 @@ pub enum Action {
     DiskError {
         handle: String,
         machine: String,
-        op: DiskOp,
+        request: DiskOp,
         ppm: u64,
         #[serde(default, skip_serializing_if = "DiskEffect::is_eio")]
         effect: DiskEffect,
         #[serde(default, skip_serializing_if = "DiskScope::is_all")]
         scope: DiskScope,
     },
-    /// Complete the machine's disk requests of kind `op` late, until the
+    /// Complete the machine's disk requests of kind `request` late, until the
     /// handle is healed: each takes `latency_ns` plus a seeded draw up to
     /// `jitter_ns`, and completes no earlier than the request before it, so
     /// completion order stays submission order. A request has its disk
@@ -243,7 +243,7 @@ pub enum Action {
     DiskLatency {
         handle: String,
         machine: String,
-        op: DiskOp,
+        request: DiskOp,
         latency_ns: u64,
         #[serde(default, skip_serializing_if = "is_zero")]
         jitter_ns: u64,
@@ -337,12 +337,12 @@ impl Action {
                 factor_permille, ..
             } => validate_throttle(*factor_permille),
             Self::DiskError {
-                op,
+                request,
                 ppm,
                 effect,
                 scope,
                 ..
-            } => validate_disk_error(*op, *ppm, *effect, *scope),
+            } => validate_disk_error(*request, *ppm, *effect, *scope),
             Self::DiskLatency {
                 latency_ns,
                 jitter_ns,
@@ -474,7 +474,7 @@ fn is_zero(value: &u64) -> bool {
 /// A probability within [`DISK_ERROR_PPM`]. Corruption needs data, so it
 /// cannot select only flushes; neither can the data scope.
 pub fn validate_disk_error(
-    op: DiskOp,
+    request: DiskOp,
     ppm: u64,
     effect: DiskEffect,
     scope: DiskScope,
@@ -486,7 +486,7 @@ pub fn validate_disk_error(
             DISK_ERROR_PPM.end()
         ));
     }
-    if op == DiskOp::Flush && (effect == DiskEffect::Corrupt || scope == DiskScope::Data) {
+    if request == DiskOp::Flush && (effect == DiskEffect::Corrupt || scope == DiskScope::Data) {
         return Err(
             "disk_error on flushes takes neither the corrupt effect nor the data scope".into(),
         );

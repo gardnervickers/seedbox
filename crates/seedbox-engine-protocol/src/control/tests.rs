@@ -9,19 +9,19 @@ fn parse(value: serde_json::Value) -> Result<Action, String> {
 fn disk_and_scheduler_actions_round_trip_in_canonical_form() {
     for (wire, name) in [
         (
-            json!({"action":"disk_error","handle":"eio","machine":"db","op":"write","ppm":1_000_000}),
+            json!({"action":"disk_error","handle":"eio","machine":"db","request":"write","ppm":1_000_000}),
             "disk_error",
         ),
         (
-            json!({"action":"disk_error","handle":"rot","machine":"db","op":"read","ppm":1000,"effect":"corrupt","scope":"data"}),
+            json!({"action":"disk_error","handle":"rot","machine":"db","request":"read","ppm":1000,"effect":"corrupt","scope":"data"}),
             "disk_error",
         ),
         (
-            json!({"action":"disk_latency","handle":"slow","machine":"db","op":"any","latency_ns":20_000_000}),
+            json!({"action":"disk_latency","handle":"slow","machine":"db","request":"any","latency_ns":20_000_000}),
             "disk_latency",
         ),
         (
-            json!({"action":"disk_latency","handle":"slow","machine":"db","op":"flush","latency_ns":1000,"jitter_ns":5000}),
+            json!({"action":"disk_latency","handle":"slow","machine":"db","request":"flush","latency_ns":1000,"jitter_ns":5000}),
             "disk_latency",
         ),
         (
@@ -37,16 +37,16 @@ fn disk_and_scheduler_actions_round_trip_in_canonical_form() {
         assert_eq!(serde_json::to_value(&action).unwrap(), wire);
     }
     // Defaults are omitted on the way out, so an input that spells them
-    // matches one that leaves them out. Neither `op` nor `ppm` has one.
-    let spelled = parse(json!({"action":"disk_error","handle":"h","machine":"m","op":"any","ppm":5,"effect":"eio","scope":"all"})).unwrap();
+    // matches one that leaves them out. Neither `request` nor `ppm` has one.
+    let spelled = parse(json!({"action":"disk_error","handle":"h","machine":"m","request":"any","ppm":5,"effect":"eio","scope":"all"})).unwrap();
     assert_eq!(
         serde_json::to_value(&spelled).unwrap(),
-        json!({"action":"disk_error","handle":"h","machine":"m","op":"any","ppm":5})
+        json!({"action":"disk_error","handle":"h","machine":"m","request":"any","ppm":5})
     );
-    let latency = parse(json!({"action":"disk_latency","handle":"h","machine":"m","op":"any","latency_ns":1000,"jitter_ns":0})).unwrap();
+    let latency = parse(json!({"action":"disk_latency","handle":"h","machine":"m","request":"any","latency_ns":1000,"jitter_ns":0})).unwrap();
     assert_eq!(
         serde_json::to_value(&latency).unwrap(),
-        json!({"action":"disk_latency","handle":"h","machine":"m","op":"any","latency_ns":1000})
+        json!({"action":"disk_latency","handle":"h","machine":"m","request":"any","latency_ns":1000})
     );
 }
 
@@ -54,13 +54,13 @@ fn disk_and_scheduler_actions_round_trip_in_canonical_form() {
 fn disk_and_scheduler_actions_refuse_unknown_fields_and_missing_arguments() {
     for bad in [
         json!({"action":"disk_error","handle":"h","machine":"m","ppm":1}),
-        json!({"action":"disk_error","handle":"h","machine":"m","op":"read"}),
-        json!({"action":"disk_error","handle":"h","machine":"m","op":"trim","ppm":1}),
-        json!({"action":"disk_error","handle":"h","machine":"m","op":"read","ppm":1,"effect":"error"}),
-        json!({"action":"disk_error","handle":"h","machine":"m","op":"read","ppm":1,"scope":"disk"}),
-        json!({"action":"disk_error","handle":"h","machine":"m","op":"read","ppm":1,"extra":1}),
+        json!({"action":"disk_error","handle":"h","machine":"m","request":"read"}),
+        json!({"action":"disk_error","handle":"h","machine":"m","request":"trim","ppm":1}),
+        json!({"action":"disk_error","handle":"h","machine":"m","request":"read","ppm":1,"effect":"error"}),
+        json!({"action":"disk_error","handle":"h","machine":"m","request":"read","ppm":1,"scope":"disk"}),
+        json!({"action":"disk_error","handle":"h","machine":"m","request":"read","ppm":1,"extra":1}),
         json!({"action":"disk_latency","handle":"h","machine":"m","latency_ns":1000}),
-        json!({"action":"disk_latency","handle":"h","machine":"m","op":"any"}),
+        json!({"action":"disk_latency","handle":"h","machine":"m","request":"any"}),
         json!({"action":"preempt","handle":"h","machine":"m"}),
         json!({"action":"preempt","machine":"m","ppm":1}),
     ] {
