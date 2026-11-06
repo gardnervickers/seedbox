@@ -92,12 +92,7 @@ impl Queue {
         if !self.ready {
             return Ok(None);
         }
-        if self.size == 0 || self.size > QUEUE_LIMIT as u16 || !self.size.is_power_of_two() {
-            return Err("virtio invalid queue size".into());
-        }
-        offset(ram, self.descriptor, self.size as usize * 16)?;
-        offset(ram, self.available, 6 + self.size as usize * 2)?;
-        offset(ram, self.used, 6 + self.size as usize * 8)?;
+        self.check_rings(ram)?;
         let available = u16_at(ram, add(self.available, 2)?)?;
         let pending = available.wrapping_sub(self.cursor);
         if pending > self.size {
@@ -110,6 +105,26 @@ impl Queue {
             ram,
             add(self.available, 4 + (self.cursor % self.size) as usize * 2)?,
         )?;
+        Ok(Some((head, self.chain(ram, head, direction)?)))
+    }
+    fn check_rings(&self, ram: &[u8]) -> Result<()> {
+        if self.size == 0 || self.size > QUEUE_LIMIT as u16 || !self.size.is_power_of_two() {
+            return Err("virtio invalid queue size".into());
+        }
+        offset(ram, self.descriptor, self.size as usize * 16)?;
+        offset(ram, self.available, 6 + self.size as usize * 2)?;
+        offset(ram, self.used, 6 + self.size as usize * 8)?;
+        Ok(())
+    }
+    /// Validate and decode the chain starting at `head`, as it is in RAM now:
+    /// a delayed request is decoded again when it completes.
+    pub(super) fn chain(
+        &self,
+        ram: &[u8],
+        head: u16,
+        direction: Direction,
+    ) -> Result<Vec<Descriptor>> {
+        self.check_rings(ram)?;
         let mut result = Vec::new();
         let mut current = head;
         let mut seen = vec![false; self.size as usize];
@@ -144,9 +159,15 @@ impl Queue {
             }
             current = u16::from_le_bytes(d[14..16].try_into().unwrap());
         }
-        Ok(Some((head, result)))
+        Ok(result)
     }
-    pub(super) fn finish(&mut self, ram: &mut [u8], head: u16, length: usize) -> Result<bool> {
+    /// Take the next available chain without completing it: its used entry
+    /// comes later, in the order chains were taken.
+    pub(super) fn consume(&mut self) {
+        self.cursor = self.cursor.wrapping_add(1);
+    }
+    /// Write the used entry of a consumed chain; whether to interrupt.
+    pub(super) fn used(&mut self, ram: &mut [u8], head: u16, length: usize) -> Result<bool> {
         let index = u16_at(ram, add(self.used, 2)?)?;
         let at = offset(
             ram,
@@ -157,8 +178,12 @@ impl Queue {
         ram[at + 4..at + 8].copy_from_slice(&(length as u32).to_le_bytes());
         let at = offset(ram, add(self.used, 2)?, 2)?;
         ram[at..at + 2].copy_from_slice(&index.wrapping_add(1).to_le_bytes());
-        self.cursor = self.cursor.wrapping_add(1);
         Ok(u16_at(ram, self.available)? & AVAILABLE_NO_INTERRUPT == 0)
+    }
+    pub(super) fn finish(&mut self, ram: &mut [u8], head: u16, length: usize) -> Result<bool> {
+        let interrupt = self.used(ram, head, length)?;
+        self.consume();
+        Ok(interrupt)
     }
 }
 

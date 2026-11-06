@@ -7,227 +7,34 @@ use seedbox_test::process::Guarded;
 use std::{
     collections::HashSet,
     fs,
-    io::{BufRead, BufReader},
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
 };
 
 pub mod support;
-use support::{failure_capture, json_diff};
+use support::application::{compare, first_run, invoke, simulation_id, with_server};
+use support::failure_capture;
 
 // Every discovered workload proves a PASS. These retain the expensive
 // independent same-seed and retained-input comparisons, covering dynamic
 // network faults, volume durability across crashes, clock state across reboot,
-// concurrent application behavior, and guest property findings (with an
-// allowed crash and a machine's reboot) as part of the compared results.
-const REPEAT_WORKLOADS: [&str; 6] = [
+// concurrent application behavior, guest property findings (with an allowed
+// crash and a machine's reboot), and an oracle's seeded fault profile as part
+// of the compared results.
+const REPEAT_WORKLOADS: [&str; 7] = [
     "dns",
     "network-faults",
     "volume-crash",
     "clock-reboot",
     "race",
     "properties",
+    "profile",
 ];
 
-fn invoke(
-    cli: &Path,
-    directory: &Path,
-    state: &Path,
-    name: &str,
-    args: &[&str],
-) -> Result<String, String> {
-    let logfile = directory.join(format!("{name}.log"));
-    let log = fs::File::create(&logfile).map_err(|error| error.to_string())?;
-    eprintln!("application: {} / {name}", directory.display());
-    let mut command = Command::new(cli);
-    command
-        .args(args)
-        .env_remove("SEEDBOX_VMM")
-        .env("SEEDBOX_STATE", state)
-        .stdout(log.try_clone().map_err(|error| error.to_string())?)
-        .stderr(log);
-    let status = command
-        .guarded_status()
-        .map_err(|error| format!("{}: {error}", cli.display()))?;
-    if !status.success() {
-        // CI keeps only the console, so show the end of the failing log there.
-        let text = fs::read(&logfile).map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-        if let Ok(text) = &text {
-            let lines: Vec<_> = text.lines().collect();
-            let tail = &lines[lines.len().saturating_sub(80)..];
-            eprintln!(
-                "--- {name} failed; last {} lines of {}:",
-                tail.len(),
-                logfile.display()
-            );
-            for line in tail {
-                eprintln!("{line}");
-            }
-            eprintln!("--- end of {name}");
-        }
-        return Err(format!("{name}: {status}; see {}", logfile.display()));
-    }
-    Ok(
-        String::from_utf8_lossy(&fs::read(&logfile).map_err(|error| error.to_string())?)
-            .into_owned(),
-    )
-}
-
-fn first_run(cli: &Path, directory: &Path, state: &Path, args: &[&str]) -> Result<String, String> {
-    let result = invoke(cli, directory, state, "first", args);
-    if let Err(error) = &result {
-        let failure = directory.join("failure");
-        failure_capture::note(&failure, error);
-        let guard = failure_capture::budget();
-        let capture = || -> Result<(), String> {
-            let bytes = failure_capture::read(&directory.join("first.log"))?;
-            fs::write(failure.join("first.log"), &bytes).map_err(|e| e.to_string())?;
-            let output = String::from_utf8_lossy(&bytes);
-            let id = output
-                .lines()
-                .find_map(|line| line.strip_prefix("simulation: "))
-                .or_else(|| output.lines().find_map(|line| line.strip_prefix("FAIL: ")))
-                .ok_or("failed first run has no simulation ID")?;
-            // Validate before using the ID as a public observation argument.
-            let id: seedbox_api::SimulationId =
-                id.parse().map_err(|e| format!("simulation ID: {e}"))?;
-            for (label, args) in [
-                (
-                    "oracle-logs",
-                    vec!["logs", id.as_str(), "oracle", "--tail", "100"],
-                ),
-                (
-                    "application-logs",
-                    vec!["logs", id.as_str(), "--tail", "100"],
-                ),
-                (
-                    "definition",
-                    vec!["show", "--view", "definition", id.as_str(), "--json"],
-                ),
-                (
-                    "world",
-                    vec!["show", "--view", "world", id.as_str(), "--json"],
-                ),
-                (
-                    "timeline",
-                    vec!["show", "--view", "timeline", id.as_str(), "--json"],
-                ),
-            ] {
-                let mut command = Command::new(cli);
-                command
-                    .args(args)
-                    .env_remove("SEEDBOX_VMM")
-                    .env("SEEDBOX_STATE", state);
-                if let Err(error) = failure_capture::command(command, &failure, label, &guard) {
-                    failure_capture::note(&failure, &format!("{label}: {error}"));
-                }
-            }
-            Ok(())
-        };
-        if let Err(error) = capture() {
-            failure_capture::note(&failure, &error);
-        }
-    }
-    result
-}
-
-fn simulation_id(output: &str) -> Result<&str, String> {
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix("PASS: "))
-        .ok_or_else(|| format!("missing PASS simulation ID: {output}"))
-}
-
-fn require_full_state_match(output: &str) -> Result<(), String> {
-    let comparison: seedbox_api::SimulationComparison =
-        serde_json::from_str(output).map_err(|error| format!("comparison: {error}"))?;
-    if comparison.full_state_matches != Some(true) {
-        return Err(format!("missing full-state MATCH: {output}"));
-    }
-    Ok(())
-}
-
-// Capture both sides while the session is still alive. The CI artifact collector
-// bounds these files; shutdown would otherwise remove the evidence we need.
-fn compare(
-    cli: &Path,
-    directory: &Path,
-    state: &Path,
-    name: &str,
-    baseline: &str,
-    repeated: &str,
-) -> Result<(), String> {
-    let result = invoke(
-        cli,
-        directory,
-        state,
-        name,
-        &["compare", baseline, repeated, "--json"],
-    )
-    .and_then(|output| require_full_state_match(&output));
-    if let Err(error) = &result {
-        let failure = directory.join("failure");
-        failure_capture::note(&failure, error);
-        let guard = failure_capture::budget();
-        for (side, id) in [("baseline", baseline), ("repeated", repeated)] {
-            for (kind, args) in [
-                (
-                    "definition",
-                    vec!["show", "--view", "definition", id, "--json"],
-                ),
-                ("world", vec!["show", "--view", "world", id, "--json"]),
-                ("timeline", vec!["show", "--view", "timeline", id, "--json"]),
-                ("logs", vec!["logs", id, "--tail", "100"]),
-            ] {
-                let mut command = Command::new(cli);
-                command
-                    .args(&args)
-                    .env_remove("SEEDBOX_VMM")
-                    .env("SEEDBOX_STATE", state);
-                if let Err(error) = failure_capture::command(
-                    command,
-                    &failure,
-                    &format!("{name}-{side}-{kind}"),
-                    &guard,
-                ) {
-                    failure_capture::note(&failure, &format!("comparison diagnostic: {error}"));
-                }
-            }
-        }
-        log_definition_differences(&failure, name);
-    }
-    result
-}
-
-/// Show in the CI log where the two resolved definitions (prepared inputs
-/// included) differ, so a run tells MISMATCH and NOT_COMPARABLE causes apart.
-/// Reads the bounded definition observations captured in `failure`.
-fn log_definition_differences(failure: &Path, name: &str) {
-    let spec = |side: &str| {
-        failure_capture::read(&failure.join(format!("{name}-{side}-definition.stdout")))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .map(|resource| resource["spec"].clone())
-    };
-    let (Some(baseline), Some(repeated)) = (spec("baseline"), spec("repeated")) else {
-        eprintln!("{name}: definition diff unavailable");
-        return;
-    };
-    let mut differences = Vec::new();
-    json_diff::json_differences("spec", &baseline, &repeated, &mut differences);
-    eprintln!(
-        "{name}: baseline/repeated definitions differ at {} paths",
-        differences.len()
-    );
-    for difference in differences.iter().take(60) {
-        eprintln!("  {difference}");
-    }
-}
-
 macro_rules! applications {
-    ($($case:ident => $workload:literal),+ $(,)?) => {
+    ($($(#[$attribute:meta])* $case:ident => $workload:literal),+ $(,)?) => {
         const WORKLOADS: &[&str] = &[$($workload),+];
-        $(#[test] fn $case() { application($workload); })+
+        $($(#[$attribute])* #[test] fn $case() { application($workload); })+
     };
 }
 applications! {
@@ -235,18 +42,31 @@ applications! {
     clock_drift => "clock-drift",
     clock_reboot => "clock-reboot",
     clock_skew => "clock-skew",
+    clock_step => "clock-step",
     connections => "connections",
+    device_faults => "device-faults",
     dns => "dns",
+    enospc => "enospc",
     exclusives => "exclusives",
     key_value => "key-value",
     mac_capabilities => "mac-capabilities",
     network_faults => "network-faults",
+    pause_kinds => "pause-kinds",
+    process_groups => "process-groups",
+    profile => "profile",
     properties => "properties",
     race => "race",
     runtime => "runtime",
     slow_machine => "slow-machine",
+    stale_ack => "stale-ack",
     triggers => "triggers",
     volume_crash => "volume-crash",
+}
+
+fn workload(name: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../harness/acceptance/workloads")
+        .join(format!("{name}.yaml"))
 }
 
 #[test]
@@ -273,18 +93,7 @@ fn every_discovered_workload_has_an_individually_selectable_case() {
 /// INCOMPLETE (3).
 #[test]
 fn guest_properties_decide_runs_whose_oracle_passes() {
-    let cli = std::env::var_os("SEEDBOX_TEST_CLI")
-        .expect("harness/check.sh supplies the current release CLI");
-    let reports =
-        std::env::var_os("SEEDBOX_TEST_REPORT_DIR").expect("set a fresh SEEDBOX_TEST_REPORT_DIR");
-    let state_directory = tempfile::Builder::new()
-        .prefix("seedbox-apps-")
-        .tempdir_in("/tmp")
-        .unwrap();
-    let state_path = state_directory.path().join("state");
-    let state = state_path.as_path();
-    let server = Server::start(Path::new(&cli), state).unwrap();
-    let check = || -> Result<(), String> {
+    with_server("applications", "verdicts", |cli, reports, state| {
         for (name, word, code, reason) in [
             (
                 "property-violation",
@@ -315,10 +124,10 @@ fn guest_properties_decide_runs_whose_oracle_passes() {
             let project = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../harness/acceptance/verdicts")
                 .join(format!("{name}.yaml"));
-            let directory = Path::new(&reports).join("applications").join(name);
+            let directory = reports.join(name);
             fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
             let log = directory.join("first.log");
-            let status = Command::new(&cli)
+            let status = Command::new(cli)
                 .args(["run", project.to_str().unwrap(), "--wall-time", "30m"])
                 .env_remove("SEEDBOX_VMM")
                 .env("SEEDBOX_STATE", state)
@@ -335,17 +144,11 @@ fn guest_properties_decide_runs_whose_oracle_passes() {
                 return Err(format!("{name}: {status}: {output}"));
             }
             // `show` gives the same reason for the completed simulation.
-            let shown = invoke(Path::new(&cli), &directory, state, "show", &["show", id])?;
+            let shown = invoke(cli, &directory, state, "show", &["show", id])?;
             if !shown.contains(reason) {
                 return Err(format!("{name}: show: {shown}"));
             }
-            let shown = invoke(
-                Path::new(&cli),
-                &directory,
-                state,
-                "show-json",
-                &["show", id, "--json"],
-            )?;
+            let shown = invoke(cli, &directory, state, "show-json", &["show", id, "--json"])?;
             let resource: seedbox_api::Simulation =
                 serde_json::from_str(&shown).map_err(|e| format!("{name}: {e}: {shown}"))?;
             let expected = if code == 1 {
@@ -361,60 +164,32 @@ fn guest_properties_decide_runs_whose_oracle_passes() {
             }
         }
         Ok(())
-    };
-    let result = check();
-    drop(server);
-    if let Err(error) = result {
-        let retained = state_directory.keep();
-        panic!("{error}\nretained server state: {}", retained.display());
-    }
+    });
 }
 
 fn application(name: &str) {
-    let cli = std::env::var_os("SEEDBOX_TEST_CLI")
-        .expect("harness/check.sh supplies the current release CLI");
-    let reports =
-        std::env::var_os("SEEDBOX_TEST_REPORT_DIR").expect("set a fresh SEEDBOX_TEST_REPORT_DIR");
-    let workload = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../harness/acceptance/workloads")
-        .join(format!("{name}.yaml"));
-    // macOS limits Unix socket paths to 104 bytes. The checkout/report path
-    // can exceed that before appending the socket name.
-    let state_directory = tempfile::Builder::new()
-        .prefix("seedbox-apps-")
-        .tempdir_in("/tmp")
-        .unwrap();
-    // Let the daemon create its own state directory with private permissions.
-    let state_path = state_directory.path().join("state");
-    let state = state_path.as_path();
-    let server = match Server::start(Path::new(&cli), state) {
-        Ok(server) => server,
-        Err(error) => {
-            let retained = state_directory.keep();
-            panic!("{error}; retained server state: {}", retained.display());
-        }
-    };
+    let workload = workload(name);
+    let workload = workload.to_str().unwrap();
     // Every case owns its server/catalogue and report directory. Two cases can
     // execute independently without sharing simulation IDs or mutable state.
     let representative = REPEAT_WORKLOADS.contains(&name);
-    let directory = Path::new(&reports)
-        .join("applications")
-        .join(workload.file_stem().unwrap());
-    fs::create_dir_all(&directory).unwrap();
-    let check = || -> Result<(), String> {
+    with_server("applications", name, |cli, directory, state| {
         let first_output = first_run(
-            Path::new(&cli),
-            &directory,
+            cli,
+            directory,
             state,
-            &["run", workload.to_str().unwrap(), "--wall-time", "30m"],
+            &["run", workload, "--wall-time", "30m"],
         )?;
         let first = simulation_id(&first_output)?;
+        if name == "device-faults" {
+            return faulted(cli, directory, state, first);
+        }
         if !representative {
             return Ok(());
         }
         let described = invoke(
-            Path::new(&cli),
-            &directory,
+            cli,
+            directory,
             state,
             "describe-first",
             &["show", "--view", "definition", first, "--json"],
@@ -427,24 +202,17 @@ fn application(name: &str) {
             .ok_or("first simulation has no seed")?
             .to_string();
         let second_output = invoke(
-            Path::new(&cli),
-            &directory,
+            cli,
+            directory,
             state,
             "second",
-            &[
-                "run",
-                workload.to_str().unwrap(),
-                "--seed",
-                &seed,
-                "--wall-time",
-                "30m",
-            ],
+            &["run", workload, "--seed", &seed, "--wall-time", "30m"],
         )?;
         let second = simulation_id(&second_output)?;
-        compare(Path::new(&cli), &directory, state, "compare", first, second)?;
+        compare(cli, directory, state, "compare", first, second)?;
         let repeated = invoke(
-            Path::new(&cli),
-            &directory,
+            cli,
+            directory,
             state,
             "replay",
             &["replay", first, "--wall-time", "30m"],
@@ -453,107 +221,95 @@ fn application(name: &str) {
             .lines()
             .find_map(|line| line.strip_prefix("MATCH: "))
             .ok_or_else(|| format!("missing replay MATCH: {repeated}"))?;
-        compare(
-            Path::new(&cli),
-            &directory,
-            state,
-            "compare-replay",
-            first,
-            replayed,
-        )?;
+        compare(cli, directory, state, "compare-replay", first, replayed)?;
         Ok(())
-    };
-    let result = check();
-    drop(server);
-    if let Err(error) = result {
-        let retained = state_directory.keep();
-        panic!(
-            "{name}: {error}\nretained server state: {}",
-            retained.display()
-        );
-    }
+    });
 }
 
-/// The acceptance fixture owns its server process; retained reports outlive it.
-struct Server(Child);
-impl Server {
-    fn start(cli: &Path, state: &Path) -> Result<Self, String> {
-        let mut server = Self(
-            Command::new(cli)
-                .args([
-                    "server",
-                    "start",
-                    "--foreground",
-                    "--startup-handshake",
-                    "--full-state",
-                ])
-                .env("SEEDBOX_STATE", state)
-                .stdout(Stdio::piped())
-                .guarded_spawn()
-                .map_err(|e| e.to_string())?,
-        );
-        let mut ready = String::new();
-        BufReader::new(
-            server
-                .0
-                .stdout
-                .take()
-                .ok_or("server startup pipe missing")?,
-        )
-        .read_line(&mut ready)
-        .map_err(|e| e.to_string())?;
-        let ready: serde_json::Value = serde_json::from_str(&ready).map_err(|e| e.to_string())?;
-        if ready["status"] != "ready" {
-            return Err("server failed to start".into());
-        }
-        Ok(server)
+/// The oracle applies and heals every fault itself (`device_faults.py`) and
+/// observes each from inside the guest; the world view keeps the heals'
+/// counts and the victim's crash on a held FLUSH and reboot, and a replay
+/// of the run's retained inputs matches it in full state.
+fn faulted(cli: &Path, directory: &Path, state: &Path, faulted: &str) -> Result<(), String> {
+    let logs = invoke(
+        cli,
+        directory,
+        state,
+        "faulted-logs",
+        &["logs", faulted, "oracle", "--tail", "100"],
+    )?;
+    let expected = if cfg!(target_arch = "aarch64") {
+        "RESULT pass device faults faulted=read-eio,corrupt,write-eio,slow,race"
+    } else {
+        "RESULT pass device faults faulted=read-eio,corrupt,write-eio,slow"
+    };
+    if !logs.contains(expected) || !logs.contains("VICTIM crashed on a held flush and rebooted") {
+        return Err(format!("faulted run did not observe its faults: {logs}"));
     }
-}
-impl Drop for Server {
-    fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_some() {
-            return;
-        }
-        // SAFETY: this is the unreaped child owned by this fixture.
-        unsafe {
-            libc::kill(self.0.id() as i32, libc::SIGTERM);
-        }
-        let pid = self.0.id();
-        std::thread::scope(|scope| {
-            let (done, completed) = std::sync::mpsc::channel();
-            scope.spawn(move || {
-                // Observe exit without reaping: the PID stays owned until the
-                // main thread has decided whether it must send SIGKILL.
-                let result = loop {
-                    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
-                    // SAFETY: info is writable and pid names our unreaped child.
-                    let rc = unsafe {
-                        libc::waitid(
-                            libc::P_PID,
-                            pid,
-                            info.as_mut_ptr(),
-                            libc::WEXITED | libc::WNOWAIT,
-                        )
-                    };
-                    if rc == 0 {
-                        break Ok(());
-                    }
-                    let error = std::io::Error::last_os_error();
-                    if error.kind() != std::io::ErrorKind::Interrupted {
-                        break Err(error);
-                    }
-                };
-                let _ = done.send(result);
-            });
-            if !matches!(
-                completed.recv_timeout(std::time::Duration::from_secs(30)),
-                Ok(Ok(()))
-            ) {
-                let _ = self.0.kill();
-            }
-        });
-        self.0.wait().expect("reap owned application server");
+    let world = invoke(
+        cli,
+        directory,
+        state,
+        "faulted-world",
+        &["show", "--view", "world", faulted, "--json"],
+    )?;
+    let world: seedbox_api::WorldState =
+        serde_json::from_str(&world).map_err(|error| format!("faulted world: {error}"))?;
+    // The oracle's disk faults in the order it applied them, each with the
+    // handle the world gave it.
+    let handle = |fault: &&seedbox_api::FaultState| {
+        fault
+            .plan
+            .as_ref()
+            .and_then(|plan| plan["handle"].as_str())
+            .map(str::to_owned)
+    };
+    let disk: Vec<_> = world
+        .faults
+        .iter()
+        .filter(|fault| matches!(fault.action.as_str(), "disk_error" | "disk_latency"))
+        .collect();
+    let phases = [
+        ("read-eio", 8),
+        ("corrupt", 8),
+        ("write-eio", 1),
+        ("slow", 4),
+    ];
+    if disk.len() != phases.len() {
+        return Err(format!("expected {} disk faults: {disk:?}", phases.len()));
     }
+    for ((phase, at_least), fault) in phases.into_iter().zip(&disk) {
+        let applied = handle(fault).ok_or_else(|| format!("{phase} has no handle: {fault:?}"))?;
+        let counts = world
+            .faults
+            .iter()
+            .find(|heal| heal.action == "heal" && handle(heal).as_deref() == Some(&applied))
+            .and_then(|heal| heal.counts)
+            .ok_or_else(|| format!("{phase} ({applied}) heal has no counts"))?;
+        if counts.affected < at_least || counts.affected > counts.matched {
+            return Err(format!("{phase} heal counts {counts:?}"));
+        }
+    }
+    let victim = world
+        .machines
+        .iter()
+        .find(|machine| machine.name == "victim")
+        .ok_or("victim missing from the world")?;
+    if victim.incarnation < 1 {
+        return Err(format!("victim never rebooted: {victim:?}"));
+    }
+    let replay = invoke(
+        cli,
+        directory,
+        state,
+        "faulted-replay",
+        &["replay", faulted, "--wall-time", "30m"],
+    )?;
+    let replayed = replay
+        .lines()
+        .find_map(|line| line.strip_prefix("MATCH: "))
+        .ok_or_else(|| format!("missing faulted replay MATCH: {replay}"))?;
+    compare(cli, directory, state, "compare-faulted", faulted, replayed)
 }
 
 // Native CLI interactions share this discovered application acceptance target.

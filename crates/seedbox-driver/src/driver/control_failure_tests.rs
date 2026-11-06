@@ -334,6 +334,7 @@ fn a_settlement_cannot_reenter_execution_and_duplicate_retention() {
     let settled = crate::oracle::service::Settlement {
         record_id: None,
         network: None,
+        counts: None,
         fault: 1,
         requester: crate::oracle::service::Requester::Trigger(1),
         scope: crate::oracle::service::Scope::Machine {

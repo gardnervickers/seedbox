@@ -19,6 +19,16 @@
  *                  and DIR. Finally fsyncs count, reads every round file back
  *                  with O_DIRECT, so from the device rather than the page
  *                  cache, and exits 0. It never waits.
+ *   faults N [MS]  O_DIRECT on /dev/vda under disk faults: for each of N
+ *                  rounds writes sector 64+R with a pattern, FLUSHes and
+ *                  times the FLUSH in guest monotonic time, then reads the
+ *                  sector back, reporting I/O errors and mismatches rather
+ *                  than failing. With MS, sleeps that many milliseconds of
+ *                  guest time after each round. Then waits.
+ *   threads N      two threads each log their identity N times, with a
+ *                  getppid syscall after each entry, and report how often
+ *                  the log switches thread: one guest CPU switches rarely
+ *                  unless the kernel yields at syscalls. Then waits.
  *
  * Report lines:
  *   DISK raw boot=N a=XX b=XX base=XX bytes=N
@@ -26,11 +36,16 @@
  *   DISK volume boot=N, DISK volume wrote R, DISK volume submitted R,
  *   DISK volume synced R,
  *   DISK volume done count=N direct sum=HEX    (FNV-1a over all round files)
+ *   DISK round=R write=W flush=F read=D flush_ns=T  (W, F: ok or eio; D: ok,
+ *                                                     eio or corrupt)
+ *   DISK faults done eio=E corrupt=C min_flush_ns=T max_flush_ns=T
+ *   DISK threads switches=S
  * Failures print "DISK error <step>: <errno text>" and exit 70. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fs.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -222,10 +237,82 @@ static int volume(const char *dir, int rounds) {
     fflush(stdout);
     return 0;
 }
+static unsigned long long monotonic_ns(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now)) fail("clock");
+    return (unsigned long long)now.tv_sec * 1000000000ull + (unsigned long long)now.tv_nsec;
+}
+static const char *outcome(ssize_t done, ssize_t want) {
+    if (done == want) return "ok";
+    if (done < 0 && errno == EIO) return "eio";
+    fail("unexpected I/O result");
+}
+static int faults(int rounds, long gap_ms) {
+    int fd = open("/dev/vda", O_RDWR | O_DIRECT | O_CLOEXEC);
+    if (fd < 0) fail("open /dev/vda");
+    unsigned char *buffer = sector_buffer(), *back = sector_buffer();
+    int eio = 0, corrupt = 0;
+    unsigned long long min_flush = ~0ull, max_flush = 0;
+    for (int round = 1; round <= rounds; ++round) {
+        off_t at = (off_t)(64 + round) * SECTOR;
+        for (int i = 0; i < SECTOR; ++i) buffer[i] = (unsigned char)(round * 7 + i);
+        const char *write_result = outcome(pwrite(fd, buffer, SECTOR, at), SECTOR);
+        unsigned long long before = monotonic_ns();
+        const char *flush_result = fsync(fd) ? (errno == EIO ? "eio" : (fail("flush"), "")) : "ok";
+        unsigned long long flush_ns = monotonic_ns() - before;
+        if (flush_ns < min_flush) min_flush = flush_ns;
+        if (flush_ns > max_flush) max_flush = flush_ns;
+        memset(back, 0, SECTOR);
+        ssize_t got = pread(fd, back, SECTOR, at);
+        const char *read_result = outcome(got, SECTOR);
+        if (got == SECTOR && !strcmp(write_result, "ok") && memcmp(back, buffer, SECTOR)) {
+            read_result = "corrupt";
+            ++corrupt;
+        }
+        eio += !strcmp(write_result, "eio") + !strcmp(flush_result, "eio") + !strcmp(read_result, "eio");
+        printf("DISK round=%d write=%s flush=%s read=%s flush_ns=%llu\n", round, write_result,
+               flush_result, read_result, flush_ns);
+        fflush(stdout);
+        struct timespec gap = {gap_ms / 1000, (gap_ms % 1000) * 1000000};
+        while (gap_ms && nanosleep(&gap, &gap) && errno == EINTR) {}
+    }
+    printf("DISK faults done eio=%d corrupt=%d min_flush_ns=%llu max_flush_ns=%llu\n", eio, corrupt,
+           min_flush, max_flush);
+    fflush(stdout);
+    wait_forever();
+}
+static unsigned char *journal;
+static long iterations, next_entry;
+static void *record(void *identity) {
+    for (long i = 0; i < iterations; ++i) {
+        journal[__atomic_fetch_add(&next_entry, 1, __ATOMIC_SEQ_CST)] =
+            (unsigned char)(uintptr_t)identity;
+        (void)getppid();
+    }
+    return NULL;
+}
+static int threads(long count) {
+    iterations = count;
+    journal = calloc((size_t)(2 * count), 1);
+    if (!journal) fail("allocate");
+    pthread_t a, b;
+    if (pthread_create(&a, NULL, record, (void *)1) || pthread_create(&b, NULL, record, (void *)2))
+        fail("pthread_create");
+    pthread_join(a, NULL);
+    pthread_join(b, NULL);
+    long switches = 0;
+    for (long i = 1; i < 2 * count; ++i) switches += journal[i] != journal[i - 1];
+    printf("DISK threads switches=%ld\n", switches);
+    fflush(stdout);
+    wait_forever();
+}
 int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "raw")) return raw(argc, argv);
     if (argc == 2 && !strcmp(argv[1], "ext4")) return ext4();
     if (argc == 4 && !strcmp(argv[1], "volume")) return volume(argv[2], atoi(argv[3]));
     if (argc == 3 && !strcmp(argv[1], "volume-crash")) return volume_crash(argv[2]);
+    if ((argc == 3 || argc == 4) && !strcmp(argv[1], "faults"))
+        return faults(atoi(argv[2]), argc == 4 ? atol(argv[3]) : 0);
+    if (argc == 3 && !strcmp(argv[1], "threads")) return threads(atol(argv[2]));
     return 64;
 }

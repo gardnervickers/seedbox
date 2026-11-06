@@ -88,6 +88,23 @@ impl Machine for Native {
             }
         }
     }
+    fn take_fault_counts(
+        &mut self,
+        id: u64,
+    ) -> Result<Option<seedbox_machine::pv::FaultCounts>, String> {
+        match self {
+            #[cfg(any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+            ))]
+            Self::Pv { machine, .. } => machine
+                .take_fault_counts(id)
+                .map_err(|error| error.to_string()),
+            Self::Tcg { machine, .. } => machine
+                .take_fault_counts(id)
+                .map_err(|error| error.to_string()),
+        }
+    }
     fn snapshot(&mut self) -> Result<Snapshot, String> {
         match self {
             #[cfg(any(
@@ -240,19 +257,7 @@ fn environment(
     use seedbox_machine::application::{GuestEnvironment, GuestLimits, NamedVolume};
     let mut configs = std::collections::BTreeMap::new();
     for (target, artifact) in &retained.configs {
-        let file = super::checkpoint::verified(artifact).map_err(|error| error.to_string())?;
-        let length = usize::try_from(artifact.length)
-            .map_err(|_| "config artifact exceeds host address space".to_owned())?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(length)
-            .map_err(|_| "config artifact allocation failed".to_owned())?;
-        file.take(artifact.length.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|error| error.to_string())?;
-        if bytes.len() != length {
-            return Err("config artifact changed after verification".into());
-        }
+        let bytes = super::build::read_input(artifact).map_err(|error| error.to_string())?;
         configs.insert(target.clone(), bytes);
     }
     Ok(GuestEnvironment {
@@ -406,14 +411,7 @@ impl Factory {
         let boot = self
             .boot_archives
             .get(&name)
-            .map(|artifact| {
-                let mut file =
-                    super::checkpoint::verified(artifact).map_err(|error| error.to_string())?;
-                let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes)
-                    .map_err(|error| error.to_string())?;
-                Ok::<_, String>(bytes)
-            })
+            .map(|artifact| super::build::read_input(artifact).map_err(|error| error.to_string()))
             .transpose()?;
         match &mut self.inner {
             #[cfg(any(

@@ -61,6 +61,8 @@ impl<M> ExecutionState<M> {
             definitions,
             network,
             properties,
+            // Declared by the owner, not simulation state.
+            engine: _,
         } = self;
         let SimulationRng::Seeded(rng) = rng else {
             return Err(CodecError::Invalid(

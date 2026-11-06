@@ -20,7 +20,8 @@
 //!
 //! The library supplies the [`run`]ner, the in-memory [`Recorder`] history,
 //! the seeded [`Rng`], the guest control socket's [`GuestWorld`], Jepsen's
-//! standard fault [`patterns`] and the [`queue`] checker. [`main`] runs a
+//! standard fault [`patterns`], fault profiles written as data
+//! ([`nemesis::Profile`]) and the [`queue`] checker. [`main`] runs a
 //! scenario as an oracle program.
 pub mod checker;
 pub mod client;

@@ -126,7 +126,7 @@ impl Control {
 }
 
 /// A breakpoint hit. Its machine stays suspended until it is resumed or
-/// crashed.
+/// crashed. A held block request's hit is named [`BLOCK_REQUEST`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hit {
     pub id: u32,
@@ -134,9 +134,15 @@ pub struct Hit {
     pub machine: String,
     pub boot: u64,
     pub name: String,
-    /// The simulated time of the breakpoint write.
+    /// The simulated time of the breakpoint write or held request.
     pub at_ns: u64,
+    /// The held request's kind and `nth`, for a block request hit; `None`
+    /// for a program's breakpoint write.
+    pub block_request: Option<(crate::control::DiskOp, u64)>,
 }
+
+/// The name of every block request hit. A program cannot declare it.
+pub const BLOCK_REQUEST: &str = "block_request";
 
 impl Control {
     /// Replace the breakpoint names that suspend a machine, for later hits.
@@ -145,6 +151,11 @@ impl Control {
         names: impl IntoIterator<Item = &'a str>,
     ) -> Result<(), Error> {
         let names: std::collections::BTreeSet<&str> = names.into_iter().collect();
+        if names.contains(BLOCK_REQUEST) {
+            return Err(Error(format!(
+                "{BLOCK_REQUEST} names block request hits, not a program breakpoint"
+            )));
+        }
         self.call("declare_breaks", json!({ "names": names }))
             .map(drop)
     }
@@ -160,22 +171,56 @@ impl Control {
         }
         let number = |key: &str| result.get(key).and_then(Value::as_u64);
         let text = |key: &str| result.get(key).and_then(Value::as_str).map(str::to_owned);
+        let request = result
+            .get("request")
+            .map(|r| serde_json::from_value::<crate::control::DiskOp>(r.clone()).ok());
+        let block_request = match (text("source").as_deref(), request, number("nth")) {
+            (Some("program"), None, None) if result.get("nth").is_none() => Some(None),
+            (Some(BLOCK_REQUEST), Some(Some(op)), Some(nth))
+                if nth > 0 && text("name").as_deref() == Some(BLOCK_REQUEST) =>
+            {
+                Some(Some((op, nth)))
+            }
+            _ => None,
+        };
         match (
             number("break_id").and_then(|id| u32::try_from(id).ok()),
             text("machine"),
             number("boot"),
             text("name"),
             number("at_ns"),
+            block_request,
         ) {
-            (Some(id), Some(machine), Some(boot), Some(name), Some(at_ns)) => Ok(Some(Hit {
-                id,
-                machine,
-                boot,
-                name,
-                at_ns,
-            })),
+            (Some(id), Some(machine), Some(boot), Some(name), Some(at_ns), Some(block_request)) => {
+                Ok(Some(Hit {
+                    id,
+                    machine,
+                    boot,
+                    name,
+                    at_ns,
+                    block_request,
+                }))
+            }
             _ => self.fail("invalid breakpoint hit".into()),
         }
+    }
+
+    /// Suspend `machine` at its `nth` disk request of kind `op` from now
+    /// on, counted across boots, with that request held unwritten. It is
+    /// one-shot; its hit is named `block_request`, so
+    /// [`GuestWorld::on_break`] with that name serves it. Resuming lets the
+    /// request continue.
+    pub fn break_on_block_request(
+        &mut self,
+        machine: &str,
+        op: crate::control::DiskOp,
+        nth: u64,
+    ) -> Result<(), Error> {
+        self.call(
+            "break_on_block_request",
+            json!({ "target": { "machine": machine }, "request": op, "nth": nth }),
+        )
+        .map(drop)
     }
 
     /// Let a suspended machine run again; its breakpoint write returns.
@@ -244,7 +289,12 @@ impl GuestWorld {
         handler: impl FnMut(&mut GuestWorld, &Hit) -> Result<(), Error> + Send + 'static,
     ) -> Result<(), Error> {
         let mut handlers = self.breaks.handlers.lock().unwrap();
-        let names = handlers.keys().map(String::as_str).chain([name]);
+        // Block request hits need no declaration; their name is reserved.
+        let names = handlers
+            .keys()
+            .map(String::as_str)
+            .chain([name])
+            .filter(|&name| name != BLOCK_REQUEST);
         self.control.declare_breaks(names)?;
         handlers.insert(name.to_owned(), Box::new(handler));
         drop(handlers);

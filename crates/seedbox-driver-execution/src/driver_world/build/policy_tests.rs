@@ -66,7 +66,7 @@ fn native_invalid_wire_policy_is_rejected_before_materialization_and_restore_bin
         ..Default::default()
     }));
     let valid = inventory(Some(wire::BackendPolicy::default()));
-    let error = materialize_factory(&invalid, &output, None)
+    let error = materialize_factory(&invalid, None, &output, None)
         .err()
         .expect("invalid native policy must precede artifact reads")
         .to_string();

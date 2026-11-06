@@ -64,7 +64,23 @@ pub fn sdk(
     // Host QEMU members live under the system recorded in host-system.
     let host = |name: &str| format!("host/{system}/{name}");
     append(&host("bin/qemu-system-x86_64"), b"#!/bin/sh\nexit 0\n");
-    append(&host("libexec/qemu-system-x86_64"), &elf);
+    let host_executable = if cfg!(target_os = "macos") {
+        // The host executable is a Mach-O for the running architecture.
+        let mut header = 0xfeed_facf_u32.to_le_bytes().to_vec();
+        header.extend_from_slice(
+            &(if cfg!(target_arch = "aarch64") {
+                0x0100_000c_u32
+            } else {
+                0x0100_0007_u32
+            })
+            .to_le_bytes(),
+        );
+        header.resize(elf.len(), 0);
+        header
+    } else {
+        elf.clone()
+    };
+    append(&host("libexec/qemu-system-x86_64"), &host_executable);
     append(&host("lib/loader"), b"cold library");
     append(&host("share/qemu/qboot.rom"), b"cold firmware");
     let mut progress = tar::Builder::new(Vec::new());

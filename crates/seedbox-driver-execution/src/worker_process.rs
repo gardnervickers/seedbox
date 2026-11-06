@@ -306,11 +306,12 @@ impl<P: ProcessLifetime> RunningWorker<P> {
                 return Ok(incomplete(StopReason::Cancelled));
             }
             serve()?;
-            if elapsed(&self)?.saturating_sub(waited(&self)?) >= Duration::from_nanos(wall_time_ns)
-            {
+            let used = elapsed(&self)?.saturating_sub(waited(&self)?);
+            let budget = Duration::from_nanos(wall_time_ns);
+            if used >= budget {
                 return Ok(incomplete(StopReason::WallTimeLimit));
             }
-            std::thread::sleep(Duration::from_millis(10));
+            self.process.wait((budget - used).min(RECHECK))?;
         })();
         // Cleanup remains an execution error, but an already observed oracle
         // exit must survive it. Drop still retries cleanup before releasing ownership.
@@ -345,8 +346,15 @@ fn finish_cleanup(
     }
 }
 
+/// How often a waiting server re-checks what no descriptor announces:
+/// cancellation, the worker's spawn requests and the wall-time budget. The
+/// worker's exit ends the wait at once.
+const RECHECK: Duration = Duration::from_millis(10);
+
 pub(crate) trait ProcessLifetime {
     fn exited(&mut self) -> Result<Option<bool>>;
+    /// Block until the process may have exited, or `timeout` passes.
+    fn wait(&mut self, timeout: Duration) -> Result<()>;
     fn stop(&mut self) -> Result<()>;
 }
 impl ProcessLifetime for crate::process_lifetime::OwnedExecution {
@@ -364,6 +372,9 @@ impl ProcessLifetime for crate::process_lifetime::OwnedExecution {
             })
             .transpose()
     }
+    fn wait(&mut self, timeout: Duration) -> Result<()> {
+        crate::process_lifetime::OwnedExecution::wait(self, timeout).map_err(Error::from)
+    }
     fn stop(&mut self) -> Result<()> {
         self.cancel();
         let completion = self.finish()?;
@@ -378,6 +389,12 @@ impl ProcessLifetime for crate::process_lifetime::OwnedExecution {
 impl ProcessLifetime for OwnedProcess {
     fn exited(&mut self) -> Result<Option<bool>> {
         OwnedProcess::exited(self)
+    }
+    // Only unit tests launch standalone workers; a direct child's exit has no
+    // descriptor to wait on here.
+    fn wait(&mut self, timeout: Duration) -> Result<()> {
+        std::thread::sleep(timeout);
+        Ok(())
     }
     fn stop(&mut self) -> Result<()> {
         OwnedProcess::stop(self)

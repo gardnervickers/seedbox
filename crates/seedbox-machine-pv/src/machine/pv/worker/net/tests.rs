@@ -606,3 +606,168 @@ fn snapshot_retains_backlog_cursor_and_untaken_tx_without_repeating() {
     // The source still owns its own copy.
     assert_eq!(device.take_transmitted().len(), 1);
 }
+
+/// One RX ring placement as RAM offsets: (size, descriptors, available,
+/// used, buffers), with one 128-byte buffer per descriptor.
+type Placement = (u16, u64, u64, u64, u64);
+
+/// Negotiate RX at `rx` and TX at a fixed placement, as a fresh driver does.
+fn negotiate(device: &mut Net, ram: &mut [u8], rx: Placement) {
+    let mut w = |offset, value| device.write(ram, offset, 4, value, 0).unwrap();
+    w(STATUS, ACKNOWLEDGE_DRIVER);
+    w(DRIVER_FEATURES_SEL, 0);
+    w(DRIVER_FEATURES, FEATURES);
+    w(DRIVER_FEATURES_SEL, 1);
+    w(DRIVER_FEATURES, FEATURE_VERSION_1_HIGH);
+    w(STATUS, ACKNOWLEDGE_DRIVER | STATUS_FEATURES_OK);
+    for (queue, (size, descriptors, available, used, _)) in
+        [(RX, rx), (TX, (2, 0xe00, 0xe40, 0xe80, 0))]
+    {
+        w(QUEUE_SEL, queue as u32);
+        w(QUEUE_NUM, size as u32);
+        for (low, high, address) in [
+            (QUEUE_DESC_LOW, QUEUE_DESC_HIGH, descriptors),
+            (QUEUE_AVAIL_LOW, QUEUE_AVAIL_HIGH, available),
+            (QUEUE_USED_LOW, QUEUE_USED_HIGH, used),
+        ] {
+            w(low, (BASE + address) as u32);
+            w(high, ((BASE + address) >> 32) as u32);
+        }
+        w(QUEUE_READY, 1);
+    }
+    w(
+        STATUS,
+        ACKNOWLEDGE_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
+    );
+}
+
+/// Post the 128-byte buffer of descriptor `slot` and publish it.
+fn post_slot(ram: &mut [u8], (size, descriptors, available, _, buffers): Placement, slot: u16) {
+    let mut put = |at: u64, bytes: &[u8]| {
+        ram[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+    };
+    let at = descriptors + 16 * slot as u64;
+    put(at, &(BASE + buffers + 128 * slot as u64).to_le_bytes());
+    put(at + 8, &128u32.to_le_bytes());
+    put(at + 12, &DESCRIPTOR_WRITE.to_le_bytes());
+    let index = u16::from_le_bytes(
+        ram[available as usize + 2..available as usize + 4]
+            .try_into()
+            .unwrap(),
+    );
+    let entry = available + 4 + 2 * (index % size) as u64;
+    ram[entry as usize..entry as usize + 2].copy_from_slice(&slot.to_le_bytes());
+    ram[available as usize + 2..available as usize + 4]
+        .copy_from_slice(&index.wrapping_add(1).to_le_bytes());
+}
+
+/// The device's serialized state without its diagnostic counters, which a
+/// driver reset deliberately keeps.
+fn semantic(device: &Net) -> serde_json::Value {
+    let mut value = serde_json::to_value(device).unwrap();
+    value.as_object_mut().unwrap().remove("stats");
+    value
+}
+
+/// A driver reset after a partial receive: the first frame was DMAed and
+/// interrupted, the second waits in the backlog, and the driver resets
+/// through STATUS with the interrupt still asserted, then negotiates fresh
+/// rings elsewhere. Nothing from before the reset may reach the new rings or
+/// the interrupt, the old rings are guest memory again, and the device is
+/// indistinguishable from one that only saw the fresh negotiation. The NIC
+/// is backend-neutral: this covers the ARM and x86 workers alike.
+#[test]
+fn reset_after_a_partial_receive_leaves_no_stale_frame_or_interrupt() {
+    const OLD: Placement = (2, 0x100, 0x200, 0x300, 0x400);
+    const NEW: Placement = (4, 0x800, 0x900, 0xa00, 0xc00);
+    let within = |(size, descriptors, available, used, buffers): Placement, at: usize| {
+        let n = size as u64;
+        [
+            (descriptors, 16 * n),
+            (available, 6 + 2 * n),
+            (used, 6 + 8 * n),
+            (buffers, 128 * n),
+        ]
+        .iter()
+        .any(|&(start, length)| (start..start + length).contains(&(at as u64)))
+    };
+    let (first, second, third) = (ethernet(60, 1), ethernet(60, 2), ethernet(60, 3));
+    let mut device = Net::new(MAC);
+    let mut ram = vec![0; 0x1000];
+    negotiate(&mut device, &mut ram, OLD);
+    post_slot(&mut ram, OLD, 0);
+    assert_eq!(
+        device.receive(&mut ram, first.clone()),
+        Ok(Received::Delivered)
+    );
+    assert_eq!(&ram[OLD.4 as usize + HEADER..][..60], first);
+    // No second buffer: the frame waits in the backlog.
+    assert_eq!(
+        device.receive(&mut ram, second.clone()),
+        Ok(Received::Backlogged)
+    );
+    assert_eq!(device.backlog.len(), 1);
+    assert_eq!(device.interrupt_status(), USED_RING_INTERRUPT);
+
+    let before = ram.clone();
+    device.write(&mut ram, STATUS, 4, 0, 0).unwrap();
+    assert_eq!(ram, before, "a reset writes no guest RAM");
+    assert!(!device.irq(), "a reset drops the asserted interrupt");
+    assert_eq!(device.read(STATUS, 4).unwrap(), 0);
+    assert!(device.backlog.is_empty());
+    for queue in &device.queues {
+        assert!(!queue.ready);
+        assert_eq!((queue.size, queue.cursor), (0, 0));
+    }
+    let at_reset = ram.clone();
+
+    negotiate(&mut device, &mut ram, NEW);
+    post_slot(&mut ram, NEW, 0);
+    post_slot(&mut ram, NEW, 1);
+    let posted = ram.clone();
+    // The driver kicks RX after refilling; the stale frame must not appear.
+    device
+        .write(&mut ram, QUEUE_NOTIFY, 4, RX as u32, 0)
+        .unwrap();
+    assert!(!device.irq(), "the stale frame raised an interrupt");
+    assert_eq!(ram, posted, "the kick completed a stale frame");
+
+    assert_eq!(
+        device.receive(&mut ram, third.clone()),
+        Ok(Received::Delivered)
+    );
+    assert!(device.irq());
+    assert_eq!(&ram[NEW.4 as usize + HEADER..][..60], third);
+    let used = NEW.3 as usize;
+    assert_eq!(&ram[used + 2..used + 4], 1u16.to_le_bytes());
+    assert_eq!(&ram[used + 4..used + 12], [0, 0, 0, 0, 72, 0, 0, 0]);
+    assert_eq!(device.queues[RX].cursor, 1);
+    // Every byte changed since the reset belongs to the fresh rings; the old
+    // rings are untouched.
+    for (at, (&now, &then)) in ram.iter().zip(&at_reset).enumerate() {
+        if now != then {
+            assert!(
+                within(NEW, at),
+                "byte {at:#x} written outside the new rings"
+            );
+        }
+        if within(OLD, at) {
+            assert_eq!(now, then, "old ring byte {at:#x}");
+        }
+    }
+    assert!(!ram.windows(60).any(|w| w == second));
+
+    let mut fresh = Net::new(MAC);
+    let mut fresh_ram = at_reset;
+    negotiate(&mut fresh, &mut fresh_ram, NEW);
+    post_slot(&mut fresh_ram, NEW, 0);
+    post_slot(&mut fresh_ram, NEW, 1);
+    fresh
+        .write(&mut fresh_ram, QUEUE_NOTIFY, 4, RX as u32, 0)
+        .unwrap();
+    fresh.receive(&mut fresh_ram, third).unwrap();
+    assert_eq!(fresh_ram, ram);
+    assert_eq!(semantic(&fresh), semantic(&device));
+    // Only the diagnostic counters remember the frame received before the reset.
+    assert_eq!((device.stats().rx_frames, fresh.stats().rx_frames), (2, 1));
+}

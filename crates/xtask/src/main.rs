@@ -234,7 +234,8 @@ fn publish(root: &Path, build_assets: impl FnOnce(&Path) -> Result<()>) -> Resul
         &pointer,
     )?;
     fs::rename(pointer, directory.join("assets"))?;
-    Ok(retained)
+    // Both outcomes name the publication by its resolved path.
+    Ok(retained.canonicalize()?)
 }
 
 fn clean_assets(root: &Path) -> Result<()> {

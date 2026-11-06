@@ -162,9 +162,14 @@ impl Service {
             Effect::Reboot => facts.vm == Vm::Down,
             Effect::Shutdown => facts.vm != Vm::Down,
             // Clock effects were checked before drawing their values.
-            Effect::Execution(_) | Effect::Spawn | Effect::Drift(_) | Effect::StepRealtime(_) => {
-                true
-            }
+            // Device faults apply in every state, like a throttle: an exited
+            // or crashed machine keeps them for its next boot.
+            Effect::Execution(_)
+            | Effect::Spawn
+            | Effect::Drift(_)
+            | Effect::StepRealtime(_)
+            | Effect::Fault { .. }
+            | Effect::Unfault { .. } => true,
             Effect::Partition
             | Effect::Unpartition
             | Effect::Shape(..)
@@ -435,7 +440,11 @@ impl Service {
             Effect::Crash => facts.vm != Vm::Down,
             Effect::Reboot => facts.vm == Vm::Down,
             Effect::Shutdown => facts.vm != Vm::Down,
-            Effect::Execution(_) | Effect::Spawn | Effect::Drift(_) => true,
+            Effect::Execution(_)
+            | Effect::Spawn
+            | Effect::Drift(_)
+            | Effect::Fault { .. }
+            | Effect::Unfault { .. } => true,
             // Commands already reserved for the application are decided by its
             // actual acknowledgment. Earlier commands can change process state.
             Effect::Process(_) | Effect::StepRealtime(_) => {

@@ -404,6 +404,7 @@ where
                 definitions: checkpoint.definitions.clone(),
                 network: checkpoint.network.clone(),
                 properties: checkpoint.properties.clone(),
+                engine: None,
             },
             workers,
             observations: ObservationState::default(),
