@@ -131,9 +131,6 @@ where
                 request.name
             )));
         }
-        for artifact in environment.configs.values() {
-            super::super::checkpoint::verified(artifact)?;
-        }
         let definition = super::super::build::definition(&spawned.machine)?;
         let environments = self
             .environments
