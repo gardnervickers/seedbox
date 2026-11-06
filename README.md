@@ -115,7 +115,6 @@ Replay and checkpoints retain the quantum.
 
 Choose the backend, seed, execution limits and machine threads with CLI flags.
 `run` and `replay` accept `--machine-workers 1..64`; the default is one thread per
-machine. The count
-affects host throughput without changing simulation results. Workers steal queued
-machine runs, so machines can outnumber threads. Each round still waits for all
-its running machines to reach the barrier.
+machine. The count affects host throughput without changing simulation results.
+Workers steal queued machine runs, so machines can outnumber threads. Each round
+still waits for all its running machines to reach the barrier.
