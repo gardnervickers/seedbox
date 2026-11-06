@@ -16,5 +16,6 @@ in pkgs.runCommand "seedbox-tcg-kernel-x86_64-${source.version}" {
   ];
 } ''
   bash ${../crates/seedbox-machine/guest/kernel/build.sh} \
-    ${archive} ${../crates/seedbox-machine/guest/kernel/tcg-x86_64.config} "$out"
+    ${archive} ${../crates/seedbox-machine/guest/kernel/tcg-x86_64.config} \
+    ${../crates/seedbox-machine/guest/kernel/tcg-x86_64.patch} "$out"
 ''

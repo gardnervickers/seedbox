@@ -1,10 +1,12 @@
-/* Native clock-fault acceptance, shared by TCG and PV. One executable, two roles:
+/* Native clock-fault acceptance, shared by TCG and PV. One executable, several roles:
  *   clock       reads CLOCK_REALTIME/MONOTONIC/MONOTONIC_RAW and the machine
  *               counter, sleeps, and arms absolute realtime timerfds.
  *   controller  applies drift, a realtime step, crash/reboot and heals to the
  *               machine named "clock" at fixed simulation times, then exits 0.
  *   idle        an oracle for host-driven runs: sleeps 12.5 s, then exits 0.
- * Every line is "<TAG> rt=<ns> mono=<ns> raw=<ns> cnt=<ns>". */
+ *   ticks       TCG only: times the local APIC timer against the counter and
+ *               prints "TICKS loc=<count> late=<ns> source=<clocksource>".
+ * Every other line is "<TAG> rt=<ns> mono=<ns> raw=<ns> cnt=<ns>". */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -60,8 +62,8 @@ static void line(const char *tag) {
     if (size < 0 || (size_t)size >= sizeof(text)) fail("line");
     put(STDOUT_FILENO, text, (size_t)size);
 }
-static int realtime_timer(uint64_t at, int flags) {
-    int fd = timerfd_create(CLOCK_REALTIME, TFD_NONBLOCK | TFD_CLOEXEC);
+static int timer_at(clockid_t clock, uint64_t at, int flags) {
+    int fd = timerfd_create(clock, TFD_NONBLOCK | TFD_CLOEXEC);
     if (fd < 0) fail("timerfd_create");
     struct itimerspec spec = {.it_value = {(time_t)(at / 1000000000u), (long)(at % 1000000000u)}};
     if (timerfd_settime(fd, TFD_TIMER_ABSTIME | flags, &spec, NULL)) fail("timerfd_settime");
@@ -71,8 +73,8 @@ static void clock_role(void) {
     line("BOOT");
     uint64_t rt0 = ns(CLOCK_REALTIME);
     /* Cancelled by any realtime step; fired only after a forward step. */
-    int cancel = realtime_timer(rt0 + 100000000000ull, TFD_TIMER_CANCEL_ON_SET);
-    int absolute = realtime_timer(rt0 + 5000000000ull, 0);
+    int cancel = timer_at(CLOCK_REALTIME, rt0 + 100000000000ull, TFD_TIMER_CANCEL_ON_SET);
+    int absolute = timer_at(CLOCK_REALTIME, rt0 + 5000000000ull, 0);
     for (int i = 0; i < 2; ++i) {
         struct timespec second = {.tv_sec = 1};
         while (nanosleep(&second, &second)) if (errno != EINTR) fail("nanosleep");
@@ -96,6 +98,56 @@ static void clock_role(void) {
             close(absolute); absolute = -1;
         }
     }
+}
+
+/* A whole proc or sysfs file, NUL-terminated. */
+static void slurp(const char *path, char *text, size_t size) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) fail(path);
+    size_t used = 0;
+    for (;;) {
+        if (used + 1 == size) fail(path);
+        ssize_t count = read(fd, text + used, size - 1 - used);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) fail(path);
+        if (!count) break;
+        used += (size_t)count;
+    }
+    close(fd);
+    text[used] = 0;
+}
+/* The LOC row of /proc/interrupts: local APIC timer interrupts so far. */
+static uint64_t local_timer_interrupts(void) {
+    static char text[65536];
+    slurp("/proc/interrupts", text, sizeof(text));
+    const char *row = strstr(text, "LOC:");
+    if (!row) fail("LOC row");
+    return strtoull(row + 4, NULL, 10);
+}
+/* Times the local APIC timer against the counter: the TSC, which counts guest
+ * nanoseconds whatever the kernel's clocksource. loc counts interrupts over
+ * one busy second: one per 1/HZ, more if the timer fires early. source is the
+ * clocksource after that second. late is how long after expiry a 100 ms timer
+ * wakes the idle CPU, which programs the local APIC timer for the rest of the
+ * wait. */
+static void ticks_role(void) {
+    uint64_t before = local_timer_interrupts(), start = counter();
+    while (counter() - start < 1000000000u) {}
+    uint64_t loc = local_timer_interrupts() - before;
+    char source[64];
+    slurp("/sys/devices/system/clocksource/clocksource0/current_clocksource", source, sizeof(source));
+    source[strcspn(source, "\n")] = 0;
+    uint64_t armed = counter();
+    int timer = timer_at(CLOCK_MONOTONIC, ns(CLOCK_MONOTONIC) + 100000000u, 0);
+    struct pollfd ready = {.fd = timer, .events = POLLIN};
+    while (poll(&ready, 1, -1) != 1) if (errno != EINTR) fail("poll");
+    int64_t late = (int64_t)(counter() - armed) - 100000000;
+    close(timer);
+    char text[192];
+    int size = snprintf(text, sizeof(text), "TICKS loc=%llu late=%lld source=%s\n",
+                        (unsigned long long)loc, (long long)late, source);
+    if (size < 0 || (size_t)size >= sizeof(text)) fail("ticks line");
+    put(STDOUT_FILENO, text, (size_t)size);
 }
 
 static char reply[4096];
@@ -163,6 +215,7 @@ int main(int argc, char **argv) {
     if (argc != 2) fail("role");
     if (!strcmp(argv[1], "clock")) clock_role();
     else if (!strcmp(argv[1], "controller")) controller_role();
+    else if (!strcmp(argv[1], "ticks")) ticks_role();
     else if (!strcmp(argv[1], "idle")) {
         struct timespec rest = {.tv_sec = 12, .tv_nsec = 500000000};
         while (nanosleep(&rest, &rest)) if (errno != EINTR) fail("idle");
