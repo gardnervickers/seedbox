@@ -100,7 +100,7 @@ mod program_tests {
         // The example in docs/faults.md.
         let document = r#"
 - {id: slow-fsync, atNs: 1000000000,
-   action: {action: disk_latency, handle: slow, machine: db, op: flush, latency_ns: 20000000}}
+   action: {action: disk_latency, handle: slow, machine: db, request: flush, latency_ns: 20000000}}
 - {id: fast-fsync, atNs: 2000000000, action: {action: heal, handle: slow}}
 "#;
         let overrides: Vec<seedbox_spec::definition::Override> =
@@ -130,7 +130,7 @@ mod program_tests {
         let eio = |machine: &str| -> TimedInput {
             serde_json::from_value(serde_json::json!({
                 "key": "eio", "at_ns": 10,
-                "action": {"action": "disk_error", "handle": "eio", "machine": machine, "op": "write", "ppm": 1_000_000},
+                "action": {"action": "disk_error", "handle": "eio", "machine": machine, "request": "write", "ppm": 1_000_000},
             }))
             .unwrap()
         };

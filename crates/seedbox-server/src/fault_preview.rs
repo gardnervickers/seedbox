@@ -201,7 +201,7 @@ pub(crate) fn preview(
             format!("Scale the machine's seeded CPU cost to {factor_permille} thousandths until healed.")
         }
         Action::DiskError {
-            op,
+            request,
             ppm,
             effect,
             scope,
@@ -211,27 +211,27 @@ pub(crate) fn preview(
                 "Only the disk's requests are selected; a machine without a disk is unaffected."
                     .into(),
             );
-            let op = serde_json::to_value(op).unwrap_or_default();
-            let op = op.as_str().unwrap_or("any");
+            let request = serde_json::to_value(request).unwrap_or_default();
+            let request = request.as_str().unwrap_or("any");
             let spared = if scope.is_all() {
                 ""
             } else {
                 ", sparing the filesystem's static metadata"
             };
             match effect {
-                seedbox_engine_protocol::control::DiskEffect::Eio => format!("Fail {ppm} per million {op} requests with an I/O error before any disk effect{spared}, until healed; the heal reports what it matched and failed."),
-                seedbox_engine_protocol::control::DiskEffect::Corrupt => format!("Complete {ppm} per million {op} requests with one sector of seeded bytes{spared}, until healed; the heal reports what it matched and corrupted."),
+                seedbox_engine_protocol::control::DiskEffect::Eio => format!("Fail {ppm} per million {request} requests with an I/O error before any disk effect{spared}, until healed; the heal reports what it matched and failed."),
+                seedbox_engine_protocol::control::DiskEffect::Corrupt => format!("Complete {ppm} per million {request} requests with one sector of seeded bytes{spared}, until healed; the heal reports what it matched and corrupted."),
             }
         }
         Action::DiskLatency {
-            op,
+            request,
             latency_ns,
             jitter_ns,
             ..
         } => {
-            let op = serde_json::to_value(op).unwrap_or_default();
-            let op = op.as_str().unwrap_or("any");
-            format!("Complete {op} disk requests {latency_ns} ns late, plus up to {jitter_ns} ns of seeded jitter, in submission order, until healed; queued requests still complete after the heal.")
+            let request = serde_json::to_value(request).unwrap_or_default();
+            let request = request.as_str().unwrap_or("any");
+            format!("Complete {request} disk requests {latency_ns} ns late, plus up to {jitter_ns} ns of seeded jitter, in submission order, until healed; queued requests still complete after the heal.")
         }
         Action::Preempt { ppm, .. } => {
             result
@@ -322,12 +322,12 @@ mod tests {
         let (configuration, world) = fixture();
         for (wire, category, effect) in [
             (
-                json!({"action":"disk_error","handle":"eio","machine":"n1","op":"write","ppm":10,"scope":"data"}),
+                json!({"action":"disk_error","handle":"eio","machine":"n1","request":"write","ppm":10,"scope":"data"}),
                 seedbox_api::FaultCategory::Disk,
                 "Fail 10 per million write requests with an I/O error before any disk effect, sparing the filesystem's static metadata, until healed",
             ),
             (
-                json!({"action":"disk_latency","handle":"slow","machine":"n1","op":"flush","latency_ns":5000}),
+                json!({"action":"disk_latency","handle":"slow","machine":"n1","request":"flush","latency_ns":5000}),
                 seedbox_api::FaultCategory::Disk,
                 "Complete flush disk requests 5000 ns late",
             ),
@@ -344,7 +344,7 @@ mod tests {
             assert!(preview.expected_effect.starts_with(effect), "{}", preview.expected_effect);
         }
         let invalid: Action = serde_json::from_value(
-            json!({"action":"disk_error","handle":"eio","machine":"n1","op":"write","ppm":0}),
+            json!({"action":"disk_error","handle":"eio","machine":"n1","request":"write","ppm":0}),
         )
         .unwrap();
         assert!(matches!(

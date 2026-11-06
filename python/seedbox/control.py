@@ -12,7 +12,7 @@ MAX_CLOCK_OFFSET_NS = 365 * 86_400 * 1_000_000_000
 MAX_CLOCK_RATE_PPB = 100_000_000
 MAX_PPM = 1_000_000
 DISK_LATENCY_NS = (1_000, 1_000_000_000)
-DISK_OPS = ("read", "write", "flush", "any")
+DISK_REQUESTS = ("read", "write", "flush", "any")
 DEFAULT_SOCKET = "/run/seedbox/control.sock"
 
 
@@ -140,10 +140,10 @@ def _ppm(name, value):
     return value
 
 
-def _disk_op(op):
-    if op not in DISK_OPS:
-        raise ValueError("op must be read, write, flush or any")
-    return op
+def _disk_request(request):
+    if request not in DISK_REQUESTS:
+        raise ValueError("request must be read, write, flush or any")
+    return request
 
 
 def _nanoseconds(seconds):
@@ -460,43 +460,45 @@ class World:
             raise ProtocolError(f"{op} response lacks an opaque handle")
         return kind(result["handle"], effect)
 
-    def disk_error(self, target, op, ppm, *, effect="eio", scope="all"):
-        """Fail or corrupt the target machine's disk requests of kind op until healed.
+    def disk_error(self, target, request, ppm, *, effect="eio", scope="all"):
+        """Fail or corrupt the target machine's disk requests of one kind until healed.
 
-        op is "read", "write", "flush" or "any"; each such request is selected
+        request is "read", "write", "flush" or "any"; each such request is selected
         with probability ppm per million on a seeded stream. With effect "eio"
         a selected request fails with EIO before any disk effect; with
         "corrupt" it succeeds with one sector of seeded bytes. scope "data"
         spares the ext4 metadata laid out at format time. Neither "corrupt"
         nor "data" selects flushes. Engines without disk request selection
-        refuse it as unsupported. heal() stops selecting.
+        refuse it as unsupported. heal() stops selecting and returns what the
+        fault matched and affected.
         """
-        _disk_op(op)
+        _disk_request(request)
         _ppm("disk_error", ppm)
         if effect not in ("eio", "corrupt") or scope not in ("all", "data"):
             raise ValueError('effect must be "eio" or "corrupt" and scope "all" or "data"')
-        if op == "flush" and (effect == "corrupt" or scope == "data"):
+        if request == "flush" and (effect == "corrupt" or scope == "data"):
             raise ValueError("disk_error on flushes takes neither the corrupt effect nor the data scope")
-        arguments = {"target": _target(target), "disk_op": op, "ppm": ppm}
+        arguments = {"target": _target(target), "request": request, "ppm": ppm}
         if effect != "eio":
             arguments["effect"] = effect
         if scope != "all":
             arguments["scope"] = scope
         return self._device_fault("disk_error", DiskError, **arguments)
 
-    def disk_latency(self, target, op, latency_ns, *, jitter_ns=0):
-        """Complete the target machine's disk requests of kind op late until healed.
+    def disk_latency(self, target, request, latency_ns, *, jitter_ns=0):
+        """Complete the target machine's disk requests of one kind late until healed.
 
         Each takes latency_ns (1 µs to 1 s) plus a seeded draw up to jitter_ns
         (at most 1 s), in submission order. Engines without delayed block
-        completion refuse it as unsupported. heal() stops delaying new
-        requests; queued ones still complete at their times.
+        completion refuse it as unsupported. request is as for disk_error.
+        heal() stops delaying new requests, while queued ones still complete
+        at their times, and returns what the fault matched and delayed.
         """
-        _disk_op(op)
+        _disk_request(request)
         low, high = DISK_LATENCY_NS
         if type(latency_ns) is not int or not low <= latency_ns <= high or type(jitter_ns) is not int or not 0 <= jitter_ns <= high:
             raise ValueError(f"latency_ns must be {low} to {high} and jitter_ns 0 to {high}")
-        arguments = {"target": _target(target), "disk_op": op, "latency_ns": latency_ns}
+        arguments = {"target": _target(target), "request": request, "latency_ns": latency_ns}
         if jitter_ns:
             arguments["jitter_ns"] = jitter_ns
         return self._device_fault("disk_latency", DiskLatency, **arguments)
@@ -512,12 +514,17 @@ class World:
         return self._device_fault("preempt", Preempt, target=_target(target), ppm=ppm)
 
     def heal(self, partition):
-        """Release this handle only; prior shape layers or overlapping cuts remain."""
+        """Release this handle only; prior shape layers or overlapping cuts remain.
+
+        A disk fault's heal returns its counts, {"matched": ..., "affected": ...},
+        covering every boot it applied to.
+        """
         if not isinstance(partition, (Partition, Shape, ConnectionDrop, ClockSkew, ClockDrift, Throttle,
                                       DiskError, DiskLatency, Preempt)):
             raise TypeError("heal expects a fault handle returned by this API")
         result, effect = self._call("heal", handle=partition.handle)
-        return result if isinstance(partition, ConnectionDrop) or "queue_counts" in result or "network_fault_counts" in result else effect
+        counted = isinstance(partition, (ConnectionDrop, DiskError, DiskLatency))
+        return result if counted or "queue_counts" in result or "network_fault_counts" in result else effect
 
 
     def _arm_console(self, source, marker, match_timeout, fault):
@@ -627,20 +634,19 @@ class World:
             raise TypeError("resume_break expects a Hit returned by wait_break")
         return self._call("resume_break", break_id=hit.id)[1]
 
-    def break_on_block_request(self, target, op, nth):
-        """Suspend the target's machine at its nth disk request of kind op.
+    def break_on_block_request(self, target, request, nth):
+        """Suspend the target's machine at its nth disk request of one kind.
 
-        op is "read", "write", "flush" or "any", counted from now across
+        request is "read", "write", "flush" or "any", counted from now across
         boots. The request is held unwritten, and its hit arrives like any
         other, named "block_request", so on_break("block_request", handler)
         serves it. Resuming lets the request continue; crashing the machine
         drops it. It is one-shot.
         """
-        if op not in ("read", "write", "flush", "any"):
-            raise ValueError("op must be read, write, flush or any")
+        _disk_request(request)
         if type(nth) is not int or nth < 1:
             raise ValueError("nth must be a positive integer")
-        return self._call("break_on_block_request", target=_target(target), request=op, nth=nth)[1]
+        return self._call("break_on_block_request", target=_target(target), request=request, nth=nth)[1]
 
     def on_break(self, name, handler):
         """Call handler(world, hit) whenever a machine hits breakpoint `name`.

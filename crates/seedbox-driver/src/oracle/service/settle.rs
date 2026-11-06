@@ -53,7 +53,8 @@ impl Service {
         self.finish(fault, observed, at, Ok(()))
     }
     /// Confirm a non-guest effect that took effect at `at`, with the counts
-    /// its machine reported for a healed device fault.
+    /// its machine reported for a healed device fault. The oracle's heal
+    /// reply carries them too.
     pub(crate) fn applied_counts(
         &mut self,
         fault: u32,
@@ -74,6 +75,10 @@ impl Service {
                 .is_some_and(|p| matches!(p.effect, Effect::Unfault { .. }))
         {
             return Err("fault counts settle only a device fault heal".into());
+        }
+        if let (Some(counts), Some(p)) = (&counts, self.pending.get_mut(&fault)) {
+            p.result = serde_json::to_value(counts)
+                .map_err(|e| Failure::from(format!("fault counts result: {e}")))?;
         }
         self.finish_inner(fault, at, at, Ok(()), None, counts)
     }
@@ -214,7 +219,7 @@ impl Service {
                     Some(fault),
                     Some(observed),
                     at,
-                    format!("handle completion: {e:?}"),
+                    format!("handle completion: {e}"),
                 ));
             }
         }
@@ -291,7 +296,7 @@ impl Service {
                     Some(fault),
                     Some(observed),
                     at,
-                    format!("handle completion: {e:?}"),
+                    format!("handle completion: {e}"),
                 ));
             }
         }
