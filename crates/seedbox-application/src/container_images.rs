@@ -307,44 +307,29 @@ impl ImageTransport for ContainerTransport {
             .build()
             .map_err(setup)?;
         let (docker, image) = runtime.block_on(self.resolve(service, directory, architecture))?;
-        let record = self.export_cache.as_ref().map(|engine| {
-            ContentDigest::of(
-                serde_json::json!([EXPORT_FORMAT, engine, architecture.platform(), image])
-                    .to_string()
-                    .as_bytes(),
-            )
-        });
+        let record = self
+            .export_cache
+            .as_ref()
+            .map(|engine| export_record(engine, architecture, &image));
         let (config_bytes, layer, view) = match record
             .as_ref()
             .and_then(|record| cached_export(store, record))
         {
-            Some(cached) => {
+            Some((config_bytes, layer, view)) => {
                 (self.progress)("reusing exported image layers");
-                cached
+                (config_bytes, layer, Some(view))
             }
             None => {
                 let mut config = runtime.block_on(self.export(&docker, &image, directory))?;
-                let rootfs = directory.join("filesystem.tar");
-                let layer = store.put_file(&rootfs)?;
-                // Machines boot this logical view of the export. It derives from
-                // the layer and this build alone, so it is recorded with them.
-                let archive = directory.join("rootfs.tar");
-                prefix_archive(&rootfs, &archive, &|| self.check())?;
-                let view = store.put(&crate::driver_preparation::logical_archive(&archive)?)?;
+                let layer = store.put_file(&directory.join("filesystem.tar"))?;
                 // This is an OCI-shaped snapshot of the engine's resolved filesystem,
                 // not a claim to be the registry's original layered manifest.
                 config["rootfs"] = serde_json::json!({"type":"layers", "diff_ids":[format!("sha256:{}", layer.hex())]});
-                let config_bytes = serde_json::to_vec(&config)?;
-                let config_digest = store.put(&config_bytes)?;
-                if let Some(record) = &record {
-                    store.set_record(&view_record(record, &layer), &view)?;
-                    store.set_record(record, &config_digest)?;
-                }
-                (config_bytes, layer, view)
+                (serde_json::to_vec(&config)?, layer, None)
             }
         };
-        // The store already holds the config and layer, so only the manifest
-        // is written; the import verifies the stored objects instead.
+        // Only the manifest is written here: the import verifies the stored
+        // config and layer instead of copies of them.
         let raw = directory.join("metadata");
         fs::create_dir(&raw)?;
         let config_digest = store.put(&config_bytes)?;
@@ -357,6 +342,24 @@ impl ImageTransport for ContainerTransport {
             }))?,
         )?;
         let image = crate::oci::import_metadata_for_arch(&raw, service, store, architecture)?;
+        let view = match view {
+            Some(view) => view,
+            None => {
+                // Machines boot this logical view of the export. It derives from
+                // the layer and this build alone, so it is recorded with them,
+                // only once the image has imported and with the export record last.
+                let archive = directory.join("rootfs.tar");
+                prefix_archive(&directory.join("filesystem.tar"), &archive, &|| {
+                    self.check()
+                })?;
+                let view = store.put(&crate::driver_preparation::logical_archive(&archive)?)?;
+                if let Some(record) = &record {
+                    store.set_record(&view_record(record, &layer), &view)?;
+                    store.set_record(record, &config_digest)?;
+                }
+                view
+            }
+        };
         Ok(ImportedImage {
             image,
             rootfs: RootFilesystem::Stored(view),
@@ -364,6 +367,15 @@ impl ImageTransport for ContainerTransport {
             provenance: BTreeMap::new(),
         })
     }
+}
+
+/// Names one image's export by this build (the engine digest) and platform.
+fn export_record(engine: &ContentDigest, architecture: Architecture, image: &str) -> ContentDigest {
+    ContentDigest::of(
+        serde_json::json!([EXPORT_FORMAT, engine, architecture.platform(), image])
+            .to_string()
+            .as_bytes(),
+    )
 }
 
 /// Names the filesystem view this build derived from one recorded export's
@@ -855,7 +867,7 @@ mod tests {
         )
         .unwrap();
         let store = ContentStore::new(directory.path().join("store"));
-        let import = |engine: &[u8], name: &str| {
+        let import_as = |service: &Service, engine: &[u8], name: &str| {
             let transport = ContainerTransport {
                 docker: Docker::connect_with_http(
                     &format!("http://{address}"),
@@ -867,15 +879,16 @@ mod tests {
                 progress: |_| {},
                 export_cache: Some(ContentDigest::of(engine)),
             };
-            let imported = transport
-                .import(
-                    &simulation.services["oracle"],
-                    &directory.path().join(name),
-                    &store,
-                    None,
-                    Architecture::Amd64,
-                )
-                .unwrap();
+            transport.import(
+                service,
+                &directory.path().join(name),
+                &store,
+                None,
+                Architecture::Amd64,
+            )
+        };
+        let import = |engine: &[u8], name: &str| {
+            let imported = import_as(&simulation.services["oracle"], engine, name).unwrap();
             let RootFilesystem::Stored(view) = &imported.rootfs else {
                 panic!("expected a stored view")
             };
@@ -889,15 +902,48 @@ mod tests {
         // Another engine exports again rather than trusting this one's merge.
         assert_eq!(import(b"other engine", "third"), exported);
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 2);
+        // Nor does a view recorded for another engine's export of the same
+        // layer stand in for this engine's own.
+        let layer = &exported.0.layers[0];
+        let other = export_record(
+            &ContentDigest::of(b"other engine"),
+            Architecture::Amd64,
+            "sha256:test",
+        );
+        let planted = store.put(b"another build's view").unwrap();
+        store
+            .set_record(&view_record(&other, layer), &planted)
+            .unwrap();
+        assert_eq!(import(b"engine", "planted"), exported);
+        assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 2);
         // A record whose objects are gone is a miss, not an error.
         fs::remove_dir_all(directory.path().join("store/sha256")).unwrap();
         assert_eq!(import(b"engine", "fourth"), exported);
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 3);
-        // So is one whose filesystem view alone is gone.
+        // So is one whose filesystem view alone is gone, or whose layer alone is.
         let view = ContentDigest::of(&exported.1);
         fs::remove_file(directory.path().join("store/sha256").join(view.hex())).unwrap();
         assert_eq!(import(b"engine", "fifth"), exported);
         assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 4);
+        fs::remove_file(directory.path().join("store/sha256").join(layer.hex())).unwrap();
+        assert_eq!(import(b"engine", "sixth"), exported);
+        assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 5);
+        // An export that a service can't launch records nothing, so the next
+        // import exports again.
+        let unlaunchable = crate::config::parse(
+            "name: fixture\nmachines: {}\noracle: {image: example/app, entrypoint: [\"\"]}\n",
+            &directory.path().join("seedbox.yaml"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let Err(error) = import_as(&unlaunchable.services["oracle"], b"new engine", "rejected")
+        else {
+            panic!("a service without an executable imported")
+        };
+        assert!(error.to_string().contains("no executable"), "{error}");
+        assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 6);
+        assert_eq!(import(b"new engine", "seventh"), exported);
+        assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 7);
     }
 
     /// A path of exactly `length` bytes ending in a 30-byte name of `leaf`,
