@@ -33,14 +33,7 @@ impl BootFactory for OciBootFactory {
 
 #[derive(Clone, Debug)]
 pub struct OciPreparer {
-    pub kernel: PathBuf,
     pub engine: PathBuf,
-    pub init: PathBuf,
-    /// Architecture-specific automatic application instrumentation bundle.
-    pub progress: PathBuf,
-    /// Static mke2fs, needed only when a service mounts a named volume: the
-    /// guest formats its blank retained disk with it on first boot.
-    pub mke2fs: Option<PathBuf>,
     pub profile: ExecutionProfile,
     pub docker: bollard::Docker,
 }
@@ -50,27 +43,37 @@ pub use crate::preparation_command::{PreparationContext, PreparationStage};
 impl OciPreparer {
     /// Share normal image resolution/retention while the selected native SDK
     /// alone packages Driver boot bytes. Runtime formats are not interchangeable.
-    /// `digests` are this preparation's stored copies of `runtime`'s files.
+    /// Boots render from the runtime whose stored files `runtime` names.
     pub fn prepare_driver_with_transport(
         &self,
         simulation: &Simulation,
         store: &ContentStore,
         context: &PreparationContext,
         transport: &dyn crate::oci::ImageTransport,
-        runtime: &seedbox_driver_execution::runtime_assets::Inputs,
-        digests: &RuntimeDigests,
+        runtime: &RuntimeDigests,
     ) -> Result<PreparedInputs> {
         self.prepare_with_factory(
             simulation,
             store,
             context,
             transport,
-            digests,
+            runtime,
             (
-                || crate::driver_preparation::validate_oci_runtime(self, runtime),
-                |epoch, blocks| OciBootFactory::new(&self.engine, runtime, epoch, blocks),
+                || crate::driver_preparation::validate_oci_runtime(self, runtime.inputs()),
+                |epoch, blocks| OciBootFactory::new(&self.engine, runtime.inputs(), epoch, blocks),
             ),
         )
+    }
+    /// Store one preparation's runtime files: this engine and the selected
+    /// runtime's package and guest files. A cancelled preparation stores none.
+    pub fn runtime_digests(
+        &self,
+        runtime: &seedbox_driver_execution::runtime_assets::Inputs,
+        store: &ContentStore,
+        context: &PreparationContext,
+    ) -> Result<RuntimeDigests> {
+        context.check()?;
+        RuntimeDigests::new(store.put_file(&self.engine)?, runtime, store)
     }
     fn prepare_with_factory<F: BootFactory>(
         &self,
@@ -98,7 +101,7 @@ impl OciPreparer {
         factory: impl FnOnce(u32, seedbox_spec::progress::ProgressBudget) -> Result<F>,
     ) -> Result<PreparedInputs> {
         let architecture = self.validate_services(simulation, context)?;
-        architecture.validate_elf(&self.init)?;
+        architecture.validate_elf(&runtime.inputs().guest_assets.join("init"))?;
         validate_volume_targets(simulation)?;
         let mut auxiliary = self.guest_auxiliary(simulation, architecture, runtime)?;
         let configs = read_configs(simulation, store, &mut auxiliary)?;
@@ -243,14 +246,9 @@ impl OciPreparer {
             );
         }
         if volumes {
-            let mke2fs = self.mke2fs.as_ref().ok_or_else(|| {
-                Error::Setup(
-                    "named volumes need the formatter from a complete Driver runtime package; rebuild the SDK"
-                        .into(),
-                )
-            })?;
-            architecture.validate_elf(mke2fs)?;
-            auxiliary.insert("guest-mke2fs".into(), runtime.file("mke2fs")?.clone());
+            let mke2fs = runtime.file("mke2fs").map_err(|_| missing_formatter())?;
+            architecture.validate_elf(&runtime.inputs().guest_assets.join("mke2fs"))?;
+            auxiliary.insert("guest-mke2fs".into(), mke2fs.clone());
         }
         Ok(auxiliary)
     }
@@ -288,6 +286,14 @@ impl Launch<'_> {
             |request, store| factory.boot(request, store),
         )
     }
+}
+
+/// Named volumes are formatted on first boot by the runtime's mke2fs.
+fn missing_formatter() -> Error {
+    Error::Setup(
+        "named volumes need the formatter from a complete Driver runtime package; rebuild the SDK"
+            .into(),
+    )
 }
 
 fn validate_volume_targets(simulation: &Simulation) -> Result<()> {

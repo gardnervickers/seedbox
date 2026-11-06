@@ -8,12 +8,13 @@ use seedbox_engine_protocol::driver_world as wire;
 impl OciPreparer {
     /// Prepare the machine `request` names from its spec, a `machines` entry
     /// of `simulation`'s seedbox.yaml. Files the worker reads are written
-    /// under `directory`.
+    /// under `directory`; `runtime` is the run's selected Driver runtime.
     pub fn prepare_spawn(
         &self,
         simulation: &Simulation,
         store: &ContentStore,
         transport: &dyn crate::oci::ImageTransport,
+        runtime: &seedbox_driver_execution::runtime_assets::Inputs,
         request: &wire::SpawnRequest,
         directory: &Path,
     ) -> Result<(wire::Machine, wire::Environment)> {
@@ -26,11 +27,8 @@ impl OciPreparer {
         for mount in &service.volumes {
             validate_config_target(&mount.target)?;
         }
-        if !service.volumes.is_empty() && self.mke2fs.is_none() {
-            return Err(Error::Setup(
-                "named volumes need the formatter from a complete Driver runtime package; rebuild the SDK"
-                    .into(),
-            ));
+        if !service.volumes.is_empty() && !runtime.guest_assets.join("mke2fs").is_file() {
+            return Err(missing_formatter());
         }
         fs::create_dir_all(directory)?;
         let mut configs = BTreeMap::new();

@@ -37,13 +37,14 @@ fn stored(store: &ContentStore, digest: &ContentDigest) -> Result<wire::Artifact
 
 /// The runtime files one preparation boots and retains, each stored once.
 /// `put_file` rereads a file on every call, so a preparation builds this once
-/// and its boot cache and retained inventory share the digests.
+/// and its boot cache and retained inventory share the digests. It keeps the
+/// runtime it stored, so boots render from the same files the digests name.
 #[derive(Clone, Debug)]
 pub struct RuntimeDigests {
     engine: ContentDigest,
     /// The complete package and each selected file, by its runtime name.
     files: BTreeMap<String, ContentDigest>,
-    tcg: bool,
+    runtime: Inputs,
 }
 impl RuntimeDigests {
     /// Fingerprint bytes, never host paths or timestamps. Include selected
@@ -80,15 +81,19 @@ impl RuntimeDigests {
         Ok(Self {
             engine,
             files,
-            tcg: runtime.qemu.is_some(),
+            runtime: runtime.clone(),
         })
     }
     pub fn engine(&self) -> &ContentDigest {
         &self.engine
     }
+    /// The runtime whose files these are.
+    pub fn inputs(&self) -> &Inputs {
+        &self.runtime
+    }
     /// Whether these are a TCG runtime's files, with QEMU and firmware.
     pub fn tcg(&self) -> bool {
-        self.tcg
+        self.runtime.qemu.is_some()
     }
     /// One stored file by its runtime name, such as `kernel` or `package`.
     pub fn file(&self, name: &str) -> Result<&ContentDigest> {

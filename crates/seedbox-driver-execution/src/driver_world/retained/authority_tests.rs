@@ -553,14 +553,28 @@ fn stored_artifacts_retain_by_reference_only_when_the_store_holds_them() {
         "{error}"
     );
     let absent = ContentDigest::of(b"never stored");
-    assert!(retain_prepared(
+    let error = retain_prepared(
         &mut inputs.clone(),
         &referenced(Artifact {
             sha256: absent.hex().into(),
             artifact: format!("asset:{}", absent.hex()),
-            ..stored
+            ..stored.clone()
         }),
         &store,
     )
-    .is_err());
+    .unwrap_err();
+    assert!(error.to_string().contains(absent.hex()), "{error}");
+    // And its bytes must still be the ones it is named for. A new store
+    // instance has verified nothing yet.
+    let object = root.path().join("store/sha256").join(&stored.sha256);
+    let mut bytes = fs::read(&object).unwrap();
+    bytes[0] ^= 1;
+    fs::write(&object, bytes).unwrap();
+    let error = retain_prepared(
+        &mut inputs.clone(),
+        &referenced(stored),
+        &ContentStore::new(root.path().join("store")),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("hash mismatch"), "{error}");
 }

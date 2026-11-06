@@ -33,7 +33,7 @@ impl PreparedBootCache {
         digests.insert("engine".into(), runtime.engine.clone());
         Self {
             runtime: digests,
-            tcg: runtime.tcg,
+            tcg: runtime.tcg(),
             epoch,
             blocks,
         }

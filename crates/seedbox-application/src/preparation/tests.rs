@@ -36,7 +36,7 @@ impl FixturePreparer {
         context: &PreparationContext,
         transport: &dyn ImageTransport,
     ) -> seedbox_application::Result<seedbox_application::execution::PreparedInputs> {
-        let runtime = self.digests(store)?;
+        let runtime = self.inner.runtime_digests(&self.runtime, store, context)?;
         let mut inputs = self.inner.prepare_with_factory(
             simulation,
             store,
@@ -57,7 +57,7 @@ impl FixturePreparer {
         )?;
         Ok(inputs)
     }
-    /// The runtime files one preparation stores, as the CLI computes them.
+    /// The runtime files one preparation stores, without a preparation.
     fn digests(&self, store: &ContentStore) -> Result<RuntimeDigests> {
         RuntimeDigests::new(store.put_file(&self.engine)?, &self.runtime, store)
     }
@@ -66,8 +66,6 @@ impl FixturePreparer {
 fn fixture(root: &Path) -> (FixturePreparer, config::Simulation, ContentStore) {
     use seedbox_driver_execution::driver_world::DriverExecutor;
     let (_, runtime, _) = sdk(root, seedbox_spec::backend::CpuBackend::Pv);
-    let kernel = root.join("kernel");
-    fs::copy(runtime.guest_assets.join("kernel"), &kernel).unwrap();
     let engine = std::env::current_exe().unwrap();
     let store = ContentStore::new(root.join("store"));
     let simulation = config::parse_for_architecture(
@@ -82,11 +80,7 @@ fn fixture(root: &Path) -> (FixturePreparer, config::Simulation, ContentStore) {
     )
     .unwrap();
     let preparer = OciPreparer {
-        kernel,
         engine,
-        init: runtime.guest_assets.join("init"),
-        progress: runtime.guest_assets.join("progress.tar"),
-        mke2fs: None,
         profile: ExecutionProfile {
             backend: "driver-pv".into(),
             witness_mode: WitnessMode::Exits,
@@ -140,6 +134,13 @@ fn cancelled_preparation_never_imports_images() {
     let token = CancellationToken::default();
     token.cancel();
     let context = PreparationContext::new(root.path().join("evidence"), token).unwrap();
+    // Nor does it store the runtime files.
+    assert!(matches!(
+        preparer.runtime_digests(&preparer.runtime, &store, &context),
+        Err(Error::PreparationCancelled)
+    ));
+    let objects = root.path().join("store/sha256");
+    assert!(!objects.exists() || fs::read_dir(&objects).unwrap().next().is_none());
     let result = preparer.inner.prepare_with_factory(
         &simulation,
         &store,
@@ -254,12 +255,15 @@ fn preparation_retains_kernel_before_transport_changes_source() {
     let (preparer, simulation, store) = fixture(root.path());
     let context =
         PreparationContext::new(root.path().join("evidence"), Default::default()).unwrap();
-    let original_kernel = fs::read(&preparer.kernel).unwrap();
+    // A selected runtime is private and never rewritten; changing its kernel
+    // during import only shows that preparation stored the kernel before.
+    let kernel = preparer.runtime.guest_assets.join("kernel");
+    let original_kernel = fs::read(&kernel).unwrap();
     let inputs = preparer
-        .prepare_with_transport(&simulation, &store, &context, &Transport(&preparer.kernel))
+        .prepare_with_transport(&simulation, &store, &context, &Transport(&kernel))
         .unwrap();
     assert!(inputs.auxiliary.contains_key("driver-world/manifest"));
-    assert_eq!(fs::read(&preparer.kernel).unwrap(), b"changed");
+    assert_eq!(fs::read(&kernel).unwrap(), b"changed");
     assert_eq!(
         store.read(&ContentDigest::of(&original_kernel)).unwrap(),
         original_kernel

@@ -21,8 +21,6 @@ fn fixture(
     use seedbox_application::execution::ExecutionBackend;
     use seedbox_driver_execution::driver_world::DriverExecutor;
     let (_, runtime, _) = sdk(root, seedbox_spec::backend::CpuBackend::Pv);
-    let kernel = root.join("kernel");
-    fs::copy(runtime.guest_assets.join("kernel"), &kernel).unwrap();
     let engine = std::env::current_exe().unwrap();
     let store = ContentStore::new(root.join("store"));
     let simulation = config::parse_for_architecture(
@@ -40,11 +38,7 @@ fn fixture(
         DriverExecutor::for_preparation(&simulation, WitnessMode::Exits, Default::default())
             .unwrap();
     let preparer = OciPreparer {
-        kernel,
         engine,
-        init: runtime.guest_assets.join("init"),
-        progress: runtime.guest_assets.join("progress.tar"),
-        mke2fs: None,
         profile: executor.profile(),
         docker: bollard::Docker::connect_with_http(
             "http://127.0.0.1:9",
@@ -145,12 +139,7 @@ fn cold_driver_factory(backend: seedbox_spec::backend::CpuBackend) {
         target: "/data".into(),
         size_bytes: None,
     });
-    preparer.mke2fs = Some(preparer.init.clone());
     let (runtime, selected, package) = sdk(root.path(), backend);
-    preparer.kernel = selected.guest_assets.join("kernel");
-    preparer.init = selected.guest_assets.join("init");
-    preparer.progress = selected.guest_assets.join("progress.tar");
-    preparer.mke2fs = Some(selected.guest_assets.join("mke2fs"));
     preparer.engine = std::env::current_exe().unwrap();
     simulation.control = Some(seedbox_application::config::Control {
         service: "oracle".into(),
@@ -160,25 +149,15 @@ fn cold_driver_factory(backend: seedbox_spec::backend::CpuBackend) {
     preparer.profile = executor.profile();
     let context =
         PreparationContext::new(root.path().join("evidence"), Default::default()).unwrap();
-    let digests = driver_world::preparation::RuntimeDigests::new(
-        store.put_file(&preparer.engine).unwrap(),
-        &selected,
-        &store,
-    )
-    .unwrap();
+    let digests = preparer
+        .runtime_digests(&selected, &store, &context)
+        .unwrap();
     let mut inputs = preparer
-        .prepare_driver_with_transport(
-            &simulation,
-            &store,
-            &context,
-            &Transport,
-            &selected,
-            &digests,
-        )
+        .prepare_driver_with_transport(&simulation, &store, &context, &Transport, &digests)
         .unwrap();
     if backend == seedbox_spec::backend::CpuBackend::Tcg {
         assert!(
-            !preparer.progress.exists(),
+            !selected.guest_assets.join("progress.tar").exists(),
             "TCG package deliberately lacks progress.tar"
         );
         assert!(!inputs.auxiliary.contains_key("guest-progress"));
