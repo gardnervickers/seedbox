@@ -1,0 +1,26 @@
+name: stale-ack
+machines:
+  app:
+    image: docker.io/library/python:3.13-alpine@sha256:2d9aefe2fef018a7eb2c13064c89c71929800fd2e5dccdbf52ea5da5bb8d929a
+    entrypoint:
+    - python3
+    - "/scenario/process_acks.py"
+    - app
+    files:
+    - source: "../driver/process_acks.py"
+      target: "/scenario/process_acks.py"
+oracle:
+  image: docker.io/library/python:3.13-alpine@sha256:2d9aefe2fef018a7eb2c13064c89c71929800fd2e5dccdbf52ea5da5bb8d929a
+  entrypoint:
+  - python3
+  - "/scenario/process_acks.py"
+  - reboot
+  files:
+  - source: "../driver/process_acks.py"
+    target: "/scenario/process_acks.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms

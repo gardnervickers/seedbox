@@ -1,0 +1,20 @@
+name: checkpoint-altstack
+machines:
+  sig:
+    build:
+      context: "../images/altstack"
+      dockerfile: Dockerfile
+oracle:
+  image: docker.io/library/python:3.13-alpine
+  entrypoint:
+  - python3
+  - "/scenario/altstack_checkpoint.py"
+  files:
+  - source: "../driver/altstack_checkpoint.py"
+    target: "/scenario/altstack_checkpoint.py"
+  - source: "../../../python/seedbox/__init__.py"
+    target: "/scenario/seedbox/__init__.py"
+  - source: "../../../python/seedbox/control.py"
+    target: "/scenario/seedbox/control.py"
+network:
+  latency: 1ms

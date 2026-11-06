@@ -290,3 +290,61 @@ fn reclamation_never_removes_an_object_an_ordinary_put_returned() {
     }
     assert!(store.owned_objects().is_empty());
 }
+
+#[test]
+fn an_executable_is_copied_once_into_a_directory_while_unchanged() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(directory.path().join("store"));
+    let bytes = b"#!/bin/sh\nexit 0\n";
+    let digest = store.put(bytes).unwrap();
+    let object = directory.path().join("store/sha256").join(digest.hex());
+    let away = directory.path().join("away");
+    let shared = directory.path().join("shared");
+    let mode = |path: &std::path::Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+    let first = store.materialize_executable(&digest, &shared).unwrap();
+    assert_eq!(mode(&first), 0o500);
+    // Without the object only the existing file can satisfy a call. Clones
+    // share it, as concurrent executions do, and a mode change is no
+    // modification; another directory needs a copy.
+    fs::rename(&object, &away).unwrap();
+    fs::set_permissions(&first, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        store
+            .clone()
+            .materialize_executable(&digest, &shared)
+            .unwrap(),
+        first
+    );
+    assert!(store
+        .materialize_executable(&digest, &directory.path().join("other"))
+        .is_err());
+    fs::rename(&away, &object).unwrap();
+
+    // A changed file is replaced with the retained bytes, already executable.
+    fs::write(&first, b"changed by a backend").unwrap();
+    assert_eq!(
+        store.materialize_executable(&digest, &shared).unwrap(),
+        first
+    );
+    assert_eq!(
+        (fs::read(&first).unwrap(), mode(&first)),
+        (bytes.to_vec(), 0o500)
+    );
+
+    // So is a removed one, and a file another store materialized there.
+    fs::remove_file(&first).unwrap();
+    assert_eq!(
+        store.materialize_executable(&digest, &shared).unwrap(),
+        first
+    );
+    let unrelated = ContentStore::new(directory.path().join("store"));
+    assert_eq!(
+        unrelated.materialize_executable(&digest, &shared).unwrap(),
+        first
+    );
+    assert_eq!(
+        (fs::read(&first).unwrap(), mode(&first)),
+        (bytes.to_vec(), 0o500)
+    );
+}

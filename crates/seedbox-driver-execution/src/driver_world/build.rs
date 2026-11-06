@@ -49,6 +49,7 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     let program = program(request)?;
     let assets = materialize_factory(
         &request.prepared.inventory,
+        pv_engine(&request.prepared.inventory),
         &request.output,
         request.runtime_binding.as_ref(),
     )?;
@@ -253,6 +254,7 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
     .validate_saved(retained.controller_setup())?;
     let assets = materialize_factory(
         &envelope.inventory,
+        pv_engine(&request.prepared.inventory),
         &request.output,
         request.runtime_binding.as_ref(),
     )?;
@@ -375,14 +377,24 @@ pub(super) fn check_program_engine(
 fn encode(snapshot: Snapshot, writer: &mut BufWriter<fs::File>) -> Result<()> {
     snapshot.write_to(writer).map_err(bad)
 }
+/// The engine executable a PV inventory runs; TCG machines run QEMU instead.
+fn pv_engine(inventory: &Inventory) -> Option<&Artifact> {
+    match inventory {
+        Inventory::Pv { executable, .. } => Some(executable),
+        Inventory::Tcg { .. } => None,
+    }
+}
 struct Assets {
     executable: PathBuf,
     inputs: Option<crate::runtime_assets::Inputs>,
     guest_assets: PathBuf,
     inventory: Inventory,
 }
+/// `materialized` is the engine executable the parent materialized for this
+/// request, when its inventory runs one (PV).
 fn materialize_factory(
     inventory: &Inventory,
+    materialized: Option<&Artifact>,
     output: &Path,
     binding: Option<&wire::RuntimeBinding>,
 ) -> Result<Assets> {
@@ -396,10 +408,8 @@ fn materialize_factory(
     }) = inventory;
     let engine = super::actions::engine(inventory);
     let (backend, architecture) = (engine.backend, engine.architecture);
-    checkpoint::verified(archive)?;
     let (guest_assets, qemu, inputs) = if let Some(binding) = binding {
         binding.validate_archive(archive).map_err(bad)?;
-        checkpoint::verified(&binding.archive)?;
         (binding.guest_assets.clone(), binding.qemu.clone(), None)
     } else {
         // An explicitly unbound standalone worker owns its own extraction. The
@@ -409,7 +419,6 @@ fn materialize_factory(
         // because machine QEMU and PV-worker spawns are not exec-file scoped
         // (see seedbox_exec): no fork can then copy its fd.
         let runtime = Runtime::from_archive(Path::new(&archive.artifact), output)?;
-        verify_at(archive, &runtime.archive())?;
         let inputs = runtime.select(backend, architecture)?;
         (
             inputs.guest_assets.clone(),
@@ -425,7 +434,6 @@ fn materialize_factory(
             init,
             command_line,
             progress,
-            runtime,
             formatter,
             ..
         } => {
@@ -437,19 +445,33 @@ fn materialize_factory(
             ] {
                 remap(artifact, &guest_assets.join(name))?;
             }
-            remap(runtime, Path::new(&archive.artifact))?;
             if let Some(formatter) = formatter {
                 remap(formatter, &guest_assets.join("mke2fs"))?;
             }
-            // Worker-owned copy, written before `Factory::load` spawns anything
-            // (see above). It lives in the attempt's native scratch, which the
-            // parent removes after the monitor exits, so the engine never
-            // becomes part of the attempt's retained output logs.
-            let scratch = output.join(super::NATIVE_SCRATCH);
-            fs::create_dir_all(&scratch)?;
-            let path = scratch.join("factory-worker");
-            copy(executable, &path)?;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
+            // PV workers run the engine. The parent already materialized this
+            // request's engine as a private executable, so workers execute
+            // that file in place instead of a fresh copy of it per attempt.
+            let path = match materialized {
+                Some(engine)
+                    if engine.sha256 == executable.sha256 && engine.length == executable.length =>
+                {
+                    PathBuf::from(&engine.artifact)
+                }
+                // A checkpoint saved by another engine retains its engine as
+                // plain bytes. The worker writes an executable copy before
+                // `Factory::load` spawns anything (see above), in the attempt's
+                // native scratch, which the parent removes after the monitor
+                // exits, so the engine never becomes part of the attempt's
+                // retained output logs.
+                _ => {
+                    let scratch = output.join(super::NATIVE_SCRATCH);
+                    fs::create_dir_all(&scratch)?;
+                    let path = scratch.join("factory-worker");
+                    copy(executable, &path)?;
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
+                    path
+                }
+            };
             remap(executable, &path)?;
             path
         }
@@ -459,7 +481,6 @@ fn materialize_factory(
             init,
             command_line,
             firmware,
-            runtime,
             formatter,
             ..
         } => {
@@ -471,7 +492,6 @@ fn materialize_factory(
             ] {
                 remap(artifact, &guest_assets.join(name))?;
             }
-            remap(runtime, Path::new(&archive.artifact))?;
             if let Some(formatter) = formatter {
                 remap(formatter, &guest_assets.join("mke2fs"))?;
             }
@@ -505,17 +525,7 @@ fn materialize_factory(
         inventory,
     })
 }
-fn verify_at(artifact: &Artifact, path: &Path) -> Result<()> {
-    let mut reference = artifact.clone();
-    reference.artifact = path
-        .to_str()
-        .ok_or_else(|| bad("Driver factory path is not UTF-8"))?
-        .into();
-    checkpoint::verified(&reference)?;
-    Ok(())
-}
 fn remap(artifact: &mut Artifact, path: &Path) -> Result<()> {
-    verify_at(artifact, path)?;
     artifact.artifact = path
         .to_str()
         .ok_or_else(|| bad("Driver factory path is not UTF-8"))?
@@ -523,7 +533,7 @@ fn remap(artifact: &mut Artifact, path: &Path) -> Result<()> {
     Ok(())
 }
 fn copy(artifact: &Artifact, path: &Path) -> Result<()> {
-    let mut input = checkpoint::verified(artifact)?;
+    let mut input = open_input(artifact)?;
     let mut file = fs::File::options()
         .write(true)
         .create_new(true)
@@ -538,11 +548,24 @@ fn copy(artifact: &Artifact, path: &Path) -> Result<()> {
         ));
     }
     file.flush()?;
-    verify_at(artifact, path)
+    Ok(())
+}
+/// Open one input of this run. Its digest was checked before this worker was
+/// given it, so only its recorded length is checked here.
+fn open_input(artifact: &Artifact) -> Result<fs::File> {
+    artifact.validate().map_err(bad)?;
+    let file = fs::File::open(&artifact.artifact)?;
+    if file.metadata()?.len() != artifact.length {
+        return Err(bad("Driver artifact encoded length differs"));
+    }
+    Ok(file)
+}
+/// Read one input of this run whole, once.
+pub(super) fn read_input(artifact: &Artifact) -> Result<Vec<u8>> {
+    read(&mut open_input(artifact)?, artifact.length)
 }
 pub(super) fn definition(input: &wire::Machine) -> Result<MachineDefinition> {
-    let mut reader = checkpoint::verified(&input.filesystem)?;
-    let bytes = read(&mut reader, input.filesystem.length)?;
+    let bytes = read_input(&input.filesystem)?;
     let application = definition::PreparedApplication {
         filesystem: FilesystemArchive::new(bytes).map_err(|e| bad(e.to_string()))?,
         launch: definition::Launch {
@@ -557,13 +580,10 @@ pub(super) fn definition(input: &wire::Machine) -> Result<MachineDefinition> {
         Some(wire::Disk::Zero { bytes }) => {
             Some(definition::DiskImage::zeroed(*bytes).map_err(|e| bad(e.to_string()))?)
         }
-        Some(wire::Disk::Image { contents }) => {
-            let mut reader = checkpoint::verified(contents)?;
-            Some(
-                definition::DiskImage::from_bytes(read(&mut reader, contents.length)?)
-                    .map_err(|e| bad(e.to_string()))?,
-            )
-        }
+        Some(wire::Disk::Image { contents }) => Some(
+            definition::DiskImage::from_bytes(read_input(contents)?)
+                .map_err(|e| bad(e.to_string()))?,
+        ),
     };
     let network = input
         .interface

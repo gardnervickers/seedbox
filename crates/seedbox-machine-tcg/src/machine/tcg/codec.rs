@@ -380,16 +380,17 @@ impl Snapshot {
         {
             return Err(invalid("overlay length exceeds disk geometry"));
         }
-        // Vec -> Arc copies for three boot bodies and an image base. The single
-        // opaque migration allocation and client overlay Vec are never copied.
-        r.charge(sum(&[nk, ni, nf, nb])?)?;
+        // Vec -> Arc copies for two boot bodies and an image base. The
+        // initramfs, the single opaque migration allocation and the client
+        // overlay Vec are never copied.
+        r.charge(sum(&[nk, nf, nb])?)?;
         // Validate scalar boundary ownership before any raw-body allocation/read;
         // empty Arc boot placeholders allocate no element storage.
         let mut snapshot = Self {
             manifest: Manifest {
                 boot: Boot::Linux {
                     kernel: [].into(),
-                    initramfs: [].into(),
+                    initramfs: Default::default(),
                     firmware: [].into(),
                     command_line,
                     epoch_seconds,

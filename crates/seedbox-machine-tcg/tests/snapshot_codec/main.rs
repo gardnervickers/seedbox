@@ -773,8 +773,10 @@ fn quotas_and_forbidden_counts_fail_before_corresponding_body_reads() {
     l.allocation_bytes = 1;
     prefix_error(&wire, m["command"] + 8, &l, "allocation bytes");
     // All six raw bodies and ownership copies are charged before the first byte.
+    // The initramfs keeps the allocation it is read into, so it has no copy.
     let charged = Fixture::default().command.len() as u64
-        + 2 * (Fixture::default().kernel.len() + Fixture::default().initrd.len() + 65536) as u64;
+        + Fixture::default().initrd.len() as u64
+        + 2 * (Fixture::default().kernel.len() + 65536) as u64;
     l = limits();
     l.allocation_bytes = charged - 1;
     prefix_error(&wire, m["raw"], &l, "allocation bytes");
@@ -847,7 +849,8 @@ fn blob_ownership_copies_and_single_migration_have_exact_logical_charges() {
     ] {
         let (wire, m) = f.wire();
         let exact = f.command.len() as u64
-            + 2 * (f.kernel.len() + f.initrd.len() + f.firmware.len() + f.base.len()) as u64
+            + 2 * (f.kernel.len() + f.firmware.len() + f.base.len()) as u64
+            + f.initrd.len() as u64
             + f.image.as_ref().map_or(0, Vec::len) as u64
             + f.overlay.len() as u64;
         let mut l = limits();

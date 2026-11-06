@@ -36,6 +36,7 @@ pub struct Orchestrator {
     pub(crate) program: Vec<seedbox_engine_protocol::input_program::TimedInput>,
     pub(crate) store: ContentStore,
     pub(crate) runs: PathBuf,
+    pub(crate) executables: Option<PathBuf>,
     pub(crate) log_policy: LogPolicy,
     pub(crate) spawner: Option<SharedSpawner>,
 }
@@ -79,6 +80,7 @@ impl Orchestrator {
             program: Vec::new(),
             store,
             runs: runs.into(),
+            executables: None,
             log_policy: LogPolicy::default(),
             spawner: None,
         }
@@ -88,6 +90,16 @@ impl Orchestrator {
     /// retain. The run then retains them, so its replay needs no preparation.
     pub fn with_spawner(mut self, spawner: std::sync::Arc<dyn Spawner>) -> Self {
         self.spawner = Some(SharedSpawner(spawner));
+        self
+    }
+
+    /// Materialize the retained engine into `directory`, shared by the runs
+    /// of this orchestrator and its clones, instead of into each attempt's
+    /// inputs. The engine is then copied once and keeps one path, so macOS
+    /// assesses it on its first launch only. The caller owns the directory
+    /// and removes it once no execution can use it.
+    pub fn with_executables(mut self, directory: PathBuf) -> Self {
+        self.executables = Some(directory);
         self
     }
 
@@ -236,7 +248,8 @@ impl Orchestrator {
                         .executable()
                         .is_ok_and(|engine| digest == engine);
                     let path = if executable {
-                        self.store.materialize_executable(digest, &inputs)?
+                        let directory = self.executables.as_deref().unwrap_or(&inputs);
+                        self.store.materialize_executable(digest, directory)?
                     } else {
                         self.store.materialize(digest, &inputs)?
                     };

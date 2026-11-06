@@ -14,7 +14,6 @@ use std::{
     io::Read,
     path::Path,
 };
-mod verification;
 pub(super) const MANIFEST: &str = "driver-world/manifest";
 pub fn validate_contract(profile: &crate::execution::ExecutionProfile) -> Result<CpuBackend> {
     if profile.semantic_parameters.launch() != Some(crate::engine::ExecutableKind::DriverWorld) {
@@ -406,8 +405,7 @@ pub(crate) fn request(
             *epoch_seconds = epoch
         }
     }
-    // Keep the worker-option error at its existing validation position. A bad
-    // option still uses the serial verifier until that error is returned.
+    // Report a bad worker option only after mapping and import errors.
     let workers = request
         .performance_parameters
         .get("SEEDBOX_MACHINE_WORKERS")
@@ -423,8 +421,9 @@ pub(crate) fn request(
                 Err(bad("Driver machine worker count must be in 1..64"))
             }
         });
-    let mut artifacts = Vec::new();
-    let mapped = visit(&mut prepared, |artifact| {
+    // Point each input at the bound runtime's file or this run's materialized
+    // copy. Both were hashed before this request, so neither is hashed again.
+    visit(&mut prepared, |artifact| {
         let digest = ContentDigest::try_from(artifact.sha256.clone())?;
         let path = runtime
             .and_then(|runtime| runtime.files.get(&digest))
@@ -439,13 +438,8 @@ pub(crate) fn request(
             .to_str()
             .ok_or_else(|| bad("Driver materialized path is not UTF-8"))?
             .into();
-        artifacts.push(artifact.clone());
         Ok(())
-    });
-    // Verify every preceding artifact before reporting a later remapping
-    // error, preserving the walk's original first-error selection.
-    verification::artifacts(&artifacts, *workers.as_ref().unwrap_or(&1))?;
-    mapped?;
+    })?;
     // Imported views are attempt-owned files retained under the same output
     // lifetime as the request; guest paths are never extracted onto the host.
     let boots = match &prepared.inventory {
