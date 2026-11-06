@@ -49,6 +49,7 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     let program = program(request)?;
     let assets = materialize_factory(
         &request.prepared.inventory,
+        pv_engine(&request.prepared.inventory),
         &request.output,
         request.runtime_binding.as_ref(),
     )?;
@@ -253,6 +254,7 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
     .validate_saved(retained.controller_setup())?;
     let assets = materialize_factory(
         &envelope.inventory,
+        pv_engine(&request.prepared.inventory),
         &request.output,
         request.runtime_binding.as_ref(),
     )?;
@@ -375,14 +377,24 @@ pub(super) fn check_program_engine(
 fn encode(snapshot: Snapshot, writer: &mut BufWriter<fs::File>) -> Result<()> {
     snapshot.write_to(writer).map_err(bad)
 }
+/// The engine executable a PV inventory runs; TCG machines run QEMU instead.
+fn pv_engine(inventory: &Inventory) -> Option<&Artifact> {
+    match inventory {
+        Inventory::Pv { executable, .. } => Some(executable),
+        Inventory::Tcg { .. } => None,
+    }
+}
 struct Assets {
     executable: PathBuf,
     inputs: Option<crate::runtime_assets::Inputs>,
     guest_assets: PathBuf,
     inventory: Inventory,
 }
+/// `materialized` is the engine executable the parent materialized for this
+/// request, when its inventory runs one (PV).
 fn materialize_factory(
     inventory: &Inventory,
+    materialized: Option<&Artifact>,
     output: &Path,
     binding: Option<&wire::RuntimeBinding>,
 ) -> Result<Assets> {
@@ -441,15 +453,30 @@ fn materialize_factory(
             if let Some(formatter) = formatter {
                 remap(formatter, &guest_assets.join("mke2fs"))?;
             }
-            // Worker-owned copy, written before `Factory::load` spawns anything
-            // (see above). It lives in the attempt's native scratch, which the
-            // parent removes after the monitor exits, so the engine never
-            // becomes part of the attempt's retained output logs.
-            let scratch = output.join(super::NATIVE_SCRATCH);
-            fs::create_dir_all(&scratch)?;
-            let path = scratch.join("factory-worker");
-            copy(executable, &path)?;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
+            // PV workers run the engine. The parent already materialized this
+            // request's engine as a private executable, so workers execute
+            // that file in place instead of a fresh copy of it per attempt.
+            let path = match materialized {
+                Some(engine)
+                    if engine.sha256 == executable.sha256 && engine.length == executable.length =>
+                {
+                    PathBuf::from(&engine.artifact)
+                }
+                // A checkpoint saved by another engine retains its engine as
+                // plain bytes. The worker writes an executable copy before
+                // `Factory::load` spawns anything (see above), in the attempt's
+                // native scratch, which the parent removes after the monitor
+                // exits, so the engine never becomes part of the attempt's
+                // retained output logs.
+                _ => {
+                    let scratch = output.join(super::NATIVE_SCRATCH);
+                    fs::create_dir_all(&scratch)?;
+                    let path = scratch.join("factory-worker");
+                    copy(executable, &path)?;
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
+                    path
+                }
+            };
             remap(executable, &path)?;
             path
         }

@@ -3,7 +3,7 @@
 use seedbox_engine_protocol::host_control::{Command, Reply, Request, INVALID, MAX_DATAGRAM};
 use std::{
     fmt, io,
-    os::unix::net::UnixDatagram,
+    os::{fd::AsRawFd, unix::net::UnixDatagram},
     path::Path,
     time::{Duration, Instant},
 };
@@ -161,11 +161,12 @@ impl Client {
                 }
                 next_send = elapsed.saturating_add(Duration::from_millis(20));
             }
-            std::thread::sleep(
-                timeout
-                    .saturating_sub(started.elapsed())
-                    .min(Duration::from_millis(2)),
-            );
+            // Wake for the reply, the next retransmission or the deadline.
+            let now = started.elapsed();
+            crate::readiness::wait(
+                &[self.socket.as_raw_fd()],
+                Some(next_send.min(timeout).saturating_sub(now)),
+            )?;
         }
     }
 }

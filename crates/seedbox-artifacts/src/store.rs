@@ -57,6 +57,9 @@ pub struct ContentStore {
     /// Objects this process hashed, with the file identity they had then.
     /// Clones share it, so concurrent users verify each object once.
     verified: Arc<Mutex<HashMap<ContentDigest, Stamp>>>,
+    /// Executables this process materialized, by path, with the file
+    /// identity each had then. Clones share it.
+    executables: Arc<Mutex<HashMap<PathBuf, Stamp>>>,
     /// Cache objects this process created for its resources, if it reclaims
     /// them. Ownership lives only in this process: after a crash or any other
     /// exit, the objects stay as ordinary cache content. Clones share it, and
@@ -78,14 +81,21 @@ struct Stamp {
 
 impl Stamp {
     fn of(file: &fs::File) -> io::Result<Self> {
-        let m = file.metadata()?;
-        Ok(Self {
+        Ok(Self::of_metadata(&file.metadata()?))
+    }
+    fn of_metadata(m: &fs::Metadata) -> Self {
+        Self {
             dev: m.dev(),
             ino: m.ino(),
             len: m.len(),
             mtime: (m.mtime(), m.mtime_nsec()),
             ctime: (m.ctime(), m.ctime_nsec()),
-        })
+        }
+    }
+    /// The same file, with the same length and modification time. Unlike
+    /// equality this ignores ctime, which links and mode changes update.
+    fn same_unmodified_file(&self, other: &Self) -> bool {
+        (self.dev, self.ino, self.len, self.mtime) == (other.dev, other.ino, other.len, other.mtime)
     }
 }
 
@@ -95,6 +105,7 @@ impl ContentStore {
             root: root.into(),
             evidence_root: None,
             verified: Arc::default(),
+            executables: Arc::default(),
             owned: None,
         }
     }
@@ -481,13 +492,36 @@ impl ContentStore {
     /// no concurrent fork can keep a writable copy that makes the first
     /// execution fail with ETXTBSY. Only executables pay the exclusion; guest
     /// inputs are read as bytes and use plain `materialize`.
+    ///
+    /// A digest this process already materialized into `directory` is not
+    /// copied again: while that file is the same file, unchanged since, the
+    /// call returns it. Executions only read and execute it, so callers may
+    /// share one directory between them. macOS assesses an executable on the
+    /// first launch through each new path, so a stable path also keeps later
+    /// launches fast, where a fresh copy or link per execution would not.
     pub fn materialize_executable(
         &self,
         digest: &ContentDigest,
         directory: &Path,
     ) -> Result<PathBuf> {
-        let _writing = seedbox_exec::writing();
-        self.materialize(digest, directory)
+        let path = directory.join(digest.hex());
+        // Held throughout, so concurrent calls for one path copy it once.
+        let mut materialized = self.executables.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(stamp) = materialized.remove(&path) {
+            let unchanged = fs::metadata(&path)
+                .is_ok_and(|metadata| Stamp::of_metadata(&metadata).same_unmodified_file(&stamp));
+            if unchanged {
+                materialized.insert(path.clone(), stamp);
+                return Ok(path);
+            }
+            remove_if_present(&path)?;
+        }
+        let path = {
+            let _writing = seedbox_exec::writing();
+            self.materialize(digest, directory)?
+        };
+        materialized.insert(path.clone(), Stamp::of_metadata(&fs::metadata(&path)?));
+        Ok(path)
     }
 }
 

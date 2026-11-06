@@ -256,6 +256,11 @@ impl OwnedExecution {
     pub fn poll(&mut self) -> io::Result<Option<&Completion>> {
         self.pending.as_mut().expect("owned monitor").poll()
     }
+    /// Block until the monitor writes or closes its status, or `timeout`
+    /// passes. This consumes nothing: call [`Self::poll`] afterwards.
+    pub fn wait(&self, timeout: Duration) -> io::Result<()> {
+        self.pending.as_ref().expect("owned monitor").wait(timeout)
+    }
     /// Wait for cleanup in an explicit blocking execution context, never on a
     /// Tokio executor thread. Drop only cancels and hands off the owned join.
     pub fn finish(&mut self) -> io::Result<&Completion> {
@@ -309,19 +314,26 @@ impl MonitorReceipt {
         self.completion = Some(completion);
         Ok(self.completion.as_ref())
     }
+    fn wait(&self, timeout: Duration) -> io::Result<()> {
+        if self.completion.is_none() {
+            crate::readiness::wait(&[self.status.as_raw_fd()], Some(timeout))?;
+        }
+        Ok(())
+    }
 
     /// Obtain the typed receipt and reap only the monitor. Missing/truncated
     /// status, timeout, or failure never authorizes directory removal.
     pub fn finish(&mut self) -> io::Result<&Completion> {
         let start = Instant::now();
         while self.poll()?.is_none() {
-            if start.elapsed() >= COMPLETION_TIMEOUT {
+            let elapsed = start.elapsed();
+            if elapsed >= COMPLETION_TIMEOUT {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "execution monitor completion timed out; execution files must be kept",
                 ));
             }
-            std::thread::sleep(Duration::from_millis(5));
+            self.wait(COMPLETION_TIMEOUT - elapsed)?;
         }
         Ok(self.completion.as_ref().expect("completed receipt"))
     }
@@ -390,6 +402,9 @@ pub fn serve_monitor(mut arguments: Vec<std::ffi::OsString>) -> io::Result<()> {
         ));
     }
     let worker_executable = arguments.remove(0);
+    // Before the children exist, and while descriptors 1 and 2 are still
+    // open, so the wake pipe never takes over a standard stream's number.
+    let exits = ChildExits::install()?;
     let (anchor_owner, anchor_input) = UnixStream::pair()?;
     let mut anchor_command = Command::new(&executable);
     anchor_command
@@ -443,6 +458,7 @@ pub fn serve_monitor(mut arguments: Vec<std::ffi::OsString>) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     let observed = loop {
+        exits.drain();
         if observe_exit(&children.anchor)?.is_some() {
             return Err(io::Error::other(
                 "execution group anchor exited before termination; execution files must be kept",
@@ -462,13 +478,15 @@ pub fn serve_monitor(mut arguments: Vec<std::ffi::OsString>) -> io::Result<()> {
                     // Observe its real exit next, then use ordinary cleanup.
                     children.worker.as_mut().expect("spawned worker").kill()?;
                 }
+                continue;
             }
             Err(e)
                 if e.kind() == io::ErrorKind::Interrupted
                     || e.kind() == io::ErrorKind::WouldBlock => {}
             Err(_) => break None,
         }
-        std::thread::sleep(Duration::from_millis(5));
+        // Owner input, owner EOF or a child's exit.
+        exits.wait(&[owner.as_raw_fd()], None)?;
     };
     let group = if unsafe { libc::kill(-group_id, libc::SIGKILL) } == 0 {
         GroupTermination::Signalled
@@ -502,16 +520,18 @@ pub fn serve_monitor(mut arguments: Vec<std::ffi::OsString>) -> io::Result<()> {
     drop(anchor_owner);
     let deadline = Instant::now();
     let exit = loop {
+        exits.drain();
         if let Some(exit) = observe_exit(children.worker.as_ref().expect("spawned worker"))? {
             break exit;
         }
-        if deadline.elapsed() >= TERMINATION_TIMEOUT {
+        let elapsed = deadline.elapsed();
+        if elapsed >= TERMINATION_TIMEOUT {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "worker did not exit after group termination; execution files must be kept",
             ));
         }
-        std::thread::sleep(Duration::from_millis(5));
+        exits.wait(&[], Some(TERMINATION_TIMEOUT - elapsed))?;
     };
     children.worker.as_mut().expect("spawned worker").wait()?;
     // The live anchor makes the final group signal possible on Darwin even
@@ -578,6 +598,83 @@ impl Drop for GroupChildren {
             let _ = worker.wait();
         }
         let _ = self.anchor.wait();
+    }
+}
+
+/// Wakes the monitor's waits when one of its children exits. The SIGCHLD
+/// handler only writes a byte to a non-blocking pipe, which is
+/// async-signal-safe; a full pipe is already readable.
+struct ChildExits {
+    read: File,
+    _write: File,
+}
+static CHILD_EXIT_WAKE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+extern "C" fn child_exited(_: libc::c_int) {
+    let fd = CHILD_EXIT_WAKE.load(std::sync::atomic::Ordering::Relaxed);
+    if fd >= 0 {
+        let saved = unsafe { *errno() };
+        unsafe { libc::write(fd, [0u8].as_ptr().cast(), 1) };
+        unsafe { *errno() = saved };
+    }
+}
+#[cfg(target_os = "linux")]
+fn errno() -> *mut libc::c_int {
+    unsafe { libc::__errno_location() }
+}
+#[cfg(target_os = "macos")]
+fn errno() -> *mut libc::c_int {
+    unsafe { libc::__error() }
+}
+impl ChildExits {
+    fn install() -> io::Result<Self> {
+        let mut fds = [0; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let (read, write) = unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) };
+        for fd in fds {
+            close_on_exec(fd)?;
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        CHILD_EXIT_WAKE.store(fds[1], std::sync::atomic::Ordering::Relaxed);
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = child_exited as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        action.sa_flags = libc::SA_RESTART | libc::SA_NOCLDSTOP;
+        unsafe { libc::sigemptyset(&mut action.sa_mask) };
+        if unsafe { libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut()) } != 0 {
+            CHILD_EXIT_WAKE.store(-1, std::sync::atomic::Ordering::Relaxed);
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            read,
+            _write: write,
+        })
+    }
+    /// Consume earlier wakes. Callers drain, then check their children, then
+    /// wait: an exit after the check still finds the pipe readable.
+    fn drain(&self) {
+        let mut bytes = [0; 64];
+        while (&self.read).read(&mut bytes).is_ok_and(|n| n > 0) {}
+    }
+    /// Wait for a child's exit, one of `descriptors` or `timeout`.
+    fn wait(&self, descriptors: &[RawFd], timeout: Option<Duration>) -> io::Result<()> {
+        let mut all = vec![self.read.as_raw_fd()];
+        all.extend_from_slice(descriptors);
+        crate::readiness::wait(&all, timeout).map(drop)
+    }
+}
+impl Drop for ChildExits {
+    fn drop(&mut self) {
+        // Restore the default before the pipe closes: a later handler must
+        // never write to a reused descriptor number.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = libc::SIG_DFL;
+        unsafe { libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut()) };
+        CHILD_EXIT_WAKE.store(-1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

@@ -1041,6 +1041,49 @@ fn only_the_backend_runtime_inputs_are_copied_into_an_attempt() {
 }
 
 #[test]
+fn runs_with_an_executables_directory_share_one_engine_path() {
+    struct Engines<'a>(&'a Fixture, std::sync::Mutex<Vec<std::path::PathBuf>>);
+    impl ExecutionBackend for Engines<'_> {
+        fn profile(&self) -> ExecutionProfile {
+            self.0.backend.profile()
+        }
+        fn performance_parameters(&self) -> BTreeMap<String, String> {
+            self.0.backend.performance_parameters()
+        }
+        fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+            let engine = &request.artifacts[request.prepared.executable().unwrap()];
+            self.1.lock().unwrap().push(engine.clone());
+            self.0.backend.execute(request)
+        }
+    }
+    let fixture = Fixture::new();
+    let executables = fixture.directory.path().join("executables");
+    let orchestrator = fixture
+        .orchestrator
+        .clone()
+        .with_executables(executables.clone());
+    let backend = Engines(&fixture, Default::default());
+    let inputs = &fixture.preparer.inputs;
+    for _ in 0..2 {
+        let run = orchestrator
+            .run(
+                &fixture.simulation,
+                RunOptions::default(),
+                &fixture.preparer,
+                &backend,
+            )
+            .unwrap();
+        assert_eq!(run.record.outcome, Outcome::Pass);
+        // Other inputs are still copied into each attempt.
+        let attempt = |digest: &ContentDigest| run.directory.join("inputs").join(digest.hex());
+        assert!(attempt(&inputs.auxiliary["fixture/kernel"]).exists());
+        assert!(!attempt(inputs.executable().unwrap()).exists());
+    }
+    let engine = executables.join(inputs.executable().unwrap().hex());
+    assert_eq!(backend.1.into_inner().unwrap(), [engine.clone(), engine]);
+}
+
+#[test]
 fn put_file_of_a_retained_object_reads_it_without_rewriting_it() {
     use std::os::unix::fs::MetadataExt;
     use std::time::{Duration, UNIX_EPOCH};
