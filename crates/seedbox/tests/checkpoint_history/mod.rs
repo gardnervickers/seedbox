@@ -58,9 +58,6 @@ fn observe(args: &[&str], imported: bool) -> Output {
             socket
                 .set_read_timeout(Some(guard.remaining().unwrap()))
                 .unwrap();
-            socket
-                .set_write_timeout(Some(guard.remaining().unwrap()))
-                .unwrap();
             let mut header = Vec::new();
             loop {
                 let mut byte = [0];
@@ -74,8 +71,14 @@ fn observe(args: &[&str], imported: bool) -> Output {
                 }
             }
             if header.is_empty() {
+                // The daemon's connect-only liveness probe. macOS rejects
+                // socket options (EINVAL) once the peer has closed, so only a
+                // connection that sent a request gets a write timeout.
                 continue;
-            } // daemon's connect-only liveness probe
+            }
+            socket
+                .set_write_timeout(Some(guard.remaining().unwrap()))
+                .unwrap();
             requests += 1;
             let header = String::from_utf8(header).unwrap();
             let path = header.split_whitespace().nth(1).unwrap();
