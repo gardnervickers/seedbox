@@ -75,7 +75,8 @@
               # (from the TCG kernel's patch) states its rate too.
               # The initramfs root uses guest RAM directly, without tmpfs's
               # separate quota while the boot archive is still reserved.
-              commandLine = "console=ttyS0 earlycon=uart8250,io,0x3f8 rdinit=/init rootfstype=ramfs nokaslr panic=-1 tsc_early_khz=1000000 lapic_timer_khz=1000000";
+              # virtio_net.napi_tx=0: see the PV command line below.
+              commandLine = "console=ttyS0 earlycon=uart8250,io,0x3f8 rdinit=/init rootfstype=ramfs nokaslr panic=-1 tsc_early_khz=1000000 lapic_timer_khz=1000000 virtio_net.napi_tx=0";
               # qboot loads the kernel and the ACPI tables from fw_cfg itself,
               # so with option ROMs disabled only owned firmware runs. (The
               # microvm ACPI default, bios-microvm.bin, needs QEMU's
@@ -98,9 +99,12 @@
               init = "${guest}/bin/init";
               # Avoid a second, smaller tmpfs quota during initramfs unpacking;
               # the VM's configured physical RAM remains the memory limit.
+              # virtio_net.napi_tx=0 leaves TX completion interrupts off until
+              # the ring is nearly full; with TX NAPI the driver re-enables
+              # them before every send, an interrupt per transmitted frame.
               commandLine = if arm
-                then "console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init rootfstype=ramfs nokaslr nosmp maxcpus=1 random.trust_cpu=off random.trust_bootloader=on mitigations=off panic=-1 loglevel=4"
-                else "console=ttyS0 rdinit=/init rootfstype=ramfs random.trust_cpu=off random.trust_bootloader=on panic=-1 loglevel=4";
+                then "console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init rootfstype=ramfs nokaslr nosmp maxcpus=1 random.trust_cpu=off random.trust_bootloader=on mitigations=off panic=-1 loglevel=4 virtio_net.napi_tx=0"
+                else "console=ttyS0 rdinit=/init rootfstype=ramfs random.trust_cpu=off random.trust_bootloader=on panic=-1 loglevel=4 virtio_net.napi_tx=0";
             };
             testFixtures = import ./crates/seedbox-machine/pv-test-fixtures.nix { inherit pkgs guest; };
           };
