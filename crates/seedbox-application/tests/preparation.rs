@@ -90,29 +90,31 @@ fn cold_driver_factory(backend: seedbox_spec::backend::CpuBackend) {
                 }))?,
             )?;
             let image = seedbox_application::oci::import_metadata(directory, service, store)?;
-            let root = directory.join("root");
-            fs::create_dir(&root)?;
-            fs::write(root.join("app"), b"cold application bytes; never executed")?;
-            // Match real ContainerTransport's prefixed archive, not just its
-            // directory-shaped test double: the SDK supplies its own rootfs/.
-            let archive = directory.join("rootfs.tar");
-            let mut tar = tar::Builder::new(fs::File::create(&archive)?);
-            tar.follow_symlinks(false);
-            tar.append_dir_all("rootfs", &root)?;
+            // Match real ContainerTransport's stored view, links included,
+            // not just its directory-shaped test double: the SDK supplies its
+            // own rootfs/.
+            let mut tar = tar::Builder::new(Vec::new());
             let mut header = tar::Header::new_gnu();
-            header.set_mode(0o644);
             header.set_uid(0);
             header.set_gid(0);
             header.set_mtime(0);
             header.set_size(0);
+            header.set_mode(0o755);
+            header.set_entry_type(tar::EntryType::Directory);
+            tar.append_data(&mut header, ".", std::io::empty())?;
+            let application = b"cold application bytes; never executed";
+            header.set_mode(0o644);
+            header.set_size(application.len() as u64);
+            header.set_entry_type(tar::EntryType::Regular);
+            tar.append_data(&mut header, "app", &application[..])?;
+            header.set_size(0);
             header.set_entry_type(tar::EntryType::Link);
-            tar.append_link(&mut header, "rootfs/app-hard", "rootfs/app")?;
+            tar.append_link(&mut header, "app-hard", "app")?;
             header.set_entry_type(tar::EntryType::Symlink);
-            tar.append_link(&mut header, "rootfs/app-link", "/app")?;
-            tar.finish()?;
+            tar.append_link(&mut header, "app-link", "/app")?;
             Ok(ImportedImage {
                 image,
-                rootfs: RootFilesystem::Archive(archive),
+                rootfs: RootFilesystem::Stored(store.put(&tar.into_inner()?)?),
                 auxiliary: BTreeMap::new(),
                 provenance: BTreeMap::new(),
             })

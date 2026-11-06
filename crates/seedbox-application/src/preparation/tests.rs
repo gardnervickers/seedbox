@@ -458,7 +458,7 @@ fn production_oci_boot_factory_embeds_epoch_and_progress_budget() {
             .boot(
                 OciBoot {
                     name: "oracle",
-                    filesystem: filesystem.clone(),
+                    filesystem: store.put(&filesystem).unwrap(),
                     launch: &launch,
                     simulation: &simulation,
                     configs: &configs,
@@ -501,10 +501,11 @@ impl TestBoot {
 impl BootFactory for TestBoot {
     fn boot(&self, request: OciBoot<'_>, store: &ContentStore) -> Result<BootArchive> {
         use seedbox_machine::{application, definition};
-        let filesystem = store.put(&request.filesystem)?;
+        let mut filesystem = Vec::new();
+        store.copy_to(&request.filesystem, &mut filesystem)?;
         let application = application::DerivedApplication {
             application: definition::PreparedApplication {
-                filesystem: definition::FilesystemArchive::new(request.filesystem)
+                filesystem: definition::FilesystemArchive::new(filesystem)
                     .map_err(|error| Error::Integrity(error.to_string()))?,
                 launch: definition::Launch {
                     argv: request.launch.argv.clone(),
@@ -523,6 +524,9 @@ impl BootFactory for TestBoot {
         let bytes =
             application::boot_derived_configured(&application, &self.bootstrap, &environment, None)
                 .map_err(|error| Error::Integrity(error.to_string()))?;
-        Ok(BootArchive { bytes, filesystem })
+        Ok(BootArchive {
+            bytes,
+            filesystem: request.filesystem,
+        })
     }
 }
