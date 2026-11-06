@@ -35,8 +35,9 @@ type Result<T> = std::result::Result<T, String>;
 pub(super) const DESCRIPTOR: i32 = 196;
 /// Bytes in each ring; a longer message passes through in pieces.
 pub(super) const CAPACITY: u64 = 256 << 10;
-/// How long a waiting side spins before it sleeps.
-const SPIN: Duration = Duration::from_micros(50);
+/// How long a waiting side spins before it sleeps. Most waits for a guest run
+/// or for the client's next call end within it.
+const SPIN: Duration = Duration::from_micros(200);
 /// How long it spins before it also yields between checks.
 const YIELD: Duration = Duration::from_micros(5);
 /// Control words, each on its own 128-byte line, fill the first 16 KiB. The
