@@ -224,7 +224,7 @@ fn programs_beyond_the_engine_are_refused_before_any_machine_boots() {
     request.simulated_time_ns = 100;
     request.program = vec![serde_json::from_value(serde_json::json!({
         "key": "slow", "at_ns": 10,
-        "action": {"action": "disk_latency", "handle": "slow", "machine": "oracle", "op": "any", "latency_ns": 1000},
+        "action": {"action": "disk_latency", "handle": "slow", "machine": "oracle", "request": "any", "latency_ns": 1000},
     }))
     .unwrap()];
     assert_eq!(

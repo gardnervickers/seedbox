@@ -1,5 +1,6 @@
-//! Batch execution: due machines run on the workers in their own time
-//! bases, and accepted runs commit in identity order.
+//! Batch execution: due machines run on the workers, the Driver's own thread
+//! among them, in their own time bases, and accepted runs commit in identity
+//! order.
 use super::*;
 
 /// Each batch machine's start, bound and offered input count, in its own
@@ -62,7 +63,7 @@ where
         let offered_commands = self.offered_commands(ids);
         let offered_stops = self.offered_stops(ids);
         let (bounds, views) = self.batch_views(ids, now, upto)?;
-        let reports = self.execute_batch(views, &bounds)?;
+        let reports = self.execute_batch(views, &bounds);
         // Validate each stop in its machine's time base, then convert back.
         // The conversion returns the earliest simulation time whose machine
         // time reaches the reported one, so nothing is reported early, and a
@@ -157,42 +158,39 @@ where
         &mut self,
         views: Vec<BatchView>,
         bounds: &BatchBounds,
-    ) -> Result<Vec<RunReport<M::Error>>, Error<M::Error>> {
-        let (send, receive) = mpsc::channel();
-        let mut submission_error = None;
-        for (id, start, bound, mut inbox) in views {
-            let entry = &mut self.execution.machines[id.0];
-            let mut machine = entry.machine.take().expect("stopped machine");
-            let mut rng = entry.rng.take().expect("stopped machine RNG");
-            let execution = entry.lifecycle.execution();
-            let mut outputs = Vec::new();
-            let result = send.clone();
-            if let Err(error) = self.workers.submit(id.0, move |context| {
-                let stopped = catch_unwind(AssertUnwindSafe(|| {
-                    machine.run(
-                        &mut RunContext {
-                            worker: context,
-                            clock: &FixedClock(start.as_nanos()),
-                            rng: &mut rng,
-                            execution,
-                            inbox: Inbox::new(&mut inbox, start),
-                            outbox: Outbox::new(&mut outputs, start, bound),
-                        },
-                        bound,
-                    )
-                }))
-                .map_err(|_| Error::Panicked { id })
-                .and_then(|result| result.map_err(|source| Error::Machine { id, source }));
-                let _ = result.send((id, machine, rng, inbox.len(), outputs, stopped));
-            }) {
-                submission_error = Some(error);
-                break;
-            }
-        }
-        drop(send);
-        // All submitted jobs must finish before changing the clock or returning.
-        // Results are ordered by identity, never by worker completion time.
-        let mut results: Vec<_> = receive.into_iter().collect();
+    ) -> Vec<RunReport<M::Error>> {
+        let jobs = views
+            .into_iter()
+            .map(|(id, start, bound, mut inbox)| {
+                let entry = &mut self.execution.machines[id.0];
+                let mut machine = entry.machine.take().expect("stopped machine");
+                let mut rng = entry.rng.take().expect("stopped machine RNG");
+                let execution = entry.lifecycle.execution();
+                let job = move |context: &mut M::Context| {
+                    let mut outputs = Vec::new();
+                    let stopped = catch_unwind(AssertUnwindSafe(|| {
+                        machine.run(
+                            &mut RunContext {
+                                worker: context,
+                                clock: &FixedClock(start.as_nanos()),
+                                rng: &mut rng,
+                                execution,
+                                inbox: Inbox::new(&mut inbox, start),
+                                outbox: Outbox::new(&mut outputs, start, bound),
+                            },
+                            bound,
+                        )
+                    }))
+                    .map_err(|_| Error::Panicked { id })
+                    .and_then(|result| result.map_err(|source| Error::Machine { id, source }));
+                    (id, machine, rng, inbox.len(), outputs, stopped)
+                };
+                (id.0, job)
+            })
+            .collect();
+        // All jobs finish before changing the clock or returning. Results are
+        // ordered by identity, never by worker completion time.
+        let mut results = self.workers.run(jobs);
         results.sort_by_key(|(id, _, _, _, _, _)| *id);
         let mut reports = Vec::with_capacity(results.len());
         for (id, machine, rng, remaining, outputs, stopped) in results {
@@ -217,10 +215,7 @@ where
                 admitted_end,
             });
         }
-        if let Some(error) = submission_error {
-            return Err(error);
-        }
-        Ok(reports)
+        reports
     }
 
     /// Validate one run against its machine-time `start` and `bound`, and
