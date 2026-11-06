@@ -42,12 +42,17 @@ fn try_import(
         },
     )
 }
-fn entries(image: &ImportedImage) -> BTreeMap<std::path::PathBuf, (tar::EntryType, Vec<u8>)> {
+fn entries(
+    image: &ImportedImage,
+    store: &ContentStore,
+) -> BTreeMap<std::path::PathBuf, (tar::EntryType, Vec<u8>)> {
     use std::io::Read;
-    let RootFilesystem::Archive(path) = &image.rootfs else {
-        panic!("expected export archive")
+    let RootFilesystem::Stored(view) = &image.rootfs else {
+        panic!("expected a stored filesystem view")
     };
-    tar::Archive::new(fs::File::open(path).unwrap())
+    let mut bytes = Vec::new();
+    store.copy_to(view, &mut bytes).unwrap();
+    tar::Archive::new(bytes.as_slice())
         .entries()
         .unwrap()
         .map(|entry| {
@@ -68,20 +73,16 @@ fn registry_images_export_the_expected_files() {
         (
             "redis",
             "docker.io/library/redis:7.2",
-            "rootfs/usr/local/bin/redis-server",
+            "usr/local/bin/redis-server",
         ),
-        (
-            "etcd",
-            "quay.io/coreos/etcd:v3.5.2",
-            "rootfs/usr/local/bin/etcd",
-        ),
+        ("etcd", "quay.io/coreos/etcd:v3.5.2", "usr/local/bin/etcd"),
     ] {
         let image = import(
             &simulation(reference).services["oracle"],
             &directory.path().join(name),
             &store,
         );
-        assert!(entries(&image).contains_key(Path::new(binary)));
+        assert!(entries(&image, &store).contains_key(Path::new(binary)));
         for digest in image.image.layers {
             store.verify(&digest).unwrap();
         }
@@ -118,11 +119,11 @@ fn canonical_etcd_member_and_go_oracle_export_real_image_closures() {
         simulation.services["n3"].source
     );
     for (name, executable, argv0) in [
-        ("n1", "rootfs/usr/local/bin/etcd", "/usr/local/bin/etcd"),
-        ("oracle", "rootfs/client", "/client"),
+        ("n1", "usr/local/bin/etcd", "/usr/local/bin/etcd"),
+        ("oracle", "client", "/client"),
     ] {
         let image = import(&simulation.services[name], &directory.join(name), &store);
-        let files = entries(&image);
+        let files = entries(&image, &store);
         let binary = &files[Path::new(executable)].1;
         assert!(
             binary.starts_with(b"\x7fELF"),
@@ -172,27 +173,26 @@ fn build_honors_ignore_whiteouts_and_launch_metadata() {
     service.command = None;
     let store = ContentStore::new(directory.path().join("store"));
     let image = import(&service, &directory.path().join("image"), &store);
-    let files = entries(&image);
-    assert!(!files.contains_key(Path::new("rootfs/.dockerenv")));
+    let files = entries(&image, &store);
+    assert!(!files.contains_key(Path::new(".dockerenv")));
     let again = import(&service, &directory.path().join("again"), &store);
-    let (RootFilesystem::Archive(first), RootFilesystem::Archive(second)) =
+    let (RootFilesystem::Stored(first), RootFilesystem::Stored(second)) =
         (&image.rootfs, &again.rootfs)
     else {
-        panic!("expected archives")
+        panic!("expected stored filesystem views")
     };
     assert_eq!(
-        fs::read(first).unwrap(),
-        fs::read(second).unwrap(),
+        first, second,
         "same image must produce identical rootfs bytes"
     );
-    assert!(!files.contains_key(Path::new("rootfs/data/remove")));
-    assert!(!files.contains_key(Path::new("rootfs/source/ignored")));
-    assert_eq!(files[Path::new("rootfs/data/keep")].1, b"keep\n");
+    assert!(!files.contains_key(Path::new("data/remove")));
+    assert!(!files.contains_key(Path::new("source/ignored")));
+    assert_eq!(files[Path::new("data/keep")].1, b"keep\n");
     assert_eq!(
-        files[Path::new("rootfs/etc/resolv.conf")].1,
+        files[Path::new("etc/resolv.conf")].1,
         b"image-owned resolver\n"
     );
-    assert!(files[Path::new("rootfs/data/link")].0.is_symlink());
+    assert!(files[Path::new("data/link")].0.is_symlink());
     assert_eq!(image.image.launch.argv, ["/bin/echo", "default"]);
     assert_eq!(image.image.launch.user, "123:456");
     assert_eq!(image.image.launch.working_dir, "/data");
