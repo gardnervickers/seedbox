@@ -445,14 +445,14 @@ impl Command {
             Operation::DropConnection { connection } => Ok(Self::DropConnection { connection }),
             Operation::DiskError {
                 target,
-                disk_op,
+                request,
                 ppm,
                 effect,
                 scope,
             } => Ok(Self::DeviceFault {
                 target,
                 fault: crate::pv::DeviceFault::DiskError {
-                    op: disk_op,
+                    op: request,
                     ppm: Self::ppm(ppm)?,
                     effect,
                     scope,
@@ -460,13 +460,13 @@ impl Command {
             }),
             Operation::DiskLatency {
                 target,
-                disk_op,
+                request,
                 latency_ns,
                 jitter_ns,
             } => Ok(Self::DeviceFault {
                 target,
                 fault: crate::pv::DeviceFault::DiskLatency {
-                    op: disk_op,
+                    op: request,
                     latency_ns,
                     jitter_ns,
                 },

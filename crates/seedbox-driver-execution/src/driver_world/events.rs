@@ -629,7 +629,7 @@ fn control_action(
                 } => Action::DiskError {
                     handle: handle()?,
                     machine: machine()?,
-                    op,
+                    request: op,
                     ppm: ppm.into(),
                     effect,
                     scope,
@@ -641,7 +641,7 @@ fn control_action(
                 } => Action::DiskLatency {
                     handle: handle()?,
                     machine: machine()?,
-                    op,
+                    request: op,
                     latency_ns,
                     jitter_ns,
                 },

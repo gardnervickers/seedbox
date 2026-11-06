@@ -18,7 +18,7 @@ use std::{
     num::NonZeroU32,
     ops::ControlFlow,
     panic::{catch_unwind, AssertUnwindSafe},
-    sync::{mpsc, Arc},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -361,10 +361,12 @@ struct ObservationState {
 /// simulation-time meaning, while a drifting guest's own clocks run at its
 /// rate: a 1 s control `sleep` at +10% spans 1.1 s of that guest's clocks.
 ///
-/// Execution uses a fixed pool of worker threads. Each worker owns its context;
-/// contexts must not contain machine-specific simulation state. Worker count and
-/// completion order must not affect simulation results. Machines share the
-/// driver's read-only clock, which stays fixed throughout each batch of calls.
+/// Execution uses a fixed number of workers: whichever thread steps the
+/// driver, which runs one machine of every batch itself, and a pool of threads
+/// for the rest. Each worker owns its context; contexts must not contain
+/// machine-specific simulation state. Worker count and completion order must
+/// not affect simulation results. Machines share the driver's read-only clock,
+/// which stays fixed throughout each batch of calls.
 ///
 /// The positive quantum is fixed for the driver's lifetime. Quantum boundaries
 /// are anchored at the initial timestamp; intermediate barriers never shift them.
@@ -434,9 +436,12 @@ where
     /// first boundary must fit after `start`. `workers` must be nonzero. Invalid
     /// configuration is rejected before either factory is called.
     ///
-    /// The context factory runs once on each worker thread, before constructing
-    /// machines. That context is used and destroyed on the same thread, so it
-    /// need not be Send. Factories and contexts must not make simulation behavior
+    /// The context factory runs once for each worker, before constructing
+    /// machines: first on the calling thread, which is worker 0 and runs machines
+    /// itself, then on each of the `workers - 1` pool threads. A pool context is
+    /// used and destroyed on its own thread, so it need not be Send; worker 0's
+    /// context moves with the driver, which is therefore Send only when the
+    /// context is. Factories and contexts must not make simulation behavior
     /// depend on worker identity or host timing. Machines can move between the
     /// caller and workers; their errors must also be transferable between threads.
     /// Initialization failure joins all started workers before returning.

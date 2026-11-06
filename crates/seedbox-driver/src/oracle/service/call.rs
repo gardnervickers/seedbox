@@ -73,7 +73,7 @@ impl Service {
                     &self
                         .handles
                         .active_handles()
-                        .map_err(|e| format!("handles: {e:?}"))?,
+                        .map_err(|e| format!("handles: {e}"))?,
                     self.triggers.records(),
                 )
                 .map(|mut inspected| {

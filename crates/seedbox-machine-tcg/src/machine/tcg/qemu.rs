@@ -671,9 +671,9 @@ fn command(
                 .arg("-rtc")
                 .arg(format!("base={},clock=vm", utc(*epoch_seconds)));
             for (name, bytes, flag) in [
-                ("kernel", kernel, "-kernel"),
-                ("initramfs", initramfs, "-initrd"),
-                ("firmware", firmware, "-bios"),
+                ("kernel", &kernel[..], "-kernel"),
+                ("initramfs", &initramfs[..], "-initrd"),
+                ("firmware", &firmware[..], "-bios"),
             ] {
                 let path = directory.join(name);
                 fs::write(&path, bytes)?;

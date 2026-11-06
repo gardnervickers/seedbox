@@ -55,12 +55,13 @@ fn observe(args: &[&str], imported: bool) -> Output {
             let ready = unsafe { libc::poll(&mut fd, 1, remaining) };
             assert_eq!(ready, 1);
             let (mut socket, _) = listener.accept().unwrap();
-            socket
-                .set_read_timeout(Some(guard.remaining().unwrap()))
-                .unwrap();
-            socket
-                .set_write_timeout(Some(guard.remaining().unwrap()))
-                .unwrap();
+            match socket.set_read_timeout(Some(guard.remaining().unwrap())) {
+                Ok(()) => {}
+                // macOS rejects socket options once the peer has closed: the
+                // connect-only liveness probe may already be gone.
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => continue,
+                Err(error) => panic!("request read timeout: {error}"),
+            }
             let mut header = Vec::new();
             loop {
                 let mut byte = [0];
@@ -74,8 +75,12 @@ fn observe(args: &[&str], imported: bool) -> Output {
                 }
             }
             if header.is_empty() {
+                // The daemon's connect-only liveness probe.
                 continue;
-            } // daemon's connect-only liveness probe
+            }
+            socket
+                .set_write_timeout(Some(guard.remaining().unwrap()))
+                .unwrap();
             requests += 1;
             let header = String::from_utf8(header).unwrap();
             let path = header.split_whitespace().nth(1).unwrap();

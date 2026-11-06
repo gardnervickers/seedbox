@@ -215,8 +215,8 @@ mod oracle {
     const X86_PV: faults::Engine = engine(CpuBackend::Pv, Architecture::X86_64);
 
     const DISK_ERROR: &str =
-        r#""op":"disk_error","target":{"machine":"fixture-1"},"disk_op":"write","ppm":1000"#;
-    const DISK_LATENCY: &str = r#""op":"disk_latency","target":{"machine":"fixture-1"},"disk_op":"flush","latency_ns":20000000,"jitter_ns":5"#;
+        r#""op":"disk_error","target":{"machine":"fixture-1"},"request":"write","ppm":1000"#;
+    const DISK_LATENCY: &str = r#""op":"disk_latency","target":{"machine":"fixture-1"},"request":"flush","latency_ns":20000000,"jitter_ns":5"#;
     const PREEMPT: &str = r#""op":"preempt","target":{"service":"fixture-1"},"ppm":100000"#;
 
     /// The oracle's call `id`, sent at `at`.
@@ -283,10 +283,6 @@ mod oracle {
             .map(|reply| reply["result"]["handle"].clone())
             .collect();
         assert_eq!(handles, ["p1", "p2", "p3"], "{replies:?}");
-        for reply in &replies[3..] {
-            assert_eq!(reply["ok"], true, "{reply}");
-            assert_eq!(reply["result"], serde_json::json!({}), "{reply}");
-        }
         let faults = [
             DeviceFault::DiskError {
                 op: DiskOp::Write,
@@ -346,6 +342,14 @@ mod oracle {
             ]
         );
         assert!(settled[3].3.is_some() && settled[4].3.is_some());
+        // Each heal's reply carries the counts it settled with.
+        for (reply, (_, _, _, counts)) in replies[3..].iter().zip(&settled[3..]) {
+            assert_eq!(reply["ok"], true, "{reply}");
+            let expected = counts.map_or(serde_json::json!({}), |counts| {
+                serde_json::to_value(counts).unwrap()
+            });
+            assert_eq!(reply["result"], expected, "{reply}");
+        }
     }
 
     #[test]
@@ -362,7 +366,10 @@ mod oracle {
         advance(&mut d, 40);
         let replies = replies(&d);
         assert_eq!(replies[1]["error"]["code"], "invalid_state", "{replies:?}");
-        assert_eq!(replies[1]["error"]["message"], "preempt: AlreadyPreempted");
+        assert_eq!(
+            replies[1]["error"]["message"],
+            "preempt: the target machine already has a preempt fault"
+        );
         for index in [0, 2, 3] {
             assert_eq!(replies[index]["ok"], true, "{replies:?}");
         }
@@ -429,12 +436,12 @@ mod oracle {
                 call(
                     0,
                     1,
-                    r#""op":"disk_error","target":{"machine":"fixture-1"},"disk_op":"flush","ppm":10,"effect":"corrupt""#,
+                    r#""op":"disk_error","target":{"machine":"fixture-1"},"request":"flush","ppm":10,"effect":"corrupt""#,
                 ),
                 call(
                     1,
                     2,
-                    r#""op":"disk_latency","target":{"machine":"fixture-1"},"disk_op":"read","latency_ns":1"#,
+                    r#""op":"disk_latency","target":{"machine":"fixture-1"},"request":"read","latency_ns":1"#,
                 ),
                 call(
                     2,

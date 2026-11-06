@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     fs,
     io::{self, Read, Seek, Write},
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -459,18 +459,30 @@ impl ContentStore {
     /// the content store into a backend's writable execution workspace.
     ///
     /// An object this process already hashed, unchanged since, is cloned
-    /// (copy-on-write where the filesystem supports it) or copied in the
-    /// kernel without hashing again. Others stream through the hash as before.
+    /// (copy-on-write where the filesystem supports it) or copied without
+    /// hashing again. Others stream through the hash as before.
     /// The copy is scratch for one execution, so it is not synced: after a
     /// crash the run is INCOMPLETE and replay materializes from the store.
     pub fn materialize(&self, digest: &ContentDigest, directory: &Path) -> Result<PathBuf> {
-        fs::create_dir_all(directory)?;
         let path = directory.join(digest.hex());
+        self.temporary_copy(digest, directory)?
+            .persist_noclobber(&path)
+            .map_err(|e| e.error)?;
+        Ok(path)
+    }
+
+    /// A copy of `digest` in a new temporary file in `directory`.
+    fn temporary_copy(
+        &self,
+        digest: &ContentDigest,
+        directory: &Path,
+    ) -> Result<tempfile::NamedTempFile> {
+        fs::create_dir_all(directory)?;
         let mut temp = tempfile::NamedTempFile::new_in(directory)?;
         let mut source = self.open(digest)?;
         match self.trusted(digest, &source)? {
             Some(stamp) => {
-                if !clone_file(&source, temp.as_file())? {
+                if !clone_file(&source, &mut temp)? {
                     io::copy(&mut source, temp.as_file_mut())?;
                 }
                 // Changed while copying: fall back to hashing the bytes.
@@ -482,8 +494,7 @@ impl ContentStore {
             }
             None => self.copy_to(digest, &mut temp)?,
         }
-        temp.persist_noclobber(&path).map_err(|e| e.error)?;
-        Ok(path)
+        Ok(temp)
     }
 
     /// `materialize` for a file this process (or one it launches) will execute,
@@ -493,12 +504,13 @@ impl ContentStore {
     /// execution fail with ETXTBSY. Only executables pay the exclusion; guest
     /// inputs are read as bytes and use plain `materialize`.
     ///
-    /// A digest this process already materialized into `directory` is not
-    /// copied again: while that file is the same file, unchanged since, the
-    /// call returns it. Executions only read and execute it, so callers may
-    /// share one directory between them. macOS assesses an executable on the
-    /// first launch through each new path, so a stable path also keeps later
-    /// launches fast, where a fresh copy or link per execution would not.
+    /// The file is published executable (mode 0o500). A digest this process
+    /// already materialized into `directory` is not copied again: while that
+    /// file is the same file, unchanged since, the call returns it. Executions
+    /// only read and execute it, so callers may share one directory between
+    /// them. macOS assesses an executable on the first launch through each new
+    /// path, so a stable path also keeps later launches fast, where a fresh
+    /// copy or link per execution would not.
     pub fn materialize_executable(
         &self,
         digest: &ContentDigest,
@@ -507,19 +519,24 @@ impl ContentStore {
         let path = directory.join(digest.hex());
         // Held throughout, so concurrent calls for one path copy it once.
         let mut materialized = self.executables.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(stamp) = materialized.remove(&path) {
+        if let Some(stamp) = materialized.get(&path) {
             let unchanged = fs::metadata(&path)
-                .is_ok_and(|metadata| Stamp::of_metadata(&metadata).same_unmodified_file(&stamp));
+                .is_ok_and(|metadata| Stamp::of_metadata(&metadata).same_unmodified_file(stamp));
             if unchanged {
-                materialized.insert(path.clone(), stamp);
                 return Ok(path);
             }
-            remove_if_present(&path)?;
         }
-        let path = {
+        // A changed, removed or unknown file is replaced in one rename by a
+        // copy already executable, so an execution that holds the path finds
+        // the old file or the whole new one: never no file, or one it may not
+        // execute.
+        {
             let _writing = seedbox_exec::writing();
-            self.materialize(digest, directory)?
-        };
+            let temp = self.temporary_copy(digest, directory)?;
+            temp.as_file()
+                .set_permissions(fs::Permissions::from_mode(0o500))?;
+            temp.persist(&path).map_err(|e| e.error)?;
+        }
         materialized.insert(path.clone(), Stamp::of_metadata(&fs::metadata(&path)?));
         Ok(path)
     }
@@ -534,13 +551,14 @@ fn remove_if_present(path: &Path) -> io::Result<bool> {
     }
 }
 
-/// Share `source`'s extents with the empty `destination` (FICLONE). False
-/// where the filesystem cannot, such as ext4 or across filesystems.
+/// Share `source`'s extents with the empty `temp` (FICLONE). False where the
+/// filesystem cannot, such as ext4 or across filesystems.
 #[cfg(target_os = "linux")]
-fn clone_file(source: &fs::File, destination: &fs::File) -> io::Result<bool> {
+fn clone_file(source: &fs::File, temp: &mut tempfile::NamedTempFile) -> io::Result<bool> {
     use std::os::fd::AsRawFd;
+    let destination = temp.as_file().as_raw_fd();
     // SAFETY: both descriptors are open for the duration of the call.
-    if unsafe { libc::ioctl(destination.as_raw_fd(), libc::FICLONE, source.as_raw_fd()) } == 0 {
+    if unsafe { libc::ioctl(destination, libc::FICLONE, source.as_raw_fd()) } == 0 {
         return Ok(true);
     }
     let error = io::Error::last_os_error();
@@ -552,8 +570,46 @@ fn clone_file(source: &fs::File, destination: &fs::File) -> io::Result<bool> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn clone_file(_: &fs::File, _: &fs::File) -> io::Result<bool> {
+/// Replace the empty `temp` with a copy-on-write clone of `source` (APFS
+/// `fclonefileat`) under a new temporary name beside it. False where the
+/// volume cannot clone or `source` is on another volume.
+#[cfg(target_os = "macos")]
+fn clone_file(source: &fs::File, temp: &mut tempfile::NamedTempFile) -> io::Result<bool> {
+    use std::{
+        ffi::CString,
+        os::{fd::AsRawFd, unix::ffi::OsStrExt},
+    };
+    let Some(directory) = temp.path().parent() else {
+        return Ok(false);
+    };
+    let source = source.as_raw_fd();
+    // fclonefileat creates its destination, so it cannot fill the open
+    // `temp`. A taken name fails with EEXIST and make_in tries another; the
+    // clone's name is removed with it unless it is persisted.
+    let clone = tempfile::Builder::new().make_in(directory, |path| {
+        let name = CString::new(path.as_os_str().as_bytes())?;
+        // SAFETY: the descriptor and the name outlive the call.
+        if unsafe { libc::fclonefileat(source, libc::AT_FDCWD, name.as_ptr(), 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        fs::File::open(path).inspect_err(|_| {
+            let _ = fs::remove_file(path);
+        })
+    });
+    match clone {
+        Ok(clone) => {
+            *temp = clone;
+            Ok(true)
+        }
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EXDEV)) => {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn clone_file(_: &fs::File, _: &mut tempfile::NamedTempFile) -> io::Result<bool> {
     Ok(false)
 }
 
@@ -584,5 +640,7 @@ fn transfer_observed(
     Ok(ContentDigest::finish(hash))
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod clone_tests;
 #[cfg(test)]
 mod observed_tests;

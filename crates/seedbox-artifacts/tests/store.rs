@@ -38,6 +38,22 @@ fn content_store_never_silently_repairs_corruption_or_accepts_path_digests() {
 }
 
 #[test]
+fn materialize_never_replaces_a_copy_or_leaves_a_temporary_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(directory.path().join("store"));
+    let digest = store.put(b"input").unwrap();
+    let inputs = directory.path().join("inputs");
+    let path = store.materialize(&digest, &inputs).unwrap();
+    fs::write(&path, b"backend changed its private input").unwrap();
+    assert!(store.materialize(&digest, &inputs).is_err());
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"backend changed its private input"
+    );
+    assert_eq!(fs::read_dir(&inputs).unwrap().count(), 1);
+}
+
+#[test]
 fn large_artifacts_stream_with_bounded_reads_and_corrupt_copies_are_not_published() {
     use std::io::{self, Read};
     struct BoundedSource(usize);
@@ -284,12 +300,14 @@ fn an_executable_is_copied_once_into_a_directory_while_unchanged() {
     let object = directory.path().join("store/sha256").join(digest.hex());
     let away = directory.path().join("away");
     let shared = directory.path().join("shared");
+    let mode = |path: &std::path::Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
     let first = store.materialize_executable(&digest, &shared).unwrap();
-    // Backends make it executable; a mode change is no modification.
-    fs::set_permissions(&first, fs::Permissions::from_mode(0o500)).unwrap();
+    assert_eq!(mode(&first), 0o500);
     // Without the object only the existing file can satisfy a call. Clones
-    // share it, as concurrent executions do; another directory needs a copy.
+    // share it, as concurrent executions do, and a mode change is no
+    // modification; another directory needs a copy.
     fs::rename(&object, &away).unwrap();
+    fs::set_permissions(&first, fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(
         store
             .clone()
@@ -302,20 +320,30 @@ fn an_executable_is_copied_once_into_a_directory_while_unchanged() {
         .is_err());
     fs::rename(&away, &object).unwrap();
 
-    // A changed file is replaced with the retained bytes.
-    fs::set_permissions(&first, fs::Permissions::from_mode(0o700)).unwrap();
+    // A changed file is replaced with the retained bytes, already executable.
     fs::write(&first, b"changed by a backend").unwrap();
     assert_eq!(
         store.materialize_executable(&digest, &shared).unwrap(),
         first
     );
-    assert_eq!(fs::read(&first).unwrap(), bytes);
+    assert_eq!(
+        (fs::read(&first).unwrap(), mode(&first)),
+        (bytes.to_vec(), 0o500)
+    );
 
-    // So is a removed one.
+    // So is a removed one, and a file another store materialized there.
     fs::remove_file(&first).unwrap();
     assert_eq!(
         store.materialize_executable(&digest, &shared).unwrap(),
         first
     );
-    assert_eq!(fs::read(&first).unwrap(), bytes);
+    let unrelated = ContentStore::new(directory.path().join("store"));
+    assert_eq!(
+        unrelated.materialize_executable(&digest, &shared).unwrap(),
+        first
+    );
+    assert_eq!(
+        (fs::read(&first).unwrap(), mode(&first)),
+        (bytes.to_vec(), 0o500)
+    );
 }

@@ -316,8 +316,8 @@ fn device_faults_send_their_actions_arguments_and_heal_their_handles() {
         (3, json!({"handle":"p3"}), json!({})),
         (4, json!({"handle":"p4"}), json!({})),
         (5, json!({"handle":"p5"}), json!({})),
-        (6, json!({}), json!({})),
-        (7, json!({}), json!({})),
+        (6, json!({"matched":8,"affected":8}), json!({})),
+        (7, json!({"matched":4,"affected":4}), json!({})),
         (8, json!({}), json!({})),
     ]));
     let read = sdk.call("disk_error", json!(["db", "read", 1_000_000]), json!({}));
@@ -337,18 +337,26 @@ fn device_faults_send_their_actions_arguments_and_heal_their_handles() {
     let race = sdk.call("preempt", json!([machine("db-vm"), 100_000]), json!({}));
     typed(ok(&race), "Preempt");
     assert_eq!(race["value"]["fields"]["handle"], "p5");
-    // A heal returns its effect; a disk fault's counts are in the world view.
-    for op in ["disk_error", "disk_latency", "preempt"] {
-        let healed = call(&mut sdk, "heal", json!([reference(op)]));
-        typed(ok(&healed), "Effect");
-    }
+    // A disk fault's heal returns its counts; a preempt heal, its effect.
+    assert_eq!(
+        ok(&call(&mut sdk, "heal", json!([reference("disk_error")]))),
+        &json!({"matched":8,"affected":8})
+    );
+    assert_eq!(
+        ok(&call(&mut sdk, "heal", json!([reference("disk_latency")]))),
+        &json!({"matched":4,"affected":4})
+    );
+    typed(
+        ok(&call(&mut sdk, "heal", json!([reference("preempt")]))),
+        "Effect",
+    );
     assert_eq!(
         sdk.close()["requests"],
         json!([
-        {"version":1,"id":1,"op":"disk_error","target":{"service":"db"},"disk_op":"read","ppm":1_000_000},
-        {"version":1,"id":2,"op":"disk_error","target":{"machine":"db-vm"},"disk_op":"write","ppm":500,"effect":"corrupt","scope":"data"},
-        {"version":1,"id":3,"op":"disk_latency","target":{"service":"db"},"disk_op":"flush","latency_ns":20_000_000},
-        {"version":1,"id":4,"op":"disk_latency","target":{"service":"db"},"disk_op":"any","latency_ns":1_000,"jitter_ns":7},
+        {"version":1,"id":1,"op":"disk_error","target":{"service":"db"},"request":"read","ppm":1_000_000},
+        {"version":1,"id":2,"op":"disk_error","target":{"machine":"db-vm"},"request":"write","ppm":500,"effect":"corrupt","scope":"data"},
+        {"version":1,"id":3,"op":"disk_latency","target":{"service":"db"},"request":"flush","latency_ns":20_000_000},
+        {"version":1,"id":4,"op":"disk_latency","target":{"service":"db"},"request":"any","latency_ns":1_000,"jitter_ns":7},
         {"version":1,"id":5,"op":"preempt","target":{"machine":"db-vm"},"ppm":100_000},
         {"version":1,"id":6,"op":"heal","handle":"p1"},
         {"version":1,"id":7,"op":"heal","handle":"p3"},
