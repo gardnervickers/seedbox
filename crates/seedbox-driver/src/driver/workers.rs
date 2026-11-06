@@ -22,8 +22,9 @@ type Job<C> = Box<dyn FnOnce(&mut C) + Send>;
 type Deferred = Box<dyn FnOnce() + Send>;
 
 thread_local! {
-    // Only the dedicated pool's own threads receive driver jobs. Type erasure
-    // permits different context types without moving a context between threads.
+    // Only pool threads keep a context here; the calling thread passes worker
+    // 0's context directly. Type erasure permits different context types
+    // without moving a pool context between threads.
     static CONTEXT: RefCell<Option<Box<dyn Any>>> = const { RefCell::new(None) };
     static DEFERRED: RefCell<VecDeque<Deferred>> = const { RefCell::new(VecDeque::new()) };
     static DRAINING: Cell<bool> = const { Cell::new(false) };

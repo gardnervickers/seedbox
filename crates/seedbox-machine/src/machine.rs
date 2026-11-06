@@ -3,7 +3,7 @@
 use crate::{clock::Clock, execution::ExecutionConfig, rng::RngStream};
 
 /// Dependencies supplied for one stopped execution interval.
-/// Worker resources belong to the executing thread; clock and RNG belong to
+/// Worker resources belong to the executing worker; clock and RNG belong to
 /// the driver. The execution rate is a copied driver-owned setting. The clock
 /// reads this machine's time base, which the Driver maps to simulation time;
 /// the mapping itself is never exposed to or captured by the machine.

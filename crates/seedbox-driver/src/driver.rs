@@ -347,9 +347,9 @@ struct ObservationState {
 /// simulation-time meaning, while a drifting guest's own clocks run at its
 /// rate: a 1 s control `sleep` at +10% spans 1.1 s of that guest's clocks.
 ///
-/// Execution uses a fixed set of worker threads: the thread that steps the
-/// driver, which runs one machine of every batch itself, and a pool for the
-/// rest. Each worker owns its context; contexts must not contain
+/// Execution uses a fixed number of workers: whichever thread steps the
+/// driver, which runs one machine of every batch itself, and a pool of threads
+/// for the rest. Each worker owns its context; contexts must not contain
 /// machine-specific simulation state. Worker count and completion order must
 /// not affect simulation results. Machines share the driver's read-only clock,
 /// which stays fixed throughout each batch of calls.
