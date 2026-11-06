@@ -240,7 +240,7 @@ pub(super) fn run_count(
     let _signals = super::signals::Signals::interrupt(&cancellation)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
-        default_machine_workers(&client, &mut request.options, &request.spec).await?;
+        default_machine_workers(&mut request.options, &request.spec);
         let mut range = client.submit_seeds(&request).await.map_err(client_error)?;
         if detach {
             if json {
@@ -426,20 +426,11 @@ fn resource_metadata(resource: &Simulation) -> seedbox_spec::definition::Metadat
         annotations,
     }
 }
-/// Compute the omitted worker count from the server that will run the simulation.
-async fn default_machine_workers(
-    client: &Client,
-    options: &mut seedbox_api::ExecutionOptions,
-    spec: &SimulationSpec,
-) -> Result<()> {
-    if options.machine_workers.is_none() {
-        let slots = client.capacity().await.map_err(client_error)?.slots;
-        options.machine_workers = Some(defaults::machine_workers(
-            spec.configuration.services.len(),
-            slots,
-        ));
-    }
-    Ok(())
+/// Fill in the omitted worker count from the simulation's machines.
+fn default_machine_workers(options: &mut seedbox_api::ExecutionOptions, spec: &SimulationSpec) {
+    options
+        .machine_workers
+        .get_or_insert_with(|| defaults::machine_workers(spec.configuration.services.len()));
 }
 
 fn submit(
@@ -473,7 +464,7 @@ fn submit_with_comparison(
     let _signals = super::signals::Signals::interrupt(&cancellation)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
-        default_machine_workers(&client, &mut request.options, &request.spec).await?;
+        default_machine_workers(&mut request.options, &request.spec);
         let resource = client.submit(&request).await.map_err(client_error)?;
         if detach {
             if json { output::json(&resource)?; } else { output::status("CREATED", &resource.metadata.id); }

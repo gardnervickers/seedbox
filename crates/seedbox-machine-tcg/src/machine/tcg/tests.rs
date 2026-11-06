@@ -1041,6 +1041,9 @@ fn tcg_snapshots_and_restores_share_owned_boot_blobs() {
         else {
             panic!("expected Linux boot inputs");
         };
+        let (Initramfs::Bytes(li), Initramfs::Bytes(ri)) = (li, ri) else {
+            panic!("expected owned initramfs bytes");
+        };
         assert!(Arc::ptr_eq(lk, rk));
         assert!(Arc::ptr_eq(li, ri));
         assert!(Arc::ptr_eq(lf, rf));
@@ -1066,7 +1069,7 @@ fn tcg_snapshots_and_restores_share_owned_boot_blobs() {
             ..
         } => {
             assert_eq!(kernel.as_ref(), bzimage());
-            assert!(!initramfs.is_empty());
+            assert_ne!(initramfs.len(), 0);
             assert_eq!(firmware.as_ref(), bios_image());
         }
         _ => unreachable!(),

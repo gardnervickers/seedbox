@@ -78,6 +78,90 @@ fn loaded_assets_are_owned_and_workload_is_reusable() {
 }
 
 #[test]
+fn a_retained_boot_archive_file_is_read_only_by_a_snapshot() {
+    use super::super::{Boot, Initramfs};
+    use seedbox_machine::machine::Machine;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(
+        root.join("kernel"),
+        seedbox_machine::test_support::assets::bzimage_header(),
+    )
+    .unwrap();
+    fs::write(
+        root.join("init"),
+        seedbox_machine::test_support::assets::image(EM_X86_64),
+    )
+    .unwrap();
+    fs::write(root.join("command-line"), "custom=x\n").unwrap();
+    fs::write(root.join("firmware"), [1; 64 * 1024]).unwrap();
+    let mut factory = Factory::new(
+        &std::env::current_exe().unwrap(),
+        root,
+        crate::machine::TEST_EPOCH_SECONDS,
+    )
+    .unwrap();
+    let definition = definition::definition(0);
+    let packaged = factory.create(&definition).unwrap();
+    let Boot::Linux {
+        initramfs: Initramfs::Bytes(archive),
+        ..
+    } = &packaged.manifest.boot
+    else {
+        panic!("expected packaged initramfs bytes")
+    };
+    let retained = root.join("boot-archive");
+    fs::write(&retained, archive.as_slice()).unwrap();
+    let length = archive.len() as u64;
+    let mut machine = factory
+        .create_boot_archive_file(&definition, &retained, length)
+        .unwrap();
+    let initramfs = |boot: &Boot| match boot {
+        Boot::Linux { initramfs, .. } => initramfs.clone(),
+        _ => panic!("expected Linux"),
+    };
+    assert_eq!(
+        initramfs(&machine.manifest.boot),
+        Initramfs::File {
+            path: retained.as_path().into(),
+            length
+        }
+    );
+    // The snapshot owns the bytes; the machine still refers to the file.
+    let snapshot = machine.snapshot().unwrap();
+    assert_eq!(
+        initramfs(&snapshot.manifest.boot),
+        Initramfs::Bytes(archive.clone())
+    );
+    snapshot.write_to(&mut Vec::new()).unwrap();
+    assert!(matches!(
+        initramfs(&machine.manifest.boot),
+        Initramfs::File { .. }
+    ));
+    // A file that no longer has its recorded length is not snapshotted.
+    for changed in [&archive[1..], &[archive.as_slice(), &[0]].concat()[..]] {
+        fs::write(&retained, changed).unwrap();
+        let error = machine.snapshot().err().expect("changed file").to_string();
+        assert!(
+            error.contains(&format!("no longer {length} bytes")),
+            "{error}"
+        );
+    }
+    // Guest RAM must hold the recorded length, as it must hold packaged bytes.
+    let mut small = definition;
+    small.resources.memory_bytes = 1 << 20;
+    factory
+        .create_boot_archive_file(&small, &retained, 1 << 20)
+        .unwrap();
+    let error = factory
+        .create_boot_archive_file(&small, &retained, (1 << 20) + 1)
+        .err()
+        .expect("archive larger than guest RAM")
+        .to_string();
+    assert!(error.contains("must fit in guest RAM"), "{error}");
+}
+
+#[test]
 fn assets_for_another_architecture_or_firmware_are_rejected_at_load() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

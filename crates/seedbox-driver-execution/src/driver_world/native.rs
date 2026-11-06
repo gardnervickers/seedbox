@@ -301,12 +301,11 @@ pub(super) struct Factory {
 }
 fn check_boot_memory(
     definition: &seedbox_machine::definition::MachineDefinition,
-    bytes: &[u8],
+    length: u64,
 ) -> Result<(), String> {
-    let floor =
-        super::boot::minimum_memory(bytes.len() as u64).map_err(|error| error.to_string())?;
+    let floor = super::boot::minimum_memory(length).map_err(|error| error.to_string())?;
     if definition.resources.memory_bytes < floor {
-        return Err(format!("machine {}: {} bytes RAM is below {} bytes required by its actual {}-byte complete boot (archive * 3 + 128 MiB); increase machine memory", definition.name, definition.resources.memory_bytes, floor, bytes.len()));
+        return Err(format!("machine {}: {} bytes RAM is below {} bytes required by its actual {}-byte complete boot (archive * 3 + 128 MiB); increase machine memory", definition.name, definition.resources.memory_bytes, floor, length));
     }
     Ok(())
 }
@@ -408,29 +407,26 @@ impl Factory {
             .get(&name)
             .map(environment)
             .transpose()?;
-        let boot = self
-            .boot_archives
-            .get(&name)
-            .map(|artifact| super::build::read_input(artifact).map_err(|error| error.to_string()))
-            .transpose()?;
+        let retained = self.boot_archives.get(&name);
+        let missing = || format!("retained factory environment missing for {name}");
         match &mut self.inner {
             #[cfg(any(
                 all(target_os = "linux", target_arch = "x86_64"),
                 all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
             ))]
             FactoryKind::Pv(factory) => {
-                let bytes = match boot {
-                    Some(bytes) => bytes,
+                let bytes = match retained {
+                    Some(artifact) => {
+                        super::build::read_input(artifact).map_err(|error| error.to_string())?
+                    }
                     None => factory
                         .boot_archive_configured(
                             definition,
-                            environment.as_ref().ok_or_else(|| {
-                                format!("retained factory environment missing for {name}")
-                            })?,
+                            environment.as_ref().ok_or_else(missing)?,
                         )
                         .map_err(|error| error.to_string())?,
                 };
-                check_boot_memory(definition, &bytes)?;
+                check_boot_memory(definition, bytes.len() as u64)?;
                 factory
                     .create_boot_archive(definition, bytes)
                     .map(|machine| Native::Pv {
@@ -439,27 +435,35 @@ impl Factory {
                     })
                     .map_err(|error| error.to_string())
             }
-            FactoryKind::Tcg(factory) => {
-                let bytes = match boot {
-                    Some(bytes) => bytes,
-                    None => factory
+            // QEMU reads a retained boot archive in place, so the engine
+            // never holds or rewrites its hundreds of MB.
+            FactoryKind::Tcg(factory) => match retained {
+                Some(artifact) => {
+                    // Checked as every input read is, but only QEMU reads it.
+                    super::build::open_input(artifact).map_err(|error| error.to_string())?;
+                    check_boot_memory(definition, artifact.length)?;
+                    factory.create_boot_archive_file(
+                        definition,
+                        Path::new(&artifact.artifact),
+                        artifact.length,
+                    )
+                }
+                None => {
+                    let bytes = factory
                         .boot_archive_configured(
                             definition,
-                            environment.as_ref().ok_or_else(|| {
-                                format!("retained factory environment missing for {name}")
-                            })?,
+                            environment.as_ref().ok_or_else(missing)?,
                         )
-                        .map_err(|error| error.to_string())?,
-                };
-                check_boot_memory(definition, &bytes)?;
-                factory
-                    .create_boot_archive(definition, bytes)
-                    .map(|machine| Native::Tcg {
-                        name,
-                        machine: Box::new(machine),
-                    })
-                    .map_err(|error| error.to_string())
+                        .map_err(|error| error.to_string())?;
+                    check_boot_memory(definition, bytes.len() as u64)?;
+                    factory.create_boot_archive(definition, bytes)
+                }
             }
+            .map(|machine| Native::Tcg {
+                name,
+                machine: Box::new(machine),
+            })
+            .map_err(|error| error.to_string()),
         }
     }
 }

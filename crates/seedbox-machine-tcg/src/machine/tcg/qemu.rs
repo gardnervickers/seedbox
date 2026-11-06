@@ -1,7 +1,7 @@
 //! Private QEMU process lifecycle and QMP transport. Execution uses QMP only;
 //! test builds additionally open a GDB socket for independent state inspection.
 
-use super::{checked_scratch_root, path_text, Boot, Error, Manifest, Timestamp};
+use super::{checked_scratch_root, path_text, Boot, Error, Initramfs, Manifest, Timestamp};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -561,8 +561,9 @@ impl Process {
         }
     }
 }
-/// The complete QEMU command line of one process, writing its boot input
-/// files into `directory`. Every board choice is fixed here.
+/// The complete QEMU command line of one process, writing its owned boot
+/// inputs into `directory`; a retained initramfs file is passed in place.
+/// Every board choice is fixed here.
 fn command(
     qemu: &Path,
     manifest: &Manifest,
@@ -670,15 +671,17 @@ fn command(
             command
                 .arg("-rtc")
                 .arg(format!("base={},clock=vm", utc(*epoch_seconds)));
-            for (name, bytes, flag) in [
-                ("kernel", &kernel[..], "-kernel"),
-                ("initramfs", &initramfs[..], "-initrd"),
-                ("firmware", &firmware[..], "-bios"),
-            ] {
+            let write = |name: &str, bytes: &[u8]| -> Result<PathBuf, Error> {
                 let path = directory.join(name);
                 fs::write(&path, bytes)?;
-                command.arg(flag).arg(path);
-            }
+                Ok(path)
+            };
+            command.arg("-kernel").arg(write("kernel", kernel)?);
+            command.arg("-initrd").arg(match initramfs {
+                Initramfs::Bytes(bytes) => write("initramfs", bytes)?,
+                Initramfs::File { path, .. } => path.to_path_buf(),
+            });
+            command.arg("-bios").arg(write("firmware", firmware)?);
             command.arg("-append").arg(command_line);
         }
     }
