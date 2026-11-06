@@ -35,8 +35,8 @@ pub const DEFAULT_MAX_FAULTS: u32 = 64;
 ///
 /// A fault the world refuses fails `run`. With `skip_unsupported`, a refusal
 /// whose code is `unsupported` (an engine that lacks the fault, such as
-/// `preempt` on x86_64 PV) skips that start instead, and the entry is not
-/// drawn again; `run` fails once no entry is left.
+/// `preempt` on x86_64 PV) skips that start instead, and no entry of that
+/// kind is drawn again; `run` fails once no kind is left.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
@@ -54,7 +54,9 @@ pub struct Profile {
     pub targets: Vec<String>,
     /// The kinds of fault to draw, by weight.
     pub faults: Vec<Fault>,
-    /// Drop the kinds the world refuses as `unsupported` rather than fail.
+    /// Drop the kinds the world refuses as `unsupported` rather than fail. A
+    /// refusal counts when its message has the form the guest control RPC
+    /// gives one, `{op}: unsupported: {message}`, where `op` names the action.
     #[serde(default, skip_serializing_if = "is_false")]
     pub skip_unsupported: bool,
     #[serde(skip)]
@@ -87,8 +89,8 @@ struct State {
     ending: Vec<Ending>,
     /// Targets with a fault of this profile in force.
     busy: BTreeSet<String>,
-    /// Entries the world refused as unsupported, by index.
-    unsupported: BTreeSet<usize>,
+    /// Kinds the world refused as unsupported.
+    unsupported: BTreeSet<&'static str>,
     pace: Box<dyn Pace>,
 }
 
@@ -178,15 +180,19 @@ impl Profile {
         )
     }
 
+    /// The kinds skipped because the world refused them as unsupported.
+    pub fn unsupported(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.state.unsupported.iter().copied()
+    }
+
     /// Draw and apply one fault; false when every target is busy, or when
     /// the world refuses the fault as unsupported and the profile skips it.
     fn start(&mut self, world: &mut dyn World, random: &mut dyn Random) -> Result<bool, Error> {
         let weights: Vec<u64> = self
             .faults
             .iter()
-            .enumerate()
-            .map(|(index, fault)| {
-                if self.state.unsupported.contains(&index) {
+            .map(|fault| {
+                if self.state.unsupported.contains(fault.name()) {
                     0
                 } else {
                     u64::from(fault.weight())
@@ -222,8 +228,16 @@ impl Profile {
                 if self.skip_unsupported
                     && message.starts_with(&format!("{}: unsupported: ", drawn.action.name())) =>
             {
-                self.state.unsupported.insert(index);
-                if total == weights[index] {
+                let kind = fault.name();
+                self.state.unsupported.insert(kind);
+                let left: u64 = self
+                    .faults
+                    .iter()
+                    .zip(&weights)
+                    .filter(|(entry, _)| entry.name() != kind)
+                    .map(|(_, weight)| weight)
+                    .sum();
+                if left == 0 {
                     return Err(Error(format!(
                         "fault profile has no supported fault kind left: {message}"
                     )));

@@ -205,7 +205,7 @@ impl Control {
         }
     }
 
-    /// Suspend `machine` at its `nth` disk request of kind `op` from now
+    /// Suspend `machine` at its `nth` disk request of kind `request` from now
     /// on, counted across boots, with that request held unwritten. It is
     /// one-shot; its hit is named `block_request`, so
     /// [`GuestWorld::on_break`] with that name serves it. Resuming lets the
@@ -213,12 +213,12 @@ impl Control {
     pub fn break_on_block_request(
         &mut self,
         machine: &str,
-        op: crate::control::DiskOp,
+        request: crate::control::DiskOp,
         nth: u64,
     ) -> Result<(), Error> {
         self.call(
             "break_on_block_request",
-            json!({ "target": { "machine": machine }, "request": op, "nth": nth }),
+            json!({ "target": { "machine": machine }, "request": request, "nth": nth }),
         )
         .map(drop)
     }

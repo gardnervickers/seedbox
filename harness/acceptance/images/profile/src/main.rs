@@ -3,8 +3,9 @@
 //! fault profile in `profile.yaml` runs as its nemesis, heals, then reads
 //! every node. It prints every action the world applied or refused, and two
 //! checks decide the run: every node serves after the heal, and the profile
-//! ran and healed without a failure. It skips the kinds the engine refuses
-//! as unsupported.
+//! ran and healed without a failure. The profile skips the kinds the engine
+//! refuses as unsupported; the second check allows only preempt there, on
+//! x86_64 PV, which has no guest yield hook.
 use seedbox_oracle::{
     nemesis::Profile, Checker, Checkers, Client, Completion, Error, FinalRead, History, Nemesis,
     Random, RandomExt, Read, Record, Recorder, Scenario, Validity, Verdict, World,
@@ -98,10 +99,11 @@ impl Client for Pinger {
     }
 }
 
-/// What the profile applied and any failure it reported.
+/// What the profile applied and skipped, and any failure it reported.
 #[derive(Default)]
 struct Outcome {
     applied: usize,
+    unsupported: Vec<&'static str>,
     failures: Vec<String>,
 }
 
@@ -157,6 +159,7 @@ impl Nemesis for Logged {
             outcome: &outcome,
         };
         let result = self.profile.run(&mut world, random);
+        self.outcome.lock().unwrap().unsupported = self.profile.unsupported().collect();
         self.record("run", result)
     }
     fn heal(&mut self, world: &mut dyn World) -> Result<(), Error> {
@@ -242,13 +245,25 @@ struct Ran(Arc<Mutex<Outcome>>);
 
 impl Checker<usize, (), ()> for Ran {
     fn name(&self) -> &str {
-        "the fault profile runs and heals without a failure"
+        "the fault profile runs and heals, skipping only what its engine lacks"
     }
     fn check(&self, _: &[Record<usize, ()>], _: &[Read<()>]) -> Verdict {
         let outcome = self.0.lock().unwrap();
-        let summary = format!("{} actions applied", outcome.applied);
-        let holds = outcome.failures.is_empty() && outcome.applied > 0;
-        verdict(holds, summary, json!({ "failures": outcome.failures }))
+        // Only x86_64 PV lacks a kind: preempt, for want of the guest yield hook.
+        let lacks: &[&str] = if cfg!(target_arch = "x86_64") {
+            &["preempt"]
+        } else {
+            &[]
+        };
+        let summary = format!(
+            "{} actions applied, unsupported {:?}",
+            outcome.applied, outcome.unsupported
+        );
+        let holds = outcome.failures.is_empty()
+            && outcome.applied > 0
+            && outcome.unsupported.iter().all(|kind| lacks.contains(kind));
+        let details = json!({ "failures": outcome.failures, "unsupported": outcome.unsupported });
+        verdict(holds, summary, details)
     }
 }
 

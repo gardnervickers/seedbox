@@ -37,7 +37,7 @@ fn disk_and_scheduler_actions_round_trip_in_canonical_form() {
         assert_eq!(serde_json::to_value(&action).unwrap(), wire);
     }
     // Defaults are omitted on the way out, so an input that spells them
-    // matches one that leaves them out. Neither `op` nor `ppm` has one.
+    // matches one that leaves them out. Neither `request` nor `ppm` has one.
     let spelled = parse(json!({"action":"disk_error","handle":"h","machine":"m","request":"any","ppm":5,"effect":"eio","scope":"all"})).unwrap();
     assert_eq!(
         serde_json::to_value(&spelled).unwrap(),
@@ -55,7 +55,7 @@ fn disk_and_scheduler_actions_refuse_unknown_fields_and_missing_arguments() {
     for bad in [
         json!({"action":"disk_error","handle":"h","machine":"m","ppm":1}),
         json!({"action":"disk_error","handle":"h","machine":"m","request":"read"}),
-        json!({"action":"disk_error","handle":"h","machine":"m","op":"trim","ppm":1}),
+        json!({"action":"disk_error","handle":"h","machine":"m","request":"trim","ppm":1}),
         json!({"action":"disk_error","handle":"h","machine":"m","request":"read","ppm":1,"effect":"error"}),
         json!({"action":"disk_error","handle":"h","machine":"m","request":"read","ppm":1,"scope":"disk"}),
         json!({"action":"disk_error","handle":"h","machine":"m","request":"read","ppm":1,"extra":1}),

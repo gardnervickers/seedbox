@@ -133,5 +133,5 @@ machines with a volume. The world checks what needs the world, such as the
 network's latency floor, when the action is applied, and a refusal fails `run`.
 With `skip_unsupported: true`, the profile instead skips a kind the engine
 refuses as `unsupported` (`preempt` on x86_64 PV) and never draws it again;
-`run` fails if no kind is left. See
+`run` fails if no kind is left, and `unsupported()` lists the kinds skipped. See
 [the acceptance oracle](../harness/acceptance/images/profile/src/main.rs).
