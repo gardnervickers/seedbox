@@ -51,6 +51,9 @@ fn clones_across_volumes_fall_back_to_the_empty_temporary_file() {
 
 #[test]
 fn a_clone_that_cannot_be_opened_is_removed() {
+    // SAFETY: geteuid has no pointer arguments.
+    let euid = unsafe { libc::geteuid() };
+    assert_ne!(euid, 0, "root bypasses the mode this test relies on");
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("source");
     fs::write(&path, b"bytes").unwrap();
