@@ -83,7 +83,7 @@ The [Driver](../crates/seedbox-driver/src/driver.rs) assigns fault IDs at admiss
 Partitions survive reboots and stack by handle, but do not retract frames already routed.
 A frame stamped T by the round ending at T routes before a partition/heal due at T.
 Admission-run output after that effect sees the changed policy; zero-budget receive can wake a paused machine.
-A blocked receiver is runnable from a frame's arrival, so rounds end within one latency even if it does not wake.
+A blocked receiver is runnable from a frame's arrival, so rounds end within one network (or controller) latency even if it does not wake.
 The [network policy](../crates/seedbox-driver/src/driver/network.rs) checks cuts before random draws and FIFO reservation.
 
 ## Simulated DNS

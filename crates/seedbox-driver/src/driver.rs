@@ -476,7 +476,7 @@ where
     /// earliest execution time plus latency, so no frame arrives before the
     /// round that sent it commits. Blocked or paused machines impose no limit;
     /// a blocked receiver can execute from a frame's arrival, even if the frame
-    /// does not wake it.
+    /// does not wake it, which also tightens the controller latency bound.
     // Blocked machines impose no bound, so idle simulations still jump to their
     // next event.
     #[allow(clippy::too_many_arguments)]
