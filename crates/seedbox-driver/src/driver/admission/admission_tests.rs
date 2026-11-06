@@ -608,7 +608,7 @@ fn due_frames_are_refused_work_but_runnable_machines_are_not() {
         StepOutcome::BarrierReached { at: at(10) }
     );
     assert_eq!(
-        d.step(at(100)).unwrap(),
+        d.step(at(15)).unwrap(),
         StepOutcome::BarrierReached { at: at(15) }
     );
     // Its next run starts at the deadline and takes the timer there.

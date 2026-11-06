@@ -99,6 +99,28 @@ fn claim<F>(slot: &Slot<F>) -> Option<(usize, F)> {
     slot.lock().unwrap_or_else(PoisonError::into_inner).take()
 }
 
+/// Jobs submitted one at a time whose results are taken as they finish
+/// ([`Workers::submit`], [`Workers::next`]).
+pub(super) struct Stream<F, T> {
+    /// Submitted jobs, newest last; pool threads empty the ones they claim.
+    slots: Vec<Arc<Slot<F>>>,
+    send: mpsc::Sender<T>,
+    receive: mpsc::Receiver<T>,
+    outstanding: usize,
+}
+
+impl<F, T> Default for Stream<F, T> {
+    fn default() -> Self {
+        let (send, receive) = mpsc::channel();
+        Self {
+            slots: Vec::new(),
+            send,
+            receive,
+            outstanding: 0,
+        }
+    }
+}
+
 pub(super) struct Workers<C> {
     /// Workers 1 and up; none when the calling thread is the only worker.
     pool: Option<ThreadPool>,
@@ -243,6 +265,53 @@ impl<C: 'static> Workers<C> {
             .into_iter()
             .map(|result| result.expect("every job returns its result"))
             .collect()
+    }
+
+    /// Submit one job to a stream of jobs whose results are taken as they
+    /// finish. A pool thread may claim it; otherwise the calling thread runs
+    /// it while it waits in [`Self::next`].
+    pub(super) fn submit<F, T>(&self, stream: &mut Stream<F, T>, machine: usize, job: F)
+    where
+        F: FnOnce(&mut C) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let slot: Arc<Slot<F>> = Arc::new(Mutex::new(Some((machine, job))));
+        if let Some(pool) = &self.pool {
+            let (claimed, send, published) = (slot.clone(), stream.send.clone(), self.published());
+            pool.spawn(move || {
+                if let Some((machine, job)) = claim(&claimed) {
+                    execute(Box::new(move |context: &mut C| {
+                        let _ = send.send(job(context));
+                        published(machine);
+                    }));
+                }
+            });
+        }
+        stream.slots.push(slot);
+        stream.outstanding += 1;
+    }
+
+    /// The next finished result of the stream, in completion order; `None`
+    /// once every submitted job has returned. While no result is ready, the
+    /// calling thread runs the newest job no pool thread has claimed.
+    pub(super) fn next<F, T>(&mut self, stream: &mut Stream<F, T>) -> Option<T>
+    where
+        F: FnOnce(&mut C) -> T,
+    {
+        if stream.outstanding == 0 {
+            return None;
+        }
+        stream.outstanding -= 1;
+        if let Ok(result) = stream.receive.try_recv() {
+            return Some(result);
+        }
+        while let Some(slot) = stream.slots.pop() {
+            if let Some(job) = claim(&slot) {
+                return Some(self.run_here(job));
+            }
+        }
+        // Every outstanding job is on a pool thread, which always sends.
+        Some(stream.receive.recv().expect("pool job reports"))
     }
 
     fn run_here<F, T>(&mut self, (machine, job): (usize, F)) -> T

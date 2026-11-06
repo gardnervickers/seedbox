@@ -276,3 +276,31 @@ fn partial_startup_failure_joins_and_drops_started_contexts() {
         assert_eq!(*dropped.lock().unwrap(), [0]);
     }
 }
+
+#[test]
+fn streamed_jobs_return_once_each_and_follow_ups_can_join() {
+    for count in [1, 3] {
+        let _guard = guard("stream");
+        let caller = thread::current().id();
+        let mut workers = Workers::new(count, || Ok::<_, io::Error>(())).unwrap();
+        type Job = Box<dyn FnOnce(&mut ()) -> (usize, thread::ThreadId) + Send>;
+        let job = |machine: usize| -> Job { Box::new(move |_| (machine, thread::current().id())) };
+        let mut stream = Stream::default();
+        for machine in 0..4 {
+            workers.submit(&mut stream, machine, job(machine));
+        }
+        let mut seen = Vec::new();
+        while let Some((machine, thread)) = workers.next(&mut stream) {
+            if count == 1 {
+                assert_eq!(thread, caller, "one worker runs every job itself");
+            }
+            // A finished job's follow-up joins the same stream.
+            if machine < 4 {
+                workers.submit(&mut stream, machine + 4, job(machine + 4));
+            }
+            seen.push(machine);
+        }
+        seen.sort();
+        assert_eq!(seen, (0..8).collect::<Vec<_>>());
+    }
+}

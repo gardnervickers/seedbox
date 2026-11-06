@@ -320,8 +320,9 @@ fn idle_jump_respects_limit_and_delivers_timer_at_exact_boundary() {
         driver.step(at(10)).unwrap(),
         StepOutcome::BarrierReached { at: at(10) }
     );
+    // A round no longer ends at a timer, so ask for a barrier at it.
     assert_eq!(
-        driver.step(at(50)).unwrap(),
+        driver.step(at(22)).unwrap(),
         StepOutcome::BarrierReached { at: at(22) }
     );
     // The timer due at the boundary fires at the start of the next run, which
@@ -645,7 +646,8 @@ fn idle_time_does_not_skip_quantum_boundaries() {
         || Ok(vec![machine(0, &[Op::Sleep(25), Op::Exit])]),
     )
     .unwrap();
-    for end in [10, 20, 25] {
+    // The machine's timer is taken inside the third window's lane.
+    for end in [10, 20] {
         assert_eq!(
             driver.step(at(100)).unwrap(),
             StepOutcome::BarrierReached { at: at(end) }

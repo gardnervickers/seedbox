@@ -110,7 +110,7 @@ simulator:
 ```
 
 `quantum` defaults to `1ms` and must be a positive duration in whole nanoseconds.
-Network latency, timers and scheduled events can shorten a parallel execution window.
+Network latency and scheduled events can shorten a parallel execution window.
 Replay and checkpoints retain the quantum.
 
 Choose the backend, seed, execution limits and machine threads with CLI flags.
