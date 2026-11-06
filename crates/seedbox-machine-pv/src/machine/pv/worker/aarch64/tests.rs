@@ -311,7 +311,11 @@ fn each_component_mutation_changes_exactly_its_comparison_fields() {
         let block = vm.block.as_ref().unwrap();
         let mut store = block.store().clone();
         edit(&mut store);
-        vm.block = Some(Block::restore(block.transport().clone(), store));
+        vm.block = Some(Block::restore(
+            block.transport().clone(),
+            store,
+            block.faults().clone(),
+        ));
     }
     let mut taken = 0;
     let mut fields = |vm: &mut Machine<Scripted>| -> BTreeMap<String, String> {
