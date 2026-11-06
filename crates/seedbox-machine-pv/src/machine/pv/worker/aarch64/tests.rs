@@ -414,11 +414,17 @@ fn each_component_mutation_changes_exactly_its_comparison_fields() {
         assert_eq!(changed, expected, "{name}");
     }
 }
+
 #[test]
 fn only_raised_lines_are_lowered() {
     let mut vm = machine();
     vm.interrupts().unwrap();
     vm.lower(TIMER).unwrap();
+    // Raised while masked: deferred, never reaches the native GIC.
+    vm.irq(DISK, true).unwrap();
+    assert!(vm.state.devices.deferred.contains(&DISK));
+    vm.irq(DISK, false).unwrap();
+    assert!(vm.state.devices.deferred.is_empty());
     assert!(vm.native.irqs.is_empty());
     vm.native.core[PSTATE as usize] &= !PSTATE_I;
     vm.irq(UART, true).unwrap();
