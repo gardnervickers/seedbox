@@ -24,14 +24,14 @@
 
 // Assemble with --defsym PAIR=1 to force the low-register STXP case:
 // X0/X1 data, W2 status, X3 base, with live sentinels in X4 through X7.
-// STOLEN=1 instead exercises the translator's reserved X28 as store status.
+// STOLEN=1 instead exercises the translator's reserved X18 as store status.
 .ifdef PAIR
 .equ UC_STATUS, UC_REGS + 2 * 8
 .else
 .ifdef STOLEN
-.equ UC_STATUS, UC_REGS + 28 * 8
-status_x .req x28
-status_w .req w28
+.equ UC_STATUS, UC_REGS + 18 * 8
+status_x .req x18
+status_w .req w18
 .else
 .equ UC_STATUS, UC_X20
 status_x .req x20

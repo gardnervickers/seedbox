@@ -159,15 +159,15 @@ _start:
     pair_case ldxp, stxp, w0, w1, w2, w4, 51
     pair_case ldaxp, stlxp, w1, w2, w0, w4, 54
 
-    // Codes 58-66: DynamoRIO steals x28, but each application operand must
-    // still refer to its application value, including a W28 status write.
-    mov x28, x3
-    single_case ldxr, stxr, ldr, x0, x1, 0x123, 0x234, 58, x28
-    single_case ldaxr, stlxr, ldr, x28, x1, 0x345, 0x456, 61
-    movz x28, #0xface, lsl #48
-    single_case ldxr, stxr, ldr, x0, x1, 0x567, 0x678, 64, x3, w28
+    // Codes 58-66: DynamoRIO steals x18, but each application operand must
+    // still refer to its application value, including a W18 status write.
+    mov x18, x3
+    single_case ldxr, stxr, ldr, x0, x1, 0x123, 0x234, 58, x18
+    single_case ldaxr, stlxr, ldr, x18, x1, 0x345, 0x456, 61
+    movz x18, #0xface, lsl #48
+    single_case ldxr, stxr, ldr, x0, x1, 0x567, 0x678, 64, x3, w18
     mov x0, #0
-    require_equal x28, x0, 74     // W28 status must also zero the upper bits.
+    require_equal x18, x0, 74     // W18 status must also zero the upper bits.
 
     // Codes 67-69: SP denotes an address here, while register 31 as a load
     // destination below denotes XZR/WZR. Keep SP aligned and restore it.

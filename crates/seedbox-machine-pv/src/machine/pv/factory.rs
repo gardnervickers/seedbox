@@ -250,9 +250,10 @@ mod guest {
     /// The application's `IC IVAU` invalidates rewritten code, rather than
     /// code-page write protection and sandboxing; reads of `CTR_EL0` clear
     /// DIC, so applications cannot legally omit that `IC IVAU`.
-    /// DynamoRIO keeps its thread-local base in x18, which Linux leaves free
-    /// and Go never uses, instead of the default x28, Go's `g` register,
-    /// whose every use would be mangled through a spill.
+    /// DynamoRIO keeps its thread-local base in a stolen register, and every
+    /// application use of it is mangled through a spill. The default x28 is
+    /// Go's `g` register; Go never uses x18 (a caller-saved temporary that C
+    /// compilers may still allocate).
     pub(super) const TRANSLATOR_OPTIONS: &[&str] = &[
         "-ldstex2cas",
         "-no_hw_cache_consistency",

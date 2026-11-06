@@ -33,7 +33,7 @@
 #define ALTSTACK (64 * 1024)
 #define BLOCKS 64
 #define AFTER_RELEASE 8
-#define REGISTERS (10 + 2 * 24)
+#define REGISTERS (11 + 2 * 24)
 
 typedef double v2df __attribute__((vector_size(16)));
 
@@ -61,8 +61,9 @@ static double __attribute__((noinline)) block(unsigned index) {
     return s + c[0] + c[1];
 }
 
-/* x0=fd x1=buffer x2=length x3=registers out. Loads sentinels into x19-x28 and
- * q8-q31, calls read(2) with them live, then stores them for the caller. */
+/* x0=fd x1=buffer x2=length x3=registers out. Loads sentinels into x19-x28,
+ * q8-q31 and x18 (DynamoRIO's stolen register on arm64), calls read(2) with
+ * them live, then stores them for the caller. */
 extern long sentinel_read(int fd, void *buffer, size_t length, uint64_t *out);
 __asm__(
     ".text\n.global sentinel_read\n.type sentinel_read, %function\nsentinel_read:\n"
@@ -74,7 +75,7 @@ __asm__(
     "  movz x9, #0x5ee1, lsl #48\n"
     "  add x19, x9, #19\n  add x20, x9, #20\n  add x21, x9, #21\n  add x22, x9, #22\n"
     "  add x23, x9, #23\n  add x24, x9, #24\n  add x25, x9, #25\n  add x26, x9, #26\n"
-    "  add x27, x9, #27\n  add x28, x9, #28\n"
+    "  add x27, x9, #27\n  add x28, x9, #28\n  add x18, x9, #18\n"
     "  movz x10, #0xa5a5, lsl #48\n  movz x11, #0x5a5a, lsl #48\n"
 #define Q(n) "  add x12, x10, #" #n "\n  add x13, x11, #" #n "\n  mov v" #n ".d[0], x12\n  mov v" #n ".d[1], x13\n"
     Q(8) Q(9) Q(10) Q(11) Q(12) Q(13) Q(14) Q(15) Q(16) Q(17) Q(18) Q(19)
@@ -88,6 +89,7 @@ __asm__(
     "  stp q14, q15, [x3, #96]\n  stp q16, q17, [x3, #128]\n  stp q18, q19, [x3, #160]\n"
     "  stp q20, q21, [x3, #192]\n  stp q22, q23, [x3, #224]\n  stp q24, q25, [x3, #256]\n"
     "  stp q26, q27, [x3, #288]\n  stp q28, q29, [x3, #320]\n  stp q30, q31, [x3, #352]\n"
+    "  str x18, [x3, #384]\n"
     "  ldp x19, x20, [sp, #16]\n  ldp x21, x22, [sp, #32]\n  ldp x23, x24, [sp, #48]\n"
     "  ldp x25, x26, [sp, #64]\n  ldp x27, x28, [sp, #80]\n"
     "  ldp d8, d9, [sp, #96]\n  ldp d10, d11, [sp, #112]\n  ldp d12, d13, [sp, #128]\n"
@@ -132,6 +134,9 @@ static void on_signal(int number, siginfo_t *info, void *context) {
             || registers[11 + 2 * i] != (0x5a5aull << 48) + 8 + i) {
             handler.registers_ok = 0; handler.bad_register = 100 + 8 + i;
         }
+    }
+    if (registers[REGISTERS - 1] != (0x5ee1ull << 48) + 18) {
+        handler.registers_ok = 0; handler.bad_register = 18;
     }
     handler.locals_ok = 1;
     for (int i = 0; i < 8; ++i) handler.locals_ok &= scalars[i] == (0x51C0000000000000ull | (uint64_t)i);
