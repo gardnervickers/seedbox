@@ -980,7 +980,7 @@ pub(crate) fn serve() -> Result<()> {
         Some(Request::Attach { capacity }) => capacity,
         Some(_) => return Err("PV request before transport attach".into()),
     };
-    let mut io = super::shm::accept(capacity, input, stdout.lock())?;
+    let mut io = std::io::BufReader::new(super::shm::accept(capacity, input, stdout.lock())?);
     let mut machine: Option<Machine> = None;
     while let Some(request) = protocol::receive(&mut io)? {
         // A Run's frames follow it on the stream; read them before running so
@@ -1138,9 +1138,9 @@ pub(crate) fn serve() -> Result<()> {
             Ok(answer) => answer,
             Err(error) => Response::Error(error),
         };
-        protocol::send(&mut io, &response)?;
+        protocol::send(io.get_mut(), &response)?;
         if let Some(writes) = writes {
-            super::wire::send_writes(&mut io, &writes)?;
+            super::wire::send_writes(io.get_mut(), &writes)?;
         }
     }
     Ok(())

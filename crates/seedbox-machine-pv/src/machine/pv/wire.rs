@@ -1,6 +1,6 @@
 //! Private binary trailers for guest writes and host frames. They follow a
-//! JSON `Run` or `Stopped` message on the worker pipe, which carries only the
-//! record count. Record bytes never pass through JSON, so the JSON message
+//! JSON `Run` or `Stopped` message on the worker stream, which carries only
+//! the record count. Record bytes never pass through JSON, so the JSON message
 //! limit does not bound how much a run may emit or receive.
 //!
 //! Guest writes: `count` records of `tag: u8`, `time: u64 LE`, `length: u32

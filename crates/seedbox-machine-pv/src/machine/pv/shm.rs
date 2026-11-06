@@ -11,10 +11,11 @@
 //! publishes bytes or frees room and finds the matching mark clears it and
 //! writes that byte, so every sleep takes exactly one wakeup.
 // While the peer answers within the spin, a call costs a cache-line handoff
-// instead of two cross-process wakeups and several pipe syscalls. Past YIELD a
-// spinning thread yields between checks, so on a host with no idle core it
-// gives way to runnable threads, such as a guest's vCPU, instead of delaying
-// them.
+// instead of two cross-process wakeups and several pipe syscalls. The spin
+// never yields: a thread that yields without marking its wait is owed no
+// wakeup, so on a busy host it can stay descheduled long after its peer
+// publishes, while a thread asleep on its pipe wakes when the byte lands. On a
+// host with no idle core the bounded spin delays its peer by at most SPIN.
 use super::protocol::{self, Response};
 use std::{
     io::{self, Read, Write},
@@ -38,8 +39,6 @@ pub(super) const CAPACITY: u64 = 256 << 10;
 /// How long a waiting side spins before it sleeps. Most waits for a guest run
 /// or for the client's next call end within it.
 const SPIN: Duration = Duration::from_micros(200);
-/// How long it spins before it also yields between checks.
-const YIELD: Duration = Duration::from_micros(5);
 /// Control words, each on its own 128-byte line, fill the first 16 KiB. The
 /// request ring follows, then the response ring.
 const LINE: usize = 128;
@@ -270,7 +269,8 @@ impl Side {
 }
 
 /// One side of the region as a byte stream. It sleeps on `sleep` and wakes
-/// its peer through `wake`. Written bytes reach the peer at `flush`.
+/// its peer through `wake`. Written bytes reach the peer at `flush`. Every
+/// read publishes its position, so a reader of small pieces buffers it.
 pub(crate) struct Stream<R, W> {
     region: Region,
     incoming: Ring,
@@ -322,12 +322,8 @@ impl<R: Read, W: Write> Stream<R, W> {
                 }
                 std::hint::spin_loop();
             }
-            let spun = start.elapsed();
-            if spun >= self.spin {
+            if start.elapsed() >= self.spin {
                 break;
-            }
-            if spun >= YIELD {
-                std::thread::yield_now();
             }
         }
         let mark = self.region.word(mark);
@@ -428,7 +424,7 @@ impl<R: Read, W: Write> Write for Stream<R, W> {
                     None => return Err(io::ErrorKind::BrokenPipe.into()),
                 }
             }
-            if now < self.drained || now > self.written {
+            if now < self.drained || now > self.published {
                 return Err(corrupt());
             }
             self.drained = now;

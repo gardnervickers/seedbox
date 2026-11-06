@@ -98,6 +98,26 @@ pub fn malformed_streams(binary: &Path) {
         assert!(error.starts_with(diagnostic), "{error}");
     }
 }
+/// An attach without the shared region is answered with a framed error, and
+/// the worker exits without serving.
+pub fn attach_without_region(binary: &Path) {
+    let framed = |json: &str| [&(json.len() as u32).to_le_bytes()[..], json.as_bytes()].concat();
+    let (status, stdout, stderr) = invoke(
+        binary,
+        &["--seedbox-pv-worker-v1".into()],
+        &framed(r#"{"Attach":{"capacity":262144}}"#),
+    );
+    assert_eq!(status.code(), Some(2));
+    assert_eq!(
+        stdout,
+        framed(r#"{"Error":"PV transport descriptor absent"}"#)
+    );
+    let error = String::from_utf8(stderr).unwrap();
+    assert!(
+        error.starts_with("PV transport descriptor absent"),
+        "{error}"
+    );
+}
 /// The client's own spawn attaches its shared region, and the worker answers
 /// requests that need a boot through it, frames trailer included.
 #[cfg(seedbox_pv)]

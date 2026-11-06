@@ -20,3 +20,7 @@ fn private_worker_malformed_protocol_exits_without_state() {
 fn private_worker_preboot_rejections_are_framed_without_native_setup() {
     cases::preboot_requests(std::path::Path::new(env!("CARGO_BIN_EXE_seedbox")));
 }
+#[test]
+fn private_worker_attach_without_region_is_a_framed_error() {
+    cases::attach_without_region(std::path::Path::new(env!("CARGO_BIN_EXE_seedbox")));
+}

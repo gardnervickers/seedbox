@@ -2,13 +2,17 @@ use super::protocol::{receive, send, Request, Response, Result, Stop};
 use super::{shm, wire};
 use seedbox_machine::pv::transport::GuestWrite;
 use std::{
+    io::BufReader,
     path::Path,
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
 
+/// The attached region, buffered for reads; writes go to the stream inside.
+type Stream = BufReader<shm::Stream<ChildStdout, ChildStdin>>;
+
 pub(super) struct Worker {
     child: Child,
-    stream: shm::Stream<ChildStdout, ChildStdin>,
+    stream: Stream,
 }
 impl Worker {
     pub(super) fn spawn(executable: &Path) -> Result<Self> {
@@ -43,10 +47,7 @@ impl Worker {
     }
     /// Start-up on the pipes: attach the shared region, which then carries
     /// every message while the pipes carry wakeups.
-    fn attach(
-        child: &mut Child,
-        region: shm::Region,
-    ) -> Result<shm::Stream<ChildStdout, ChildStdin>> {
+    fn attach(child: &mut Child, region: shm::Region) -> Result<Stream> {
         let mut input = child.stdin.take().ok_or("PV worker stdin unavailable")?;
         let mut output = child.stdout.take().ok_or("PV worker stdout unavailable")?;
         send(
@@ -56,7 +57,7 @@ impl Worker {
             },
         )?;
         match receive(&mut output)?.ok_or("PV worker closed its protocol")? {
-            Response::Attached => Ok(shm::Stream::client(region, output, input)),
+            Response::Attached => Ok(BufReader::new(shm::Stream::client(region, output, input))),
             Response::Error(error) => Err(error),
             _ => Err("PV worker returned unexpected attach response".into()),
         }
@@ -66,7 +67,7 @@ impl Worker {
         if matches!(request, Request::Run { .. }) {
             return Err("PV run requires its frame trailer".into());
         }
-        send(&mut self.stream, &request)?;
+        send(self.stream.get_mut(), &request)?;
         match self.answer()? {
             Response::Stopped { .. } => Err("PV unexpected run response".into()),
             other => Ok(other),
@@ -89,8 +90,8 @@ impl Worker {
             return Err("PV run requires a Run request".into());
         };
         *count = frames.len() as u64;
-        send(&mut self.stream, &request)?;
-        wire::send_frames(&mut self.stream, frames)?;
+        send(self.stream.get_mut(), &request)?;
+        wire::send_frames(self.stream.get_mut(), frames)?;
         match self.answer()? {
             Response::Stopped { time, stop, writes } => {
                 Ok((time, stop, wire::receive_writes(&mut self.stream, writes)?))
