@@ -279,9 +279,10 @@ mod guest {
 pub(super) fn runtime_prefix(budget: seedbox_spec::progress::ProgressBudget) -> Vec<String> {
     let mut prefix = vec!["/seedbox/progress/bin64/drrun"];
     prefix.extend_from_slice(guest::LAUNCHER_OPTIONS);
-    // An ignorable syscall's block stays thread-private and unlinked, so
-    // each clock read leaves the code cache; intercepting every syscall
-    // keeps those blocks shared and linked.
+    // A block holding an ignorable syscall is never shared, so it is built
+    // per thread, and entering or leaving it from shared code goes through
+    // the dispatcher. Intercepting every syscall lets those blocks (most
+    // are clock reads) be shared and built once.
     prefix.extend(["-opt_speed", "-disable_traces", "-no_ignore_syscalls"]);
     prefix.extend_from_slice(guest::TRANSLATOR_OPTIONS);
     prefix.extend(["-c", "/seedbox/progress/libseedbox_progress.so"]);
