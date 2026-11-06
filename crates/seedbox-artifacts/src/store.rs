@@ -392,6 +392,15 @@ impl ContentStore {
         Ok(metadata.len())
     }
 
+    /// The first `length` bytes of a verified object, such as a format
+    /// signature, without copying or holding the rest of a large artifact.
+    pub fn read_prefix(&self, digest: &ContentDigest, length: u64) -> Result<Vec<u8>> {
+        self.verify(digest)?;
+        let mut prefix = Vec::new();
+        self.open(digest)?.take(length).read_to_end(&mut prefix)?;
+        Ok(prefix)
+    }
+
     fn open(&self, digest: &ContentDigest) -> Result<fs::File> {
         fs::File::open(self.object_path(digest)).context(Error::Integrity, digest.hex())
     }
