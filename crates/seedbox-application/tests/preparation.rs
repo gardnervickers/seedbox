@@ -21,8 +21,6 @@ fn fixture(
     use seedbox_application::execution::ExecutionBackend;
     use seedbox_driver_execution::driver_world::DriverExecutor;
     let (_, runtime, _) = sdk(root, seedbox_spec::backend::CpuBackend::Pv);
-    let kernel = root.join("kernel");
-    fs::copy(runtime.guest_assets.join("kernel"), &kernel).unwrap();
     let engine = std::env::current_exe().unwrap();
     let store = ContentStore::new(root.join("store"));
     let simulation = config::parse_for_architecture(
@@ -40,11 +38,7 @@ fn fixture(
         DriverExecutor::for_preparation(&simulation, WitnessMode::Exits, Default::default())
             .unwrap();
     let preparer = OciPreparer {
-        kernel,
         engine,
-        init: runtime.guest_assets.join("init"),
-        progress: runtime.guest_assets.join("progress.tar"),
-        mke2fs: None,
         profile: executor.profile(),
         docker: bollard::Docker::connect_with_http(
             "http://127.0.0.1:9",
@@ -96,29 +90,31 @@ fn cold_driver_factory(backend: seedbox_spec::backend::CpuBackend) {
                 }))?,
             )?;
             let image = seedbox_application::oci::import_metadata(directory, service, store)?;
-            let root = directory.join("root");
-            fs::create_dir(&root)?;
-            fs::write(root.join("app"), b"cold application bytes; never executed")?;
-            // Match real ContainerTransport's prefixed archive, not just its
-            // directory-shaped test double: the SDK supplies its own rootfs/.
-            let archive = directory.join("rootfs.tar");
-            let mut tar = tar::Builder::new(fs::File::create(&archive)?);
-            tar.follow_symlinks(false);
-            tar.append_dir_all("rootfs", &root)?;
+            // Match real ContainerTransport's stored view, links included,
+            // not just its directory-shaped test double: the SDK supplies its
+            // own rootfs/.
+            let mut tar = tar::Builder::new(Vec::new());
             let mut header = tar::Header::new_gnu();
-            header.set_mode(0o644);
             header.set_uid(0);
             header.set_gid(0);
             header.set_mtime(0);
             header.set_size(0);
+            header.set_mode(0o755);
+            header.set_entry_type(tar::EntryType::Directory);
+            tar.append_data(&mut header, ".", std::io::empty())?;
+            let application = b"cold application bytes; never executed";
+            header.set_mode(0o644);
+            header.set_size(application.len() as u64);
+            header.set_entry_type(tar::EntryType::Regular);
+            tar.append_data(&mut header, "app", &application[..])?;
+            header.set_size(0);
             header.set_entry_type(tar::EntryType::Link);
-            tar.append_link(&mut header, "rootfs/app-hard", "rootfs/app")?;
+            tar.append_link(&mut header, "app-hard", "app")?;
             header.set_entry_type(tar::EntryType::Symlink);
-            tar.append_link(&mut header, "rootfs/app-link", "/app")?;
-            tar.finish()?;
+            tar.append_link(&mut header, "app-link", "/app")?;
             Ok(ImportedImage {
                 image,
-                rootfs: RootFilesystem::Archive(archive),
+                rootfs: RootFilesystem::Stored(store.put(&tar.into_inner()?)?),
                 auxiliary: BTreeMap::new(),
                 provenance: BTreeMap::new(),
             })
@@ -145,12 +141,7 @@ fn cold_driver_factory(backend: seedbox_spec::backend::CpuBackend) {
         target: "/data".into(),
         size_bytes: None,
     });
-    preparer.mke2fs = Some(preparer.init.clone());
     let (runtime, selected, package) = sdk(root.path(), backend);
-    preparer.kernel = selected.guest_assets.join("kernel");
-    preparer.init = selected.guest_assets.join("init");
-    preparer.progress = selected.guest_assets.join("progress.tar");
-    preparer.mke2fs = Some(selected.guest_assets.join("mke2fs"));
     preparer.engine = std::env::current_exe().unwrap();
     simulation.control = Some(seedbox_application::config::Control {
         service: "oracle".into(),
@@ -160,22 +151,25 @@ fn cold_driver_factory(backend: seedbox_spec::backend::CpuBackend) {
     preparer.profile = executor.profile();
     let context =
         PreparationContext::new(root.path().join("evidence"), Default::default()).unwrap();
+    let digests = preparer
+        .runtime_digests(&selected, &store, &context)
+        .unwrap();
     let mut inputs = preparer
-        .prepare_driver_with_transport(&simulation, &store, &context, &Transport, &selected)
+        .prepare_driver_with_transport(&simulation, &store, &context, &Transport, &digests)
         .unwrap();
     if backend == seedbox_spec::backend::CpuBackend::Tcg {
         assert!(
-            !preparer.progress.exists(),
+            !selected.guest_assets.join("progress.tar").exists(),
             "TCG package deliberately lacks progress.tar"
         );
         assert!(!inputs.auxiliary.contains_key("guest-progress"));
         assert!(inputs.auxiliary.contains_key("guest-firmware"));
     }
     let original_boots = inputs.guests.clone();
-    seedbox_driver_execution::driver_world::preparation::retain_oci_prepared(
+    driver_world::preparation::retain_oci_prepared(
         &mut inputs,
         &simulation,
-        &selected,
+        &digests,
         &store,
         &|| context.check(),
     )

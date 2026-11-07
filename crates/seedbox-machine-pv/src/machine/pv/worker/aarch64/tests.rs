@@ -311,7 +311,11 @@ fn each_component_mutation_changes_exactly_its_comparison_fields() {
         let block = vm.block.as_ref().unwrap();
         let mut store = block.store().clone();
         edit(&mut store);
-        vm.block = Some(Block::restore(block.transport().clone(), store));
+        vm.block = Some(Block::restore(
+            block.transport().clone(),
+            store,
+            block.faults().clone(),
+        ));
     }
     let mut taken = 0;
     let mut fields = |vm: &mut Machine<Scripted>| -> BTreeMap<String, String> {
@@ -409,4 +413,22 @@ fn each_component_mutation_changes_exactly_its_comparison_fields() {
         expected.sort_unstable();
         assert_eq!(changed, expected, "{name}");
     }
+}
+
+#[test]
+fn only_raised_lines_are_lowered() {
+    let mut vm = machine();
+    vm.interrupts().unwrap();
+    vm.lower(TIMER).unwrap();
+    // Raised while masked: deferred, never reaches the native GIC.
+    vm.irq(DISK, true).unwrap();
+    assert!(vm.state.devices.deferred.contains(&DISK));
+    vm.irq(DISK, false).unwrap();
+    assert!(vm.state.devices.deferred.is_empty());
+    assert!(vm.native.irqs.is_empty());
+    vm.native.core[PSTATE as usize] &= !PSTATE_I;
+    vm.irq(UART, true).unwrap();
+    vm.irq(UART, false).unwrap();
+    vm.irq(UART, false).unwrap();
+    assert_eq!(vm.native.irqs, [(UART, true), (UART, false)]);
 }

@@ -446,7 +446,7 @@ struct ExecutionArgs {
     /// Stop after this much active host time, excluding explicit pauses [default: unlimited].
     #[arg(long, value_parser = wall_time)]
     wall_time: Option<u64>,
-    /// Host threads that run machines; never changes results [default: one per machine, sharing CPUs across server slots].
+    /// Host threads that run machines; never changes results [default: one per machine].
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=64))]
     machine_workers: Option<u32>,
 }
@@ -527,11 +527,7 @@ impl RuntimeInputs {
         let selected = runtime.select(cpu_backend, architecture)?;
         let inputs = OciPreparer {
             docker: backends::container_engine()?,
-            kernel: selected.guest_assets.join("kernel"),
             engine: engine.to_owned(),
-            init: selected.guest_assets.join("init"),
-            progress: selected.guest_assets.join("progress.tar"),
-            mke2fs: Some(selected.guest_assets.join("mke2fs")),
             profile: executor.profile(),
         };
         Ok((

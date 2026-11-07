@@ -69,6 +69,19 @@ pub fn run_request(
         Ok(reason) => (reason, None),
         Err(error) => (StopReason::Error, Some(error.to_string())),
     };
+    // Frames and timers due at the final barrier still wait for machines'
+    // next runs; evidence covers them, and their commit is published.
+    if reason != StopReason::Error {
+        let admitted = worker
+            .driver
+            .admit_waiting_work()
+            .map_err(|error| error.to_string())
+            .and_then(|()| worker.flush().map(drop).map_err(|error| error.to_string()));
+        if let Err(error) = admitted {
+            reason = StopReason::Error;
+            detail = Some(format!("final admission: {error}"));
+        }
+    }
     let mut failure = |error: crate::Error| {
         reason = StopReason::Error;
         detail = Some(match detail.take() {

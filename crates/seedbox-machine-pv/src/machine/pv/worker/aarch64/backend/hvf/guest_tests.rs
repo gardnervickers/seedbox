@@ -423,13 +423,15 @@ fn futex_run(interrupt: bool) -> Run {
     while core(&vm, 27) == 0 && horizon < 4_000_000 {
         horizon += 1_000;
         let now = vm.state.now;
-        vm.run(now, horizon, 1000, false, &[], Vec::new()).unwrap();
+        vm.run(now, horizon, 1000, false, &[], Vec::new(), &[])
+            .unwrap();
     }
     // A few more bounds in the final idle loop.
     for _ in 0..4 {
         horizon += 1_000;
         let now = vm.state.now;
-        vm.run(now, horizon, 1000, false, &[], Vec::new()).unwrap();
+        vm.run(now, horizon, 1000, false, &[], Vec::new(), &[])
+            .unwrap();
     }
     stop.store(true, Ordering::Release);
     for helper in helpers {
@@ -518,7 +520,7 @@ fn finish(vm: &mut Machine) -> Final {
 fn run_to(vm: &mut Machine, to: u64) {
     let mut now = vm.state.now;
     loop {
-        match vm.run(now, to, 1000, false, &[], Vec::new()).unwrap() {
+        match vm.run(now, to, 1000, false, &[], Vec::new(), &[]).unwrap() {
             Stop::Horizon => return,
             Stop::Blocked(Some(deadline)) if deadline < to => now = deadline,
             Stop::Blocked(_) if now < to => now = to,

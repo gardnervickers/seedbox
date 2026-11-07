@@ -52,27 +52,28 @@ where
         &mut self,
     ) -> Result<Vec<ExecutionEvidenceRead<M::Error>>, Error<M::Error>> {
         self.driver.check_valid()?;
-        let (send, receive) = std::sync::mpsc::channel();
-        let mut submission_error = None;
-        for (index, entry) in self.driver.execution.machines.iter_mut().enumerate() {
-            let id = MachineId(index);
-            let mut machine = entry.machine.take().expect("stopped machine");
-            let result = send.clone();
-            if let Err(error) = self.driver.workers.submit(index, move |_| {
-                let evidence = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    machine.execution_evidence()
-                }))
-                .map_err(|_| Error::Panicked { id })
-                .and_then(|read| read.map_err(|source| Error::Machine { id, source }));
-                let _ = result.send((id, machine, evidence));
-            }) {
-                submission_error = Some(error);
-                break;
-            }
-        }
-        drop(send);
-        let mut results: Vec<_> = receive.into_iter().collect();
-        results.sort_by_key(|(id, _, _)| *id);
+        let jobs = self
+            .driver
+            .execution
+            .machines
+            .iter_mut()
+            .enumerate()
+            .map(|(index, entry)| {
+                let id = MachineId(index);
+                let mut machine = entry.machine.take().expect("stopped machine");
+                let job = move |_: &mut M::Context| {
+                    let evidence = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        machine.execution_evidence()
+                    }))
+                    .map_err(|_| Error::Panicked { id })
+                    .and_then(|read| read.map_err(|source| Error::Machine { id, source }));
+                    (id, machine, evidence)
+                };
+                (index, job)
+            })
+            .collect();
+        // Results come back in job order, which is insertion order.
+        let results = self.driver.workers.run(jobs);
         let mut reads = Vec::with_capacity(results.len());
         for (id, machine, result) in results {
             self.driver.execution.machines[id.0].machine = Some(machine);
@@ -80,9 +81,6 @@ where
                 machine: id,
                 result,
             });
-        }
-        if let Some(error) = submission_error {
-            return Err(error);
         }
         Ok(reads)
     }

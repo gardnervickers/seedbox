@@ -1,16 +1,28 @@
-//! Batch execution: due machines run on the workers in their own time
-//! bases, and accepted runs commit in identity order.
+//! Batch execution: due machines run on the workers, the Driver's own thread
+//! among them, in their own time bases, and accepted runs commit in identity
+//! order.
 use super::*;
 
 /// Each batch machine's start, bound and offered input count, in its own
 /// time base.
-type BatchBounds = BTreeMap<MachineId, (Timestamp, Timestamp, usize)>;
+pub(super) type BatchBounds = BTreeMap<MachineId, (Timestamp, Timestamp, usize)>;
 
 /// A batch machine's start, bound and due inputs, in its own time base.
-type BatchView = (MachineId, Timestamp, Timestamp, VecDeque<Input>);
+pub(super) type BatchView = (MachineId, Timestamp, Timestamp, VecDeque<Input>);
+
+/// A worker's finished run: the lent machine and RNG, how many offered
+/// inputs it left, and its outputs and stop, in its own time base.
+pub(super) struct RunResult<M: Machine> {
+    pub(super) id: MachineId,
+    machine: M,
+    rng: SeededRng,
+    remaining: usize,
+    outputs: Vec<crate::pv::Output>,
+    stopped: Result<StopReason, Error<M::Error>>,
+}
 
 /// One machine's finished batch run, still in its own time base.
-struct RunReport<E> {
+pub(super) struct RunReport<E> {
     id: MachineId,
     outputs: Vec<crate::pv::Output>,
     stopped: Result<StopReason, Error<E>>,
@@ -19,7 +31,7 @@ struct RunReport<E> {
 }
 
 /// A validated batch run, converted back to simulation time.
-struct AcceptedRun {
+pub(super) struct AcceptedRun {
     id: MachineId,
     reached: Timestamp,
     stopped: StopReason,
@@ -62,7 +74,7 @@ where
         let offered_commands = self.offered_commands(ids);
         let offered_stops = self.offered_stops(ids);
         let (bounds, views) = self.batch_views(ids, now, upto)?;
-        let reports = self.execute_batch(views, &bounds)?;
+        let reports = self.execute_batch(views, &bounds);
         // Validate each stop in its machine's time base, then convert back.
         // The conversion returns the earliest simulation time whose machine
         // time reaches the reported one, so nothing is reported early, and a
@@ -83,7 +95,10 @@ where
     }
 
     /// Guest commands queued for the batch's machines, offered to this run.
-    fn offered_commands(&self, ids: &[MachineId]) -> Vec<(MachineId, NonZeroU32, Timestamp)> {
+    pub(super) fn offered_commands(
+        &self,
+        ids: &[MachineId],
+    ) -> Vec<(MachineId, NonZeroU32, Timestamp)> {
         ids.iter()
             .flat_map(|&machine| {
                 self.execution.machines[machine.0]
@@ -97,7 +112,7 @@ where
     }
 
     /// Application stop commands queued for the oracle, when it is in the batch.
-    fn offered_stops(&self, ids: &[MachineId]) -> Vec<NonZeroU32> {
+    pub(super) fn offered_stops(&self, ids: &[MachineId]) -> Vec<NonZeroU32> {
         if !ids.contains(&self.execution.oracle) {
             return Vec::new();
         }
@@ -121,7 +136,7 @@ where
     /// Map the common barrier into every machine's own time base before
     /// submitting any work: start, bound and due inputs. Inputs that became
     /// due before the last rate change are offered at that change.
-    fn batch_views(
+    pub(super) fn batch_views(
         &self,
         ids: &[MachineId],
         now: Timestamp,
@@ -157,75 +172,99 @@ where
         &mut self,
         views: Vec<BatchView>,
         bounds: &BatchBounds,
-    ) -> Result<Vec<RunReport<M::Error>>, Error<M::Error>> {
-        let (send, receive) = mpsc::channel();
-        let mut submission_error = None;
-        for (id, start, bound, mut inbox) in views {
-            let entry = &mut self.execution.machines[id.0];
-            let mut machine = entry.machine.take().expect("stopped machine");
-            let mut rng = entry.rng.take().expect("stopped machine RNG");
-            let execution = entry.lifecycle.execution();
+    ) -> Vec<RunReport<M::Error>> {
+        let jobs = views.into_iter().map(|view| self.run_job(view)).collect();
+        // All jobs finish before changing the clock or returning. Results are
+        // ordered by identity, never by worker completion time.
+        let mut results = self.workers.run(jobs);
+        results.sort_by_key(|result: &RunResult<M>| result.id);
+        results
+            .into_iter()
+            .map(|result| {
+                let offered = bounds[&result.id].2;
+                self.receive_run(result, offered)
+            })
+            .collect()
+    }
+
+    /// Lend one view's machine and RNG to a job that runs it on a worker.
+    pub(super) fn run_job(
+        &mut self,
+        (id, start, bound, mut inbox): BatchView,
+    ) -> (
+        usize,
+        impl FnOnce(&mut M::Context) -> RunResult<M> + Send + 'static,
+    ) {
+        let entry = &mut self.execution.machines[id.0];
+        let mut machine = entry.machine.take().expect("stopped machine");
+        let mut rng = entry.rng.take().expect("stopped machine RNG");
+        let execution = entry.lifecycle.execution();
+        let job = move |context: &mut M::Context| {
             let mut outputs = Vec::new();
-            let result = send.clone();
-            if let Err(error) = self.workers.submit(id.0, move |context| {
-                let stopped = catch_unwind(AssertUnwindSafe(|| {
-                    machine.run(
-                        &mut RunContext {
-                            worker: context,
-                            clock: &FixedClock(start.as_nanos()),
-                            rng: &mut rng,
-                            execution,
-                            inbox: Inbox::new(&mut inbox, start),
-                            outbox: Outbox::new(&mut outputs, start, bound),
-                        },
-                        bound,
-                    )
-                }))
-                .map_err(|_| Error::Panicked { id })
-                .and_then(|result| result.map_err(|source| Error::Machine { id, source }));
-                let _ = result.send((id, machine, rng, inbox.len(), outputs, stopped));
-            }) {
-                submission_error = Some(error);
-                break;
-            }
-        }
-        drop(send);
-        // All submitted jobs must finish before changing the clock or returning.
-        // Results are ordered by identity, never by worker completion time.
-        let mut results: Vec<_> = receive.into_iter().collect();
-        results.sort_by_key(|(id, _, _, _, _, _)| *id);
-        let mut reports = Vec::with_capacity(results.len());
-        for (id, machine, rng, remaining, outputs, stopped) in results {
-            let entry = &mut self.execution.machines[id.0];
-            entry.machine = Some(machine);
-            entry.rng = Some(rng);
-            // Accepted inputs are the taken prefix; the rest stay in simulation time.
-            let taken = bounds[&id]
-                .2
-                .saturating_sub(remaining)
-                .min(entry.inbox.len());
-            let admitted_end = entry
-                .inbox
-                .iter()
-                .take(taken)
-                .any(|input| matches!(input.payload, Request::Crash | Request::Reboot));
-            entry.inbox.drain(..taken);
-            reports.push(RunReport {
+            let stopped = catch_unwind(AssertUnwindSafe(|| {
+                machine.run(
+                    &mut RunContext {
+                        worker: context,
+                        clock: &FixedClock(start.as_nanos()),
+                        rng: &mut rng,
+                        execution,
+                        inbox: Inbox::new(&mut inbox, start),
+                        outbox: Outbox::new(&mut outputs, start, bound),
+                    },
+                    bound,
+                )
+            }))
+            .map_err(|_| Error::Panicked { id })
+            .and_then(|result| result.map_err(|source| Error::Machine { id, source }));
+            RunResult {
                 id,
+                machine,
+                rng,
+                remaining: inbox.len(),
                 outputs,
                 stopped,
-                admitted_end,
-            });
+            }
+        };
+        (id.0, job)
+    }
+
+    /// Return a finished run's machine and RNG to its entry and remove the
+    /// inputs it accepted out of the `offered` ones.
+    pub(super) fn receive_run(
+        &mut self,
+        result: RunResult<M>,
+        offered: usize,
+    ) -> RunReport<M::Error> {
+        let RunResult {
+            id,
+            machine,
+            rng,
+            remaining,
+            outputs,
+            stopped,
+        } = result;
+        let entry = &mut self.execution.machines[id.0];
+        entry.machine = Some(machine);
+        entry.rng = Some(rng);
+        // Accepted inputs are the taken prefix; the rest stay in simulation time.
+        let taken = offered.saturating_sub(remaining).min(entry.inbox.len());
+        let admitted_end = entry
+            .inbox
+            .iter()
+            .take(taken)
+            .any(|input| matches!(input.payload, Request::Crash | Request::Reboot));
+        entry.inbox.drain(..taken);
+        RunReport {
+            id,
+            outputs,
+            stopped,
+            admitted_end,
         }
-        if let Some(error) = submission_error {
-            return Err(error);
-        }
-        Ok(reports)
     }
 
     /// Validate one run against its machine-time `start` and `bound`, and
     /// convert its stop and outputs back to simulation time.
-    fn accept_run(
+    pub(super) fn accept_run(
         &self,
         report: RunReport<M::Error>,
         start: Timestamp,
@@ -321,7 +360,7 @@ where
     }
 
     /// Confirm every offered guest command the batch consumed from its inbox.
-    fn confirm_offered_commands(
+    pub(super) fn confirm_offered_commands(
         &mut self,
         offered: &[(MachineId, NonZeroU32, Timestamp)],
         upto: Timestamp,
@@ -344,7 +383,7 @@ where
 
     /// Record accepted runs: consumed oracle stops, progress, the pending
     /// timer, and staged outputs.
-    fn commit_runs(
+    pub(super) fn commit_runs(
         &mut self,
         accepted: Vec<AcceptedRun>,
         offered_stops: &[NonZeroU32],

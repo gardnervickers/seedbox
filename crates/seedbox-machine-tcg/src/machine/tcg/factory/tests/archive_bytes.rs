@@ -53,10 +53,14 @@ fn pure_configured_assembly_is_exact_creation_input_and_does_not_gate_ram_sizing
     let machine = factory
         .create_configured(&definition, &environment)
         .unwrap();
-    let super::super::super::Boot::Linux { initramfs, .. } = &machine.manifest.boot else {
+    let super::super::super::Boot::Linux {
+        initramfs: super::super::super::Initramfs::Bytes(initramfs),
+        ..
+    } = &machine.manifest.boot
+    else {
         panic!("expected complete Linux boot image")
     };
-    assert_eq!(initramfs.as_ref(), expected.as_slice());
+    assert_eq!(initramfs.as_slice(), expected.as_slice());
     assert_eq!(definition, original);
     assert!(
         !expected

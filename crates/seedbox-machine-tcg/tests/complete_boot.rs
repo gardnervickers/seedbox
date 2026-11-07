@@ -32,16 +32,27 @@ fn supplied_complete_boot_wins_over_stale_workload_fields_without_repackaging() 
         .boot_archive_configured(&replacement, &environment)
         .unwrap();
     std::fs::remove_dir_all(root).unwrap();
+    let retained = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(retained.path(), &archive).unwrap();
+    let length = archive.len() as u64;
     let mut configured = factory
         .create_configured(&replacement, &environment)
         .unwrap();
     let mut supplied = factory.create_boot_archive(&original, archive).unwrap();
+    let mut in_place = factory
+        .create_boot_archive_file(&original, retained.path(), length)
+        .unwrap();
     let mut stale = factory.create(&original).unwrap();
     let expected = encoded(&mut configured);
     assert_eq!(
         encoded(&mut supplied),
         expected,
         "complete boot is authoritative even when original application fields remain unchanged"
+    );
+    assert_eq!(
+        encoded(&mut in_place),
+        expected,
+        "a retained complete boot file snapshots exactly as its bytes"
     );
     assert_ne!(encoded(&mut stale), expected);
 }

@@ -1,8 +1,7 @@
 //! Content-addressed finished boot inputs. OCI resolution stays in application;
 //! the key follows the explicit inputs consumed by OciBootFactory::boot.
-use super::{BootArchive, OciBoot};
+use super::{BootArchive, OciBoot, RuntimeDigests};
 use crate::{
-    runtime_assets::Inputs,
     store::{ContentDigest, ContentStore},
     Error, Result,
 };
@@ -24,52 +23,20 @@ struct RetainedBoot {
 }
 
 impl PreparedBootCache {
-    /// Fingerprint bytes once per preparation, never host paths or timestamps.
-    /// Include selected files as well as the package: Inputs exposes their paths,
-    /// and factories consume those files rather than rereading the package.
+    /// Key boots by the bytes of one preparation's runtime files.
     pub fn new(
-        engine: &ContentDigest,
-        runtime: &Inputs,
+        runtime: &RuntimeDigests,
         epoch: u32,
         blocks: seedbox_spec::progress::ProgressBudget,
-        store: &ContentStore,
-    ) -> Result<Self> {
-        let mut digests = BTreeMap::from([
-            ("engine".into(), engine.clone()),
-            ("package".into(), store.put_file(&runtime.archive())?),
-        ]);
-        for name in [
-            "kernel",
-            "init",
-            "command-line",
-            if runtime.qemu.is_some() {
-                "firmware"
-            } else {
-                "progress.tar"
-            },
-        ] {
-            digests.insert(
-                name.into(),
-                store.put_file(&runtime.guest_assets.join(name))?,
-            );
-        }
-        let formatter = runtime.guest_assets.join("mke2fs");
-        match std::fs::metadata(&formatter) {
-            Ok(_) => {
-                digests.insert("mke2fs".into(), store.put_file(&formatter)?);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        if let Some(qemu) = &runtime.qemu {
-            digests.insert("qemu".into(), store.put_file(qemu)?);
-        }
-        Ok(Self {
+    ) -> Self {
+        let mut digests = runtime.files.clone();
+        digests.insert("engine".into(), runtime.engine.clone());
+        Self {
             runtime: digests,
-            tcg: runtime.qemu.is_some(),
+            tcg: runtime.tcg(),
             epoch,
             blocks,
-        })
+        }
     }
 
     fn key(&self, request: &OciBoot<'_>) -> Result<ContentDigest> {
@@ -89,7 +56,7 @@ impl PreparedBootCache {
                 "kind": "prepared-oci-boot-v1",
                 "runtime": self.runtime,
                 "tcg": self.tcg,
-                "filesystem": ContentDigest::of(&request.filesystem),
+                "filesystem": request.filesystem,
                 "launch": request.launch,
                 "configs": configs,
                 "name": request.name,

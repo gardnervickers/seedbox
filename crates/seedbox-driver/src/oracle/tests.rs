@@ -201,12 +201,12 @@ fn semantic_bounds_and_time_overflow_are_checked_without_runtime_admission() {
 fn device_faults_take_their_actions_arguments_and_validators() {
     use crate::driver::faults::Capability;
     let target = json!({"machine":"m"});
-    // `disk_op` is the action's `op`; effect, scope and jitter default.
+    // `request` is the action's own field; effect, scope and jitter default.
     assert_eq!(
-        operation(json!({"op":"disk_error","target":target,"disk_op":"read","ppm":1_000_000})),
+        operation(json!({"op":"disk_error","target":target,"request":"read","ppm":1_000_000})),
         Operation::DiskError {
             target: Target::Machine("m".into()),
-            disk_op: DiskOp::Read,
+            request: DiskOp::Read,
             ppm: 1_000_000,
             effect: DiskEffect::Eio,
             scope: DiskScope::All,
@@ -214,11 +214,11 @@ fn device_faults_take_their_actions_arguments_and_validators() {
     );
     assert_eq!(
         operation(
-            json!({"op":"disk_error","target":{"service":"s"},"disk_op":"write","ppm":1,"effect":"corrupt","scope":"data"})
+            json!({"op":"disk_error","target":{"service":"s"},"request":"write","ppm":1,"effect":"corrupt","scope":"data"})
         ),
         Operation::DiskError {
             target: Target::Service("s".into()),
-            disk_op: DiskOp::Write,
+            request: DiskOp::Write,
             ppm: 1,
             effect: DiskEffect::Corrupt,
             scope: DiskScope::Data,
@@ -226,17 +226,17 @@ fn device_faults_take_their_actions_arguments_and_validators() {
     );
     assert_eq!(
         operation(
-            json!({"op":"disk_latency","target":target,"disk_op":"flush","latency_ns":1_000})
+            json!({"op":"disk_latency","target":target,"request":"flush","latency_ns":1_000})
         ),
         Operation::DiskLatency {
             target: Target::Machine("m".into()),
-            disk_op: DiskOp::Flush,
+            request: DiskOp::Flush,
             latency_ns: 1_000,
             jitter_ns: 0,
         }
     );
     operation(
-        json!({"op":"disk_latency","target":target,"disk_op":"any","latency_ns":1_000_000_000,"jitter_ns":1_000_000_000}),
+        json!({"op":"disk_latency","target":target,"request":"any","latency_ns":1_000_000_000,"jitter_ns":1_000_000_000}),
     );
     assert_eq!(
         operation(json!({"op":"preempt","target":target,"ppm":100_000})),
@@ -248,11 +248,11 @@ fn device_faults_take_their_actions_arguments_and_validators() {
     // Each names the capability its engine must provide.
     for (arguments, capability) in [
         (
-            json!({"op":"disk_error","target":target,"disk_op":"read","ppm":1}),
+            json!({"op":"disk_error","target":target,"request":"read","ppm":1}),
             Capability::DiskSelection,
         ),
         (
-            json!({"op":"disk_latency","target":target,"disk_op":"read","latency_ns":1_000}),
+            json!({"op":"disk_latency","target":target,"request":"read","latency_ns":1_000}),
             Capability::DelayedBlockCompletion,
         ),
         (
@@ -274,23 +274,23 @@ fn device_faults_take_their_actions_arguments_and_validators() {
     // The actions' own validators refuse their arguments, with their messages.
     for (arguments, message) in [
         (
-            json!({"op":"disk_error","target":target,"disk_op":"read","ppm":0}),
+            json!({"op":"disk_error","target":target,"request":"read","ppm":0}),
             "disk_error ppm must be 1 to 1000000",
         ),
         (
-            json!({"op":"disk_error","target":target,"disk_op":"read","ppm":1_000_001}),
+            json!({"op":"disk_error","target":target,"request":"read","ppm":1_000_001}),
             "disk_error ppm must be 1 to 1000000",
         ),
         (
-            json!({"op":"disk_error","target":target,"disk_op":"flush","ppm":1,"scope":"data"}),
+            json!({"op":"disk_error","target":target,"request":"flush","ppm":1,"scope":"data"}),
             "disk_error on flushes takes neither the corrupt effect nor the data scope",
         ),
         (
-            json!({"op":"disk_latency","target":target,"disk_op":"read","latency_ns":999}),
+            json!({"op":"disk_latency","target":target,"request":"read","latency_ns":999}),
             "disk_latency latency_ns must be 1000 to 1000000000 and jitter_ns at most 1000000000",
         ),
         (
-            json!({"op":"disk_latency","target":target,"disk_op":"read","latency_ns":1_000,"jitter_ns":1_000_000_001}),
+            json!({"op":"disk_latency","target":target,"request":"read","latency_ns":1_000,"jitter_ns":1_000_000_001}),
             "disk_latency latency_ns must be 1000 to 1000000000 and jitter_ns at most 1000000000",
         ),
         (
@@ -304,11 +304,11 @@ fn device_faults_take_their_actions_arguments_and_validators() {
             (ErrorCode::InvalidRequest, message)
         );
     }
-    // Shapes outside the schema: no `disk_op`, a handle, an unknown kind, `machine`.
+    // Shapes outside the schema: no `request`, a handle, an unknown kind, `machine`.
     for arguments in [
         json!({"op":"disk_error","target":target,"ppm":1}),
-        json!({"op":"disk_error","target":target,"disk_op":"read","ppm":1,"handle":"h"}),
-        json!({"op":"disk_latency","target":target,"disk_op":"trim","latency_ns":1_000}),
+        json!({"op":"disk_error","target":target,"request":"read","ppm":1,"handle":"h"}),
+        json!({"op":"disk_latency","target":target,"request":"trim","latency_ns":1_000}),
         json!({"op":"preempt","machine":"m","ppm":1}),
     ] {
         assert_eq!(invalid(arguments).code, ErrorCode::InvalidRequest);

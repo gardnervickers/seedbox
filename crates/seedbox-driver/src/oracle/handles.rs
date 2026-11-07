@@ -63,6 +63,25 @@ pub(crate) enum Error {
     /// A realtime step outside the 365-day bound, including i64::MIN.
     StepOutOfRange,
 }
+/// The message a refused call carries after its operation's name.
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::RecordsExhausted => "no fault records are left",
+            Self::DuplicateActive => "a fault with that handle is already in force",
+            Self::Poisoned => "fault state is unusable after an earlier failure",
+            Self::HandlesExhausted => "no fault handles are left",
+            Self::AttemptsExhausted => "the fault has no heal attempts left",
+            Self::AlreadyThrottled => "the target machine is already throttled",
+            Self::AlreadyDrifting => "the target machine clock is already drifting",
+            Self::AlreadyPreempted => "the target machine already has a preempt fault",
+            Self::InactiveHandle => "no fault with that handle is in force",
+            Self::Unsettled => "the fault has not settled yet",
+            Self::UnexpectedEffect => "the effect does not match its fault",
+            Self::StepOutOfRange => "the realtime step exceeds 365 days",
+        })
+    }
+}
 #[derive(Clone, Default)]
 struct Allocator {
     last: u32,

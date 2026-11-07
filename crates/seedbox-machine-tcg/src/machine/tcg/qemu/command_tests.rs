@@ -1,4 +1,4 @@
-use super::super::{Boot, Manifest};
+use super::super::{Boot, Initramfs, Manifest};
 use std::ffi::OsStr;
 
 fn arguments(boot: Boot) -> (tempfile::TempDir, Vec<String>) {
@@ -77,6 +77,31 @@ fn linux_boots_owned_inputs_on_the_fixed_x86_microvm_board() {
         .iter()
         .any(|argument| argument.starts_with("loader")));
     assert!(!arguments.iter().any(|argument| argument == "-incoming"));
+}
+
+#[test]
+fn a_retained_initramfs_file_is_passed_to_qemu_in_place() {
+    let retained = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(retained.path(), [2; 4]).unwrap();
+    let (directory, arguments) = arguments(Boot::Linux {
+        kernel: vec![1; 4].into(),
+        initramfs: Initramfs::File {
+            path: retained.path().into(),
+            length: 4,
+        },
+        firmware: vec![3; 4].into(),
+        command_line: "console=ttyS0".into(),
+        epoch_seconds: 0,
+    });
+    assert_eq!(
+        value(&arguments, "-initrd"),
+        [retained.path().to_str().unwrap()]
+    );
+    assert!(!directory.path().join("initramfs").exists());
+    for (flag, name) in [("-kernel", "kernel"), ("-bios", "firmware")] {
+        let path = directory.path().join(name);
+        assert_eq!(value(&arguments, flag), [path.to_str().unwrap()]);
+    }
 }
 
 #[test]

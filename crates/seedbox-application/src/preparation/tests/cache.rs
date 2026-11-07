@@ -12,6 +12,17 @@ fn launch() -> crate::image::Launch {
     }
 }
 
+fn boot_cache(
+    engine: &ContentDigest,
+    runtime: &seedbox_driver_execution::runtime_assets::Inputs,
+    epoch: u32,
+    blocks: seedbox_spec::progress::ProgressBudget,
+    store: &ContentStore,
+) -> PreparedBootCache {
+    let runtime = RuntimeDigests::new(engine.clone(), runtime, store).unwrap();
+    PreparedBootCache::new(&runtime, epoch, blocks)
+}
+
 fn filesystem(contents: &[u8]) -> Vec<u8> {
     let mut archive = tar::Builder::new(Vec::new());
     let mut header = tar::Header::new_gnu();
@@ -31,11 +42,11 @@ fn prepared_boot_cache_invalidates_every_machine_input() {
     let engine = store.put(b"engine").unwrap();
     let epoch = 86_400;
     let blocks = simulation.simulator.progress_budget;
-    let cache = PreparedBootCache::new(&engine, &preparer.runtime, epoch, blocks, &store).unwrap();
+    let cache = boot_cache(&engine, &preparer.runtime, epoch, blocks, &store);
     let boot = TestBoot::new(&preparer.runtime, epoch, blocks).unwrap();
     let launch = launch();
     let configs = BTreeMap::from([("/config".into(), b"one".to_vec())]);
-    let fs = filesystem(b"application");
+    let fs = store.put(&filesystem(b"application")).unwrap();
     let request = || OciBoot {
         name: "oracle",
         filesystem: fs.clone(),
@@ -66,15 +77,14 @@ fn prepared_boot_cache_invalidates_every_machine_input() {
         ),
         (epoch, blocks, store.put(b"changed engine").unwrap()),
     ] {
-        let changed =
-            PreparedBootCache::new(&engine, &preparer.runtime, epoch, blocks, &store).unwrap();
+        let changed = boot_cache(&engine, &preparer.runtime, epoch, blocks, &store);
         miss(&changed, request());
     }
     // Equal lengths intentionally rule out size-only identities.
     miss(
         &cache,
         OciBoot {
-            filesystem: filesystem(b"APPLICATION"),
+            filesystem: store.put(&filesystem(b"APPLICATION")).unwrap(),
             ..request()
         },
     );
@@ -199,15 +209,14 @@ fn prepared_boot_cache_invalidates_every_machine_input() {
         let mut changed = original.clone();
         changed[0] ^= 1;
         fs::write(&path, changed).unwrap();
-        let cache =
-            PreparedBootCache::new(&engine, &preparer.runtime, epoch, blocks, &store).unwrap();
+        let cache = boot_cache(&engine, &preparer.runtime, epoch, blocks, &store);
         miss(&cache, request());
         fs::write(path, original).unwrap();
     }
     let package = preparer.runtime.archive();
     let original = fs::read(&package).unwrap();
     fs::write(&package, b"changed package").unwrap();
-    let cache = PreparedBootCache::new(&engine, &preparer.runtime, epoch, blocks, &store).unwrap();
+    let cache = boot_cache(&engine, &preparer.runtime, epoch, blocks, &store);
     miss(&cache, request());
     fs::write(package, original).unwrap();
 }
@@ -216,14 +225,13 @@ fn prepared_boot_cache_invalidates_every_machine_input() {
 fn prepared_boot_cache_requires_verified_complete_content() {
     let root = tempfile::tempdir().unwrap();
     let (preparer, simulation, store) = fixture(root.path());
-    let cache = PreparedBootCache::new(
+    let cache = boot_cache(
         &store.put(b"engine").unwrap(),
         &preparer.runtime,
         86_400,
         simulation.simulator.progress_budget,
         &store,
-    )
-    .unwrap();
+    );
     let boot = TestBoot::new(
         &preparer.runtime,
         86_400,
@@ -232,9 +240,10 @@ fn prepared_boot_cache_requires_verified_complete_content() {
     .unwrap();
     let launch = launch();
     let configs = BTreeMap::new();
+    // Each preparation stores its filesystem view before asking for a boot.
     let request = || OciBoot {
         name: "oracle",
-        filesystem: filesystem(b"application"),
+        filesystem: store.put(&filesystem(b"application")).unwrap(),
         launch: &launch,
         simulation: &simulation,
         configs: &configs,
@@ -250,7 +259,8 @@ fn prepared_boot_cache_requires_verified_complete_content() {
         fs::remove_file(root.path().join("store/sha256").join(digest.hex())).unwrap();
         let before = renders.get();
         assert_eq!(cache.prepare(request(), &store, render).unwrap(), expected);
-        assert_eq!(renders.get(), before + 1);
+        // A view stored again completes the cached boot; a lost archive renders.
+        assert_eq!(renders.get(), before + usize::from(digest == &expected.0));
     }
     let records = root.path().join("store/records");
     let record = fs::read_dir(&records)
@@ -290,24 +300,15 @@ impl ImageTransport for Transport {
         let config = store.put(&serde_json::to_vec(&serde_json::json!({
             "os": "linux", "architecture": architecture.oci_name(), "config": {"Cmd": ["/app"]},
         }))?)?;
-        let archive = directory.join("rootfs.tar");
-        let mut tar = tar::Builder::new(fs::File::create(&archive)?);
-        let mut header = tar::Header::new_gnu();
-        header.set_uid(0);
-        header.set_gid(0);
-        header.set_mtime(0);
-        header.set_mode(0o755);
-        header.set_size(11);
-        tar.append_data(&mut header, "rootfs/app", b"application".as_slice())?;
-        tar.finish()?;
+        let view = store.put(&filesystem(b"application"))?;
         Ok(ImportedImage {
             image: crate::execution::PreparedImage {
                 manifest: store.put(b"manifest")?,
                 config,
-                layers: vec![store.put_file(&archive)?],
+                layers: vec![view.clone()],
                 launch: launch(),
             },
-            rootfs: RootFilesystem::Archive(archive),
+            rootfs: RootFilesystem::Stored(view),
             auxiliary: BTreeMap::new(),
             provenance: BTreeMap::new(),
         })
@@ -330,6 +331,7 @@ fn prepared_boot_cache_matches_fresh_retention_and_cross_project_relative_files(
         let evidence = tempfile::tempdir_in(root.path()).unwrap();
         let context =
             PreparationContext::new(evidence.path().join("evidence"), Default::default()).unwrap();
+        let runtime = preparer.digests(store).unwrap();
         let mut inputs = preparer
             .inner
             .prepare_with_factory(
@@ -337,7 +339,7 @@ fn prepared_boot_cache_matches_fresh_retention_and_cross_project_relative_files(
                 store,
                 &context,
                 &Transport,
-                &preparer.runtime,
+                &runtime,
                 (
                     || Ok(()),
                     |epoch, blocks| {
@@ -352,7 +354,7 @@ fn prepared_boot_cache_matches_fresh_retention_and_cross_project_relative_files(
         seedbox_driver_execution::driver_world::preparation::retain_oci_prepared(
             &mut inputs,
             simulation,
-            &preparer.runtime,
+            &runtime,
             store,
             &|| context.check(),
         )
@@ -438,7 +440,7 @@ fn prepared_boot_cache_matches_production_pv_and_tcg_archives() {
         let blocks = std::num::NonZeroU32::new(17).unwrap().into();
         let factory = OciBootFactory::new(&preparer.engine, runtime, epoch, blocks).unwrap();
         let engine = store.put(b"engine identity").unwrap();
-        let cache = PreparedBootCache::new(&engine, runtime, epoch, blocks, &store).unwrap();
+        let cache = boot_cache(&engine, runtime, epoch, blocks, &store);
         let mut launch = launch();
         launch.volumes.push("/anonymous".into());
         launch.disk_volumes.push(config::VolumeMount {
@@ -447,9 +449,10 @@ fn prepared_boot_cache_matches_production_pv_and_tcg_archives() {
             size_bytes: None,
         });
         let configs = BTreeMap::from([("/config".into(), b"configuration".to_vec())]);
+        let view = store.put(&filesystem(b"application")).unwrap();
         let request = || OciBoot {
             name: "oracle",
-            filesystem: filesystem(b"application"),
+            filesystem: view.clone(),
             launch: &launch,
             simulation: &simulation,
             configs: &configs,
@@ -480,8 +483,7 @@ fn prepared_boot_cache_matches_production_pv_and_tcg_archives() {
                 let mut changed = original.clone();
                 changed[0] ^= 1;
                 fs::write(&path, changed).unwrap();
-                let cache =
-                    PreparedBootCache::new(&engine, runtime, epoch, blocks, &store).unwrap();
+                let cache = boot_cache(&engine, runtime, epoch, blocks, &store);
                 let before = renders.get();
                 cache.prepare(request(), &store, render).unwrap();
                 assert_eq!(renders.get(), before + 1);

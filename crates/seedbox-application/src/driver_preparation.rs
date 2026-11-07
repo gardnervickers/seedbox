@@ -1,5 +1,10 @@
 //! OCI ingestion and preparation bridge to explicit Driver boot inputs.
-use crate::{preparation::OciPreparer, Error, Result};
+use crate::{
+    oci::RootFilesystem,
+    preparation::OciPreparer,
+    store::{ContentDigest, ContentStore},
+    Error, Result,
+};
 use seedbox_driver_execution::{driver_world::preparation::OciBootFactory, runtime_assets::Inputs};
 use std::{fs, path::Path};
 // ContainerTransport's archive carries a rootfs/ transport prefix on every
@@ -44,10 +49,14 @@ pub(crate) fn logical_archive(path: &Path) -> Result<Vec<u8>> {
     Ok(output.into_inner()?)
 }
 
-pub(crate) fn filesystem(rootfs: &crate::oci::RootFilesystem) -> Result<Vec<u8>> {
+pub(crate) fn filesystem(rootfs: &RootFilesystem, store: &ContentStore) -> Result<Vec<u8>> {
     let bytes = match rootfs {
-        crate::oci::RootFilesystem::Archive(path) => logical_archive(path)?,
-        crate::oci::RootFilesystem::Directory(root) => {
+        RootFilesystem::Stored(view) => {
+            let mut bytes = Vec::new();
+            store.copy_to(view, &mut bytes)?;
+            bytes
+        }
+        RootFilesystem::Directory(root) => {
             let mut paths = vec![];
             let mut pending = vec![root.to_owned()];
             while let Some(directory) = pending.pop() {
@@ -74,37 +83,21 @@ pub(crate) fn filesystem(rootfs: &crate::oci::RootFilesystem) -> Result<Vec<u8>>
     };
     Ok(bytes)
 }
-/// Whether two paths hold the same bytes. The CLI normally passes the runtime's
-/// own files, so one inode needs no byte comparison.
-fn same_bytes(left: &std::path::Path, right: &std::path::Path) -> Result<bool> {
-    use std::os::unix::fs::MetadataExt;
-    let (a, b) = (fs::metadata(left)?, fs::metadata(right)?);
-    if a.dev() == b.dev() && a.ino() == b.ino() {
-        return Ok(true);
+/// The logical filesystem view in the store. A container transport stored
+/// it with the image export; other roots are rendered now.
+pub(crate) fn stored_filesystem(
+    rootfs: &RootFilesystem,
+    store: &ContentStore,
+) -> Result<ContentDigest> {
+    match rootfs {
+        RootFilesystem::Stored(view) => Ok(view.clone()),
+        _ => store.put(&filesystem(rootfs, store)?),
     }
-    Ok(fs::read(left)? == fs::read(right)?)
 }
 /// Validate the explicit SDK bootstrap package without opening a hypervisor,
 /// starting a worker or contacting OCI.
 pub fn validate_oci_runtime(preparer: &OciPreparer, runtime: &Inputs) -> Result<()> {
     seedbox_driver_execution::driver_world::retained::validate_contract(&preparer.profile)?;
-    for (path, name) in [(&preparer.kernel, "kernel"), (&preparer.init, "init")] {
-        if !same_bytes(path, &runtime.guest_assets.join(name))? {
-            return Err(Error::Integrity(
-                "Driver OCI bootstrap differs from its selected runtime".into(),
-            ));
-        }
-    }
-    if runtime.qemu.is_none()
-        && !same_bytes(
-            &preparer.progress,
-            &runtime.guest_assets.join("progress.tar"),
-        )?
-    {
-        return Err(Error::Integrity(
-            "Driver PV progress differs from its selected runtime".into(),
-        ));
-    }
     let expected = if runtime.qemu.is_some() {
         "driver-tcg"
     } else {

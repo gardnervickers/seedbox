@@ -156,14 +156,14 @@ pub fn translate(
         Public::DiskError {
             handle: alias,
             machine,
-            op,
+            request,
             ppm,
             effect,
             scope,
         } => {
             action.validate()?;
             let fault = crate::pv::DeviceFault::DiskError {
-                op: *op,
+                op: *request,
                 ppm: u32::try_from(*ppm).map_err(|_| "disk_error ppm exceeds u32".to_owned())?,
                 effect: *effect,
                 scope: *scope,
@@ -179,7 +179,7 @@ pub fn translate(
         Public::DiskLatency {
             handle: alias,
             machine,
-            op,
+            request,
             latency_ns,
             jitter_ns,
         } => {
@@ -188,7 +188,7 @@ pub fn translate(
                 Action::DeviceFault {
                     target: target(machine),
                     fault: crate::pv::DeviceFault::DiskLatency {
-                        op: *op,
+                        op: *request,
                         latency_ns: *latency_ns,
                         jitter_ns: *jitter_ns,
                     },

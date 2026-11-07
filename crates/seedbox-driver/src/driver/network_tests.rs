@@ -280,8 +280,10 @@ fn blocked_networked_machines_jump_to_their_next_event() {
             spec(Some(2)),
         ],
     );
-    // Only the initial runnable round is bounded by latency; blocked machines
-    // impose no bound, so the next barrier is the 10 s send deadline.
+    // Only the initial runnable round is bounded by latency from now; a
+    // blocked machine bounds the next one from its 10 s send deadline. The
+    // send runs in the sender's lane and that round ends when both machines
+    // block, before the frame routes; the receiver takes it in its lane.
     assert_eq!(
         barriers(&mut driver, 20_000 * MS),
         [
@@ -451,6 +453,77 @@ fn frames_survive_sender_crash_and_reach_paused_receivers() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn a_blocked_receiver_takes_frames_in_its_next_run() {
+    let (mut driver, log) = simple(
+        10 * MS,
+        NetworkConfig::default(),
+        vec![spec(Some(1)).send(0, frame(mac(2), 1)), spec(Some(2))],
+    );
+    barriers(&mut driver, 5 * MS);
+    assert_eq!(received(&log), [(1, MS, 1)]);
+    // No zero-budget run delivers it: the receiver's one run at the arrival
+    // has a budget.
+    let runs: Vec<_> = log
+        .lock()
+        .unwrap()
+        .runs
+        .iter()
+        .filter(|r| (r.0, r.1) == (1, MS))
+        .copied()
+        .collect();
+    assert_eq!(runs, [(1, MS, 2 * MS)]);
+}
+
+#[test]
+fn a_later_same_time_item_for_a_receiver_follows_its_frames() {
+    // Scheduled at the arrival after its barrier is reached, a crash or pause
+    // finds the frame still waiting for the receiver's next run. The boot it
+    // arrived for admits it first, at the arrival.
+    for action in [
+        Action::Crash(Target::Machine(MachineId(1))),
+        Action::Pause(Target::Machine(MachineId(1))),
+    ] {
+        let (mut driver, log) = simple(
+            10 * MS,
+            NetworkConfig::default(),
+            vec![spec(Some(1)).send(0, frame(mac(2), 1)), spec(Some(2))],
+        );
+        assert_eq!(
+            barriers(&mut driver, MS).last(),
+            Some(&StepOutcome::BarrierReached { at: at(MS) })
+        );
+        assert!(received(&log).is_empty());
+        schedule(&mut driver, MS, action);
+        barriers(&mut driver, 5 * MS);
+        assert_eq!(received(&log), [(1, MS, 1)]);
+    }
+}
+
+#[test]
+fn final_admission_takes_frames_waiting_at_the_barrier() {
+    let (mut driver, log) = simple(
+        10 * MS,
+        NetworkConfig::default(),
+        vec![spec(Some(1)).send(0, frame(mac(2), 1)), spec(Some(2))],
+    );
+    assert_eq!(
+        barriers(&mut driver, MS).last(),
+        Some(&StepOutcome::BarrierReached { at: at(MS) })
+    );
+    assert!(received(&log).is_empty());
+    let commits = driver.execution.boundary_index;
+    driver.admit_waiting_work().unwrap();
+    // One zero-budget run at the arrival admits it, and its round commits.
+    assert_eq!(received(&log), [(1, MS, 1)]);
+    assert_eq!(log.lock().unwrap().runs.last(), Some(&(1, MS, MS)));
+    assert_eq!(driver.execution.boundary_index, commits + 1);
+    let runs = log.lock().unwrap().runs.len();
+    driver.admit_waiting_work().unwrap();
+    assert_eq!(log.lock().unwrap().runs.len(), runs);
+    assert_eq!(driver.execution.boundary_index, commits + 1);
 }
 
 #[test]
@@ -1145,7 +1218,7 @@ fn triggered_partitions_arm_without_a_target_and_cut_after_firing() {
             spec(Some(1))
                 .emit(MS, arm(1, &["fixture-3"]))
                 .emit(MS, arm(2, &["fixture-2"]))
-                .emit(2 * MS, control(3, serde_json::json!({"op":"inspect"})))
+                .emit(MS, control(3, serde_json::json!({"op":"inspect"})))
                 .emit(7 * MS, control(4, serde_json::json!({"op":"inspect"}))),
             spec(Some(2))
                 .send(2 * MS, frame(mac(3), 1))
@@ -1251,7 +1324,7 @@ fn round_end_transmissions_route_before_a_same_time_partition_but_admission_answ
 }
 
 #[test]
-fn a_frame_arriving_at_a_timer_deadline_shares_one_admission_run() {
+fn a_frame_arriving_at_a_timer_deadline_shares_one_run() {
     let (mut driver, log) = simple(
         10 * MS,
         NetworkConfig::default(),
@@ -1262,14 +1335,15 @@ fn a_frame_arriving_at_a_timer_deadline_shares_one_admission_run() {
     );
     barriers(&mut driver, 10 * MS);
     let log = log.lock().unwrap();
-    // Frames precede timers at a barrier: the delivery run also serves the
-    // due timer, so no separate wake run follows.
-    let at_deadline = log
+    // The receiver's next run, from the deadline, takes the frame and serves
+    // the due timer: one run, with a budget.
+    let at_deadline: Vec<_> = log
         .runs
         .iter()
         .filter(|r| (r.0, r.1) == (1, 3 * MS))
-        .count();
-    assert_eq!(at_deadline, 1);
+        .collect();
+    assert_eq!(at_deadline.len(), 1);
+    assert!(at_deadline[0].2 > 3 * MS);
     let mut got = log.received.clone();
     got.sort();
     assert_eq!(got, [(0, 4 * MS, 2), (1, 3 * MS, 1)]);
@@ -1307,4 +1381,83 @@ fn down_members_can_be_partitioned_and_stay_cut_after_reboot() {
     assert!(settled(&events)
         .iter()
         .any(|(r, s)| r.action == FaultAction::Partition && *s == SettlementStatus::Applied));
+}
+
+#[test]
+fn machines_run_whole_windows_and_take_frames_at_their_arrival() {
+    let mut seen = Vec::new();
+    for workers in [1, 3] {
+        let (mut driver, log) = world(
+            0,
+            MS,
+            workers,
+            NetworkConfig::default(),
+            vec![
+                spec(Some(1)).busy().send(MS / 10, frame(mac(2), 7)),
+                spec(Some(2)),
+                spec(Some(3)).busy(),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        // The frame arrives inside the second window: the round does not end
+        // there, the receiver takes it at its arrival and the others run
+        // the whole window in one run.
+        assert_eq!(
+            barriers(&mut driver, 2 * MS),
+            [
+                StepOutcome::BarrierReached { at: at(MS) },
+                StepOutcome::BarrierReached { at: at(2 * MS) },
+            ]
+        );
+        let log = log.lock().unwrap();
+        assert_eq!(log.received, [(1, MS + MS / 10, 7)]);
+        let mut runs = log.runs.clone();
+        runs.sort();
+        assert_eq!(
+            runs,
+            [
+                (0, 0, MS),
+                (0, MS, 2 * MS),
+                (1, 0, MS),
+                (1, MS + MS / 10, 2 * MS),
+                (2, 0, MS),
+                (2, MS, 2 * MS),
+            ]
+        );
+        seen.push((log.received.clone(), runs));
+    }
+    assert_eq!(seen[0], seen[1]);
+}
+
+#[test]
+fn a_frame_dropped_inside_a_lane_still_holds_the_quiescent_end() {
+    let (mut driver, _log) = simple(
+        10 * MS,
+        NetworkConfig::default(),
+        vec![
+            spec(None),
+            spec(Some(1)).send(0, frame(mac(2), 7)),
+            spec(Some(2)),
+        ],
+    );
+    driver.set_frame_capacity(8);
+    schedule(
+        &mut driver,
+        MS / 2,
+        Action::Crash(Target::Machine(MachineId(2))),
+    );
+    // The receiver has exited when the frame arrives at 1 ms and drops it in
+    // its lane; the simulation still blocks only after that arrival.
+    assert_eq!(
+        barriers(&mut driver, 5 * MS).last(),
+        Some(&StepOutcome::Blocked { at: at(MS) })
+    );
+    let facts = driver.drain_observations().frames.facts;
+    let dropped: Vec<_> = facts
+        .iter()
+        .filter(|fact| matches!(fact.fate, FrameFate::ReceiverDropped))
+        .map(|fact| fact.due)
+        .collect();
+    assert_eq!(dropped, [Some(at(MS))]);
 }

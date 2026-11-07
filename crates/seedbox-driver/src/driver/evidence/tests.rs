@@ -177,8 +177,10 @@ fn optional_frame_capture_capacity_and_draining_never_change_policy_evidence() {
 
     // Capture while deliveries are still pending. Restore host observation
     // independently of the captured buffer, with either worker count.
+    // The capture is at a round's natural end: a barrier the caller asks for
+    // inside a round adds a commit, which policy evidence counts.
     let mut source = make(8);
-    advance(&mut source, 3);
+    advance(&mut source, 5);
     let checkpoint = source.checkpoint().unwrap();
     let retained = source.drain_observations().frames;
     assert!(!retained.facts.is_empty());

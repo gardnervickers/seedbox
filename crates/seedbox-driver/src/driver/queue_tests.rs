@@ -2,7 +2,10 @@ use super::fixture::auto_key;
 use super::*;
 use crate::pv::{ApplicationCommand, CommandResult, Request, Response};
 use seedbox_test_time::{handshake, HangGuard, Participant};
-use std::{num::NonZeroU32, sync::Mutex};
+use std::{
+    num::NonZeroU32,
+    sync::{mpsc, Mutex},
+};
 
 #[derive(Clone)]
 struct QueueMachine {

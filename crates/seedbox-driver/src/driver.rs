@@ -18,7 +18,7 @@ use std::{
     num::NonZeroU32,
     ops::ControlFlow,
     panic::{catch_unwind, AssertUnwindSafe},
-    sync::{mpsc, Arc},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -29,6 +29,7 @@ mod boot_end;
 mod checkpoint;
 mod evidence;
 mod execution_evidence;
+mod lanes;
 pub use crate::persistence::{CodecError, DecodeLimits, SnapshotReference};
 pub use checkpoint::{Checkpoint, CheckpointMapError};
 pub use execution_evidence::ExecutionEvidenceRead;
@@ -237,6 +238,17 @@ impl<M> Entry<M> {
             StopReason::Exited { .. } => None,
         }
     }
+
+    /// Whether zero-time work waits for this machine's next run: frames that
+    /// arrived for it, or a timer that came due while it was blocked. A run
+    /// that reaches a boundary leaves no pending timer.
+    fn waiting(&self) -> bool {
+        matches!(self.stopped, StopReason::BoundaryReached) && self.timer.is_some()
+            || self
+                .inbox
+                .iter()
+                .any(|input| matches!(input.payload, Request::ReceiveFrame { .. }))
+    }
 }
 
 /// Driver bookkeeping for a live host input key. Only live keys are kept;
@@ -350,10 +362,12 @@ struct ObservationState {
 /// simulation-time meaning, while a drifting guest's own clocks run at its
 /// rate: a 1 s control `sleep` at +10% spans 1.1 s of that guest's clocks.
 ///
-/// Execution uses a fixed pool of worker threads. Each worker owns its context;
-/// contexts must not contain machine-specific simulation state. Worker count and
-/// completion order must not affect simulation results. Machines share the
-/// driver's read-only clock, which stays fixed throughout each batch of calls.
+/// Execution uses a fixed number of workers: whichever thread steps the
+/// driver, which runs one machine of every batch itself, and a pool of threads
+/// for the rest. Each worker owns its context; contexts must not contain
+/// machine-specific simulation state. Worker count and completion order must
+/// not affect simulation results. Machines share the driver's read-only clock,
+/// which stays fixed throughout each batch of calls.
 ///
 /// The positive quantum is fixed for the driver's lifetime. Quantum boundaries
 /// are anchored at the initial timestamp; intermediate barriers never shift them.
@@ -423,9 +437,12 @@ where
     /// first boundary must fit after `start`. `workers` must be nonzero. Invalid
     /// configuration is rejected before either factory is called.
     ///
-    /// The context factory runs once on each worker thread, before constructing
-    /// machines. That context is used and destroyed on the same thread, so it
-    /// need not be Send. Factories and contexts must not make simulation behavior
+    /// The context factory runs once for each worker, before constructing
+    /// machines: first on the calling thread, which is worker 0 and runs machines
+    /// itself, then on each of the `workers - 1` pool threads. A pool context is
+    /// used and destroyed on its own thread, so it need not be Send; worker 0's
+    /// context moves with the driver, which is therefore Send only when the
+    /// context is. Factories and contexts must not make simulation behavior
     /// depend on worker identity or host timing. Machines can move between the
     /// caller and workers; their errors must also be transferable between threads.
     /// Initialization failure joins all started workers before returning.
@@ -456,11 +473,21 @@ where
     ///
     /// A frame arriving at `T` is offered exactly at `T`, after every timeline
     /// item due at `T` and before timer wakeups, as [`Request::ReceiveFrame`]
-    /// to the receiver's current boot, including while paused. It is dropped if
-    /// that boot has exited. Delivery means offered to the NIC, not consumed.
+    /// to the receiver's current boot, including while paused. A running
+    /// receiver takes it in its next run, which starts at `T`; a paused or
+    /// suspended one, or one with a later item due at `T`, takes it in a
+    /// zero-budget run first. It is dropped if that boot has exited. Delivery
+    /// means offered to the NIC, not consumed.
     /// While an attached machine can execute, rounds end no later than its
     /// earliest execution time plus latency, so no frame arrives before the
-    /// round that sent it commits. Blocked or paused machines impose no limit.
+    /// round that sent it commits. Blocked or paused machines impose no limit;
+    /// a blocked receiver can execute from a frame's arrival, even if the frame
+    /// does not wake it, which also tightens the controller latency bound.
+    /// Inside a round, each machine runs to the round's end on its own lane and
+    /// takes its timers and frames at their exact times; lanes run side by side.
+    /// Only frames for a paused or suspended receiver end a round at their
+    /// arrival. Effects decided at commit, such as control replies, trigger
+    /// effects and the finish time, therefore take the round's end.
     // Blocked machines impose no bound, so idle simulations still jump to their
     // next event.
     #[allow(clippy::too_many_arguments)]
@@ -895,8 +922,8 @@ where
     /// `upto` must be at or after the current shared time. Returned times never
     /// move backwards or exceed `upto`. A step may stop earlier for a scheduled
     /// event or execution boundary, or because work becomes blocked or finishes.
-    /// A call never crosses the next fixed quantum boundary. A shorter `upto`,
-    /// timer, or action may produce an intermediate barrier, but the unfinished
+    /// A call never crosses the next fixed quantum boundary. A shorter `upto`
+    /// or a timeline item may produce an intermediate barrier, but the unfinished
     /// quantum retains its original end. Repeated short calls therefore visit
     /// the same quantum boundaries as larger calls. Quantum changes require a
     /// new driver; there is no runtime setter.
@@ -979,6 +1006,35 @@ where
         upto: Timestamp,
     ) -> Result<StepOutcome, Error<M::Error>> {
         self.step_at_with_external(upto, Instant::now(), true)
+    }
+
+    /// Admit, without executing, the zero-time work that still waits at the
+    /// current barrier for a machine's next run: frames that arrived for it
+    /// and a timer that came due. Call it once where execution ends, before
+    /// reading final evidence, so that the evidence covers every frame and
+    /// timer due by then, also after completion or a permanent stop.
+    pub fn admit_waiting_work(&mut self) -> Result<(), Error<M::Error>> {
+        self.check_valid()?;
+        let waiting = self
+            .execution
+            .machines
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.waiting())
+            .map(|(index, _)| MachineId(index))
+            .collect::<Vec<_>>();
+        if waiting.is_empty() {
+            return Ok(());
+        }
+        let now = self.now();
+        let result = match self.run_batch(&waiting, now) {
+            Ok(()) => self.commit_boundary(),
+            Err(error) => {
+                self.uncertain_failure();
+                Err(error)
+            }
+        };
+        self.finish_execution(result)
     }
 
     fn step_at(
@@ -1444,63 +1500,38 @@ where
             );
         }
 
-        // Known events limit the whole round. A timer discovered during a run
-        // can shorten another machine's next budget, but cannot invalidate the
-        // round's final boundary. Intermediate local progress stays private.
+        // Known events limit the whole round, and so do frames for receivers
+        // that take them only at a boundary. Every other machine takes its
+        // timers and frames inside its lane. Intermediate progress stays private.
+        let receivers = self.lane_receivers();
         let boundary = self
             .execution
-            .machines
-            .iter()
-            .filter(|entry| !entry.lifecycle.paused())
-            .filter_map(|entry| match entry.stopped {
-                StopReason::Blocked { deadline, .. } => deadline,
-                _ => None,
-            })
-            .chain(self.execution.events.first_key_value().map(|(&at, _)| at))
+            .events
+            .first_key_value()
+            .map(|(&at, _)| at)
+            .into_iter()
             .chain(
                 self.execution
                     .network
-                    .next_arrival()
+                    .next_arrival_to(|to| !receivers[to.0])
                     .map(Timestamp::from_nanos),
             )
-            .chain(self.causal_bound())
-            .chain(self.controller_bound())
+            .chain(self.causal_bound(&receivers))
+            .chain(self.controller_bound(&receivers))
             .fold(upto.min(self.execution.quantum_end), Timestamp::min);
 
         let initial = self.now();
-        let mut ran = false;
-        while let Some((_, now)) = self.next() {
-            if now >= boundary {
-                break;
-            }
-            self.execution.clock.set(now.as_nanos());
-            let limit = self
-                .execution
-                .machines
-                .iter()
-                .filter_map(Entry::next)
-                .filter(|&at| at > now)
-                .min()
-                .map_or(boundary, |at| at.min(boundary));
-            let ready = self
-                .execution
-                .machines
-                .iter()
-                .enumerate()
-                .filter(|(_, entry)| entry.next() == Some(now))
-                .map(|(index, _)| MachineId(index))
-                .collect::<Vec<_>>();
-            self.run_batch(&ready, limit)?;
-            ran = true;
-        }
+        let (ran, arrived) = self.run_lanes(boundary, &receivers)?;
 
         // Finish early if all machines exited or became indefinitely blocked.
-        // A queued input still keeps time moving toward its own barrier.
+        // A queued input still keeps time moving toward its own barrier, and
+        // so does a frame a lane took, even one its exited receiver dropped.
         let at = if self.is_quiescent() && !external_work {
             self.execution
                 .machines
                 .iter()
                 .map(|entry| entry.reached)
+                .chain(arrived)
                 .max()
                 .unwrap_or(self.now())
                 .max(self.now())
@@ -1518,10 +1549,12 @@ where
     }
 
     /// Offer every frame arriving at `now` to its receiver's current boot, in
-    /// (sender, sequence, receiver) order, with one zero-budget admission batch
-    /// and commit. A receiver whose boot has exited drops the frame. Returns
-    /// whether any frame was due, so that newly generated timeline items at
-    /// `now` are processed before timers.
+    /// (sender, sequence, receiver) order. A receiver whose boot has exited
+    /// drops the frame. A running receiver takes its frames at the start of its
+    /// next run, which starts at `now`, so a blocked one becomes runnable here.
+    /// A paused or suspended receiver runs no guest work, so it admits them now
+    /// with one zero-budget batch and commit. Returns whether any frame was
+    /// due, so that newly generated timeline items at `now` are processed next.
     fn deliver_frames(&mut self, now: Timestamp) -> Result<bool, Error<M::Error>> {
         let due = self.execution.network.take_due(now.as_nanos());
         if due.is_empty() {
@@ -1560,11 +1593,26 @@ where
             });
             receivers.insert(delivery.to);
         }
-        if receivers.is_empty() {
-            return Ok(true);
+        // A zero-budget run would only store the frames and report the stop
+        // state; the next run, from `now`, does the same before executing.
+        let mut admitting = Vec::new();
+        for id in receivers {
+            let suspended = self
+                .execution
+                .control
+                .service
+                .breaks
+                .suspended(&control::Control::source(id));
+            let entry = &mut self.execution.machines[id.0];
+            if entry.lifecycle.paused() || suspended {
+                admitting.push(id);
+            } else if let StopReason::Blocked { .. } = entry.stopped {
+                entry.stopped = StopReason::BoundaryReached;
+                entry.reached = now;
+                entry.timer = None;
+            }
         }
-        let receivers: Vec<_> = receivers.into_iter().collect();
-        if let Err(error) = self.run_batch(&receivers, now) {
+        if let Err(error) = self.run_batch(&admitting, now) {
             self.uncertain_failure();
             return Err(error);
         }
@@ -1579,7 +1627,9 @@ where
                 &mut self.observations.frames,
             );
         }
-        self.commit_boundary()?;
+        if !admitting.is_empty() {
+            self.commit_boundary()?;
+        }
         Ok(true)
     }
 
@@ -1800,37 +1850,58 @@ where
             && self.execution.network.is_idle()
     }
 
-    /// The latest round boundary at which no frame sent in the round can be
-    /// due: the earliest time an attached machine can execute, plus latency.
-    /// Positive-budget runs start only at `Entry::next`, so every send in the
-    /// round is at or after it. Blocked, paused and exited machines impose
-    /// none. An unrepresentable bound imposes none: no such arrival exists.
-    fn causal_bound(&self) -> Option<Timestamp> {
-        let earliest = self
+    /// The earliest time a machine can execute in the round: its own next
+    /// start, or the arrival of a frame that wakes it inside its lane.
+    fn earliest_producer(
+        &self,
+        receivers: &[bool],
+        include: impl Fn(MachineId) -> bool,
+    ) -> Option<Timestamp> {
+        let started = self
             .execution
             .machines
             .iter()
             .enumerate()
-            .filter(|&(index, _)| self.execution.network.attached(MachineId(index)))
+            .filter(|&(index, _)| include(MachineId(index)))
             .filter_map(|(_, entry)| entry.next())
-            .min()?;
+            .min();
+        let woken = self
+            .execution
+            .network
+            .next_arrival_to(|to| {
+                receivers[to.0]
+                    && !matches!(
+                        self.execution.machines[to.0].stopped,
+                        StopReason::Exited { .. }
+                    )
+                    && include(to)
+            })
+            .map(Timestamp::from_nanos);
+        let earliest = started.into_iter().chain(woken).min()?;
         debug_assert!(earliest >= self.now(), "eligible producer behind now");
-        earliest
+        Some(earliest)
+    }
+
+    /// The latest round boundary at which no frame sent in the round can be
+    /// due: the earliest time an attached machine can execute, plus latency.
+    /// Positive-budget runs start only at `Entry::next` or at an arrival in
+    /// the receiver's lane, so every send in the round is at or after the
+    /// earliest of them. Blocked machines that no frame wakes, paused and
+    /// exited machines impose none, even with frames arriving for them. An unrepresentable bound imposes none:
+    /// no such arrival exists.
+    fn causal_bound(&self, receivers: &[bool]) -> Option<Timestamp> {
+        self.earliest_producer(receivers, |id| self.execution.network.attached(id))?
             .as_nanos()
             .checked_add(self.execution.network.latency_ns())
             .map(Timestamp::from_nanos)
     }
 
-    fn controller_bound(&self) -> Option<Timestamp> {
+    fn controller_bound(&self, receivers: &[bool]) -> Option<Timestamp> {
         let setup = self.execution.control.controller?;
         setup.controller?;
         // Target acknowledgements carry an observed effect time too. Bound all
         // runnable producers so their effect+latency cannot precede commit.
-        self.execution
-            .machines
-            .iter()
-            .filter_map(Entry::next)
-            .min()?
+        self.earliest_producer(receivers, |_| true)?
             .as_nanos()
             .checked_add(setup.latency_ns)
             .map(Timestamp::from_nanos)
@@ -2059,7 +2130,10 @@ where
     }
 
     /// The machine's last stop projected into simulation time. Unlike a
-    /// `Machine::run` result, a `Blocked` deadline may equal `reached`.
+    /// `Machine::run` result, a `Blocked` deadline may equal `reached`. A
+    /// machine whose timer came due at the current barrier, or that frames
+    /// arrived for, reports `BoundaryReached`: its next run starts there and
+    /// takes them first.
     // The projection rounds machine times up to whole
     // simulation nanoseconds so nothing fires early; keeping the strict
     // inequality would need delaying the timer, so the Driver relaxes it here
@@ -2172,8 +2246,9 @@ where
     /// execution configuration and pause flag observed through `paused`, its
     /// time-base mapping (a pure function of its addition time and its
     /// `Transition::ClockRate` events), its last accepted position and pending
-    /// timer in machine time, global RNG cursor, the independently continuing
-    /// RNG cursor and clock-fault stream cursor of every machine, and the
+    /// timer in machine time, frames that arrived for it and wait for its next
+    /// run, global RNG cursor, the independently continuing RNG cursor and
+    /// clock-fault stream cursor of every machine, and the
     /// control timeline: host inputs
     /// scheduled but not yet admitted, live input keys (with the handles they
     /// own), and admitted faults awaiting their effect or settlement. It also

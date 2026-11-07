@@ -368,7 +368,7 @@ fn disk_and_scheduler_faults_compile_to_named_device_faults_after_argument_check
     use crate::pv::{DeviceFault, DiskEffect, DiskOp, DiskScope};
     for (wire, fault) in [
         (
-            json!({"action":"disk_error","handle":"eio","machine":"node","op":"write","ppm":10,"effect":"corrupt","scope":"data"}),
+            json!({"action":"disk_error","handle":"eio","machine":"node","request":"write","ppm":10,"effect":"corrupt","scope":"data"}),
             DeviceFault::DiskError {
                 op: DiskOp::Write,
                 ppm: 10,
@@ -377,7 +377,7 @@ fn disk_and_scheduler_faults_compile_to_named_device_faults_after_argument_check
             },
         ),
         (
-            json!({"action":"disk_latency","handle":"slow","machine":"node","op":"any","latency_ns":1000,"jitter_ns":5}),
+            json!({"action":"disk_latency","handle":"slow","machine":"node","request":"any","latency_ns":1000,"jitter_ns":5}),
             DeviceFault::DiskLatency {
                 op: DiskOp::Any,
                 latency_ns: 1000,
@@ -406,7 +406,7 @@ fn disk_and_scheduler_faults_compile_to_named_device_faults_after_argument_check
         );
     }
     let invalid: Public = serde_json::from_value(
-        json!({"action":"disk_latency","handle":"slow","machine":"node","op":"any","latency_ns":1}),
+        json!({"action":"disk_latency","handle":"slow","machine":"node","request":"any","latency_ns":1}),
     )
     .unwrap();
     assert!(translate(&invalid, 19)
@@ -427,8 +427,8 @@ fn new_faults_need_capabilities_pv_has_except_the_x86_yield_and_tcg_lacks() {
     });
     let action = |action: serde_json::Value| -> Public { serde_json::from_value(action).unwrap() };
     let limited = [
-        json!({"action":"disk_error","handle":"h","machine":"db","op":"write","ppm":1}),
-        json!({"action":"disk_latency","handle":"h","machine":"db","op":"any","latency_ns":1000}),
+        json!({"action":"disk_error","handle":"h","machine":"db","request":"write","ppm":1}),
+        json!({"action":"disk_latency","handle":"h","machine":"db","request":"any","latency_ns":1000}),
         json!({"action":"preempt","handle":"h","machine":"db","ppm":10}),
     ]
     .map(action);
