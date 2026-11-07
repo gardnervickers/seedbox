@@ -44,7 +44,7 @@ pub(super) const CAPACITY: u64 = 256 << 10;
 const SPIN: Duration = Duration::from_micros(200);
 /// Spins in a row that ran out before a side stops spinning, and how often a
 /// side that stopped spins anyway.
-const FUTILE: u32 = 4;
+const FUTILE: u32 = u32::MAX; // PROBE ONLY: spin hot like 15b4d361
 const PROBE: u64 = 64;
 /// Control words, each on its own 128-byte line, fill the first 16 KiB. The
 /// request ring follows, then the response ring.

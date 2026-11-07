@@ -100,6 +100,17 @@ for m in sorted(set(machines(a_dir)) | set(machines(b_dir))):
     da, db = dict(map(tuple, A["digests"])), dict(map(tuple, B["digests"]))
     differing = [k for k in sorted(set(da) | set(db)) if da.get(k) != db.get(k)]
     print(f"machine {m}: differing parts {differing or 'none'}")
+    try:
+        with open(os.path.join(a_dir, m + ".probe-host.json")) as f:
+            HA = json.load(f)
+        with open(os.path.join(b_dir, m + ".probe-host.json")) as f:
+            HB = json.load(f)
+        ha, hb = dict(map(tuple, HA["parts"])), dict(map(tuple, HB["parts"]))
+        print(f"  host-level differing parts {[k for k in sorted(set(ha) | set(hb)) if ha.get(k) != hb.get(k)] or 'none'}")
+        if HA.get("pending") != HB.get("pending"):
+            describe("pending", HA.get("pending"), HB.get("pending"))
+    except FileNotFoundError:
+        print("  host parts missing")
     ra, rb = raw_map(A), raw_map(B)
     for name in sorted(set(ra) | set(rb)):
         if ra.get(name) != rb.get(name):

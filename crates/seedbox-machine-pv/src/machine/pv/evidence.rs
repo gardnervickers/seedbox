@@ -199,6 +199,33 @@ impl PVMachine {
         else {
             return Err("PV evidence response is not actual stopped metadata".into());
         };
+        // PROBE ONLY: keep the worker's raw evidence under a stable per-machine name.
+        let probe_stem = {
+            let dir = std::path::Path::new("/tmp/sbx-probe");
+            fs::create_dir_all(dir).map_err(|e| format!("probe dir: {e}"))?;
+            let mac = self
+                .network
+                .map(|m| hex(&m))
+                .unwrap_or_else(|| "nonet".into());
+            let disp: String = format!("{disposition:?}")
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect();
+            let mut n = 0;
+            let stem = loop {
+                let stem = dir.join(format!("{mac}-b{boot}-{disp}-{n}"));
+                if !stem.with_extension("probe-parts.json").exists() {
+                    break stem;
+                }
+                n += 1;
+            };
+            for ext in ["probe-ram", "probe-parts.json"] {
+                fs::copy(path.with_extension(ext), stem.with_extension(ext))
+                    .map_err(|e| format!("probe copy {ext}: {e}"))?;
+                let _ = fs::remove_file(path.with_extension(ext));
+            }
+            stem
+        };
         let expected = regions(self.memory_bytes)?;
         if native.regions != expected {
             return Err("PV worker evidence RAM layout mismatch".into());
@@ -235,7 +262,7 @@ impl PVMachine {
         }
         let mut parts = native.parts;
         let pending=serde_json::to_vec(&json!({"input":self.input,"writes":self.writes,"bridge":self.guest,"shutdown":self.shutdown,"pending_ends":self.aux.pending})).map_err(|e|format!("PV pending evidence: {e}"))?;
-        parts.push(("pending_io".into(), hex(&Sha256::digest(pending))));
+        parts.push(("pending_io".into(), hex(&Sha256::digest(&pending))));
         let policy = self
             .aux
             .policy
@@ -248,6 +275,13 @@ impl PVMachine {
             ));
         }
         parts.push(("policy".into(), policy_digest(policy, boot, disposition)?));
+        // PROBE ONLY: every part digest, host-side ones included.
+        fs::write(
+            probe_stem.with_extension("probe-host.json"),
+            serde_json::to_vec_pretty(&json!({"parts": parts, "pending": serde_json::from_slice::<serde_json::Value>(&pending).ok()}))
+                .map_err(|e| format!("probe host: {e}"))?,
+        )
+        .map_err(|e| format!("probe host write: {e}"))?;
         let e = StateEvidence {
             boot,
             disposition,

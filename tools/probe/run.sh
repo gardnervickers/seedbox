@@ -7,20 +7,19 @@ sb=$root/target/release/seedbox
 out=$root/target/probe-out
 mkdir -p "$out"
 export SEEDBOX_STATE=$RUNNER_TEMP/s
+grep -m1 "model name" /proc/cpuinfo
 "$sb" server start --full-state >"$out/server-start.log" 2>&1 || { cat "$out/server-start.log"; exit 1; }
-stash() { # copy this run's evidence into $1, moving the large RAM images
+stash() { # move this run's evidence from the fixed probe directory into $1
   local dest=$1; mkdir -p "$dest"
-  while IFS= read -r -d '' f; do
-    local name; name=$(basename "$f")
-    case $name in
-      *.probe-ram) mv "$f" "$dest/$name" ;;
-      *.probe-parts.json|*.pages) cp "$f" "$dest/$name" ;;
-    esac
-  done < <(find "$SEEDBOX_STATE" -newer "$dest/../marker" -type f \( -name '*.probe-ram' -o -name '*.probe-parts.json' -o -name '*.pages' \) -print0)
+  shopt -s nullglob
+  local f; for f in /tmp/sbx-probe/*; do mv "$f" "$dest/"; done
+  shopt -u nullglob
+  ls -l "$dest" | head -40
 }
+rm -rf /tmp/sbx-probe
 run_one() { # workload label [seed]
   local w=$1 label=$2 seed=${3:-}
-  local dir=$out/$w/$round; mkdir -p "$dir"; touch "$dir/marker"; sleep 1
+  local dir=$out/$w/$round; mkdir -p "$dir"
   local args=(run "$root/harness/acceptance/workloads/$w.yaml" --wall-time 30m)
   [[ -n $seed ]] && args+=(--seed "$seed")
   local pids=""; for _ in $(seq "$(nproc)"); do yes >/dev/null & pids="$pids $!"; done
