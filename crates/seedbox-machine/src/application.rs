@@ -386,7 +386,7 @@ fn filesystem_mode(
         } else {
             return Err(invalid(format!(
                 "unsupported filesystem tar entry type for {}",
-                String::from_utf8_lossy(&name)
+                name.escape_ascii()
             )));
         };
         if name.is_empty() && !matches!(kind, Kind::Directory) {
@@ -464,7 +464,7 @@ fn resolve<'a>(
             _ => {
                 return Err(invalid(format!(
                     "newc hardlink {} requires a regular-file target",
-                    String::from_utf8_lossy(name)
+                    name.escape_ascii()
                 )))
             }
         }
