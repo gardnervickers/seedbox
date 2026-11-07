@@ -384,7 +384,10 @@ fn filesystem_mode(
         } else if kind.is_fifo() {
             (0o10000 | permissions, Kind::Fifo)
         } else {
-            return Err(invalid("unsupported filesystem tar entry type"));
+            return Err(invalid(format!(
+                "unsupported filesystem tar entry type for {}",
+                String::from_utf8_lossy(&name)
+            )));
         };
         if name.is_empty() && !matches!(kind, Kind::Directory) {
             return Err(invalid("filesystem root must be a directory"));
@@ -458,7 +461,12 @@ fn resolve<'a>(
             Kind::Hardlink(next) => current = next,
             Kind::File(_) => return Ok((current, node)),
             _ if current == name => return Ok((current, node)),
-            _ => return Err(invalid("newc hardlinks require a regular-file target")),
+            _ => {
+                return Err(invalid(format!(
+                    "newc hardlink {} requires a regular-file target",
+                    String::from_utf8_lossy(name)
+                )))
+            }
         }
     }
 }

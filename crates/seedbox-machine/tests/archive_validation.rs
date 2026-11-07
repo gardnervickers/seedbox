@@ -214,3 +214,29 @@ fn gnu_sparse_file_is_still_rejected_without_expanding_its_holes() {
         .contains("unsupported filesystem tar entry type"));
     assert!(FilesystemArchive::new_bounded(bytes, generous()).is_err());
 }
+#[test]
+fn hardlink_to_special_file_names_the_entry() {
+    let mut b = tar::Builder::new(Vec::new());
+    let mut h = tar::Header::new_gnu();
+    h.set_entry_type(tar::EntryType::Fifo);
+    h.set_size(0);
+    h.set_mode(0o644);
+    h.set_uid(0);
+    h.set_gid(0);
+    h.set_mtime(0);
+    h.set_cksum();
+    b.append_data(&mut h, "run/pipe", &[][..]).unwrap();
+    let mut h = tar::Header::new_gnu();
+    h.set_entry_type(tar::EntryType::Link);
+    h.set_size(0);
+    h.set_link_name("run/pipe").unwrap();
+    h.set_mode(0o644);
+    h.set_uid(0);
+    h.set_gid(0);
+    h.set_mtime(0);
+    h.set_cksum();
+    b.append_data(&mut h, "run/alias", &[][..]).unwrap();
+    let bytes = b.into_inner().unwrap();
+    let error = FilesystemArchive::new(bytes).unwrap_err().to_string();
+    assert!(error.contains("run/alias"), "{error}");
+}
