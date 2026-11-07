@@ -150,7 +150,7 @@ def changes(root):
         s, "int set_tsc_mode(unsigned int val)\n{\n",
         "int set_tsc_mode(unsigned int val)\n{\n\treturn -EINVAL;\n"))
 
-    # Initial SSE/YMM state needs one saved representation in guest RAM.
+    # Initial x87/SSE/YMM state needs one saved representation in guest RAM.
     # SSE's MXCSR rules depend on the XSAVE format; standard saves stay intact.
     edit("arch/x86/kernel/fpu/xstate.h", lambda s: replace(replace(
         s,
@@ -177,6 +177,23 @@ void seedbox_canonicalize_task_xstate(struct fpstate *fpstate)
 	struct xregs_state *xsave = &fpstate->regs.xsave;
 	struct fxregs_state *sse = &xsave->i387;
 	void *ymm;
+
+	/* x87 is bytes 0-23 and the ST registers of the legacy area; its init
+	 * state has no format-dependent restore rule.
+	 */
+	if (!(xsave->header.xfeatures & XFEATURE_MASK_FP)) {
+		sse->cwd = 0x37f;
+		sse->swd = 0;
+		sse->twd = 0;
+		sse->fop = 0;
+		sse->rip = 0;
+		sse->rdp = 0;
+		memset(sse->st_space, 0, sizeof(sse->st_space));
+	} else if (sse->cwd == 0x37f && !sse->swd && !sse->twd && !sse->fop &&
+		   !sse->rip && !sse->rdp &&
+		   !memchr_inv(sse->st_space, 0, sizeof(sse->st_space))) {
+		xsave->header.xfeatures &= ~XFEATURE_MASK_FP;
+	}
 
 	if ((fpstate->xfeatures & XFEATURE_MASK_SSE) &&
 	    (xsave->header.xcomp_bv & XCOMP_BV_COMPACTED_FORMAT)) {
