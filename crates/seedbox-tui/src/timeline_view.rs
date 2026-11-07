@@ -333,12 +333,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        for expected in [
-            "removed",
-            "heal",
-            "split",
-            "Completed rounds: 3",
-        ] {
+        for expected in ["removed", "heal", "split", "Completed rounds: 3"] {
             assert!(text.contains(expected), "missing {expected}: {text}");
         }
         let mut small = Terminal::new(TestBackend::new(40, 8)).unwrap();

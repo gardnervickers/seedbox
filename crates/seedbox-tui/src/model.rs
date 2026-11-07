@@ -795,8 +795,9 @@ pub struct App {
     pub inspector: Option<Inspector>,
     pub fault_form: Option<FaultForm>,
     pub fault_menu: Option<FaultMenu>,
-    /// In-memory edits to the focused simulation's recorded faults.
-    pub timeline: Option<crate::timeline::TimelineDraft>,
+    /// In-memory edits to recorded faults, kept for the session per simulation
+    /// (id and creation time). Only the focused simulation's is shown.
+    timelines: BTreeMap<(SimulationId, u64), crate::timeline::TimelineDraft>,
     pub timeline_row: usize,
     timeline_confirm: Option<char>,
     pub timeline_name: Option<String>,
@@ -864,18 +865,12 @@ impl App {
             return;
         };
         let created = resource.metadata.created_at_unix_ms;
-        if !self.timeline.as_ref().is_some_and(|draft| {
-            draft.source() == &timeline.simulation && draft.created_at_unix_ms() == created
-        }) {
-            self.timeline = Some(crate::timeline::TimelineDraft::new(
-                timeline.simulation.clone(),
-                created,
-            ));
-            self.timeline_row = 0;
-        }
-        let Some(draft) = self.timeline.as_mut() else {
-            return;
-        };
+        let draft = self
+            .timelines
+            .entry((timeline.simulation.clone(), created))
+            .or_insert_with(|| {
+                crate::timeline::TimelineDraft::new(timeline.simulation.clone(), created)
+            });
         let application = simulation_name(resource).to_owned();
         let mut metadata = draft.metadata().clone();
         if metadata.name == timeline.simulation.as_str() {
@@ -894,10 +889,23 @@ impl App {
     /// The draft for the focused simulation, if any.
     pub(super) fn focused_timeline(&self) -> Option<&crate::timeline::TimelineDraft> {
         let resource = self.focus.as_ref()?.resource.as_ref()?;
-        self.timeline.as_ref().filter(|draft| {
-            &resource.metadata.id == draft.source()
-                && resource.metadata.created_at_unix_ms == draft.created_at_unix_ms()
-        })
+        self.timelines.get(&(
+            resource.metadata.id.clone(),
+            resource.metadata.created_at_unix_ms,
+        ))
+    }
+
+    fn focused_timeline_key(&self) -> Option<(SimulationId, u64)> {
+        let resource = self.focus.as_ref()?.resource.as_ref()?;
+        Some((
+            resource.metadata.id.clone(),
+            resource.metadata.created_at_unix_ms,
+        ))
+    }
+
+    fn focused_timeline_mut(&mut self) -> Option<&mut crate::timeline::TimelineDraft> {
+        let key = self.focused_timeline_key()?;
+        self.timelines.get_mut(&key)
     }
 
     fn timeline_key(&mut self, key: KeyEvent) -> Vec<Request> {
@@ -925,10 +933,14 @@ impl App {
             return Vec::new();
         }
         if key.code == KeyCode::Char('p') {
-            let Some(focus) = self.focus.as_ref().filter(|focus| !focus.terminal()) else {
-                self.notify("source simulation has completed", Tone::Info);
+            let Some(focus) = self.focus.as_ref() else {
+                self.notify("open a simulation to control playback", Tone::Info);
                 return Vec::new();
             };
+            if focus.terminal() {
+                self.notify("source simulation has completed", Tone::Info);
+                return Vec::new();
+            }
             let rate = match self.fault_menu {
                 Some(FaultMenu::Editing(rate)) if rate != PlaybackRate::Paused => rate,
                 _ => focus.resume_rate,
@@ -970,10 +982,10 @@ impl App {
             };
             return Vec::new();
         }
-        if self.focused_timeline().is_none() {
+        let Some(focused) = self.focused_timeline_key() else {
             return Vec::new();
-        }
-        let Some(draft) = self.timeline.as_mut() else {
+        };
+        let Some(draft) = self.timelines.get_mut(&focused) else {
             return Vec::new();
         };
         match key.code {
@@ -1040,7 +1052,7 @@ impl App {
             inspector: None,
             fault_form: None,
             fault_menu: None,
-            timeline: None,
+            timelines: BTreeMap::new(),
             timeline_row: 0,
             timeline_confirm: None,
             timeline_name: None,
@@ -1897,8 +1909,7 @@ impl App {
                 KeyCode::Enter => {
                     let name = self.timeline_name.take().unwrap_or_default();
                     if !name.trim().is_empty() {
-                        let focused = self.focused_timeline().is_some();
-                        if let Some(draft) = self.timeline.as_mut().filter(|_| focused) {
+                        if let Some(draft) = self.focused_timeline_mut() {
                             draft.rename(name.trim().to_owned());
                         }
                     }
@@ -3019,7 +3030,7 @@ pub(crate) mod tests {
             assert_eq!(app.screen, Screen::Timeline);
             assert_eq!(app.fault_menu, None);
             app.input(key('d'));
-            assert_eq!(app.timeline.as_ref().unwrap().modified_count(), 1);
+            assert_eq!(app.focused_timeline().unwrap().modified_count(), 1);
             assert!(app.input(key('2')).is_empty());
             assert_eq!(app.screen, Screen::Simulation);
             app.control_pending = true;
@@ -3480,7 +3491,8 @@ pub(crate) mod tests {
             },
         ];
         draft.merge(&entries).unwrap();
-        app.timeline = Some(draft);
+        app.timelines
+            .insert(("k7m2p9qx".parse().unwrap(), 10), draft);
         app
     }
 
@@ -3490,30 +3502,47 @@ pub(crate) mod tests {
         let resource = app.focus.as_mut().unwrap().resource.as_mut().unwrap();
         resource.metadata.name = "resolved application".into();
         resource.spec.configuration.name.clear();
-        let entries = app.timeline.as_ref().unwrap().entries().to_vec();
+        let entries = app.focused_timeline().unwrap().entries().to_vec();
         app.timeline_update(seedbox_api::FaultTimeline {
             simulation: "k7m2p9qx".parse().unwrap(),
             entries,
         });
         assert_eq!(
-            app.timeline.as_ref().unwrap().metadata().application,
+            app.focused_timeline().unwrap().metadata().application,
             "resolved application"
         );
         assert_eq!(
-            app.timeline.as_ref().unwrap().metadata().name,
+            app.focused_timeline().unwrap().metadata().name,
             "resolved application"
         );
 
-        app.timeline.as_mut().unwrap().rename("my recording".into());
-        let entries = app.timeline.as_ref().unwrap().entries().to_vec();
+        app.focused_timeline_mut()
+            .unwrap()
+            .rename("my recording".into());
+        let entries = app.focused_timeline().unwrap().entries().to_vec();
         app.timeline_update(seedbox_api::FaultTimeline {
             simulation: "k7m2p9qx".parse().unwrap(),
             entries,
         });
         assert_eq!(
-            app.timeline.as_ref().unwrap().metadata().name,
+            app.focused_timeline().unwrap().metadata().name,
             "my recording"
         );
+    }
+
+    #[test]
+    fn edits_survive_focus_moving_away_and_back_but_not_a_reused_id() {
+        let mut app = edited_timeline_app();
+        app.input(key('d'));
+        assert_eq!(app.focused_timeline().unwrap().modified_count(), 1);
+        app.focus.as_mut().unwrap().resource = Some(timeline_resource(11));
+        assert!(app.focused_timeline().is_none());
+        app.timeline_row = 1;
+        assert!(app.input(key('d')).is_empty());
+        assert!(app.input(key('N')).is_empty());
+        assert_eq!(app.timeline_row, 1);
+        app.focus.as_mut().unwrap().resource = Some(timeline_resource(10));
+        assert_eq!(app.focused_timeline().unwrap().modified_count(), 1);
     }
 
     #[test]
@@ -3525,7 +3554,7 @@ pub(crate) mod tests {
             KeyModifiers::NONE,
         )));
         assert!(requests.is_empty());
-        assert_eq!(app.timeline.as_ref().unwrap().modified_count(), 1);
+        assert_eq!(app.focused_timeline().unwrap().modified_count(), 1);
     }
 
     fn heal_catalogue() -> FaultCatalogue {
