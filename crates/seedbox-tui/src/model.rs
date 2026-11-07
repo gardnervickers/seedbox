@@ -795,10 +795,9 @@ pub struct App {
     pub inspector: Option<Inspector>,
     pub fault_form: Option<FaultForm>,
     pub fault_menu: Option<FaultMenu>,
-    pub timelines: Vec<crate::timeline::TimelineDraft>,
-    pub timeline_source: usize,
+    /// In-memory edits to the focused simulation's recorded faults.
+    pub timeline: Option<crate::timeline::TimelineDraft>,
     pub timeline_row: usize,
-    pub timeline_directory: Option<std::path::PathBuf>,
     timeline_confirm: Option<char>,
     pub timeline_name: Option<String>,
     control_pending: bool,
@@ -855,24 +854,6 @@ fn ladder(index: usize) -> PlaybackRate {
 }
 
 impl App {
-    pub fn with_timelines(mut self, directory: std::path::PathBuf) -> std::io::Result<Self> {
-        let (timelines, skipped) = crate::timeline::TimelineDraft::load_all(&directory)?;
-        self.timelines = timelines;
-        self.timeline_directory = Some(directory);
-        if let Some(first) = skipped.first() {
-            let more = skipped.len() - 1;
-            self.notify(
-                if more == 0 {
-                    format!("saved timeline skipped: {first}")
-                } else {
-                    format!("saved timeline skipped: {first} (and {more} more)")
-                },
-                Tone::Bad,
-            );
-        }
-        Ok(self)
-    }
-
     fn timeline_update(&mut self, timeline: seedbox_api::FaultTimeline) {
         let Some(resource) = self
             .focus
@@ -883,59 +864,45 @@ impl App {
             return;
         };
         let created = resource.metadata.created_at_unix_ms;
-        let index = self
-            .timelines
-            .iter()
-            .position(|draft| {
-                draft.source() == &timeline.simulation && draft.created_at_unix_ms() == created
-            })
-            .unwrap_or_else(|| {
-                self.timelines.push(crate::timeline::TimelineDraft::new(
-                    timeline.simulation.clone(),
-                    created,
-                ));
-                self.timelines.len() - 1
-            });
+        if !self.timeline.as_ref().is_some_and(|draft| {
+            draft.source() == &timeline.simulation && draft.created_at_unix_ms() == created
+        }) {
+            self.timeline = Some(crate::timeline::TimelineDraft::new(
+                timeline.simulation.clone(),
+                created,
+            ));
+            self.timeline_row = 0;
+        }
+        let Some(draft) = self.timeline.as_mut() else {
+            return;
+        };
         let application = simulation_name(resource).to_owned();
-        let mut metadata = self.timelines[index].metadata().clone();
+        let mut metadata = draft.metadata().clone();
         if metadata.name == timeline.simulation.as_str() {
             metadata.name = application.clone();
         }
         metadata.application = application;
         metadata.seed = resource.spec.seed;
         metadata.recorded_at_unix_ms = created;
-        let draft = &mut self.timelines[index];
         draft.attach_definition(resource);
         draft.set_metadata(metadata);
-        let result = draft.merge(&timeline.entries);
-        if let Err(error) = result {
+        if let Err(error) = draft.merge(&timeline.entries) {
             self.notify(format!("timeline update: {error}"), Tone::Bad);
-        } else if draft.is_unsaved() {
-            if let Some(directory) = &self.timeline_directory {
-                if let Err(error) = draft.retry_save(directory) {
-                    self.notify(format!("timeline save failed: {error}"), Tone::Bad);
-                }
-            }
         }
     }
 
-    fn timeline_matches_focus(&self) -> bool {
-        self.timelines
-            .get(self.timeline_source)
-            .is_some_and(|draft| {
-                self.focus
-                    .as_ref()
-                    .and_then(|f| f.resource.as_ref())
-                    .is_some_and(|r| {
-                        &r.metadata.id == draft.source()
-                            && r.metadata.created_at_unix_ms == draft.created_at_unix_ms()
-                    })
-            })
+    /// The draft for the focused simulation, if any.
+    pub(super) fn focused_timeline(&self) -> Option<&crate::timeline::TimelineDraft> {
+        let resource = self.focus.as_ref()?.resource.as_ref()?;
+        self.timeline.as_ref().filter(|draft| {
+            &resource.metadata.id == draft.source()
+                && resource.metadata.created_at_unix_ms == draft.created_at_unix_ms()
+        })
     }
 
     fn timeline_key(&mut self, key: KeyEvent) -> Vec<Request> {
         if key.code == KeyCode::Enter {
-            let Some(draft) = self.timelines.get(self.timeline_source) else {
+            let Some(draft) = self.focused_timeline() else {
                 return Vec::new();
             };
             if let Some(mut document) = draft.submission_snapshot() {
@@ -958,13 +925,6 @@ impl App {
             return Vec::new();
         }
         if key.code == KeyCode::Char('p') {
-            if !self.timeline_matches_focus() {
-                self.notify(
-                    "open this timeline's source before controlling playback",
-                    Tone::Info,
-                );
-                return Vec::new();
-            }
             let Some(focus) = self.focus.as_ref().filter(|focus| !focus.terminal()) else {
                 self.notify("source simulation has completed", Tone::Info);
                 return Vec::new();
@@ -981,14 +941,7 @@ impl App {
             )];
         }
         if key.code == KeyCode::Char('N') {
-            if !self.timeline_matches_focus() {
-                self.notify(
-                    "open this timeline's source to locate its next fault",
-                    Tone::Info,
-                );
-                return Vec::new();
-            }
-            let next = self.timelines.get(self.timeline_source).and_then(|d| {
+            let next = self.focused_timeline().and_then(|d| {
                 self.focus
                     .as_ref()
                     .and_then(|f| f.world.as_ref())
@@ -1002,33 +955,10 @@ impl App {
             return Vec::new();
         }
         if key.code == KeyCode::Char('n') {
-            self.timeline_name = self
-                .timelines
-                .get(self.timeline_source)
-                .map(|d| d.metadata().name.clone());
-            return Vec::new();
-        }
-        if key.code == KeyCode::Char('w') {
-            if let (Some(draft), Some(directory)) = (
-                self.timelines.get_mut(self.timeline_source),
-                &self.timeline_directory,
-            ) {
-                let result = draft.save_definition(directory);
-                self.notify(
-                    match result {
-                        Ok(path) => format!("simulation definition saved: {}", path.display()),
-                        Err(e) => format!("timeline not saved: {e}"),
-                    },
-                    Tone::Info,
-                );
-            }
+            self.timeline_name = self.focused_timeline().map(|d| d.metadata().name.clone());
             return Vec::new();
         }
         if key.code == KeyCode::Char(' ') {
-            if !self.timeline_matches_focus() {
-                self.notify("this saved timeline is not the focused simulation; open its source before controlling playback", Tone::Info);
-                return Vec::new();
-            }
             return self.simulation_key(key);
         }
 
@@ -1040,23 +970,12 @@ impl App {
             };
             return Vec::new();
         }
-        if matches!(key.code, KeyCode::Char('[' | ']')) && !self.timelines.is_empty() {
-            let n = self.timelines.len();
-            self.timeline_source = (self.timeline_source
-                + if key.code == KeyCode::Char(']') {
-                    1
-                } else {
-                    n - 1
-                })
-                % n;
-            self.timeline_row = 0;
-            self.timeline_confirm = None;
+        if self.focused_timeline().is_none() {
             return Vec::new();
         }
-        let Some(draft) = self.timelines.get_mut(self.timeline_source) else {
+        let Some(draft) = self.timeline.as_mut() else {
             return Vec::new();
         };
-        let mut changed = false;
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.timeline_row = self.timeline_row.saturating_sub(1)
@@ -1065,11 +984,11 @@ impl App {
                 self.timeline_row =
                     (self.timeline_row + 1).min(draft.entries().len().saturating_sub(1))
             }
-            KeyCode::Char('d') | KeyCode::Delete => changed = draft.toggle(self.timeline_row),
-            KeyCode::Char('u') => changed = draft.undo(),
+            KeyCode::Char('d') | KeyCode::Delete => _ = draft.toggle(self.timeline_row),
+            KeyCode::Char('u') => _ = draft.undo(),
             KeyCode::Char(c @ ('C' | 'R')) => {
                 if self.timeline_confirm == Some(c) {
-                    changed = if c == 'C' {
+                    _ = if c == 'C' {
                         draft.clear()
                     } else {
                         draft.reset()
@@ -1089,17 +1008,6 @@ impl App {
             _ => {}
         }
         self.timeline_confirm = None;
-        if changed {
-            if let Some(directory) = &self.timeline_directory {
-                match draft.save(directory) {
-                    Ok(()) => self.notify(
-                        "working copy stored; w saves a simulation definition",
-                        Tone::Good,
-                    ),
-                    Err(error) => self.notify(format!("timeline not saved: {error}"), Tone::Bad),
-                }
-            }
-        }
         Vec::new()
     }
 
@@ -1132,10 +1040,8 @@ impl App {
             inspector: None,
             fault_form: None,
             fault_menu: None,
-            timelines: Vec::new(),
-            timeline_source: 0,
+            timeline: None,
             timeline_row: 0,
-            timeline_directory: None,
             timeline_confirm: None,
             timeline_name: None,
             control_pending: false,
@@ -1991,13 +1897,9 @@ impl App {
                 KeyCode::Enter => {
                     let name = self.timeline_name.take().unwrap_or_default();
                     if !name.trim().is_empty() {
-                        if let Some(draft) = self.timelines.get_mut(self.timeline_source) {
+                        let focused = self.focused_timeline().is_some();
+                        if let Some(draft) = self.timeline.as_mut().filter(|_| focused) {
                             draft.rename(name.trim().to_owned());
-                            if let Some(directory) = &self.timeline_directory {
-                                if let Err(error) = draft.save(directory) {
-                                    self.notify(format!("timeline not saved: {error}"), Tone::Bad);
-                                }
-                            }
                         }
                     }
                 }
@@ -2097,14 +1999,6 @@ impl App {
                 return Vec::new();
             }
             KeyCode::Char('3') => {
-                if let Some(resource) = self.focus.as_ref().and_then(|f| f.resource.as_ref()) {
-                    if let Some(index) = self.timelines.iter().position(|d| {
-                        d.source() == &resource.metadata.id
-                            && d.created_at_unix_ms() == resource.metadata.created_at_unix_ms
-                    }) {
-                        self.timeline_source = index;
-                    }
-                }
                 self.timeline_row = 0;
                 self.screen = Screen::Timeline;
                 return Vec::new();
@@ -2265,8 +2159,7 @@ impl App {
                 }
                 HitTarget::Timeline(row) => {
                     self.timeline_row = row.min(
-                        self.timelines
-                            .get(self.timeline_source)
+                        self.focused_timeline()
                             .map_or(0, |d| d.entries().len().saturating_sub(1)),
                     )
                 }
@@ -3126,7 +3019,7 @@ pub(crate) mod tests {
             assert_eq!(app.screen, Screen::Timeline);
             assert_eq!(app.fault_menu, None);
             app.input(key('d'));
-            assert_eq!(app.timelines[0].modified_count(), 1);
+            assert_eq!(app.timeline.as_ref().unwrap().modified_count(), 1);
             assert!(app.input(key('2')).is_empty());
             assert_eq!(app.screen, Screen::Simulation);
             app.control_pending = true;
@@ -3382,30 +3275,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn foreign_saved_timeline_never_controls_focused_simulation() {
-        let mut app = app(&["a"]);
-        app.screen = Screen::Timeline;
-        app.timelines.push(crate::timeline::TimelineDraft::new(
-            "a7m2p9qx".parse().unwrap(),
-            10,
-        ));
-        assert!(app.input(key(' ')).is_empty());
-        app.fault_menu = Some(FaultMenu::Editing(PlaybackRate::Unlimited));
-        assert!(app.input(key(' ')).is_empty());
-        assert_eq!(
-            app.fault_menu,
-            Some(FaultMenu::Editing(PlaybackRate::Unlimited))
-        );
-        assert_eq!(
-            app.cancel_fault_menu(),
-            [Request::EndFaultMenu(
-                "k7m2p9qx".parse().unwrap(),
-                PlaybackRate::Unlimited
-            )]
-        );
-    }
-
-    #[test]
     fn server_catalogue_form_submits_unknown_action_as_json() {
         let mut app = app(&["a"]);
         app.apply(Update::FaultTypes(fault_catalogue("future_server_fault")));
@@ -3611,7 +3480,7 @@ pub(crate) mod tests {
             },
         ];
         draft.merge(&entries).unwrap();
-        app.timelines.push(draft);
+        app.timeline = Some(draft);
         app
     }
 
@@ -3621,24 +3490,30 @@ pub(crate) mod tests {
         let resource = app.focus.as_mut().unwrap().resource.as_mut().unwrap();
         resource.metadata.name = "resolved application".into();
         resource.spec.configuration.name.clear();
-        let entries = app.timelines[0].entries().to_vec();
+        let entries = app.timeline.as_ref().unwrap().entries().to_vec();
         app.timeline_update(seedbox_api::FaultTimeline {
             simulation: "k7m2p9qx".parse().unwrap(),
             entries,
         });
         assert_eq!(
-            app.timelines[0].metadata().application,
+            app.timeline.as_ref().unwrap().metadata().application,
             "resolved application"
         );
-        assert_eq!(app.timelines[0].metadata().name, "resolved application");
+        assert_eq!(
+            app.timeline.as_ref().unwrap().metadata().name,
+            "resolved application"
+        );
 
-        app.timelines[0].rename("my recording".into());
-        let entries = app.timelines[0].entries().to_vec();
+        app.timeline.as_mut().unwrap().rename("my recording".into());
+        let entries = app.timeline.as_ref().unwrap().entries().to_vec();
         app.timeline_update(seedbox_api::FaultTimeline {
             simulation: "k7m2p9qx".parse().unwrap(),
             entries,
         });
-        assert_eq!(app.timelines[0].metadata().name, "my recording");
+        assert_eq!(
+            app.timeline.as_ref().unwrap().metadata().name,
+            "my recording"
+        );
     }
 
     #[test]
@@ -3650,75 +3525,7 @@ pub(crate) mod tests {
             KeyModifiers::NONE,
         )));
         assert!(requests.is_empty());
-        assert_eq!(app.timelines[0].modified_count(), 1);
-    }
-
-    #[test]
-    fn reused_source_id_with_new_creation_never_controls_or_navigates_focus() {
-        let mut app = edited_timeline_app();
-        app.focus.as_mut().unwrap().resource = Some(timeline_resource(11));
-        assert!(app.input(key(' ')).is_empty());
-        assert!(!app.control_pending);
-        app.timeline_row = 1;
-        assert!(app.input(key('N')).is_empty());
-        assert_eq!(app.timeline_row, 1);
-        assert!(app
-            .notice
-            .as_ref()
-            .unwrap()
-            .text
-            .contains("open this timeline's source"));
-    }
-
-    #[test]
-    fn editing_save_failure_survives_refresh_and_retry_persists_edits() {
-        let directory_owner = tempfile::tempdir().unwrap();
-        let directory = directory_owner.path().join("timeline");
-        std::fs::write(&directory, b"block directory creation").unwrap();
-        let mut app = edited_timeline_app();
-        app.timeline_directory = Some(directory.clone());
-        app.input(key('d'));
-        assert!(app.timelines[0].is_unsaved());
-        assert!(app.timelines[0].save_error().is_some());
-        let entries = app.timelines[0].entries().to_vec();
-        app.timeline_update(seedbox_api::FaultTimeline {
-            simulation: "k7m2p9qx".parse().unwrap(),
-            entries,
-        });
-        assert!(app.timelines[0].is_unsaved());
-        assert_eq!(app.timelines[0].modified_count(), 1);
-        std::fs::remove_file(&directory).unwrap();
-        app.timelines[0].retry_save(&directory).unwrap();
-        assert!(!app.timelines[0].is_unsaved());
-        assert!(app.timelines[0].save_error().is_none());
-        let (saved, _) = crate::timeline::TimelineDraft::load_all(&directory).unwrap();
-        assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0].modified_count(), 1);
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn unknown_admitted_fault_is_persisted_before_immediate_quit() {
-        let directory_owner = tempfile::tempdir().unwrap();
-        let directory = directory_owner.path().join("timeline");
-        let mut app = app(&["a"]);
-        app.focus.as_mut().unwrap().resource = Some(timeline_resource(10));
-        app.timeline_directory = Some(directory.clone());
-        app.apply(Update::FaultReceipt {
-            title:"future_action".into(), request:serde_json::json!({"command":{"type":"injectFault","action":{"action":"future_action","newField":{"value":7}}}}).to_string(),
-            result:Ok(serde_json::json!({"state":{"type":"acknowledged","error":null,
-                "intervention":{"requestId":"new-request","position":{"boundaryIndex":4,"completedRounds":3,"simulatedTimeNs":100},
-                "plan":{"id":1,"at_ns":100,"deadline_ns":200,"action":"future_action","newField":{"value":7}}}}})),
-        });
-        app.input(key('q'));
-        assert!(app.quit);
-        let (saved, _) = crate::timeline::TimelineDraft::load_all(&directory).unwrap();
-        assert_eq!(saved[0].entries()[0].id, "program:new-request");
-        assert_eq!(
-            saved[0].entries()[0].action,
-            serde_json::json!({"action":"future_action","newField":{"value":7}})
-        );
-        std::fs::remove_dir_all(directory).unwrap();
+        assert_eq!(app.timeline.as_ref().unwrap().modified_count(), 1);
     }
 
     fn heal_catalogue() -> FaultCatalogue {

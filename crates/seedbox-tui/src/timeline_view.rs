@@ -1,4 +1,4 @@
-//! Recorded fault timeline and the client's saved inclusion edits.
+//! Recorded fault timeline and the client's in-memory inclusion edits.
 use crate::timeline::TimelineDraft;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -7,7 +7,6 @@ use ratatui::{
     Frame,
 };
 use seedbox_api::{FaultStatus, TimelineEntry, WorldState};
-use std::path::Path;
 
 const ICE: Color = Color::Rgb(120, 200, 255);
 const DIM: Color = Color::Rgb(95, 112, 132);
@@ -79,7 +78,6 @@ pub(super) fn draw(
     area: Rect,
     draft: &TimelineDraft,
     selected: usize,
-    save_path: &Path,
     world: Option<&WorldState>,
     display: (
         bool,
@@ -87,31 +85,21 @@ pub(super) fn draw(
     ),
 ) {
     let (details, hitboxes) = display;
-    let [heading, body] = Layout::vertical([Constraint::Length(5), Constraint::Min(0)]).areas(area);
+    let [heading, body] = Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).areas(area);
     let entries = draft.entries();
     let total = entries.len();
     let removed = draft.modified_count();
     let metadata = draft.metadata();
-    let save_label = if draft.is_unsaved() {
-        "WORKING COPY UNSAVED · w save definition"
-    } else {
-        "Working copy stored"
-    };
-    let save_error = draft
-        .save_error()
-        .map(|error| format!(" · {error}"))
-        .unwrap_or_default();
     frame.render_widget(
         Paragraph::new(format!(
-            "{} · {}\nApplication: {} · Seed: {} · Recorded: {}\n{} included · {} removed · {} faults{}\n{}: {}{}",
+            "{} · {}\nApplication: {} · Seed: {} · Recorded: {}\n{} included · {} removed · {} faults{}",
             metadata.name, draft.source(),
             if metadata.application.is_empty() { "unknown" } else { &metadata.application },
             metadata.seed.map(|seed| seed.to_string()).unwrap_or_else(|| "unknown".into()),
             recording_date(metadata.recorded_at_unix_ms),
             total - removed, removed, total,
             world.map(|world| format!(" · live {}", crate::view::time(world.simulated_time_ns))).unwrap_or_default(),
-            save_label, if details { save_path.display().to_string() } else { "locally".into() }, save_error,
-        )).style(Style::new().fg(if draft.is_unsaved() { Color::Rgb(255, 181, 71) } else { TEXT }))
+        )).style(Style::new().fg(TEXT))
             .wrap(Wrap { trim: false }), heading,
     );
     if total == 0 {
@@ -334,7 +322,6 @@ mod tests {
                     frame.area(),
                     &draft,
                     0,
-                    Path::new("/tmp/timeline.json"),
                     None,
                     (true, &Default::default()),
                 )
@@ -347,12 +334,10 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         for expected in [
-            "UNSAVED",
             "removed",
             "heal",
             "split",
             "Completed rounds: 3",
-            "/tmp/timeline.json",
         ] {
             assert!(text.contains(expected), "missing {expected}: {text}");
         }
@@ -364,7 +349,6 @@ mod tests {
                     frame.area(),
                     &draft,
                     99,
-                    Path::new("/tmp/timeline.json"),
                     None,
                     (true, &Default::default()),
                 )
@@ -414,39 +398,5 @@ mod tests {
     fn dates_render_in_utc() {
         assert_eq!(recording_date(0), "1970-01-01 00:00:00 UTC");
         assert_eq!(recording_date(1_704_067_200_000), "2024-01-01 00:00:00 UTC");
-    }
-
-    #[test]
-    fn save_failure_remains_visible_without_claiming_saved() {
-        let directory_owner = tempfile::tempdir().unwrap();
-        let directory = directory_owner.path().join("timeline");
-        std::fs::write(&directory, b"block directory creation").unwrap();
-        let mut draft = TimelineDraft::new("k7m2p9qx".parse().unwrap(), 123);
-        assert!(draft.save(&directory).is_err());
-        let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
-        terminal
-            .draw(|frame| {
-                draw(
-                    frame,
-                    frame.area(),
-                    &draft,
-                    0,
-                    &directory,
-                    None,
-                    (true, &Default::default()),
-                )
-            })
-            .unwrap();
-        let text = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(text.contains("UNSAVED"));
-        assert!(text.contains("w save definition"));
-        assert!(!text.contains("Saved:"));
-        std::fs::remove_file(directory).unwrap();
     }
 }
