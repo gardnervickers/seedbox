@@ -1,16 +1,17 @@
 /* Freestanding x86-64 PID 1: hand off live tasks with controlled FP banks. */
 typedef unsigned long u64;
 typedef unsigned u32;
-enum { WORKERS = 5, BYTES = 832 };
+enum { WORKERS = 7, MARKED = 5, BYTES = 832 };
 static int ready[WORKERS][2], release[WORKERS][2], parked[2];
 static volatile unsigned char image[BYTES] __attribute__((aligned(64)));
-static const unsigned char markers[WORKERS][10] = {
+static const unsigned char markers[MARKED][10] = {
     {0x31,0x71,0x52,0x93,0xb4,0xd5,0xe6,0x80,0x00,0x40},
     {0x32,0x71,0x52,0x93,0xb4,0xd5,0xe6,0x80,0x00,0x40},
     {0x33,0x71,0x52,0x93,0xb4,0xd5,0xe6,0x80,0x00,0x40},
     {0x34,0x71,0x52,0x93,0xb4,0xd5,0xe6,0x80,0x00,0x40},
     {0x35,0x71,0x52,0x93,0xb4,0xd5,0xe6,0x80,0x00,0x40},
 };
+static const unsigned char stale[10] = {0x37,0x71,0x52,0x93,0xb4,0xd5,0xe6,0x80,0x00,0x40};
 /* The compiler must not use SIMD between a restore and the blocking syscall. */
 #define INTEGER __attribute__((target("no-sse,no-sse2,no-mmx,no-avx")))
 static INTEGER long syscall3(long number, long a, long b, long c) {
@@ -45,9 +46,31 @@ static INTEGER void restore(u64 present, u32 mxcsr, int xmm, int ymm) {
      * from the compacted banks produced by the kernel's XSAVES task saves. */
     __asm__ volatile("xrstor (%0)" : : "r"(image), "a"(6), "d"(0) : "memory");
 }
+/* Restore initial x87 values, present or absent, beside a live XMM marker
+ * that identifies the task's saved bank. */
+static INTEGER void restore_x87(u64 present, unsigned char pattern) {
+    for (unsigned i = 0; i < BYTES; ++i) image[i] = 0;
+    *(unsigned short *)image = 0x37f;
+    *(u32 *)(image + 24) = 0x1f80;
+    *(u64 *)(image + 512) = present;
+    for (unsigned i = 0; i < 256; ++i) image[160 + i] = i ^ pattern;
+    __asm__ volatile("xrstor (%0)" : : "r"(image), "a"(7), "d"(0) : "memory");
+}
 static INTEGER __attribute__((noreturn)) void worker(unsigned number) {
-    __asm__ volatile("fninit; fldt (%0)" : : "r"(markers[number]) : "memory");
-    if (number == 0) {
+    if (number < MARKED)
+        __asm__ volatile("fninit; fldt (%0)" : : "r"(markers[number]) : "memory");
+    if (number == 5) {
+        /* Present x87 holding its initial values is initial x87 state. */
+        restore_x87(3, 0x5a);
+    } else if (number == 6) {
+        /* A saved noninitial x87 bank must not leave stale bytes once the
+         * component becomes initial, whichever way XINUSE then reports it. */
+        restore_x87(3, 0x69);
+        __asm__ volatile("fldt (%0)" : : "r"(stale) : "memory");
+        token(1, ready[number][1]);
+        token(0, release[number][0]);
+        restore_x87(2, 0x69);
+    } else if (number == 0) {
         restore(2, 0x1fa0, 1, 0);
         token(1, ready[number][1]);
         /* The controller's reply proves a save of this noninitial SSE bank. */
@@ -90,7 +113,7 @@ INTEGER __attribute__((noreturn)) void start(void) {
         if (child < 0) fail("XSAVE_TASK_ERROR: fork\n");
         if (!child) worker(i);
         token(0, ready[i][0]);
-        if (i == 0) {
+        if (i == 0 || i == 6) {
             token(1, release[i][1]);
             token(0, ready[i][0]);
         }

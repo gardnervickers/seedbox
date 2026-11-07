@@ -150,7 +150,7 @@ def changes(root):
         s, "int set_tsc_mode(unsigned int val)\n{\n",
         "int set_tsc_mode(unsigned int val)\n{\n\treturn -EINVAL;\n"))
 
-    # Initial x87/SSE/YMM state needs one saved representation in guest RAM.
+    # Initial x87/SSE/AVX state needs one saved representation in guest RAM.
     # SSE's MXCSR rules depend on the XSAVE format; standard saves stay intact.
     edit("arch/x86/kernel/fpu/xstate.h", lambda s: replace(replace(
         s,
@@ -176,7 +176,9 @@ void seedbox_canonicalize_task_xstate(struct fpstate *fpstate)
 {
 	struct xregs_state *xsave = &fpstate->regs.xsave;
 	struct fxregs_state *sse = &xsave->i387;
-	void *ymm;
+	u64 vectors;
+	unsigned int nr;
+	void *vector;
 
 	/* x87 is bytes 0-23 and the ST registers of the legacy area; its init
 	 * state has no format-dependent restore rule.
@@ -206,15 +208,17 @@ void seedbox_canonicalize_task_xstate(struct fpstate *fpstate)
 		}
 	}
 
-	if (!(fpstate->xfeatures & XFEATURE_MASK_YMM))
-		return;
-	ymm = __raw_xsave_addr(xsave, XFEATURE_YMM);
-	if (!ymm)
-		return;
-	if (!(xsave->header.xfeatures & XFEATURE_MASK_YMM))
-		memset(ymm, 0, xstate_sizes[XFEATURE_YMM]);
-	else if (!memchr_inv(ymm, 0, xstate_sizes[XFEATURE_YMM]))
-		xsave->header.xfeatures &= ~XFEATURE_MASK_YMM;
+	/* YMM and the AVX-512 components are initial exactly when zero. */
+	vectors = fpstate->xfeatures & (XFEATURE_MASK_YMM | XFEATURE_MASK_AVX512);
+	for_each_extended_xfeature(nr, vectors) {
+		vector = __raw_xsave_addr(xsave, nr);
+		if (!vector)
+			continue;
+		if (!(xsave->header.xfeatures & BIT_ULL(nr)))
+			memset(vector, 0, xstate_sizes[nr]);
+		else if (!memchr_inv(vector, 0, xstate_sizes[nr]))
+			xsave->header.xfeatures &= ~BIT_ULL(nr);
+	}
 }
 """))
 

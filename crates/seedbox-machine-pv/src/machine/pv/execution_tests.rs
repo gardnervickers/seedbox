@@ -19,7 +19,7 @@ fn input(name: &str) -> PathBuf {
 #[cfg(target_arch = "x86_64")]
 #[test]
 #[ignore = "requires a native PV worker, current PV Linux kernel and fixture clang/linker"]
-fn native_linux_task_sse_initial_encoding_preserves_live_fp_components() {
+fn native_linux_task_initial_fp_encoding_preserves_live_fp_components() {
     use std::io::Read as _;
 
     let mut machine = PVMachine::from_boot_inputs(
@@ -55,7 +55,7 @@ fn native_linux_task_sse_initial_encoding_preserves_live_fp_components() {
         );
         // Each receipt has already handed the single guest CPU away from its
         // worker. The controller need not have reached its own parking read:
-        // these five saved task banks are already stable at this rendezvous.
+        // these seven saved task banks are already stable at this rendezvous.
         if machine.console.windows(ready.len()).any(|w| w == ready) {
             handed_off = true;
             break;
@@ -90,9 +90,25 @@ fn native_linux_task_sse_initial_encoding_preserves_live_fp_components() {
     }
     // Locate live kernel fpstate allocations, not the fixture's user XRSTOR
     // images: size/user_size/xfeatures metadata precedes aligned XSAVE regs.
-    // Each task owns a distinct noninitial 80-bit x87 value, independent of
-    // whether the SSE canonicalizer removes that task's stale XMM bytes.
-    let mut banks: [Vec<&[u8]>; 5] = std::array::from_fn(|_| Vec::new());
+    // Tasks 0-4 own a distinct noninitial 80-bit x87 value, independent of
+    // whether the SSE canonicalizer removes that task's stale XMM bytes;
+    // tasks 5-6 hold initial x87 state beside a distinct live XMM value.
+    let xmm_marker = |pattern: u8| (0..=255u8).map(move |i| i ^ pattern);
+    let marker = |number: usize| {
+        [
+            0x31 + number as u8,
+            0x71,
+            0x52,
+            0x93,
+            0xb4,
+            0xd5,
+            0xe6,
+            0x80,
+            0x00,
+            0x40,
+        ]
+    };
+    let mut banks: [Vec<&[u8]>; 7] = std::array::from_fn(|_| Vec::new());
     for base in (64..ram.len().saturating_sub(832)).step_by(64) {
         let metadata = &ram[base - 64..base];
         let size = u32::from_le_bytes(metadata[..4].try_into().unwrap()) as usize;
@@ -106,25 +122,17 @@ fn native_linux_task_sse_initial_encoding_preserves_live_fp_components() {
             || features & 7 != 7
             || compacted != ((1 << 63) | features)
             || present & !features != 0
-            || present & 1 == 0
             || bank[528..576].iter().any(|byte| *byte != 0)
         {
             continue;
         }
         for (number, matches) in banks.iter_mut().enumerate() {
-            let marker = [
-                0x31 + number as u8,
-                0x71,
-                0x52,
-                0x93,
-                0xb4,
-                0xd5,
-                0xe6,
-                0x80,
-                0x00,
-                0x40,
-            ];
-            if bank[32..42] == marker {
+            let identified = match number {
+                5 => bank[160..416].iter().copied().eq(xmm_marker(0x5a)),
+                6 => bank[160..416].iter().copied().eq(xmm_marker(0x69)),
+                _ => bank[32..42] == marker(number),
+            };
+            if identified {
                 eprintln!(
                     "task FP bank {number}: RAM offset={base:#x} size={size} present={present:#x} compacted={compacted:#x} MXCSR={:#x}",
                     u32::from_le_bytes(bank[24..28].try_into().unwrap())
@@ -169,6 +177,32 @@ fn native_linux_task_sse_initial_encoding_preserves_live_fp_components() {
     assert!(banks[3][160..416].iter().all(|byte| *byte == 0));
     assert_eq!(word(&banks[4][512..520]) & 4, 4);
     assert_eq!(banks[4][576..832], ymm, "SSE clearing damaged live YMM");
+
+    for (number, pattern) in [(5, 0x5a), (6, 0x69)] {
+        let bank = banks[number];
+        assert_eq!(
+            word(&bank[512..520]) & 3,
+            2,
+            "bank {number}: initial x87 bit"
+        );
+        assert_eq!(bank[..2], [0x7f, 0x03], "bank {number}: initial FCW");
+        assert!(
+            bank[2..24]
+                .iter()
+                .chain(&bank[32..160])
+                .all(|byte| *byte == 0),
+            "bank {number}: initial x87 retains ignored or stale storage"
+        );
+        assert_eq!(
+            mxcsr(bank),
+            0x1f80,
+            "bank {number}: x87 clearing changed MXCSR"
+        );
+        assert!(
+            bank[160..416].iter().copied().eq(xmm_marker(pattern)),
+            "bank {number}: x87 clearing damaged live XMM"
+        );
+    }
 }
 
 /// Charge two syscall-priced work units through bounded clock reads, writing
