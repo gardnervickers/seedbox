@@ -238,7 +238,10 @@ fn hardlink_to_special_file_names_the_entry() {
     b.append_data(&mut h, "run/alias", &[][..]).unwrap();
     let bytes = b.into_inner().unwrap();
     let error = FilesystemArchive::new(bytes).unwrap_err().to_string();
-    assert_eq!(error, "newc hardlink run/alias requires a regular-file target");
+    assert_eq!(
+        error,
+        "newc hardlink run/alias requires a regular-file target"
+    );
 }
 #[test]
 fn unsupported_entry_type_names_the_entry() {
