@@ -86,7 +86,8 @@ impl Report {
     /// decide: the run is incomplete, neither a pass nor a bug.
     pub const UNKNOWN: u8 = 3;
 
-    /// One line for each step that failed, in the order the steps ran.
+    /// One line for each step that failed: the nemesis run, then the
+    /// clients by index, then the heal.
     pub fn failures(&self) -> Vec<String> {
         let nemesis = self.nemesis.iter().map(|e| format!("nemesis run: {e}"));
         let panics = self.panics.iter();

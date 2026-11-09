@@ -135,7 +135,7 @@ from `from`, and a shape delays traffic to `to`; each defaults to the other
 targets. `disk_error` and `disk_latency` entries may narrow the targets to the
 machines with a volume. The world checks what needs the world, such as the
 network's latency floor, when the action is applied, and a refusal fails `run`,
-which leaves the run incomplete.
+which leaves the run incomplete unless a check is violated.
 With `skip_unsupported: true`, the profile instead skips a kind the engine
 refuses as `unsupported` (`preempt` on x86_64 PV) and never draws it again;
 `run` fails if no kind is left, and `unsupported()` lists the kinds skipped. See

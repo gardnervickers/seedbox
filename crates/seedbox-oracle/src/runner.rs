@@ -249,7 +249,7 @@ fn finish(guest: Guest<'_>, report: Report) -> Report {
     }
     let failures = report.failures();
     if !failures.is_empty() {
-        println!("incomplete: {}", failures.join("; "));
+        println!("execution failures: {}", failures.join("; "));
     }
     if let Err(error) = guest.flush() {
         eprintln!("seedbox-oracle: property flush failed: {error}");
