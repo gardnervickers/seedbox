@@ -756,7 +756,10 @@ fn with_overlap(yaml: &str, overlap: &str) -> String {
 #[test]
 fn the_default_overlap_applies_the_same_sequence_as_before_it_existed() {
     // Digests of seeds 0..32 taken on origin/main 0875cc887, before
-    // profiles had `overlap`.
+    // profiles had `overlap`. They hash the serialized actions, so a change
+    // to `Action`'s wire format changes them with no profile change. Re-pin
+    // only after confirming the new digests on the previous commit with the
+    // field omitted.
     let before = [
         (PROFILE, 0x52af_f1af_96f7_7bfe),
         (SINGLE, 0x51c8_b1d5_745c_d916),
@@ -936,6 +939,49 @@ fn ending_a_fault_frees_only_its_own_domain_in_either_order() {
     assert!(
         latency_freed > 0 && crash_freed > 0,
         "{latency_freed} {crash_freed}"
+    );
+}
+
+/// One target, a clock_skew against a lifecycle fault and a clock fault.
+const SKEW: &str = r#"
+start_ns: 1000000000
+end_ns: 18000000000
+interval_ns: 1000000000
+targets: [n1]
+overlap: per_domain
+faults:
+  - {kind: clock_skew, weight: 2, duration_ns: {min: 1000000000, max: 2000000000},
+     max_offset_ns: 5000000000}
+  - {kind: crash, downtime_ns: {min: 500000000, max: 1000000000}}
+  - {kind: clock_drift, duration_ns: {min: 500000000, max: 1000000000}, max_rate_ppb: 1000000}
+"#;
+
+#[test]
+fn ending_a_clock_skew_frees_both_its_clock_and_lifecycle_slots() {
+    // Nothing else holds the lifecycle or the clock slot while a skew does,
+    // so a crash or a drift that starts after a skew ends, and before the
+    // next skew, starts only because that end freed its slot.
+    let (mut crash_after, mut drift_after) = (0, 0);
+    for seed in 0..32 {
+        let events = events(&run_profile(SKEW, seed));
+        for (i, _) in events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !e.starts && e.kind == "clock_skew")
+        {
+            let rest = &events[i + 1..];
+            let window = rest
+                .iter()
+                .position(|e| e.starts && e.kind == "clock_skew")
+                .map_or(rest, |next| &rest[..next]);
+            let starts = |kind: &str| window.iter().any(|e| e.starts && e.kind == kind);
+            crash_after += usize::from(starts("crash"));
+            drift_after += usize::from(starts("clock_drift"));
+        }
+    }
+    assert!(
+        crash_after > 0 && drift_after > 0,
+        "{crash_after} {drift_after}"
     );
 }
 

@@ -566,9 +566,10 @@ impl Fault {
 
     /// The domains this kind holds its target in under
     /// [`Overlap::PerDomain`]. Each kind holds one, except `clock_skew`,
-    /// which also holds [`Domain::Lifecycle`]: a realtime step is a guest
-    /// command, so the engine refuses one on a paused VM and fails one on a
-    /// crashed VM, and refuses a step's heal while its VM is paused.
+    /// which also holds [`Domain::Lifecycle`]: the engine refuses a realtime
+    /// step, or its heal, on a paused VM and fails one on a crashed VM. For
+    /// `pause_process` and `stop` that grouping is deliberately
+    /// conservative, since a step is a guest command.
     /// Every other pair of domains is one the engine takes in either order:
     /// network faults bind to links, and clock_drift, throttle and the
     /// device faults (disk_error, disk_latency, preempt) apply in every VM
