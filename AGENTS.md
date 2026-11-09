@@ -28,7 +28,8 @@ We do not need to support every possible application. If someone intentionally t
   `seedbox-engine-protocol` owns wire/evidence types, not policy. `seedbox-artifacts`
   owns offline data; keep it independent of core, hypervisors, Bollard and Tokio.
 - New crates inherit workspace version/edition/publish; shared dependencies belong
-  in `[workspace.dependencies]`. Update `Cargo.lock` for dependency changes.
+  in `[workspace.dependencies]`. Update `Cargo.lock` for dependency changes, and
+  `harness/acceptance/images/{profile,properties}/Cargo.lock` when their graph changes.
 
 ## Runtime and determinism
 
