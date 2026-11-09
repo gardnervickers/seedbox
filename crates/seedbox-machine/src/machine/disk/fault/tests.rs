@@ -222,6 +222,55 @@ fn corrupt_replaces_one_seeded_sector_of_read_data_or_stored_writes() {
     );
 }
 
+/// Corruption needs data, so `any` selects reads and writes only: a flush
+/// neither counts nor draws, and a stacked flush fault still fails it.
+#[test]
+fn corrupt_never_selects_a_flush() {
+    let corrupted = |flushed: bool| {
+        let mut store = Store::zeroed(64).unwrap();
+        for sector in 0..4 {
+            store.write(sector, &[sector as u8 + 1; SECTOR]).unwrap();
+        }
+        let mut faults = DiskFaults::new(0);
+        faults
+            .install(
+                1,
+                11,
+                error(DiskOp::Any, 1_000_000, DiskEffect::Corrupt, DiskScope::All),
+            )
+            .unwrap();
+        faults
+            .install(
+                2,
+                12,
+                error(DiskOp::Flush, 1_000_000, DiskEffect::Eio, DiskScope::All),
+            )
+            .unwrap();
+        if flushed {
+            let completion = run(&mut faults, &mut store, &mut flush());
+            assert_eq!(completion.status, STATUS_IOERR, "the flush fault acts");
+        }
+        let mut buffers = read(0, 4);
+        assert_eq!(run(&mut faults, &mut store, &mut buffers).status, STATUS_OK);
+        let changed: Vec<_> = (0..4)
+            .filter(|&s| buffers.writable[s * SECTOR..(s + 1) * SECTOR] != [s as u8 + 1; SECTOR])
+            .collect();
+        (changed, faults.heal(1).unwrap())
+    };
+    let (changed, counts) = corrupted(true);
+    assert_eq!(changed.len(), 1, "exactly one sector replaced");
+    assert_eq!(
+        counts,
+        FaultCounts {
+            matched: 1,
+            affected: 1
+        },
+        "only the read matched"
+    );
+    // The flush left the corrupt fault's stream where it was.
+    assert_eq!(corrupted(false), (changed, counts));
+}
+
 #[test]
 fn data_scope_spares_static_ext4_metadata_and_unformatted_disks() {
     let mut store = Store::zeroed(65536 * 8).unwrap();

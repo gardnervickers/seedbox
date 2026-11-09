@@ -283,6 +283,10 @@ impl DiskFaults {
             if !selects(op, request.kind) {
                 continue;
             }
+            // Corruption needs data, so `any` means reads and writes.
+            if effect == DiskEffect::Corrupt && request.kind == Kind::Flush {
+                continue;
+            }
             if scope == DiskScope::Data {
                 let layout = layout.get_or_insert_with(|| ext4::layout(store));
                 // Unformatted disks have no data yet; flushes have no sectors.
