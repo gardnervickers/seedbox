@@ -148,6 +148,21 @@ fn entries_are_refused_with_their_actions_own_errors() {
         "fault profile partition: from needs a machine other than db1"
     );
     with(json!({"kind": "partition", "duration_ns": range, "from": ["db1", "client"]})).unwrap();
+    // Narrowed to the targets that have a far side, a `from` may name a target.
+    with(json!({"kind": "partition", "duration_ns": range, "from": ["db1"], "targets": ["db2", "db3"]}))
+        .unwrap();
+    assert_eq!(
+        with(json!({"kind": "partition", "duration_ns": range, "targets": ["db9"]}))
+            .unwrap_err()
+            .0,
+        "fault profile partition: targets must be profile targets, not \"db9\""
+    );
+    assert_eq!(
+        with(json!({"kind": "partition", "duration_ns": range, "targets": ["db2", "db2"]}))
+            .unwrap_err()
+            .0,
+        "fault profile partition: targets must be distinct"
+    );
     assert_eq!(
         with(
             json!({"kind": "disk_error", "request": "write", "ppm": 10, "duration_ns": range,
