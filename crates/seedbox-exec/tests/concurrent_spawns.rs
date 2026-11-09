@@ -10,7 +10,8 @@
 //! pipe came from a spawn in flight on another thread: on macOS std creates a
 //! pipe and marks it close-on-exec in a second call, and a fork in between
 //! copies it. If the copy is that spawn's exec-status write end, the spawn
-//! never returns; the containment bound below turns that into a failure.
+//! never returns; the containment bound below turns that into a failure, and
+//! a failure ends the process rather than waiting for any spawn.
 //!
 //! No libtest harness: the binary is also the spawned child ([`CHILD`]).
 use std::{
@@ -26,7 +27,7 @@ use std::{
         },
     },
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{mpsc, Barrier, Mutex},
+    sync::{mpsc, Barrier, Mutex, PoisonError},
     thread,
     time::{Duration, Instant},
 };
@@ -127,10 +128,31 @@ fn foreign(spawned: &Spawned, inherited: &BTreeSet<Pipe>) -> Vec<(RawFd, Pipe)> 
         .collect()
 }
 
-/// One round. Fails on the first foreign pipe or on a spawn outlasting
-/// [`BOUND`]; either way every child is killed first, which also releases
-/// any spawn stuck on a leaked exec-status pipe.
-fn round(round: usize, inherited: &BTreeSet<Pipe>) -> Result<(), String> {
+/// Report `failure` and end the process with libtest's failure status.
+///
+/// Nothing here waits for a spawn thread: two stuck spawns can each be held
+/// by the other's child, and neither child is registered until its spawn
+/// returns. So kill and reap the children registered so far, and exit. The
+/// exit closes every stdin this process still holds, so an unregistered child
+/// reaches EOF and exits too, unless another unregistered child holds a
+/// leaked copy of its stdin.
+fn fail(failure: &str, children: &Mutex<Vec<Child>>) -> ! {
+    // A spawn thread may have panicked while holding the lock.
+    let mut children = children.lock().unwrap_or_else(PoisonError::into_inner);
+    for child in children.iter_mut() {
+        let _ = child.kill();
+    }
+    for child in children.iter_mut() {
+        let _ = child.wait();
+    }
+    eprintln!("{NAME} failed: {failure}");
+    println!("test {NAME} ... FAILED");
+    std::process::exit(101)
+}
+
+/// One round. Fails, through [`fail`], on the first foreign pipe or on a
+/// spawn outlasting [`BOUND`].
+fn round(round: usize, inherited: &BTreeSet<Pipe>) {
     let barrier = Barrier::new(THREADS);
     let children = Mutex::new(Vec::new());
     let (done, results) = mpsc::channel();
@@ -163,31 +185,13 @@ fn round(round: usize, inherited: &BTreeSet<Pipe>) -> Result<(), String> {
                         spawned.len()
                     ))
                 }
-                // A spawn thread panicked; the scope reports it.
-                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                // Every spawn thread has ended and one panicked; the scope
+                // reports it.
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
-            if failure.is_some() {
-                break;
+            if let Some(failure) = failure {
+                fail(&failure, &children);
             }
-        }
-        if let Some(failure) = failure {
-            // Kill until every thread has reported: a stuck spawn returns once
-            // the child holding its status pipe dies, then registers its own.
-            let mut outstanding = THREADS - spawned.len();
-            loop {
-                for child in children.lock().unwrap().iter_mut() {
-                    let _ = child.kill();
-                }
-                if outstanding == 0 {
-                    break;
-                }
-                results.recv().expect("spawn thread");
-                outstanding -= 1;
-            }
-            for mut child in std::mem::take(&mut *children.lock().unwrap()) {
-                let _ = child.wait();
-            }
-            return Err(failure);
         }
         // Close every stdin: the children exit.
         spawned.into_iter().for_each(|spawned| drop(spawned.stdin));
@@ -195,16 +199,13 @@ fn round(round: usize, inherited: &BTreeSet<Pipe>) -> Result<(), String> {
             let status = child.wait().expect("wait");
             assert!(status.success(), "round {round}: child {status}");
         }
-        Ok(())
     })
 }
 
 fn concurrent_spawns_keep_their_pipes() {
     let inherited: BTreeSet<Pipe> = pipes().into_iter().map(|(_, pipe)| pipe).collect();
     for n in 0..ROUNDS {
-        if let Err(failure) = round(n, &inherited) {
-            panic!("{failure}");
-        }
+        round(n, &inherited);
     }
 }
 
