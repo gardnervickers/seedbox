@@ -457,12 +457,16 @@ pub fn portable<C: Commands>(checks: &mut Checks<C>) -> Result<(), String> {
 /// [`std::env::consts::OS`]. A package for another host has only its
 /// formatting checked. Every check runs even after one fails.
 ///
-/// The packages build into one directory under the checkout's own `target/`,
-/// even when `CARGO_TARGET_DIR` names another, and apart from the
-/// workspace's artifacts. `cargo test` runs a package's test targets, never
-/// its program.
+/// The packages build into `standalone-packages` under the suite's
+/// `CARGO_TARGET_DIR` (the checkout's `target` when unset, and a relative
+/// value resolved against the checkout), apart from the workspace's
+/// artifacts. `cargo test` runs a package's test targets, never its program.
 pub fn standalone_packages<C: Commands>(checks: &mut Checks<C>, os: &str) -> bool {
-    let target = checks.root.join("target/standalone-packages");
+    let target = match checks.environment.get("CARGO_TARGET_DIR") {
+        Some(dir) => checks.root.join(dir),
+        None => checks.root.join("target"),
+    };
+    let target = target.join("standalone-packages");
     let target = target.to_string_lossy();
     let mut passed = true;
     for package in STANDALONE_PACKAGES {

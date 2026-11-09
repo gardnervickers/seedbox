@@ -1151,14 +1151,27 @@ fn portable_order_is_single_owned() {
     }
 }
 #[test]
-fn standalone_packages_are_checked_through_their_manifests_in_the_checkout_target() {
+fn standalone_packages_are_checked_through_their_manifests_under_the_target_dir() {
     let t = fixture();
-    let target = t.0.join("target/standalone-packages");
-    let target = target.to_str().unwrap();
-    for os in ["linux", "macos"] {
+    // Unset, absolute and relative (against the checkout) CARGO_TARGET_DIR.
+    let cases = [
+        (None, t.0.join("target/standalone-packages")),
+        (Some("/shared"), "/shared/standalone-packages".into()),
+        (
+            Some("agent/target"),
+            t.0.join("agent/target/standalone-packages"),
+        ),
+    ];
+    for ((dir, target), os) in cases
+        .iter()
+        .flat_map(|case| ["linux", "macos"].map(|os| (case, os)))
+    {
+        let target = target.to_str().unwrap();
         let mut c = checks(&t.0);
-        c.environment
-            .insert("CARGO_TARGET_DIR".into(), "/shared".into());
+        if let Some(dir) = dir {
+            c.environment
+                .insert("CARGO_TARGET_DIR".into(), (*dir).into());
+        }
         assert!(standalone_packages(&mut c, os));
         let jobs: Vec<_> = c
             .commands
@@ -1203,7 +1216,7 @@ fn standalone_packages_are_checked_through_their_manifests_in_the_checkout_targe
             .iter()
             .map(|(name, args)| (name.as_str(), args.clone()))
             .collect();
-        assert_eq!(jobs, expected, "{os}");
+        assert_eq!(jobs, expected, "{os} {dir:?}");
         assert!(c.commands.jobs.iter().all(|j| j.cwd == t.0));
     }
 }
