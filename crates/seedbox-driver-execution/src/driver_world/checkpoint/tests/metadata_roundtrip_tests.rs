@@ -51,7 +51,7 @@ fn tcg_policy_option_survives_envelope_and_descriptor_roundtrip_without_defaulti
         let envelope = read(&path).unwrap();
         assert_eq!(envelope.version, wire::ENVELOPE_VERSION);
         assert_eq!(envelope.inventory.backend_policy(), selected.as_ref());
-        super::super::open(&envelope, limits()).unwrap();
+        super::super::open(&envelope, limits(), root.path()).unwrap();
         crate::driver_world::build::validate_policy_binding(&inventory, &envelope.inventory)
             .unwrap();
         let mut opposite = inventory.clone();
@@ -108,7 +108,7 @@ fn pv_optional_policy_roundtrips_envelope_and_driver_metadata_without_defaulting
         .unwrap();
         let envelope = read(&path).unwrap();
         assert_eq!(envelope.inventory.backend_policy(), selected.as_ref());
-        super::super::open(&envelope, limits()).unwrap();
+        super::super::open(&envelope, limits(), root.path()).unwrap();
         crate::driver_world::build::validate_policy_binding(&inventory, &envelope.inventory)
             .unwrap();
         let mut opposite = inventory.clone();
@@ -170,7 +170,7 @@ fn complete_boot_factory_authority_survives_checkpoint_source_deletion() {
     assert_eq!(retained.sha256, artifact.sha256);
     assert_ne!(retained.artifact, artifact.artifact);
     assert_eq!(fs::read(&retained.artifact).unwrap(), bytes);
-    super::super::open(&envelope, limits()).unwrap();
+    super::super::open(&envelope, limits(), root.path()).unwrap();
 }
 #[test]
 fn distinct_runtime_closure_bytes_are_retained_and_exported_independently() {

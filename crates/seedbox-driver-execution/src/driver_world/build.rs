@@ -201,7 +201,9 @@ fn validate_checkpoint_quantum<S>(
 }
 
 fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
-    let mut envelope = checkpoint::read(path)?;
+    // Only the envelope here: `checkpoint::open` verifies every body, once,
+    // into private copies before anything is decoded.
+    let mut envelope = checkpoint::load(path)?;
     if envelope.state.world.seed != request.seed {
         return Err(bad(
             "Driver checkpoint seed differs; restoration never reseeds a branch",
@@ -244,7 +246,11 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
         .map_err(bad)?;
     // Bind the codec5 controller/latency before extracting a factory runtime
     // or restoring even the first native machine. Saved queues stay in Driver.
-    let retained = checkpoint::open(&envelope, driver_limits(envelope.driver.length)?)?;
+    let retained = checkpoint::open(
+        &envelope,
+        driver_limits(envelope.driver.length)?,
+        &request.output.join(super::NATIVE_SCRATCH),
+    )?;
     validate_checkpoint_quantum(&retained, request.prepared.quantum_ns)?;
     super::controller::resolve(
         &request.prepared.inventory,
@@ -269,7 +275,7 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
     let environments = factory.environments();
     let constructed: Constructed = Arc::new(Mutex::new(VecDeque::new()));
     let ledger = constructed.clone();
-    // Only verified open descriptors accumulate here, not decoded RAM images.
+    // Only verified private copies accumulate here, not decoded RAM images.
     let retained = retained.try_map_snapshots(|file| Ok::<_, Error>(Snapshot::Retained(file)))?;
     let mut names = envelope.state.world.machine_names.iter();
     let native_limits = native_limits(

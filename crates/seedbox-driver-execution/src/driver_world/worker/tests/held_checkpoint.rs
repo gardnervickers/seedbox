@@ -113,7 +113,8 @@ fn drive(worker: &mut Worker<Mock>, observed: &mut Observed, upto: u64) {
     panic!("mock failed to reach its requested deterministic boundary");
 }
 fn restore(envelope: &wire::Checkpoint, workers: usize, output: &Path) -> Worker<Mock> {
-    let decoded = checkpoint::open(envelope, limits())
+    let scratch = tempfile::tempdir().unwrap();
+    let decoded = checkpoint::open(envelope, limits(), scratch.path())
         .unwrap()
         .try_map_snapshots(|file| {
             serde_json::from_reader(file.reader())

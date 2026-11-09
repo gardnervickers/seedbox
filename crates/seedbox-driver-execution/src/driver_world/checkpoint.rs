@@ -311,10 +311,11 @@ fn copy_inventory(inventory: &Inventory, staging: &Path, published: &Path) -> Re
     Ok(retained)
 }
 
-/// Decode service metadata and verify the whole referenced closure before any
+/// Decode and validate the service envelope only. No body is opened or hashed
+/// here: [`open`] verifies the whole referenced closure, once, before any
 /// backend decode or native restore. Service JSON has a finite byte envelope;
 /// the large Driver/native bodies use their own explicit closed codec budgets.
-pub(super) fn read(path: &Path) -> Result<wire::Checkpoint> {
+pub(super) fn load(path: &Path) -> Result<wire::Checkpoint> {
     let file = File::open(path)?;
     if file.metadata()?.len() > wire::MAX_ENVELOPE_BYTES {
         return Err(integrity("Driver service envelope exceeds limit"));
@@ -328,7 +329,14 @@ pub(super) fn read(path: &Path) -> Result<wire::Checkpoint> {
     metadata::validate(&bytes)?;
     let checkpoint: wire::Checkpoint = serde_json::from_slice(&bytes)?;
     checkpoint.validate().map_err(integrity)?;
-    // Verify the entire closure first, including unused future-bootstrap inputs.
+    Ok(checkpoint)
+}
+
+/// The envelope plus a check of every published artifact in place, for tests
+/// that inspect a capture without restoring it.
+#[cfg(test)]
+pub(super) fn read(path: &Path) -> Result<wire::Checkpoint> {
+    let checkpoint = load(path)?;
     for artifact in checkpoint
         .inventory
         .artifacts()
@@ -339,6 +347,50 @@ pub(super) fn read(path: &Path) -> Result<wire::Checkpoint> {
         verified(artifact)?;
     }
     Ok(checkpoint)
+}
+
+/// Stream one published artifact once, from a single descriptor, into `sink`
+/// while hashing exactly the bytes it receives. The caller must not use what
+/// `sink` holds unless this returns `Ok`.
+fn stream_verified(artifact: &Artifact, sink: &mut impl Write) -> Result<()> {
+    artifact.validate().map_err(integrity)?;
+    let file = File::open(&artifact.artifact)?;
+    if file.metadata()?.len() != artifact.length {
+        return Err(integrity("Driver artifact encoded length differs"));
+    }
+    let mut input = file.take(artifact.length.saturating_add(1));
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0; STREAM_CHUNK];
+    let mut count = 0u64;
+    loop {
+        let read = match input.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        };
+        count += read as u64;
+        hash.update(&buffer[..read]);
+        sink.write_all(&buffer[..read])?;
+    }
+    if count != artifact.length || hex::encode(hash.finalize()) != artifact.sha256 {
+        return Err(integrity("Driver artifact SHA-256 differs"));
+    }
+    Ok(())
+}
+const STREAM_CHUNK: usize = 1 << 20;
+
+/// Copy one published body into an unnamed file under `scratch` that only this
+/// process holds, hashing it on the way. The copy, not the published path, is
+/// what any decoder later reads.
+fn private_copy(artifact: &Artifact, scratch: &Path) -> Result<Opened> {
+    let mut file = tempfile::tempfile_in(scratch)?;
+    stream_verified(artifact, &mut file)?;
+    file.rewind()?;
+    Ok(Opened {
+        file,
+        length: artifact.length,
+    })
 }
 
 /// Resolve by typed digest+length, never a mutable index or host-path codec.
@@ -369,17 +421,31 @@ fn validate_machine_names<'a>(
     Ok(())
 }
 
+/// Verify the whole closure, hashing each artifact exactly once, and only then
+/// decode. Factory inputs, including unused future-bootstrap inputs, are
+/// hashed in place. The Driver metadata and every native body are streamed
+/// once into private unnamed files under `scratch` while they are hashed; once
+/// every digest matches, decoding reads those copies and never a published
+/// path, so a later in-place rewrite of the checkpoint cannot reach a decoder.
 pub(super) fn open(
     envelope: &wire::Checkpoint,
     limits: seedbox_driver::driver::DecodeLimits,
+    scratch: &Path,
 ) -> Result<Checkpoint<Opened>> {
     envelope.validate().map_err(integrity)?;
     for artifact in envelope.inventory.artifacts() {
-        verified(artifact)?;
+        stream_verified(artifact, &mut io::sink())?;
     }
-    let mut metadata = verified(&envelope.driver)?;
-    let captured =
-        Checkpoint::read_from(&mut metadata, limits).map_err(|e| integrity(e.to_string()))?;
+    let metadata = private_copy(&envelope.driver, scratch)?;
+    let mut bodies = envelope
+        .machines
+        .iter()
+        .map(|artifact| private_copy(artifact, scratch))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter();
+    // Every digest in the closure has matched: decoding starts here.
+    let captured = Checkpoint::read_from(&mut BufReader::new(metadata.reader()), limits)
+        .map_err(|e| integrity(e.to_string()))?;
     validate_machine_names(
         captured.machine_names().map(|(_, name)| name),
         &envelope.state.world.machine_names,
@@ -396,10 +462,9 @@ pub(super) fn open(
                 "Driver native snapshot reference differs from service inventory",
             ));
         }
-        Ok::<_, Error>(Opened {
-            file: verified(artifact)?.into_inner(),
-            length: artifact.length,
-        })
+        bodies
+            .next()
+            .ok_or_else(|| integrity("missing Driver native snapshot reference"))
     })?;
     if index != envelope.machines.len() {
         return Err(integrity("unused Driver native snapshot inventory"));
@@ -407,9 +472,10 @@ pub(super) fn open(
     Ok(opened)
 }
 
-/// Already verified immutable service artifact. Each reader has an independent
-/// offset (pread), so repeated restores never share a seek cursor. Native RAM
-/// is decoded only inside the Driver's per-machine restore callback.
+/// A verified private copy of one service artifact: an unnamed file that no
+/// path reaches. Each reader has an independent offset (pread), so repeated
+/// restores never share a seek cursor. Native RAM is decoded only inside the
+/// Driver's per-machine restore callback.
 pub(super) struct Opened {
     file: File,
     length: u64,
@@ -447,7 +513,8 @@ fn resolve<S>(
     limits: seedbox_driver::driver::DecodeLimits,
     mut decode: impl FnMut(&Inventory, &mut BufReader<File>) -> Result<S>,
 ) -> Result<Checkpoint<S>> {
-    open(envelope, limits)?
+    let scratch = tempfile::tempdir()?;
+    open(envelope, limits, scratch.path())?
         .try_map_snapshots(|file| decode(&envelope.inventory, &mut BufReader::new(file.file)))
 }
 

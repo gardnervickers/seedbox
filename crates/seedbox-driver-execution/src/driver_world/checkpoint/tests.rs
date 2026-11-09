@@ -472,6 +472,65 @@ fn integrity_and_length_are_verified_before_decoding_any_native_body() {
 }
 
 #[test]
+fn in_place_rewrite_after_load_is_rejected_and_after_open_never_reaches_a_decoder() {
+    let root = tempfile::tempdir().unwrap();
+    let inventory = fixture_inventory(&root.path().join("authority"));
+    let mut driver = driver(1, 2, Arc::default(), Arc::default(), None);
+    let mut state = state(2);
+    let path = capture(
+        &mut driver,
+        Capture {
+            inventory: &inventory,
+            state: &mut state,
+            prepared: false,
+        },
+        root.path(),
+        "saved",
+        publish,
+        encode,
+    )
+    .unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    // The restore path loads only the envelope, so nothing has been hashed yet.
+    let envelope = load(&path).unwrap();
+    let later = &envelope.machines[1];
+    let original = fs::read(&later.artifact).unwrap();
+    let mut changed = original.clone();
+    changed[0] ^= 1;
+    fs::write(&later.artifact, &changed).unwrap();
+    let error = open(&envelope, limits(), scratch.path()).err().unwrap();
+    assert!(error.to_string().contains("SHA-256"));
+    // Once opened, the private copies are what decoders read: rewriting every
+    // published body in place (same inode, same length) changes nothing.
+    fs::write(&later.artifact, &original).unwrap();
+    let opened = open(&envelope, limits(), scratch.path()).unwrap();
+    let mut published = vec![];
+    for artifact in &envelope.machines {
+        let bytes = fs::read(&artifact.artifact).unwrap();
+        let mut changed = bytes.clone();
+        changed[0] ^= 1;
+        fs::write(&artifact.artifact, &changed).unwrap();
+        published.push(bytes);
+    }
+    let mut index = 0;
+    opened
+        .try_map_snapshots(|file| {
+            let mut bytes = vec![];
+            file.reader().read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, published[index]);
+            index += 1;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+    assert_eq!(index, 2);
+    assert_eq!(
+        fs::read_dir(scratch.path()).unwrap().count(),
+        0,
+        "private copies are unnamed"
+    );
+}
+
+#[test]
 fn body_manifest_mismatch_and_unused_entries_are_not_silently_accepted() {
     let root = tempfile::tempdir().unwrap();
     let inventory = fixture_inventory(&root.path().join("authority"));

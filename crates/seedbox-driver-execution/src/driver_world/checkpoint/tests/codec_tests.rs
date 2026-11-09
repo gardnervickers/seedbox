@@ -182,7 +182,7 @@ fn codec_service_descriptor_roundtrip_distinguishes_none_and_some_zero() {
         .unwrap();
         let envelope = read(&path).unwrap();
         envelope.validate().unwrap();
-        let checkpoint = open(&envelope, limits())
+        let checkpoint = open(&envelope, limits(), root.path())
             .unwrap()
             .try_map_snapshots(|file| Ok::<_, Error>(EndSaved::Stored(file)))
             .unwrap();
