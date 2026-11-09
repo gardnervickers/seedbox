@@ -349,10 +349,12 @@ pub(super) fn read(path: &Path) -> Result<wire::Checkpoint> {
     Ok(checkpoint)
 }
 
-/// Stream one published artifact once, from a single descriptor, into `sink`
+const STREAM_CHUNK: usize = 1 << 20;
+
+/// Stream one published artifact once, from a single descriptor, to `sink`
 /// while hashing exactly the bytes it receives. The caller must not use what
-/// `sink` holds unless this returns `Ok`.
-fn stream_verified(artifact: &Artifact, sink: &mut impl Write) -> Result<()> {
+/// `sink` received unless this returns `Ok`.
+fn stream_verified(artifact: &Artifact, mut sink: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
     artifact.validate().map_err(integrity)?;
     let file = File::open(&artifact.artifact)?;
     if file.metadata()?.len() != artifact.length {
@@ -371,22 +373,31 @@ fn stream_verified(artifact: &Artifact, sink: &mut impl Write) -> Result<()> {
         };
         count += read as u64;
         hash.update(&buffer[..read]);
-        sink.write_all(&buffer[..read])?;
+        sink(&buffer[..read])?;
     }
     if count != artifact.length || hex::encode(hash.finalize()) != artifact.sha256 {
         return Err(integrity("Driver artifact SHA-256 differs"));
     }
     Ok(())
 }
-const STREAM_CHUNK: usize = 1 << 20;
 
 /// Copy one published body into an unnamed file under `scratch` that only this
 /// process holds, hashing it on the way. The copy, not the published path, is
-/// what any decoder later reads.
+/// what any decoder later reads. Scratch errors (a full disk, say) name the
+/// artifact and the directory.
 fn private_copy(artifact: &Artifact, scratch: &Path) -> Result<Opened> {
-    let mut file = tempfile::tempfile_in(scratch)?;
-    stream_verified(artifact, &mut file)?;
-    file.rewind()?;
+    let failed = |error: io::Error| {
+        Error::Setup(format!(
+            "private copy of {} in {}: {error}",
+            artifact.artifact,
+            scratch.display()
+        ))
+    };
+    let mut file = tempfile::tempfile_in(scratch).map_err(failed)?;
+    stream_verified(artifact, |bytes| file.write_all(bytes).map_err(failed))?;
+    // `Opened::reader` reads by offset, but test-only `resolve` decodes from
+    // this descriptor's own cursor, so leave it at the start.
+    file.rewind().map_err(failed)?;
     Ok(Opened {
         file,
         length: artifact.length,
@@ -434,7 +445,7 @@ pub(super) fn open(
 ) -> Result<Checkpoint<Opened>> {
     envelope.validate().map_err(integrity)?;
     for artifact in envelope.inventory.artifacts() {
-        stream_verified(artifact, &mut io::sink())?;
+        stream_verified(artifact, |_| Ok(()))?;
     }
     let metadata = private_copy(&envelope.driver, scratch)?;
     let mut bodies = envelope
@@ -462,9 +473,9 @@ pub(super) fn open(
                 "Driver native snapshot reference differs from service inventory",
             ));
         }
-        bodies
-            .next()
-            .ok_or_else(|| integrity("missing Driver native snapshot reference"))
+        bodies.next().ok_or_else(|| {
+            integrity("fewer verified native bodies than Driver snapshot references")
+        })
     })?;
     if index != envelope.machines.len() {
         return Err(integrity("unused Driver native snapshot inventory"));
