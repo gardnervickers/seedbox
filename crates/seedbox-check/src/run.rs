@@ -447,7 +447,58 @@ pub fn portable<C: Commands>(checks: &mut Checks<C>) -> Result<(), String> {
     // seedbox-cli's native_acceptance_projects_round_trip_through_submission_json
     // discovers and validates every workload in the workspace tests above.
     // The public `check` command also probes the host and is not a portable check.
+    timed(checks, "standalone-packages", |checks| {
+        Ok(standalone_packages(checks, std::env::consts::OS))
+    })?;
     Ok(())
+}
+/// Check the formatting, lints and unit tests of every
+/// [`STANDALONE_PACKAGES`] entry through its manifest; `os` is the host's
+/// [`std::env::consts::OS`]. A package for another host has only its
+/// formatting checked. Every check runs even after one fails.
+///
+/// The packages build into one directory under the checkout's own `target/`,
+/// even when `CARGO_TARGET_DIR` names another, and apart from the
+/// workspace's artifacts. `cargo test` runs a package's test targets, never
+/// its program.
+pub fn standalone_packages<C: Commands>(checks: &mut Checks<C>, os: &str) -> bool {
+    let target = checks.root.join("target/standalone-packages");
+    let target = target.to_string_lossy();
+    let mut passed = true;
+    for package in STANDALONE_PACKAGES {
+        let manifest = package.manifest;
+        let name = manifest.trim_end_matches("/Cargo.toml");
+        let cargo = |command: &str, rest: &[&str]| {
+            let mut args = words(&["cargo", command, "--manifest-path", manifest]);
+            args.extend(words(rest));
+            args
+        };
+        passed &= checks.step(&format!("fmt {name}"), cargo("fmt", &["--check"]));
+        if package.hosts == Hosts::Linux && os != "linux" {
+            println!("{name}: clippy and tests need a Linux host; formatting checked only");
+            continue;
+        }
+        passed &= checks.step(
+            &format!("clippy {name}"),
+            cargo(
+                "clippy",
+                &[
+                    "--target-dir",
+                    &target,
+                    "--all-targets",
+                    "--locked",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+            ),
+        );
+        passed &= checks.step(
+            &format!("test {name}"),
+            cargo("test", &["--target-dir", &target, "--locked"]),
+        );
+    }
+    passed
 }
 pub fn machine_suite_runs(suites: &[Suite], environment: &Environment, root: &Path) -> Vec<Job> {
     let mut environment = environment.clone();

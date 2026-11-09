@@ -93,6 +93,8 @@ We do not need to support every possible application. If someone intentionally t
 - Run portable checks in `nix develop`; engine changes also need relevant native
   suites. Portable compiles native cases without running them. Missing requirements
   are blockers. Suite discovery/policy lives in `crates/seedbox-check/src/`.
+  Packages outside the workspace (an image's oracle) go in `STANDALONE_PACKAGES`
+  there, so portable formats, lints and unit-tests them.
 - Application workloads taking minutes (`harness/acceptance/long`, derived and
   determinism cases) use feature `long-application-tests`; only the
   `mac-apps-long`/`linux-apps-long` suites, in no group, run them.

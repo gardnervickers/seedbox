@@ -1123,21 +1123,122 @@ fn portable_order_is_single_owned() {
         .insert("CARGO_TARGET_DIR".into(), "/workspace".into());
     portable(&mut c).unwrap();
     let jobs = &c.commands.jobs;
+    let mut standalone = checks(&t.0);
+    assert!(standalone_packages(&mut standalone, std::env::consts::OS));
     assert_eq!(
         jobs.iter().map(|j| j.name.as_str()).collect::<Vec<_>>(),
         ["shell-discovery", "workspace-tests"]
+            .into_iter()
+            .chain(standalone.commands.jobs.iter().map(|j| j.name.as_str()))
+            .collect::<Vec<_>>()
     );
     assert!(jobs[1].environment.contains_key("CARGO_TARGET_DIR"));
     assert_eq!(
         jobs[1].args,
         strings(&["cargo", "test", "--workspace", "--locked"])
     );
-    let labels = ["shell-syntax", "test-time-policy", "workspace-tests"];
+    let labels = [
+        "shell-syntax",
+        "test-time-policy",
+        "workspace-tests",
+        "standalone-packages",
+    ];
     assert_eq!(c.timings.len(), labels.len());
     for (row, label) in c.timings.iter().zip(labels) {
         assert!(row.starts_with(&format!("timing: portable/{label}: ")));
         assert!(row.contains(" seconds (user "));
         assert!(row.contains(", sys "));
+    }
+}
+#[test]
+fn standalone_packages_are_checked_through_their_manifests_in_the_checkout_target() {
+    let t = fixture();
+    let target = t.0.join("target/standalone-packages");
+    let target = target.to_str().unwrap();
+    for os in ["linux", "macos"] {
+        let mut c = checks(&t.0);
+        c.environment
+            .insert("CARGO_TARGET_DIR".into(), "/shared".into());
+        assert!(standalone_packages(&mut c, os));
+        let jobs: Vec<_> = c
+            .commands
+            .jobs
+            .iter()
+            .map(|j| (j.name.as_str(), j.args.join(" ")))
+            .collect();
+        let profile = "harness/acceptance/images/profile";
+        let properties = "harness/acceptance/images/properties";
+        let mut expected = vec![
+            (
+                format!("fmt {profile}"),
+                format!("cargo fmt --manifest-path {profile}/Cargo.toml --check"),
+            ),
+            (
+                format!("clippy {profile}"),
+                format!("cargo clippy --manifest-path {profile}/Cargo.toml --target-dir {target} --all-targets --locked -- -D warnings"),
+            ),
+            (
+                format!("test {profile}"),
+                format!("cargo test --manifest-path {profile}/Cargo.toml --target-dir {target} --locked"),
+            ),
+            (
+                format!("fmt {properties}"),
+                format!("cargo fmt --manifest-path {properties}/Cargo.toml --check"),
+            ),
+        ];
+        // The property probe is Linux-only: elsewhere only its format.
+        if os == "linux" {
+            expected.extend([
+                (
+                    format!("clippy {properties}"),
+                    format!("cargo clippy --manifest-path {properties}/Cargo.toml --target-dir {target} --all-targets --locked -- -D warnings"),
+                ),
+                (
+                    format!("test {properties}"),
+                    format!("cargo test --manifest-path {properties}/Cargo.toml --target-dir {target} --locked"),
+                ),
+            ]);
+        }
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|(name, args)| (name.as_str(), args.clone()))
+            .collect();
+        assert_eq!(jobs, expected, "{os}");
+        assert!(c.commands.jobs.iter().all(|j| j.cwd == t.0));
+    }
+}
+#[test]
+fn a_failed_standalone_check_fails_portable_without_hiding_the_others() {
+    let t = fixture();
+    let mut c = checks(&t.0);
+    // shell discovery, workspace tests, then the profile oracle's fmt fails.
+    c.commands.replies.extend([
+        Outcome::default(),
+        Outcome::default(),
+        Outcome {
+            code: 1,
+            stdout: String::new(),
+        },
+    ]);
+    portable(&mut c).unwrap();
+    assert!(c.failed);
+    let names: Vec<_> = c.commands.jobs.iter().map(|j| j.name.as_str()).collect();
+    assert_eq!(names[2], "fmt harness/acceptance/images/profile");
+    assert!(names.contains(&"test harness/acceptance/images/profile"));
+    assert!(names.contains(&"fmt harness/acceptance/images/properties"));
+}
+#[test]
+fn standalone_packages_are_their_own_workspaces_in_this_checkout() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for package in STANDALONE_PACKAGES {
+        let manifest = fs::read_to_string(root.join(package.manifest)).unwrap();
+        assert!(
+            manifest.lines().any(|line| line.trim() == "[workspace]"),
+            "{}",
+            package.manifest
+        );
+        let lock = std::path::Path::new(package.manifest).with_file_name("Cargo.lock");
+        assert!(root.join(&lock).is_file(), "{}", lock.display());
     }
 }
 #[test]
