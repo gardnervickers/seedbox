@@ -84,10 +84,13 @@ it names, through the oracle's `World` while the clients run, then heals them.
 before reading each node. The library also has an in-memory `Recorder`, a seeded
 `Rng`, the control socket's `GuestWorld` (which maps the handles it is given to
 the world's own), the standard fault `patterns` (kill/restart, process pauses,
-partitions, crash-all) and the `queue` checker. Each `Checker` turns the history
-and reads into a `Verdict`, evaluated as an `always` property named by the
-checker. An undecided verdict evaluates nothing and the oracle exits 3, which
-marks the run incomplete:
+partitions, crash-all) and the `queue` checker. A pattern's rounds run under a
+`Schedule`, which starts rounds while its `hold` lasts, or `Once`, which runs
+exactly one. Control calls take simulated time, so a `hold` shorter than they
+take starts no round; use `Once` for a fault that must happen. Each `Checker`
+turns the history and reads into a `Verdict`, evaluated as an `always` property
+named by the checker. An undecided verdict evaluates nothing and the oracle
+exits 3, which marks the run incomplete:
 
 ```rust
 impl Checker<Publish, Ack, Stream> for Queue {

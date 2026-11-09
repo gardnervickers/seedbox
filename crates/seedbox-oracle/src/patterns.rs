@@ -2,7 +2,9 @@
 //! restart rounds, process pauses, partition rounds and coordinated power
 //! failures. Every choice is drawn from the scenario's [`Random`] and every
 //! fault still in force is recorded, so [`Nemesis::heal`] undoes it. A
-//! pattern given too few nodes to act on returns an error.
+//! [`Schedule`] repeats a [`Round`] for a span of simulated time, and
+//! [`Once`] runs one exactly once. A pattern given too few nodes to act on
+//! returns an error.
 use crate::{control::Action, random::RandomExt, Error, Nemesis, Pace, Random, World};
 use std::{collections::BTreeSet, time::Duration};
 
@@ -202,7 +204,8 @@ impl InForce {
 
 /// When a schedule injects faults: after `warm_up` of fault-free workload,
 /// rounds for `hold`, then `tail` of fault-free workload. Durations are
-/// simulated time.
+/// simulated time. `hold` bounds when rounds start, not how many run; see
+/// [`Schedule`] for why a short one can run none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Phases {
     pub warm_up: Duration,
@@ -221,7 +224,16 @@ pub trait Round {
     ) -> Result<(), Error>;
 }
 
-/// A [`Nemesis`] that runs one [`Round`] pattern over [`Phases`].
+/// A [`Nemesis`] that runs one [`Round`] pattern over [`Phases`]: it reads
+/// the world's clock when the warm-up ends, then starts a round whenever
+/// less than `hold` has passed since. A round is never cut short, so the
+/// last one can run past `hold`.
+///
+/// Every [`World`] call takes simulated time when the world keeps running
+/// meanwhile, as [`GuestWorld`](crate::GuestWorld)'s control calls do, and
+/// the clock reads count toward `hold`. A hold shorter than those calls
+/// therefore starts no round, and the run applies no fault. Use [`Once`] for
+/// a pattern that must run exactly once.
 pub struct Schedule<R> {
     pub phases: Phases,
     pub round: R,
@@ -260,6 +272,47 @@ impl<R: Round> Nemesis for Schedule<R> {
                 .round(&mut self.faults, world, self.pace.as_mut(), random)?;
         }
         self.pace.wait(world, self.phases.tail)
+    }
+
+    fn heal(&mut self, world: &mut dyn World) -> Result<(), Error> {
+        self.faults.heal(world)
+    }
+}
+
+/// A [`Nemesis`] that runs exactly one [`Round`] after `warm_up`, however
+/// long the round's control calls take. The workload ends when the round
+/// does, so its own last wait is the fault-free tail. [`Nemesis::heal`]
+/// undoes whatever the round left in force, also after a round that failed
+/// partway.
+pub struct Once<R> {
+    pub warm_up: Duration,
+    pub round: R,
+    pub pace: Box<dyn Pace>,
+    faults: InForce,
+}
+
+impl<R: Round> Once<R> {
+    pub fn new(warm_up: Duration, round: R) -> Self {
+        Self {
+            warm_up,
+            round,
+            pace: Box::new(Sleep),
+            faults: InForce::default(),
+        }
+    }
+
+    /// Wait through `pace` instead of the world's sleep.
+    pub fn with_pace(mut self, pace: impl Pace + 'static) -> Self {
+        self.pace = Box::new(pace);
+        self
+    }
+}
+
+impl<R: Round> Nemesis for Once<R> {
+    fn run(&mut self, world: &mut dyn World, random: &mut dyn Random) -> Result<(), Error> {
+        self.pace.wait(world, self.warm_up)?;
+        self.round
+            .round(&mut self.faults, world, self.pace.as_mut(), random)
     }
 
     fn heal(&mut self, world: &mut dyn World) -> Result<(), Error> {
