@@ -213,3 +213,25 @@ fn pipe() -> io::Result<(fs::File, fs::File)> {
     }
     Ok(pair)
 }
+
+#[cfg(all(test, not(target_os = "linux")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_second_guard_holding_child_is_refused_where_spawns_are_serialized() {
+        const { assert!(seedbox_exec::SERIALIZED_SPAWNS) };
+        let mut held = HeldChildren::new();
+        held.hold(Spawn::GuardWhileHeld).unwrap();
+        // The held spawn keeps the shared guard; a second hold would wait on
+        // the spawn mutex for ever, so it is refused without taking either.
+        assert!(seedbox_exec::try_writing().is_none());
+        let error = held.hold(Spawn::GuardWhileHeld).unwrap_err();
+        assert!(error.to_string().contains("would deadlock"), "{error}");
+        assert_eq!(held.len(), 1);
+        held.release().unwrap();
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        assert!(status(&mut command).unwrap().success());
+    }
+}

@@ -252,6 +252,7 @@ mod tests {
         );
         assert!(try_writing().is_some(), "spawn_with released its guard");
         nesting_panics_before_it_can_deadlock();
+        a_panic_inside_spawn_with_leaves_spawns_working();
     }
 
     /// Part of the single test above: it must not overlap other lock users.
@@ -285,5 +286,34 @@ mod tests {
         // Unwinding released every guard and the per-thread count.
         drop(writing());
         assert!(try_spawning().is_some());
+    }
+
+    /// Part of the single test above, and last: it leaves the spawn mutex
+    /// poisoned where spawns are serialized.
+    fn a_panic_inside_spawn_with_leaves_spawns_working() {
+        let panicked = std::panic::catch_unwind(|| {
+            let _ = spawn_with(|| -> io::Result<()> { panic!("the spawner panicked") });
+        });
+        assert!(panicked.is_err(), "the panic reached the caller");
+        assert_eq!(
+            SPAWN.is_poisoned(),
+            SERIALIZED_SPAWNS,
+            "the panic poisoned the spawn mutex where it was held"
+        );
+        assert!(
+            !matches!(SPAWN.try_lock(), Err(TryLockError::WouldBlock)),
+            "unwinding released the spawn mutex"
+        );
+        // Unwinding released the shared guard and the per-thread count.
+        drop(writing());
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        assert!(spawn(&mut command).unwrap().wait().unwrap().success());
+        let serialized =
+            spawn_with(|| Ok(matches!(SPAWN.try_lock(), Err(TryLockError::WouldBlock)))).unwrap();
+        assert_eq!(
+            serialized, SERIALIZED_SPAWNS,
+            "a poisoned mutex still serializes"
+        );
     }
 }
