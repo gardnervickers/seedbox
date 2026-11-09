@@ -8,3 +8,8 @@ publish.workspace = true
 # Deliberately dependency-free: production crates, worker-only machine crates,
 # the standalone arm64 workspace and test support all depend on it.
 [dependencies]
+
+# Re-executes itself as the spawned child, so it owns its `main`.
+[[test]]
+name = "concurrent_spawns"
+harness = false
