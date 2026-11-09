@@ -46,9 +46,14 @@ impl Guest<'_> {
 /// 4. Check, evaluate each decided verdict's property (valid holds, invalid
 ///    violates; unknown evaluates nothing), flush.
 ///
-/// Nemesis and heal failures are reported on stderr; the run still reads
-/// and checks, so they surface as unknown verdicts when they cost evidence,
-/// and [`Report::exit_code`] then reports the run incomplete.
+/// A failed [`crate::Nemesis::run`] does not end the run: the clients
+/// stop, and the heal, final reads and checks run as they would otherwise.
+/// The [`Report`] keeps that error, a failed heal's error and each client
+/// thread's panic beside the verdicts, and the runner prints a line naming
+/// them. Any of them makes [`Report::exit_code`] report the run incomplete
+/// unless a check was violated, whatever the verdicts say: the faults the
+/// scenario describes did not all happen or did not all end, or a client
+/// stopped early.
 pub fn run<S: Scenario>(scenario: &mut S, world: &mut dyn World, random: &mut Rng) -> Report {
     drive_scenario(scenario, world, random, Guest::Process)
 }
@@ -73,13 +78,20 @@ fn drive_scenario<S: Scenario>(
     if let Err(error) = scenario.setup(world) {
         warn("setup", &error);
         let verdicts = unknown(&checkers, &format!("setup failed: {error}"));
-        return finish(guest, verdicts);
+        return finish(
+            guest,
+            Report {
+                verdicts,
+                ..Report::default()
+            },
+        );
     }
     let history = scenario.history();
     let clients = scenario.clients();
     let processes = clients.len() as u64;
     let stop = AtomicBool::new(false);
     let mut nemesis = scenario.nemesis();
+    let mut report = Report::default();
     std::thread::scope(|scope| {
         let workers: Vec<_> = clients
             .into_iter()
@@ -91,25 +103,37 @@ fn drive_scenario<S: Scenario>(
             .collect();
         if let Err(error) = nemesis.run(world, random) {
             warn("nemesis", &error);
+            report.nemesis = Some(error);
         }
         stop.store(true, Ordering::SeqCst);
-        for worker in workers {
-            if worker.join().is_err() {
-                warn("client", &Error("a client thread panicked".into()));
+        for (client, worker) in workers.into_iter().enumerate() {
+            if let Err(panic) = worker.join() {
+                report.panics.push((client, panic_message(panic.as_ref())));
             }
         }
     });
     if let Err(error) = nemesis.heal(world) {
         warn("heal", &error);
+        report.heal = Some(error);
     }
     let mut reader = scenario.final_read();
     let reads = final_reads(reader.as_mut(), world);
     let records = history.records();
-    let verdicts = checkers
+    report.verdicts = checkers
         .iter()
         .map(|checker| (checker.name().to_owned(), checker.check(&records, &reads)))
         .collect();
-    finish(guest, verdicts)
+    finish(guest, report)
+}
+
+/// A panic's message, when it has one; the panic hook has already printed it
+/// with its location.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    match (panic.downcast_ref::<&str>(), panic.downcast_ref::<String>()) {
+        (Some(message), _) => (*message).to_owned(),
+        (_, Some(message)) => message.clone(),
+        _ => "(no message)".to_owned(),
+    }
 }
 
 /// One client's workload: generate, invoke and record until stopped. After
@@ -213,19 +237,24 @@ fn warn(phase: &str, error: &Error) {
 }
 
 /// Evaluate each decided checker's property and flush, so the verdicts are
-/// part of the run's results before the oracle exits.
-fn finish(guest: Guest<'_>, verdicts: Vec<(String, Verdict)>) -> Report {
-    for (name, verdict) in &verdicts {
+/// part of the run's results before the oracle exits. Print each verdict,
+/// then one line naming the steps that failed, if any did.
+fn finish(guest: Guest<'_>, report: Report) -> Report {
+    for (name, verdict) in &report.verdicts {
         println!("{name}: {:?}: {}", verdict.validity, verdict.summary);
         if let Some(condition) = verdict.condition() {
             let details = json!({"summary": verdict.summary, "details": verdict.details});
             guest.always(name, condition, details);
         }
     }
+    let failures = report.failures();
+    if !failures.is_empty() {
+        println!("incomplete: {}", failures.join("; "));
+    }
     if let Err(error) = guest.flush() {
         eprintln!("seedbox-oracle: property flush failed: {error}");
     }
-    Report { verdicts }
+    report
 }
 
 /// A client type for scenarios whose operations happen elsewhere and

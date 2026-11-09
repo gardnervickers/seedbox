@@ -16,7 +16,8 @@
 //! named by the checker, through `seedbox-guest`: valid holds and invalid
 //! violates it, which fails the run. An unknown verdict evaluates nothing.
 //! The oracle then exits with [`Report::exit_code`]: 1 when a check was
-//! violated, and 3, incomplete, when one could not decide.
+//! violated, and otherwise 3, incomplete, when one could not decide or the
+//! nemesis, its heal or a client failed.
 //!
 //! The library supplies the [`run`]ner, the in-memory [`Recorder`] history,
 //! the seeded [`Rng`], the guest control socket's [`GuestWorld`], Jepsen's

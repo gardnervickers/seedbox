@@ -60,27 +60,51 @@ pub trait Scenario {
 /// A scenario's checkers, each judging the same history and final reads.
 pub type Checkers<O, V, R> = Vec<Box<dyn Checker<O, V, R>>>;
 
-/// What a scenario run concluded, one verdict per checker in order.
-#[derive(Clone, Debug, PartialEq)]
+/// What a scenario run concluded: one verdict per checker in order, and
+/// how the run's own steps went. A failed step does not end the run (the
+/// runner still heals, reads and checks), but it leaves the run incomplete:
+/// the faults the scenario describes did not all happen or did not all end,
+/// or a client stopped early.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Report {
     pub verdicts: Vec<(String, Verdict)>,
+    /// [`Nemesis::run`]'s error, if it returned one.
+    pub nemesis: Option<Error>,
+    /// [`Nemesis::heal`]'s error, if it returned one.
+    pub heal: Option<Error>,
+    /// Each client thread that panicked: its index in
+    /// [`Scenario::clients`] and the panic's message.
+    pub panics: Vec<(usize, String)>,
 }
 
 impl Report {
-    /// Every check held.
+    /// Every check held and every step ran.
     pub const OK: u8 = 0;
     /// Some check was violated.
     pub const INVALID: u8 = 1;
-    /// No check was violated, but some could not decide: the run is
-    /// incomplete, neither a pass nor a bug.
+    /// No check was violated, but a step failed or some check could not
+    /// decide: the run is incomplete, neither a pass nor a bug.
     pub const UNKNOWN: u8 = 3;
 
-    /// The oracle's exit status for this report.
+    /// One line for each step that failed, in the order the steps ran.
+    pub fn failures(&self) -> Vec<String> {
+        let nemesis = self.nemesis.iter().map(|e| format!("nemesis run: {e}"));
+        let panics = self.panics.iter();
+        let panics = panics.map(|(client, message)| format!("client {client} panicked: {message}"));
+        let heal = self.heal.iter().map(|e| format!("nemesis heal: {e}"));
+        nemesis.chain(panics).chain(heal).collect()
+    }
+
+    /// The oracle's exit status for this report: [`Report::INVALID`] when a
+    /// check was violated; otherwise [`Report::UNKNOWN`] when a step failed,
+    /// a check could not decide or there were no checks; otherwise
+    /// [`Report::OK`].
     pub fn exit_code(&self) -> u8 {
         let has = |v: Validity| self.verdicts.iter().any(|(_, d)| d.validity == v);
+        let failed = self.nemesis.is_some() || self.heal.is_some() || !self.panics.is_empty();
         if has(Validity::Invalid) {
             Self::INVALID
-        } else if has(Validity::Unknown) || self.verdicts.is_empty() {
+        } else if failed || has(Validity::Unknown) || self.verdicts.is_empty() {
             Self::UNKNOWN
         } else {
             Self::OK

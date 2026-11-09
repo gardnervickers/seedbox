@@ -35,10 +35,12 @@ impl Shared {
 }
 
 /// Appends `OPS` unique values `process * 1000 + n`, then ends its workload.
+/// If `panics`, it panics after its last append takes effect.
 struct Appender {
     shared: Arc<Shared>,
     id: u64,
     sent: u64,
+    panics: bool,
 }
 
 impl Client for Appender {
@@ -67,6 +69,7 @@ impl Client for Appender {
         let length = cluster.logs[0].len();
         drop(cluster);
         self.shared.progress.notify_all();
+        assert!(!self.panics || self.sent < OPS, "client {} broke", self.id);
         // Every third op times out after taking effect.
         if op.is_multiple_of(3) {
             Completion::Info("timeout".into())
@@ -128,14 +131,20 @@ impl World for FakeWorld {
     }
 }
 
-/// Cuts n3 off, waits, and leaves the cut for `heal`.
+/// Cuts n3 off, waits, and leaves the cut for `heal`. With `fail_run` it
+/// then pauses n1, and with `fail_heal` resumes n1 after healing the cut;
+/// the world refuses both.
 #[derive(Default)]
-struct Isolate(crate::patterns::InForce);
+struct Isolate {
+    in_force: crate::patterns::InForce,
+    fail_run: bool,
+    fail_heal: bool,
+}
 
 impl Nemesis for Isolate {
     fn run(&mut self, world: &mut dyn World, _: &mut dyn Random) -> Result<(), Error> {
-        let handle = self.0.name("isolate");
-        self.0.apply(
+        let handle = self.in_force.name("isolate");
+        self.in_force.apply(
             world,
             &Action::Partition {
                 handle,
@@ -143,10 +152,22 @@ impl Nemesis for Isolate {
                 right: vec!["n1".into(), "n2".into()],
             },
         )?;
-        world.sleep(Duration::from_secs(1))
+        world.sleep(Duration::from_secs(1))?;
+        if self.fail_run {
+            world.apply(&Action::Pause {
+                machine: "n1".into(),
+            })?;
+        }
+        Ok(())
     }
     fn heal(&mut self, world: &mut dyn World) -> Result<(), Error> {
-        self.0.heal(world)
+        self.in_force.heal(world)?;
+        if self.fail_heal {
+            world.apply(&Action::Resume {
+                machine: "n1".into(),
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -209,10 +230,22 @@ impl Checker<u64, usize, Vec<u64>> for Survives {
     }
 }
 
+/// What goes wrong in a run of [`Toy`].
+#[derive(Clone, Copy, Default)]
+struct Faults {
+    /// A heal does not repair the cut replica, so the check is violated.
+    lossy: bool,
+    fail_setup: bool,
+    fail_run: bool,
+    fail_heal: bool,
+    /// Client 1 panics in its last operation.
+    panic: bool,
+}
+
 struct Toy {
     shared: Arc<Shared>,
     history: Arc<Recorder<u64, usize>>,
-    fail_setup: bool,
+    faults: Faults,
 }
 
 impl Scenario for Toy {
@@ -224,7 +257,7 @@ impl Scenario for Toy {
         "toy-log"
     }
     fn setup(&mut self, _: &mut dyn World) -> Result<(), Error> {
-        if self.fail_setup {
+        if self.faults.fail_setup {
             return Err("no leader".into());
         }
         Ok(())
@@ -238,11 +271,16 @@ impl Scenario for Toy {
                 shared: self.shared.clone(),
                 id,
                 sent: 0,
+                panics: self.faults.panic && id == 1,
             })
             .collect()
     }
     fn nemesis(&mut self) -> Box<dyn Nemesis> {
-        Box::new(Isolate::default())
+        Box::new(Isolate {
+            fail_run: self.faults.fail_run,
+            fail_heal: self.faults.fail_heal,
+            ..Isolate::default()
+        })
     }
     fn final_read(&mut self) -> Box<dyn FinalRead<Read = Vec<u64>>> {
         Box::new(Reads(self.shared.clone()))
@@ -252,14 +290,14 @@ impl Scenario for Toy {
     }
 }
 
-fn outcome(lossy: bool, fail_setup: bool) -> (Report, FakeWorld, Vec<Record<u64, usize>>) {
+fn outcome(faults: Faults) -> (Report, FakeWorld, Vec<Record<u64, usize>>) {
     let shared = Arc::new(Shared::default());
-    shared.lock().lossy = lossy;
+    shared.lock().lossy = faults.lossy;
     let history = Arc::new(Recorder::with_clock(|| 0));
     let mut scenario = Toy {
         shared: shared.clone(),
         history: history.clone(),
-        fail_setup,
+        faults,
     };
     let mut world = FakeWorld {
         shared,
@@ -273,8 +311,9 @@ fn outcome(lossy: bool, fail_setup: bool) -> (Report, FakeWorld, Vec<Record<u64,
 
 #[test]
 fn clients_run_concurrently_until_the_nemesis_returns_then_everything_heals() {
-    let (report, world, records) = outcome(false, false);
+    let (report, world, records) = outcome(Faults::default());
     assert_eq!(report.exit_code(), Report::OK, "{report:?}");
+    assert!(report.failures().is_empty(), "{report:?}");
     assert_eq!(report.verdicts[0].0, "appends survive on every replica");
     assert_eq!(report.verdicts[0].1.details["invoked"], 2 * OPS);
     let [Action::Partition { handle, .. }, Action::Heal { handle: healed }] = &world.applied[..]
@@ -297,17 +336,140 @@ fn clients_run_concurrently_until_the_nemesis_returns_then_everything_heals() {
 
 #[test]
 fn appends_a_heal_cannot_repair_are_a_violation() {
-    let (report, _, _) = outcome(true, false);
+    let (report, _, _) = outcome(Faults {
+        lossy: true,
+        ..Faults::default()
+    });
     assert_eq!(report.exit_code(), Report::INVALID);
     assert_eq!(report.verdicts[0].1.condition(), Some(false));
 }
 
 #[test]
 fn a_failed_setup_leaves_every_verdict_unknown() {
-    let (report, world, records) = outcome(false, true);
+    let (report, world, records) = outcome(Faults {
+        fail_setup: true,
+        ..Faults::default()
+    });
     assert_eq!(report.exit_code(), Report::UNKNOWN);
     assert_eq!(report.verdicts[0].1.summary, "setup failed: no leader");
     assert!(world.applied.is_empty() && records.is_empty());
+}
+
+fn pause() -> Action {
+    Action::Pause {
+        machine: "n1".into(),
+    }
+}
+
+fn resume() -> Action {
+    Action::Resume {
+        machine: "n1".into(),
+    }
+}
+
+#[test]
+fn a_failed_nemesis_run_still_heals_reads_and_checks_but_is_incomplete() {
+    let (report, world, records) = outcome(Faults {
+        fail_run: true,
+        ..Faults::default()
+    });
+    // The cut is healed after the refused pause, and the final reads see
+    // every append on every replica.
+    let [Action::Partition { handle, .. }, refused, Action::Heal { handle: healed }] =
+        &world.applied[..]
+    else {
+        panic!("{:?}", world.applied);
+    };
+    assert_eq!((handle, refused), (healed, &pause()));
+    assert_eq!(records.len() as u64, 4 * OPS);
+    assert_eq!(report.verdicts[0].1.validity, Validity::Valid, "{report:?}");
+    assert_eq!(report.verdicts[0].1.details["invoked"], 2 * OPS);
+    assert_eq!(report.nemesis, Some(Error("unsupported pause".into())));
+    assert_eq!((&report.heal, report.panics.len()), (&None, 0));
+    assert_eq!(report.failures(), ["nemesis run: unsupported pause"]);
+    assert_eq!(report.exit_code(), Report::UNKNOWN);
+}
+
+#[test]
+fn a_failed_heal_is_incomplete() {
+    let (report, world, _) = outcome(Faults {
+        fail_heal: true,
+        ..Faults::default()
+    });
+    assert_eq!(world.applied.last(), Some(&resume()));
+    assert_eq!(report.verdicts[0].1.validity, Validity::Valid, "{report:?}");
+    assert_eq!(report.nemesis, None);
+    assert_eq!(report.failures(), ["nemesis heal: unsupported resume"]);
+    assert_eq!(report.exit_code(), Report::UNKNOWN);
+}
+
+#[test]
+fn a_failed_run_and_heal_are_both_reported() {
+    let (report, world, _) = outcome(Faults {
+        fail_run: true,
+        fail_heal: true,
+        ..Faults::default()
+    });
+    assert!(matches!(
+        &world.applied[..],
+        [Action::Partition { .. }, _, Action::Heal { .. }, _]
+    ));
+    assert_eq!(report.verdicts[0].1.validity, Validity::Valid, "{report:?}");
+    assert_eq!(
+        report.failures(),
+        [
+            "nemesis run: unsupported pause",
+            "nemesis heal: unsupported resume"
+        ]
+    );
+    assert_eq!(report.exit_code(), Report::UNKNOWN);
+}
+
+#[test]
+fn a_panicked_client_is_incomplete() {
+    let (report, world, _) = outcome(Faults {
+        panic: true,
+        ..Faults::default()
+    });
+    assert!(matches!(
+        &world.applied[..],
+        [Action::Partition { .. }, Action::Heal { .. }]
+    ));
+    assert_eq!(report.verdicts[0].1.validity, Validity::Valid, "{report:?}");
+    assert_eq!(report.panics, [(1, "client 1 broke".to_string())]);
+    assert_eq!(report.failures(), ["client 1 panicked: client 1 broke"]);
+    assert_eq!(report.exit_code(), Report::UNKNOWN);
+}
+
+#[test]
+fn a_violated_check_outranks_every_failure() {
+    for faults in [
+        Faults {
+            fail_run: true,
+            ..Faults::default()
+        },
+        Faults {
+            fail_heal: true,
+            ..Faults::default()
+        },
+        Faults {
+            fail_run: true,
+            fail_heal: true,
+            ..Faults::default()
+        },
+        Faults {
+            panic: true,
+            ..Faults::default()
+        },
+    ] {
+        let (report, _, _) = outcome(Faults {
+            lossy: true,
+            ..faults
+        });
+        assert!(!report.failures().is_empty(), "{report:?}");
+        assert_eq!(report.verdicts[0].1.validity, Validity::Invalid);
+        assert_eq!(report.exit_code(), Report::INVALID, "{report:?}");
+    }
 }
 
 /// Views converge after a few polls; one node exited and needs a restart.
@@ -438,7 +600,7 @@ fn verdicts_are_reported_as_properties_and_flushed() {
     let mut scenario = Toy {
         shared: shared.clone(),
         history: Arc::new(Recorder::with_clock(|| 0)),
-        fail_setup: false,
+        faults: Faults::default(),
     };
     let mut world = FakeWorld {
         shared,
