@@ -135,3 +135,26 @@ With `skip_unsupported: true`, the profile instead skips a kind the engine
 refuses as `unsupported` (`preempt` on x86_64 PV) and never draws it again;
 `run` fails if no kind is left, and `unsupported()` lists the kinds skipped. See
 [the acceptance oracle](../harness/acceptance/images/profile/src/main.rs).
+
+By default (`overlap: per_target`) a target holds one fault of the profile at a
+time, whatever its kind. With `overlap: per_domain`, a target is free for an
+entry while no fault of the same exclusion domain holds it, so faults of
+different domains overlap on one machine:
+
+| Domain | Kinds |
+|---|---|
+| lifecycle | `crash`, `stop`, `pause`, `pause_process`, and `clock_skew` |
+| network | `partition`, `shape` |
+| clock | `clock_skew`, `clock_drift` |
+| disk error | `disk_error` |
+| disk latency | `disk_latency` |
+| scheduler | `throttle`, `preempt` |
+
+`clock_skew` holds both the clock and the lifecycle domain, because the engine
+refuses a realtime step, or its heal, on a paused VM, and fails one on a crashed
+VM. Ending a fault frees only its own domains on its target: a disk latency that
+ends during a crash's downtime lets another latency start before the reboot, but
+no second crash. The profile still draws every start from one weighted stream,
+with one `max_faults` budget. Either setting fixes the applied sequence for a
+seed, and `per_target` gives the sequence profiles gave before the field
+existed.

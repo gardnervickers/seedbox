@@ -218,3 +218,105 @@ fn profile_bounds_are_explicit() {
         assert!(message.contains(error), "{message}");
     }
 }
+
+#[test]
+fn overlap_defaults_to_per_target_and_round_trips_either_way() {
+    // Omitted or spelled out, the default is the same profile, and it is
+    // written without the field.
+    let omitted = documented();
+    assert_eq!(omitted.overlap, Overlap::PerTarget);
+    let spelled: Profile =
+        serde_yaml_ng::from_str(&format!("{DOCUMENTED}overlap: per_target\n")).unwrap();
+    assert_eq!(spelled.overlap, Overlap::PerTarget);
+    let wire = serde_json::to_value(&spelled).unwrap();
+    assert!(wire.get("overlap").is_none());
+    assert_eq!(wire, serde_json::to_value(&omitted).unwrap());
+
+    let yaml = format!("{DOCUMENTED}overlap: per_domain\n");
+    let per_domain: Profile = serde_yaml_ng::from_str(&yaml).unwrap();
+    per_domain.validate().unwrap();
+    assert_eq!(per_domain.overlap, Overlap::PerDomain);
+    let wire = serde_json::to_value(&per_domain).unwrap();
+    assert_eq!(wire["overlap"], "per_domain");
+    let again: Profile = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&again).unwrap(), wire);
+    let text = serde_yaml_ng::to_string(&per_domain).unwrap();
+    assert!(text.contains("overlap: per_domain"), "{text}");
+    let again: Profile = serde_yaml_ng::from_str(&text).unwrap();
+    assert_eq!(serde_json::to_value(&again).unwrap(), wire);
+
+    assert!(
+        serde_yaml_ng::from_str::<Profile>(&format!("{DOCUMENTED}overlap: per_kind\n")).is_err()
+    );
+}
+
+#[test]
+fn every_kind_has_its_domains_and_slots() {
+    let range = json!({"min": 1_000_000, "max": 2_000_000});
+    let fault = |value: Value| -> Fault { serde_json::from_value(value).unwrap() };
+    let table = [
+        (
+            json!({"kind": "crash", "downtime_ns": range}),
+            vec![Domain::Lifecycle],
+        ),
+        (
+            json!({"kind": "stop", "downtime_ns": range}),
+            vec![Domain::Lifecycle],
+        ),
+        (
+            json!({"kind": "pause", "duration_ns": range}),
+            vec![Domain::Lifecycle],
+        ),
+        (
+            json!({"kind": "pause_process", "duration_ns": range}),
+            vec![Domain::Lifecycle],
+        ),
+        (
+            json!({"kind": "partition", "duration_ns": range}),
+            vec![Domain::Network],
+        ),
+        (
+            json!({"kind": "shape", "duration_ns": range, "latency_ns": range}),
+            vec![Domain::Network],
+        ),
+        (
+            json!({"kind": "clock_skew", "duration_ns": range, "max_offset_ns": 1_000}),
+            vec![Domain::Clock, Domain::Lifecycle],
+        ),
+        (
+            json!({"kind": "clock_drift", "duration_ns": range, "max_rate_ppb": 1_000}),
+            vec![Domain::Clock],
+        ),
+        (
+            json!({"kind": "disk_error", "duration_ns": range, "request": "write", "ppm": 1}),
+            vec![Domain::DiskError],
+        ),
+        (
+            json!({"kind": "disk_latency", "duration_ns": range, "request": "any",
+                   "latency_ns": range}),
+            vec![Domain::DiskLatency],
+        ),
+        (
+            json!({"kind": "throttle", "duration_ns": range, "factor_permille": 2_000}),
+            vec![Domain::Scheduler],
+        ),
+        (
+            json!({"kind": "preempt", "duration_ns": range, "ppm": 1}),
+            vec![Domain::Scheduler],
+        ),
+    ];
+    let per_target = documented();
+    let mut per_domain = documented();
+    per_domain.overlap = Overlap::PerDomain;
+    let mut kinds = BTreeSet::new();
+    for (value, domains) in table {
+        let fault = fault(value);
+        kinds.insert(fault.name());
+        assert_eq!(fault.domains(), domains, "{}", fault.name());
+        assert_eq!(per_target.slots(&fault), [Slot::Target]);
+        let slots: Vec<_> = domains.into_iter().map(Slot::In).collect();
+        assert_eq!(per_domain.slots(&fault), slots);
+    }
+    // One row per `Fault` variant.
+    assert_eq!(kinds.len(), 12);
+}
