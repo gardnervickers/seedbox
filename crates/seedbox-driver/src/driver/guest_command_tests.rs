@@ -378,3 +378,29 @@ fn an_undelivered_skew_takes_its_queued_heal_with_it() {
     );
     assert!(steps(&d).is_empty());
 }
+
+/// A pause cannot be admitted while a guest command waits to be
+/// acknowledged: the paused machine would never acknowledge it and its
+/// deadline would fail the run. The command still lands, and once it has, a
+/// pause is admitted and refuses a command behind it.
+#[test]
+fn a_pause_is_refused_while_a_guest_command_waits_for_its_acknowledgment() {
+    let mut d = driver(vec![]);
+    input(&mut d, 10, "stop", stop(100));
+    input(&mut d, 11, "pause", Action::Pause(target()));
+    // The guest acknowledges the stop at 13, so a later pause is admitted.
+    input(&mut d, 20, "pause-after", Action::Pause(target()));
+    input(&mut d, 30, "behind", restart(100));
+    let events = advance(&mut d, 200);
+    assert_eq!(
+        rejected(&events, "pause").map(|r| r.reason),
+        Some(RejectionReason::InvalidState)
+    );
+    assert_eq!(settlement(&events, "stop").0, SettlementStatus::Applied);
+    assert_eq!(rejected(&events, "pause-after"), None);
+    assert_eq!(
+        rejected(&events, "behind").map(|r| r.reason),
+        Some(RejectionReason::InvalidState)
+    );
+    assert_eq!(application(&d), [crate::pv::ApplicationCommand::Stop]);
+}
