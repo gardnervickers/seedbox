@@ -39,6 +39,8 @@ pub enum Spawn {
     /// code, unless nothing else in the binary can write an executable at the
     /// same time. Probe writers with `seedbox_exec::try_writing`, never
     /// [`install_executable`]. Most probes want [`Spawn::GuardForkOnly`].
+    /// Where [`seedbox_exec::SERIALIZED_SPAWNS`], a held child also blocks
+    /// every other spawn in the process, so a holder takes at most one.
     GuardWhileHeld,
     /// The exclusive guard is held across the fork only and released once the
     /// child is parked. At the fork no executable is being installed and no
@@ -79,11 +81,18 @@ impl HeldChildren {
     ///
     /// A [`Spawn::GuardForkOnly`] hold needs exclusive access for its fork, so
     /// it is refused while this holder has a [`Spawn::GuardWhileHeld`] child,
-    /// which would otherwise wait for itself forever.
+    /// which would otherwise wait for itself forever. So is a second
+    /// [`Spawn::GuardWhileHeld`] where spawns are serialized.
     pub fn hold(&mut self, how: Spawn) -> io::Result<()> {
-        if how == Spawn::GuardForkOnly && self.held.iter().any(|held| held.guarded) {
+        let guarded = self.held.iter().any(|held| held.guarded);
+        if how == Spawn::GuardForkOnly && guarded {
             return Err(io::Error::other(
                 "a fork-only hold after a guard-holding child would deadlock",
+            ));
+        }
+        if how == Spawn::GuardWhileHeld && guarded && seedbox_exec::SERIALIZED_SPAWNS {
+            return Err(io::Error::other(
+                "a second guard-holding child would deadlock: spawns are serialized here",
             ));
         }
         let (mut ready, ready_write) = pipe()?;
