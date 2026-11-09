@@ -469,6 +469,23 @@ fn integrity_and_length_are_verified_before_decoding_any_native_body() {
         .unwrap_err()
         .to_string()
         .contains("encoded length"));
+    // Restore never calls `read`: the length check that matters is `open`'s.
+    assert!(
+        resolve::<Saved>(&envelope, limits(), |_, _| panic!("must verify first"))
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("encoded length")
+    );
+}
+
+fn flip_first_byte(path: impl AsRef<Path>) -> Vec<u8> {
+    let path = path.as_ref();
+    let original = fs::read(path).unwrap();
+    let mut changed = original.clone();
+    changed[0] ^= 1;
+    fs::write(path, &changed).unwrap();
+    original
 }
 
 #[test]
@@ -491,27 +508,27 @@ fn in_place_rewrite_after_load_is_rejected_and_after_open_never_reaches_a_decode
     )
     .unwrap();
     let scratch = tempfile::tempdir().unwrap();
+    let scratch_is_empty = || fs::read_dir(scratch.path()).unwrap().count() == 0;
     // The restore path loads only the envelope, so nothing has been hashed yet.
     let envelope = load(&path).unwrap();
-    let later = &envelope.machines[1];
-    let original = fs::read(&later.artifact).unwrap();
-    let mut changed = original.clone();
-    changed[0] ^= 1;
-    fs::write(&later.artifact, &changed).unwrap();
-    let error = open(&envelope, limits(), scratch.path()).err().unwrap();
-    assert!(error.to_string().contains("SHA-256"));
+    // A rewrite of the Driver metadata or of a later body between `load` and
+    // `open` is rejected, and the copies made before it are gone.
+    for artifact in [&envelope.driver, &envelope.machines[1]] {
+        let original = flip_first_byte(&artifact.artifact);
+        let error = open(&envelope, limits(), scratch.path()).err().unwrap();
+        assert!(error.to_string().contains("SHA-256"));
+        assert!(scratch_is_empty());
+        fs::write(&artifact.artifact, &original).unwrap();
+    }
     // Once opened, the private copies are what decoders read: rewriting every
     // published body in place (same inode, same length) changes nothing.
-    fs::write(&later.artifact, &original).unwrap();
     let opened = open(&envelope, limits(), scratch.path()).unwrap();
-    let mut published = vec![];
-    for artifact in &envelope.machines {
-        let bytes = fs::read(&artifact.artifact).unwrap();
-        let mut changed = bytes.clone();
-        changed[0] ^= 1;
-        fs::write(&artifact.artifact, &changed).unwrap();
-        published.push(bytes);
-    }
+    assert!(scratch_is_empty(), "live private copies are unnamed");
+    let published = envelope
+        .machines
+        .iter()
+        .map(|artifact| flip_first_byte(&artifact.artifact))
+        .collect::<Vec<_>>();
     let mut index = 0;
     opened
         .try_map_snapshots(|file| {
@@ -523,11 +540,77 @@ fn in_place_rewrite_after_load_is_rejected_and_after_open_never_reaches_a_decode
         })
         .unwrap();
     assert_eq!(index, 2);
-    assert_eq!(
-        fs::read_dir(scratch.path()).unwrap().count(),
-        0,
-        "private copies are unnamed"
-    );
+}
+
+#[test]
+fn corrupt_later_body_is_rejected_before_driver_metadata_decodes() {
+    let root = tempfile::tempdir().unwrap();
+    let inventory = fixture_inventory(&root.path().join("authority"));
+    let mut driver = driver(1, 2, Arc::default(), Arc::default(), None);
+    let mut state = state(2);
+    let path = capture(
+        &mut driver,
+        Capture {
+            inventory: &inventory,
+            state: &mut state,
+            prepared: false,
+        },
+        root.path(),
+        "saved",
+        publish,
+        encode,
+    )
+    .unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let mut envelope = load(&path).unwrap();
+    // Driver metadata that matches its digest but cannot decode.
+    let garbage = vec![0xff; 64];
+    fs::write(&envelope.driver.artifact, &garbage).unwrap();
+    envelope.driver.sha256 = hex::encode(Sha256::digest(&garbage));
+    envelope.driver.length = garbage.len() as u64;
+    let decoding = open(&envelope, limits(), scratch.path())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(!decoding.contains("SHA-256"), "{decoding}");
+    // With a corrupt later body too, the digest check fails first: the
+    // metadata decoder is never reached.
+    flip_first_byte(&envelope.machines[1].artifact);
+    assert!(open(&envelope, limits(), scratch.path())
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("SHA-256"));
+}
+
+#[test]
+fn unusable_scratch_is_a_named_error_that_leaves_nothing_behind() {
+    let root = tempfile::tempdir().unwrap();
+    let inventory = fixture_inventory(&root.path().join("authority"));
+    let mut driver = driver(1, 1, Arc::default(), Arc::default(), None);
+    let mut state = state(1);
+    let path = capture(
+        &mut driver,
+        Capture {
+            inventory: &inventory,
+            state: &mut state,
+            prepared: false,
+        },
+        root.path(),
+        "saved",
+        publish,
+        encode,
+    )
+    .unwrap();
+    let envelope = load(&path).unwrap();
+    let missing = root.path().join("no-scratch");
+    let error = open(&envelope, limits(), &missing)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("private copy of"), "{error}");
+    assert!(error.contains(&missing.display().to_string()), "{error}");
+    assert!(!missing.exists());
 }
 
 #[test]
