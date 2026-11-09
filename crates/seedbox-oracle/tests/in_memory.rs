@@ -377,6 +377,7 @@ max_faults: 20
 targets: [n1, n2, n3]
 faults:
   - {kind: partition, weight: 2, duration_ns: {min: 500000000, max: 3000000000}}
+  - {kind: partition, duration_ns: {min: 500000000, max: 3000000000}, targets: [n1, n2], from: [n3]}
   - {kind: shape, duration_ns: {min: 500000000, max: 3000000000},
      latency_ns: {min: 1000000, max: 50000000}, jitter_ns: 500000, to: [n1, n2, n3, client]}
   - {kind: crash, downtime_ns: {min: 500000000, max: 3000000000}}
@@ -463,6 +464,17 @@ impl World for Modelled {
                 right,
             } => {
                 assert!(left.iter().chain(right).all(known) && !right.contains(&left[0]));
+                // The narrowed entry cuts n1 or n2 off from n3 alone; the
+                // other cuts its target off from the other profile targets.
+                let others: Vec<_> = ["n1", "n2", "n3"]
+                    .into_iter()
+                    .filter(|m| *m != left[0])
+                    .collect();
+                assert!(
+                    (*right == ["n3"] && ["n1", "n2"].contains(&left[0].as_str()))
+                        || *right == others,
+                    "{action:?}"
+                );
                 assert!(self.handles.insert(handle.clone()));
             }
             Action::Shape {
@@ -551,11 +563,22 @@ fn a_profile_applies_the_same_sequence_for_the_same_seed() {
     assert!(starts
         .iter()
         .all(|(at, _)| (6_000_000_000..35_000_000_000).contains(at)));
-    let kinds: BTreeSet<_> = (0..20)
+    let all: Vec<_> = (0..20)
         .flat_map(applied)
-        .map(|(_, action)| action.name())
+        .map(|(_, action)| action)
         .collect();
+    let kinds: BTreeSet<_> = all.iter().map(Action::name).collect();
     assert_eq!(kinds.len(), 17, "{kinds:?}");
+    // Both partition entries come up: the narrowed one's far side is n3
+    // alone, the other's the two other targets.
+    let sides: BTreeSet<_> = all
+        .iter()
+        .filter_map(|action| match action {
+            Action::Partition { right, .. } => Some(right.len()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sides, BTreeSet::from([1, 2]));
 }
 
 #[test]
