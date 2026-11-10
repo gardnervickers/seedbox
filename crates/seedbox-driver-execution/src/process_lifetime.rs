@@ -193,8 +193,11 @@ impl OwnedExecution {
             .stdout(stdout)
             .stderr(stderr)
             .process_group(0);
-        // Only async-signal-safe operations occur after fork. The parent's
-        // descriptors always retain CLOEXEC, including during concurrent spawns.
+        // Only async-signal-safe operations occur after fork. `inherit` runs in
+        // the child, so the parent's descriptors keep CLOEXEC. The two pairs
+        // above are the exception where `seedbox_exec::SERIALIZED_SPAWNS`: std
+        // creates each and then marks it, outside the spawn mutex, so a spawn
+        // on another thread in that window copies it unmarked into its child.
         unsafe {
             command.pre_exec(move || {
                 inherit(output.as_raw_fd(), STATUS_FD)?;
