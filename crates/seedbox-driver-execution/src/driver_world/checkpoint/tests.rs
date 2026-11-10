@@ -508,11 +508,15 @@ fn in_place_rewrite_after_load_is_rejected_and_after_open_never_reaches_a_decode
     )
     .unwrap();
     let scratch = tempfile::tempdir().unwrap();
+    // The private copies never have a name, so this holds whether or not they
+    // are still open. It rules out a named copy, live or left behind. That a
+    // failed `open` releases its copies follows from ownership and is not
+    // checked here.
     let scratch_is_empty = || fs::read_dir(scratch.path()).unwrap().count() == 0;
     // The restore path loads only the envelope, so nothing has been hashed yet.
     let envelope = load(&path).unwrap();
     // A rewrite of the Driver metadata or of a later body between `load` and
-    // `open` is rejected, and the copies made before it are gone.
+    // `open` is rejected.
     for artifact in [&envelope.driver, &envelope.machines[1]] {
         let original = flip_first_byte(&artifact.artifact);
         let error = open(&envelope, limits(), scratch.path()).err().unwrap();
@@ -523,7 +527,7 @@ fn in_place_rewrite_after_load_is_rejected_and_after_open_never_reaches_a_decode
     // Once opened, the private copies are what decoders read: rewriting every
     // published body in place (same inode, same length) changes nothing.
     let opened = open(&envelope, limits(), scratch.path()).unwrap();
-    assert!(scratch_is_empty(), "live private copies are unnamed");
+    assert!(scratch_is_empty(), "private copies are unnamed");
     let published = envelope
         .machines
         .iter()
@@ -584,7 +588,7 @@ fn corrupt_later_body_is_rejected_before_driver_metadata_decodes() {
 }
 
 #[test]
-fn unusable_scratch_is_a_named_error_that_leaves_nothing_behind() {
+fn unusable_scratch_is_a_named_error_and_is_not_created() {
     let root = tempfile::tempdir().unwrap();
     let inventory = fixture_inventory(&root.path().join("authority"));
     let mut driver = driver(1, 1, Arc::default(), Arc::default(), None);
@@ -610,6 +614,7 @@ fn unusable_scratch_is_a_named_error_that_leaves_nothing_behind() {
         .to_string();
     assert!(error.contains("private copy of"), "{error}");
     assert!(error.contains(&missing.display().to_string()), "{error}");
+    // `open` does not create the directory it was given.
     assert!(!missing.exists());
 }
 
