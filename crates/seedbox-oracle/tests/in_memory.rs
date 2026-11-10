@@ -733,6 +733,32 @@ faults:
      latency_ns: {min: 25000000, max: 40000000}}
 "#;
 
+/// `PROFILE` as it was on origin/main 0875cc887, frozen: the digest below is
+/// of this text, so `PROFILE` can gain entries without moving it.
+const PINNED: &str = r#"
+start_ns: 1000000000
+end_ns: 30000000000
+interval_ns: 1000000000
+max_faults: 20
+targets: [n1, n2, n3]
+faults:
+  - {kind: partition, weight: 2, duration_ns: {min: 500000000, max: 3000000000}}
+  - {kind: shape, duration_ns: {min: 500000000, max: 3000000000},
+     latency_ns: {min: 1000000, max: 50000000}, jitter_ns: 500000, to: [n1, n2, n3, client]}
+  - {kind: crash, downtime_ns: {min: 500000000, max: 3000000000}}
+  - {kind: pause, duration_ns: {min: 500000000, max: 3000000000}}
+  - {kind: pause_process, duration_ns: {min: 500000000, max: 3000000000}}
+  - {kind: stop, downtime_ns: {min: 500000000, max: 3000000000}}
+  - {kind: clock_skew, duration_ns: {min: 500000000, max: 3000000000}, max_offset_ns: 5000000000}
+  - {kind: clock_drift, duration_ns: {min: 500000000, max: 3000000000}, max_rate_ppb: 1000000}
+  - {kind: throttle, duration_ns: {min: 500000000, max: 3000000000}, factor_permille: 4000}
+  - {kind: disk_error, duration_ns: {min: 500000000, max: 3000000000}, request: write, ppm: 1000,
+     targets: [n1, n2]}
+  - {kind: disk_latency, duration_ns: {min: 500000000, max: 3000000000}, request: flush,
+     latency_ns: {min: 1000000, max: 20000000}, targets: [n1, n2]}
+  - {kind: preempt, duration_ns: {min: 500000000, max: 3000000000}, ppm: 10000}
+"#;
+
 /// FNV-1a over every applied (time, action) of seeds 0..32.
 fn fingerprint(yaml: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -761,7 +787,7 @@ fn the_default_overlap_applies_the_same_sequence_as_before_it_existed() {
     // only after confirming the new digests on the previous commit with the
     // field omitted.
     let before = [
-        (PROFILE, 0x52af_f1af_96f7_7bfe),
+        (PINNED, 0x52af_f1af_96f7_7bfe),
         (SINGLE, 0x51c8_b1d5_745c_d916),
     ];
     for (yaml, digest) in before {
