@@ -27,6 +27,12 @@ pub trait World {
     /// Wait `duration` of simulated time.
     fn sleep(&mut self, duration: Duration) -> Result<(), Error>;
     fn apply(&mut self, action: &Action) -> Result<(), Error>;
+    /// The error that stopped this world serving breakpoints, if one did;
+    /// see [`crate::GuestWorld::on_break`]. A world without breakpoints has
+    /// none.
+    fn break_error(&self) -> Option<Error> {
+        None
+    }
 }
 
 /// How a fault pattern waits between faults: the world's simulated sleep,

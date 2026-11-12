@@ -48,12 +48,13 @@ impl Guest<'_> {
 ///
 /// A failed [`crate::Nemesis::run`] does not end the run: the clients
 /// stop, and the heal, final reads and checks run as they would otherwise.
-/// The [`Report`] keeps that error, a failed heal's error and each client
-/// thread's panic beside the verdicts, and the runner prints a line naming
-/// them. Any of them makes [`Report::exit_code`] report the run incomplete
-/// unless a check was violated, whatever the verdicts say: the faults the
-/// scenario describes did not all happen or did not all end, or a client
-/// stopped early.
+/// The [`Report`] keeps that error beside the verdicts, with a failed
+/// heal's error, each client thread's panic, each restart the final reads
+/// asked for and the world refused, the world's [`World::break_error`] and
+/// a failed property flush, and the runner prints a line naming them. Any
+/// of them makes [`Report::exit_code`] report the run incomplete unless a
+/// check was violated, whatever the verdicts say: a step the scenario
+/// describes did not happen as described.
 pub fn run<S: Scenario>(scenario: &mut S, world: &mut dyn World, random: &mut Rng) -> Report {
     drive_scenario(scenario, world, random, Guest::Process)
 }
@@ -82,6 +83,7 @@ fn drive_scenario<S: Scenario>(
             guest,
             Report {
                 verdicts,
+                break_error: world.break_error(),
                 ..Report::default()
             },
         );
@@ -120,7 +122,12 @@ fn drive_scenario<S: Scenario>(
         report.heal_error = Some(error);
     }
     let mut reader = scenario.final_read();
-    let reads = final_reads(reader.as_mut(), world);
+    let FinalReads {
+        reads,
+        restart_errors,
+    } = final_reads(reader.as_mut(), world);
+    report.restart_errors = restart_errors;
+    report.break_error = world.break_error();
     let records = history.records();
     report.verdicts = checkers
         .iter()
@@ -170,8 +177,12 @@ fn drive<C: Client>(
 /// [`FinalRead::settle`] passes regardless, and read each node in order.
 /// A node that could not be read keeps its error, which checkers treat as
 /// unknown evidence.
-pub fn final_reads<R>(reader: &mut dyn FinalRead<Read = R>, world: &mut dyn World) -> Vec<Read<R>> {
+pub fn final_reads<R>(
+    reader: &mut dyn FinalRead<Read = R>,
+    world: &mut dyn World,
+) -> FinalReads<R> {
     let nodes = reader.nodes();
+    let mut restart_errors = Vec::new();
     if !reader.ready() {
         let exited: Vec<_> = nodes
             .iter()
@@ -182,20 +193,34 @@ pub fn final_reads<R>(reader: &mut dyn FinalRead<Read = R>, world: &mut dyn Worl
             if let Err(error) = world.apply(&Action::Restart {
                 machine: machine.clone(),
             }) {
-                eprintln!("seedbox-oracle: restart {machine}: {error}");
+                let error = Error(format!("restart {machine}: {error}"));
+                warn("final read", &error);
+                restart_errors.push(error);
             }
         }
         // Readiness is the readers' own check; reading reports what is left.
         reader.ready();
     }
     settle(reader, world, &nodes);
-    nodes
+    let reads = nodes
         .into_iter()
         .map(|node| Read {
             result: reader.read(&node),
             node,
         })
-        .collect()
+        .collect();
+    FinalReads {
+        reads,
+        restart_errors,
+    }
+}
+
+/// What [`final_reads`] read, node by node, and each restart it asked for
+/// that the world refused.
+#[derive(Debug, PartialEq)]
+pub struct FinalReads<R> {
+    pub reads: Vec<Read<R>>,
+    pub restart_errors: Vec<Error>,
 }
 
 /// Poll views until they agree for `agree_for` or `settle` passes. Times are
@@ -241,8 +266,9 @@ fn warn(phase: &str, error: &Error) {
 
 /// Evaluate each decided checker's property and flush, so the verdicts are
 /// part of the run's results before the oracle exits. Print each verdict,
-/// then one line naming the steps that failed, if any did.
-fn finish(guest: Guest<'_>, report: Report) -> Report {
+/// then one line naming the steps that failed, if any did, a failed flush
+/// among them.
+fn finish(guest: Guest<'_>, mut report: Report) -> Report {
     for (name, verdict) in &report.verdicts {
         println!("{name}: {:?}: {}", verdict.validity, verdict.summary);
         if let Some(condition) = verdict.condition() {
@@ -250,12 +276,14 @@ fn finish(guest: Guest<'_>, report: Report) -> Report {
             guest.always(name, condition, details);
         }
     }
+    if let Err(error) = guest.flush() {
+        let error = Error(error.to_string());
+        warn("property flush", &error);
+        report.flush_error = Some(error);
+    }
     let failures = report.failures();
     if !failures.is_empty() {
         println!("execution failures: {}", failures.join("; "));
-    }
-    if let Err(error) = guest.flush() {
-        eprintln!("seedbox-oracle: property flush failed: {error}");
     }
     report
 }
