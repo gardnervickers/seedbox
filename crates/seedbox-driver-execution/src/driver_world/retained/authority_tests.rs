@@ -846,7 +846,35 @@ fn a_removed_machine_is_refused() {
             inputs.machine_memory_mb.remove("db");
         });
         assert!(
-            error.starts_with("machines.db is missing from the prepared world;"),
+            error.starts_with(
+                "machines.db is in the prepared world but missing from the definition;"
+            ),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn a_renamed_oracle_is_refused_as_its_name() {
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        let error = refused(backend, |edited| {
+            let inputs = &mut edited.inputs;
+            let image = inputs.images.remove("oracle").unwrap();
+            inputs.images.insert("checker".into(), image);
+            let guest = inputs.guests.remove("oracle").unwrap();
+            inputs.guests.insert("checker".into(), guest);
+            inputs.placement.remove("oracle");
+            inputs.placement.insert("checker".into(), "checker".into());
+            let memory = inputs.machine_memory_mb.remove("oracle").unwrap();
+            inputs.machine_memory_mb.insert("checker".into(), memory);
+            edited.control = Some(crate::config::Control {
+                service: "checker".into(),
+            });
+        });
+        assert!(
+            error.starts_with(
+                "oracle.name oracle is in the prepared world but missing from the definition;"
+            ),
             "{error}"
         );
     }

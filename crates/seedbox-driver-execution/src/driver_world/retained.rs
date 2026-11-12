@@ -279,6 +279,7 @@ pub(crate) fn request(
     if let Some(runtime) = runtime {
         runtime.wire.validate_archive(archive).map_err(bad)?;
     }
+    refuse_changed_machines(request, &prepared)?;
     let controller = request.control.map(|control| {
         request
             .prepared
@@ -475,6 +476,29 @@ pub(crate) fn request(
 /// and the factory builds later machines from the same inventory, so an edit
 /// to any of them, or to the machine set, is refused here rather than recorded
 /// and ignored. Process, memory and `allowCrashes` edits are applied instead.
+/// Refuses a definition whose machines differ from the prepared world's, naming
+/// a prepared machine the definition dropped (or the oracle it renamed) first.
+fn refuse_changed_machines(request: &ExecutionRequest<'_>, prepared: &Prepared) -> Result<()> {
+    let initial: BTreeSet<&str> = std::iter::once(&prepared.oracle)
+        .chain(&prepared.machines)
+        .map(|machine| machine.name.as_str())
+        .collect();
+    let declared: BTreeSet<&str> = request.prepared.images.keys().map(String::as_str).collect();
+    let change = if let Some(name) = initial.difference(&declared).next() {
+        if *name == prepared.oracle.name {
+            format!("oracle.name {name} is in the prepared world but missing from the definition")
+        } else {
+            format!("machines.{name} is in the prepared world but missing from the definition")
+        }
+    } else if let Some(name) = declared.difference(&initial).next() {
+        format!("machines.{name} is not in the prepared world")
+    } else {
+        return Ok(());
+    };
+    Err(Error::Setup(format!(
+        "{change}; a resolved definition replays the machines it prepared, so machines cannot be added, removed or renamed"
+    )))
+}
 fn refuse_unprepared_edits(
     request: &ExecutionRequest<'_>,
     prepared: &Prepared,
@@ -484,17 +508,6 @@ fn refuse_unprepared_edits(
         Error::Setup(format!(
             "{field} {change}; a resolved definition replays prepared boot archives that embed it, so it cannot be changed"
         ))
-    }
-    let initial: BTreeSet<&str> = std::iter::once(&prepared.oracle)
-        .chain(&prepared.machines)
-        .map(|machine| machine.name.as_str())
-        .collect();
-    let declared: BTreeSet<&str> = request.prepared.images.keys().map(String::as_str).collect();
-    if let Some(name) = declared.symmetric_difference(&initial).next() {
-        return Err(Error::Setup(format!(
-            "machines.{name} {} the prepared world; a resolved definition replays the machines it prepared, so machines cannot be added or removed",
-            if initial.contains(name) { "is missing from" } else { "is not in" }
-        )));
     }
     let (epoch, budget, environments) = match &prepared.inventory {
         wire::Inventory::Pv {
