@@ -23,12 +23,13 @@ pub const DEFAULT_MAX_FAULTS: u32 = 64;
 /// Faults start between `start_ns` and `end_ns` after [`Nemesis::run`]
 /// begins, one gap apart; each gap is drawn uniformly from half to one and a
 /// half times `interval_ns`. Each start draws an entry by weight, then a
-/// target among `targets` (or the entry's own, for the partition and disk
-/// kinds) with no fault of this profile in force (a start with none free is
-/// skipped), then the entry's ranges, and holds the fault for its drawn
-/// duration before ending it. At most `max_faults` start. `run` returns at
-/// `end_ns`, or once the last fault ends if that is later; faults still in
-/// force when a failure cuts it short are ended by [`Nemesis::heal`].
+/// target among `targets` (or the entry's own, for the partition, shape and
+/// disk kinds) with no fault of this profile in force (a start with none
+/// free is skipped), then the entry's ranges, and holds the fault for its
+/// drawn duration before ending it. At most `max_faults` start. `run`
+/// returns at `end_ns`, or once the last fault ends if that is later; faults
+/// still in force when a failure cuts it short are ended by
+/// [`Nemesis::heal`].
 ///
 /// Every draw comes from the scenario's [`Random`] in that order, so a seed
 /// fixes the applied sequence.
@@ -343,7 +344,9 @@ fn signed(random: &mut dyn Random, max: u64) -> i64 {
 pub enum Fault {
     /// Cut one target off from `from`, or from the other targets when `from`
     /// is empty, then heal. `targets` narrows the profile's targets, as for
-    /// the disk kinds, so a `from` may name some of them.
+    /// the disk kinds, so a `from` may name some of them. It narrows only
+    /// which target is cut off: with no `from`, the far side is still every
+    /// other target of the profile, not just of the entry.
     Partition {
         #[serde(default = "weight", skip_serializing_if = "is_one")]
         weight: u32,
@@ -356,6 +359,9 @@ pub enum Fault {
     /// Delay and drop the traffic from one target to `to`, or to the other
     /// targets when `to` is empty, then heal. Every latency in the range,
     /// with `jitter_ns` and `loss_ppm`, must be a valid link policy.
+    /// `targets` narrows the profile's targets as for a partition: a `to` may
+    /// name some of them, and with no `to` the traffic shaped is still to
+    /// every other target of the profile.
     Shape {
         #[serde(default = "weight", skip_serializing_if = "is_one")]
         weight: u32,
@@ -367,6 +373,8 @@ pub enum Fault {
         loss_ppm: u64,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         to: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<String>,
     },
     /// Destroy one target's VM, then reboot it.
     Crash {
@@ -521,6 +529,7 @@ impl Fault {
     fn targets<'a>(&'a self, profile: &'a [String]) -> &'a [String] {
         match self {
             Self::Partition { targets, .. }
+            | Self::Shape { targets, .. }
             | Self::DiskError { targets, .. }
             | Self::DiskLatency { targets, .. }
                 if !targets.is_empty() =>
@@ -564,10 +573,12 @@ impl Fault {
                 jitter_ns,
                 loss_ppm,
                 to,
+                targets: narrowed,
                 ..
             } => {
                 duration_ns.validate("duration_ns")?;
                 latency_ns.validate("latency_ns")?;
+                narrows(narrowed, targets)?;
                 // The same checks as every shape action, at both ends of
                 // the range; the floor is the world's, checked on apply.
                 for latency in [latency_ns.min, latency_ns.max] {

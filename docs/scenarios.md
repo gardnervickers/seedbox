@@ -128,9 +128,11 @@ applied sequence. `run` checks every entry with its action's own validator
 before applying anything, and refuses an invalid entry with that action's
 message. `heal` ends every fault still in force. A partition cuts its target off
 from `from`, and a shape delays traffic to `to`; each defaults to the other
-targets. Partition, `disk_error` and `disk_latency` entries may narrow the
-targets with their own `targets`, such as the machines with a volume, or the
-targets that have a far side when `from` names one of them. The world checks
+targets. Partition, shape, `disk_error` and `disk_latency` entries may narrow
+the targets with their own `targets`, such as the machines with a volume, or
+the targets that have a far side when `from` or `to` names one of them.
+Narrowing picks only the target: a narrowed partition with no `from` still cuts
+it off from every other target of the profile. The world checks
 what needs the world, such as the network's latency floor, when the action is
 applied, and a refusal fails `run`.
 With `skip_unsupported: true`, the profile instead skips a kind the engine

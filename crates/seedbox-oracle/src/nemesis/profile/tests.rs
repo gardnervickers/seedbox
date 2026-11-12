@@ -163,6 +163,21 @@ fn entries_are_refused_with_their_actions_own_errors() {
             .0,
         "fault profile partition: targets must be distinct"
     );
+    // A shape's `to` narrows the same way.
+    let shape = json!({"kind": "shape", "duration_ns": range, "to": ["db1"],
+                       "latency_ns": {"min": 1_000_000, "max": 2_000_000}});
+    assert_eq!(
+        with(shape.clone()).unwrap_err().0,
+        "fault profile shape: to needs a machine other than db1"
+    );
+    let mut narrowed = shape.clone();
+    narrowed["targets"] = json!(["db2", "db3"]);
+    with(narrowed.clone()).unwrap();
+    narrowed["targets"] = json!(["db2", "client"]);
+    assert_eq!(
+        with(narrowed).unwrap_err().0,
+        "fault profile shape: targets must be profile targets, not \"client\""
+    );
     assert_eq!(
         with(
             json!({"kind": "disk_error", "request": "write", "ppm": 10, "duration_ns": range,
@@ -231,5 +246,38 @@ fn profile_bounds_are_explicit() {
         change(&mut profile);
         let message = profile.validate().unwrap_err().0;
         assert!(message.contains(error), "{message}");
+    }
+}
+
+/// Narrowing picks which target the fault lands on; with no `from` or `to`,
+/// the far side is still every other target of the profile.
+#[test]
+fn a_narrowed_entry_without_a_side_faces_all_other_profile_targets() {
+    let profile = documented();
+    let range = json!({"min": 1_000_000, "max": 2_000_000});
+    for fault in [
+        json!({"kind": "partition", "duration_ns": range, "targets": ["db1"]}),
+        json!({"kind": "shape", "duration_ns": range, "latency_ns": range, "targets": ["db1"]}),
+    ] {
+        let fault: Fault = serde_json::from_value(fault).unwrap();
+        assert_eq!(fault.targets(&profile.targets), ["db1"]);
+        let drawn = fault.draw(
+            "db1",
+            &profile.targets,
+            &mut crate::Rng::new(7),
+            &mut InForce::default(),
+        );
+        let far = match drawn.action {
+            Action::Partition { left, right, .. } => {
+                assert_eq!(left, ["db1"]);
+                right
+            }
+            Action::Shape { from, to, .. } => {
+                assert_eq!(from, ["db1"]);
+                to
+            }
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(far, ["db2", "db3"]);
     }
 }
