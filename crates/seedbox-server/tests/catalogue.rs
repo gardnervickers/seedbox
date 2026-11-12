@@ -567,3 +567,38 @@ fn state_dependent_heal_can_be_submitted_for_deterministic_runtime_rejection() {
     let (accepted, _) = catalogue.submit(submission).unwrap();
     assert_eq!(accepted.spec.program[0].id, "heal-removed-prior-action");
 }
+
+#[test]
+fn finalizing_runs_change_only_their_retained_driver_closure() {
+    use seedbox_api::InputSource;
+    let mut catalogue = Catalogue::in_memory();
+    let (mut resource, _) = catalogue
+        .submit(test_support::resolved_request("finalizing-closure"))
+        .unwrap();
+    let closure = |resource: &mut seedbox_api::Simulation, manifest: &str| {
+        let InputSource::Resolved { definition } = &mut resource.spec.inputs else {
+            panic!("resolved fixture")
+        };
+        definition.runtime.execution["driver_world"] = serde_json::json!({ "manifest": manifest });
+    };
+    for phase in [Phase::Preparing, Phase::Running] {
+        resource.status.phase = phase;
+        resource = catalogue.update(resource).unwrap();
+    }
+    let mut running = resource.clone();
+    closure(&mut running, "spawned");
+    assert!(
+        matches!(catalogue.update(running), Err(Error::Invalid(message)) if message.contains("immutable after preparation"))
+    );
+    resource.status.phase = Phase::Finalizing;
+    resource = catalogue.update(resource).unwrap();
+    let mut seed = resource.clone();
+    closure(&mut seed, "spawned");
+    seed.spec.seed = Some(124);
+    assert!(
+        matches!(catalogue.update(seed), Err(Error::Invalid(message)) if message.contains("immutable after preparation"))
+    );
+    closure(&mut resource, "spawned");
+    let resource = catalogue.update(resource).unwrap();
+    assert_eq!(catalogue.get(&resource.metadata.id).unwrap(), &resource);
+}

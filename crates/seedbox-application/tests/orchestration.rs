@@ -338,6 +338,72 @@ fn requested_full_state_requires_a_digest_for_every_machine() {
 }
 
 #[test]
+fn spawned_machines_join_the_fault_and_full_state_evidence() {
+    let mut fixture = Fixture::new();
+    fixture.backend.profile.witness_mode = WitnessMode::FullState;
+    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
+    let fault = |service: &str, action: &str, at: u64| FaultEvent {
+        requested_at_ns: at,
+        applied_at_ns: at,
+        service: service.into(),
+        action: action.into(),
+        detail: String::new(),
+    };
+    let state = |names: &[&str]| {
+        Some(
+            names
+                .iter()
+                .map(|name| (name.to_string(), ContentDigest::of(name.as_bytes())))
+                .collect::<BTreeMap<_, _>>(),
+        )
+    };
+    let spawn_and_crash = vec![
+        fault("replica", SPAWN_ACTION, 5),
+        fault("replica", "crash", 7),
+    ];
+    fixture.backend.report.faults = spawn_and_crash.clone();
+    fixture.backend.report.full_state = state(&["oracle", "replica"]);
+    let first = fixture.run();
+    assert_eq!(
+        first.record.outcome,
+        Outcome::Pass,
+        "{:?}",
+        first.record.error
+    );
+    let replay = fixture.replay(&first);
+    assert_eq!(replay.record.outcome, Outcome::Pass);
+    assert_eq!(replay.comparison.full_state_matches, Some(true));
+    assert_eq!(replay.comparison.status, ComparisonStatus::Match);
+    // A spawn names only the machine it adds, and only after it exists can
+    // effects or state refer to that machine.
+    for (faults, names) in [
+        (spawn_and_crash.clone(), &["oracle"][..]),
+        (spawn_and_crash.clone(), &["oracle", "replica", "stray"]),
+        (
+            vec![
+                fault("replica", "crash", 3),
+                fault("replica", SPAWN_ACTION, 5),
+            ],
+            &["oracle", "replica"],
+        ),
+        (
+            vec![
+                fault("replica", SPAWN_ACTION, 5),
+                fault("replica", SPAWN_ACTION, 6),
+            ],
+            &["oracle", "replica"],
+        ),
+        (vec![fault("oracle", SPAWN_ACTION, 5)], &["oracle"]),
+        (vec![fault("", SPAWN_ACTION, 5)], &["oracle"]),
+    ] {
+        fixture.backend.report.faults = faults;
+        fixture.backend.report.full_state = state(names);
+        let run = fixture.run();
+        assert_eq!(run.record.outcome, Outcome::Error, "{names:?}");
+    }
+}
+
+#[test]
 fn limits_cancellation_and_missing_completion_cannot_pass() {
     let mut fixture = Fixture::new();
     for (reason, expected) in [

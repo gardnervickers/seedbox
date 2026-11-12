@@ -167,6 +167,37 @@ fn guest_properties_decide_runs_whose_oracle_passes() {
     });
 }
 
+/// The README's spawn example: the oracle adds `replica` mid-run, so the
+/// run's faults and full state name a machine its configuration does not.
+/// It must PASS, and its replay must boot the retained machine and MATCH in
+/// full state.
+#[test]
+fn spawn_example_passes_and_replays_the_spawned_machine() {
+    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/spawn");
+    let project = project.to_str().unwrap();
+    with_server("applications", "spawn", |cli, directory, state| {
+        let first_output = first_run(
+            cli,
+            directory,
+            state,
+            &["run", project, "--wall-time", "30m"],
+        )?;
+        let first = simulation_id(&first_output)?;
+        let repeated = invoke(
+            cli,
+            directory,
+            state,
+            "replay",
+            &["replay", first, "--wall-time", "30m"],
+        )?;
+        let replayed = repeated
+            .lines()
+            .find_map(|line| line.strip_prefix("MATCH: "))
+            .ok_or_else(|| format!("missing replay MATCH: {repeated}"))?;
+        compare(cli, directory, state, "compare-replay", first, replayed)
+    });
+}
+
 fn application(name: &str) {
     let workload = workload(name);
     let workload = workload.to_str().unwrap();

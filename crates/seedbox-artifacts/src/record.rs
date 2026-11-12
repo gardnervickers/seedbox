@@ -122,9 +122,7 @@ pub fn compare(
         record.report.as_ref().is_some_and(|r| {
             r.witness.is_some()
                 && (record.identity.inputs.profile.witness_mode != WitnessMode::FullState
-                    || r.full_state
-                        .as_ref()
-                        .is_some_and(|s| s.keys().eq(record.identity.inputs.guests.keys())))
+                    || r.full_state_covers(&record.identity.inputs.guests))
         })
     };
     let comparable = matches!(

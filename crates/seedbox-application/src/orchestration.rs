@@ -441,17 +441,26 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
         StopReason::SimulatedTimeLimit => return Ok(Outcome::Timeout),
         StopReason::Completed => {}
     }
+    // A spawn adds a machine the configuration does not name; effects on
+    // that machine follow its spawn in the transcript.
+    let mut spawned = BTreeSet::new();
     for fault in &report.faults {
-        if fault.applied_at_ns < fault.requested_at_ns
-            || !(simulation.services.contains_key(&fault.service)
+        let known = simulation.services.contains_key(&fault.service)
+            || spawned.contains(fault.service.as_str());
+        let acknowledged = if fault.action == SPAWN_ACTION {
+            !fault.service.is_empty() && !known && spawned.insert(fault.service.as_str())
+        } else {
+            known
                 || (fault.service.is_empty()
                     && matches!(
                         fault.action.as_str(),
                         "partition" | "shape" | "drop_connection" | "heal"
-                    )))
-        {
+                    ))
+        };
+        if fault.applied_at_ns < fault.requested_at_ns || !acknowledged {
             return Err(Error::Execution(
-                "fault effect must acknowledge a known service at or after its request time".into(),
+                "fault effect must acknowledge a known or spawned machine at or after its request time"
+                    .into(),
             ));
         }
     }
@@ -474,12 +483,10 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
             "requested full-state evidence is missing".into(),
         ));
     }
-    if let Some(state) = &report.full_state {
-        if state.keys().ne(identity.inputs.guests.keys()) {
-            return Err(Error::Execution(
-                "full-state digests must cover exactly the configured machines".into(),
-            ));
-        }
+    if report.full_state.is_some() && !report.full_state_covers(&identity.inputs.guests) {
+        return Err(Error::Execution(
+            "full-state digests must cover exactly the configured and spawned machines".into(),
+        ));
     }
     // Property findings qualify the oracle's exit as the run's verdict does.
     Ok(

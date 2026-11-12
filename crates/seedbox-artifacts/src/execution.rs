@@ -2,7 +2,7 @@
 use crate::{engine::ExecutableKind, image::Launch, store::ContentDigest};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -196,6 +196,9 @@ pub struct WorkloadExit {
     pub code: u8,
 }
 
+/// The action of an applied spawn; its `service` names the machine it added.
+pub const SPAWN_ACTION: &str = "spawn";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FaultEvent {
@@ -231,6 +234,82 @@ pub struct ExecutionReport {
     /// reported property evidence. Part of result comparisons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub properties: Option<seedbox_engine_protocol::property::Assessment>,
+}
+
+impl ExecutionReport {
+    /// Machines the run's applied spawns added, in spawn order. Prepared
+    /// inputs name only the initial machines as guests; a spawned machine
+    /// lives in the retained Driver manifest.
+    pub fn spawned_machines(&self) -> impl Iterator<Item = &str> {
+        self.faults
+            .iter()
+            .filter(|fault| fault.action == SPAWN_ACTION)
+            .map(|fault| fault.service.as_str())
+    }
+
+    /// Whether full-state digests name exactly the initial `guests` and the
+    /// machines the run spawned; false when there are none.
+    pub fn full_state_covers(&self, guests: &BTreeMap<String, ContentDigest>) -> bool {
+        let Some(state) = &self.full_state else {
+            return false;
+        };
+        let machines: BTreeSet<&str> = guests
+            .keys()
+            .map(String::as_str)
+            .chain(self.spawned_machines())
+            .collect();
+        state.keys().map(String::as_str).eq(machines)
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    fn fault(service: &str, action: &str) -> FaultEvent {
+        FaultEvent {
+            requested_at_ns: 1,
+            applied_at_ns: 1,
+            service: service.into(),
+            action: action.into(),
+            detail: String::new(),
+        }
+    }
+
+    fn digests(names: &[&str]) -> BTreeMap<String, ContentDigest> {
+        names
+            .iter()
+            .map(|name| (name.to_string(), ContentDigest::of(name.as_bytes())))
+            .collect()
+    }
+
+    #[test]
+    fn full_state_covers_initial_and_spawned_machines() {
+        let guests = digests(&["db", "oracle"]);
+        let mut report = ExecutionReport {
+            host_wait_ns: 0,
+            simulated_time_ns: None,
+            reason: StopReason::Completed,
+            workload_exit: None,
+            witness: None,
+            full_state: None,
+            faults: vec![fault("db", "crash"), fault("replica", SPAWN_ACTION)],
+            detail: None,
+            properties: None,
+        };
+        assert!(report.spawned_machines().eq(["replica"]));
+        assert!(!report.full_state_covers(&guests));
+        report.full_state = Some(digests(&["db", "oracle", "replica"]));
+        assert!(report.full_state_covers(&guests));
+        for names in [
+            &["db", "oracle"][..],
+            &["db", "oracle", "replica", "stray"],
+            &["oracle", "replica"],
+        ] {
+            report.full_state = Some(digests(names));
+            assert!(!report.full_state_covers(&guests), "{names:?}");
+        }
+    }
 }
 
 #[cfg(test)]
