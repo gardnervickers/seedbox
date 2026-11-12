@@ -52,7 +52,9 @@ pub(super) struct Worker<M: Machine> {
     publisher: Publisher,
     prepared: Option<Prepared>,
     checkpoint: Option<host::CheckpointStatus>,
-    checkpoint_refusal: Option<String>,
+    /// The checkpoint request whose capture was refused, with the reason.
+    /// Only a `Checkpoint` naming that request reports it.
+    checkpoint_refusal: Option<Refusal>,
     terminal: bool,
     failed: bool,
     measurement: Option<(u64, Instant)>,
@@ -63,6 +65,10 @@ pub(super) struct Worker<M: Machine> {
 pub(super) struct Facts {
     pub admissions: Vec<FaultRecord>,
     pub rejections: Vec<(InputKey, String)>,
+}
+struct Refusal {
+    request_id: String,
+    detail: String,
 }
 pub(super) enum Dispatch {
     Reply(Reply),
@@ -262,13 +268,7 @@ where
             return Ok(Dispatch::Reply(reply));
         }
         let result = match &request.command {
-            Command::Status => {
-                if let Some(detail) = &self.checkpoint_refusal {
-                    reply.error = Some(ControlError::InvalidCheckpoint);
-                    reply.detail = Some(detail.clone());
-                }
-                return Ok(Dispatch::Reply(reply));
-            }
+            Command::Status => return Ok(Dispatch::Reply(reply)),
             Command::SetRate { rate } => {
                 self.driver.with_barrier(|barrier| barrier.set_rate(*rate))
             }
@@ -285,6 +285,20 @@ where
                 {
                     return Ok(Dispatch::Reply(reply));
                 }
+                // The server polls a pending checkpoint under fresh wire IDs
+                // until it resolves. Answer the refused request with its
+                // refusal instead of capturing it again; any other request
+                // starts afresh.
+                if let Some(refusal) = self
+                    .checkpoint_refusal
+                    .as_ref()
+                    .filter(|refusal| refusal.request_id == *request_id)
+                {
+                    reply.error = Some(ControlError::InvalidCheckpoint);
+                    reply.detail = Some(refusal.detail.clone());
+                    return Ok(Dispatch::Reply(reply));
+                }
+                self.checkpoint_refusal = None;
                 let error = if playback.rate != driver::PlaybackRate::Paused {
                     Some(ControlError::NotPaused)
                 } else if !self.state.world.readiness.latched {
@@ -297,7 +311,6 @@ where
                 if let Some(error) = error {
                     reply.error = Some(error)
                 } else {
-                    self.checkpoint_refusal = None;
                     self.checkpoint = Some(host::CheckpointStatus {
                         request_id: request_id.clone(),
                         position: reply.position,
@@ -362,11 +375,14 @@ where
             self.write_snapshot,
         );
         if let Err(error) = result {
-            // Refusal is returned once, never automatically retried by the
-            // boundary loop. Lost publication state is separately terminal.
+            // A refusal is never automatically retried: later polls for the
+            // same request receive it. Lost publication state is terminal.
             self.checkpoint = None;
             if matches!(error, checkpoint::CaptureFailure::Refused(_)) {
-                self.checkpoint_refusal = Some(error.to_string());
+                self.checkpoint_refusal = Some(Refusal {
+                    request_id: checkpoint.request_id,
+                    detail: error.to_string(),
+                });
             }
             if matches!(error, checkpoint::CaptureFailure::Publication(_)) {
                 self.terminal = true;
