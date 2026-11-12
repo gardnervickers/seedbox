@@ -294,8 +294,9 @@ The [service envelope](../crates/seedbox-driver-execution/src/driver_world/check
 
 Checkpoint capture and imports create *owned* cache objects; the running server remembers each new one in memory.
 An ordinary put of the same bytes makes an owned object a reusable input.
-Deletion removes owned objects that no resource, retained input, export of a remaining source or unclaimed checkpoint upload names; creators hold a reference lock until one does.
-One later resource that names all of an upload's content claims it, even while being deleted, so a second upload of the same file stays until its own submission is deleted.
+Deletion removes owned objects that no resource, retained input, export of a remaining source or unreleased checkpoint upload names; creators hold a reference lock until one does, and admission holds it too.
+Any resource created after an upload that names all its content releases it, even the one being deleted, so an upload of the same file that was not yet submitted may be reclaimed with it.
+Deletion holds the lock for writing from removing the catalogue entry until it records what it reclaimed, so concurrent imports and submissions see the catalogue either before or after.
 Ownership ends with the server: after graceful shutdown, a crash or a failed reclamation, remaining objects stay as ordinary cache content, so an uncertain path leaks rather than deletes.
 The exclusive server lock means only one process reclaims, and only objects it created.
 The catalogue remembers which deletion reclaimed each object, so submitting a definition that names one fails before admission with that checkpoint and deletion; an upload or export that puts the object back clears the record, which also ends with the server.

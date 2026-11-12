@@ -238,7 +238,11 @@ async fn submit(
         )
     })?;
     tokio::task::spawn_blocking(move || {
-        let (simulation, created) = state.manager.submit(request)?;
+        // The execution service excludes admission from content reclamation.
+        let (simulation, created) = match &state.execution {
+            Some(execution) => execution.submit(request)?,
+            None => state.manager.submit(request)?,
+        };
         if created {
             permit.send(simulation.metadata.id.clone());
         }
@@ -280,7 +284,7 @@ async fn derive(
     })?;
     tokio::task::spawn_blocking(move || {
         let request = execution.derive_request(&id, request)?;
-        let (simulation, created) = state.manager.submit(request)?;
+        let (simulation, created) = execution.submit(request)?;
         if created {
             permit.send(simulation.metadata.id.clone());
         }
@@ -310,7 +314,10 @@ async fn submit_seeds(
         )
     })?;
     tokio::task::spawn_blocking(move || {
-        let (source, created) = state.manager.submit_seeds(request)?;
+        let (source, created) = match &state.execution {
+            Some(execution) => execution.submit_seeds(request)?,
+            None => state.manager.submit_seeds(request)?,
+        };
         if created {
             permit.send(source.metadata.id.clone());
         }

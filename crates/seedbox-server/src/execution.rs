@@ -91,8 +91,9 @@ pub struct ExecutionService {
     backends: Arc<dyn BackendProvider>,
     preparation_limit: Duration,
     evidence: Mutex<()>,
-    /// Read while creating owned content until something names it; written by
-    /// reclamation (`content.rs`).
+    /// Read while creating owned content until something names it and while
+    /// admitting a submission; written by deletion and reclamation
+    /// (`content.rs`).
     references: RwLock<()>,
     pins: Mutex<content::Pins>,
     admission: Mutex<(usize, BTreeMap<tokio::task::Id, SimulationId>)>,
@@ -177,7 +178,7 @@ impl ExecutionService {
                 Err(error) => return Err(error.into()),
             }
         }
-        // Read before its files go: what it named releases its upload pin.
+        // Read before its files go: what it named can release its upload pin.
         let named = self
             .resource_digests(Some(id))?
             .remove(id)
@@ -192,9 +193,37 @@ impl ExecutionService {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             result => result?,
         }
+        // Removing the entry and reclaiming are one step for imports and
+        // admissions: an import that saw this resource never lets it release
+        // the upload, and a submission is either a root or refused as reclaimed.
+        let references = self.write_references()?;
         self.manager.delete(id)?;
-        self.reclaim_unreferenced(Some((id, named)))?;
+        self.reclaim_unreferenced(&references, Some((id, named)))?;
         Ok(())
+    }
+
+    /// Admit a submission while no deletion is reclaiming (`content.rs`).
+    pub fn submit(
+        &self,
+        request: seedbox_api::SubmitRequest,
+    ) -> Result<(seedbox_api::Simulation, bool), Error> {
+        let _references = self
+            .references
+            .read()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
+        Ok(self.manager.submit(request)?)
+    }
+
+    /// Admit a seed range while no deletion is reclaiming (`content.rs`).
+    pub fn submit_seeds(
+        &self,
+        request: seedbox_api::SeedRangeRequest,
+    ) -> Result<(seedbox_api::Simulation, bool), Error> {
+        let _references = self
+            .references
+            .read()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
+        Ok(self.manager.submit_seeds(request)?)
     }
 
     /// Snapshot the atomically published semantic journal using owned paths.

@@ -142,12 +142,17 @@ fn server(root: &Path) -> (Arc<Manager>, ExecutionService, ContentStore, Simulat
 }
 
 /// Submit and complete `spec` without executing it.
-fn complete(manager: &Manager, name: &str, spec: Option<SimulationSpec>) -> SimulationId {
+fn complete(
+    manager: &Manager,
+    execution: &ExecutionService,
+    name: &str,
+    spec: Option<SimulationSpec>,
+) -> SimulationId {
     let mut request = test_support::resolved_request(name);
     if let Some(spec) = spec {
         request.spec = spec;
     }
-    let id = manager.submit(request).unwrap().0.metadata.id;
+    let id = execution.submit(request).unwrap().0.metadata.id;
     manager.begin(&id).unwrap();
     manager
         .update(&id, |s| s.status.phase = Phase::Completed)
@@ -163,7 +168,7 @@ fn branch(
     name: &str,
 ) -> SimulationId {
     let resource = execution.checkpoint_definition(source, "capture").unwrap();
-    complete(manager, name, Some(resource.spec))
+    complete(manager, execution, name, Some(resource.spec))
 }
 
 #[test]
@@ -233,7 +238,7 @@ fn a_checkpoint_file_keeps_its_state_until_the_branch_submitted_from_it_is_delet
     execution.delete(&source).unwrap();
     assert_eq!(cache(root.path()), baseline);
     // Uploading the file owns its state again until a submission names it.
-    let unrelated = complete(&manager, "unrelated", None);
+    let unrelated = complete(&manager, &execution, "unrelated", None);
     let definition = execution
         .import_checkpoint_bundle(bytes.as_slice(), &Options::default())
         .unwrap();
@@ -241,8 +246,8 @@ fn a_checkpoint_file_keeps_its_state_until_the_branch_submitted_from_it_is_delet
     execution.delete(&unrelated).unwrap();
     store.verify(&ram).unwrap();
     let spec = SimulationSpec::resolved(definition).unwrap();
-    let branched = complete(&manager, "branch", Some(spec));
-    let other = complete(&manager, "other", None);
+    let branched = complete(&manager, &execution, "branch", Some(spec));
+    let other = complete(&manager, &execution, "other", None);
     execution.delete(&other).unwrap();
     store.verify(&ram).unwrap();
     execution.delete(&branched).unwrap();
@@ -264,7 +269,7 @@ fn deleting_the_only_branch_submitted_from_an_upload_reclaims_its_state() {
         .import_checkpoint_bundle(bytes.as_slice(), &Options::default())
         .unwrap();
     let spec = SimulationSpec::resolved(definition).unwrap();
-    let branched = complete(&manager, "branch", Some(spec.clone()));
+    let branched = complete(&manager, &execution, "branch", Some(spec.clone()));
     execution.delete(&branched).unwrap();
     assert_eq!(cache(root.path()), baseline);
     assert!(store.owned_objects().is_empty());
@@ -272,7 +277,7 @@ fn deleting_the_only_branch_submitted_from_an_upload_reclaims_its_state() {
     let mut request = test_support::resolved_request("resubmitted");
     request.spec = spec;
     assert_eq!(
-        manager.submit(request).unwrap_err().to_string(),
+        execution.submit(request).unwrap_err().to_string(),
         format!(
             "checkpoint state for this definition was reclaimed when simulation {branched} was \
              deleted; export a checkpoint file to keep it"
@@ -280,27 +285,65 @@ fn deleting_the_only_branch_submitted_from_an_upload_reclaims_its_state() {
     );
 }
 
+/// Export `capture` to a checkpoint file and delete its source.
+fn checkpoint_file(execution: &ExecutionService, source: &SimulationId) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    execution
+        .export_checkpoint_bundle(source, "capture", &mut bytes, &Options::default())
+        .unwrap();
+    execution.delete(source).unwrap();
+    bytes
+}
+
+fn upload(execution: &ExecutionService, bytes: &[u8]) -> SimulationSpec {
+    let definition = execution
+        .import_checkpoint_bundle(bytes, &Options::default())
+        .unwrap();
+    SimulationSpec::resolved(definition).unwrap()
+}
+
 #[test]
-fn each_upload_of_a_checkpoint_file_keeps_its_state_until_its_own_branch_is_deleted() {
+fn an_upload_made_while_a_branch_exists_keeps_its_state_when_that_branch_is_deleted() {
     let root = tempfile::tempdir().unwrap();
     let (manager, execution, store, source) = server(root.path());
     let baseline = cache(root.path());
     let ram = ContentDigest::of(RAM);
-    let mut bytes = Vec::new();
-    execution
-        .export_checkpoint_bundle(&source, "capture", &mut bytes, &Options::default())
-        .unwrap();
-    execution.delete(&source).unwrap();
-    let [first, second] = [(); 2].map(|()| {
-        let definition = execution
-            .import_checkpoint_bundle(bytes.as_slice(), &Options::default())
-            .unwrap();
-        SimulationSpec::resolved(definition).unwrap()
-    });
-    let branched = complete(&manager, "branch", Some(first));
+    let bytes = checkpoint_file(&execution, &source);
+    let first = upload(&execution, &bytes);
+    let branched = complete(&manager, &execution, "branch", Some(first));
+    // The branch existed at this upload, so it cannot release it.
+    let second = upload(&execution, &bytes);
     execution.delete(&branched).unwrap();
     store.verify(&ram).unwrap();
-    let again = complete(&manager, "again", Some(second));
+    let again = complete(&manager, &execution, "again", Some(second));
+    execution.delete(&again).unwrap();
+    assert_eq!(cache(root.path()), baseline);
+    assert_eq!(markers(root.path()), 0);
+}
+
+#[test]
+fn a_branch_releases_every_earlier_upload_of_its_checkpoint_file() {
+    let root = tempfile::tempdir().unwrap();
+    let (manager, execution, store, source) = server(root.path());
+    let baseline = cache(root.path());
+    let bytes = checkpoint_file(&execution, &source);
+    let [first, second] = [(); 2].map(|()| upload(&execution, &bytes));
+    let branched = complete(&manager, &execution, "branch", Some(first));
+    execution.delete(&branched).unwrap();
+    assert_eq!(cache(root.path()), baseline);
+    assert!(store.owned_objects().is_empty());
+    let mut request = test_support::resolved_request("again");
+    request.spec = second;
+    assert_eq!(
+        execution.submit(request).unwrap_err().to_string(),
+        format!(
+            "checkpoint state for this definition was reclaimed when simulation {branched} was \
+             deleted; export a checkpoint file to keep it"
+        )
+    );
+    // Uploading the file again puts the state back.
+    let third = upload(&execution, &bytes);
+    let again = complete(&manager, &execution, "again", Some(third));
     execution.delete(&again).unwrap();
     assert_eq!(cache(root.path()), baseline);
     assert_eq!(markers(root.path()), 0);
@@ -311,7 +354,7 @@ fn a_seed_range_source_with_an_active_member_is_refused_before_anything_is_remov
     let root = tempfile::tempdir().unwrap();
     let (manager, execution, _store, _) = server(root.path());
     let base = test_support::resolved_request("range");
-    let source = manager
+    let source = execution
         .submit_seeds(SeedRangeRequest {
             metadata: Default::default(),
             options: Default::default(),
@@ -379,12 +422,12 @@ fn a_branch_whose_state_was_reclaimed_is_refused_before_admission_until_its_file
     execution
         .export_checkpoint_bundle(&source, "capture", &mut bytes, &Options::default())
         .unwrap();
-    let branched = complete(&manager, "branch", Some(fetched.spec.clone()));
+    let branched = complete(&manager, &execution, "branch", Some(fetched.spec.clone()));
     execution.delete(&source).unwrap();
     execution.delete(&branched).unwrap();
     let mut request = test_support::resolved_request("resubmitted");
     request.spec = fetched.spec;
-    let error = manager.submit(request.clone()).unwrap_err();
+    let error = execution.submit(request.clone()).unwrap_err();
     assert_eq!(
         error.to_string(),
         format!(
@@ -402,5 +445,5 @@ fn a_branch_whose_state_was_reclaimed_is_refused_before_admission_until_its_file
     execution
         .import_checkpoint_bundle(bytes.as_slice(), &Options::default())
         .unwrap();
-    manager.submit(request).unwrap();
+    execution.submit(request).unwrap();
 }
