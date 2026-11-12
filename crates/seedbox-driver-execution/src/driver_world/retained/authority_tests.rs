@@ -27,7 +27,7 @@ fn inventory(backend: CpuBackend, artifact: &Artifact) -> wire::Inventory {
             formatter: None,
             environments: Default::default(),
             boot_archives: Default::default(),
-            progress_budget: std::num::NonZeroU32::new(32).unwrap().into(),
+            progress_budget: Default::default(),
             epoch_seconds: 86400,
         },
         CpuBackend::Tcg => wire::Inventory::Tcg {
@@ -168,6 +168,8 @@ fn backend_authority_checks_saved_inventory_in_runtime_and_both_launch_paths() {
             seed: 42,
             program: &[],
             quantum_ns: simulation.simulator.quantum_ns,
+            progress_budget: simulation.simulator.progress_budget,
+            allow_crashes: &Default::default(),
             limits: &simulation.limits,
             network: &simulation.network,
             schedule: &simulation.schedule,
@@ -254,6 +256,8 @@ fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
             seed: 42,
             program: &[],
             quantum_ns: simulation.simulator.quantum_ns,
+            progress_budget: simulation.simulator.progress_budget,
+            allow_crashes: &Default::default(),
             limits: &simulation.limits,
             network: &simulation.network,
             schedule: &simulation.schedule,
@@ -406,6 +410,8 @@ fn request_keeps_mapping_import_and_worker_option_error_order() {
             seed: 42,
             program: &[],
             quantum_ns: simulation.simulator.quantum_ns,
+            progress_budget: simulation.simulator.progress_budget,
+            allow_crashes: &Default::default(),
             limits: &simulation.limits,
             network: &simulation.network,
             schedule: &simulation.schedule,
@@ -563,4 +569,228 @@ fn stored_artifacts_retain_by_reference_only_when_the_store_holds_them() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("hash mismatch"), "{error}");
+}
+
+/// What a resubmitted definition can change about a prepared two-machine
+/// world: the oracle and `db`, which mounts one named volume.
+struct Edited {
+    inputs: PreparedInputs,
+    progress_budget: seedbox_spec::progress::ProgressBudget,
+    allow_crashes: BTreeSet<String>,
+    control: Option<crate::config::Control>,
+}
+fn adapt_edited(backend: CpuBackend, edit: impl FnOnce(&mut Edited)) -> Result<wire::Request> {
+    use crate::execution::PreparedImage;
+    use seedbox_artifacts::image::Launch;
+    let root = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(root.path().join("store"));
+    let (mut inputs, mut prepared, artifact) = fixture(root.path(), backend);
+    let digest = ContentDigest::try_from(artifact.sha256).unwrap();
+    let data = seedbox_spec::VolumeMount {
+        source: "data".into(),
+        target: "/data".into(),
+        size_bytes: None,
+    };
+    let environment = |name: &str, named_volumes| wire::Environment {
+        hostname: name.into(),
+        hosts: format!("10.0.0.1 {name}\n"),
+        anonymous_volumes: vec![],
+        named_volumes,
+        configs: BTreeMap::new(),
+        limits: wire::GuestLimits {
+            max_map_count: std::num::NonZeroU32::MIN,
+            nofile: std::num::NonZeroU32::MIN,
+        },
+        control_socket: false,
+    };
+    prepared.machines.push(wire::Machine {
+        name: "db".into(),
+        disk: Some(wire::Disk::Zero { bytes: 1 << 30 }),
+        ..prepared.oracle.clone()
+    });
+    let (wire::Inventory::Pv { environments, .. } | wire::Inventory::Tcg { environments, .. }) =
+        &mut prepared.inventory;
+    environments.insert("oracle".into(), environment("oracle", vec![]));
+    environments.insert(
+        "db".into(),
+        environment(
+            "db",
+            vec![wire::NamedVolume {
+                name: "data".into(),
+                target: "/data".into(),
+            }],
+        ),
+    );
+    inputs.wall_clock_epoch = Some(86400);
+    for (name, disk_volumes) in [("oracle", vec![]), ("db", vec![data])] {
+        inputs.machine_memory_mb.insert(name.into(), 128);
+        inputs.guests.insert(name.into(), digest.clone());
+        inputs.placement.insert(name.into(), name.into());
+        inputs.images.insert(
+            name.into(),
+            PreparedImage {
+                manifest: digest.clone(),
+                config: digest.clone(),
+                layers: vec![],
+                launch: Launch {
+                    argv: prepared.oracle.process.argv.clone(),
+                    environment: Default::default(),
+                    working_dir: "/".into(),
+                    user: "".into(),
+                    volumes: vec![],
+                    disk_volumes,
+                },
+            },
+        );
+    }
+    retain_prepared(&mut inputs, &prepared, &store).unwrap();
+    let artifacts = inputs
+        .digests()
+        .enumerate()
+        .map(|(index, digest)| {
+            let path = store
+                .materialize(digest, &root.path().join(format!("input-{index}")))
+                .unwrap();
+            (digest.clone(), path)
+        })
+        .collect();
+    let mut edited = Edited {
+        inputs,
+        progress_budget: Default::default(),
+        allow_crashes: BTreeSet::new(),
+        control: None,
+    };
+    edit(&mut edited);
+    let output = root.path().join("output");
+    fs::create_dir(&output).unwrap();
+    let simulation = crate::fixture_simulation("oracle");
+    let cancellation = CancellationToken::default();
+    let performance = BTreeMap::new();
+    let request = ExecutionRequest {
+        start_paused: true,
+        resume_checkpoint: None,
+        intervention_history: None,
+        observations: None,
+        seed: 42,
+        program: &[],
+        quantum_ns: simulation.simulator.quantum_ns,
+        progress_budget: edited.progress_budget,
+        allow_crashes: &edited.allow_crashes,
+        limits: &simulation.limits,
+        network: &simulation.network,
+        schedule: &simulation.schedule,
+        control: edited.control.as_ref(),
+        check: &simulation.check,
+        prepared: &edited.inputs,
+        artifacts: &artifacts,
+        output: &output,
+        cancellation: &cancellation,
+        performance_parameters: &performance,
+        spawner: None,
+    };
+    super::request(&request, &output.join("host.sock"), None)
+}
+fn refused(backend: CpuBackend, edit: impl FnOnce(&mut Edited)) -> String {
+    let error = adapt_edited(backend, edit).expect_err("the edit must be refused");
+    assert!(matches!(error, Error::Setup(_)), "{error:?}");
+    error.to_string()
+}
+
+#[test]
+fn unedited_definitions_adapt_their_prepared_world() {
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        let worker = adapt_edited(backend, |_| {}).unwrap();
+        assert!(!worker.prepared.oracle.allow_crashes);
+        assert!(!worker.prepared.machines[0].allow_crashes);
+        assert_eq!(
+            worker.prepared.machines[0].disk,
+            Some(wire::Disk::Zero { bytes: 1 << 30 })
+        );
+    }
+}
+
+#[test]
+fn edited_allow_crashes_reach_the_worker_request() {
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        let worker = adapt_edited(backend, |edited| {
+            edited.allow_crashes.insert("db".into());
+        })
+        .unwrap();
+        assert!(!worker.prepared.oracle.allow_crashes);
+        assert_eq!(worker.prepared.machines[0].name, "db");
+        assert!(worker.prepared.machines[0].allow_crashes);
+    }
+}
+
+#[test]
+fn edits_the_prepared_boot_archives_embed_are_refused_by_field() {
+    let budget = |blocks| std::num::NonZeroU32::new(blocks).unwrap().into();
+    let error = refused(CpuBackend::Pv, |edited| edited.progress_budget = budget(17));
+    assert_eq!(
+        error,
+        "simulator.blocksPerProgressCall 17 differs from the prepared 10000; a resolved definition replays prepared boot archives that embed it, so it cannot be changed"
+    );
+    // TCG has no translator budget, so its recorded value changes nothing.
+    adapt_edited(CpuBackend::Tcg, |edited| {
+        edited.progress_budget = budget(17)
+    })
+    .unwrap();
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        let error = refused(backend, |edited| {
+            edited.inputs.wall_clock_epoch = Some(86401);
+        });
+        assert!(
+            error.starts_with("clock.epochSeconds 86401 differs from the prepared 86400;"),
+            "{error}"
+        );
+        let error = refused(backend, |edited| {
+            edited.control = Some(crate::config::Control {
+                service: "oracle".into(),
+            });
+        });
+        assert!(
+            error.starts_with("simulator.oracleControl true differs from the prepared false;"),
+            "{error}"
+        );
+        let error = refused(backend, |edited| {
+            let launch = &mut edited.inputs.images.get_mut("db").unwrap().launch;
+            launch.disk_volumes[0].size_bytes = Some(2 << 30);
+        });
+        assert!(
+            error.starts_with("machines.db.volumes differs from the prepared machine;"),
+            "{error}"
+        );
+        let error = refused(backend, |edited| {
+            let launch = &mut edited.inputs.images.get_mut("db").unwrap().launch;
+            launch.disk_volumes[0].target = "/elsewhere".into();
+        });
+        assert!(error.starts_with("machines.db.volumes differs"), "{error}");
+        let error = refused(backend, |edited| {
+            let volumes = edited.inputs.images["db"].launch.disk_volumes.clone();
+            edited
+                .inputs
+                .images
+                .get_mut("oracle")
+                .unwrap()
+                .launch
+                .disk_volumes = volumes;
+        });
+        assert!(error.starts_with("oracle.volumes differs"), "{error}");
+        let error = refused(backend, |edited| {
+            let launch = &mut edited.inputs.images.get_mut("oracle").unwrap().launch;
+            launch.volumes.push("/cache".into());
+        });
+        assert!(
+            error.starts_with("oracle.anonymousVolumes differs"),
+            "{error}"
+        );
+        let error = refused(backend, |edited| {
+            let db = edited.inputs.images["db"].clone();
+            edited.inputs.images.insert("extra".into(), db);
+        });
+        assert!(
+            error.starts_with("machines.extra is not in the prepared world;"),
+            "{error}"
+        );
+    }
 }

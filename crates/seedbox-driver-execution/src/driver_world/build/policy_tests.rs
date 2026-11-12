@@ -136,28 +136,27 @@ fn tcg_controller_requests_are_admitted_only_on_driver_hosts() {
     }
 }
 
-#[test]
-fn checkpoint_quantum_must_match_without_changing_saved_state() {
-    use seedbox_machine::{
-        definition::{Launch, PreparedApplication, Resources},
-        machine::{Machine, RunContext, StopReason},
-    };
-    struct Mock;
-    impl Machine for Mock {
-        type Context = ();
-        type Error = String;
-        type Snapshot = ();
-        fn run(
-            &mut self,
-            _: &mut RunContext<'_, ()>,
-            _: Timestamp,
-        ) -> std::result::Result<StopReason, String> {
-            Ok(StopReason::BoundaryReached)
-        }
-        fn snapshot(&mut self) -> std::result::Result<(), String> {
-            Ok(())
-        }
+struct Mock;
+impl seedbox_machine::machine::Machine for Mock {
+    type Context = ();
+    type Error = String;
+    type Snapshot = ();
+    fn run(
+        &mut self,
+        _: &mut seedbox_machine::machine::RunContext<'_, ()>,
+        _: Timestamp,
+    ) -> std::result::Result<seedbox_machine::machine::StopReason, String> {
+        Ok(seedbox_machine::machine::StopReason::BoundaryReached)
     }
+    fn snapshot(&mut self) -> std::result::Result<(), String> {
+        Ok(())
+    }
+}
+/// A one-millisecond-quantum capture of a mock oracle, after `configure`.
+fn saved_checkpoint(
+    configure: impl FnOnce(&mut Driver<Mock>),
+) -> seedbox_driver::driver::Checkpoint<seedbox_driver::driver::SnapshotReference> {
+    use seedbox_machine::definition::{Launch, PreparedApplication, Resources};
     let oracle = MachineDefinition {
         name: "oracle".into(),
         resources: Resources {
@@ -189,13 +188,18 @@ fn checkpoint_quantum_must_match_without_changing_saved_state() {
         |_| Ok(Mock),
     )
     .unwrap();
-    let saved = source
+    configure(&mut source);
+    source
         .checkpoint()
         .unwrap()
         .try_map_snapshots(|()| {
             Ok::<_, String>(seedbox_driver::driver::SnapshotReference::new([0; 32], 1))
         })
-        .unwrap();
+        .unwrap()
+}
+#[test]
+fn checkpoint_quantum_must_match_without_changing_saved_state() {
+    let saved = saved_checkpoint(|_| {});
     let mut before = Vec::new();
     saved.write_to(&mut before).unwrap();
     validate_checkpoint_quantum(&saved, 1_000_000).unwrap();
@@ -208,6 +212,25 @@ fn checkpoint_quantum_must_match_without_changing_saved_state() {
     saved.write_to(&mut after).unwrap();
     assert_eq!(before, after);
     validate_checkpoint_quantum(&saved, 1_000_000).unwrap();
+}
+#[test]
+fn checkpoint_allow_crashes_must_match_the_requested_machines() {
+    let root = tempfile::tempdir().unwrap();
+    let mut request = request(inventory(None), root.path().join("must-not-exist"));
+    let allowed = saved_checkpoint(|driver| {
+        driver.allow_crashes(["oracle".into()].into()).unwrap();
+    });
+    let plain = saved_checkpoint(|_| {});
+    validate_checkpoint_allow_crashes(&plain, &request.prepared).unwrap();
+    let error = validate_checkpoint_allow_crashes(&allowed, &request.prepared).unwrap_err();
+    assert!(matches!(error, Error::Setup(_)), "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        "allowCrashes for oracle differs from the checkpoint; start fresh to change allowCrashes"
+    );
+    request.prepared.oracle.allow_crashes = true;
+    validate_checkpoint_allow_crashes(&allowed, &request.prepared).unwrap();
+    assert!(validate_checkpoint_allow_crashes(&plain, &request.prepared).is_err());
 }
 #[test]
 fn programs_beyond_the_engine_are_refused_before_any_machine_boots() {
