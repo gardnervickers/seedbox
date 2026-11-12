@@ -359,7 +359,7 @@ fn captured_checkpoint_registry_is_independent_of_descendant_ownership() {
     source.status.termination = Some(seedbox_api::ExecutionTermination::Stopped);
     catalogue.update(source).unwrap();
     assert_eq!(catalogue.checkpoints(&id).unwrap().len(), 2);
-    assert_eq!(catalogue.begin_delete(&id).unwrap(), vec![id.clone()]);
+    catalogue.begin_delete(&id).unwrap();
     let marked = catalogue.get(&id).unwrap().metadata.clone();
     assert!(marked.deletion_requested_at_unix_ms.is_some());
     catalogue.begin_delete(&id).unwrap();
@@ -426,10 +426,7 @@ fn seed_range_waits_for_frozen_inputs_and_continues_once() {
         member.status.termination = Some(seedbox_api::ExecutionTermination::Stopped);
         catalogue.update(member).unwrap();
     }
-    assert_eq!(
-        catalogue.begin_delete(&source.metadata.id).unwrap(),
-        vec![source.metadata.id.clone()]
-    );
+    catalogue.begin_delete(&source.metadata.id).unwrap();
     catalogue.delete(&source.metadata.id).unwrap();
     assert_eq!(catalogue.list().count(), 2);
     for id in [&second.metadata.id, &third.metadata.id] {

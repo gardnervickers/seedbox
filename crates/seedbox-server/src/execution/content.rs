@@ -3,7 +3,7 @@
 //! Captured checkpoint state and imported binaries are owned cache objects
 //! (`ContentStore::put_*_owned`). After a deletion, every owned object that no
 //! remaining resource, retained input file, checkpoint exported from a remaining
-//! source or unsubmitted checkpoint upload names is removed. Reusable inputs
+//! source or unclaimed checkpoint upload names is removed. Reusable inputs
 //! (kernels, prepared images and guests) are never owned, so this is not cache
 //! pruning. Work that creates an owned object holds `references` for reading
 //! until a resource or one of those registries names it; reclamation holds it
@@ -26,9 +26,13 @@ pub(super) struct Pins {
     /// Captured state of exported checkpoints, by source and checkpoint: a
     /// fetched branch stays submittable while its source remains.
     exports: BTreeMap<SimulationId, BTreeMap<String, BTreeSet<ContentDigest>>>,
-    /// Uploaded checkpoints, with the resources that existed at upload. Each
-    /// lasts until a later resource names all its content.
+    /// Uploaded checkpoints, newest first, with the resources that existed at
+    /// upload. Each lasts until a later resource that names all its content
+    /// claims it.
     uploads: Vec<(BTreeSet<SimulationId>, BTreeSet<ContentDigest>)>,
+    /// Remaining resources that claimed an upload. Each claims at most one, so
+    /// a second upload of the same checkpoint stays until its own submission.
+    claimed: BTreeSet<SimulationId>,
     /// The latest exported checkpoint that named each digest, for the error a
     /// submission gets after deletion reclaims it.
     exported: BTreeMap<ContentDigest, (SimulationId, String)>,
@@ -81,19 +85,17 @@ impl ExecutionService {
         self.reclaim_unreferenced(None)
     }
 
-    /// Callers hold the evidence lock. The catalogue records what deleting
-    /// `deleted` reclaimed.
-    pub(super) fn reclaim_unreferenced(
+    /// The content each resource (or only `only`) names in the catalogue and
+    /// its retained input file.
+    pub(super) fn resource_digests(
         &self,
-        deleted: Option<&SimulationId>,
-    ) -> Result<Vec<ContentDigest>, Error> {
-        let _references = self
-            .references
-            .write()
-            .map_err(|_| catalogue::Error::StorageFailed)?;
+        only: Option<&SimulationId>,
+    ) -> Result<BTreeMap<SimulationId, BTreeSet<ContentDigest>>, Error> {
         let mut resources: BTreeMap<SimulationId, BTreeSet<ContentDigest>> = BTreeMap::new();
         for (id, value) in self.manager.content()? {
-            digests_in(&value, resources.entry(id).or_default());
+            if only.is_none_or(|only| *only == id) {
+                digests_in(&value, resources.entry(id).or_default());
+            }
         }
         for (id, digests) in &mut resources {
             match fs::read(self.root.join("inputs").join(format!("{id}.json"))) {
@@ -105,6 +107,21 @@ impl ExecutionService {
                 Err(e) => return Err(e.into()),
             }
         }
+        Ok(resources)
+    }
+
+    /// Callers hold the evidence lock. `deleted` is the resource just deleted
+    /// with the content it named: it can still claim the upload it was
+    /// submitted from, and the catalogue records what its deletion reclaimed.
+    pub(super) fn reclaim_unreferenced(
+        &self,
+        deleted: Option<(&SimulationId, BTreeSet<ContentDigest>)>,
+    ) -> Result<Vec<ContentDigest>, Error> {
+        let _references = self
+            .references
+            .write()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
+        let resources = self.resource_digests(None)?;
         let mut roots: BTreeSet<ContentDigest> = resources.values().flatten().cloned().collect();
         let mut pins = self
             .pins
@@ -112,14 +129,28 @@ impl ExecutionService {
             .map_err(|_| catalogue::Error::StorageFailed)?;
         pins.exports
             .retain(|source, _| resources.contains_key(source));
-        pins.uploads.retain(|(existing, digests)| {
-            let named: BTreeSet<_> = resources
-                .iter()
-                .filter(|(id, _)| !existing.contains(*id))
-                .flat_map(|(_, digests)| digests)
-                .collect();
-            !digests.iter().all(|digest| named.contains(digest))
+        // A resource later than an upload is later than every older one too,
+        // so newer uploads are claimed first; the deleted resource claims
+        // before the remaining ones, which can still claim later.
+        let named: Vec<_> = deleted
+            .as_ref()
+            .map(|(id, digests)| (*id, digests))
+            .into_iter()
+            .chain(&resources)
+            .collect();
+        let Pins {
+            uploads, claimed, ..
+        } = &mut *pins;
+        uploads.retain(|(existing, digests)| {
+            let claimant = named.iter().find(|(id, named)| {
+                !existing.contains(*id) && !claimed.contains(*id) && digests.is_subset(named)
+            });
+            if let Some((id, _)) = claimant {
+                claimed.insert((*id).clone());
+            }
+            claimant.is_none()
         });
+        claimed.retain(|id| resources.contains_key(id));
         roots.extend(
             pins.exports
                 .values()
@@ -137,7 +168,7 @@ impl ExecutionService {
             .iter()
             .filter_map(|digest| {
                 let checkpoint = pins.exported.remove(digest);
-                let deleted = deleted?.clone();
+                let deleted = deleted.as_ref()?.0.clone();
                 let checkpoint = checkpoint
                     .map(|(source, name)| format!("checkpoint {name} of simulation {source}"));
                 Some((
@@ -192,7 +223,7 @@ impl ExecutionService {
             .lock()
             .map_err(|_| catalogue::Error::StorageFailed)?
             .uploads
-            .push((existing, digests));
+            .insert(0, (existing, digests));
         Ok(())
     }
 }

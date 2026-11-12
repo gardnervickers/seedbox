@@ -1,4 +1,5 @@
-//! Deleting resources reclaims the cache objects only they referenced.
+//! Deleting a resource removes its files and reclaims the cache objects only it
+//! referenced.
 #![cfg(unix)]
 use seedbox_api::*;
 use seedbox_application::{
@@ -247,6 +248,113 @@ fn a_checkpoint_file_keeps_its_state_until_the_branch_submitted_from_it_is_delet
     execution.delete(&branched).unwrap();
     assert_eq!(cache(root.path()), baseline);
     assert_eq!(markers(root.path()), 0);
+}
+
+#[test]
+fn deleting_the_only_branch_submitted_from_an_upload_reclaims_its_state() {
+    let root = tempfile::tempdir().unwrap();
+    let (manager, execution, store, source) = server(root.path());
+    let baseline = cache(root.path());
+    let mut bytes = Vec::new();
+    execution
+        .export_checkpoint_bundle(&source, "capture", &mut bytes, &Options::default())
+        .unwrap();
+    execution.delete(&source).unwrap();
+    let definition = execution
+        .import_checkpoint_bundle(bytes.as_slice(), &Options::default())
+        .unwrap();
+    let spec = SimulationSpec::resolved(definition).unwrap();
+    let branched = complete(&manager, "branch", Some(spec.clone()));
+    execution.delete(&branched).unwrap();
+    assert_eq!(cache(root.path()), baseline);
+    assert!(store.owned_objects().is_empty());
+    assert_eq!(markers(root.path()), 0);
+    let mut request = test_support::resolved_request("resubmitted");
+    request.spec = spec;
+    assert_eq!(
+        manager.submit(request).unwrap_err().to_string(),
+        format!(
+            "checkpoint state for this definition was reclaimed when simulation {branched} was \
+             deleted; export a checkpoint file to keep it"
+        )
+    );
+}
+
+#[test]
+fn each_upload_of_a_checkpoint_file_keeps_its_state_until_its_own_branch_is_deleted() {
+    let root = tempfile::tempdir().unwrap();
+    let (manager, execution, store, source) = server(root.path());
+    let baseline = cache(root.path());
+    let ram = ContentDigest::of(RAM);
+    let mut bytes = Vec::new();
+    execution
+        .export_checkpoint_bundle(&source, "capture", &mut bytes, &Options::default())
+        .unwrap();
+    execution.delete(&source).unwrap();
+    let [first, second] = [(); 2].map(|()| {
+        let definition = execution
+            .import_checkpoint_bundle(bytes.as_slice(), &Options::default())
+            .unwrap();
+        SimulationSpec::resolved(definition).unwrap()
+    });
+    let branched = complete(&manager, "branch", Some(first));
+    execution.delete(&branched).unwrap();
+    store.verify(&ram).unwrap();
+    let again = complete(&manager, "again", Some(second));
+    execution.delete(&again).unwrap();
+    assert_eq!(cache(root.path()), baseline);
+    assert_eq!(markers(root.path()), 0);
+}
+
+#[test]
+fn a_seed_range_source_with_an_active_member_is_refused_before_anything_is_removed() {
+    let root = tempfile::tempdir().unwrap();
+    let (manager, execution, _store, _) = server(root.path());
+    let base = test_support::resolved_request("range");
+    let source = manager
+        .submit_seeds(SeedRangeRequest {
+            metadata: Default::default(),
+            options: Default::default(),
+            request_id: base.request_id,
+            spec: base.spec,
+            count: 2,
+        })
+        .unwrap()
+        .0
+        .metadata
+        .id;
+    manager.begin(&source).unwrap();
+    manager
+        .update(&source, |s| s.status.phase = Phase::Completed)
+        .unwrap();
+    let member = manager.advance_seeds().unwrap().unwrap();
+    let run = root.path().join("runs").join(source.as_str());
+    let inputs = root.path().join("inputs").join(format!("{source}.json"));
+    fs::create_dir_all(&run).unwrap();
+    fs::write(run.join("output"), b"retained").unwrap();
+    fs::write(&inputs, b"{}").unwrap();
+    let before = manager.describe(&source).unwrap().metadata;
+    let error = execution.delete(&source).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "invalid catalogue record: stop the seed range and wait for completion before deleting it"
+    );
+    assert!(run.join("output").is_file() && inputs.is_file());
+    assert_eq!(manager.describe(&source).unwrap().metadata, before);
+    assert!(
+        !manager
+            .read(|catalogue| catalogue.seed_range(&source))
+            .unwrap()
+            .stop_requested
+    );
+    // Once the member completes, the same deletion succeeds.
+    manager.begin(&member).unwrap();
+    manager
+        .update(&member, |s| s.status.phase = Phase::Completed)
+        .unwrap();
+    execution.delete(&source).unwrap();
+    assert!(!run.exists() && !inputs.exists());
+    assert!(manager.describe(&member).is_ok());
 }
 
 #[test]

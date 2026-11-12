@@ -152,48 +152,48 @@ impl ExecutionService {
         Ok(self.manager.capacity(admission.0, &occupying)?)
     }
 
-    /// Foreground cascading deletion: stop the frozen ownership tree, wait for
-    /// execution cleanup, then remove dependents before their parents, and
-    /// finally the owned content no remaining resource references.
+    /// Foreground deletion of one resource: stop it, wait for execution
+    /// cleanup, remove its files and catalogue entry, and finally the owned
+    /// content no remaining resource references.
     pub fn delete(&self, id: &SimulationId) -> Result<(), Error> {
         let _evidence = self
             .evidence
             .lock()
             .map_err(|_| catalogue::Error::StorageFailed)?;
-        let targets = self.manager.begin_delete(id)?;
+        let worker = self.manager.begin_delete(id)?;
         // Join control transport and journal I/O without holding the catalogue
         // mutex. Retirement prevents already cloned handles from starting later.
-        for target in &targets {
-            if let Some(worker) = &target.worker {
-                crate::worker::lock_for_retirement(worker)
-                    .map_err(|_| Error::Catalogue(catalogue::Error::StorageFailed))?
-                    .retire();
-            }
+        if let Some(worker) = &worker {
+            crate::worker::lock_for_retirement(worker)
+                .map_err(|_| Error::Catalogue(catalogue::Error::StorageFailed))?
+                .retire();
         }
-        for target in targets {
-            let id = target.id;
-            loop {
-                match self.manager.describe(&id) {
-                    Ok(resource) if resource.status.phase != Phase::Completed => {
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                    Ok(_) | Err(catalogue::Error::NotFound(_)) => break,
-                    Err(error) => return Err(error.into()),
+        loop {
+            match self.manager.describe(id) {
+                Ok(resource) if resource.status.phase != Phase::Completed => {
+                    std::thread::sleep(Duration::from_millis(50));
                 }
+                Ok(_) | Err(catalogue::Error::NotFound(_)) => break,
+                Err(error) => return Err(error.into()),
             }
-            // Paths are derived from validated IDs, never from retained metadata.
-            let directory = self.root.join("runs").join(id.as_str());
-            match fs::remove_dir_all(directory) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                result => result?,
-            }
-            match fs::remove_file(self.root.join("inputs").join(format!("{id}.json"))) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                result => result?,
-            }
-            self.manager.delete(&id)?;
         }
-        self.reclaim_unreferenced(Some(id))?;
+        // Read before its files go: what it named releases its upload pin.
+        let named = self
+            .resource_digests(Some(id))?
+            .remove(id)
+            .unwrap_or_default();
+        // Paths are derived from validated IDs, never from retained metadata.
+        let directory = self.root.join("runs").join(id.as_str());
+        match fs::remove_dir_all(directory) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            result => result?,
+        }
+        match fs::remove_file(self.root.join("inputs").join(format!("{id}.json"))) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            result => result?,
+        }
+        self.manager.delete(id)?;
+        self.reclaim_unreferenced(Some((id, named)))?;
         Ok(())
     }
 
@@ -334,17 +334,15 @@ impl ExecutionService {
         &self,
         baseline: &SimulationId,
         simulation: &SimulationId,
-    ) -> seedbox_application::Result<seedbox_api::SimulationComparison> {
+    ) -> Result<seedbox_api::SimulationComparison, Error> {
         let _evidence = self
             .evidence
             .lock()
-            .map_err(|_| seedbox_application::Error::Setup("evidence lock failed".into()))?;
-        let record = |id: &SimulationId| {
-            self.manager
-                .result_evidence(id)
-                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))
-        };
-        let (Some(first), Some(second)) = (record(baseline)?, record(simulation)?) else {
+            .map_err(|_| catalogue::Error::StorageFailed)?;
+        let (Some(first), Some(second)) = (
+            self.manager.result_evidence(baseline)?,
+            self.manager.result_evidence(simulation)?,
+        ) else {
             return Ok(seedbox_api::SimulationComparison {
                 baseline: baseline.clone(),
                 simulation: simulation.clone(),

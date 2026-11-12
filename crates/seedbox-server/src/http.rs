@@ -372,7 +372,7 @@ async fn compare(
         execution
             .compare(&baseline, &simulation)
             .map(Json)
-            .map_err(|e| HttpError::invalid(e.to_string()))
+            .map_err(HttpError::from)
     })
     .await
     .map_err(|_| HttpError::internal("comparison task failed"))?
