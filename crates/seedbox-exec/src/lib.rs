@@ -26,7 +26,8 @@
 //!   [`spawn`] while holding [`writing`], and [`writing`] while holding
 //!   either. Debug builds panic on a blocking acquisition by a thread that
 //!   already holds a guard. The spawn mutex is only ever taken last, inside
-//!   the shared guard, and released with it.
+//!   the shared guard, and released with it, or alone by [`cloexec`], which
+//!   takes nothing else while it holds it.
 //! - **Bounded writes.** Hold [`writing`] only for a bounded local copy: never
 //!   while waiting on another thread or a child that may itself need to spawn,
 //!   such as piping a child's output into the executable.
@@ -182,6 +183,20 @@ pub fn spawn_with<T>(spawn: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     spawn()
 }
 
+/// Run `create`, which makes descriptors and marks them close-on-exec, such
+/// as `UnixStream::pair`, so that no spawn forks between the two. Where
+/// [`SERIALIZED_SPAWNS`], std creates a socket or pipe and sets the flag in a
+/// second call, and a spawn on another thread in between copies the
+/// descriptor into its child across exec; this holds the spawn mutex around
+/// `create`. Elsewhere it just runs `create`. `create` must only create and
+/// mark descriptors: never take a lock, spawn or wait. Like [`spawn`], never
+/// call it while holding a guard.
+pub fn cloexec<T>(create: impl FnOnce() -> T) -> T {
+    held::assert_none("cloexec");
+    let _serialized = serialized();
+    create()
+}
+
 /// `Command::status` through [`spawn`]. Like std, standard streams are
 /// inherited unless the command sets them.
 pub fn status(command: &mut Command) -> io::Result<std::process::ExitStatus> {
@@ -251,6 +266,11 @@ mod tests {
             "spawn_with released the spawn mutex"
         );
         assert!(try_writing().is_some(), "spawn_with released its guard");
+        let (serialized, writable) =
+            cloexec(|| (SPAWN.try_lock().is_err(), try_writing().is_some()));
+        assert_eq!(serialized, SERIALIZED_SPAWNS, "cloexec excludes spawns");
+        assert!(writable, "cloexec takes no shared guard");
+        assert!(SPAWN.try_lock().is_ok(), "cloexec released the spawn mutex");
         nesting_panics_before_it_can_deadlock();
         a_panic_inside_spawn_with_leaves_spawns_working();
     }

@@ -179,8 +179,10 @@ impl OwnedExecution {
             None => lease.try_clone()?,
         };
         let session = high_descriptor(&session)?;
-        let (mut owner, input) = UnixStream::pair()?;
-        let (status, output) = UnixStream::pair()?;
+        // A copy of `owner` left in a concurrent spawn's child would hide
+        // owner death from the monitor.
+        let (mut owner, input) = seedbox_exec::cloexec(UnixStream::pair)?;
+        let (status, output) = seedbox_exec::cloexec(UnixStream::pair)?;
         let output = high_descriptor(&output)?;
         let lease = high_descriptor(&lease)?;
         let mut command = Command::new(executable);
@@ -193,11 +195,8 @@ impl OwnedExecution {
             .stdout(stdout)
             .stderr(stderr)
             .process_group(0);
-        // Only async-signal-safe operations occur after fork. `inherit` runs in
-        // the child, so the parent's descriptors keep CLOEXEC. The two pairs
-        // above are the exception where `seedbox_exec::SERIALIZED_SPAWNS`: std
-        // creates each and then marks it, outside the spawn mutex, so a spawn
-        // on another thread in that window copies it unmarked into its child.
+        // Only async-signal-safe operations occur after fork. The parent's
+        // descriptors always retain CLOEXEC, including during concurrent spawns.
         unsafe {
             command.pre_exec(move || {
                 inherit(output.as_raw_fd(), STATUS_FD)?;
