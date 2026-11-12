@@ -80,9 +80,10 @@ impl Native {
             .collect();
         cpuid.sort_unstable();
         // request_interrupt_window is host scheduling, like immediate_exit and
-        // the last exit_reason: `prepare` rewrites it from the restored PIC
-        // state before every entry, capture does not save it and restore
-        // clears it, so hashing it would make a restored machine mismatch.
+        // the last exit_reason: `prepare` rewrites it from the current PIC
+        // state before each prepared entry (a host-interrupted or maintenance
+        // re-entry keeps it), capture does not save it and restore clears it,
+        // so hashing it would make a restored machine mismatch.
         Ok(vec![
             part(
                 "regs",
