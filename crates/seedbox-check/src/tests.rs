@@ -979,8 +979,8 @@ fn test_service_release_build_uses_the_target_the_service_tests_read() {
 }
 #[test]
 fn test_worker_failure_monitor_build_serves_the_pv_service_target() {
-    // `cargo test` builds no dependency binaries; coordinate builds the
-    // monitor for exactly the service runs that enable the worker-failure case.
+    // `cargo test` builds no dependency binaries, so the monitor has its own
+    // build job, and only the PV service target enables the case that reads it.
     let environment = env(&[("PATH", "/bin"), ("CARGO_TARGET_DIR", "/agent-cache")]);
     let job = worker_failure_monitor_build(&environment, std::path::Path::new("/fixture"));
     assert_eq!(

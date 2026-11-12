@@ -142,7 +142,7 @@ mod machine {
                     driver.step(at(10)).unwrap(),
                     StepOutcome::BarrierReached { at: at(3) }
                 );
-                // A round no longer ends at a timer, so each driver asks for a
+                // A round does not end at a timer, so each driver asks for a
                 // barrier at the guests' timer before the one that powers off.
                 assert_eq!(
                     driver.step(at(5)).unwrap(),
