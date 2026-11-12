@@ -659,20 +659,11 @@ mod tests {
                         } else if first.starts_with("GET ") {
                             let mut receipt = pending.take().unwrap();
                             if let ControlState::Acknowledged {
-                                checkpoint,
-                                error,
-                                detail,
+                                checkpoint: Some(checkpoint),
                                 ..
                             } = &mut receipt.state
                             {
-                                if outcome == "refused" {
-                                    // The worker could not write the capture.
-                                    *checkpoint = None;
-                                    *error = Some(ControlError::InvalidCheckpoint);
-                                    *detail = Some(REFUSAL.into());
-                                } else if let Some(checkpoint) = checkpoint {
-                                    checkpoint.state = CheckpointState::Captured;
-                                }
+                                checkpoint.state = CheckpointState::Captured;
                             }
                             serde_json::to_vec(&receipt).unwrap()
                         } else {
@@ -695,7 +686,7 @@ mod tests {
                                     checkpoint = Some(seedbox_api::CheckpointStatus {
                                         request_id: request.request_id.clone(),
                                         position: Default::default(),
-                                        state: if matches!(outcome, "deferred" | "refused") {
+                                        state: if outcome == "deferred" {
                                             CheckpointState::Requested
                                         } else {
                                             CheckpointState::Captured
@@ -707,11 +698,22 @@ mod tests {
                                 }
                                 _ => panic!("unexpected command"),
                             }
+                            let refused = request.command == ControlCommand::Checkpoint
+                                && outcome == "refused";
                             let receipt = ControlReceipt {
                                 request,
                                 revision: 1,
                                 state: if rejected {
                                     ControlState::Unsupported
+                                } else if refused {
+                                    // The worker could not write the capture.
+                                    ControlState::Acknowledged {
+                                        status: status.clone(),
+                                        error: Some(ControlError::InvalidCheckpoint),
+                                        intervention: None,
+                                        detail: Some(REFUSAL.into()),
+                                        checkpoint: None,
+                                    }
                                 } else {
                                     ControlState::Acknowledged {
                                         status: status.clone(),
@@ -723,7 +725,13 @@ mod tests {
                                 },
                             };
                             pending = Some(receipt.clone());
-                            serde_json::to_vec(&receipt).unwrap()
+                            // The server keeps a refused checkpoint's receipt
+                            // accepted until the worker answers it.
+                            let mut public = receipt;
+                            if refused {
+                                public.state = ControlState::Accepted;
+                            }
+                            serde_json::to_vec(&public).unwrap()
                         };
                         let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len());
                         connection

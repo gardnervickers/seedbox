@@ -70,6 +70,36 @@ struct Refusal {
     request_id: String,
     detail: String,
 }
+/// Longest refusal detail, in JSON-encoded bytes, that a checkpoint reply
+/// carries. Every control reply must fit one `MAX_DATAGRAM`, and a reply that
+/// does not ends the worker's run, so an arbitrarily long I/O or Driver error
+/// is cut short here rather than taking the simulation down with it.
+const REFUSAL_DETAIL_LIMIT: usize = 1024;
+const TRUNCATED: &str = " [truncated]";
+impl Refusal {
+    fn new(request_id: String, error: &checkpoint::CaptureFailure) -> Self {
+        let mut detail = error.to_string();
+        // Count escapes conservatively so the encoded detail stays in bounds.
+        let encoded = |c: char| match c {
+            '"' | '\\' | '\u{0}'..='\u{1f}' => 6,
+            c => c.len_utf8(),
+        };
+        if detail.chars().map(encoded).sum::<usize>() > REFUSAL_DETAIL_LIMIT {
+            let budget = REFUSAL_DETAIL_LIMIT - TRUNCATED.len();
+            let mut used = 0;
+            let end = detail
+                .char_indices()
+                .find(|&(_, c)| {
+                    used += encoded(c);
+                    used > budget
+                })
+                .map_or(detail.len(), |(at, _)| at);
+            detail.truncate(end);
+            detail.push_str(TRUNCATED);
+        }
+        Self { request_id, detail }
+    }
+}
 pub(super) enum Dispatch {
     Reply(Reply),
     Semantic(Request),
@@ -242,6 +272,20 @@ where
     /// or reinterpreted as another kind of control.
     pub(super) fn playback_request(&mut self, request: Request) -> Result<Dispatch> {
         let mut reply = self.status(request.id)?;
+        // The server polls a pending checkpoint under fresh wire IDs until it
+        // resolves. Answer the refused request with its refusal, even after
+        // the run ends, instead of capturing it again.
+        if let Command::Checkpoint { request_id } = &request.command {
+            if let Some(refusal) = self
+                .checkpoint_refusal
+                .as_ref()
+                .filter(|refusal| refusal.request_id == *request_id)
+            {
+                reply.error = Some(ControlError::InvalidCheckpoint);
+                reply.detail = Some(refusal.detail.clone());
+                return Ok(Dispatch::Reply(reply));
+            }
+        }
         if self.terminal && request.command != Command::Status {
             reply.error = Some(ControlError::Completed);
             return Ok(Dispatch::Reply(reply));
@@ -285,19 +329,7 @@ where
                 {
                     return Ok(Dispatch::Reply(reply));
                 }
-                // The server polls a pending checkpoint under fresh wire IDs
-                // until it resolves. Answer the refused request with its
-                // refusal instead of capturing it again; any other request
-                // starts afresh.
-                if let Some(refusal) = self
-                    .checkpoint_refusal
-                    .as_ref()
-                    .filter(|refusal| refusal.request_id == *request_id)
-                {
-                    reply.error = Some(ControlError::InvalidCheckpoint);
-                    reply.detail = Some(refusal.detail.clone());
-                    return Ok(Dispatch::Reply(reply));
-                }
+                // Any request other than the refused one starts afresh.
                 self.checkpoint_refusal = None;
                 let error = if playback.rate != driver::PlaybackRate::Paused {
                     Some(ControlError::NotPaused)
@@ -379,10 +411,7 @@ where
             // same request receive it. Lost publication state is terminal.
             self.checkpoint = None;
             if matches!(error, checkpoint::CaptureFailure::Refused(_)) {
-                self.checkpoint_refusal = Some(Refusal {
-                    request_id: checkpoint.request_id,
-                    detail: error.to_string(),
-                });
+                self.checkpoint_refusal = Some(Refusal::new(checkpoint.request_id, &error));
             }
             if matches!(error, checkpoint::CaptureFailure::Publication(_)) {
                 self.terminal = true;
