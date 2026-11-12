@@ -880,6 +880,7 @@ where
                     detail: fault.detail.clone(),
                 })
                 .collect(),
+            machines: self.state.world.machine_names.clone(),
             detail,
             properties: self.driver.properties(),
         })

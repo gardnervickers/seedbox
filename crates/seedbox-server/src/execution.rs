@@ -1046,6 +1046,7 @@ mod tests {
                     witness: Some(self.0.guests["oracle"].clone()),
                     full_state: None,
                     faults: vec![],
+                    machines: vec![],
                     detail: None,
                     properties: None,
                 })

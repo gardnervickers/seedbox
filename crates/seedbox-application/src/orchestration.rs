@@ -265,6 +265,7 @@ impl Orchestrator {
                     witness: None,
                     full_state: None,
                     faults: vec![],
+                    machines: vec![],
                     detail: Some("cancelled before execution".into()),
                     properties: None,
                 });
@@ -441,27 +442,45 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
         StopReason::SimulatedTimeLimit => return Ok(Outcome::Timeout),
         StopReason::Completed => {}
     }
-    // A spawn adds a machine the configuration does not name; effects on
-    // that machine follow its spawn in the transcript.
+    // A spawned machine is not configured; the machines present at stop
+    // name it. Its spawn record is in this transcript unless the machine
+    // already existed at the checkpoint this run resumed from, and effects
+    // on it in this run follow that record.
+    let present = report.machines(&identity.inputs.guests);
+    let spawns: BTreeSet<&str> = report
+        .faults
+        .iter()
+        .filter(|fault| fault.action == SPAWN_ACTION)
+        .map(|fault| fault.service.as_str())
+        .collect();
     let mut spawned = BTreeSet::new();
     for fault in &report.faults {
-        let known = simulation.services.contains_key(&fault.service)
-            || spawned.contains(fault.service.as_str());
-        let acknowledged = if fault.action == SPAWN_ACTION {
-            !fault.service.is_empty() && !known && spawned.insert(fault.service.as_str())
-        } else {
-            known
-                || (fault.service.is_empty()
-                    && matches!(
-                        fault.action.as_str(),
-                        "partition" | "shape" | "drop_connection" | "heal"
-                    ))
-        };
-        if fault.applied_at_ns < fault.requested_at_ns || !acknowledged {
+        let service = fault.service.as_str();
+        if fault.applied_at_ns < fault.requested_at_ns {
             return Err(Error::Execution(
-                "fault effect must acknowledge a known or spawned machine at or after its request time"
-                    .into(),
+                "fault effect must be acknowledged at or after its request time".into(),
             ));
+        }
+        let configured = simulation.services.contains_key(service);
+        let added = !configured && present.contains(service);
+        if fault.action == SPAWN_ACTION {
+            if !added || !spawned.insert(service) {
+                return Err(Error::Execution(format!(
+                    "spawn of {service:?} must add a new machine, once, that is present when the run stops"
+                )));
+            }
+        } else if !(configured
+            || (added && (spawned.contains(service) || !spawns.contains(service)))
+            || (service.is_empty()
+                && matches!(
+                    fault.action.as_str(),
+                    "partition" | "shape" | "drop_connection" | "heal"
+                )))
+        {
+            return Err(Error::Execution(format!(
+                "{} effect on {service:?} must name a configured machine, or a spawned machine after its spawn",
+                fault.action
+            )));
         }
     }
     let Some(exit) = &report.workload_exit else {
@@ -485,7 +504,7 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
     }
     if report.full_state.is_some() && !report.full_state_covers(&identity.inputs.guests) {
         return Err(Error::Execution(
-            "full-state digests must cover exactly the configured and spawned machines".into(),
+            "full-state digests must cover exactly the machines present when the run stops".into(),
         ));
     }
     // Property findings qualify the oracle's exit as the run's verdict does.
@@ -595,6 +614,7 @@ fn incomplete(reason: crate::execution::StopReason) -> crate::execution::Executi
     crate::execution::ExecutionReport {
         reason,
         workload_exit: None,
+        machines: vec![],
         detail: None,
         witness: None,
         full_state: None,

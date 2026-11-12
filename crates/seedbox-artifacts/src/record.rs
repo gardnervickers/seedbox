@@ -148,6 +148,7 @@ pub fn compare(
                 a.faults == b.faults,
                 a.workload_exit == b.workload_exit
                     && a.reason == b.reason
+                    && a.machines == b.machines
                     && a.properties == b.properties,
             ),
             _ => (None, None, false, false),

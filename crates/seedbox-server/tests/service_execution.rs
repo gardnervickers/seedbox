@@ -152,6 +152,11 @@ impl ExecutionBackend for FixtureExecutor {
                     code: 0,
                 })
             },
+            machines: if matches!(self.behavior, Behavior::Spawning) {
+                vec!["oracle".into(), "replica".into()]
+            } else {
+                vec![]
+            },
             detail: matches!(self.behavior, Behavior::BackendError)
                 .then(|| "host fixture: interaction witness unavailable".into()),
             witness: match self.behavior {
@@ -365,6 +370,7 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
                     service: "oracle".into(),
                     code: 0,
                 }),
+                machines: vec![],
                 detail: None,
                 witness: Some(ContentDigest::of(policy)),
                 full_state: None,
