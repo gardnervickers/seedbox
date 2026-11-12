@@ -389,6 +389,17 @@ pub fn coordinate<C: Commands>(
             runs.retain(|job| !job.args.iter().any(|a| a == "seedbox-server"));
         }
     }
+    let worker_failure = |job: &Job| job.args.iter().any(|a| a.contains("worker-failure-tests"));
+    if runs.iter().any(worker_failure)
+        && checks
+            .run(worker_failure_monitor_build(
+                &checks.environment,
+                &checks.root,
+            ))
+            .is_none()
+    {
+        runs.retain(|job| !worker_failure(job));
+    }
     for job in runs {
         run_machine(checks, job)?;
     }
@@ -550,6 +561,27 @@ pub fn service_release_build(environment: &Environment, root: &Path) -> Job {
     Job::new(
         "service-release-cli",
         words(&["cargo", "build", "--release", "--locked", "-p", "seedbox"]),
+        environment,
+        root,
+    )
+}
+/// The monitor the PV public-service worker-failure case runs its Driver
+/// under. `cargo test` builds no binaries of dependencies, so build it where
+/// the case reads it: the debug profile beside the release CLI.
+pub fn worker_failure_monitor_build(environment: &Environment, root: &Path) -> Job {
+    Job::new(
+        "worker-failure-monitor",
+        words(&[
+            "cargo",
+            "build",
+            "--locked",
+            "-p",
+            "seedbox-driver-execution",
+            "--features",
+            "worker-failure",
+            "--bin",
+            "seedbox-lifetime-fixture",
+        ]),
         environment,
         root,
     )
