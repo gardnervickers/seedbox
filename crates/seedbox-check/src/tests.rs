@@ -1034,31 +1034,38 @@ fn portable_list_observes_and_executes_nothing() {
 fn portable_failure_blocks_all_native_work_but_not_outer_prerequisites() {
     let t = fixture();
     let mut c = checks(&t.0);
-    c.commands.replies.extend([
-        Outcome {
-            code: 1,
-            stdout: String::new(),
-        },
-        Outcome::default(),
-        Outcome {
-            code: 1,
-            stdout: String::new(),
-        },
-    ]);
+    // Workspace fmt fails; the standalone fmt steps beside it and clippy
+    // pass; shell discovery fails.
+    let mut replies = vec![Outcome {
+        code: 1,
+        stdout: String::new(),
+    }];
+    replies.resize_with(STANDALONE_PACKAGES.len() + 2, Outcome::default);
+    replies.push(Outcome {
+        code: 1,
+        stdout: String::new(),
+    });
+    c.commands.replies.extend(replies);
     let o = options(strings(&["linux-oci"])).unwrap();
     assert_eq!(coordinate(&mut c, &host(), &o).unwrap(), 1);
+    let standalone_fmt = STANDALONE_PACKAGES
+        .iter()
+        .map(|p| format!("fmt {}", p.manifest.trim_end_matches("/Cargo.toml")));
     assert_eq!(
         c.commands
             .jobs
             .iter()
-            .map(|j| j.name.as_str())
+            .map(|j| j.name.clone())
             .collect::<Vec<_>>(),
-        ["fmt", "clippy", "shell-discovery"]
+        std::iter::once("fmt".to_string())
+            .chain(standalone_fmt)
+            .chain(["clippy".into(), "shell-discovery".into()])
+            .collect::<Vec<_>>()
     );
     // Clippy type-checks every feature-gated target; there is no second
     // all-features test build.
     assert_eq!(
-        c.commands.jobs[1].args,
+        c.commands.jobs[STANDALONE_PACKAGES.len() + 1].args,
         strings(&[
             "cargo",
             "clippy",
@@ -1183,10 +1190,6 @@ fn standalone_packages_are_checked_through_their_manifests_under_the_target_dir(
         let properties = "harness/acceptance/images/properties";
         let mut expected = vec![
             (
-                format!("fmt {profile}"),
-                format!("cargo fmt --manifest-path {profile}/Cargo.toml --check"),
-            ),
-            (
                 format!("clippy {profile}"),
                 format!("cargo clippy --manifest-path {profile}/Cargo.toml --target-dir {target} --all-targets --locked -- -D warnings"),
             ),
@@ -1194,12 +1197,9 @@ fn standalone_packages_are_checked_through_their_manifests_under_the_target_dir(
                 format!("test {profile}"),
                 format!("cargo test --manifest-path {profile}/Cargo.toml --target-dir {target} --locked"),
             ),
-            (
-                format!("fmt {properties}"),
-                format!("cargo fmt --manifest-path {properties}/Cargo.toml --check"),
-            ),
         ];
-        // The property probe is Linux-only: elsewhere only its format.
+        // The property probe is Linux-only: elsewhere only its format,
+        // which `standalone_fmt` checks.
         if os == "linux" {
             expected.extend([
                 (
@@ -1221,10 +1221,42 @@ fn standalone_packages_are_checked_through_their_manifests_under_the_target_dir(
     }
 }
 #[test]
+fn standalone_formatting_is_checked_through_each_manifest_on_every_host() {
+    let t = fixture();
+    let mut c = checks(&t.0);
+    // The profile oracle's fmt fails; the probe's still runs.
+    c.commands.replies.push_back(Outcome {
+        code: 1,
+        stdout: String::new(),
+    });
+    assert!(!standalone_fmt(&mut c));
+    let jobs: Vec<_> = c
+        .commands
+        .jobs
+        .iter()
+        .map(|j| (j.name.as_str(), j.args.join(" ")))
+        .collect();
+    let profile = "harness/acceptance/images/profile";
+    let properties = "harness/acceptance/images/properties";
+    assert_eq!(
+        jobs,
+        [
+            (
+                format!("fmt {profile}").as_str(),
+                format!("cargo fmt --manifest-path {profile}/Cargo.toml --check")
+            ),
+            (
+                format!("fmt {properties}").as_str(),
+                format!("cargo fmt --manifest-path {properties}/Cargo.toml --check")
+            ),
+        ]
+    );
+}
+#[test]
 fn a_failed_standalone_check_fails_portable_without_hiding_the_others() {
     let t = fixture();
     let mut c = checks(&t.0);
-    // shell discovery, workspace tests, then the profile oracle's fmt fails.
+    // shell discovery, workspace tests, then the profile oracle's clippy fails.
     c.commands.replies.extend([
         Outcome::default(),
         Outcome::default(),
@@ -1236,9 +1268,8 @@ fn a_failed_standalone_check_fails_portable_without_hiding_the_others() {
     portable(&mut c).unwrap();
     assert!(c.failed);
     let names: Vec<_> = c.commands.jobs.iter().map(|j| j.name.as_str()).collect();
-    assert_eq!(names[2], "fmt harness/acceptance/images/profile");
+    assert_eq!(names[2], "clippy harness/acceptance/images/profile");
     assert!(names.contains(&"test harness/acceptance/images/profile"));
-    assert!(names.contains(&"fmt harness/acceptance/images/properties"));
 }
 #[test]
 fn standalone_packages_are_their_own_workspaces_in_this_checkout() {

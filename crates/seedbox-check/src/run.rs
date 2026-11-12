@@ -353,6 +353,7 @@ pub fn coordinate<C: Commands>(
     }
     if options.suites.contains(&Suite::Portable) {
         checks.step("fmt", words(&["cargo", "fmt", "--all", "--check"]));
+        standalone_fmt(checks);
         // --all-features type-checks every feature-gated target (native service
         // suites, worker-failure hooks) without a second full test build.
         checks.step(
@@ -452,10 +453,26 @@ pub fn portable<C: Commands>(checks: &mut Checks<C>) -> Result<(), String> {
     })?;
     Ok(())
 }
-/// Check the formatting, lints and unit tests of every
-/// [`STANDALONE_PACKAGES`] entry through its manifest; `os` is the host's
-/// [`std::env::consts::OS`]. A package for another host has only its
-/// formatting checked. Every check runs even after one fails.
+/// Check the formatting of every [`STANDALONE_PACKAGES`] entry through its
+/// manifest, on every host. It runs beside the workspace's fmt, so a slip
+/// shows before the long workspace tests. Every check runs even after one
+/// fails.
+pub fn standalone_fmt<C: Commands>(checks: &mut Checks<C>) -> bool {
+    let mut passed = true;
+    for package in STANDALONE_PACKAGES {
+        let manifest = package.manifest;
+        let name = manifest.trim_end_matches("/Cargo.toml");
+        passed &= checks.step(
+            &format!("fmt {name}"),
+            words(&["cargo", "fmt", "--manifest-path", manifest, "--check"]),
+        );
+    }
+    passed
+}
+/// Check the lints and unit tests of every [`STANDALONE_PACKAGES`] entry
+/// through its manifest; `os` is the host's [`std::env::consts::OS`]. A
+/// package for another host is skipped ([`standalone_fmt`] still checks its
+/// formatting). Every check runs even after one fails.
 ///
 /// The packages build into `standalone-packages` under the suite's
 /// `CARGO_TARGET_DIR` (the checkout's `target` when unset, and a relative
@@ -477,7 +494,6 @@ pub fn standalone_packages<C: Commands>(checks: &mut Checks<C>, os: &str) -> boo
             args.extend(words(rest));
             args
         };
-        passed &= checks.step(&format!("fmt {name}"), cargo("fmt", &["--check"]));
         if package.hosts == Hosts::Linux && os != "linux" {
             println!("{name}: clippy and tests need a Linux host; formatting checked only");
             continue;
