@@ -423,8 +423,6 @@ impl Catalogue {
                 original.resource.status.phase,
                 Phase::Queued | Phase::Preparing
             )
-            && !(original.resource.status.phase == Phase::Finalizing
-                && retains_spawned_machines(&original.resource.spec, &resource.spec))
         {
             return Err(Error::Invalid(
                 "simulation inputs are immutable after preparation".into(),
@@ -755,29 +753,6 @@ fn check_injected(command: &seedbox_api::ControlCommand) -> Result<()> {
         action.validate().map_err(Error::Invalid)?;
     }
     Ok(())
-}
-
-/// Machines a run's spawns prepared join its retained Driver closure only
-/// once it stops, and replay boots them from that closure. So while a run
-/// finalizes, its resolved definition may change in exactly the closure its
-/// execution settings name; every other input stays as prepared.
-fn retains_spawned_machines(
-    before: &seedbox_api::SimulationSpec,
-    after: &seedbox_api::SimulationSpec,
-) -> bool {
-    let without_closure = |spec: &seedbox_api::SimulationSpec| {
-        let mut spec = spec.clone();
-        let InputSource::Resolved { definition } = &mut spec.inputs else {
-            return None;
-        };
-        definition
-            .runtime
-            .execution
-            .as_object_mut()?
-            .remove("driver_world");
-        Some(spec)
-    };
-    without_closure(before).is_some_and(|before| Some(before) == without_closure(after))
 }
 
 #[cfg(test)]

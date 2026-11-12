@@ -92,7 +92,11 @@ impl ExecutionBackend for FixtureExecutor {
         request: ExecutionRequest<'_>,
     ) -> seedbox_application::Result<ExecutionReport> {
         let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(request.seed, 123);
+        // Only a spawning run's seed-range member runs another seed.
+        assert!(
+            request.seed == 123
+                || (matches!(self.behavior, Behavior::Spawning) && request.seed == 124)
+        );
         assert!(request.resume_checkpoint.is_none());
         assert!(request.output.is_dir());
         for (digest, path) in request.artifacts {
@@ -660,8 +664,21 @@ async fn interactive_fault_replays_via_resolved_definition() {
     .expect("interactive host fixture exceeded its hang guard");
 }
 
+fn driver_closure(spec: &seedbox_api::SimulationSpec) -> &serde_json::Value {
+    let seedbox_api::InputSource::Resolved { definition } = &spec.inputs else {
+        panic!("a run records its resolved definition")
+    };
+    &definition.runtime.execution["driver_world"]
+}
+
+fn manifest(contents: &[u8]) -> serde_json::Value {
+    serde_json::to_value(ContentDigest::of(contents)).unwrap()
+}
+
 // A spawned machine is absent from the configuration and the initial
-// guests, and joins the retained closure only after the run stops.
+// guests, and joins the run's own retained closure only after it stops.
+// The catalogue keeps the submitted definition; describing the run adds
+// the closure, so its replay boots the spawned machine.
 #[tokio::test]
 async fn spawning_run_completes_and_its_definition_replays_the_spawned_machine() {
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -677,13 +694,14 @@ async fn spawning_run_completes_and_its_definition_replays_the_spawned_machine()
             Some(ExecutionTermination::OracleExited)
         );
         assert_eq!(completed.status.verdict(), TestVerdict::Passed);
-        let recorded = host.client.describe(&source.metadata.id).await.unwrap();
-        let seedbox_api::InputSource::Resolved { definition } = &recorded.spec.inputs else {
-            panic!("a run records its resolved definition")
-        };
         assert_eq!(
-            definition.runtime.execution["driver_world"]["manifest"],
-            serde_json::to_value(ContentDigest::of(SPAWNED_MANIFEST)).unwrap()
+            driver_closure(&completed.spec)["manifest"],
+            manifest(b"catalogue-only-binary")
+        );
+        let recorded = host.client.describe(&source.metadata.id).await.unwrap();
+        assert_eq!(
+            driver_closure(&recorded.spec)["manifest"],
+            manifest(SPAWNED_MANIFEST)
         );
         let replay = host
             .client
@@ -705,6 +723,53 @@ async fn spawning_run_completes_and_its_definition_replays_the_spawned_machine()
     })
     .await
     .expect("spawning host fixture exceeded its hang guard");
+}
+
+// A seed-range member's inputs are the source's submitted definition, never
+// what the source run's spawns added to its own record.
+#[tokio::test]
+async fn seed_range_members_of_a_spawning_run_start_from_its_submitted_definition() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let host = HostService::start(Behavior::Spawning).await;
+        let request = driver_world_request("spawning-seed-range");
+        let range = host
+            .client
+            .submit_seeds(&seedbox_api::SeedRangeRequest {
+                options: request.options,
+                metadata: request.metadata,
+                request_id: request.request_id,
+                spec: request.spec,
+                count: 2,
+            })
+            .await
+            .unwrap();
+        let source = host.completed(&range.source).await;
+        assert_eq!(source.status.verdict(), TestVerdict::Passed);
+        let recorded = host.client.describe(&range.source).await.unwrap();
+        assert_eq!(
+            driver_closure(&recorded.spec)["manifest"],
+            manifest(SPAWNED_MANIFEST)
+        );
+        // Each fixture execution signals its entry; a member is admitted
+        // before it executes.
+        let member = loop {
+            let status = host.client.seed_range(&range.source).await.unwrap();
+            if let Some(member) = status.members.get(1) {
+                break member.metadata.id.clone();
+            }
+            host.entered.notified().await;
+        };
+        let member = host.completed(&member).await;
+        assert_eq!(member.spec.seed, Some(124));
+        assert_eq!(driver_closure(&member.spec), driver_closure(&source.spec));
+        assert_eq!(
+            driver_closure(&member.spec)["manifest"],
+            manifest(b"catalogue-only-binary")
+        );
+        host.shutdown().await;
+    })
+    .await
+    .expect("spawning seed-range host fixture exceeded its hang guard");
 }
 
 // These are synthetic witnesses for comparison composition, not proof of native determinism.

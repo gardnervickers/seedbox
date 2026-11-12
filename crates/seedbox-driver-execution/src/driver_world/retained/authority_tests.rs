@@ -434,6 +434,7 @@ fn spawned_machines_join_the_retained_manifest_once_by_name() {
     let store = ContentStore::new(root.path().join("store"));
     let (mut inputs, prepared, artifact) = fixture(root.path(), CpuBackend::Pv);
     retain_prepared(&mut inputs, &prepared, &store).unwrap();
+    let submitted = Closure::from_inputs(&inputs).unwrap().unwrap();
     let file = |name: &str, bytes: &[u8]| {
         let path = root.path().join(name);
         fs::write(&path, bytes).unwrap();
@@ -488,10 +489,41 @@ fn spawned_machines_join_the_retained_manifest_once_by_name() {
         .artifact
         .starts_with("asset:"));
     // Every stored object stays in the closure, the initial ones included.
-    let objects = Closure::from_inputs(&inputs).unwrap().unwrap().objects;
+    let closure = Closure::from_inputs(&inputs).unwrap().unwrap();
     for sha in [&artifact.sha256, &filesystem.sha256] {
-        assert!(objects.iter().any(|object| object.hex() == sha.as_str()));
+        assert!(closure
+            .objects
+            .iter()
+            .any(|object| object.hex() == sha.as_str()));
     }
+    // So the retained closure extends the submitted one, and a closure that
+    // changes its executable or drops a submitted object does not.
+    closure.extends(&submitted).unwrap();
+    let error = |closure: &Closure| closure.extends(&submitted).unwrap_err().to_string();
+    let other_executable = Closure {
+        executable: ContentDigest::of(b"other executable"),
+        ..closure.clone()
+    };
+    assert_eq!(
+        error(&other_executable),
+        "input integrity: a run's retained Driver closure must keep its submitted executable"
+    );
+    let dropped = Closure {
+        objects: closure
+            .objects
+            .iter()
+            .filter(|object| object.hex() != artifact.sha256.as_str())
+            .cloned()
+            .collect(),
+        ..closure.clone()
+    };
+    assert_eq!(
+        error(&dropped),
+        format!(
+            "input integrity: a run's retained Driver closure must keep its submitted object sha256:{}",
+            artifact.sha256
+        )
+    );
     // A machine the manifest already holds stays as it is.
     let before = inputs.auxiliary.clone();
     let other = file("other-filesystem", b"other filesystem");

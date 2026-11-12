@@ -210,6 +210,28 @@ impl Closure {
         value.validate()?;
         Ok(Some(value))
     }
+    /// Check that this closure, retained after a run, only adds what the
+    /// run's spawns prepared to the `submitted` closure the run started
+    /// from: the same executable and every submitted object. Its manifest
+    /// differs once it names the spawned machines.
+    pub fn extends(&self, submitted: &Self) -> Result<()> {
+        if self.executable != submitted.executable {
+            return Err(bad(
+                "a run's retained Driver closure must keep its submitted executable",
+            ));
+        }
+        if let Some(missing) = submitted
+            .objects
+            .iter()
+            .find(|object| self.objects.binary_search(object).is_err())
+        {
+            return Err(bad(format!(
+                "a run's retained Driver closure must keep its submitted object sha256:{}",
+                missing.hex()
+            )));
+        }
+        Ok(())
+    }
     pub fn into_auxiliary(self) -> Result<BTreeMap<String, ContentDigest>> {
         self.validate()?;
         let mut entries = BTreeMap::from([
