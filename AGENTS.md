@@ -29,7 +29,7 @@ We do not need to support every possible application. If someone intentionally t
   owns offline data; keep it independent of core, hypervisors, Bollard and Tokio.
 - New crates inherit workspace version/edition/publish; shared dependencies belong
   in `[workspace.dependencies]`. Update `Cargo.lock` for dependency changes, and
-  `harness/acceptance/images/{profile,properties}/Cargo.lock` when their graph changes.
+  each `STANDALONE_PACKAGES` lockfile when its graph changes.
 
 ## Runtime and determinism
 

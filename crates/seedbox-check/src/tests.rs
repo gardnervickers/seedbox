@@ -1255,6 +1255,47 @@ fn standalone_packages_are_their_own_workspaces_in_this_checkout() {
     }
 }
 #[test]
+fn every_nested_workspace_in_this_checkout_is_a_standalone_package() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // Ask Git, as portable's shell discovery does, rather than walk the tree:
+    // it lists tracked and new unignored files, so it skips target dirs and
+    // does not descend into submodules (vendor/dynamorio), which are not ours.
+    let mut git = std::process::Command::new("git");
+    git.current_dir(&root).args([
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "*/Cargo.toml",
+    ]);
+    let output = seedbox_exec::output(&mut git).unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let listed: Vec<_> = STANDALONE_PACKAGES.iter().map(|p| p.manifest).collect();
+    let mut nested = Vec::new();
+    for manifest in String::from_utf8(output.stdout).unwrap().split('\0') {
+        let Ok(text) = fs::read_to_string(root.join(manifest)) else {
+            continue; // empty entry, or deleted but not yet staged
+        };
+        if text.lines().any(|line| {
+            let line = line.trim();
+            line == "[workspace]" || line.starts_with("[workspace.")
+        }) {
+            nested.push(manifest.to_string());
+        }
+    }
+    let missing: Vec<_> = nested
+        .iter()
+        .filter(|m| !listed.contains(&m.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "own workspaces missing from STANDALONE_PACKAGES: {missing:?}"
+    );
+    // Discovery must see the listed packages, or it checks nothing.
+    assert_eq!(nested.len(), listed.len(), "{nested:?}");
+}
+#[test]
 fn process_timeout_reaps_owned_descendants() {
     if let Some(root) = std::env::var_os("SEEDBOX_CHECK_TIMEOUT_CHILD") {
         let root = PathBuf::from(root);
