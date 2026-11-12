@@ -978,6 +978,36 @@ fn test_service_release_build_uses_the_target_the_service_tests_read() {
     }
 }
 #[test]
+fn test_worker_failure_monitor_build_serves_the_pv_service_target() {
+    // `cargo test` builds no dependency binaries; coordinate builds the
+    // monitor for exactly the service runs that enable the worker-failure case.
+    let environment = env(&[("PATH", "/bin"), ("CARGO_TARGET_DIR", "/agent-cache")]);
+    let job = worker_failure_monitor_build(&environment, std::path::Path::new("/fixture"));
+    assert_eq!(
+        job.args,
+        strings(&[
+            "cargo",
+            "build",
+            "--locked",
+            "-p",
+            "seedbox-driver-execution",
+            "--features",
+            "worker-failure",
+            "--bin",
+            "seedbox-lifetime-fixture"
+        ])
+    );
+    assert_eq!(job.environment, environment);
+    for (suite, enabled) in [(Suite::MachinePv, true), (Suite::MachineTcg, false)] {
+        assert_eq!(
+            service_targets(suite)
+                .iter()
+                .any(|(_, features)| features.contains("worker-failure-tests")),
+            enabled
+        );
+    }
+}
+#[test]
 fn test_unselected_machine_suites_have_no_runs() {
     assert!(machine_suite_runs(
         &suites(&["linux-oci"]),
