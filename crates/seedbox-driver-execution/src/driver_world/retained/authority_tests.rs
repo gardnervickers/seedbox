@@ -580,6 +580,14 @@ struct Edited {
     control: Option<crate::config::Control>,
 }
 fn adapt_edited(backend: CpuBackend, edit: impl FnOnce(&mut Edited)) -> Result<wire::Request> {
+    adapt_prepared(backend, |_| {}, edit)
+}
+/// [`adapt_edited`] of a world that `prepare` changed before it was retained.
+fn adapt_prepared(
+    backend: CpuBackend,
+    prepare: impl FnOnce(&mut Prepared),
+    edit: impl FnOnce(&mut Edited),
+) -> Result<wire::Request> {
     use crate::execution::PreparedImage;
     use seedbox_artifacts::image::Launch;
     let root = tempfile::tempdir().unwrap();
@@ -643,6 +651,7 @@ fn adapt_edited(backend: CpuBackend, edit: impl FnOnce(&mut Edited)) -> Result<w
             },
         );
     }
+    prepare(&mut prepared);
     retain_prepared(&mut inputs, &prepared, &store).unwrap();
     let artifacts = inputs
         .digests()
@@ -691,7 +700,14 @@ fn adapt_edited(backend: CpuBackend, edit: impl FnOnce(&mut Edited)) -> Result<w
     super::request(&request, &output.join("host.sock"), None)
 }
 fn refused(backend: CpuBackend, edit: impl FnOnce(&mut Edited)) -> String {
-    let error = adapt_edited(backend, edit).expect_err("the edit must be refused");
+    refused_prepared(backend, |_| {}, edit)
+}
+fn refused_prepared(
+    backend: CpuBackend,
+    prepare: impl FnOnce(&mut Prepared),
+    edit: impl FnOnce(&mut Edited),
+) -> String {
+    let error = adapt_prepared(backend, prepare, edit).expect_err("the edit must be refused");
     assert!(matches!(error, Error::Setup(_)), "{error:?}");
     error.to_string()
 }
@@ -792,5 +808,99 @@ fn edits_the_prepared_boot_archives_embed_are_refused_by_field() {
             error.starts_with("machines.extra is not in the prepared world;"),
             "{error}"
         );
+    }
+}
+
+fn environment_of<'a>(prepared: &'a mut Prepared, name: &str) -> &'a mut wire::Environment {
+    let (wire::Inventory::Pv { environments, .. } | wire::Inventory::Tcg { environments, .. }) =
+        &mut prepared.inventory;
+    environments.get_mut(name).unwrap()
+}
+
+#[test]
+fn edited_allow_crashes_are_cleared_and_set_on_the_oracle_too() {
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        // Prepared with db allowed to crash; the edit clears it and allows the oracle.
+        let worker = adapt_prepared(
+            backend,
+            |prepared| prepared.machines[0].allow_crashes = true,
+            |edited| {
+                edited.allow_crashes.insert("oracle".into());
+            },
+        )
+        .unwrap();
+        assert!(worker.prepared.oracle.allow_crashes);
+        assert_eq!(worker.prepared.machines[0].name, "db");
+        assert!(!worker.prepared.machines[0].allow_crashes);
+    }
+}
+
+#[test]
+fn a_removed_machine_is_refused() {
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        let error = refused(backend, |edited| {
+            let inputs = &mut edited.inputs;
+            inputs.images.remove("db");
+            inputs.guests.remove("db");
+            inputs.placement.remove("db");
+            inputs.machine_memory_mb.remove("db");
+        });
+        assert!(
+            error.starts_with("machines.db is missing from the prepared world;"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn oracle_control_must_match_the_prepared_control_socket() {
+    let control = || {
+        Some(crate::config::Control {
+            service: "oracle".into(),
+        })
+    };
+    let socket = |prepared: &mut Prepared| environment_of(prepared, "oracle").control_socket = true;
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        adapt_prepared(backend, socket, |edited| edited.control = control()).unwrap();
+        let error = refused_prepared(backend, socket, |_| {});
+        assert!(
+            error.starts_with("simulator.oracleControl false differs from the prepared true;"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn named_volumes_match_regardless_of_their_retained_order() {
+    let mount = |source: &str| seedbox_spec::VolumeMount {
+        source: source.into(),
+        target: format!("/{source}"),
+        size_bytes: None,
+    };
+    // Preparation keeps the image's mount order; a resubmitted definition keys
+    // volumes by name, so its mounts arrive sorted.
+    let manifest_order = |prepared: &mut Prepared| {
+        environment_of(prepared, "db").named_volumes = ["zeta", "alpha"]
+            .map(|name| wire::NamedVolume {
+                name: name.into(),
+                target: format!("/{name}"),
+            })
+            .to_vec();
+    };
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        let worker = adapt_prepared(backend, manifest_order, |edited| {
+            let launch = &mut edited.inputs.images.get_mut("db").unwrap().launch;
+            launch.disk_volumes = vec![mount("alpha"), mount("zeta")];
+        })
+        .unwrap();
+        assert_eq!(
+            worker.prepared.machines[0].disk,
+            Some(wire::Disk::Zero { bytes: 1 << 30 })
+        );
+        let error = refused_prepared(backend, manifest_order, |edited| {
+            let launch = &mut edited.inputs.images.get_mut("db").unwrap().launch;
+            launch.disk_volumes = vec![mount("alpha"), mount("omega")];
+        });
+        assert!(error.starts_with("machines.db.volumes differs"), "{error}");
     }
 }
