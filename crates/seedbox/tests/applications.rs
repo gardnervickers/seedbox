@@ -169,8 +169,9 @@ fn guest_properties_decide_runs_whose_oracle_passes() {
 
 /// The README's spawn example: the oracle adds `replica` mid-run, so the
 /// run's faults and full state name a machine its configuration does not.
-/// It must PASS, and its replay must boot the retained machine and MATCH in
-/// full state.
+/// It must PASS, an independent fresh run of its seed must spawn the same
+/// machine and MATCH it, and its replay must boot the retained machine and
+/// MATCH in full state.
 #[test]
 fn spawn_example_passes_and_replays_the_spawned_machine() {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/spawn");
@@ -183,6 +184,29 @@ fn spawn_example_passes_and_replays_the_spawned_machine() {
             &["run", project, "--wall-time", "30m"],
         )?;
         let first = simulation_id(&first_output)?;
+        let described = invoke(
+            cli,
+            directory,
+            state,
+            "describe-first",
+            &["show", "--view", "definition", first, "--json"],
+        )?;
+        let resource: seedbox_api::Simulation =
+            serde_json::from_str(&described).map_err(|error| format!("describe first: {error}"))?;
+        let seed = resource
+            .spec
+            .seed
+            .ok_or("first simulation has no seed")?
+            .to_string();
+        let second_output = invoke(
+            cli,
+            directory,
+            state,
+            "second",
+            &["run", project, "--seed", &seed, "--wall-time", "30m"],
+        )?;
+        let second = simulation_id(&second_output)?;
+        compare(cli, directory, state, "compare", first, second)?;
         let repeated = invoke(
             cli,
             directory,

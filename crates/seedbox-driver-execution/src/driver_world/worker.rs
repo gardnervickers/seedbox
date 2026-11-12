@@ -184,7 +184,21 @@ where
                     _ => {}
                 }
             }
-            self.publisher.batch(&mut self.state, &self.names, batch)?;
+            // A spawn's admission targets the identity it reserved, which
+            // has no committed name until its machine joins.
+            let reserved: Vec<_> = self
+                .driver
+                .reserved_machines()
+                .filter(|(machine, _)| !self.names.contains_key(machine))
+                .map(|(machine, name)| (machine, name.to_owned()))
+                .collect();
+            if reserved.is_empty() {
+                self.publisher.batch(&mut self.state, &self.names, batch)?;
+            } else {
+                let mut names = self.names.clone();
+                names.extend(reserved);
+                self.publisher.batch(&mut self.state, &names, batch)?;
+            }
             Ok(facts)
         })();
         if result.is_err() {

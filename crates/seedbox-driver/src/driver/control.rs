@@ -147,6 +147,12 @@ impl Control {
         self.spawning.remove(name);
         Ok(id)
     }
+    /// Each admitted spawn's reserved identity and name, until it joins.
+    pub(super) fn reserved(&self) -> impl Iterator<Item = (MachineId, &str)> {
+        self.spawning
+            .iter()
+            .map(|(name, reservation)| (reservation.id, name.as_str()))
+    }
     /// A reserved spawn's request, for the host to prepare.
     pub(super) fn reservation(&self, name: &str) -> Option<&Reservation> {
         self.spawning.get(name)
