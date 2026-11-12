@@ -271,6 +271,49 @@ fn corrupt_never_selects_a_flush() {
     assert_eq!(corrupted(false), (changed, counts));
 }
 
+/// A read or write without whole sectors has none to replace: `corrupt`
+/// neither counts it nor touches its status byte, which then sits where the
+/// sector would, and a stacked fault still acts on it.
+#[test]
+fn corrupt_never_selects_a_request_without_data() {
+    let mut store = Store::zeroed(64).unwrap();
+    let mut faults = DiskFaults::new(0);
+    faults
+        .install(
+            1,
+            11,
+            error(DiskOp::Any, 1_000_000, DiskEffect::Corrupt, DiskScope::All),
+        )
+        .unwrap();
+    let mut empty = read(0, 0);
+    assert_eq!(run(&mut faults, &mut store, &mut empty).status, STATUS_OK);
+    assert_eq!(empty.writable, [STATUS_OK], "the device's status byte");
+    let mut short = Gathered {
+        readable: header(TYPE_IN, 0),
+        writable: vec![0xcc; 101],
+    };
+    assert_eq!(
+        run(&mut faults, &mut store, &mut short).status,
+        STATUS_IOERR
+    );
+    assert_eq!(
+        short.writable[100], STATUS_IOERR,
+        "the device's status byte"
+    );
+    let mut nothing = write(0, &[]);
+    assert_eq!(run(&mut faults, &mut store, &mut nothing).status, STATUS_OK);
+    faults
+        .install(
+            2,
+            12,
+            error(DiskOp::Read, 1_000_000, DiskEffect::Eio, DiskScope::All),
+        )
+        .unwrap();
+    let completion = run(&mut faults, &mut store, &mut read(0, 0));
+    assert_eq!(completion.status, STATUS_IOERR, "the read fault acts");
+    assert_eq!(faults.heal(1), Some(FaultCounts::default()));
+}
+
 #[test]
 fn data_scope_spares_static_ext4_metadata_and_unformatted_disks() {
     let mut store = Store::zeroed(65536 * 8).unwrap();
