@@ -69,12 +69,20 @@ pub type Checkers<O, V, R> = Vec<Box<dyn Checker<O, V, R>>>;
 pub struct Report {
     pub verdicts: Vec<(String, Verdict)>,
     /// [`Nemesis::run`]'s error, if it returned one.
-    pub nemesis: Option<Error>,
+    pub run_error: Option<Error>,
     /// [`Nemesis::heal`]'s error, if it returned one.
-    pub heal: Option<Error>,
-    /// Each client thread that panicked: its index in
-    /// [`Scenario::clients`] and the panic's message.
-    pub panics: Vec<(usize, String)>,
+    pub heal_error: Option<Error>,
+    /// Each client thread that panicked, by index.
+    pub panics: Vec<ClientPanic>,
+}
+
+/// A client thread that panicked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClientPanic {
+    /// The client's index in [`Scenario::clients`].
+    pub client: usize,
+    /// The panic's message, or `(no message)`.
+    pub message: String,
 }
 
 impl Report {
@@ -89,11 +97,11 @@ impl Report {
     /// One line for each step that failed: the nemesis run, then the
     /// clients by index, then the heal.
     pub fn failures(&self) -> Vec<String> {
-        let nemesis = self.nemesis.iter().map(|e| format!("nemesis run: {e}"));
+        let run = self.run_error.iter().map(|e| format!("nemesis run: {e}"));
         let panics = self.panics.iter();
-        let panics = panics.map(|(client, message)| format!("client {client} panicked: {message}"));
-        let heal = self.heal.iter().map(|e| format!("nemesis heal: {e}"));
-        nemesis.chain(panics).chain(heal).collect()
+        let panics = panics.map(|p| format!("client {} panicked: {}", p.client, p.message));
+        let heal = self.heal_error.iter().map(|e| format!("nemesis heal: {e}"));
+        run.chain(panics).chain(heal).collect()
     }
 
     /// The oracle's exit status for this report: [`Report::INVALID`] when a
@@ -102,7 +110,8 @@ impl Report {
     /// [`Report::OK`].
     pub fn exit_code(&self) -> u8 {
         let has = |v: Validity| self.verdicts.iter().any(|(_, d)| d.validity == v);
-        let failed = self.nemesis.is_some() || self.heal.is_some() || !self.panics.is_empty();
+        let failed =
+            self.run_error.is_some() || self.heal_error.is_some() || !self.panics.is_empty();
         if has(Validity::Invalid) {
             Self::INVALID
         } else if failed || has(Validity::Unknown) || self.verdicts.is_empty() {

@@ -1,7 +1,7 @@
 //! The runner that drives a [`Scenario`] through its phases.
 use crate::{
-    control::Action, random::Rng, Checkers, Client, Completion, Error, FinalRead, Read, Report,
-    Scenario, Validity, Verdict, World,
+    control::Action, random::Rng, Checkers, Client, ClientPanic, Completion, Error, FinalRead,
+    Read, Report, Scenario, Validity, Verdict, World,
 };
 use serde_json::{json, Value};
 use std::{
@@ -103,18 +103,21 @@ fn drive_scenario<S: Scenario>(
             .collect();
         if let Err(error) = nemesis.run(world, random) {
             warn("nemesis", &error);
-            report.nemesis = Some(error);
+            report.run_error = Some(error);
         }
         stop.store(true, Ordering::SeqCst);
         for (client, worker) in workers.into_iter().enumerate() {
             if let Err(panic) = worker.join() {
-                report.panics.push((client, panic_message(panic.as_ref())));
+                report.panics.push(ClientPanic {
+                    client,
+                    message: panic_message(panic.as_ref()),
+                });
             }
         }
     });
     if let Err(error) = nemesis.heal(world) {
         warn("heal", &error);
-        report.heal = Some(error);
+        report.heal_error = Some(error);
     }
     let mut reader = scenario.final_read();
     let reads = final_reads(reader.as_mut(), world);

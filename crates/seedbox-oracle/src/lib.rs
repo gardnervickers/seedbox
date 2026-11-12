@@ -43,7 +43,7 @@ pub use nemesis::{control, Action, Nemesis, Pace, World};
 pub use random::{RandomExt, Rng};
 pub use recorder::Recorder;
 pub use runner::{final_reads, main, run, run_with, NoClient};
-pub use scenario::{Checkers, FinalRead, Report, Scenario};
+pub use scenario::{Checkers, ClientPanic, FinalRead, Report, Scenario};
 pub use world::GuestWorld;
 
 /// A failure a scenario step reports; the caller decides whether it is fatal.

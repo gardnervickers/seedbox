@@ -384,8 +384,8 @@ fn a_failed_nemesis_run_still_heals_reads_and_checks_but_is_incomplete() {
     assert_eq!(records.len() as u64, 4 * OPS);
     assert_eq!(report.verdicts[0].1.validity, Validity::Valid, "{report:?}");
     assert_eq!(report.verdicts[0].1.details["invoked"], 2 * OPS);
-    assert_eq!(report.nemesis, Some(Error("unsupported pause".into())));
-    assert_eq!((&report.heal, report.panics.len()), (&None, 0));
+    assert_eq!(report.run_error, Some(Error("unsupported pause".into())));
+    assert_eq!((&report.heal_error, report.panics.len()), (&None, 0));
     assert_eq!(report.failures(), ["nemesis run: unsupported pause"]);
     assert_eq!(report.exit_code(), Report::UNKNOWN);
 }
@@ -398,7 +398,7 @@ fn a_failed_heal_is_incomplete() {
     });
     assert_eq!(world.applied.last(), Some(&resume()));
     assert_eq!(report.verdicts[0].1.validity, Validity::Valid, "{report:?}");
-    assert_eq!(report.nemesis, None);
+    assert_eq!(report.run_error, None);
     assert_eq!(report.failures(), ["nemesis heal: unsupported resume"]);
     assert_eq!(report.exit_code(), Report::UNKNOWN);
 }
@@ -436,7 +436,11 @@ fn a_panicked_client_is_incomplete() {
         [Action::Partition { .. }, Action::Heal { .. }]
     ));
     assert_eq!(report.verdicts[0].1.validity, Validity::Valid, "{report:?}");
-    assert_eq!(report.panics, [(1, "client 1 broke".to_string())]);
+    let panic = ClientPanic {
+        client: 1,
+        message: "client 1 broke".into(),
+    };
+    assert_eq!(report.panics, [panic]);
     assert_eq!(report.failures(), ["client 1 panicked: client 1 broke"]);
     assert_eq!(report.exit_code(), Report::UNKNOWN);
 }

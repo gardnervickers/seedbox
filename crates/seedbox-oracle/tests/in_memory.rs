@@ -383,7 +383,7 @@ fn exit_codes_rank_violations_then_failed_steps_and_undecided_checks() {
             .iter()
             .map(|v| ("check".to_string(), verdict(*v)))
             .collect(),
-        nemesis: failed.then(|| Error("shape: invalid_request".into())),
+        run_error: failed.then(|| Error("shape: invalid_request".into())),
         ..Report::default()
     };
     use Validity::*;
@@ -401,10 +401,13 @@ fn exit_codes_rank_violations_then_failed_steps_and_undecided_checks() {
         assert_eq!(report.exit_code(), code, "{report:?}");
     }
     let mut failed = report(&[Valid], false);
-    failed.heal = Some(Error("heal p1: no such handle".into()));
+    failed.heal_error = Some(Error("heal p1: no such handle".into()));
     assert_eq!(failed.exit_code(), Report::UNKNOWN);
-    failed.heal = None;
-    failed.panics.push((0, "boom".into()));
+    failed.heal_error = None;
+    failed.panics.push(ClientPanic {
+        client: 0,
+        message: "boom".into(),
+    });
     assert_eq!(failed.exit_code(), Report::UNKNOWN);
     assert_eq!(failed.failures(), ["client 0 panicked: boom"]);
 }
