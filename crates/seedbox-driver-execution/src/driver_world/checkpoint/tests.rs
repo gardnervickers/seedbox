@@ -479,6 +479,14 @@ fn integrity_and_length_are_verified_before_decoding_any_native_body() {
             .to_string()
             .contains("encoded length")
     );
+    // The same holds for the Driver metadata.
+    fs::write(&artifact.artifact, &original).unwrap();
+    flip_first_byte(&envelope.driver.artifact);
+    assert!(open(&envelope, limits())
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("SHA-256"));
 }
 
 fn flip_first_byte(path: impl AsRef<Path>) -> Vec<u8> {
@@ -488,38 +496,6 @@ fn flip_first_byte(path: impl AsRef<Path>) -> Vec<u8> {
     changed[0] ^= 1;
     fs::write(path, &changed).unwrap();
     original
-}
-
-#[test]
-fn in_place_rewrite_after_load_is_rejected_by_open() {
-    let root = tempfile::tempdir().unwrap();
-    let inventory = fixture_inventory(&root.path().join("authority"));
-    let mut driver = driver(1, 2, Arc::default(), Arc::default(), None);
-    let mut state = state(2);
-    let path = capture(
-        &mut driver,
-        Capture {
-            inventory: &inventory,
-            state: &mut state,
-            prepared: false,
-        },
-        root.path(),
-        "saved",
-        publish,
-        encode,
-    )
-    .unwrap();
-    // The restore path loads only the envelope, so nothing has been hashed yet.
-    let envelope = load(&path).unwrap();
-    // A rewrite of the Driver metadata or of a later body between `load` and
-    // `open` is rejected.
-    for artifact in [&envelope.driver, &envelope.machines[1]] {
-        let original = flip_first_byte(&artifact.artifact);
-        let error = open(&envelope, limits()).err().unwrap();
-        assert!(error.to_string().contains("SHA-256"));
-        fs::write(&artifact.artifact, &original).unwrap();
-    }
-    open(&envelope, limits()).unwrap();
 }
 
 #[test]
