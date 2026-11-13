@@ -111,6 +111,10 @@ fn physical_oracle_program_exit_reaches_public_result_without_an_application_out
             code: 0
         })
     );
+    // The report names the Driver's machines at stop, which a resumed run's
+    // spawn records cannot.
+    assert_eq!(report.machines, ["oracle"]);
+    assert_eq!(report.machines, worker.state.world.machine_names);
 }
 fn evidence() -> StateEvidence {
     let ram = vec![0xab; 4097];

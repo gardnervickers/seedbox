@@ -269,6 +269,7 @@ impl ExecutionBackend for ProcessBackend {
         Ok(ExecutionReport {
             reason: StopReason::Cancelled,
             workload_exit: None,
+            machines: vec![],
             detail: None,
             witness: None,
             full_state: None,

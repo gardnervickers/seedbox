@@ -109,12 +109,32 @@ fn check_includes_standalone_workspaces_and_external_gated_helpers() {
             "crates/a/src/production.rs",
             "fn run(){std::thread::sleep(delay);}",
         ),
+        (
+            "harness/acceptance/images/profile/src/main.rs",
+            "fn run(){std::thread::sleep(delay);} #[cfg(test)] mod tests {#[test] fn t(){std::thread::sleep(delay);}}",
+        ),
+        (
+            "harness/acceptance/images/properties/src/main.rs",
+            "fn main(){std::thread::sleep(delay);}",
+        ),
+        (
+            "harness/other/src/lib.rs",
+            "#[test] fn t(){std::thread::sleep(delay);}",
+        ),
     ] {
         let file = root.join(name);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(file, code).unwrap();
     }
-    assert_eq!(check(root).unwrap().findings.len(), 3);
+    let findings = check(root).unwrap().findings;
+    assert_eq!(findings.len(), 4, "{findings:?}");
+    // A listed standalone package's tests are scanned; its program and
+    // unlisted packages are not.
+    assert!(findings
+        .iter()
+        .any(|f| f.path.starts_with("harness/acceptance/images/profile")));
+    assert!(!findings.iter().any(|f| f.path.starts_with("harness/other")
+        || f.path.starts_with("harness/acceptance/images/properties")));
 }
 #[test]
 fn ordinary_timeout_and_sleep_data_are_not_host_time_operations() {

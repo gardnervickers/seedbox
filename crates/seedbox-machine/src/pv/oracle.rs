@@ -60,11 +60,13 @@ pub(crate) struct Session {
 pub(crate) struct Decoder {
     relay: u32,
     /// Highest session the guest has issued; issued sessions are never reused.
+    /// The guest numbers a session at its first request, so this grows in
+    /// first-request order and an unknown session at or below it has closed.
     session: u32,
     failed: bool,
     last_time: Option<u64>,
     /// Open sessions in ascending ID order. A closed session's replies are
-    /// discarded; a session that sent nothing yet is unknown here.
+    /// discarded; a connection that sent nothing yet has no session here.
     sessions: Vec<Session>,
 }
 
@@ -84,8 +86,8 @@ impl Decoder {
         self.sessions.iter().position(|s| s.id == session)
     }
 
-    /// True when `session` was issued and has since closed or not yet spoken,
-    /// so a reply addressed to it has lost its destination.
+    /// True when `session` was issued and has since closed, so a reply
+    /// addressed to it has lost its destination.
     fn issued(&self, session: NonZeroU32) -> bool {
         session.get() <= self.session && self.open(session).is_none()
     }

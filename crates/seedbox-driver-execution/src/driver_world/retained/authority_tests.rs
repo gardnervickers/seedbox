@@ -27,7 +27,7 @@ fn inventory(backend: CpuBackend, artifact: &Artifact) -> wire::Inventory {
             formatter: None,
             environments: Default::default(),
             boot_archives: Default::default(),
-            progress_budget: std::num::NonZeroU32::new(32).unwrap().into(),
+            progress_budget: Default::default(),
             epoch_seconds: 86400,
         },
         CpuBackend::Tcg => wire::Inventory::Tcg {
@@ -168,6 +168,8 @@ fn backend_authority_checks_saved_inventory_in_runtime_and_both_launch_paths() {
             seed: 42,
             program: &[],
             quantum_ns: simulation.simulator.quantum_ns,
+            progress_budget: simulation.simulator.progress_budget,
+            allow_crashes: &Default::default(),
             limits: &simulation.limits,
             network: &simulation.network,
             schedule: &simulation.schedule,
@@ -254,6 +256,8 @@ fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
             seed: 42,
             program: &[],
             quantum_ns: simulation.simulator.quantum_ns,
+            progress_budget: simulation.simulator.progress_budget,
+            allow_crashes: &Default::default(),
             limits: &simulation.limits,
             network: &simulation.network,
             schedule: &simulation.schedule,
@@ -406,6 +410,8 @@ fn request_keeps_mapping_import_and_worker_option_error_order() {
             seed: 42,
             program: &[],
             quantum_ns: simulation.simulator.quantum_ns,
+            progress_budget: simulation.simulator.progress_budget,
+            allow_crashes: &Default::default(),
             limits: &simulation.limits,
             network: &simulation.network,
             schedule: &simulation.schedule,
@@ -434,6 +440,7 @@ fn spawned_machines_join_the_retained_manifest_once_by_name() {
     let store = ContentStore::new(root.path().join("store"));
     let (mut inputs, prepared, artifact) = fixture(root.path(), CpuBackend::Pv);
     retain_prepared(&mut inputs, &prepared, &store).unwrap();
+    let submitted = Closure::from_inputs(&inputs).unwrap().unwrap();
     let file = |name: &str, bytes: &[u8]| {
         let path = root.path().join(name);
         fs::write(&path, bytes).unwrap();
@@ -488,10 +495,41 @@ fn spawned_machines_join_the_retained_manifest_once_by_name() {
         .artifact
         .starts_with("asset:"));
     // Every stored object stays in the closure, the initial ones included.
-    let objects = Closure::from_inputs(&inputs).unwrap().unwrap().objects;
+    let closure = Closure::from_inputs(&inputs).unwrap().unwrap();
     for sha in [&artifact.sha256, &filesystem.sha256] {
-        assert!(objects.iter().any(|object| object.hex() == sha.as_str()));
+        assert!(closure
+            .objects
+            .iter()
+            .any(|object| object.hex() == sha.as_str()));
     }
+    // So the retained closure extends the submitted one, and a closure that
+    // changes its executable or drops a submitted object does not.
+    closure.extends(&submitted).unwrap();
+    let error = |closure: &Closure| closure.extends(&submitted).unwrap_err().to_string();
+    let other_executable = Closure {
+        executable: ContentDigest::of(b"other executable"),
+        ..closure.clone()
+    };
+    assert_eq!(
+        error(&other_executable),
+        "input integrity: a run's retained Driver closure must keep its submitted executable"
+    );
+    let dropped = Closure {
+        objects: closure
+            .objects
+            .iter()
+            .filter(|object| object.hex() != artifact.sha256.as_str())
+            .cloned()
+            .collect(),
+        ..closure.clone()
+    };
+    assert_eq!(
+        error(&dropped),
+        format!(
+            "input integrity: a run's retained Driver closure must keep its submitted object sha256:{}",
+            artifact.sha256
+        )
+    );
     // A machine the manifest already holds stays as it is.
     let before = inputs.auxiliary.clone();
     let other = file("other-filesystem", b"other filesystem");
@@ -563,4 +601,366 @@ fn stored_artifacts_retain_by_reference_only_when_the_store_holds_them() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("hash mismatch"), "{error}");
+}
+
+/// What a resubmitted definition can change about a prepared two-machine
+/// world: the oracle and `db`, which mounts one named volume.
+struct Edited {
+    inputs: PreparedInputs,
+    progress_budget: seedbox_spec::progress::ProgressBudget,
+    allow_crashes: BTreeSet<String>,
+    control: Option<crate::config::Control>,
+}
+fn adapt_edited(backend: CpuBackend, edit: impl FnOnce(&mut Edited)) -> Result<wire::Request> {
+    adapt_prepared(backend, |_| {}, edit)
+}
+/// [`adapt_edited`] of a world that `prepare` changed before it was retained.
+fn adapt_prepared(
+    backend: CpuBackend,
+    prepare: impl FnOnce(&mut Prepared),
+    edit: impl FnOnce(&mut Edited),
+) -> Result<wire::Request> {
+    use crate::execution::PreparedImage;
+    use seedbox_artifacts::image::Launch;
+    let root = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(root.path().join("store"));
+    let (mut inputs, mut prepared, artifact) = fixture(root.path(), backend);
+    let digest = ContentDigest::try_from(artifact.sha256).unwrap();
+    let data = seedbox_spec::VolumeMount {
+        source: "data".into(),
+        target: "/data".into(),
+        size_bytes: None,
+    };
+    let environment = |name: &str, named_volumes| wire::Environment {
+        hostname: name.into(),
+        hosts: format!("10.0.0.1 {name}\n"),
+        anonymous_volumes: vec![],
+        named_volumes,
+        configs: BTreeMap::new(),
+        limits: wire::GuestLimits {
+            max_map_count: std::num::NonZeroU32::MIN,
+            nofile: std::num::NonZeroU32::MIN,
+        },
+        control_socket: false,
+    };
+    prepared.machines.push(wire::Machine {
+        name: "db".into(),
+        disk: Some(wire::Disk::Zero { bytes: 1 << 30 }),
+        ..prepared.oracle.clone()
+    });
+    let (wire::Inventory::Pv { environments, .. } | wire::Inventory::Tcg { environments, .. }) =
+        &mut prepared.inventory;
+    environments.insert("oracle".into(), environment("oracle", vec![]));
+    environments.insert(
+        "db".into(),
+        environment(
+            "db",
+            vec![wire::NamedVolume {
+                name: "data".into(),
+                target: "/data".into(),
+            }],
+        ),
+    );
+    inputs.wall_clock_epoch = Some(86400);
+    for (name, disk_volumes) in [("oracle", vec![]), ("db", vec![data])] {
+        inputs.machine_memory_mb.insert(name.into(), 128);
+        inputs.guests.insert(name.into(), digest.clone());
+        inputs.placement.insert(name.into(), name.into());
+        inputs.images.insert(
+            name.into(),
+            PreparedImage {
+                manifest: digest.clone(),
+                config: digest.clone(),
+                layers: vec![],
+                launch: Launch {
+                    argv: prepared.oracle.process.argv.clone(),
+                    environment: Default::default(),
+                    working_dir: "/".into(),
+                    user: "".into(),
+                    volumes: vec![],
+                    disk_volumes,
+                },
+            },
+        );
+    }
+    prepare(&mut prepared);
+    retain_prepared(&mut inputs, &prepared, &store).unwrap();
+    let artifacts = inputs
+        .digests()
+        .enumerate()
+        .map(|(index, digest)| {
+            let path = store
+                .materialize(digest, &root.path().join(format!("input-{index}")))
+                .unwrap();
+            (digest.clone(), path)
+        })
+        .collect();
+    let mut edited = Edited {
+        inputs,
+        progress_budget: Default::default(),
+        allow_crashes: BTreeSet::new(),
+        control: None,
+    };
+    edit(&mut edited);
+    let output = root.path().join("output");
+    fs::create_dir(&output).unwrap();
+    let simulation = crate::fixture_simulation("oracle");
+    let cancellation = CancellationToken::default();
+    let performance = BTreeMap::new();
+    let request = ExecutionRequest {
+        start_paused: true,
+        resume_checkpoint: None,
+        intervention_history: None,
+        observations: None,
+        seed: 42,
+        program: &[],
+        quantum_ns: simulation.simulator.quantum_ns,
+        progress_budget: edited.progress_budget,
+        allow_crashes: &edited.allow_crashes,
+        limits: &simulation.limits,
+        network: &simulation.network,
+        schedule: &simulation.schedule,
+        control: edited.control.as_ref(),
+        check: &simulation.check,
+        prepared: &edited.inputs,
+        artifacts: &artifacts,
+        output: &output,
+        cancellation: &cancellation,
+        performance_parameters: &performance,
+        spawner: None,
+    };
+    super::request(&request, &output.join("host.sock"), None)
+}
+fn refused(backend: CpuBackend, edit: impl FnOnce(&mut Edited)) -> String {
+    refused_prepared(backend, |_| {}, edit)
+}
+fn refused_prepared(
+    backend: CpuBackend,
+    prepare: impl FnOnce(&mut Prepared),
+    edit: impl FnOnce(&mut Edited),
+) -> String {
+    let error = adapt_prepared(backend, prepare, edit).expect_err("the edit must be refused");
+    assert!(matches!(error, Error::Setup(_)), "{error:?}");
+    error.to_string()
+}
+
+#[test]
+fn unedited_definitions_adapt_their_prepared_world() {
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        let worker = adapt_edited(backend, |_| {}).unwrap();
+        assert!(!worker.prepared.oracle.allow_crashes);
+        assert!(!worker.prepared.machines[0].allow_crashes);
+        assert_eq!(
+            worker.prepared.machines[0].disk,
+            Some(wire::Disk::Zero { bytes: 1 << 30 })
+        );
+    }
+}
+
+#[test]
+fn edited_allow_crashes_reach_the_worker_request() {
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        let worker = adapt_edited(backend, |edited| {
+            edited.allow_crashes.insert("db".into());
+        })
+        .unwrap();
+        assert!(!worker.prepared.oracle.allow_crashes);
+        assert_eq!(worker.prepared.machines[0].name, "db");
+        assert!(worker.prepared.machines[0].allow_crashes);
+    }
+}
+
+#[test]
+fn edits_the_prepared_boot_archives_embed_are_refused_by_field() {
+    let budget = |blocks| std::num::NonZeroU32::new(blocks).unwrap().into();
+    let error = refused(CpuBackend::Pv, |edited| edited.progress_budget = budget(17));
+    assert_eq!(
+        error,
+        "simulator.blocksPerProgressCall 17 differs from the prepared 10000; a resolved definition replays prepared boot archives that embed it, so it cannot be changed"
+    );
+    // TCG has no translator budget, so its recorded value changes nothing.
+    adapt_edited(CpuBackend::Tcg, |edited| {
+        edited.progress_budget = budget(17)
+    })
+    .unwrap();
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        let error = refused(backend, |edited| {
+            edited.inputs.wall_clock_epoch = Some(86401);
+        });
+        assert!(
+            error.starts_with("clock.epochSeconds 86401 differs from the prepared 86400;"),
+            "{error}"
+        );
+        let error = refused(backend, |edited| {
+            edited.control = Some(crate::config::Control {
+                service: "oracle".into(),
+            });
+        });
+        assert!(
+            error.starts_with("simulator.oracleControl true differs from the prepared false;"),
+            "{error}"
+        );
+        let error = refused(backend, |edited| {
+            let launch = &mut edited.inputs.images.get_mut("db").unwrap().launch;
+            launch.disk_volumes[0].size_bytes = Some(2 << 30);
+        });
+        assert!(
+            error.starts_with("machines.db.volumes differs from the prepared machine;"),
+            "{error}"
+        );
+        let error = refused(backend, |edited| {
+            let launch = &mut edited.inputs.images.get_mut("db").unwrap().launch;
+            launch.disk_volumes[0].target = "/elsewhere".into();
+        });
+        assert!(error.starts_with("machines.db.volumes differs"), "{error}");
+        let error = refused(backend, |edited| {
+            let volumes = edited.inputs.images["db"].launch.disk_volumes.clone();
+            edited
+                .inputs
+                .images
+                .get_mut("oracle")
+                .unwrap()
+                .launch
+                .disk_volumes = volumes;
+        });
+        assert!(error.starts_with("oracle.volumes differs"), "{error}");
+        let error = refused(backend, |edited| {
+            let launch = &mut edited.inputs.images.get_mut("oracle").unwrap().launch;
+            launch.volumes.push("/cache".into());
+        });
+        assert!(
+            error.starts_with("oracle.anonymousVolumes differs"),
+            "{error}"
+        );
+        let error = refused(backend, |edited| {
+            let db = edited.inputs.images["db"].clone();
+            edited.inputs.images.insert("extra".into(), db);
+        });
+        assert!(
+            error.starts_with("machines.extra is not in the prepared world;"),
+            "{error}"
+        );
+    }
+}
+
+fn environment_of<'a>(prepared: &'a mut Prepared, name: &str) -> &'a mut wire::Environment {
+    let (wire::Inventory::Pv { environments, .. } | wire::Inventory::Tcg { environments, .. }) =
+        &mut prepared.inventory;
+    environments.get_mut(name).unwrap()
+}
+
+#[test]
+fn edited_allow_crashes_are_cleared_and_set_on_the_oracle_too() {
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        // Prepared with db allowed to crash; the edit clears it and allows the oracle.
+        let worker = adapt_prepared(
+            backend,
+            |prepared| prepared.machines[0].allow_crashes = true,
+            |edited| {
+                edited.allow_crashes.insert("oracle".into());
+            },
+        )
+        .unwrap();
+        assert!(worker.prepared.oracle.allow_crashes);
+        assert_eq!(worker.prepared.machines[0].name, "db");
+        assert!(!worker.prepared.machines[0].allow_crashes);
+    }
+}
+
+#[test]
+fn a_removed_machine_is_refused() {
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        let error = refused(backend, |edited| {
+            let inputs = &mut edited.inputs;
+            inputs.images.remove("db");
+            inputs.guests.remove("db");
+            inputs.placement.remove("db");
+            inputs.machine_memory_mb.remove("db");
+        });
+        assert!(
+            error.starts_with(
+                "machines.db is in the prepared world but missing from the definition;"
+            ),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn a_renamed_oracle_is_refused_as_its_name() {
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        let error = refused(backend, |edited| {
+            let inputs = &mut edited.inputs;
+            let image = inputs.images.remove("oracle").unwrap();
+            inputs.images.insert("checker".into(), image);
+            let guest = inputs.guests.remove("oracle").unwrap();
+            inputs.guests.insert("checker".into(), guest);
+            inputs.placement.remove("oracle");
+            inputs.placement.insert("checker".into(), "checker".into());
+            let memory = inputs.machine_memory_mb.remove("oracle").unwrap();
+            inputs.machine_memory_mb.insert("checker".into(), memory);
+            edited.control = Some(crate::config::Control {
+                service: "checker".into(),
+            });
+        });
+        assert!(
+            error.starts_with(
+                "oracle.name oracle is in the prepared world but missing from the definition;"
+            ),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn oracle_control_must_match_the_prepared_control_socket() {
+    let control = || {
+        Some(crate::config::Control {
+            service: "oracle".into(),
+        })
+    };
+    let socket = |prepared: &mut Prepared| environment_of(prepared, "oracle").control_socket = true;
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        adapt_prepared(backend, socket, |edited| edited.control = control()).unwrap();
+        let error = refused_prepared(backend, socket, |_| {});
+        assert!(
+            error.starts_with("simulator.oracleControl false differs from the prepared true;"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn named_volumes_match_regardless_of_their_retained_order() {
+    let mount = |source: &str| seedbox_spec::VolumeMount {
+        source: source.into(),
+        target: format!("/{source}"),
+        size_bytes: None,
+    };
+    // Preparation keeps the image's mount order; a resubmitted definition keys
+    // volumes by name, so its mounts arrive sorted.
+    let manifest_order = |prepared: &mut Prepared| {
+        environment_of(prepared, "db").named_volumes = ["zeta", "alpha"]
+            .map(|name| wire::NamedVolume {
+                name: name.into(),
+                target: format!("/{name}"),
+            })
+            .to_vec();
+    };
+    for backend in [CpuBackend::Pv, CpuBackend::Tcg] {
+        let worker = adapt_prepared(backend, manifest_order, |edited| {
+            let launch = &mut edited.inputs.images.get_mut("db").unwrap().launch;
+            launch.disk_volumes = vec![mount("alpha"), mount("zeta")];
+        })
+        .unwrap();
+        assert_eq!(
+            worker.prepared.machines[0].disk,
+            Some(wire::Disk::Zero { bytes: 1 << 30 })
+        );
+        let error = refused_prepared(backend, manifest_order, |edited| {
+            let launch = &mut edited.inputs.images.get_mut("db").unwrap().launch;
+            launch.disk_volumes = vec![mount("alpha"), mount("omega")];
+        });
+        assert!(error.starts_with("machines.db.volumes differs"), "{error}");
+    }
 }

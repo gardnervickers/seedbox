@@ -58,6 +58,14 @@ impl ExecutionBackend for Executor {
         );
         self.backend().execute(request)
     }
+    fn retain_spawned(
+        &self,
+        inputs: &mut PreparedInputs,
+        output: &Path,
+        store: &ContentStore,
+    ) -> Result<bool> {
+        self.backend().retain_spawned(inputs, output, store)
+    }
 }
 
 fn execution_backend_label(

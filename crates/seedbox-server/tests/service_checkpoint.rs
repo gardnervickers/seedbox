@@ -200,6 +200,7 @@ fn report(reason: StopReason, simulated_time_ns: u64) -> ExecutionReport {
         full_state: None,
         faults: Vec::new(),
         host_wait_ns: 0,
+        machines: vec![],
         detail: None,
         properties: None,
     }

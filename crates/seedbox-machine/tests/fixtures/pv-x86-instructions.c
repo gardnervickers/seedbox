@@ -1,8 +1,9 @@
 /* Freestanding x86-64 application for instrumented PV instruction checks.
  *
  *   entropy  execute RDRAND and RDSEED at 16, 32 and 64 bits regardless of
- *            CPUID, with a sentinel destination and every arithmetic flag set
- *            beforehand; print the destination and arithmetic flags after.
+ *            CPUID, mid-block and as the first instruction of a block, with a
+ *            sentinel destination and every arithmetic flag set beforehand;
+ *            print the destination and arithmetic flags after.
  *   probe    run each host-sensitive user instruction in a child process and
  *            print its result or the signal that ended the child.
  */
@@ -48,6 +49,18 @@ ENTROPY(rdrand64, "rdrand %q0", "r")
 ENTROPY(rdseed16, "rdseed %w0", "r")
 ENTROPY(rdseed32, "rdseed %k0", "r")
 ENTROPY(rdseed64, "rdseed %q0", "r")
+/* An entropy instruction that begins its block: the indirect branch ends the
+ * block before it and sets no flag, so the preset flags still reach RDRAND. */
+static void rdrand_target64(void) {
+    u64 value = 0xa5a5a5a5a5a5a5a5UL, flags = 0x8d4UL | 2;
+    __asm__ volatile("lea 1f(%%rip), %%rax\n\tpush %1\n\tpopf\n\tjmp *%%rax\n"
+                     "1:\n\trdrand %q0\n\tpushf\n\tpop %1"
+                     : "+r"(value), "+r"(flags) : : "rax", "cc");
+    out("rdrand_target64 ");
+    hex(value);
+    hex(flags & ARITHMETIC);
+    out("\n");
+}
 
 static void probe(const char *name, void (*run)(void)) {
     out(name);
@@ -110,6 +123,7 @@ void start(u64 *stack) {
         rdseed32();
         rdseed64();
         rdseed64();
+        rdrand_target64();
     } else if (mode[0] == 'p') {
         probe("rdpid", rdpid);
         probe("rdpru", rdpru);

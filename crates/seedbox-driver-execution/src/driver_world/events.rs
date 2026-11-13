@@ -491,7 +491,7 @@ fn members(names: &BTreeMap<MachineId, String>, ids: &[MachineId]) -> Result<Vec
 }
 pub(super) fn action_name(action: FaultAction) -> Result<&'static str> {
     Ok(match action {
-        FaultAction::Spawn => "spawn",
+        FaultAction::Spawn => crate::execution::SPAWN_ACTION,
         FaultAction::Pause => "pause",
         FaultAction::Resume => "resume",
         FaultAction::Crash => "crash",

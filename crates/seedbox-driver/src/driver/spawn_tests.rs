@@ -651,6 +651,11 @@ fn unprepared_spawn_waits_at_its_turn_and_then_matches_a_prepared_run() {
                     );
                     assert_eq!(draws.load(Ordering::SeqCst), 1);
                     assert_eq!(*built.lock().unwrap(), ["fixture-0"]);
+                    // The admitted spawn's records already target the
+                    // identity it reserved; the reservation names it.
+                    assert!(driver
+                        .reserved_machines()
+                        .eq([(request.machine, request.name.as_str())]));
                     needed.push((held, (*request).clone()));
                     driver
                         .with_barrier(|b| {
@@ -664,6 +669,7 @@ fn unprepared_spawn_waits_at_its_turn_and_then_matches_a_prepared_run() {
                 other => panic!("unexpected {other:?}"),
             }
         }
+        assert_eq!(driver.reserved_machines().count(), 0);
         let randoms: Vec<_> = driver
             .execution
             .machines
