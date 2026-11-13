@@ -79,9 +79,11 @@ impl Native {
             .map(|e| [e.function, e.index, e.flags, e.eax, e.ebx, e.ecx, e.edx])
             .collect();
         cpuid.sort_unstable();
-        // request_interrupt_window affects the next architectural entry. Do not
-        // include immediate_exit/last exit_reason or other host scheduling fields.
-        let window = self.cpu.get_kvm_run().request_interrupt_window;
+        // request_interrupt_window is host scheduling, like immediate_exit and
+        // the last exit_reason: `prepare` rewrites it from the current PIC
+        // state before each prepared entry (a host-interrupted or maintenance
+        // re-entry keeps it), capture does not save it and restore clears it,
+        // so hashing it would make a restored machine mismatch.
         Ok(vec![
             part(
                 "regs",
@@ -107,7 +109,7 @@ impl Native {
             )?,
             part(
                 "vcpu",
-                &json!({"mp_state":mp.mp_state,"injected":self.injected,"interrupt_window":window}),
+                &json!({"mp_state":mp.mp_state,"injected":self.injected}),
             )?,
             part("cpuid", &cpuid)?,
         ])
