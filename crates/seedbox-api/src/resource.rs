@@ -143,27 +143,36 @@ impl SimulationSpec {
         &mut self,
         architecture: seedbox_spec::definition::Architecture,
     ) -> Result<(), String> {
-        use seedbox_spec::definition::Architecture;
-        let (expected, maximum) = match architecture {
-            Architecture::X86_64 => ("linux/amd64", 65536),
-            Architecture::Aarch64 => ("linux/arm64", 3072),
-        };
-        for (name, service) in &mut self.configuration.services {
-            if !service.platform.is_empty() && service.platform != expected {
-                return Err(format!(
-                    "machine {name}: architecture {} does not match execution server {expected}",
-                    service.platform
-                ));
-            }
-            if let Some(memory) = service.memory_mb {
-                if !(64..=maximum).contains(&memory) {
-                    return Err(format!("machine {name}: memoryMiB must be 64..{maximum}"));
-                }
-            }
-            service.platform = expected.into();
-        }
-        Ok(())
+        resolve_architecture(&mut self.configuration, architecture)
     }
+}
+
+/// Resolve a project configuration's omitted platforms against the execution
+/// server's architecture, refusing a platform or memory size it cannot run.
+pub fn resolve_architecture(
+    configuration: &mut seedbox_spec::Simulation,
+    architecture: seedbox_spec::definition::Architecture,
+) -> Result<(), String> {
+    use seedbox_spec::definition::Architecture;
+    let (expected, maximum) = match architecture {
+        Architecture::X86_64 => ("linux/amd64", 65536),
+        Architecture::Aarch64 => ("linux/arm64", 3072),
+    };
+    for (name, service) in &mut configuration.services {
+        if !service.platform.is_empty() && service.platform != expected {
+            return Err(format!(
+                "machine {name}: architecture {} does not match execution server {expected}",
+                service.platform
+            ));
+        }
+        if let Some(memory) = service.memory_mb {
+            if !(64..=maximum).contains(&memory) {
+                return Err(format!("machine {name}: memoryMiB must be 64..{maximum}"));
+            }
+        }
+        service.platform = expected.into();
+    }
+    Ok(())
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
