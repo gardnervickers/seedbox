@@ -61,6 +61,9 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone)]
 struct Entry {
     range: Option<seeds::Range>,
+    /// For a seed-range member, the project its range was submitted from, so
+    /// its spawns prepare machines as a fresh run of that project would.
+    range_project: Option<seedbox_application::config::Simulation>,
     request: SubmitRequest,
     resource: Simulation,
     controls: BTreeMap<String, ControlReceipt>,
@@ -97,6 +100,17 @@ impl Catalogue {
         self.entries
             .get(id)
             .map(|e| &e.resource)
+            .ok_or_else(|| Error::NotFound(id.clone()))
+    }
+
+    /// The project a seed-range member's range was submitted from, if any.
+    pub fn range_project(
+        &self,
+        id: &SimulationId,
+    ) -> Result<Option<&seedbox_application::config::Simulation>> {
+        self.entries
+            .get(id)
+            .map(|e| e.range_project.as_ref())
             .ok_or_else(|| Error::NotFound(id.clone()))
     }
 
@@ -296,6 +310,7 @@ impl Catalogue {
             controls: BTreeMap::new(),
             deleting: false,
             range,
+            range_project: None,
         };
         self.requests
             .insert(entry.request.request_id.clone(), id.clone());
@@ -458,6 +473,7 @@ impl Catalogue {
             controls: original.controls.clone(),
             deleting: original.deleting,
             range: original.range.clone(),
+            range_project: original.range_project.clone(),
         };
         if resource.status.phase == Phase::Completed {
             for control in entry.controls.values_mut() {
