@@ -37,7 +37,7 @@ pub(super) enum Snapshot {
     ))]
     Pv(Box<pv::Snapshot>),
     Tcg(Box<tcg::Snapshot>),
-    /// Only a verified private copy, never a decoded native RAM image.
+    /// Only an already-verified descriptor, never a decoded native RAM image.
     Retained(Opened),
 }
 impl Machine for Native {

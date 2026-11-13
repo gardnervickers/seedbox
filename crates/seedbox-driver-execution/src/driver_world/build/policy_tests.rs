@@ -360,7 +360,7 @@ fn restore_refuses_edited_initial_allow_crashes_before_materializing_anything() 
             .path()
             .join(format!("{}-{oracle_allowed}", allowed.len()));
         let (inventory, manifest) = published_checkpoint(&case, allowed);
-        let envelope = checkpoint::read(&manifest).unwrap();
+        let envelope = checkpoint::load(&manifest).unwrap();
         let saved =
             checkpoint::open(&envelope, driver_limits(envelope.driver.length).unwrap()).unwrap();
         // The spawned machine's own allowance is captured beside the initial set.

@@ -323,7 +323,7 @@ fn streamed_world_capture_survives_source_drop_and_branches_with_one_or_four_wor
     let expected = session_events(source_driver.drain_observations().events);
     drop(source_driver);
     fs::remove_dir_all(source).unwrap();
-    let envelope = read(&manifest).unwrap();
+    let envelope = load(&manifest).unwrap();
     assert_eq!(
         serde_json::to_value(&envelope.state).unwrap(),
         serde_json::to_value(&state).unwrap()
@@ -456,20 +456,22 @@ fn integrity_and_length_are_verified_before_decoding_any_native_body() {
         encode,
     )
     .unwrap();
-    let envelope = read(&path).unwrap();
+    let envelope = load(&path).unwrap();
     let artifact = &envelope.machines[0];
     let original = fs::read(&artifact.artifact).unwrap();
     let mut changed = original.clone();
     changed[0] ^= 1;
     fs::write(&artifact.artifact, &changed).unwrap();
-    assert!(read(&path).unwrap_err().to_string().contains("SHA-256"));
-    assert!(resolve::<Saved>(&envelope, limits(), |_, _| panic!("must verify first")).is_err());
+    // Loading the envelope opens no body, so only `open` sees the rewrite.
+    load(&path).unwrap();
+    assert!(
+        resolve::<Saved>(&envelope, limits(), |_, _| panic!("must verify first"))
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("SHA-256")
+    );
     fs::write(&artifact.artifact, &original[..original.len() - 1]).unwrap();
-    assert!(read(&path)
-        .unwrap_err()
-        .to_string()
-        .contains("encoded length"));
-    // Restore never calls `read`: the length check that matters is `open`'s.
     assert!(
         resolve::<Saved>(&envelope, limits(), |_, _| panic!("must verify first"))
             .err()
@@ -489,7 +491,7 @@ fn flip_first_byte(path: impl AsRef<Path>) -> Vec<u8> {
 }
 
 #[test]
-fn in_place_rewrite_after_load_is_rejected_and_after_open_never_reaches_a_decoder() {
+fn in_place_rewrite_after_load_is_rejected_by_open() {
     let root = tempfile::tempdir().unwrap();
     let inventory = fixture_inventory(&root.path().join("authority"));
     let mut driver = driver(1, 2, Arc::default(), Arc::default(), None);
@@ -507,43 +509,17 @@ fn in_place_rewrite_after_load_is_rejected_and_after_open_never_reaches_a_decode
         encode,
     )
     .unwrap();
-    let scratch = tempfile::tempdir().unwrap();
-    // The private copies never have a name, so this holds whether or not they
-    // are still open. It rules out a named copy, live or left behind. That a
-    // failed `open` releases its copies follows from ownership and is not
-    // checked here.
-    let scratch_is_empty = || fs::read_dir(scratch.path()).unwrap().count() == 0;
     // The restore path loads only the envelope, so nothing has been hashed yet.
     let envelope = load(&path).unwrap();
     // A rewrite of the Driver metadata or of a later body between `load` and
     // `open` is rejected.
     for artifact in [&envelope.driver, &envelope.machines[1]] {
         let original = flip_first_byte(&artifact.artifact);
-        let error = open(&envelope, limits(), scratch.path()).err().unwrap();
+        let error = open(&envelope, limits()).err().unwrap();
         assert!(error.to_string().contains("SHA-256"));
-        assert!(scratch_is_empty());
         fs::write(&artifact.artifact, &original).unwrap();
     }
-    // Once opened, the private copies are what decoders read: rewriting every
-    // published body in place (same inode, same length) changes nothing.
-    let opened = open(&envelope, limits(), scratch.path()).unwrap();
-    assert!(scratch_is_empty(), "private copies are unnamed");
-    let published = envelope
-        .machines
-        .iter()
-        .map(|artifact| flip_first_byte(&artifact.artifact))
-        .collect::<Vec<_>>();
-    let mut index = 0;
-    opened
-        .try_map_snapshots(|file| {
-            let mut bytes = vec![];
-            file.reader().read_to_end(&mut bytes).unwrap();
-            assert_eq!(bytes, published[index]);
-            index += 1;
-            Ok::<_, Error>(())
-        })
-        .unwrap();
-    assert_eq!(index, 2);
+    open(&envelope, limits()).unwrap();
 }
 
 #[test]
@@ -565,57 +541,22 @@ fn corrupt_later_body_is_rejected_before_driver_metadata_decodes() {
         encode,
     )
     .unwrap();
-    let scratch = tempfile::tempdir().unwrap();
     let mut envelope = load(&path).unwrap();
     // Driver metadata that matches its digest but cannot decode.
     let garbage = vec![0xff; 64];
     fs::write(&envelope.driver.artifact, &garbage).unwrap();
     envelope.driver.sha256 = hex::encode(Sha256::digest(&garbage));
     envelope.driver.length = garbage.len() as u64;
-    let decoding = open(&envelope, limits(), scratch.path())
-        .err()
-        .unwrap()
-        .to_string();
+    let decoding = open(&envelope, limits()).err().unwrap().to_string();
     assert!(!decoding.contains("SHA-256"), "{decoding}");
     // With a corrupt later body too, the digest check fails first: the
     // metadata decoder is never reached.
     flip_first_byte(&envelope.machines[1].artifact);
-    assert!(open(&envelope, limits(), scratch.path())
+    assert!(open(&envelope, limits())
         .err()
         .unwrap()
         .to_string()
         .contains("SHA-256"));
-}
-
-#[test]
-fn unusable_scratch_is_a_named_error_and_is_not_created() {
-    let root = tempfile::tempdir().unwrap();
-    let inventory = fixture_inventory(&root.path().join("authority"));
-    let mut driver = driver(1, 1, Arc::default(), Arc::default(), None);
-    let mut state = state(1);
-    let path = capture(
-        &mut driver,
-        Capture {
-            inventory: &inventory,
-            state: &mut state,
-            prepared: false,
-        },
-        root.path(),
-        "saved",
-        publish,
-        encode,
-    )
-    .unwrap();
-    let envelope = load(&path).unwrap();
-    let missing = root.path().join("no-scratch");
-    let error = open(&envelope, limits(), &missing)
-        .err()
-        .unwrap()
-        .to_string();
-    assert!(error.contains("private copy of"), "{error}");
-    assert!(error.contains(&missing.display().to_string()), "{error}");
-    // `open` does not create the directory it was given.
-    assert!(!missing.exists());
 }
 
 #[test]
@@ -637,13 +578,13 @@ fn body_manifest_mismatch_and_unused_entries_are_not_silently_accepted() {
         encode,
     )
     .unwrap();
-    let mut envelope = read(&path).unwrap();
+    let mut envelope = load(&path).unwrap();
     envelope.machines[0].sha256 = "00".repeat(32);
     assert!(resolve::<Saved>(&envelope, limits(), |_, _| panic!(
         "must check reference first"
     ))
     .is_err());
-    let mut envelope = read(&path).unwrap();
+    let mut envelope = load(&path).unwrap();
     envelope.machines.push(envelope.machines[0].clone());
     assert!(resolve(&envelope, limits(), decode)
         .err()
@@ -784,13 +725,13 @@ fn corrupt_later_body_and_unused_manifest_entries_fail_before_any_backend_decode
         encode,
     )
     .unwrap();
-    let mut envelope = read(&path).unwrap();
+    let mut envelope = load(&path).unwrap();
     envelope.machines.push(envelope.machines[0].clone());
     assert!(resolve::<Saved>(&envelope, limits(), |_, _| panic!(
         "all references must precede decode"
     ))
     .is_err());
-    let envelope = read(&path).unwrap();
+    let envelope = load(&path).unwrap();
     let later = &envelope.machines[1];
     let mut bytes = fs::read(&later.artifact).unwrap();
     bytes[0] ^= 1;

@@ -48,10 +48,10 @@ fn tcg_policy_option_survives_envelope_and_descriptor_roundtrip_without_defaulti
             encode,
         )
         .unwrap();
-        let envelope = read(&path).unwrap();
+        let envelope = load(&path).unwrap();
         assert_eq!(envelope.version, wire::ENVELOPE_VERSION);
         assert_eq!(envelope.inventory.backend_policy(), selected.as_ref());
-        super::super::open(&envelope, limits(), root.path()).unwrap();
+        super::super::open(&envelope, limits()).unwrap();
         crate::driver_world::build::validate_policy_binding(&inventory, &envelope.inventory)
             .unwrap();
         let mut opposite = inventory.clone();
@@ -106,9 +106,9 @@ fn pv_optional_policy_roundtrips_envelope_and_driver_metadata_without_defaulting
             encode,
         )
         .unwrap();
-        let envelope = read(&path).unwrap();
+        let envelope = load(&path).unwrap();
         assert_eq!(envelope.inventory.backend_policy(), selected.as_ref());
-        super::super::open(&envelope, limits(), root.path()).unwrap();
+        super::super::open(&envelope, limits()).unwrap();
         crate::driver_world::build::validate_policy_binding(&inventory, &envelope.inventory)
             .unwrap();
         let mut opposite = inventory.clone();
@@ -162,7 +162,7 @@ fn complete_boot_factory_authority_survives_checkpoint_source_deletion() {
     )
     .unwrap();
     fs::remove_dir_all(&authority).unwrap();
-    let envelope = read(&path).unwrap();
+    let envelope = load(&path).unwrap();
     let wire::Inventory::Pv { boot_archives, .. } = &envelope.inventory else {
         unreachable!()
     };
@@ -170,7 +170,7 @@ fn complete_boot_factory_authority_survives_checkpoint_source_deletion() {
     assert_eq!(retained.sha256, artifact.sha256);
     assert_ne!(retained.artifact, artifact.artifact);
     assert_eq!(fs::read(&retained.artifact).unwrap(), bytes);
-    super::super::open(&envelope, limits(), root.path()).unwrap();
+    super::super::open(&envelope, limits()).unwrap();
 }
 #[test]
 fn distinct_runtime_closure_bytes_are_retained_and_exported_independently() {
@@ -273,7 +273,7 @@ fn config_artifact_map_above_64_entries_keeps_large_contents_outside_metadata() 
     )
     .unwrap();
     fs::remove_dir_all(authority).unwrap();
-    let restored = read(&path).unwrap();
+    let restored = load(&path).unwrap();
     let wire::Inventory::Pv { environments, .. } = restored.inventory else {
         unreachable!()
     };
@@ -325,7 +325,7 @@ fn valid_future_named_handle_above_64k_captures_and_reads_exactly() {
         encode,
     )
     .unwrap();
-    let restored = read(&path).unwrap();
+    let restored = load(&path).unwrap();
     assert_eq!(restored.state.world.input_program.inputs, [input]);
     assert_eq!(restored.state.world.input_program.next, 0);
     let seedbox_engine_protocol::control::Action::Partition { handle, .. } =
