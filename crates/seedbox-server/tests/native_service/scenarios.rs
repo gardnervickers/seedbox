@@ -204,9 +204,6 @@ struct NativeProvider {
 /// server-owned observation socket, as an unobserved execution would.
 struct Unobserved(Box<dyn ExecutionBackend>);
 impl ExecutionBackend for Unobserved {
-    fn preflight_workers(&self, workers: u32) -> seedbox_application::Result<()> {
-        self.0.preflight_workers(workers)
-    }
     fn preflight(&self, output: Option<&Path>) -> seedbox_application::Result<()> {
         self.0.preflight(output)
     }

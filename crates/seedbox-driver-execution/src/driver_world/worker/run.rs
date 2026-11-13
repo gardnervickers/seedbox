@@ -158,53 +158,28 @@ where
         let Some(incoming) = control.receive()? else {
             break;
         };
-        match incoming {
-            Incoming::Pause(ref peer) | Incoming::Resume(ref peer) => {
-                let rate = if matches!(incoming, Incoming::Pause(_)) {
-                    host::PlaybackRate::Paused
-                } else {
-                    host::PlaybackRate::Unlimited
-                };
-                let dispatch = worker.playback_request(Request {
-                    id: 0,
-                    command: Command::SetRate { rate },
-                })?;
-                let Dispatch::Reply(reply) = dispatch else {
-                    return Err(fail("legacy playback unexpectedly became semantic work"));
-                };
-                let bytes = if reply.error.is_some() {
-                    host::INVALID
-                } else if rate == host::PlaybackRate::Paused {
-                    host::PAUSED
-                } else {
-                    host::RUNNING
-                };
-                control.raw(peer, bytes);
-            }
-            Incoming::Request { request, peer } => {
-                if let Some(prior) = control.prior(&request) {
-                    match prior {
-                        Ok(reply) => control.cached(&reply, &peer)?,
-                        Err(error) => {
-                            let mut reply = worker.status(request.id)?;
-                            reply.error = Some(error);
-                            control.cached(&reply, &peer)?;
-                        }
-                    }
-                    continue;
+        let Incoming { request, peer } = incoming;
+        if let Some(prior) = control.prior(&request) {
+            match prior {
+                Ok(reply) => control.cached(&reply, &peer)?,
+                Err(error) => {
+                    let mut reply = worker.status(request.id)?;
+                    reply.error = Some(error);
+                    control.cached(&reply, &peer)?;
                 }
-                let dispatch = worker.playback_request((*request).clone())?;
-                let reply = match dispatch {
-                    Dispatch::Reply(reply) => reply,
-                    Dispatch::Semantic(ref semantic) => match semantic.command {
-                        Command::PrepareFault { .. } => worker.prepare_request(semantic)?,
-                        Command::CommitFault { .. } => worker.commit(semantic)?,
-                        _ => return Err(fail("unexpected semantic Driver command")),
-                    },
-                };
-                control.reply(*request, reply, &peer)?;
             }
+            continue;
         }
+        let dispatch = worker.playback_request((*request).clone())?;
+        let reply = match dispatch {
+            Dispatch::Reply(reply) => reply,
+            Dispatch::Semantic(ref semantic) => match semantic.command {
+                Command::PrepareFault { .. } => worker.prepare_request(semantic)?,
+                Command::CommitFault { .. } => worker.commit(semantic)?,
+                _ => return Err(fail("unexpected semantic Driver command")),
+            },
+        };
+        control.reply(*request, reply, &peer)?;
     }
     Ok(())
 }

@@ -7,13 +7,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) enum Incoming {
-    Request {
-        request: Box<Request>,
-        peer: PathBuf,
-    },
-    Pause(PathBuf),
-    Resume(PathBuf),
+pub(super) struct Incoming {
+    pub(super) request: Box<Request>,
+    pub(super) peer: PathBuf,
 }
 pub(super) struct Control {
     socket: UnixDatagram,
@@ -54,10 +50,8 @@ impl Control {
         };
         let peer = peer.to_owned();
         let message = match &bytes[..size] {
-            wire::PAUSE => Incoming::Pause(peer),
-            wire::RESUME => Incoming::Resume(peer),
             bytes if size <= MAX_DATAGRAM => match serde_json::from_slice(bytes) {
-                Ok(request) => Incoming::Request { request, peer },
+                Ok(request) => Incoming { request, peer },
                 Err(_) => {
                     self.raw(&peer, wire::INVALID);
                     return Ok(None);

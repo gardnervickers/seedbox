@@ -61,16 +61,6 @@ pub trait Spawner: Send + Sync {
 }
 
 pub trait ExecutionBackend: Send + Sync {
-    /// Admit the requested exploration capacity before preparation. Backends are
-    /// serial unless they explicitly support owned concurrent executions.
-    fn preflight_workers(&self, workers: u32) -> Result<()> {
-        if workers != 1 {
-            return Err(crate::Error::Setup(
-                "--workers: execution backend supports only one worker".into(),
-            ));
-        }
-        self.preflight(None)
-    }
     /// Readiness check; all transient host resources must close before return.
     fn preflight(&self, _output: Option<&Path>) -> Result<()> {
         Ok(())

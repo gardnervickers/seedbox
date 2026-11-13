@@ -31,9 +31,6 @@ impl ExecutionBackend for Executor {
     fn preflight(&self, out: Option<&Path>) -> Result<()> {
         self.backend().preflight(out)
     }
-    fn preflight_workers(&self, n: u32) -> Result<()> {
-        self.backend().preflight_workers(n)
-    }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
         self.backend().validate_retained(inputs)
     }
