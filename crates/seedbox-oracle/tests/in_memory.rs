@@ -422,8 +422,11 @@ max_faults: 20
 targets: [n1, n2, n3]
 faults:
   - {kind: partition, weight: 2, duration_ns: {min: 500000000, max: 3000000000}}
+  - {kind: partition, duration_ns: {min: 500000000, max: 3000000000}, targets: [n1, n2], from: [n3]}
   - {kind: shape, duration_ns: {min: 500000000, max: 3000000000},
      latency_ns: {min: 1000000, max: 50000000}, jitter_ns: 500000, to: [n1, n2, n3, client]}
+  - {kind: shape, duration_ns: {min: 500000000, max: 3000000000},
+     latency_ns: {min: 1000000, max: 50000000}, targets: [n1, n2], to: [n3]}
   - {kind: crash, downtime_ns: {min: 500000000, max: 3000000000}}
   - {kind: pause, duration_ns: {min: 500000000, max: 3000000000}}
   - {kind: pause_process, duration_ns: {min: 500000000, max: 3000000000}}
@@ -596,11 +599,38 @@ fn a_profile_applies_the_same_sequence_for_the_same_seed() {
     assert!(starts
         .iter()
         .all(|(at, _)| (6_000_000_000..35_000_000_000).contains(at)));
-    let kinds: BTreeSet<_> = (0..20)
+    let all: Vec<_> = (0..20)
         .flat_map(applied)
-        .map(|(_, action)| action.name())
+        .map(|(_, action)| action)
         .collect();
+    let kinds: BTreeSet<_> = all.iter().map(Action::name).collect();
     assert_eq!(kinds.len(), 17, "{kinds:?}");
+    // The narrowed partition and shape cut or shape n1 or n2 to n3 alone;
+    // the others face their side without the target. Both kinds of each
+    // come up.
+    let faces = |near: &String, far: &[String], side: &[&str]| {
+        let rest: Vec<_> = side.iter().filter(|m| **m != near).collect();
+        (far == ["n3"] && ["n1", "n2"].contains(&near.as_str())) || far.iter().eq(rest)
+    };
+    let mut sides = BTreeSet::new();
+    for action in &all {
+        let (near, far, side) = match action {
+            Action::Partition { left, right, .. } => (&left[0], right, &["n1", "n2", "n3"][..]),
+            Action::Shape { from, to, .. } => (&from[0], to, &["n1", "n2", "n3", "client"][..]),
+            _ => continue,
+        };
+        assert!(faces(near, far, side), "{action:?}");
+        sides.insert((action.name(), far.len()));
+    }
+    assert_eq!(
+        sides,
+        BTreeSet::from([
+            ("partition", 1),
+            ("partition", 2),
+            ("shape", 1),
+            ("shape", 3)
+        ])
+    );
 }
 
 #[test]
