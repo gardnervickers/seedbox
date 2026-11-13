@@ -451,7 +451,9 @@ impl Service {
             ))));
         }
         let allowed = match pending.effect {
-            Effect::Pause => facts.vm == Vm::Up,
+            // A guest command admitted after this pause but before its turn
+            // would run out of deadline on the paused machine.
+            Effect::Pause => facts.vm == Vm::Up && !self.commanded(&facts),
             Effect::Resume => facts.vm == Vm::Paused,
             Effect::Crash => facts.vm != Vm::Down,
             Effect::Reboot => facts.vm == Vm::Down,

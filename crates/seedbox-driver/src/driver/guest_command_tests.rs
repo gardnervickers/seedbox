@@ -404,3 +404,16 @@ fn a_pause_is_refused_while_a_guest_command_waits_for_its_acknowledgment() {
     );
     assert_eq!(application(&d), [crate::pv::ApplicationCommand::Stop]);
 }
+
+/// A pause admitted first is refused at its turn if a guest command was
+/// admitted before the pause applied, as at the same simulated time.
+#[test]
+fn a_pause_is_refused_at_its_turn_when_a_guest_command_was_admitted_behind_it() {
+    let mut d = driver(vec![]);
+    input(&mut d, 11, "pause", Action::Pause(target()));
+    input(&mut d, 11, "stop", stop(100));
+    let events = advance(&mut d, 200);
+    assert_eq!(settlement(&events, "pause").0, SettlementStatus::Rejected);
+    assert_eq!(settlement(&events, "stop").0, SettlementStatus::Applied);
+    assert_eq!(application(&d), [crate::pv::ApplicationCommand::Stop]);
+}
