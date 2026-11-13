@@ -16,7 +16,9 @@
 //! named by the checker, through `seedbox-guest`: valid holds and invalid
 //! violates it, which fails the run. An unknown verdict evaluates nothing.
 //! The oracle then exits with [`Report::exit_code`]: 1 when a check was
-//! violated, and 3, incomplete, when one could not decide.
+//! violated, and otherwise 3, incomplete, when one could not decide or a
+//! step failed: the nemesis, its heal, a client, a final read's restart, a
+//! breakpoint handler or the property flush.
 //!
 //! The library supplies the [`run`]ner, the in-memory [`Recorder`] history,
 //! the seeded [`Rng`], the guest control socket's [`GuestWorld`], Jepsen's
@@ -41,8 +43,8 @@ pub use history::{Completion, Event, History, Record};
 pub use nemesis::{control, Action, Nemesis, Pace, World};
 pub use random::{RandomExt, Rng};
 pub use recorder::Recorder;
-pub use runner::{final_reads, main, run, run_with, NoClient};
-pub use scenario::{Checkers, FinalRead, Report, Scenario};
+pub use runner::{final_reads, main, run, run_with, FinalReads, NoClient};
+pub use scenario::{Checkers, ClientPanic, FinalRead, Report, Scenario};
 pub use world::GuestWorld;
 
 /// A failure a scenario step reports; the caller decides whether it is fatal.

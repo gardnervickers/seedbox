@@ -213,6 +213,18 @@ fn clients_share_explicit_server_and_inspect_a_retained_setup_failure() {
     assert_eq!(playback.status.code(), Some(2));
     assert!(playback.stdout.is_empty());
     assert_eq!(String::from_utf8(playback.stderr).unwrap(), "error: server rejected request (Unavailable): simulation has no active worker control endpoint\n");
+    // Comparing with a simulation the server does not have is a missing
+    // resource, not an invalid request; the exit status stays a setup error.
+    let compared = cli(root)
+        .args(["compare", simulation.metadata.id.as_str(), "z4n8r2tw"])
+        .guarded_output()
+        .unwrap();
+    assert_eq!(compared.status.code(), Some(2));
+    assert!(compared.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(compared.stderr).unwrap(),
+        "error: server rejected request (NotFound): simulation not found: z4n8r2tw\n"
+    );
     let exploration = cli(root)
         .arg("run")
         .arg(&compose)

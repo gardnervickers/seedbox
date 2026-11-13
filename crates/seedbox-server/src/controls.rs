@@ -730,4 +730,228 @@ mod tests {
         stop.store(true, Ordering::Release);
         peer.join().unwrap();
     }
+
+    /// A capture the worker refuses resolves the waiting checkpoint request
+    /// with that refusal. The server polls a pending checkpoint under fresh
+    /// wire IDs; the worker answers the refused request with its refusal and
+    /// later status reads with no error, so the simulation keeps running.
+    #[test]
+    fn refused_checkpoint_reaches_the_client_and_the_simulation_keeps_running() {
+        use seedbox_engine_protocol::host_control::{
+            CheckpointState, CheckpointStatus, Command, ControlError,
+        };
+        const REFUSAL: &str = "checkpoint refused: no space left on device";
+        let guard = seedbox_test_time::HangGuard::new(
+            "the fake worker and the control driver make progress",
+            Duration::from_secs(60),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let manager = Arc::new(Manager::new(crate::catalogue::Catalogue::in_memory()));
+        let configuration = seedbox_application::config::parse(
+            "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
+            std::path::Path::new("/project/seedbox.yaml"),
+            &Default::default(),
+        )
+        .unwrap();
+        let id = manager
+            .submit(SubmitRequest {
+                metadata: Default::default(),
+                options: Default::default(),
+                request_id: "refused".into(),
+                spec: SimulationSpec {
+                    program: Vec::new(),
+                    seed: Some(1),
+                    inputs: InputSource::Project,
+                    configuration,
+                },
+            })
+            .unwrap()
+            .0
+            .metadata
+            .id;
+        let (_, cancellation) = manager.begin(&id).unwrap().unwrap();
+        manager
+            .update(&id, |resource| resource.status.phase = Phase::Running)
+            .unwrap();
+        let run_dir = directory.path().join("run");
+        fs::create_dir_all(run_dir.join("output")).unwrap();
+        let endpoint = directory.path().join("worker.sock");
+        let socket = UnixDatagram::bind(&endpoint).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        fs::write(
+            run_dir.join("output/host-control"),
+            endpoint.as_os_str().as_encoded_bytes(),
+        )
+        .unwrap();
+        manager.attach_worker(&id, &run_dir).unwrap();
+
+        // The fake worker arms the first checkpoint wire request, then refuses
+        // its capture: any later wire request for it receives the refusal.
+        let stop = Arc::new(AtomicBool::new(false));
+        let (arrived, arrivals) = std::sync::mpsc::channel();
+        let peer = {
+            let (stop, guard) = (stop.clone(), guard.clone());
+            std::thread::spawn(move || {
+                let mut buffer = [0; MAX_DATAGRAM + 1];
+                let mut armed = None;
+                loop {
+                    let received = guard
+                        .wait_for(|| {
+                            if stop.load(Ordering::Acquire) {
+                                return Some(None);
+                            }
+                            match socket.recv_from(&mut buffer) {
+                                Ok(received) => Some(Some(received)),
+                                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                    None
+                                }
+                                Err(error) => panic!("fake worker: {error}"),
+                            }
+                        })
+                        .unwrap();
+                    let Some((count, from)) = received else {
+                        break;
+                    };
+                    let request: Request = serde_json::from_slice(&buffer[..count]).unwrap();
+                    let mut reply = Reply {
+                        id: request.id,
+                        position: BoundaryPosition::default(),
+                        terminal: false,
+                        application_ready: true,
+                        rate: PlaybackRate::Paused,
+                        achieved_rate: None,
+                        stepping: false,
+                        before_next_fault: false,
+                        checkpoint: None,
+                        error: None,
+                        detail: None,
+                        intervention: None,
+                    };
+                    let kind = match request.command {
+                        Command::Status => "status",
+                        Command::Checkpoint { request_id }
+                            if armed.is_none_or(|wire| wire == request.id) =>
+                        {
+                            armed = Some(request.id);
+                            reply.checkpoint = Some(CheckpointStatus {
+                                request_id,
+                                position: reply.position,
+                                state: CheckpointState::Requested,
+                            });
+                            "requested"
+                        }
+                        Command::Checkpoint { .. } => {
+                            reply.error = Some(ControlError::InvalidCheckpoint);
+                            reply.detail = Some(REFUSAL.into());
+                            "refused"
+                        }
+                        other => panic!("unexpected command {other:?}"),
+                    };
+                    // Report before replying: a receipt implies its arrival.
+                    arrived.send((request.id, kind)).unwrap();
+                    socket
+                        .send_to(
+                            &serde_json::to_vec(&reply).unwrap(),
+                            from.as_pathname().unwrap(),
+                        )
+                        .unwrap();
+                }
+            })
+        };
+        let shutdown = CancellationToken::default();
+        let driver = {
+            let (manager, shutdown) = (manager.clone(), shutdown.clone());
+            std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(run(manager, shutdown))
+            })
+        };
+        manager
+            .accept_control(
+                &id,
+                ControlRequest {
+                    request_id: "saved".into(),
+                    command: ControlCommand::Checkpoint,
+                },
+            )
+            .unwrap();
+        let receipt = guard
+            .wait_for(|| {
+                let receipt = manager
+                    .read(|catalogue| Ok(catalogue.control_receipt(&id, "saved")?.cloned()))
+                    .unwrap()
+                    .unwrap();
+                (receipt.state != ControlState::Accepted).then_some(receipt)
+            })
+            .unwrap();
+        let ControlState::Acknowledged {
+            error,
+            detail,
+            checkpoint,
+            ..
+        } = receipt.state
+        else {
+            panic!("refusal was not acknowledged: {receipt:?}");
+        };
+        assert_eq!(error, Some(ControlError::InvalidCheckpoint));
+        assert_eq!(detail.as_deref(), Some(REFUSAL));
+        assert_eq!(checkpoint, None);
+
+        // The refusal arrived for a later wire request than the one that armed
+        // the capture. A status request after it, then a later one, shows the
+        // first status reply was consumed and the connection kept.
+        let mut seen = Vec::new();
+        let next = |seen: &mut Vec<(u64, &'static str)>| {
+            let arrival = guard.recv(&arrivals).unwrap();
+            seen.push(arrival);
+            arrival
+        };
+        let refused = loop {
+            if let (wire, "refused") = next(&mut seen) {
+                break wire;
+            }
+        };
+        let armed = seen
+            .iter()
+            .find_map(|&(wire, kind)| (kind == "requested").then_some(wire))
+            .unwrap();
+        assert!(armed < refused, "{seen:?}");
+        let first = loop {
+            match next(&mut seen) {
+                (wire, "status") if wire > refused => break wire,
+                (_, "status") => {}
+                // A retransmission of the refused wire request.
+                (wire, "refused") if wire == refused => {}
+                other => panic!("unexpected request after the refusal {other:?}: {seen:?}"),
+            }
+        };
+        loop {
+            match next(&mut seen) {
+                (wire, "status") if wire > first => break,
+                (_, "status") => {}
+                // A retransmission of the refused wire request.
+                (wire, "refused") if wire == refused => {}
+                other => panic!("unexpected request after the refusal {other:?}: {seen:?}"),
+            }
+        }
+        let resource = manager.describe(&id).unwrap();
+        assert_eq!(resource.status.phase, Phase::Running);
+        assert_eq!(resource.status.termination, None);
+        assert!(!cancellation.is_cancelled());
+        assert!(!manager
+            .worker(&id)
+            .unwrap()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .is_retired());
+
+        shutdown.cancel();
+        driver.join().unwrap().unwrap();
+        stop.store(true, Ordering::Release);
+        peer.join().unwrap();
+    }
 }

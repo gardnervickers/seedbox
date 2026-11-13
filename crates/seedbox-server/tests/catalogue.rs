@@ -359,7 +359,7 @@ fn captured_checkpoint_registry_is_independent_of_descendant_ownership() {
     source.status.termination = Some(seedbox_api::ExecutionTermination::Stopped);
     catalogue.update(source).unwrap();
     assert_eq!(catalogue.checkpoints(&id).unwrap().len(), 2);
-    assert_eq!(catalogue.begin_delete(&id).unwrap(), vec![id.clone()]);
+    catalogue.begin_delete(&id).unwrap();
     let marked = catalogue.get(&id).unwrap().metadata.clone();
     assert!(marked.deletion_requested_at_unix_ms.is_some());
     catalogue.begin_delete(&id).unwrap();
@@ -426,10 +426,7 @@ fn seed_range_waits_for_frozen_inputs_and_continues_once() {
         member.status.termination = Some(seedbox_api::ExecutionTermination::Stopped);
         catalogue.update(member).unwrap();
     }
-    assert_eq!(
-        catalogue.begin_delete(&source.metadata.id).unwrap(),
-        vec![source.metadata.id.clone()]
-    );
+    catalogue.begin_delete(&source.metadata.id).unwrap();
     catalogue.delete(&source.metadata.id).unwrap();
     assert_eq!(catalogue.list().count(), 2);
     for id in [&second.metadata.id, &third.metadata.id] {
@@ -566,4 +563,33 @@ fn state_dependent_heal_can_be_submitted_for_deterministic_runtime_rejection() {
         });
     let (accepted, _) = catalogue.submit(submission).unwrap();
     assert_eq!(accepted.spec.program[0].id, "heal-removed-prior-action");
+}
+
+// A run's spawned machines stay on its own record; its catalogue spec is the
+// submitted definition, which seed-range members clone.
+#[test]
+fn finalizing_runs_keep_their_submitted_driver_closure() {
+    use seedbox_api::InputSource;
+    let mut catalogue = Catalogue::in_memory();
+    let (mut resource, _) = catalogue
+        .submit(test_support::resolved_request("finalizing-closure"))
+        .unwrap();
+    resource.status.phase = Phase::Preparing;
+    resource = catalogue.update(resource).unwrap();
+    for phase in [Phase::Running, Phase::Finalizing] {
+        resource.status.phase = phase;
+        resource = catalogue.update(resource).unwrap();
+        let mut spawned = resource.clone();
+        let InputSource::Resolved { definition } = &mut spawned.spec.inputs else {
+            panic!("resolved fixture")
+        };
+        definition.runtime.execution["driver_world"] = serde_json::json!({ "manifest": "spawned" });
+        assert!(
+            matches!(
+                catalogue.update(spawned),
+                Err(Error::Invalid(message)) if message == "simulation inputs are immutable after preparation"
+            ),
+            "{phase:?}"
+        );
+    }
 }

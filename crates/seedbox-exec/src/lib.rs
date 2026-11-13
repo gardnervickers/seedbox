@@ -12,9 +12,12 @@
 //! every descriptor to it is closed, for every file this process will later
 //! execute (or hand to another process to execute). [`spawn`] holds the lock
 //! shared across fork and exec: `Command::spawn` returns only after the child
-//! has exec'd or failed. Spawns share with each other and never wait for one
-//! another. The lock guards no data and is never held across waiting for a
-//! child, so a panic cannot leave state to repair and poisoning is ignored.
+//! has exec'd or failed. Spawns share the lock with each other. Except on
+//! Linux, where std creates descriptors close-on-exec atomically, they also
+//! take a mutex inside it, so one spawn waits for another to exec (see
+//! [`SERIALIZED_SPAWNS`]). Neither lock guards data or is held across waiting
+//! for a child, so a panic cannot leave state to repair and poisoning is
+//! ignored.
 //!
 //! Rules for callers:
 //! - **No nesting.** The lock is not reentrant and waiting writers are
@@ -22,7 +25,9 @@
 //!   deadlock behind a queued writer. This covers [`spawn`] inside [`spawn`],
 //!   [`spawn`] while holding [`writing`], and [`writing`] while holding
 //!   either. Debug builds panic on a blocking acquisition by a thread that
-//!   already holds a guard.
+//!   already holds a guard. The spawn mutex is only ever taken last, inside
+//!   the shared guard, and released with it, or alone by [`cloexec`], which
+//!   takes nothing else while it holds it.
 //! - **Bounded writes.** Hold [`writing`] only for a bounded local copy: never
 //!   while waiting on another thread or a child that may itself need to spawn,
 //!   such as piping a child's output into the executable.
@@ -35,10 +40,35 @@
 use std::{
     io,
     process::{Child, Command},
-    sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError},
+    sync::{
+        Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError,
+    },
 };
 
 static SCOPE: RwLock<()> = RwLock::new(());
+
+/// Whether [`spawn`] and [`spawn_with`] also exclude one another: everywhere
+/// but Linux.
+///
+/// macOS has no `pipe2`, so std creates each pipe a spawn needs (its
+/// exec-status pipe and every `Stdio::piped()`) with `pipe()` and marks it
+/// close-on-exec afterwards with `ioctl(FIOCLEX)`. A fork by another spawn in
+/// between gives that child a copy without the flag, which it keeps across
+/// exec. If the copy is an exec-status write end, the spawn that reads the
+/// pipe until EOF blocks for as long as the other child lives. Holding a mutex
+/// across the whole spawn makes every descriptor std created for it
+/// close-on-exec before any other spawn forks. Linux creates them atomically
+/// (`pipe2`, `SOCK_CLOEXEC`), so spawns there still overlap. Linux and macOS
+/// are the only targets built here; any other serializes to be safe.
+pub const SERIALIZED_SPAWNS: bool = !cfg!(target_os = "linux");
+
+/// Held by a whole spawn where [`SERIALIZED_SPAWNS`]. Taken only inside the
+/// shared guard and released with it, never while waiting for a child.
+static SPAWN: Mutex<()> = Mutex::new(());
+
+fn serialized() -> Option<MutexGuard<'static, ()>> {
+    SERIALIZED_SPAWNS.then(|| SPAWN.lock().unwrap_or_else(PoisonError::into_inner))
+}
 
 /// Guards held by this thread. Only debug builds track it (rule: no nesting).
 mod held {
@@ -126,10 +156,12 @@ pub fn try_spawning() -> Option<Spawning> {
 
 /// `Command::spawn` with the fork-to-exec window covered. Every spawn in a
 /// process that also writes executables goes through here; the guard is
-/// released as soon as the child has exec'd, not when it exits.
+/// released as soon as the child has exec'd, not when it exits. Where
+/// [`SERIALIZED_SPAWNS`], other spawns wait until then.
 pub fn spawn(command: &mut Command) -> io::Result<Child> {
     held::assert_none("spawn");
     let _spawning = Spawning::new(SCOPE.read().unwrap_or_else(PoisonError::into_inner));
+    let _serialized = serialized();
     #[allow(
         clippy::disallowed_methods,
         reason = "the guarded spawn that every other site must use"
@@ -142,11 +174,27 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
 /// `std::process::Command` (such as `tokio::process::Command`, which forks
 /// through std and returns once the child has exec'd). `spawn` must only
 /// start the child: it must not wait for it, write an executable, or spawn
-/// again through this module.
+/// again through this module. Where [`SERIALIZED_SPAWNS`], other spawns wait
+/// until it returns.
 pub fn spawn_with<T>(spawn: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     held::assert_none("spawn_with");
     let _spawning = Spawning::new(SCOPE.read().unwrap_or_else(PoisonError::into_inner));
+    let _serialized = serialized();
     spawn()
+}
+
+/// Run `create`, which makes descriptors and marks them close-on-exec, such
+/// as `UnixStream::pair`, so that no spawn forks between the two. Where
+/// [`SERIALIZED_SPAWNS`], std creates a socket or pipe and sets the flag in a
+/// second call, and a spawn on another thread in between copies the
+/// descriptor into its child across exec; this holds the spawn mutex around
+/// `create`. Elsewhere it just runs `create`. `create` must only create and
+/// mark descriptors: never take a lock, spawn or wait. Like [`spawn`], never
+/// call it while holding a guard.
+pub fn cloexec<T>(create: impl FnOnce() -> T) -> T {
+    held::assert_none("cloexec");
+    let _serialized = serialized();
+    create()
 }
 
 /// `Command::status` through [`spawn`]. Like std, standard streams are
@@ -211,8 +259,20 @@ mod tests {
         assert!(try_writing().is_some(), "spawn released its guard at exec");
         let excluded = spawn_with(|| Ok(try_writing().is_none())).unwrap();
         assert!(excluded, "spawn_with excludes writers while it runs");
+        let serialized = spawn_with(|| Ok(SPAWN.try_lock().is_err())).unwrap();
+        assert_eq!(serialized, SERIALIZED_SPAWNS, "spawn_with excludes spawns");
+        assert!(
+            SPAWN.try_lock().is_ok(),
+            "spawn_with released the spawn mutex"
+        );
         assert!(try_writing().is_some(), "spawn_with released its guard");
+        let (serialized, writable) =
+            cloexec(|| (SPAWN.try_lock().is_err(), try_writing().is_some()));
+        assert_eq!(serialized, SERIALIZED_SPAWNS, "cloexec excludes spawns");
+        assert!(writable, "cloexec takes no shared guard");
+        assert!(SPAWN.try_lock().is_ok(), "cloexec released the spawn mutex");
         nesting_panics_before_it_can_deadlock();
+        a_panic_inside_spawn_with_leaves_spawns_working();
     }
 
     /// Part of the single test above: it must not overlap other lock users.
@@ -246,5 +306,34 @@ mod tests {
         // Unwinding released every guard and the per-thread count.
         drop(writing());
         assert!(try_spawning().is_some());
+    }
+
+    /// Part of the single test above, and last: it leaves the spawn mutex
+    /// poisoned where spawns are serialized.
+    fn a_panic_inside_spawn_with_leaves_spawns_working() {
+        let panicked = std::panic::catch_unwind(|| {
+            let _ = spawn_with(|| -> io::Result<()> { panic!("the spawner panicked") });
+        });
+        assert!(panicked.is_err(), "the panic reached the caller");
+        assert_eq!(
+            SPAWN.is_poisoned(),
+            SERIALIZED_SPAWNS,
+            "the panic poisoned the spawn mutex where it was held"
+        );
+        assert!(
+            !matches!(SPAWN.try_lock(), Err(TryLockError::WouldBlock)),
+            "unwinding released the spawn mutex"
+        );
+        // Unwinding released the shared guard and the per-thread count.
+        drop(writing());
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        assert!(spawn(&mut command).unwrap().wait().unwrap().success());
+        let serialized =
+            spawn_with(|| Ok(matches!(SPAWN.try_lock(), Err(TryLockError::WouldBlock)))).unwrap();
+        assert_eq!(
+            serialized, SERIALIZED_SPAWNS,
+            "a poisoned mutex still serializes"
+        );
     }
 }

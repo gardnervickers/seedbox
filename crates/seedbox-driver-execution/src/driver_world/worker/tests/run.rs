@@ -218,3 +218,74 @@ fn loop_advances_idle_world_to_service_owned_future_input_without_queuing_a_copy
         );
     }
 }
+
+/// A refusal whose reason is far longer than a control datagram is answered
+/// with a bounded detail, both from the transport's cached reply to an exact
+/// retry and from a later poll under a fresh wire ID, and the run continues
+/// to its horizon instead of ending on an oversized reply.
+#[test]
+fn oversized_refusal_fits_its_reply_and_the_run_continues() {
+    let (root, mut worker, _) = worker_writing(1, false, |_, _| {
+        Err(fail(format!("\n\"{}é", "x".repeat(4 * host::MAX_DATAGRAM))))
+    });
+    worker.step(Timestamp::from_nanos(10)).unwrap();
+    let paused = playback(
+        &mut worker,
+        0,
+        Command::SetRate {
+            rate: host::PlaybackRate::Paused,
+        },
+    );
+    assert_eq!(paused.error, None);
+    let endpoint = root.path().join("worker.sock");
+    let mut control = Control::bind(&endpoint).unwrap();
+    let client = UnixDatagram::bind(root.path().join("peer.sock")).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let checkpoint = Command::Checkpoint {
+        request_id: "large".into(),
+    };
+    // The worker runs on its own thread so that a regression fails this
+    // caller's bounded receive instead of leaving the test waiting.
+    let running = std::thread::spawn(move || {
+        let stop = worker.execute(30, &mut control);
+        (worker, stop)
+    });
+    let exchange = |request: &Request| {
+        client
+            .send_to(&serde_json::to_vec(request).unwrap(), &endpoint)
+            .unwrap();
+        let mut bytes = [0; host::MAX_DATAGRAM + 1];
+        let size = client.recv(&mut bytes).unwrap();
+        assert!(size <= host::MAX_DATAGRAM);
+        serde_json::from_slice::<Reply>(&bytes[..size]).unwrap()
+    };
+    let armed = request(1, checkpoint.clone());
+    // Retry the arming request exactly until the worker has tried the
+    // capture; the transport then answers from its rewritten receipt.
+    let cached = (0..10_000)
+        .map(|_| exchange(&armed))
+        .find(|reply| reply.error.is_some())
+        .expect("capture was never attempted");
+    let polled = exchange(&request(2, checkpoint));
+    let resumed = exchange(&request(
+        3,
+        Command::SetRate {
+            rate: host::PlaybackRate::Unlimited,
+        },
+    ));
+    let (worker, stop) = running.join().unwrap();
+    assert_eq!(stop.unwrap(), StopReason::SimulatedTimeLimit);
+    for refused in [&cached, &polled] {
+        assert_eq!(refused.error, Some(ControlError::InvalidCheckpoint));
+        assert_eq!(refused.checkpoint, None);
+        let detail = refused.detail.as_deref().unwrap();
+        assert!(detail.starts_with("checkpoint refused: "), "{detail}");
+        assert!(detail.ends_with(" [truncated]"), "{detail}");
+        assert!(serde_json::to_vec(detail).unwrap().len() <= 1024 + 2);
+    }
+    assert_eq!(cached.detail, polled.detail);
+    assert_eq!(resumed.error, None);
+    assert_eq!(worker.state.world.position.simulated_time_ns, 30);
+}

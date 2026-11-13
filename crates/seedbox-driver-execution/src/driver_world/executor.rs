@@ -250,7 +250,7 @@ impl ExecutionBackend for DriverExecutor {
         if let Some((_, injector)) = &self.failure_test {
             worker = worker.with_failure_injector(injector)?;
         }
-        let spawns = request.output.join(super::worker::spawn::DIRECTORY);
+        let spawns = super::worker::spawn::directory(request.output);
         let spawner = request.spawner;
         worker.wait_serving(
             request.cancellation,
@@ -265,8 +265,7 @@ impl ExecutionBackend for DriverExecutor {
         output: &std::path::Path,
         store: &crate::store::ContentStore,
     ) -> Result<bool> {
-        let prepared =
-            super::worker::spawn::prepared(&output.join(super::worker::spawn::DIRECTORY))?;
+        let prepared = super::worker::spawn::prepared(&super::worker::spawn::directory(output))?;
         if prepared.is_empty() {
             return Ok(false);
         }

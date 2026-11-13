@@ -265,6 +265,7 @@ impl Orchestrator {
                     witness: None,
                     full_state: None,
                     faults: vec![],
+                    machines: vec![],
                     detail: Some("cancelled before execution".into()),
                     properties: None,
                 });
@@ -277,8 +278,18 @@ impl Orchestrator {
                 simulated_time_ns: record.identity.configuration.limits.simulated_time_ns,
                 wall_time_ns: options.wall_time_ns.unwrap_or(u64::MAX),
             };
+            let allow_crashes = record
+                .identity
+                .configuration
+                .services
+                .iter()
+                .filter(|(_, service)| service.allow_crashes)
+                .map(|(name, _)| name.clone())
+                .collect();
             let mut report = executor.execute(ExecutionRequest {
                 quantum_ns: record.identity.configuration.simulator.quantum_ns,
+                progress_budget: record.identity.configuration.simulator.progress_budget,
+                allow_crashes: &allow_crashes,
                 start_paused: self.start_paused,
                 resume_checkpoint: self.resume_checkpoint.as_deref(),
                 intervention_history: Some(&directory.join("interventions.json")),
@@ -441,18 +452,45 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
         StopReason::SimulatedTimeLimit => return Ok(Outcome::Timeout),
         StopReason::Completed => {}
     }
+    // A spawned machine is not configured; the machines present at stop
+    // name it. Its spawn record is in this transcript unless the machine
+    // already existed at the checkpoint this run resumed from, and effects
+    // on it in this run follow that record.
+    let present = report.machines(&identity.inputs.guests);
+    let spawns: BTreeSet<&str> = report
+        .faults
+        .iter()
+        .filter(|fault| fault.action == SPAWN_ACTION)
+        .map(|fault| fault.service.as_str())
+        .collect();
+    let mut spawned = BTreeSet::new();
     for fault in &report.faults {
-        if fault.applied_at_ns < fault.requested_at_ns
-            || !(simulation.services.contains_key(&fault.service)
-                || (fault.service.is_empty()
-                    && matches!(
-                        fault.action.as_str(),
-                        "partition" | "shape" | "drop_connection" | "heal"
-                    )))
-        {
+        let service = fault.service.as_str();
+        if fault.applied_at_ns < fault.requested_at_ns {
             return Err(Error::Execution(
-                "fault effect must acknowledge a known service at or after its request time".into(),
+                "fault effect must be acknowledged at or after its request time".into(),
             ));
+        }
+        let configured = simulation.services.contains_key(service);
+        let added = !configured && present.contains(service);
+        if fault.action == SPAWN_ACTION {
+            if !added || !spawned.insert(service) {
+                return Err(Error::Execution(format!(
+                    "spawn of {service:?} must add a new machine, once, that is present when the run stops"
+                )));
+            }
+        } else if !(configured
+            || (added && (spawned.contains(service) || !spawns.contains(service)))
+            || (service.is_empty()
+                && matches!(
+                    fault.action.as_str(),
+                    "partition" | "shape" | "drop_connection" | "heal"
+                )))
+        {
+            return Err(Error::Execution(format!(
+                "{} effect on {service:?} must name a configured machine, or a spawned machine after its spawn",
+                fault.action
+            )));
         }
     }
     let Some(exit) = &report.workload_exit else {
@@ -474,12 +512,10 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
             "requested full-state evidence is missing".into(),
         ));
     }
-    if let Some(state) = &report.full_state {
-        if state.keys().ne(identity.inputs.guests.keys()) {
-            return Err(Error::Execution(
-                "full-state digests must cover exactly the configured machines".into(),
-            ));
-        }
+    if report.full_state.is_some() && !report.full_state_covers(&identity.inputs.guests) {
+        return Err(Error::Execution(
+            "full-state digests must cover exactly the machines present when the run stops".into(),
+        ));
     }
     // Property findings qualify the oracle's exit as the run's verdict does.
     Ok(
@@ -588,6 +624,7 @@ fn incomplete(reason: crate::execution::StopReason) -> crate::execution::Executi
     crate::execution::ExecutionReport {
         reason,
         workload_exit: None,
+        machines: vec![],
         detail: None,
         witness: None,
         full_state: None,
