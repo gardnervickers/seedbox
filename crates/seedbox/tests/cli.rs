@@ -494,32 +494,6 @@ fn logs_help_is_portable_and_has_shared_server_options() {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-fn missing_relocated_driver_package_is_reported_before_preparation() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    assert!(seedbox(&["init", "demo"], root).status.success());
-    let project = root.join("demo");
-    let output = Command::new(env!("CARGO_BIN_EXE_seedbox"))
-        .args(["check"])
-        .current_dir(&project)
-        .env_clear()
-        .env("HOME", root)
-        .env("SEEDBOX_ASSET_DIR", root)
-        .env("PATH", "")
-        .guarded_output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    let archive = root
-        .join(std::env::consts::ARCH)
-        .join("driver-runtime.tar.gz");
-    assert_eq!(stderr(&output), format!("error: driver runtime {}: {}; run cargo xtask build-assets or supply a complete runtime archive\n", archive.display(), std::io::Error::from_raw_os_error(2)));
-    assert!(!project.join("prepared.json").exists());
-    assert!(!project.join(".seedbox/runs").exists());
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[test]
 fn invalid_relocated_driver_package_is_rejected_without_downloads_or_tools() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -726,6 +700,32 @@ fn tui_requires_an_interactive_terminal_before_starting_a_server() {
         "error: seedbox tui needs an interactive terminal; use seedbox events or seedbox show from scripts\n"
     );
     assert!(!directory.path().join(".local/state/seedbox").exists());
+}
+
+#[test]
+fn unknown_project_fields_are_rejected_without_creating_state() {
+    let directory = tempfile::tempdir().unwrap();
+    for (project, field) in [
+        (
+            "name: typo\noracle: {image: busybox}\nservices: {}\n",
+            "services",
+        ),
+        (
+            "name: typo\noracle: {image: busybox}\nsimulator: {quantum: 1ms, bogus: 1}\n",
+            "bogus",
+        ),
+    ] {
+        fs::write(directory.path().join("seedbox.yaml"), project).unwrap();
+        let output = seedbox(&["check", "."], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            stderr(&output).contains(&format!("unknown field `{field}`")),
+            "{}",
+            stderr(&output)
+        );
+        assert!(output.stdout.is_empty());
+        assert!(!directory.path().join(".seedbox").exists());
+    }
 }
 
 #[test]

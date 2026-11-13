@@ -607,7 +607,7 @@ pub fn select_build(env: &mut Environment, directory: &Path) -> Result<(), Strin
     {
         return Err("complete build did not return its executable and Driver runtime".into());
     }
-    // The complete build embeds its runtime; ambient overrides must not replace it.
+    // The complete build embeds its runtime; an ambient asset directory must not replace it.
     env.remove("SEEDBOX_ASSET_DIR");
     env.insert(
         "SEEDBOX_TEST_CLI".into(),
