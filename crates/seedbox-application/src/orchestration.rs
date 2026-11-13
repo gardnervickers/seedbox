@@ -322,7 +322,7 @@ impl Orchestrator {
         })?;
         match execution {
             Ok(report) => {
-                match classify(&record.identity, &report) {
+                match classify(&record.identity, &report, self.resume_checkpoint.is_some()) {
                     Ok(outcome) => record.outcome = outcome,
                     Err(error) => {
                         record.outcome = Outcome::Error;
@@ -427,8 +427,9 @@ fn validate_inputs(identity: &RunIdentity, executor: &dyn ExecutionBackend) -> R
 /// cancellation, quiescence, an error or a missing oracle exit), as the
 /// status verdict does; then the termination rules below apply, an unmet
 /// requirement fails a run whose oracle exited, and lost property evidence
-/// leaves a passing oracle's run incomplete.
-fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome> {
+/// leaves a passing oracle's run incomplete. `resumed` says whether the run
+/// continues from its checkpoint, whose earlier spawns it has no record of.
+fn classify(identity: &RunIdentity, report: &ExecutionReport, resumed: bool) -> Result<Outcome> {
     use seedbox_engine_core::properties::{verdict, Findings, Verdict};
     let findings = report.properties.as_ref().map(Findings::from);
     if verdict(Verdict::Incomplete, false, true, findings) == Verdict::Failed {
@@ -455,7 +456,8 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
     // A spawned machine is not configured; the machines present at stop
     // name it. Its spawn record is in this transcript unless the machine
     // already existed at the checkpoint this run resumed from, and effects
-    // on it in this run follow that record.
+    // on it in this run follow that record. A run from boot spawned every
+    // machine it was not prepared with.
     let present = report.machines(&identity.inputs.guests);
     let spawns: BTreeSet<&str> = report
         .faults
@@ -490,6 +492,17 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
             return Err(Error::Execution(format!(
                 "{} effect on {service:?} must name a configured machine, or a spawned machine after its spawn",
                 fault.action
+            )));
+        }
+    }
+    if !resumed {
+        if let Some(machine) = report.machines.iter().find(|machine| {
+            !identity.inputs.guests.contains_key(*machine)
+                && !simulation.services.contains_key(*machine)
+                && !spawned.contains(machine.as_str())
+        }) {
+            return Err(Error::Execution(format!(
+                "machine {machine:?} present when the run stops must be prepared or spawned in this run"
             )));
         }
     }
@@ -742,7 +755,7 @@ mod tests {
                 code,
             });
             report.properties = found.map(assessment);
-            classify(&record.identity, &report).ok()
+            classify(&record.identity, &report, false).ok()
         };
         use Found::*;
         use StopReason::*;

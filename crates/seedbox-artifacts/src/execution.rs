@@ -231,8 +231,9 @@ pub struct ExecutionReport {
     pub faults: Vec<FaultEvent>,
     /// The Driver's machines when the run stopped, the oracle first. Unlike
     /// spawn records, which cover only this attempt, it names machines
-    /// spawned before the checkpoint a run resumed from. Empty when the
-    /// backend names no machines beyond the prepared guests.
+    /// spawned before the checkpoint a run resumed from. The Driver worker's
+    /// report always fills it; it is empty only in a report no worker
+    /// produced, such as for a run cancelled or out of host time first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub machines: Vec<String>,
     pub detail: Option<String>,
