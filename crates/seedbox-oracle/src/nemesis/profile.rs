@@ -24,13 +24,14 @@ pub const DEFAULT_MAX_FAULTS: u32 = 64;
 /// begins, one gap apart; each gap is drawn uniformly from half to one and a
 /// half times `interval_ns`. Each start draws an entry by weight, then a
 /// target among `targets` (or the entry's own, for the partition, shape and
-/// disk kinds) that is free for it (a start with none free is skipped), then
-/// the entry's ranges, and holds the fault for its drawn duration before
-/// ending it. Which targets are free is `overlap`'s rule: by default, those
-/// with no fault of this profile in force. At most `max_faults` start, from
-/// one weighted stream whatever the rule. `run` returns at `end_ns`, or once
-/// the last fault ends if that is later; faults still in force when a failure
-/// cuts it short are ended by [`Nemesis::heal`].
+/// disk kinds) where no fault of this profile holds any of the entry's
+/// [`Domain`]s (a start with none free is skipped), then the entry's ranges,
+/// and holds the fault for its drawn duration before ending it, which frees
+/// only its own domains. So faults of different domains overlap on one
+/// target: a crash can start while a disk latency holds it, but not while a
+/// pause does. At most `max_faults` start. `run` returns at `end_ns`, or once
+/// the last fault ends if that is later; faults still in force when a
+/// failure cuts it short are ended by [`Nemesis::heal`].
 ///
 /// Every draw comes from the scenario's [`Random`] in that order, so a seed
 /// fixes the applied sequence.
@@ -61,36 +62,12 @@ pub struct Profile {
     /// gives one, `{op}: unsupported: {message}`, where `op` names the action.
     #[serde(default, skip_serializing_if = "is_false")]
     pub skip_unsupported: bool,
-    /// Which faults may hold one target at once. Omitted, one of any kind.
-    #[serde(default, skip_serializing_if = "Overlap::is_per_target")]
-    pub overlap: Overlap,
     #[serde(skip)]
     state: State,
 }
 
-/// Which faults of one profile may hold a target at the same time.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Overlap {
-    /// One fault per target, of any kind: a target is free while no fault of
-    /// the profile holds it.
-    #[default]
-    PerTarget,
-    /// One fault per target in each [`Domain`]: a target is free for an entry
-    /// while no fault holds it in any of the entry's [`Fault::domains`]. So a
-    /// crash can start while a disk latency holds its target, but not while a
-    /// pause does. Ending a fault frees only its own domains on its target.
-    PerDomain,
-}
-
-impl Overlap {
-    fn is_per_target(&self) -> bool {
-        *self == Self::PerTarget
-    }
-}
-
-/// An exclusion domain: the faults of one domain never hold one target
-/// together under [`Overlap::PerDomain`]. See [`Fault::domains`].
+/// An exclusion domain: faults of one domain never hold one target
+/// together. See [`Fault::domains`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Domain {
     /// The VM's or its application's run state: crash, stop, pause,
@@ -106,13 +83,6 @@ pub enum Domain {
     DiskLatency,
     /// The target's CPU and thread scheduling: throttle and preempt.
     Scheduler,
-}
-
-/// What a fault holds its target in: the whole target, or one domain of it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Slot {
-    Target,
-    In(Domain),
 }
 
 fn default_max_faults() -> u32 {
@@ -139,8 +109,8 @@ struct State {
     faults: InForce,
     /// Teardowns not yet due, in the order their faults started.
     ending: Vec<Ending>,
-    /// The slots faults of this profile hold, by target.
-    busy: BTreeSet<(Slot, String)>,
+    /// The domains faults of this profile hold, by target.
+    busy: BTreeSet<(Domain, String)>,
     /// Kinds the world refused as unsupported.
     unsupported: BTreeSet<&'static str>,
     pace: Box<dyn Pace>,
@@ -174,8 +144,8 @@ struct Ending {
     at_ns: u64,
     action: Action,
     target: String,
-    /// The slots its fault holds on `target`, freed when it ends.
-    slots: Vec<Slot>,
+    /// The domains its fault holds on `target`, freed when it ends.
+    domains: &'static [Domain],
 }
 
 impl Profile {
@@ -234,14 +204,6 @@ impl Profile {
         )
     }
 
-    /// The slots `fault` holds on its target under this profile's `overlap`.
-    fn slots(&self, fault: &Fault) -> Vec<Slot> {
-        match self.overlap {
-            Overlap::PerTarget => vec![Slot::Target],
-            Overlap::PerDomain => fault.domains().iter().copied().map(Slot::In).collect(),
-        }
-    }
-
     /// The kinds skipped because the world refused them as unsupported.
     pub fn unsupported(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.state.unsupported.iter().copied()
@@ -274,14 +236,14 @@ impl Profile {
             })
             .expect("a draw below the total weight lands on an entry");
         let fault = &self.faults[index];
-        let slots = self.slots(fault);
+        let domains = fault.domains();
         let free: Vec<String> = fault
             .targets(&self.targets)
             .iter()
             .filter(|target| {
-                slots
+                domains
                     .iter()
-                    .all(|slot| !self.state.busy.contains(&(*slot, (*target).clone())))
+                    .all(|domain| !self.state.busy.contains(&(*domain, (*target).clone())))
             })
             .cloned()
             .collect();
@@ -314,16 +276,27 @@ impl Profile {
             result => result?,
         }
         let applied = world.now_ns()?;
-        for slot in &slots {
-            self.state.busy.insert((*slot, target.clone()));
+        for domain in domains {
+            self.state.busy.insert((*domain, target.clone()));
         }
         self.state.ending.push(Ending {
             at_ns: applied.saturating_add(drawn.hold_ns),
             action: drawn.teardown,
             target,
-            slots,
+            domains,
         });
         Ok(true)
+    }
+
+    /// End the fault of `ending[index]`, freeing its domains on its target.
+    fn end(&mut self, world: &mut dyn World, index: usize) -> Result<(), Error> {
+        let action = self.state.ending[index].action.clone();
+        self.state.faults.apply(world, &action)?;
+        let ended = self.state.ending.remove(index);
+        for domain in ended.domains {
+            self.state.busy.remove(&(*domain, ended.target.clone()));
+        }
+        Ok(())
     }
 }
 
@@ -349,12 +322,7 @@ impl Nemesis for Profile {
             match (start, ending) {
                 (_, Some((index, at))) if start.is_none_or(|start| at <= start) => {
                     self.until(world, at)?;
-                    let action = self.state.ending[index].action.clone();
-                    self.state.faults.apply(world, &action)?;
-                    let ended = self.state.ending.remove(index);
-                    for slot in ended.slots {
-                        self.state.busy.remove(&(slot, ended.target.clone()));
-                    }
+                    self.end(world, index)?;
                 }
                 (Some(at), _) => {
                     self.until(world, at)?;
@@ -578,13 +546,12 @@ impl Fault {
         }
     }
 
-    /// The domains this kind holds its target in under
-    /// [`Overlap::PerDomain`]. Each kind holds one, except `clock_skew`,
-    /// which also holds [`Domain::Lifecycle`]: the engine refuses a realtime
-    /// step, or its heal, on a paused VM and fails one on a crashed VM. For
-    /// `pause_process` and `stop` that grouping is deliberately
-    /// conservative, since a step is a guest command.
-    /// Every other pair of domains is one the engine takes in either order:
+    /// The domains this kind holds its target in. Each kind holds one,
+    /// except `clock_skew`, which also holds [`Domain::Lifecycle`]: the
+    /// engine refuses a realtime step, or its heal, on a paused VM and fails
+    /// one on a crashed VM. For `pause_process` and `stop` that grouping is
+    /// deliberately conservative, since a step is a guest command. Every
+    /// other pair of domains is one the engine takes in either order:
     /// network faults bind to links, and clock_drift, throttle and the
     /// device faults (disk_error, disk_latency, preempt) apply in every VM
     /// state and outlast a crash.

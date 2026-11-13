@@ -1,6 +1,6 @@
 //! A fake replicated log run through every trait, as a runner would drive it,
 //! and a fault profile run against a world that models every fault in force.
-use seedbox_oracle::{nemesis::profile::Domain, *};
+use seedbox_oracle::*;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
@@ -459,7 +459,10 @@ struct Modelled {
     now_ns: u64,
     applied: Vec<(u64, Action)>,
     attempts: usize,
-    handles: BTreeSet<String>,
+    /// Faults in force with a handle, and the machine each holds.
+    handles: std::collections::BTreeMap<String, String>,
+    /// Faults started on a machine another fault held.
+    overlaps: usize,
     /// Machines with a lifecycle fault in force, by the action that undoes it.
     down: std::collections::BTreeMap<String, &'static str>,
     refuse: Refusal,
@@ -474,7 +477,8 @@ impl Modelled {
             now_ns: 5_000_000_000,
             applied: Vec::new(),
             attempts: 0,
-            handles: BTreeSet::new(),
+            handles: Default::default(),
+            overlaps: 0,
             down: Default::default(),
             refuse: Box::new(refuse),
         }
@@ -482,6 +486,15 @@ impl Modelled {
 
     fn in_force(&self) -> usize {
         self.handles.len() + self.down.len()
+    }
+
+    fn held(&self, machine: &str) -> bool {
+        self.down.contains_key(machine) || self.handles.values().any(|held| held == machine)
+    }
+
+    fn hold(&mut self, handle: &str, machine: &str) {
+        self.overlaps += usize::from(self.held(machine));
+        assert!(self.handles.insert(handle.into(), machine.into()).is_none());
     }
 }
 
@@ -514,37 +527,41 @@ impl World for Modelled {
             | Action::Reboot { machine } => {
                 assert_eq!(self.down.remove(machine), Some(action.name()), "{action:?}");
             }
-            Action::Heal { handle } => assert!(self.handles.remove(handle), "{action:?}"),
+            Action::Heal { handle } => assert!(self.handles.remove(handle).is_some(), "{action:?}"),
             Action::Partition {
                 handle,
                 left,
                 right,
             } => {
                 assert!(left.iter().chain(right).all(known) && !right.contains(&left[0]));
-                assert!(self.handles.insert(handle.clone()));
+                self.hold(handle, &left[0]);
             }
             Action::Shape {
                 handle, from, to, ..
             } => {
                 assert!(from.iter().chain(to).all(known) && !to.contains(&from[0]));
-                assert!(self.handles.insert(handle.clone()));
+                self.hold(handle, &from[0]);
             }
             Action::ClockSkew {
                 handle,
+                machine,
                 offset_ns: Some(_),
                 max_offset_ns: None,
                 ..
             }
             | Action::ClockDrift {
                 handle,
+                machine,
                 rate_ppb: Some(_),
                 max_rate_ppb: None,
                 ..
             }
-            | Action::Throttle { handle, .. }
-            | Action::Preempt { handle, .. } => {
-                assert!(self.handles.insert(handle.clone()));
+            | Action::Throttle {
+                handle, machine, ..
             }
+            | Action::Preempt {
+                handle, machine, ..
+            } => self.hold(handle, machine),
             Action::DiskError {
                 handle, machine, ..
             }
@@ -552,12 +569,13 @@ impl World for Modelled {
                 handle, machine, ..
             } => {
                 assert!(["n1", "n2"].contains(&machine.as_str()), "{action:?}");
-                assert!(self.handles.insert(handle.clone()));
+                self.hold(handle, machine);
             }
             other => {
                 let machine = other.machine().expect("a lifecycle action names a machine");
                 assert!(known(&machine.to_owned()));
                 let undo = undo.unwrap_or_else(|| panic!("unexpected {other:?}"));
+                self.overlaps += usize::from(self.held(machine));
                 assert!(
                     self.down.insert(machine.into(), undo).is_none(),
                     "{other:?} on a machine already down"
@@ -641,6 +659,15 @@ fn a_profile_applies_the_same_sequence_for_the_same_seed() {
             ("shape", 3)
         ])
     );
+}
+
+#[test]
+fn a_profile_overlaps_faults_of_different_domains_on_one_target() {
+    // Modelled refuses a second lifecycle fault on a machine, so the run
+    // keeps those apart while faults of other domains overlap them.
+    let mut world = Modelled::new(|_, _| false);
+    profile().run(&mut world, &mut Rng::new(7)).unwrap();
+    assert!(world.overlaps > 0);
 }
 
 #[test]
@@ -804,392 +831,4 @@ fn skipping_unsupported_kinds_still_fails_on_other_refusals_and_when_none_is_lef
     );
     assert_eq!(world.preempts, 1);
     assert!(world.world.applied.is_empty());
-}
-
-/// One target, a crash and a disk latency: slowdisk's shape.
-const SINGLE: &str = r#"
-start_ns: 1000000000
-end_ns: 18000000000
-interval_ns: 1000000000
-targets: [n1]
-faults:
-  - {kind: crash, downtime_ns: {min: 900000000, max: 1100000000}}
-  - {kind: disk_latency, weight: 2, request: any, duration_ns: {min: 1000000000, max: 3000000000},
-     latency_ns: {min: 25000000, max: 40000000}}
-"#;
-
-/// `PROFILE` as it was on origin/main 0875cc887, frozen: the digest below is
-/// of this text, so `PROFILE` can gain entries without moving it.
-const PINNED: &str = r#"
-start_ns: 1000000000
-end_ns: 30000000000
-interval_ns: 1000000000
-max_faults: 20
-targets: [n1, n2, n3]
-faults:
-  - {kind: partition, weight: 2, duration_ns: {min: 500000000, max: 3000000000}}
-  - {kind: shape, duration_ns: {min: 500000000, max: 3000000000},
-     latency_ns: {min: 1000000, max: 50000000}, jitter_ns: 500000, to: [n1, n2, n3, client]}
-  - {kind: crash, downtime_ns: {min: 500000000, max: 3000000000}}
-  - {kind: pause, duration_ns: {min: 500000000, max: 3000000000}}
-  - {kind: pause_process, duration_ns: {min: 500000000, max: 3000000000}}
-  - {kind: stop, downtime_ns: {min: 500000000, max: 3000000000}}
-  - {kind: clock_skew, duration_ns: {min: 500000000, max: 3000000000}, max_offset_ns: 5000000000}
-  - {kind: clock_drift, duration_ns: {min: 500000000, max: 3000000000}, max_rate_ppb: 1000000}
-  - {kind: throttle, duration_ns: {min: 500000000, max: 3000000000}, factor_permille: 4000}
-  - {kind: disk_error, duration_ns: {min: 500000000, max: 3000000000}, request: write, ppm: 1000,
-     targets: [n1, n2]}
-  - {kind: disk_latency, duration_ns: {min: 500000000, max: 3000000000}, request: flush,
-     latency_ns: {min: 1000000, max: 20000000}, targets: [n1, n2]}
-  - {kind: preempt, duration_ns: {min: 500000000, max: 3000000000}, ppm: 10000}
-"#;
-
-/// FNV-1a over every applied (time, action) of seeds 0..32.
-fn fingerprint(yaml: &str) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for seed in 0..32 {
-        let mut world = Modelled::new(|_, _| false);
-        let mut profile: nemesis::Profile = serde_yaml_ng::from_str(yaml).unwrap();
-        profile.run(&mut world, &mut Rng::new(seed)).unwrap();
-        for (at, action) in &world.applied {
-            for byte in serde_json::to_vec(&(at, action)).unwrap() {
-                hash = (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
-            }
-        }
-    }
-    hash
-}
-
-fn with_overlap(yaml: &str, overlap: &str) -> String {
-    format!("{yaml}overlap: {overlap}\n")
-}
-
-#[test]
-fn the_default_overlap_applies_the_same_sequence_as_before_it_existed() {
-    // Digests of seeds 0..32 taken on origin/main 0875cc887, before
-    // profiles had `overlap`. They hash the serialized actions, so a change
-    // to `Action`'s wire format changes them with no profile change. Re-pin
-    // only after confirming the new digests on the previous commit with the
-    // field omitted.
-    let before = [
-        (PINNED, 0x52af_f1af_96f7_7bfe),
-        (SINGLE, 0x51c8_b1d5_745c_d916),
-    ];
-    for (yaml, digest) in before {
-        assert_eq!(fingerprint(yaml), digest);
-        assert_eq!(fingerprint(&with_overlap(yaml, "per_target")), digest);
-    }
-    assert_ne!(
-        fingerprint(&with_overlap(SINGLE, "per_domain")),
-        before[1].1
-    );
-}
-
-/// A start or an end of a fault, with the kinds of the other faults holding
-/// its target at that moment.
-#[derive(Debug)]
-struct Step {
-    starts: bool,
-    kind: &'static str,
-    others: Vec<&'static str>,
-}
-
-/// Walk an applied sequence, tracking which faults hold which target.
-fn events(applied: &[(u64, Action)]) -> Vec<Step> {
-    use std::collections::BTreeMap;
-    // A key per fault in force: its handle, or the machine for lifecycle.
-    let mut held: BTreeMap<String, (&'static str, String)> = BTreeMap::new();
-    let mut events = Vec::new();
-    for (_, action) in applied {
-        let lifecycle = |machine: &str| format!("lifecycle {machine}");
-        let (starts, key, kind, target) = match action {
-            Action::Heal { handle } => {
-                let (kind, target) = held[handle].clone();
-                (false, handle.clone(), kind, target)
-            }
-            Action::Restart { machine }
-            | Action::ResumeProcess { machine }
-            | Action::Resume { machine }
-            | Action::Reboot { machine } => {
-                let (kind, _) = held[&lifecycle(machine)];
-                (false, lifecycle(machine), kind, machine.clone())
-            }
-            Action::Partition { handle, left, .. } => {
-                (true, handle.clone(), "partition", left[0].clone())
-            }
-            Action::Shape { handle, from, .. } => (true, handle.clone(), "shape", from[0].clone()),
-            Action::ClockSkew {
-                handle, machine, ..
-            }
-            | Action::ClockDrift {
-                handle, machine, ..
-            }
-            | Action::Throttle {
-                handle, machine, ..
-            }
-            | Action::DiskError {
-                handle, machine, ..
-            }
-            | Action::DiskLatency {
-                handle, machine, ..
-            }
-            | Action::Preempt {
-                handle, machine, ..
-            } => (true, handle.clone(), action.name(), machine.clone()),
-            other => {
-                let machine = other.machine().unwrap();
-                (true, lifecycle(machine), other.name(), machine.to_owned())
-            }
-        };
-        if !starts {
-            held.remove(&key);
-        }
-        let others = held
-            .values()
-            .filter(|(_, machine)| *machine == target)
-            .map(|(kind, _)| *kind)
-            .collect();
-        if starts {
-            assert!(held.insert(key, (kind, target.clone())).is_none());
-        }
-        events.push(Step {
-            starts,
-            kind,
-            others,
-        });
-    }
-    events
-}
-
-/// Run `yaml` with `seed` to completion, as `applied` does for `PROFILE`.
-fn run_profile(yaml: &str, seed: u64) -> Vec<(u64, Action)> {
-    let mut world = Modelled::new(|_, _| false);
-    let mut profile: nemesis::Profile = serde_yaml_ng::from_str(yaml).unwrap();
-    profile.run(&mut world, &mut Rng::new(seed)).unwrap();
-    assert_eq!(world.in_force(), 0, "every fault ends within run");
-    world.applied
-}
-
-/// The domains of each kind, as `Fault::domains` gives them.
-fn domains(kind: &str) -> Vec<Domain> {
-    match kind {
-        "crash" | "stop" | "pause" | "pause_process" => vec![Domain::Lifecycle],
-        "partition" | "shape" => vec![Domain::Network],
-        "clock_skew" => vec![Domain::Clock, Domain::Lifecycle],
-        "clock_drift" => vec![Domain::Clock],
-        "disk_error" => vec![Domain::DiskError],
-        "disk_latency" => vec![Domain::DiskLatency],
-        "throttle" | "preempt" => vec![Domain::Scheduler],
-        other => panic!("{other}"),
-    }
-}
-
-fn shares_a_domain(a: &str, b: &str) -> bool {
-    domains(a).iter().any(|domain| domains(b).contains(domain))
-}
-
-#[test]
-fn per_domain_overlap_starts_a_crash_while_a_disk_latency_holds_its_target() {
-    let crash_in_latency = |yaml: &str| {
-        (0..32)
-            .flat_map(|seed| events(&run_profile(yaml, seed)))
-            .filter(|e| e.starts && e.kind == "crash" && e.others.contains(&"disk_latency"))
-            .count()
-    };
-    assert_eq!(crash_in_latency(SINGLE), 0);
-    assert_eq!(crash_in_latency(&with_overlap(SINGLE, "per_target")), 0);
-    assert!(crash_in_latency(&with_overlap(SINGLE, "per_domain")) > 0);
-    // With one target, the default never holds two faults at once.
-    for seed in 0..32 {
-        assert!(events(&run_profile(SINGLE, seed))
-            .iter()
-            .all(|e| e.others.is_empty()));
-    }
-}
-
-#[test]
-fn ending_a_fault_frees_only_its_own_domain_in_either_order() {
-    let single = with_overlap(SINGLE, "per_domain");
-    // A latency ends during a crash's downtime, and another latency then
-    // starts before the reboot; a reboot comes during a latency, and another
-    // crash then starts while that latency still holds.
-    let (mut latency_freed, mut crash_freed) = (0, 0);
-    for seed in 0..200 {
-        let events = events(&run_profile(&single, seed));
-        for e in &events {
-            // Never two faults of one domain on the target.
-            assert!(
-                e.others.iter().all(|other| !shares_a_domain(e.kind, other)),
-                "seed {seed}: {e:?}"
-            );
-        }
-        for (i, end) in events.iter().enumerate().filter(|(_, e)| !e.starts) {
-            let (kind, holder) = match end.kind {
-                "disk_latency" if end.others == ["crash"] => ("disk_latency", "crash"),
-                "crash" if end.others == ["disk_latency"] => ("crash", "disk_latency"),
-                _ => continue,
-            };
-            // The next event for the holder is its end; the freed kind may
-            // start again before it.
-            let rest = &events[i + 1..];
-            let holder_ends = rest
-                .iter()
-                .position(|e| !e.starts && e.kind == holder)
-                .expect("the holder ends within run");
-            if rest[..holder_ends]
-                .iter()
-                .any(|e| e.starts && e.kind == kind && e.others == [holder])
-            {
-                match kind {
-                    "disk_latency" => latency_freed += 1,
-                    _ => crash_freed += 1,
-                }
-            }
-        }
-    }
-    assert!(
-        latency_freed > 0 && crash_freed > 0,
-        "{latency_freed} {crash_freed}"
-    );
-}
-
-/// One target, a clock_skew against a lifecycle fault and a clock fault.
-const SKEW: &str = r#"
-start_ns: 1000000000
-end_ns: 18000000000
-interval_ns: 1000000000
-targets: [n1]
-overlap: per_domain
-faults:
-  - {kind: clock_skew, weight: 2, duration_ns: {min: 1000000000, max: 2000000000},
-     max_offset_ns: 5000000000}
-  - {kind: crash, downtime_ns: {min: 500000000, max: 1000000000}}
-  - {kind: clock_drift, duration_ns: {min: 500000000, max: 1000000000}, max_rate_ppb: 1000000}
-"#;
-
-#[test]
-fn ending_a_clock_skew_frees_both_its_clock_and_lifecycle_slots() {
-    // Nothing else holds the lifecycle or the clock slot while a skew does,
-    // so a crash or a drift that starts after a skew ends, and before the
-    // next skew, starts only because that end freed its slot.
-    let (mut crash_after, mut drift_after) = (0, 0);
-    for seed in 0..32 {
-        let events = events(&run_profile(SKEW, seed));
-        for (i, _) in events
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| !e.starts && e.kind == "clock_skew")
-        {
-            let rest = &events[i + 1..];
-            let window = rest
-                .iter()
-                .position(|e| e.starts && e.kind == "clock_skew")
-                .map_or(rest, |next| &rest[..next]);
-            let starts = |kind: &str| window.iter().any(|e| e.starts && e.kind == kind);
-            crash_after += usize::from(starts("crash"));
-            drift_after += usize::from(starts("clock_drift"));
-        }
-    }
-    assert!(
-        crash_after > 0 && drift_after > 0,
-        "{crash_after} {drift_after}"
-    );
-}
-
-#[test]
-fn per_domain_overlap_keeps_conflicting_faults_apart() {
-    // Modelled refuses a second lifecycle fault on a machine, so a run
-    // that overlaps two of them fails here.
-    let profile = with_overlap(PROFILE, "per_domain");
-    let mut across = 0;
-    let mut kinds = BTreeSet::new();
-    for seed in 0..100 {
-        for e in events(&run_profile(&profile, seed)) {
-            kinds.insert(e.kind);
-            assert!(
-                e.others.iter().all(|other| !shares_a_domain(e.kind, other)),
-                "seed {seed}: {e:?}"
-            );
-            // A realtime step never meets a lifecycle fault: the engine
-            // refuses the step, or its heal, on a paused or crashed VM.
-            if e.kind == "clock_skew" {
-                assert!(
-                    e.others.iter().all(|o| domains(o) != [Domain::Lifecycle]),
-                    "seed {seed}: {e:?}"
-                );
-            }
-            if e.starts && !e.others.is_empty() {
-                across += 1;
-            }
-        }
-    }
-    assert!(across > 0, "faults of different domains share a target");
-    assert_eq!(kinds.len(), 12, "{kinds:?}");
-}
-
-#[test]
-fn per_domain_overlap_keeps_the_fault_budget() {
-    for (max, overlap) in [(3, "per_domain"), (3, "per_target"), (20, "per_domain")] {
-        let yaml = with_overlap(&format!("{SINGLE}max_faults: {max}\n"), overlap);
-        let starts: Vec<usize> = (0..32)
-            .map(|seed| {
-                let applied = run_profile(&yaml, seed);
-                let starts = events(&applied).iter().filter(|e| e.starts).count();
-                assert_eq!(applied.len(), 2 * starts);
-                starts
-            })
-            .collect();
-        assert!(starts.iter().all(|&n| n <= max), "{overlap}: {starts:?}");
-        if max == 3 {
-            assert!(starts.contains(&3), "{overlap}: {starts:?}");
-        }
-    }
-    // The same stream, budget and gaps start more faults per domain: a
-    // start is skipped only when its own domain is busy.
-    let total = |yaml: &str| -> usize {
-        (0..32)
-            .map(|seed| {
-                events(&run_profile(yaml, seed))
-                    .iter()
-                    .filter(|e| e.starts)
-                    .count()
-            })
-            .sum()
-    };
-    assert!(total(&with_overlap(SINGLE, "per_domain")) > total(SINGLE));
-}
-
-#[test]
-fn per_domain_overlap_heals_every_fault_after_a_refused_apply() {
-    for attempt in [5, 9, 14] {
-        let mut world = Modelled::new(move |n, _| n == attempt);
-        let mut profile: nemesis::Profile =
-            serde_yaml_ng::from_str(&with_overlap(PROFILE, "per_domain")).unwrap();
-        let error = profile.run(&mut world, &mut Rng::new(7)).unwrap_err();
-        assert!(error.0.ends_with("invalid_state: refused"), "{error}");
-        profile.heal(&mut world).unwrap();
-        assert_eq!(world.in_force(), 0, "attempt {attempt}");
-        let applied = world.applied.len();
-        profile.heal(&mut world).unwrap();
-        assert_eq!(world.applied.len(), applied);
-    }
-    // One target holding a crash and a latency when the next apply is
-    // refused: heal ends both.
-    let single = with_overlap(SINGLE, "per_domain");
-    let (seed, at) = (0..32)
-        .find_map(|seed| {
-            let events = events(&run_profile(&single, seed));
-            let at = events
-                .iter()
-                .position(|e| e.starts && !e.others.is_empty())?;
-            // The apply after the second fault starts.
-            Some((seed, at + 2))
-        })
-        .expect("some seed overlaps");
-    let mut world = Modelled::new(move |n, _| n == at);
-    let mut profile: nemesis::Profile = serde_yaml_ng::from_str(&single).unwrap();
-    profile.run(&mut world, &mut Rng::new(seed)).unwrap_err();
-    assert_eq!(world.in_force(), 2, "seed {seed}");
-    profile.heal(&mut world).unwrap();
-    assert_eq!(world.in_force(), 0);
 }

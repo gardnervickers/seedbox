@@ -249,106 +249,191 @@ fn profile_bounds_are_explicit() {
     }
 }
 
-#[test]
-fn overlap_defaults_to_per_target_and_round_trips_either_way() {
-    // Omitted or spelled out, the default is the same profile, and it is
-    // written without the field.
-    let omitted = documented();
-    assert_eq!(omitted.overlap, Overlap::PerTarget);
-    let spelled: Profile =
-        serde_yaml_ng::from_str(&format!("{DOCUMENTED}overlap: per_target\n")).unwrap();
-    assert_eq!(spelled.overlap, Overlap::PerTarget);
-    let wire = serde_json::to_value(&spelled).unwrap();
-    assert!(wire.get("overlap").is_none());
-    assert_eq!(wire, serde_json::to_value(&omitted).unwrap());
+/// One entry of each kind.
+const KINDS: &str = "
+- {kind: crash, downtime_ns: {min: 1000000, max: 2000000}}
+- {kind: stop, downtime_ns: {min: 1000000, max: 2000000}}
+- {kind: pause, duration_ns: {min: 1000000, max: 2000000}}
+- {kind: pause_process, duration_ns: {min: 1000000, max: 2000000}}
+- {kind: partition, duration_ns: {min: 1000000, max: 2000000}}
+- {kind: shape, duration_ns: {min: 1000000, max: 2000000}, latency_ns: {min: 1000000, max: 2000000}}
+- {kind: clock_skew, duration_ns: {min: 1000000, max: 2000000}, max_offset_ns: 1000}
+- {kind: clock_drift, duration_ns: {min: 1000000, max: 2000000}, max_rate_ppb: 1000}
+- {kind: disk_error, duration_ns: {min: 1000000, max: 2000000}, request: write, ppm: 1}
+- {kind: disk_latency, duration_ns: {min: 1000000, max: 2000000}, request: any,
+   latency_ns: {min: 1000000, max: 2000000}}
+- {kind: throttle, duration_ns: {min: 1000000, max: 2000000}, factor_permille: 2000}
+- {kind: preempt, duration_ns: {min: 1000000, max: 2000000}, ppm: 1}
+";
 
-    let yaml = format!("{DOCUMENTED}overlap: per_domain\n");
-    let per_domain: Profile = serde_yaml_ng::from_str(&yaml).unwrap();
-    per_domain.validate().unwrap();
-    assert_eq!(per_domain.overlap, Overlap::PerDomain);
-    let wire = serde_json::to_value(&per_domain).unwrap();
-    assert_eq!(wire["overlap"], "per_domain");
-    let again: Profile = serde_json::from_value(wire.clone()).unwrap();
-    assert_eq!(serde_json::to_value(&again).unwrap(), wire);
-    let text = serde_yaml_ng::to_string(&per_domain).unwrap();
-    assert!(text.contains("overlap: per_domain"), "{text}");
-    let again: Profile = serde_yaml_ng::from_str(&text).unwrap();
-    assert_eq!(serde_json::to_value(&again).unwrap(), wire);
-
-    assert!(
-        serde_yaml_ng::from_str::<Profile>(&format!("{DOCUMENTED}overlap: per_kind\n")).is_err()
-    );
+fn fault(kind: &str) -> Fault {
+    let kinds: Vec<Fault> = serde_yaml_ng::from_str(KINDS).unwrap();
+    kinds
+        .into_iter()
+        .find(|fault| fault.name() == kind)
+        .unwrap()
 }
 
 #[test]
-fn every_kind_has_its_domains_and_slots() {
-    let range = json!({"min": 1_000_000, "max": 2_000_000});
-    let fault = |value: Value| -> Fault { serde_json::from_value(value).unwrap() };
-    let table = [
-        (
-            json!({"kind": "crash", "downtime_ns": range}),
-            vec![Domain::Lifecycle],
-        ),
-        (
-            json!({"kind": "stop", "downtime_ns": range}),
-            vec![Domain::Lifecycle],
-        ),
-        (
-            json!({"kind": "pause", "duration_ns": range}),
-            vec![Domain::Lifecycle],
-        ),
-        (
-            json!({"kind": "pause_process", "duration_ns": range}),
-            vec![Domain::Lifecycle],
-        ),
-        (
-            json!({"kind": "partition", "duration_ns": range}),
-            vec![Domain::Network],
-        ),
-        (
-            json!({"kind": "shape", "duration_ns": range, "latency_ns": range}),
-            vec![Domain::Network],
-        ),
-        (
-            json!({"kind": "clock_skew", "duration_ns": range, "max_offset_ns": 1_000}),
-            vec![Domain::Clock, Domain::Lifecycle],
-        ),
-        (
-            json!({"kind": "clock_drift", "duration_ns": range, "max_rate_ppb": 1_000}),
-            vec![Domain::Clock],
-        ),
-        (
-            json!({"kind": "disk_error", "duration_ns": range, "request": "write", "ppm": 1}),
-            vec![Domain::DiskError],
-        ),
-        (
-            json!({"kind": "disk_latency", "duration_ns": range, "request": "any",
-                   "latency_ns": range}),
-            vec![Domain::DiskLatency],
-        ),
-        (
-            json!({"kind": "throttle", "duration_ns": range, "factor_permille": 2_000}),
-            vec![Domain::Scheduler],
-        ),
-        (
-            json!({"kind": "preempt", "duration_ns": range, "ppm": 1}),
-            vec![Domain::Scheduler],
-        ),
+fn every_kind_has_its_domains() {
+    use Domain::*;
+    let table: [(&str, &[Domain]); 12] = [
+        ("crash", &[Lifecycle]),
+        ("stop", &[Lifecycle]),
+        ("pause", &[Lifecycle]),
+        ("pause_process", &[Lifecycle]),
+        ("partition", &[Network]),
+        ("shape", &[Network]),
+        ("clock_skew", &[Clock, Lifecycle]),
+        ("clock_drift", &[Clock]),
+        ("disk_error", &[DiskError]),
+        ("disk_latency", &[DiskLatency]),
+        ("throttle", &[Scheduler]),
+        ("preempt", &[Scheduler]),
     ];
-    let per_target = documented();
-    let mut per_domain = documented();
-    per_domain.overlap = Overlap::PerDomain;
-    let mut kinds = BTreeSet::new();
-    for (value, domains) in table {
-        let fault = fault(value);
-        kinds.insert(fault.name());
-        assert_eq!(fault.domains(), domains, "{}", fault.name());
-        assert_eq!(per_target.slots(&fault), [Slot::Target]);
-        let slots: Vec<_> = domains.into_iter().map(Slot::In).collect();
-        assert_eq!(per_domain.slots(&fault), slots);
+    for (kind, domains) in table {
+        assert_eq!(fault(kind).domains(), domains, "{kind}");
     }
-    // One row per `Fault` variant.
-    assert_eq!(kinds.len(), 12);
+}
+
+/// A world that records what it applies, and refuses the apply numbered
+/// `refuse` (from 0).
+#[derive(Default)]
+struct Log {
+    now_ns: u64,
+    applied: Vec<Action>,
+    refuse: Option<usize>,
+}
+
+impl World for Log {
+    fn now_ns(&mut self) -> Result<u64, Error> {
+        Ok(self.now_ns)
+    }
+    fn sleep(&mut self, duration: Duration) -> Result<(), Error> {
+        self.now_ns += duration.as_nanos() as u64;
+        Ok(())
+    }
+    fn apply(&mut self, action: &Action) -> Result<(), Error> {
+        if self.refuse == Some(self.applied.len()) {
+            return Err(Error(format!("{}: invalid_state: refused", action.name())));
+        }
+        self.applied.push(action.clone());
+        Ok(())
+    }
+}
+
+/// A profile on n1 alone, and the world it applies to.
+struct Single {
+    profile: Profile,
+    world: Log,
+}
+
+impl Single {
+    fn new() -> Self {
+        let profile = serde_yaml_ng::from_str(
+            "{start_ns: 1, end_ns: 2, interval_ns: 1, targets: [n1], faults: []}",
+        );
+        let world = Log::default();
+        Self {
+            profile: profile.unwrap(),
+            world,
+        }
+    }
+
+    /// Draw `kind` on n1, as a start that picked that entry does; false
+    /// when n1 is not free for it.
+    fn try_start(&mut self, kind: &str) -> Result<bool, Error> {
+        self.profile.faults = vec![fault(kind)];
+        self.profile.start(&mut self.world, &mut crate::Rng::new(1))
+    }
+
+    fn start(&mut self, kind: &str) -> bool {
+        self.try_start(kind).unwrap()
+    }
+
+    /// End the fault holding `domain` on n1, as `run` does once it is due.
+    fn end(&mut self, domain: Domain) {
+        let ending = &self.profile.state.ending;
+        let index = ending.iter().position(|e| e.domains.contains(&domain));
+        self.profile.end(&mut self.world, index.unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn a_target_holds_one_fault_of_each_domain() {
+    let mut n1 = Single::new();
+    assert!(n1.start("disk_latency") && n1.start("crash"));
+    for held in ["disk_latency", "crash", "pause", "stop", "pause_process"] {
+        assert!(!n1.start(held), "{held}");
+    }
+    assert!(n1.start("throttle") && !n1.start("preempt"));
+    assert_eq!(n1.world.applied.len(), 3);
+}
+
+#[test]
+fn ending_a_fault_frees_only_its_own_domains_in_either_order() {
+    let mut n1 = Single::new();
+    assert!(n1.start("crash") && n1.start("disk_latency"));
+    // A latency ends during a crash's downtime: another latency may start
+    // before the reboot, but no second crash.
+    n1.end(Domain::DiskLatency);
+    assert!(!n1.start("crash") && n1.start("disk_latency"));
+    // A reboot comes during a latency: another crash may start, but no
+    // second latency.
+    n1.end(Domain::Lifecycle);
+    assert!(!n1.start("disk_latency") && n1.start("crash"));
+}
+
+#[test]
+fn a_clock_skew_holds_and_frees_both_its_clock_and_lifecycle_domains() {
+    let mut n1 = Single::new();
+    assert!(n1.start("clock_skew"));
+    for held in ["clock_drift", "crash", "pause"] {
+        assert!(!n1.start(held), "{held}");
+    }
+    assert!(n1.start("disk_latency"));
+    // Both free once it ends, and no skew starts during a pause.
+    n1.end(Domain::Clock);
+    assert!(n1.start("pause") && !n1.start("clock_skew") && n1.start("clock_drift"));
+}
+
+#[test]
+fn overlapping_domains_share_one_fault_budget() {
+    // Every fault ends long before the window does, so only the budget
+    // stops the starts.
+    let yaml = "{start_ns: 1000000000, end_ns: 60000000000, interval_ns: 1000000000,
+                 max_faults: 3, targets: [n1], faults: [
+                   {kind: crash, downtime_ns: {min: 1500000000, max: 3000000000}},
+                   {kind: disk_latency, request: any, duration_ns: {min: 1500000000, max: 3000000000},
+                    latency_ns: {min: 1000000, max: 2000000}}]}";
+    let mut overlapped = false;
+    for seed in 0..16 {
+        let mut profile: Profile = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut world = Log::default();
+        profile.run(&mut world, &mut crate::Rng::new(seed)).unwrap();
+        // Three starts and their three ends.
+        assert_eq!(world.applied.len(), 6, "seed {seed}");
+        overlapped |= !matches!(
+            world.applied[1],
+            Action::Reboot { .. } | Action::Heal { .. }
+        );
+    }
+    assert!(overlapped, "some seed starts two faults on n1 at once");
+}
+
+#[test]
+fn heal_ends_every_fault_on_a_target_after_a_refused_apply() {
+    let mut n1 = Single::new();
+    assert!(n1.start("crash") && n1.start("disk_latency"));
+    n1.world.refuse = Some(2);
+    let error = n1.try_start("clock_drift").unwrap_err();
+    assert!(error.0.ends_with("invalid_state: refused"), "{error}");
+    n1.world.refuse = None;
+    n1.profile.heal(&mut n1.world).unwrap();
+    let ended: BTreeSet<_> = n1.world.applied[2..].iter().map(Action::name).collect();
+    assert_eq!(ended, BTreeSet::from(["heal", "reboot"]));
+    // Both domains are free again.
+    assert!(n1.start("crash") && n1.start("disk_latency"));
 }
 
 /// Narrowing picks which target the fault lands on; with no `from` or `to`,
