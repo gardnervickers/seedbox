@@ -228,6 +228,7 @@ fn quiet_and_pauses_run_for_their_phases() {
     let mut quiet = Schedule::new(phases(3), Quiet);
     quiet.run(&mut world, &mut Rng::new(1)).unwrap();
     assert!(world.applied.is_empty());
+    assert_eq!(quiet.rounds, 3);
     assert_eq!(world.now_ns, 6_000_000_000);
     let mut pauses = Schedule::new(
         phases(2),
@@ -285,31 +286,29 @@ fn crash_all() -> CrashAll {
     }
 }
 
-#[test]
-fn once_runs_one_round_where_a_short_hold_runs_none() {
-    let mut world = ticking();
-    let mut once = Once::new(SECOND, crash_all());
-    once.run(&mut world, &mut Rng::new(1)).unwrap();
-    let names: Vec<_> = world.applied.iter().map(|(_, a)| a.name()).collect();
-    assert_eq!(names, [["crash"; 5], ["reboot"; 5]].concat());
-    assert!(world.applied[0].0 >= 1_000_000_000, "after the warm-up");
-    // The round healed itself: nothing is left in force.
-    once.heal(&mut world).unwrap();
-    assert_eq!(world.applied.len(), 10);
+/// A schedule that holds for `hold` nanoseconds after a one-second warm-up.
+fn short(hold: u64) -> Phases {
+    Phases {
+        warm_up: SECOND,
+        hold: Duration::from_nanos(hold),
+        tail: SECOND,
+    }
+}
 
-    // A hold shorter than one clock read starts no round.
-    let mut world = ticking();
-    let mut schedule = Schedule::new(
-        Phases {
-            warm_up: SECOND,
-            hold: Duration::from_nanos(500),
-            tail: SECOND,
-        },
-        crash_all(),
-    );
-    schedule.run(&mut world, &mut Rng::new(1)).unwrap();
-    assert_eq!(schedule.rounds, 0);
-    assert!(world.applied.is_empty());
+#[test]
+fn a_hold_shorter_than_a_clock_read_still_runs_one_round() {
+    for hold in [0, 500] {
+        let mut world = ticking();
+        let mut schedule = Schedule::new(short(hold), crash_all());
+        schedule.run(&mut world, &mut Rng::new(1)).unwrap();
+        assert_eq!(schedule.rounds, 1, "hold {hold} ns");
+        let names: Vec<_> = world.applied.iter().map(|(_, a)| a.name()).collect();
+        assert_eq!(names, [["crash"; 5], ["reboot"; 5]].concat());
+        assert!(world.applied[0].0 >= 1_000_000_000, "after the warm-up");
+        // The round healed itself: nothing is left in force.
+        schedule.heal(&mut world).unwrap();
+        assert_eq!(world.applied.len(), 10);
+    }
 }
 
 /// Installs a partition and stops `n1`, then crashes `n2`.
@@ -350,7 +349,7 @@ impl Round for Partial {
 }
 
 #[test]
-fn once_heals_what_a_failed_round_started_and_reports_heal_failures() {
+fn heal_undoes_what_a_failed_round_started_and_reports_heal_failures() {
     let mut world = ticking();
     world.refuse = vec![
         Action::Crash {
@@ -360,12 +359,12 @@ fn once_heals_what_a_failed_round_started_and_reports_heal_failures() {
             handle: "partition-1".into(),
         },
     ];
-    let mut once = Once::new(SECOND, Partial);
-    let error = once.run(&mut world, &mut Rng::new(1)).unwrap_err();
+    let mut schedule = Schedule::new(short(0), Partial);
+    let error = schedule.run(&mut world, &mut Rng::new(1)).unwrap_err();
     assert_eq!(error.0, "refused");
     assert_eq!(world.applied.len(), 2);
     // The refused heal is reported after the restart was still tried.
-    let error = once.heal(&mut world).unwrap_err();
+    let error = schedule.heal(&mut world).unwrap_err();
     assert_eq!(error.0, "heal: refused");
     assert_eq!(
         world.applied[2].1,
@@ -376,13 +375,13 @@ fn once_heals_what_a_failed_round_started_and_reports_heal_failures() {
     assert_eq!(world.applied.len(), 3);
     // What stayed in force is undone by the next heal.
     world.refuse.clear();
-    once.heal(&mut world).unwrap();
+    schedule.heal(&mut world).unwrap();
     assert_eq!(
         world.applied[3].1,
         Action::Heal {
             handle: "partition-1".into()
         }
     );
-    once.heal(&mut world).unwrap();
+    schedule.heal(&mut world).unwrap();
     assert_eq!(world.applied.len(), 4);
 }
