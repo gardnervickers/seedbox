@@ -175,6 +175,7 @@ impl Fixture {
                 witness: Some(ContentDigest::of(b"witness")),
                 full_state: None,
                 faults: vec![],
+                machines: vec![],
                 detail: None,
                 properties: None,
             },
@@ -335,6 +336,192 @@ fn requested_full_state_requires_a_digest_for_every_machine() {
         ContentDigest::of(b"state"),
     )]));
     assert_eq!(fixture.run().record.outcome, Outcome::Pass);
+}
+
+fn effect(service: &str, action: &str, at: u64) -> FaultEvent {
+    FaultEvent {
+        requested_at_ns: at,
+        applied_at_ns: at,
+        service: service.into(),
+        action: action.into(),
+        detail: String::new(),
+    }
+}
+
+fn digests(names: &[&str]) -> Option<BTreeMap<String, ContentDigest>> {
+    Some(
+        names
+            .iter()
+            .map(|name| (name.to_string(), ContentDigest::of(name.as_bytes())))
+            .collect(),
+    )
+}
+
+fn names(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| name.to_string()).collect()
+}
+
+#[test]
+fn spawned_machines_join_the_fault_and_full_state_evidence() {
+    let mut fixture = Fixture::new();
+    fixture.backend.profile.witness_mode = WitnessMode::FullState;
+    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
+    let spawn_and_crash = vec![
+        effect("replica", SPAWN_ACTION, 5),
+        effect("replica", "crash", 7),
+    ];
+    fixture.backend.report.faults = spawn_and_crash.clone();
+    fixture.backend.report.machines = names(&["oracle", "replica"]);
+    fixture.backend.report.full_state = digests(&["oracle", "replica"]);
+    let first = fixture.run();
+    assert_eq!(
+        first.record.outcome,
+        Outcome::Pass,
+        "{:?}",
+        first.record.error
+    );
+    let replay = fixture.replay(&first);
+    assert_eq!(replay.record.outcome, Outcome::Pass);
+    assert_eq!(replay.comparison.full_state_matches, Some(true));
+    assert_eq!(replay.comparison.status, ComparisonStatus::Match);
+    // A spawn names only the machine it adds, which is present at stop, and
+    // only after it can effects in the same run refer to that machine.
+    const STATE: &str =
+        "full-state digests must cover exactly the machines present when the run stops";
+    const SPAWN: &str =
+        "spawn of \"replica\" must add a new machine, once, that is present when the run stops";
+    const BEFORE: &str = "crash effect on \"replica\" must name a configured machine, or a spawned machine after its spawn";
+    for (faults, present, state, error) in [
+        (
+            spawn_and_crash.clone(),
+            &["oracle", "replica"][..],
+            &["oracle"][..],
+            STATE,
+        ),
+        (
+            spawn_and_crash.clone(),
+            &["oracle", "replica"],
+            &["oracle", "replica", "stray"],
+            STATE,
+        ),
+        (
+            spawn_and_crash.clone(),
+            &["oracle"],
+            &["oracle", "replica"],
+            SPAWN,
+        ),
+        (
+            vec![
+                effect("replica", "crash", 3),
+                effect("replica", SPAWN_ACTION, 5),
+            ],
+            &["oracle", "replica"],
+            &["oracle", "replica"],
+            BEFORE,
+        ),
+        (
+            vec![
+                effect("replica", SPAWN_ACTION, 5),
+                effect("replica", SPAWN_ACTION, 6),
+            ],
+            &["oracle", "replica"],
+            &["oracle", "replica"],
+            SPAWN,
+        ),
+        (
+            vec![effect("oracle", SPAWN_ACTION, 5)],
+            &["oracle"],
+            &["oracle"],
+            "spawn of \"oracle\" must add a new machine, once, that is present when the run stops",
+        ),
+        (
+            vec![effect("", SPAWN_ACTION, 5)],
+            &["oracle"],
+            &["oracle"],
+            "spawn of \"\" must add a new machine, once, that is present when the run stops",
+        ),
+    ] {
+        fixture.backend.report.faults = faults;
+        fixture.backend.report.machines = names(present);
+        fixture.backend.report.full_state = digests(state);
+        let run = fixture.run();
+        assert_eq!(run.record.outcome, Outcome::Error, "{error}");
+        assert_eq!(run.record.error, Some(format!("execution: {error}")));
+    }
+}
+
+#[test]
+fn resumed_runs_keep_machines_spawned_before_their_checkpoint() {
+    let mut fixture = Fixture::new();
+    fixture.backend.profile.witness_mode = WitnessMode::FullState;
+    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
+    // A resumed run's transcript starts at its checkpoint, so a machine
+    // spawned before it has no spawn record; the machines present at stop
+    // still name it.
+    let report = |faults: Vec<FaultEvent>, state: &[&str]| ExecutionReport {
+        faults,
+        machines: names(&["oracle", "replica"]),
+        full_state: digests(state),
+        ..fixture.backend.report.clone()
+    };
+    let resumed = fixture
+        .orchestrator
+        .clone()
+        .with_checkpoint("after-spawn-checkpoint".into());
+    let run = |report: ExecutionReport| {
+        let backend = fixture.executing(move |request| {
+            assert_eq!(
+                request.resume_checkpoint,
+                Some(std::path::Path::new("after-spawn-checkpoint"))
+            );
+            Ok(report.clone())
+        });
+        let first = resumed
+            .run(
+                &fixture.simulation,
+                RunOptions::default(),
+                &fixture.preparer,
+                &backend,
+            )
+            .unwrap();
+        let replay = replay_retained(&resumed, &first.directory, &backend).unwrap();
+        (first.record, replay)
+    };
+    for faults in [vec![], vec![effect("replica", "crash", 7)]] {
+        let (first, replay) = run(report(faults.clone(), &["oracle", "replica"]));
+        assert_eq!(
+            first.outcome,
+            Outcome::Pass,
+            "{faults:?}: {:?}",
+            first.error
+        );
+        assert_eq!(replay.record.outcome, Outcome::Pass);
+        assert_eq!(replay.comparison.full_state_matches, Some(true));
+        assert_eq!(replay.comparison.status, ComparisonStatus::Match);
+    }
+    // Full state still covers exactly the machines present at stop.
+    for state in [&["oracle"][..], &["oracle", "replica", "stray"]] {
+        let (first, replay) = run(report(vec![effect("replica", "crash", 7)], state));
+        assert_eq!(first.outcome, Outcome::Error);
+        assert_eq!(
+            first.error.as_deref(),
+            Some(
+                "execution: full-state digests must cover exactly the machines present when the run stops"
+            )
+        );
+        assert_eq!(replay.comparison.status, ComparisonStatus::NotComparable);
+    }
+    // A machine absent at stop is unknown, even after a resume.
+    let (first, _) = run(ExecutionReport {
+        machines: names(&["oracle"]),
+        ..report(vec![effect("replica", "crash", 7)], &["oracle"])
+    });
+    assert_eq!(
+        first.error.as_deref(),
+        Some(
+            "execution: crash effect on \"replica\" must name a configured machine, or a spawned machine after its spawn"
+        )
+    );
 }
 
 #[test]

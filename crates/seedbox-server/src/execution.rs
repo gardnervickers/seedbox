@@ -234,8 +234,10 @@ impl ExecutionService {
         Ok(crate::timeline::project(&resource, &history, &world))
     }
 
-    /// Return the immutable submitted inputs enriched with recorded external overrides.
-    /// This is an export projection; the catalogue's admitted definition stays immutable.
+    /// Return the immutable submitted inputs enriched with recorded external overrides
+    /// and the Driver closure the run retained, which names the machines its spawns
+    /// prepared. This is an export projection; the catalogue's admitted definition
+    /// stays immutable, so a seed-range member gets the submitted definition.
     pub fn describe(&self, id: &SimulationId) -> Result<seedbox_api::Simulation, Error> {
         self.recorded_snapshot(id).map(|(resource, _)| resource)
     }
@@ -256,6 +258,12 @@ impl ExecutionService {
             Ok(file) => {
                 let retained: RetainedInputs =
                     serde_json::from_reader(file).map_err(seedbox_application::Error::from)?;
+                if let InputSource::Resolved { definition } = &mut resource.spec.inputs {
+                    seedbox_application::definition::with_run_closure(
+                        definition,
+                        &retained.prepared,
+                    )?;
+                }
                 if let Some(attempt) = retained.attempt {
                     // Published attempts always have an explicit journal; missing
                     // input here is an error, never an empty timeline.
@@ -678,21 +686,12 @@ impl ExecutionService {
                 executor.as_ref(),
                 |progress| self.observe_run_progress(id, spec, &mut retained, progress),
             )?;
-        // Machines the run's spawns prepared join its retained inputs, so the
-        // definition replays without preparing them again.
+        // Machines the run's spawns prepared join its own retained inputs, so
+        // its described definition replays without preparing them again. The
+        // catalogue keeps the submitted definition (see `describe`).
         if run.record.identity.inputs != retained.prepared {
             retained.prepared = run.record.identity.inputs.clone();
             save_inputs(&self.root.join("inputs"), id, &retained, true)?;
-            let execution = seedbox_application::definition::execution_settings_with_inputs(
-                &retained.prepared,
-            )?;
-            self.manager
-                .update(id, |s| {
-                    if let InputSource::Resolved { definition } = &mut s.spec.inputs {
-                        definition.runtime.execution = execution;
-                    }
-                })
-                .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
         }
         Ok(run)
     }
@@ -1073,6 +1072,7 @@ mod tests {
                     witness: Some(self.0.guests["oracle"].clone()),
                     full_state: None,
                     faults: vec![],
+                    machines: vec![],
                     detail: None,
                     properties: None,
                 })

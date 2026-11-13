@@ -1953,6 +1953,13 @@ where
         Ok(())
     }
 
+    /// The identities admitted spawns reserved, with their names, until each
+    /// machine joins. A spawn's fault records target its reserved identity
+    /// before `MachineAdded` commits it.
+    pub fn reserved_machines(&self) -> impl Iterator<Item = (MachineId, &str)> {
+        self.execution.control.reserved()
+    }
+
     /// The property findings reduced from every committed boundary so far;
     /// `None` when there are none.
     pub fn properties(&self) -> Option<seedbox_engine_protocol::property::Assessment> {
