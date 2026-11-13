@@ -431,7 +431,7 @@ pub enum DiskEffect {
     #[default]
     Eio,
     /// Complete it successfully with one sector of seeded bytes: silent
-    /// corruption. Flushes carry no data and are never selected.
+    /// corruption. Requests without data, such as flushes, are never selected.
     Corrupt,
 }
 impl DiskEffect {
