@@ -591,13 +591,7 @@ pub fn privileged(
     let mut result = prefix.to_vec();
     for (key, value) in env {
         if key.starts_with("SEEDBOX_TEST_")
-            || [
-                "SEEDBOX_MKE2FS",
-                "DOCKER_HOST",
-                "SEEDBOX_ASSET_DIR",
-                "TMPDIR",
-            ]
-            .contains(&key.as_str())
+            || ["DOCKER_HOST", "SEEDBOX_ASSET_DIR", "TMPDIR"].contains(&key.as_str())
         {
             result.push(format!("{key}={value}"));
         }
@@ -614,9 +608,7 @@ pub fn select_build(env: &mut Environment, directory: &Path) -> Result<(), Strin
         return Err("complete build did not return its executable and Driver runtime".into());
     }
     // The complete build embeds its runtime; ambient overrides must not replace it.
-    for key in ["SEEDBOX_ASSET_DIR", "SEEDBOX_MKE2FS"] {
-        env.remove(key);
-    }
+    env.remove("SEEDBOX_ASSET_DIR");
     env.insert(
         "SEEDBOX_TEST_CLI".into(),
         directory.join("seedbox").to_string_lossy().into(),

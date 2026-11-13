@@ -55,7 +55,7 @@ pub fn fixture() -> sb::record::RunRecord {
     };
     let identity = RunIdentity {
         program: Vec::new(),
-        version: 2,
+        version: crate::record::FORMAT_VERSION,
         seed: 0,
         configuration,
         inputs: PreparedInputs {

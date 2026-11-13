@@ -12,12 +12,6 @@ pub trait RngStream {
 
 /// Extension trait for `RngStream` providing additional utility methods.
 pub trait RngStreamExt: RngStream {
-    fn next_byte(&mut self) -> u8 {
-        let mut buffer = [0u8; 1];
-        self.fill_bytes(&mut buffer);
-        buffer[0]
-    }
-
     fn next_u32(&mut self) -> u32 {
         let mut buffer = [0u8; 4];
         self.fill_bytes(&mut buffer);
@@ -28,18 +22,6 @@ pub trait RngStreamExt: RngStream {
         let mut buffer = [0u8; 8];
         self.fill_bytes(&mut buffer);
         u64::from_le_bytes(buffer)
-    }
-
-    fn next_u128(&mut self) -> u128 {
-        let mut buffer = [0u8; 16];
-        self.fill_bytes(&mut buffer);
-        u128::from_le_bytes(buffer)
-    }
-
-    fn next_usize(&mut self) -> usize {
-        let mut buffer = [0u8; std::mem::size_of::<usize>()];
-        self.fill_bytes(&mut buffer);
-        usize::from_le_bytes(buffer)
     }
 }
 

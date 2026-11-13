@@ -654,9 +654,7 @@ fn test_build_admission_needs_tools_not_cached_assets() {
 fn test_complete_build_replaces_ambient_runtime_overrides() {
     let t = fixture();
     let mut e = Environment::new();
-    for key in ["SEEDBOX_ASSET_DIR", "SEEDBOX_MKE2FS"] {
-        e.insert(key.into(), "/stale".into());
-    }
+    e.insert("SEEDBOX_ASSET_DIR".into(), "/stale".into());
     assert!(select_build(&mut e, &t.0).is_err());
     for name in ["seedbox", "driver-runtime.tar.gz"] {
         fs::write(t.0.join(name), "").unwrap();
@@ -668,7 +666,6 @@ fn test_complete_build_replaces_ambient_runtime_overrides() {
 #[test]
 fn test_privileged_execution_forwards_asset_directory_and_engine() {
     let e = env(&[
-        ("SEEDBOX_MKE2FS", "/formatter"),
         ("SEEDBOX_ASSET_DIR", "/slot"),
         ("DOCKER_HOST", "unix:///engine"),
         ("GH_TOKEN", "fixture"),
@@ -686,7 +683,6 @@ fn test_privileged_execution_forwards_asset_directory_and_engine() {
             "env",
             "DOCKER_HOST=unix:///engine",
             "SEEDBOX_ASSET_DIR=/slot",
-            "SEEDBOX_MKE2FS=/formatter",
             "/test"
         ])
     );

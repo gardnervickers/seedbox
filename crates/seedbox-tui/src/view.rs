@@ -3549,9 +3549,6 @@ mod tests {
             }
             text.push('\n');
         }
-        if std::env::var_os("SEEDBOX_TUI_DUMP").is_some() {
-            println!("{text}");
-        }
         text
     }
 

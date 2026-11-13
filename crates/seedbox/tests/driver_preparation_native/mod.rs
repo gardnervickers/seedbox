@@ -98,9 +98,6 @@ impl Service {
                 .env_clear()
                 .env("DOCKER_HOST", &self.docker)
                 .env("PATH", "");
-        } else {
-            // Removed overrides must not select or launch a legacy runtime.
-            command.env("SEEDBOX_MKE2FS", self.path().join("unused-legacy-mke2fs"));
         }
         if let Some(directory) = &self.asset_directory {
             command.env("SEEDBOX_ASSET_DIR", directory);
