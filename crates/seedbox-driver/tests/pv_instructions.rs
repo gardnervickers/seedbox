@@ -112,12 +112,12 @@ fn instruction_run(
         "PV instruction Driver worker transport",
         Duration::from_secs(300),
     );
-    // pv-x86-instructions.c executes eight entropy operations or six child
+    // pv-x86-instructions.c executes nine entropy operations or six child
     // probes. Allow 100,000 charged calls per operation for formatting and
     // fork/wait/signal settlement at the Driver default 1000 ns/call, plus
     // five simulated seconds for Linux boot. Neither mode has a sleep loop.
     let operations = match mode {
-        "entropy" => 8,
+        "entropy" => 9,
         "probe" => 6,
         _ => panic!("unknown fixture mode {mode}"),
     };
@@ -199,8 +199,16 @@ fn instrumented_rdrand_and_rdseed_draw_seeded_guest_entropy() {
     assert_eq!(
         names,
         [
-            "rdrand16", "rdrand32", "rdrand64", "rdrand64", "rdseed16", "rdseed32", "rdseed64",
-            "rdseed64"
+            "rdrand16",
+            "rdrand32",
+            "rdrand64",
+            "rdrand64",
+            "rdseed16",
+            "rdseed32",
+            "rdseed64",
+            "rdseed64",
+            // An entropy instruction that begins its block is replaced too.
+            "rdrand_target64"
         ]
     );
     for (name, value, flags) in &draws {

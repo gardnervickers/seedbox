@@ -492,7 +492,13 @@ pub fn check(root: &Path) -> Result<Report, String> {
     let root = root.canonicalize().map_err(|error| error.to_string())?;
     let root = root.as_path();
     let mut files = BTreeMap::new();
-    collect(&root.join("crates"), &mut BTreeSet::new(), &mut files)?;
+    let mut visited = BTreeSet::new();
+    collect(&root.join("crates"), &mut visited, &mut files)?;
+    // The portable checks run these packages' tests too.
+    for package in super::policy::STANDALONE_PACKAGES {
+        let directory = Path::new(package.manifest).parent().unwrap();
+        collect(&root.join(directory), &mut visited, &mut files)?;
+    }
     // Only the downstream suite is test policy input, never upstream DR tests.
     let dr_suite = root.join("vendor/dynamorio/seedbox-tests");
     if root.join("crates/seedbox-machine/Cargo.toml").is_file()

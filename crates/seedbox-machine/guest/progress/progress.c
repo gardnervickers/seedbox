@@ -192,7 +192,8 @@ static void charge_before(void *context, instrlist_t *block, instr_t *where)
     instrlist_meta_preinsert(block, where, INSTR_CREATE_cbnz(context,
         opnd_create_instr(skip), opnd_create_reg(SCRATCH)));
 #endif
-    /* The first instruction may be an entropy label without an application PC. */
+    /* The first instruction may be an entropy label, which carries the
+     * application PC of the instruction it precedes. */
     app_pc resume = instr_get_app_pc(instrlist_first_app(block));
     DR_ASSERT(resume != NULL);
     instrlist_insert_mov_immed_ptrsz(context, (ptr_int_t)resume, opnd_create_reg(SCRATCH),
@@ -268,6 +269,10 @@ static dr_emit_flags_t rewrite(void *context, void *tag, instrlist_t *block,
         DR_ASSERT(opnd_is_reg(destination));
         instr_t *label = INSTR_CREATE_label(context);
         instr_set_note(label, (void *)entropy_note);
+        /* The label keeps the original translation too: it is the block's
+         * first application instruction when the entropy instruction began
+         * the block, and the budget charge resumes from that PC. */
+        instr_set_translation(label, instr_get_app_pc(instruction));
         dr_instr_label_data_t *data = instr_get_label_data_area(label);
         data->data[0] = (ptr_uint_t)opnd_get_reg(destination);
         data->data[1] = (ptr_uint_t)opnd_size_in_bytes(opnd_get_size(destination));

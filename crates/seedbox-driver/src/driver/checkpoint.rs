@@ -51,6 +51,12 @@ impl<S> Checkpoint<S> {
         Duration::from_nanos(self.quantum_ns)
     }
 
+    /// Machines whose crashes and out-of-memory kills the capture allows,
+    /// including spawned ones. A restored Driver cannot change this set.
+    pub fn allowed_crashes(&self) -> &BTreeSet<String> {
+        self.properties.allowed_crashes()
+    }
+
     /// Captured guest-control authority and latency. None is the SDK contract;
     /// an explicit absent controller disables all guest callers.
     pub fn controller_setup(&self) -> Option<ControllerSetup> {
