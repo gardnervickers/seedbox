@@ -127,8 +127,8 @@ faults:
 
 Each entry is named by the action it starts and carries that action's fields,
 with `{min, max}` ranges for drawn values. Each start draws an entry by weight,
-a target with no fault of the profile in force (or skips the start when there is
-none), then the entry's values. It applies the fault through `World::apply` and
+a target free for it (below), or skips the start when there is none, then the
+entry's values. It applies the fault through `World::apply` and
 ends it with the action's counterpart after its drawn duration, so faults may
 overlap. Every draw comes from the scenario's `Random`, so a seed fixes the
 applied sequence. `run` checks every entry with its action's own validator
@@ -147,3 +147,24 @@ With `skip_unsupported: true`, the profile instead skips a kind the engine
 refuses as `unsupported` (`preempt` on x86_64 PV) and never draws it again;
 `run` fails if no kind is left, and `unsupported()` lists the kinds skipped. See
 [the acceptance oracle](../harness/acceptance/images/profile/src/main.rs).
+
+A target is free for an entry while no fault of the profile holds it in the
+same exclusion domain, so faults of different domains overlap on one machine:
+
+| Domain | Kinds |
+|---|---|
+| lifecycle | `crash`, `stop`, `pause`, `pause_process`, and `clock_skew` |
+| network | `partition`, `shape` |
+| clock | `clock_skew`, `clock_drift` |
+| disk error | `disk_error` |
+| disk latency | `disk_latency` |
+| scheduler | `throttle`, `preempt` |
+
+`clock_skew` holds both the clock and the lifecycle domain, because the engine
+refuses a realtime step, or its heal, on a paused VM, and fails one on a crashed
+VM. For `pause_process` and `stop` the grouping is deliberately conservative: a
+step is a guest command, so it is kept away from every lifecycle fault. Ending a
+fault frees only its own domains on its target: a disk latency that ends during
+a crash's downtime lets another latency start before the reboot, but no second
+crash. Every start still comes from one weighted stream, with one `max_faults`
+budget.

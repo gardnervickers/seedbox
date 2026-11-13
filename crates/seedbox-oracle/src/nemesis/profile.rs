@@ -24,12 +24,14 @@ pub const DEFAULT_MAX_FAULTS: u32 = 64;
 /// begins, one gap apart; each gap is drawn uniformly from half to one and a
 /// half times `interval_ns`. Each start draws an entry by weight, then a
 /// target among `targets` (or the entry's own, for the partition, shape and
-/// disk kinds) with no fault of this profile in force (a start with none
-/// free is skipped), then the entry's ranges, and holds the fault for its
-/// drawn duration before ending it. At most `max_faults` start. `run`
-/// returns at `end_ns`, or once the last fault ends if that is later; faults
-/// still in force when a failure cuts it short are ended by
-/// [`Nemesis::heal`].
+/// disk kinds) where no fault of this profile holds any of the entry's
+/// [`Domain`]s (a start with none free is skipped), then the entry's ranges,
+/// and holds the fault for its drawn duration before ending it, which frees
+/// only its own domains. So faults of different domains overlap on one
+/// target: a crash can start while a disk latency holds it, but not while a
+/// pause does. At most `max_faults` start. `run` returns at `end_ns`, or once
+/// the last fault ends if that is later; faults still in force when a
+/// failure cuts it short are ended by [`Nemesis::heal`].
 ///
 /// Every draw comes from the scenario's [`Random`] in that order, so a seed
 /// fixes the applied sequence.
@@ -64,6 +66,25 @@ pub struct Profile {
     state: State,
 }
 
+/// An exclusion domain: faults of one domain never hold one target
+/// together. See [`Fault::domains`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Domain {
+    /// The VM's or its application's run state: crash, stop, pause,
+    /// pause_process (and clock_skew, which needs that state). Each needs
+    /// the state the others take away, and its counterpart undoes only its
+    /// own.
+    Lifecycle,
+    /// The target's links: partition and shape.
+    Network,
+    /// The target's clock: clock_skew and clock_drift.
+    Clock,
+    DiskError,
+    DiskLatency,
+    /// The target's CPU and thread scheduling: throttle and preempt.
+    Scheduler,
+}
+
 fn default_max_faults() -> u32 {
     DEFAULT_MAX_FAULTS
 }
@@ -88,8 +109,8 @@ struct State {
     faults: InForce,
     /// Teardowns not yet due, in the order their faults started.
     ending: Vec<Ending>,
-    /// Targets with a fault of this profile in force.
-    busy: BTreeSet<String>,
+    /// The domains faults of this profile hold, by target.
+    busy: BTreeSet<(Domain, String)>,
     /// Kinds the world refused as unsupported.
     unsupported: BTreeSet<&'static str>,
     pace: Box<dyn Pace>,
@@ -123,6 +144,8 @@ struct Ending {
     at_ns: u64,
     action: Action,
     target: String,
+    /// The domains its fault holds on `target`, freed when it ends.
+    domains: &'static [Domain],
 }
 
 impl Profile {
@@ -213,10 +236,15 @@ impl Profile {
             })
             .expect("a draw below the total weight lands on an entry");
         let fault = &self.faults[index];
+        let domains = fault.domains();
         let free: Vec<String> = fault
             .targets(&self.targets)
             .iter()
-            .filter(|target| !self.state.busy.contains(*target))
+            .filter(|target| {
+                domains
+                    .iter()
+                    .all(|domain| !self.state.busy.contains(&(*domain, (*target).clone())))
+            })
             .cloned()
             .collect();
         if free.is_empty() {
@@ -248,13 +276,27 @@ impl Profile {
             result => result?,
         }
         let applied = world.now_ns()?;
-        self.state.busy.insert(target.clone());
+        for domain in domains {
+            self.state.busy.insert((*domain, target.clone()));
+        }
         self.state.ending.push(Ending {
             at_ns: applied.saturating_add(drawn.hold_ns),
             action: drawn.teardown,
             target,
+            domains,
         });
         Ok(true)
+    }
+
+    /// End the fault of `ending[index]`, freeing its domains on its target.
+    fn end(&mut self, world: &mut dyn World, index: usize) -> Result<(), Error> {
+        let action = self.state.ending[index].action.clone();
+        self.state.faults.apply(world, &action)?;
+        let ended = self.state.ending.remove(index);
+        for domain in ended.domains {
+            self.state.busy.remove(&(*domain, ended.target.clone()));
+        }
+        Ok(())
     }
 }
 
@@ -280,10 +322,7 @@ impl Nemesis for Profile {
             match (start, ending) {
                 (_, Some((index, at))) if start.is_none_or(|start| at <= start) => {
                     self.until(world, at)?;
-                    let action = self.state.ending[index].action.clone();
-                    self.state.faults.apply(world, &action)?;
-                    let ended = self.state.ending.remove(index);
-                    self.state.busy.remove(&ended.target);
+                    self.end(world, index)?;
                 }
                 (Some(at), _) => {
                     self.until(world, at)?;
@@ -504,6 +543,30 @@ impl Fault {
             Self::DiskError { .. } => "disk_error",
             Self::DiskLatency { .. } => "disk_latency",
             Self::Preempt { .. } => "preempt",
+        }
+    }
+
+    /// The domains this kind holds its target in. Each kind holds one,
+    /// except `clock_skew`, which also holds [`Domain::Lifecycle`]: the
+    /// engine refuses a realtime step, or its heal, on a paused VM and fails
+    /// one on a crashed VM. For `pause_process` and `stop` that grouping is
+    /// deliberately conservative, since a step is a guest command. Every
+    /// other pair of domains is one the engine takes in either order:
+    /// network faults bind to links, and clock_drift, throttle and the
+    /// device faults (disk_error, disk_latency, preempt) apply in every VM
+    /// state and outlast a crash.
+    pub fn domains(&self) -> &'static [Domain] {
+        match self {
+            Self::Crash { .. }
+            | Self::Stop { .. }
+            | Self::Pause { .. }
+            | Self::PauseProcess { .. } => &[Domain::Lifecycle],
+            Self::Partition { .. } | Self::Shape { .. } => &[Domain::Network],
+            Self::ClockSkew { .. } => &[Domain::Clock, Domain::Lifecycle],
+            Self::ClockDrift { .. } => &[Domain::Clock],
+            Self::DiskError { .. } => &[Domain::DiskError],
+            Self::DiskLatency { .. } => &[Domain::DiskLatency],
+            Self::Throttle { .. } | Self::Preempt { .. } => &[Domain::Scheduler],
         }
     }
 

@@ -459,7 +459,10 @@ struct Modelled {
     now_ns: u64,
     applied: Vec<(u64, Action)>,
     attempts: usize,
-    handles: BTreeSet<String>,
+    /// Faults in force with a handle, and the machine each holds.
+    handles: std::collections::BTreeMap<String, String>,
+    /// Faults started on a machine another fault held.
+    overlaps: usize,
     /// Machines with a lifecycle fault in force, by the action that undoes it.
     down: std::collections::BTreeMap<String, &'static str>,
     refuse: Refusal,
@@ -474,7 +477,8 @@ impl Modelled {
             now_ns: 5_000_000_000,
             applied: Vec::new(),
             attempts: 0,
-            handles: BTreeSet::new(),
+            handles: Default::default(),
+            overlaps: 0,
             down: Default::default(),
             refuse: Box::new(refuse),
         }
@@ -482,6 +486,15 @@ impl Modelled {
 
     fn in_force(&self) -> usize {
         self.handles.len() + self.down.len()
+    }
+
+    fn held(&self, machine: &str) -> bool {
+        self.down.contains_key(machine) || self.handles.values().any(|held| held == machine)
+    }
+
+    fn hold(&mut self, handle: &str, machine: &str) {
+        self.overlaps += usize::from(self.held(machine));
+        assert!(self.handles.insert(handle.into(), machine.into()).is_none());
     }
 }
 
@@ -514,37 +527,41 @@ impl World for Modelled {
             | Action::Reboot { machine } => {
                 assert_eq!(self.down.remove(machine), Some(action.name()), "{action:?}");
             }
-            Action::Heal { handle } => assert!(self.handles.remove(handle), "{action:?}"),
+            Action::Heal { handle } => assert!(self.handles.remove(handle).is_some(), "{action:?}"),
             Action::Partition {
                 handle,
                 left,
                 right,
             } => {
                 assert!(left.iter().chain(right).all(known) && !right.contains(&left[0]));
-                assert!(self.handles.insert(handle.clone()));
+                self.hold(handle, &left[0]);
             }
             Action::Shape {
                 handle, from, to, ..
             } => {
                 assert!(from.iter().chain(to).all(known) && !to.contains(&from[0]));
-                assert!(self.handles.insert(handle.clone()));
+                self.hold(handle, &from[0]);
             }
             Action::ClockSkew {
                 handle,
+                machine,
                 offset_ns: Some(_),
                 max_offset_ns: None,
                 ..
             }
             | Action::ClockDrift {
                 handle,
+                machine,
                 rate_ppb: Some(_),
                 max_rate_ppb: None,
                 ..
             }
-            | Action::Throttle { handle, .. }
-            | Action::Preempt { handle, .. } => {
-                assert!(self.handles.insert(handle.clone()));
+            | Action::Throttle {
+                handle, machine, ..
             }
+            | Action::Preempt {
+                handle, machine, ..
+            } => self.hold(handle, machine),
             Action::DiskError {
                 handle, machine, ..
             }
@@ -552,12 +569,13 @@ impl World for Modelled {
                 handle, machine, ..
             } => {
                 assert!(["n1", "n2"].contains(&machine.as_str()), "{action:?}");
-                assert!(self.handles.insert(handle.clone()));
+                self.hold(handle, machine);
             }
             other => {
                 let machine = other.machine().expect("a lifecycle action names a machine");
                 assert!(known(&machine.to_owned()));
                 let undo = undo.unwrap_or_else(|| panic!("unexpected {other:?}"));
+                self.overlaps += usize::from(self.held(machine));
                 assert!(
                     self.down.insert(machine.into(), undo).is_none(),
                     "{other:?} on a machine already down"
@@ -641,6 +659,15 @@ fn a_profile_applies_the_same_sequence_for_the_same_seed() {
             ("shape", 3)
         ])
     );
+}
+
+#[test]
+fn a_profile_overlaps_faults_of_different_domains_on_one_target() {
+    // Modelled refuses a second lifecycle fault on a machine, so the run
+    // keeps those apart while faults of other domains overlap them.
+    let mut world = Modelled::new(|_, _| false);
+    profile().run(&mut world, &mut Rng::new(7)).unwrap();
+    assert!(world.overlaps > 0);
 }
 
 #[test]
