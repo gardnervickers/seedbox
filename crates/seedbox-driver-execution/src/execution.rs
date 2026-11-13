@@ -7,7 +7,7 @@ use seedbox_artifacts::{
     Result,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
@@ -25,6 +25,10 @@ pub struct ExecutionRequest<'a> {
     pub seed: u64,
     /// Fixed simulated timeslice, retained in the experiment configuration.
     pub quantum_ns: std::num::NonZeroU64,
+    /// Translated blocks between PV progress calls, retained in the configuration.
+    pub progress_budget: seedbox_spec::progress::ProgressBudget,
+    /// Machines whose crash deaths and out-of-memory kills are not violations.
+    pub allow_crashes: &'a BTreeSet<String>,
     pub program: &'a [seedbox_engine_protocol::input_program::TimedInput],
     pub limits: &'a Limits,
     pub network: &'a Network,

@@ -81,7 +81,8 @@ runs a `wait_break` loop on a second connection, on a background thread. It
 calls the handler with that connection's world while the machine is suspended,
 and resumes the machine when the handler returns, unless the handler crashed
 it. A handler that raises stops the loop and leaves its machine suspended; the
-error is kept in `break_error`. The nemesis and other oracle calls keep using their
+error is kept in `break_error`, and the Rust runner reports the run incomplete
+when it is set. The nemesis and other oracle calls keep using their
 own connections at the same time.
 
 ```python

@@ -179,8 +179,10 @@ impl OwnedExecution {
             None => lease.try_clone()?,
         };
         let session = high_descriptor(&session)?;
-        let (mut owner, input) = UnixStream::pair()?;
-        let (status, output) = UnixStream::pair()?;
+        // A copy of `owner` left in a concurrent spawn's child would hide
+        // owner death from the monitor.
+        let (mut owner, input) = seedbox_exec::cloexec(UnixStream::pair)?;
+        let (status, output) = seedbox_exec::cloexec(UnixStream::pair)?;
         let output = high_descriptor(&output)?;
         let lease = high_descriptor(&lease)?;
         let mut command = Command::new(executable);

@@ -2,7 +2,7 @@
 use crate::{engine::ExecutableKind, image::Launch, store::ContentDigest};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -196,6 +196,9 @@ pub struct WorkloadExit {
     pub code: u8,
 }
 
+/// The action of an applied spawn; its `service` names the machine it added.
+pub const SPAWN_ACTION: &str = "spawn";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FaultEvent {
@@ -226,11 +229,101 @@ pub struct ExecutionReport {
     /// exit witness proves equality of guest RAM/registers.
     pub full_state: Option<BTreeMap<String, ContentDigest>>,
     pub faults: Vec<FaultEvent>,
+    /// The Driver's machines when the run stopped, the oracle first. Unlike
+    /// spawn records, which cover only this attempt, it names machines
+    /// spawned before the checkpoint a run resumed from. Empty when the
+    /// backend names no machines beyond the prepared guests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub machines: Vec<String>,
     pub detail: Option<String>,
     /// Guest property results reduced at commit; absent when no guest
     /// reported property evidence. Part of result comparisons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub properties: Option<seedbox_engine_protocol::property::Assessment>,
+}
+
+impl ExecutionReport {
+    /// Every machine the run's evidence may name: the initial `guests`, which
+    /// prepared inputs name, and the machines present when the run stopped,
+    /// which include spawned ones.
+    pub fn machines<'a>(
+        &'a self,
+        guests: &'a BTreeMap<String, ContentDigest>,
+    ) -> BTreeSet<&'a str> {
+        guests
+            .keys()
+            .chain(&self.machines)
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Whether full-state digests name exactly [`Self::machines`]; false
+    /// when there are none.
+    pub fn full_state_covers(&self, guests: &BTreeMap<String, ContentDigest>) -> bool {
+        self.full_state
+            .as_ref()
+            .is_some_and(|state| state.keys().map(String::as_str).eq(self.machines(guests)))
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    fn fault(service: &str, action: &str) -> FaultEvent {
+        FaultEvent {
+            requested_at_ns: 1,
+            applied_at_ns: 1,
+            service: service.into(),
+            action: action.into(),
+            detail: String::new(),
+        }
+    }
+
+    fn digests(names: &[&str]) -> BTreeMap<String, ContentDigest> {
+        names
+            .iter()
+            .map(|name| (name.to_string(), ContentDigest::of(name.as_bytes())))
+            .collect()
+    }
+
+    #[test]
+    fn full_state_covers_initial_and_present_machines() {
+        let guests = digests(&["db", "oracle"]);
+        let mut report = ExecutionReport {
+            host_wait_ns: 0,
+            simulated_time_ns: None,
+            reason: StopReason::Completed,
+            workload_exit: None,
+            witness: None,
+            full_state: None,
+            // Membership comes from the machines present at stop, not from
+            // this attempt's spawn records: a resumed run has none.
+            faults: vec![fault("db", "crash"), fault("other", SPAWN_ACTION)],
+            machines: vec!["oracle".into(), "db".into(), "replica".into()],
+            detail: None,
+            properties: None,
+        };
+        assert!(report
+            .machines(&guests)
+            .into_iter()
+            .eq(["db", "oracle", "replica"]));
+        assert!(!report.full_state_covers(&guests));
+        report.full_state = Some(digests(&["db", "oracle", "replica"]));
+        assert!(report.full_state_covers(&guests));
+        for names in [
+            &["db", "oracle"][..],
+            &["db", "oracle", "replica", "other"],
+            &["oracle", "replica"],
+        ] {
+            report.full_state = Some(digests(names));
+            assert!(!report.full_state_covers(&guests), "{names:?}");
+        }
+        // Without named machines, full state covers exactly the guests.
+        report.machines.clear();
+        report.full_state = Some(digests(&["db", "oracle"]));
+        assert!(report.full_state_covers(&guests));
+    }
 }
 
 #[cfg(test)]

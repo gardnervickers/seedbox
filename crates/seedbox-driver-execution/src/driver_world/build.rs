@@ -200,6 +200,25 @@ fn validate_checkpoint_quantum<S>(
     Ok(())
 }
 
+/// A restored Driver keeps the allowed crashes it captured, so a definition
+/// that edits an initial machine's `allowCrashes` cannot continue from it.
+fn validate_checkpoint_allow_crashes<S>(
+    checkpoint: &seedbox_driver::driver::Checkpoint<S>,
+    prepared: &wire::Prepared,
+) -> Result<()> {
+    let requested = allow_crashes(prepared);
+    let mut initial = std::iter::once(&prepared.oracle).chain(&prepared.machines);
+    if let Some(machine) = initial.find(|machine| {
+        checkpoint.allowed_crashes().contains(&machine.name) != requested.contains(&machine.name)
+    }) {
+        return Err(Error::Setup(format!(
+            "allowCrashes for {} differs from the checkpoint; start fresh to change allowCrashes",
+            machine.name
+        )));
+    }
+    Ok(())
+}
+
 fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
     let mut envelope = checkpoint::read(path)?;
     if envelope.state.world.seed != request.seed {
@@ -246,6 +265,7 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
     // or restoring even the first native machine. Saved queues stay in Driver.
     let retained = checkpoint::open(&envelope, driver_limits(envelope.driver.length)?)?;
     validate_checkpoint_quantum(&retained, request.prepared.quantum_ns)?;
+    validate_checkpoint_allow_crashes(&retained, &request.prepared)?;
     super::controller::resolve(
         &request.prepared.inventory,
         &request.prepared.oracle.name,

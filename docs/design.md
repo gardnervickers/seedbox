@@ -47,3 +47,11 @@ A submitted checkpoint branch keeps its captured state when the source simulatio
 The catalogue and execution scratch are session-scoped; the binary cache is not.
 Deleting a simulation reclaims captured checkpoint state and imported binaries no remaining resource names; kernels and images stay cached.
 A [portable archive](../crates/seedbox-artifacts/src/archive.rs) carries the closure without restoring source ownership.
+
+`show definition` output can be edited and resubmitted, but it replays the world it prepared.
+Edits the Driver reads at run time apply: seed, faults, schedule, network, quantum, limits, machine
+command, environment and memory, and `allowCrashes` (except on a checkpoint start).
+Edits baked into the prepared boot archives are refused with an error naming the field: added,
+removed or renamed machines, `volumes`, `anonymousVolumes`, `clock.epochSeconds`,
+`simulator.oracleControl` and, on PV, `simulator.blocksPerProgressCall`. Change those in the
+project and submit it again.
