@@ -323,7 +323,7 @@ fn streamed_world_capture_survives_source_drop_and_branches_with_one_or_four_wor
     let expected = session_events(source_driver.drain_observations().events);
     drop(source_driver);
     fs::remove_dir_all(source).unwrap();
-    let envelope = read(&manifest).unwrap();
+    let envelope = load(&manifest).unwrap();
     assert_eq!(
         serde_json::to_value(&envelope.state).unwrap(),
         serde_json::to_value(&state).unwrap()
@@ -456,19 +456,83 @@ fn integrity_and_length_are_verified_before_decoding_any_native_body() {
         encode,
     )
     .unwrap();
-    let envelope = read(&path).unwrap();
+    let envelope = load(&path).unwrap();
     let artifact = &envelope.machines[0];
     let original = fs::read(&artifact.artifact).unwrap();
     let mut changed = original.clone();
     changed[0] ^= 1;
     fs::write(&artifact.artifact, &changed).unwrap();
-    assert!(read(&path).unwrap_err().to_string().contains("SHA-256"));
-    assert!(resolve::<Saved>(&envelope, limits(), |_, _| panic!("must verify first")).is_err());
+    // Loading the envelope opens no body, so only `open` sees the rewrite.
+    load(&path).unwrap();
+    assert!(
+        resolve::<Saved>(&envelope, limits(), |_, _| panic!("must verify first"))
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("SHA-256")
+    );
     fs::write(&artifact.artifact, &original[..original.len() - 1]).unwrap();
-    assert!(read(&path)
-        .unwrap_err()
+    assert!(
+        resolve::<Saved>(&envelope, limits(), |_, _| panic!("must verify first"))
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("encoded length")
+    );
+    // The same holds for the Driver metadata.
+    fs::write(&artifact.artifact, &original).unwrap();
+    flip_first_byte(&envelope.driver.artifact);
+    assert!(open(&envelope, limits())
+        .err()
+        .unwrap()
         .to_string()
-        .contains("encoded length"));
+        .contains("SHA-256"));
+}
+
+fn flip_first_byte(path: impl AsRef<Path>) -> Vec<u8> {
+    let path = path.as_ref();
+    let original = fs::read(path).unwrap();
+    let mut changed = original.clone();
+    changed[0] ^= 1;
+    fs::write(path, &changed).unwrap();
+    original
+}
+
+#[test]
+fn corrupt_later_body_is_rejected_before_driver_metadata_decodes() {
+    let root = tempfile::tempdir().unwrap();
+    let inventory = fixture_inventory(&root.path().join("authority"));
+    let mut driver = driver(1, 2, Arc::default(), Arc::default(), None);
+    let mut state = state(2);
+    let path = capture(
+        &mut driver,
+        Capture {
+            inventory: &inventory,
+            state: &mut state,
+            prepared: false,
+        },
+        root.path(),
+        "saved",
+        publish,
+        encode,
+    )
+    .unwrap();
+    let mut envelope = load(&path).unwrap();
+    // Driver metadata that matches its digest but cannot decode.
+    let garbage = vec![0xff; 64];
+    fs::write(&envelope.driver.artifact, &garbage).unwrap();
+    envelope.driver.sha256 = hex::encode(Sha256::digest(&garbage));
+    envelope.driver.length = garbage.len() as u64;
+    let decoding = open(&envelope, limits()).err().unwrap().to_string();
+    assert!(!decoding.contains("SHA-256"), "{decoding}");
+    // With a corrupt later body too, the digest check fails first: the
+    // metadata decoder is never reached.
+    flip_first_byte(&envelope.machines[1].artifact);
+    assert!(open(&envelope, limits())
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("SHA-256"));
 }
 
 #[test]
@@ -490,13 +554,13 @@ fn body_manifest_mismatch_and_unused_entries_are_not_silently_accepted() {
         encode,
     )
     .unwrap();
-    let mut envelope = read(&path).unwrap();
+    let mut envelope = load(&path).unwrap();
     envelope.machines[0].sha256 = "00".repeat(32);
     assert!(resolve::<Saved>(&envelope, limits(), |_, _| panic!(
         "must check reference first"
     ))
     .is_err());
-    let mut envelope = read(&path).unwrap();
+    let mut envelope = load(&path).unwrap();
     envelope.machines.push(envelope.machines[0].clone());
     assert!(resolve(&envelope, limits(), decode)
         .err()
@@ -637,13 +701,13 @@ fn corrupt_later_body_and_unused_manifest_entries_fail_before_any_backend_decode
         encode,
     )
     .unwrap();
-    let mut envelope = read(&path).unwrap();
+    let mut envelope = load(&path).unwrap();
     envelope.machines.push(envelope.machines[0].clone());
     assert!(resolve::<Saved>(&envelope, limits(), |_, _| panic!(
         "all references must precede decode"
     ))
     .is_err());
-    let envelope = read(&path).unwrap();
+    let envelope = load(&path).unwrap();
     let later = &envelope.machines[1];
     let mut bytes = fs::read(&later.artifact).unwrap();
     bytes[0] ^= 1;

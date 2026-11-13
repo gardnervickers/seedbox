@@ -220,7 +220,9 @@ fn validate_checkpoint_allow_crashes<S>(
 }
 
 fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
-    let mut envelope = checkpoint::read(path)?;
+    // Only the envelope here: `checkpoint::open` verifies every body, once,
+    // before anything is decoded.
+    let mut envelope = checkpoint::load(path)?;
     if envelope.state.world.seed != request.seed {
         return Err(bad(
             "Driver checkpoint seed differs; restoration never reseeds a branch",

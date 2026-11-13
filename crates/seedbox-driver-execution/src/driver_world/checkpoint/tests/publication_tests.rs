@@ -119,7 +119,10 @@ fn abandoned_bodies_never_publish_or_block_identity_and_are_never_clobbered() {
         encode,
     )
     .unwrap();
-    let envelope = read(&path).unwrap();
+    let envelope = load(&path).unwrap();
+    for artifact in [&envelope.driver].into_iter().chain(&envelope.machines) {
+        verified(artifact).unwrap();
+    }
     assert_eq!(
         fs::read(abandoned.join("sentinel")).unwrap(),
         b"abandoned owned-session data"
@@ -184,7 +187,7 @@ fn actual_driver_before_fault_hold_is_captured_without_applying_effect() {
     .unwrap();
     assert!(effects.is_empty(), "capture must not publish an effect");
     assert_eq!(peak.load(Ordering::SeqCst), 1);
-    let captured = resolve(&read(&path).unwrap(), limits(), decode).unwrap();
+    let captured = resolve(&load(&path).unwrap(), limits(), decode).unwrap();
     let mut restored = restored(&captured, 4);
     assert_eq!(
         restored
