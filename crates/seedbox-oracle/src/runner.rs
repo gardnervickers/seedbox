@@ -193,9 +193,8 @@ pub fn final_reads<R>(
             if let Err(error) = world.apply(&Action::Restart {
                 machine: machine.clone(),
             }) {
-                let error = Error(format!("restart {machine}: {error}"));
-                warn("final read", &error);
-                restart_errors.push(error);
+                warn(&format!("restart {machine}"), &error);
+                restart_errors.push(Error(format!("restart {machine}: {error}")));
             }
         }
         // Readiness is the readers' own check; reading reports what is left.

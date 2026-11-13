@@ -89,8 +89,9 @@ and reads into a `Verdict`, evaluated as an `always` property named by the
 checker. An undecided verdict evaluates nothing and the oracle exits 3, which
 marks the run incomplete. So does a failed step: `Nemesis::run` or
 `Nemesis::heal` returning an error, a client thread panicking, the world
-refusing a final read's restart, a breakpoint handler failing (the world's
-`break_error`) or the final property flush failing. The runner
+refusing a final read's restart, breakpoint serving stopping (a handler error
+or a failed wait or resume: the world's `break_error`) or the final property
+flush failing. The runner
 still stops the clients, heals, reads and checks after a failed `run`, keeps
 each failure in its `Report` beside the verdicts and prints a line naming them;
 the oracle exits 3 unless a check was violated, which exits 1:

@@ -65,7 +65,7 @@ pub type Checkers<O, V, R> = Vec<Box<dyn Checker<O, V, R>>>;
 /// runner still heals, reads and checks), but it leaves the run incomplete:
 /// the faults the scenario describes did not all happen or did not all end,
 /// a client stopped early, a node the final reads needed was not restarted,
-/// a breakpoint handler stopped, or the verdicts may not have reached the
+/// breakpoint serving stopped, or the verdicts may not have reached the
 /// run's results.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Report {
@@ -107,7 +107,7 @@ impl Report {
 
     /// One line for each step that failed, in the order the steps run: the
     /// nemesis run, the clients by index, the heal, the final reads'
-    /// restarts, the breakpoint handlers, then the property flush.
+    /// restarts, breakpoint serving, then the property flush.
     pub fn failures(&self) -> Vec<String> {
         let run = self.run_error.iter().map(|e| format!("nemesis run: {e}"));
         let panics = self.panics.iter();
