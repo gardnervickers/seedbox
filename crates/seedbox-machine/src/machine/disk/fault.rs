@@ -67,6 +67,21 @@ fn selects(op: DiskOp, kind: Kind) -> bool {
             | (DiskOp::Flush | DiskOp::Any, Kind::Flush)
     )
 }
+/// Whether a `disk_error` fault selects `request`: by op; `corrupt` only
+/// when the request carries data to replace; `data` scope never a flush,
+/// and otherwise only when `in_data` says the request misses the metadata
+/// ext4 laid out.
+fn error_selects(
+    op: DiskOp,
+    effect: DiskEffect,
+    scope: DiskScope,
+    request: Request,
+    in_data: impl FnOnce() -> bool,
+) -> bool {
+    selects(op, request.kind)
+        && (effect != DiskEffect::Corrupt || request.sectors > 0)
+        && (scope != DiskScope::Data || request.kind != Kind::Flush && in_data())
+}
 
 /// A named SHA-256 counter stream, as the machine's other policy streams.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,18 +295,15 @@ impl DiskFaults {
             else {
                 continue;
             };
-            if !selects(op, request.kind) {
+            // Unformatted disks have no data yet.
+            let in_data = || {
+                layout
+                    .get_or_insert_with(|| ext4::layout(&*store))
+                    .as_ref()
+                    .is_some_and(|l| !l.overlaps(request.sector, request.sectors))
+            };
+            if !error_selects(op, effect, scope, request, in_data) {
                 continue;
-            }
-            if scope == DiskScope::Data {
-                let layout = layout.get_or_insert_with(|| ext4::layout(store));
-                // Unformatted disks have no data yet; flushes have no sectors.
-                match layout {
-                    Some(layout)
-                        if request.kind != Kind::Flush
-                            && !layout.overlaps(request.sector, request.sectors) => {}
-                    _ => continue,
-                }
             }
             let fault = &mut self.installed[index];
             fault.counts.matched += 1;
@@ -310,9 +322,7 @@ impl DiskFaults {
             }
             DiskEffect::Corrupt => {
                 let fault = &mut self.installed[index];
-                // Draw the bytes even for a request without data, so the
-                // stream's position depends on selections, not on sizes.
-                let target = fault.stream.below(request.sectors.max(1));
+                let target = fault.stream.below(request.sectors);
                 let mut bytes = [0u8; SECTOR];
                 for chunk in bytes.chunks_mut(8) {
                     chunk.copy_from_slice(&fault.stream.next().to_le_bytes());
@@ -324,7 +334,7 @@ impl DiskFaults {
                     bytes,
                 };
                 let completion = request::execute(store, &mut corrupting)?;
-                if completion.status == request::STATUS_OK && request.sectors > 0 {
+                if completion.status == request::STATUS_OK {
                     fault.counts.affected += 1;
                 }
                 Ok(completion)

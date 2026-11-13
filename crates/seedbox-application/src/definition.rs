@@ -665,6 +665,19 @@ mod tests {
             "rootfs",
             &tar::Builder::new(Vec::new()).into_inner().unwrap(),
         );
+        // The fixture's oracle declares one anonymous volume.
+        let oracle_environment = |control_socket| wire::Environment {
+            hostname: "oracle".into(),
+            hosts: "127.0.0.1 localhost\n".into(),
+            anonymous_volumes: vec!["/tmp/data".into()],
+            named_volumes: vec![],
+            configs: BTreeMap::new(),
+            limits: wire::GuestLimits {
+                max_map_count: std::num::NonZeroU32::MIN,
+                nofile: std::num::NonZeroU32::MIN,
+            },
+            control_socket,
+        };
         let rootfs = ContentDigest::try_from(filesystem.sha256.clone()).unwrap();
         inputs.guests.insert("oracle".into(), rootfs.clone());
         let prepared_world = wire::Prepared {
@@ -682,9 +695,12 @@ mod tests {
                 progress: artifact("progress", b"fixture progress"),
                 runtime: artifact("runtime", b"fixture runtime"),
                 formatter: None,
-                environments: Default::default(),
+                environments: BTreeMap::from([(
+                    "oracle".into(),
+                    oracle_environment(definition.simulator.oracle_control),
+                )]),
                 boot_archives: Default::default(),
-                progress_budget: std::num::NonZeroU32::new(32).unwrap().into(),
+                progress_budget: definition.simulator.progress_budget,
                 epoch_seconds: 86400,
             },
             oracle: wire::Machine {
@@ -762,7 +778,6 @@ mod tests {
             .unwrap()
             .contains(directory.to_str().unwrap()));
         definition.oracle.process.argv.push("--changed".into());
-        definition.clock.epoch_seconds += 1;
         let edited = prepared(&definition, &store).unwrap();
         let settings = execution_settings_with_inputs(&edited).unwrap();
         assert!(settings.get("driver_world").is_some());
@@ -795,6 +810,8 @@ mod tests {
             seed: 42,
             program: &[],
             quantum_ns: simulation.simulator.quantum_ns,
+            progress_budget: simulation.simulator.progress_budget,
+            allow_crashes: &Default::default(),
             limits: &simulation.limits,
             network: &simulation.network,
             schedule: &simulation.schedule,
@@ -1015,7 +1032,7 @@ mod tests {
                     b"fixture runtime",
                 ),
                 formatter: None,
-                environments: Default::default(),
+                environments: BTreeMap::from([("oracle".into(), oracle_environment(true))]),
                 boot_archives: BTreeMap::from([(
                     "oracle".into(),
                     artifact(&format!("tcg-paired-boot-{process_changed}"), &boot),

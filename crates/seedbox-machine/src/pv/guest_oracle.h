@@ -29,13 +29,14 @@ void sbx_oracle_init(struct sbx_oracle *, sbx_oracle_write, void *);
 int sbx_oracle_open(struct sbx_oracle *, const char *path);
 /* Nonzero while every client slot is in use; poll the listener only when zero. */
 int sbx_oracle_full(const struct sbx_oracle *);
-/* Accept one pending connection into a free slot as a new session. */
+/* Accept one pending connection into a free slot; its session is numbered
+ * by its first request. */
 int sbx_oracle_accept(struct sbx_oracle *);
 /* Nonblocking read of one slot: disconnect abandons that slot's partial/reply
  * state, frees it, and tells the host with SBX_CLOSE1 once the session has
  * sent a request; pipelining within a session fails closed. Relay IDs are
- * shared by all sessions; session advances on each accept. Public JSON
- * identity is validated by host. */
+ * shared by all sessions; session advances on each session's first request.
+ * Public JSON identity is validated by host. */
 int sbx_oracle_read(struct sbx_oracle *, unsigned slot);
 /* One complete management line without newline, routed by the sole management
  * decoder to the slot holding its session. Match relay/session before

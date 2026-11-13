@@ -24,8 +24,11 @@ where
         match worker.capture_pending() {
             Ok(Some(checkpoint)) => control.checkpoint_captured(&checkpoint),
             Ok(None) => {}
-            Err(checkpoint::CaptureFailure::Refused(error)) => {
-                control.checkpoint_refused(error.to_string())
+            // The cached reply carries the same bounded detail as later polls.
+            Err(checkpoint::CaptureFailure::Refused(_)) => {
+                if let Some(refusal) = &worker.checkpoint_refusal {
+                    control.checkpoint_refused(refusal.detail.clone())
+                }
             }
             Err(checkpoint::CaptureFailure::Publication(error)) => return Err(error),
         }
