@@ -81,11 +81,27 @@ impl Client for Appender {
 
 /// A world whose sleeps wait for every client's workload to finish: a
 /// positive signal, bounded only by a generous containment timeout.
+/// It refuses restarts if `refuse_restart`, and reports `break_error`.
 struct FakeWorld {
     shared: Arc<Shared>,
     now_ns: u64,
     applied: Vec<Action>,
     clients: u64,
+    refuse_restart: bool,
+    break_error: Option<Error>,
+}
+
+impl FakeWorld {
+    fn new(shared: Arc<Shared>, clients: u64) -> Self {
+        Self {
+            shared,
+            now_ns: 0,
+            applied: Vec::new(),
+            clients,
+            refuse_restart: false,
+            break_error: None,
+        }
+    }
 }
 
 impl World for FakeWorld {
@@ -124,10 +140,13 @@ impl World for FakeWorld {
                     }
                 }
             }
-            Action::Restart { .. } => {}
+            Action::Restart { .. } if !self.refuse_restart => {}
             other => return Err(format!("unsupported {}", other.name()).into()),
         }
         Ok(())
+    }
+    fn break_error(&self) -> Option<Error> {
+        self.break_error.clone()
     }
 }
 
@@ -171,7 +190,12 @@ impl Nemesis for Isolate {
     }
 }
 
-struct Reads(Arc<Shared>);
+/// Reads every replica; if `n3_exited`, n3 is not ready at first and
+/// needs a restart.
+struct Reads {
+    shared: Arc<Shared>,
+    n3_exited: bool,
+}
 
 impl FinalRead for Reads {
     type Read = Vec<u64>;
@@ -179,17 +203,17 @@ impl FinalRead for Reads {
         NODES.iter().map(|n| n.to_string()).collect()
     }
     fn ready(&mut self) -> bool {
-        true
+        !std::mem::take(&mut self.n3_exited)
     }
-    fn exited(&mut self, _: &str) -> bool {
-        false
+    fn exited(&mut self, node: &str) -> bool {
+        node == "n3"
     }
     fn view(&mut self, node: &str) -> Value {
         json!(self.read(node).map(|log| log.len()).ok())
     }
     fn read(&mut self, node: &str) -> Result<Vec<u64>, String> {
         let index = NODES.iter().position(|n| *n == node).ok_or("no node")?;
-        Ok(self.0.lock().logs[index].clone())
+        Ok(self.shared.lock().logs[index].clone())
     }
     fn agree_for(&self) -> Duration {
         Duration::ZERO
@@ -240,6 +264,10 @@ struct Faults {
     fail_heal: bool,
     /// Client 1 panics in its last operation.
     panic: bool,
+    /// n3 needs a restart before the final reads, which the world refuses.
+    fail_restart: bool,
+    /// The world stopped serving breakpoints.
+    fail_break: bool,
 }
 
 struct Toy {
@@ -283,7 +311,10 @@ impl Scenario for Toy {
         })
     }
     fn final_read(&mut self) -> Box<dyn FinalRead<Read = Vec<u64>>> {
-        Box::new(Reads(self.shared.clone()))
+        Box::new(Reads {
+            shared: self.shared.clone(),
+            n3_exited: self.faults.fail_restart,
+        })
     }
     fn checkers(&self) -> Checkers<u64, usize, Vec<u64>> {
         vec![Box::new(Survives)]
@@ -300,10 +331,11 @@ fn outcome(faults: Faults) -> (Report, FakeWorld, Vec<Record<u64, usize>>) {
         faults,
     };
     let mut world = FakeWorld {
-        shared,
-        now_ns: 0,
-        applied: Vec::new(),
-        clients: 2,
+        refuse_restart: faults.fail_restart,
+        break_error: faults
+            .fail_break
+            .then(|| Error("handler: no leader".into())),
+        ..FakeWorld::new(shared, 2)
     };
     let report = run(&mut scenario, &mut world, &mut Rng::new(7));
     (report, world, history.records())
@@ -446,6 +478,37 @@ fn a_panicked_client_is_incomplete() {
 }
 
 #[test]
+fn a_refused_final_read_restart_is_incomplete() {
+    let (report, world, _) = outcome(Faults {
+        fail_restart: true,
+        ..Faults::default()
+    });
+    let restart = Action::Restart {
+        machine: "n3".into(),
+    };
+    assert_eq!(world.applied.last(), Some(&restart));
+    assert_eq!(report.verdicts[0].1.validity, Validity::Valid, "{report:?}");
+    let refused = Error("restart n3: unsupported restart".into());
+    assert_eq!(report.restart_errors, [refused]);
+    assert_eq!(
+        report.failures(),
+        ["final reads: restart n3: unsupported restart"]
+    );
+    assert_eq!(report.exit_code(), Report::UNKNOWN);
+}
+
+#[test]
+fn a_stopped_breakpoint_handler_is_incomplete() {
+    let (report, _, _) = outcome(Faults {
+        fail_break: true,
+        ..Faults::default()
+    });
+    assert_eq!(report.verdicts[0].1.validity, Validity::Valid, "{report:?}");
+    assert_eq!(report.failures(), ["breakpoints: handler: no leader"]);
+    assert_eq!(report.exit_code(), Report::UNKNOWN);
+}
+
+#[test]
 fn a_violated_check_outranks_every_failure() {
     for faults in [
         Faults {
@@ -463,6 +526,14 @@ fn a_violated_check_outranks_every_failure() {
         },
         Faults {
             panic: true,
+            ..Faults::default()
+        },
+        Faults {
+            fail_restart: true,
+            ..Faults::default()
+        },
+        Faults {
+            fail_break: true,
             ..Faults::default()
         },
     ] {
@@ -510,17 +581,16 @@ impl FinalRead for Converging {
 
 #[test]
 fn final_reads_restart_exited_nodes_and_wait_for_agreement() {
-    let mut world = FakeWorld {
-        shared: Arc::new(Shared::default()),
-        now_ns: 0,
-        applied: Vec::new(),
-        clients: 0,
-    };
+    let mut world = FakeWorld::new(Arc::new(Shared::default()), 0);
     let mut reader = Converging {
         polls: 0,
         ready: false,
     };
-    let reads = final_reads(&mut reader, &mut world);
+    let FinalReads {
+        reads,
+        restart_errors,
+    } = final_reads(&mut reader, &mut world);
+    assert!(restart_errors.is_empty(), "{restart_errors:?}");
     assert_eq!(
         world.applied,
         [Action::Restart {
@@ -606,12 +676,7 @@ fn verdicts_are_reported_as_properties_and_flushed() {
         history: Arc::new(Recorder::with_clock(|| 0)),
         faults: Faults::default(),
     };
-    let mut world = FakeWorld {
-        shared,
-        now_ns: 0,
-        applied: Vec::new(),
-        clients: 2,
-    };
+    let mut world = FakeWorld::new(shared, 2);
     let guest = seedbox_guest::Client::new(&path);
     let report = run_with(&mut scenario, &mut world, &mut Rng::new(7), &guest);
     assert_eq!(report.exit_code(), Report::INVALID);
@@ -624,4 +689,34 @@ fn verdicts_are_reported_as_properties_and_flushed() {
     assert_eq!(records[0]["assert"]["condition"], false);
     assert!(records[0]["assert"]["details"]["summary"].is_string());
     assert_eq!(records[1], json!({"flush": {}}));
+}
+
+/// A guest socket the oracle cannot reach fails the final flush, so the
+/// verdicts may not count: the run is incomplete although its check holds.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_failed_property_flush_is_incomplete() {
+    let directory = tempfile::Builder::new()
+        .prefix("sbx-run-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    // A regular file, not a socket: every connection to it is refused.
+    let path = directory.path().join("guest.sock");
+    std::fs::write(&path, b"").unwrap();
+    let shared = Arc::new(Shared::default());
+    let mut scenario = Toy {
+        shared: shared.clone(),
+        history: Arc::new(Recorder::with_clock(|| 0)),
+        faults: Faults::default(),
+    };
+    let mut world = FakeWorld::new(shared, 2);
+    let guest = seedbox_guest::Client::new(&path);
+    let report = run_with(&mut scenario, &mut world, &mut Rng::new(7), &guest);
+    assert_eq!(report.verdicts[0].1.validity, Validity::Valid, "{report:?}");
+    let failures = report.failures();
+    assert!(
+        matches!(&failures[..], [only] if only.starts_with("property flush: ")),
+        "{failures:?}"
+    );
+    assert_eq!(report.exit_code(), Report::UNKNOWN);
 }

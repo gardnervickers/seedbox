@@ -410,6 +410,16 @@ fn exit_codes_rank_violations_then_failed_steps_and_undecided_checks() {
     });
     assert_eq!(failed.exit_code(), Report::UNKNOWN);
     assert_eq!(failed.failures(), ["client 0 panicked: boom"]);
+    for step in [
+        |r: &mut Report| r.restart_errors.push(Error("restart n1: refused".into())),
+        |r: &mut Report| r.break_error = Some(Error("handler failed".into())),
+        |r: &mut Report| r.flush_error = Some(Error("no flush reply".into())),
+    ] {
+        let mut failed = report(&[Valid], false);
+        step(&mut failed);
+        assert_eq!(failed.exit_code(), Report::UNKNOWN, "{failed:?}");
+        assert_eq!(failed.failures().len(), 1, "{failed:?}");
+    }
 }
 
 /// Every kind the profile has, overlapping: faults hold for up to three
