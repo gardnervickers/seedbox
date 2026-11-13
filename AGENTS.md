@@ -28,7 +28,8 @@ We do not need to support every possible application. If someone intentionally t
   `seedbox-engine-protocol` owns wire/evidence types, not policy. `seedbox-artifacts`
   owns offline data; keep it independent of core, hypervisors, Bollard and Tokio.
 - New crates inherit workspace version/edition/publish; shared dependencies belong
-  in `[workspace.dependencies]`. Update `Cargo.lock` for dependency changes.
+  in `[workspace.dependencies]`. Update `Cargo.lock` for dependency changes, and
+  each `STANDALONE_PACKAGES` lockfile when its graph changes.
 
 ## Runtime and determinism
 
@@ -93,6 +94,8 @@ We do not need to support every possible application. If someone intentionally t
 - Run portable checks in `nix develop`; engine changes also need relevant native
   suites. Portable compiles native cases without running them. Missing requirements
   are blockers. Suite discovery/policy lives in `crates/seedbox-check/src/`.
+  Packages outside the workspace (an image's oracle) go in `STANDALONE_PACKAGES`
+  there, so portable formats, lints and unit-tests them.
 - Application workloads taking minutes (`harness/acceptance/long`, derived and
   determinism cases) use feature `long-application-tests`; only the
   `mac-apps-long`/`linux-apps-long` suites, in no group, run them.

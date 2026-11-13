@@ -78,9 +78,8 @@ int sbx_oracle_accept(struct sbx_oracle *s) {
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 0;
         return fail(s, errno);
     }
-    if (s->session == UINT32_MAX) { close(client); return fail(s, EOVERFLOW); }
     if (flags(client)) { int error = errno; close(client); return fail(s, error); }
-    c->session = ++s->session; c->fd = client; return 0;
+    c->fd = client; return 0;
 }
 int sbx_oracle_read(struct sbx_oracle *s, unsigned slot) {
     if (s->poisoned) { errno = EPIPE; return -1; }
@@ -99,6 +98,13 @@ int sbx_oracle_read(struct sbx_oracle *s, unsigned slot) {
             if (bytes[i] == '\n') {
                 if (!c->used) return fail(s, EINVAL);
                 if (s->relay == UINT32_MAX) return fail(s, EOVERFLOW);
+                /* The host learns of a session from its first request, so
+                 * number it here: first-request order stays ascending however
+                 * the connections were accepted. */
+                if (!c->spoke) {
+                    if (s->session == UINT32_MAX) return fail(s, EOVERFLOW);
+                    c->session = ++s->session;
+                }
                 c->pending = ++s->relay;
                 char frame[SBX_MANAGEMENT_FRAME_MAX];
                 int prefix = snprintf(frame, sizeof(frame), "SBX_RPC1 %u %u ", c->pending, c->session);

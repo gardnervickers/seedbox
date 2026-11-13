@@ -105,6 +105,11 @@ impl Ledger {
         self.allow_crashes.insert(machine);
     }
 
+    /// The machines whose crashes and out-of-memory kills are not violations.
+    pub fn allowed_crashes(&self) -> &BTreeSet<String> {
+        &self.allow_crashes
+    }
+
     /// Check a ledger decoded from a checkpoint against the bounds reduction
     /// keeps, so a restored run reduces exactly as the original would.
     pub fn validate(&self) -> Result<(), &'static str> {

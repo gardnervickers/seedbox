@@ -14,7 +14,7 @@ reset and applies to every incarnation until healed.
 
 | Action | Arguments | While active | Heal |
 | --- | --- | --- | --- |
-| `disk_error` | `request` (`read`, `write`, `flush`, `any`); `ppm`; `effect` (`eio` default, or `corrupt`); `scope` (`all` default, or `data`) | Selected requests fail with EIO before any disk effect, or succeed with one sector of seeded bytes. `data` spares the metadata ext4 lays out at format time, not metadata it allocates later; neither `corrupt` nor `data` selects flushes | Stops selecting; settles with `matched` and `affected` counts |
+| `disk_error` | `request` (`read`, `write`, `flush`, `any`); `ppm`; `effect` (`eio` default, or `corrupt`); `scope` (`all` default, or `data`) | Selected requests fail with EIO before any disk effect, or succeed with one sector of seeded bytes. `data` spares the metadata ext4 lays out at format time, not metadata it allocates later; `corrupt` selects only requests carrying data, and `data` never selects flushes | Stops selecting; settles with `matched` and `affected` counts |
 | `disk_latency` | `request`; `latency_ns` 1 µs–1 s; `jitter_ns` up to 1 s | Requests complete late, in submission order, with their disk effect at completion; a crash loses the pending ones | Stops delaying; queued requests still complete at their times; settles with counts |
 | `preempt` | `ppm` | The guest kernel yields at that rate of syscalls and progress charges. One per machine | Restores ordinary scheduling |
 
