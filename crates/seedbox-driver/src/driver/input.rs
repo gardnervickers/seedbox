@@ -124,7 +124,8 @@ pub enum Action {
     /// Withhold the machine's execution, including ordinary wakeups and
     /// timers, while retaining its state and pending input. Admitted only for
     /// a running, unpaused machine; a paused or physically exited target is
-    /// rejected.
+    /// rejected, as is one whose guest command is still waiting to be
+    /// acknowledged, which a paused machine could never do.
     Pause(Target),
     /// Resume a paused machine at the effect's time. A zero-budget run adopts
     /// elapsed time and delivers overdue timers without replaying paused CPU
