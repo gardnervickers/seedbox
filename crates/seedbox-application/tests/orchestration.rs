@@ -391,6 +391,9 @@ fn spawned_machines_join_the_fault_and_full_state_evidence() {
     const SPAWN: &str =
         "spawn of \"replica\" must add a new machine, once, that is present when the run stops";
     const BEFORE: &str = "crash effect on \"replica\" must name a configured machine, or a spawned machine after its spawn";
+    // A run from boot spawned every machine it was not prepared with.
+    const UNSPAWNED: &str =
+        "machine \"replica\" present when the run stops must be prepared or spawned in this run";
     for (faults, present, state, error) in [
         (
             spawn_and_crash.clone(),
@@ -427,6 +430,18 @@ fn spawned_machines_join_the_fault_and_full_state_evidence() {
             &["oracle", "replica"],
             &["oracle", "replica"],
             SPAWN,
+        ),
+        (
+            vec![],
+            &["oracle", "replica"],
+            &["oracle", "replica"],
+            UNSPAWNED,
+        ),
+        (
+            vec![effect("replica", "crash", 7)],
+            &["oracle", "replica"],
+            &["oracle", "replica"],
+            UNSPAWNED,
         ),
         (
             vec![effect("oracle", SPAWN_ACTION, 5)],
