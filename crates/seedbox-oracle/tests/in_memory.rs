@@ -306,6 +306,7 @@ fn run<S: Scenario>(scenario: &mut S, world: &mut dyn World) -> Report {
             .iter()
             .map(|c| (c.name().to_string(), c.check(&records, &reads)))
             .collect(),
+        ..Report::default()
     }
 }
 
@@ -363,8 +364,52 @@ fn appends_lost_by_a_partition_are_a_violation() {
     assert_eq!(unknown.condition(), None);
     let undecided = Report {
         verdicts: vec![("check".into(), unknown)],
+        ..Report::default()
     };
     assert_eq!(undecided.exit_code(), Report::UNKNOWN);
+}
+
+/// A violated check fails the run whatever else happened; otherwise a failed
+/// step, an undecided check or no check at all leaves it incomplete.
+#[test]
+fn exit_codes_rank_violations_then_failed_steps_and_undecided_checks() {
+    let verdict = |validity| Verdict {
+        validity,
+        summary: String::new(),
+        details: Value::Null,
+    };
+    let report = |validities: &[Validity], failed: bool| Report {
+        verdicts: validities
+            .iter()
+            .map(|v| ("check".to_string(), verdict(*v)))
+            .collect(),
+        run_error: failed.then(|| Error("shape: invalid_request".into())),
+        ..Report::default()
+    };
+    use Validity::*;
+    for (validities, failed, code) in [
+        (&[Valid][..], false, Report::OK),
+        (&[Valid], true, Report::UNKNOWN),
+        (&[Valid, Unknown], false, Report::UNKNOWN),
+        (&[], false, Report::UNKNOWN),
+        (&[], true, Report::UNKNOWN),
+        (&[Valid, Invalid], false, Report::INVALID),
+        (&[Valid, Invalid], true, Report::INVALID),
+        (&[Unknown, Invalid], true, Report::INVALID),
+    ] {
+        let report = report(validities, failed);
+        assert_eq!(report.exit_code(), code, "{report:?}");
+    }
+    let mut failed = report(&[Valid], false);
+    failed.heal_error = Some(Error("heal p1: no such handle".into()));
+    assert_eq!(failed.exit_code(), Report::UNKNOWN);
+    failed.heal_error = None;
+    failed.panics.push(ClientPanic {
+        client: 0,
+        message: "boom".into(),
+    });
+    assert_eq!(failed.exit_code(), Report::UNKNOWN);
+    assert_eq!(failed.failures(), ["client 0 panicked: boom"]);
 }
 
 /// Every kind the profile has, overlapping: faults hold for up to three
