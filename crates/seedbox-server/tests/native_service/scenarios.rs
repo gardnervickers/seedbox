@@ -655,6 +655,8 @@ fn fixture_submission(
     }
     configuration.check.service = oracle.into();
     configuration.machine.memory_mb = memory_mb;
+    // The definition carries the budget the PV boot archives were prepared with.
+    configuration.simulator.progress_budget = NonZeroU32::new(32).unwrap().into();
     configuration.control = fixture.control.then(|| seedbox_spec::Control {
         service: oracle.into(),
     });
@@ -1914,6 +1916,8 @@ fn network_world_submission(
     )
     .unwrap();
     configuration.machine.memory_mb = memory_mb;
+    // The definition carries the budget the PV boot archives were prepared with.
+    configuration.simulator.progress_budget = NonZeroU32::new(32).unwrap().into();
     configuration.control = controller.then(|| seedbox_spec::Control {
         service: "oracle".into(),
     });

@@ -279,6 +279,24 @@ pub(crate) fn request(
     if let Some(runtime) = runtime {
         runtime.wire.validate_archive(archive).map_err(bad)?;
     }
+    refuse_changed_machines(request, &prepared)?;
+    let controller = request.control.map(|control| {
+        request
+            .prepared
+            .placement
+            .get(&control.service)
+            .cloned()
+            .unwrap_or_else(|| control.service.clone())
+    });
+    if controller
+        .as_ref()
+        .is_some_and(|name| name != &prepared.oracle.name)
+    {
+        return Err(bad(
+            "Driver controller must name the retained oracle, not another retained machine",
+        ));
+    }
+    refuse_unprepared_edits(request, &prepared, controller.as_deref())?;
     let boots = match &mut prepared.inventory {
         wire::Inventory::Pv { boot_archives, .. } | wire::Inventory::Tcg { boot_archives, .. } => {
             boot_archives
@@ -304,6 +322,8 @@ pub(crate) fn request(
         let process_changed = machine.process != process;
         machine.process = process;
         machine.memory_bytes = u64::from(request.prepared.memory_mb(&machine.name)?) * 1024 * 1024;
+        // The Driver judges crashes from this, not from the boot archive.
+        machine.allow_crashes = request.allow_crashes.contains(&machine.name);
         let digest = request
             .prepared
             .guests
@@ -362,22 +382,6 @@ pub(crate) fn request(
             queue_bound_ns: link.queue_bound_ns,
         })
         .collect();
-    let controller = request.control.map(|control| {
-        request
-            .prepared
-            .placement
-            .get(&control.service)
-            .cloned()
-            .unwrap_or_else(|| control.service.clone())
-    });
-    if controller
-        .as_ref()
-        .is_some_and(|name| name != &prepared.oracle.name)
-    {
-        return Err(bad(
-            "Driver controller must name the retained oracle, not another retained machine",
-        ));
-    }
     {
         let policy = match &mut prepared.inventory {
             wire::Inventory::Pv { policy, .. } | wire::Inventory::Tcg { policy, .. } => policy,
@@ -395,15 +399,6 @@ pub(crate) fn request(
         };
         resolved.validate().map_err(bad)?;
         *policy = Some(resolved);
-    }
-    let epoch = request
-        .prepared
-        .wall_clock_epoch
-        .ok_or_else(|| bad("Driver realtime epoch was not resolved"))?;
-    match &mut prepared.inventory {
-        wire::Inventory::Pv { epoch_seconds, .. } | wire::Inventory::Tcg { epoch_seconds, .. } => {
-            *epoch_seconds = epoch
-        }
     }
     // Report a bad worker option only after mapping and import errors.
     let workers = request
@@ -475,6 +470,122 @@ pub(crate) fn request(
         observations: request.observations.map(Path::to_path_buf),
         resume_checkpoint: request.resume_checkpoint.map(Path::to_path_buf),
     })
+}
+/// A resolved definition replays the world it prepared. Its boot archives
+/// embed the realtime epoch, PV progress budget, volumes and control socket,
+/// and the factory builds later machines from the same inventory, so an edit
+/// to any of them, or to the machine set, is refused here rather than recorded
+/// and ignored. Process, memory and `allowCrashes` edits are applied instead.
+/// Refuses a definition whose machines differ from the prepared world's, naming
+/// a prepared machine the definition dropped (or the oracle it renamed) first.
+fn refuse_changed_machines(request: &ExecutionRequest<'_>, prepared: &Prepared) -> Result<()> {
+    let initial: BTreeSet<&str> = std::iter::once(&prepared.oracle)
+        .chain(&prepared.machines)
+        .map(|machine| machine.name.as_str())
+        .collect();
+    let declared: BTreeSet<&str> = request.prepared.images.keys().map(String::as_str).collect();
+    let change = if let Some(name) = initial.difference(&declared).next() {
+        if *name == prepared.oracle.name {
+            format!("oracle.name {name} is in the prepared world but missing from the definition")
+        } else {
+            format!("machines.{name} is in the prepared world but missing from the definition")
+        }
+    } else if let Some(name) = declared.difference(&initial).next() {
+        format!("machines.{name} is not in the prepared world")
+    } else {
+        return Ok(());
+    };
+    Err(Error::Setup(format!(
+        "{change}; a resolved definition replays the machines it prepared, so machines cannot be added, removed or renamed"
+    )))
+}
+fn refuse_unprepared_edits(
+    request: &ExecutionRequest<'_>,
+    prepared: &Prepared,
+    controller: Option<&str>,
+) -> Result<()> {
+    fn refuse(field: &str, change: &str) -> Error {
+        Error::Setup(format!(
+            "{field} {change}; a resolved definition replays prepared boot archives that embed it, so it cannot be changed"
+        ))
+    }
+    let (epoch, budget, environments) = match &prepared.inventory {
+        wire::Inventory::Pv {
+            epoch_seconds,
+            progress_budget,
+            environments,
+            ..
+        } => (*epoch_seconds, Some(*progress_budget), environments),
+        wire::Inventory::Tcg {
+            epoch_seconds,
+            environments,
+            ..
+        } => (*epoch_seconds, None, environments),
+    };
+    let clock = request
+        .prepared
+        .wall_clock_epoch
+        .ok_or_else(|| bad("Driver realtime epoch was not resolved"))?;
+    if clock != epoch {
+        return Err(refuse(
+            "clock.epochSeconds",
+            &format!("{clock} differs from the prepared {epoch}"),
+        ));
+    }
+    // TCG counts QEMU instructions and has no translator budget to embed.
+    if let Some(budget) = budget.filter(|budget| *budget != request.progress_budget) {
+        return Err(refuse(
+            "simulator.blocksPerProgressCall",
+            &format!(
+                "{} differs from the prepared {}",
+                request.progress_budget.get(),
+                budget.get()
+            ),
+        ));
+    }
+    for machine in std::iter::once(&prepared.oracle).chain(&prepared.machines) {
+        let field = |name: &str| {
+            if machine.name == prepared.oracle.name {
+                format!("oracle.{name}")
+            } else {
+                format!("machines.{}.{name}", machine.name)
+            }
+        };
+        let launch = &request.prepared.images[&machine.name].launch;
+        // A machine without a retained environment was prepared with none.
+        let environment = environments.get(&machine.name);
+        let volumes = super::volume_setup(&launch.disk_volumes)
+            .map_err(|error| Error::Setup(format!("{}: {error}", field("volumes"))))?;
+        let named = |volumes: &[wire::NamedVolume]| -> BTreeSet<(String, String)> {
+            volumes
+                .iter()
+                .map(|volume| (volume.name.clone(), volume.target.clone()))
+                .collect()
+        };
+        if named(&volumes.named_volumes)
+            != environment.map_or_else(BTreeSet::new, |e| named(&e.named_volumes))
+            || machine.disk != volumes.disk_bytes.map(|bytes| wire::Disk::Zero { bytes })
+        {
+            return Err(refuse(
+                &field("volumes"),
+                "differs from the prepared machine",
+            ));
+        }
+        if launch.volumes.as_slice() != environment.map_or(&[][..], |e| &e.anonymous_volumes) {
+            return Err(refuse(
+                &field("anonymousVolumes"),
+                "differs from the prepared machine",
+            ));
+        }
+        let control = controller == Some(machine.name.as_str());
+        if control != environment.is_some_and(|e| e.control_socket) {
+            return Err(refuse(
+                "simulator.oracleControl",
+                &format!("{control} differs from the prepared {}", !control),
+            ));
+        }
+    }
+    Ok(())
 }
 pub(super) fn bounded(path: &Path) -> Result<Vec<u8>> {
     let file = fs::File::open(path)?;
