@@ -87,7 +87,11 @@ the world's own), the standard fault `patterns` (kill/restart, process pauses,
 partitions, crash-all) and the `queue` checker. Each `Checker` turns the history
 and reads into a `Verdict`, evaluated as an `always` property named by the
 checker. An undecided verdict evaluates nothing and the oracle exits 3, which
-marks the run incomplete:
+marks the run incomplete. So does a failed step: `Nemesis::run` or
+`Nemesis::heal` returning an error, or a client thread panicking. The runner
+still stops the clients, heals, reads and checks after a failed `run`, keeps
+each failure in its `Report` beside the verdicts and prints a line naming them;
+the oracle exits 3 unless a check was violated, which exits 1:
 
 ```rust
 impl Checker<Publish, Ack, Stream> for Queue {
@@ -130,7 +134,8 @@ message. `heal` ends every fault still in force. A partition cuts its target off
 from `from`, and a shape delays traffic to `to`; each defaults to the other
 targets. `disk_error` and `disk_latency` entries may narrow the targets to the
 machines with a volume. The world checks what needs the world, such as the
-network's latency floor, when the action is applied, and a refusal fails `run`.
+network's latency floor, when the action is applied, and a refusal fails `run`,
+which leaves the run incomplete unless a check is violated.
 With `skip_unsupported: true`, the profile instead skips a kind the engine
 refuses as `unsupported` (`preempt` on x86_64 PV) and never draws it again;
 `run` fails if no kind is left, and `unsupported()` lists the kinds skipped. See

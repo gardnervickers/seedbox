@@ -278,8 +278,18 @@ impl Orchestrator {
                 simulated_time_ns: record.identity.configuration.limits.simulated_time_ns,
                 wall_time_ns: options.wall_time_ns.unwrap_or(u64::MAX),
             };
+            let allow_crashes = record
+                .identity
+                .configuration
+                .services
+                .iter()
+                .filter(|(_, service)| service.allow_crashes)
+                .map(|(name, _)| name.clone())
+                .collect();
             let mut report = executor.execute(ExecutionRequest {
                 quantum_ns: record.identity.configuration.simulator.quantum_ns,
+                progress_budget: record.identity.configuration.simulator.progress_budget,
+                allow_crashes: &allow_crashes,
                 start_paused: self.start_paused,
                 resume_checkpoint: self.resume_checkpoint.as_deref(),
                 intervention_history: Some(&directory.join("interventions.json")),

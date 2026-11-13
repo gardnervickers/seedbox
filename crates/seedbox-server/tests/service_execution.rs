@@ -836,6 +836,32 @@ async fn completed_comparison_uses_owned_evidence_not_attempt_files() {
 }
 
 #[tokio::test]
+async fn comparing_with_an_unknown_simulation_is_not_found() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let host = HostService::start(Behavior::WithWitness).await;
+        let accepted = host
+            .client
+            .submit(&test_support::resolved_request("compare-known"))
+            .await
+            .unwrap();
+        host.completed(&accepted.metadata.id).await;
+        let known = &accepted.metadata.id;
+        let unknown: seedbox_api::SimulationId = "23456789".parse().unwrap();
+        for (baseline, simulation) in [(known, &unknown), (&unknown, known)] {
+            let error = host.client.compare(baseline, simulation).await.unwrap_err();
+            assert!(
+                matches!(&error, Error::Rejected { code: ErrorCode::NotFound, message }
+                    if *message == format!("simulation not found: {unknown}")),
+                "{error}"
+            );
+        }
+        host.shutdown().await;
+    })
+    .await
+    .expect("unknown comparison exceeded its hang guard");
+}
+
+#[tokio::test]
 async fn missing_final_journal_completes_with_explicit_error_and_no_comparable_evidence() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let host = HostService::start(Behavior::MissingJournal).await;

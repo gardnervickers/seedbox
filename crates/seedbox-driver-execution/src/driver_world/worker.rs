@@ -52,7 +52,9 @@ pub(super) struct Worker<M: Machine> {
     publisher: Publisher,
     prepared: Option<Prepared>,
     checkpoint: Option<host::CheckpointStatus>,
-    checkpoint_refusal: Option<String>,
+    /// The checkpoint request whose capture was refused, with the reason.
+    /// Only a `Checkpoint` naming that request reports it.
+    checkpoint_refusal: Option<Refusal>,
     terminal: bool,
     failed: bool,
     measurement: Option<(u64, Instant)>,
@@ -63,6 +65,40 @@ pub(super) struct Worker<M: Machine> {
 pub(super) struct Facts {
     pub admissions: Vec<FaultRecord>,
     pub rejections: Vec<(InputKey, String)>,
+}
+struct Refusal {
+    request_id: String,
+    detail: String,
+}
+/// Longest refusal detail, in JSON-encoded bytes, that a checkpoint reply
+/// carries. Every control reply must fit one `MAX_DATAGRAM`, and a reply that
+/// does not ends the worker's run, so an arbitrarily long I/O or Driver error
+/// is cut short here rather than taking the simulation down with it.
+const REFUSAL_DETAIL_LIMIT: usize = 1024;
+const TRUNCATED: &str = " [truncated]";
+impl Refusal {
+    fn new(request_id: String, error: &checkpoint::CaptureFailure) -> Self {
+        let mut detail = error.to_string();
+        // Count escapes conservatively so the encoded detail stays in bounds.
+        let encoded = |c: char| match c {
+            '"' | '\\' | '\u{0}'..='\u{1f}' => 6,
+            c => c.len_utf8(),
+        };
+        if detail.chars().map(encoded).sum::<usize>() > REFUSAL_DETAIL_LIMIT {
+            let budget = REFUSAL_DETAIL_LIMIT - TRUNCATED.len();
+            let mut used = 0;
+            let end = detail
+                .char_indices()
+                .find(|&(_, c)| {
+                    used += encoded(c);
+                    used > budget
+                })
+                .map_or(detail.len(), |(at, _)| at);
+            detail.truncate(end);
+            detail.push_str(TRUNCATED);
+        }
+        Self { request_id, detail }
+    }
 }
 pub(super) enum Dispatch {
     Reply(Reply),
@@ -250,6 +286,20 @@ where
     /// or reinterpreted as another kind of control.
     pub(super) fn playback_request(&mut self, request: Request) -> Result<Dispatch> {
         let mut reply = self.status(request.id)?;
+        // The server polls a pending checkpoint under fresh wire IDs until it
+        // resolves. Answer the refused request with its refusal, even after
+        // the run ends, instead of capturing it again.
+        if let Command::Checkpoint { request_id } = &request.command {
+            if let Some(refusal) = self
+                .checkpoint_refusal
+                .as_ref()
+                .filter(|refusal| refusal.request_id == *request_id)
+            {
+                reply.error = Some(ControlError::InvalidCheckpoint);
+                reply.detail = Some(refusal.detail.clone());
+                return Ok(Dispatch::Reply(reply));
+            }
+        }
         if self.terminal && request.command != Command::Status {
             reply.error = Some(ControlError::Completed);
             return Ok(Dispatch::Reply(reply));
@@ -276,13 +326,7 @@ where
             return Ok(Dispatch::Reply(reply));
         }
         let result = match &request.command {
-            Command::Status => {
-                if let Some(detail) = &self.checkpoint_refusal {
-                    reply.error = Some(ControlError::InvalidCheckpoint);
-                    reply.detail = Some(detail.clone());
-                }
-                return Ok(Dispatch::Reply(reply));
-            }
+            Command::Status => return Ok(Dispatch::Reply(reply)),
             Command::SetRate { rate } => {
                 self.driver.with_barrier(|barrier| barrier.set_rate(*rate))
             }
@@ -299,6 +343,8 @@ where
                 {
                     return Ok(Dispatch::Reply(reply));
                 }
+                // Any request other than the refused one starts afresh.
+                self.checkpoint_refusal = None;
                 let error = if playback.rate != driver::PlaybackRate::Paused {
                     Some(ControlError::NotPaused)
                 } else if !self.state.world.readiness.latched {
@@ -311,7 +357,6 @@ where
                 if let Some(error) = error {
                     reply.error = Some(error)
                 } else {
-                    self.checkpoint_refusal = None;
                     self.checkpoint = Some(host::CheckpointStatus {
                         request_id: request_id.clone(),
                         position: reply.position,
@@ -376,11 +421,11 @@ where
             self.write_snapshot,
         );
         if let Err(error) = result {
-            // Refusal is returned once, never automatically retried by the
-            // boundary loop. Lost publication state is separately terminal.
+            // A refusal is never automatically retried: later polls for the
+            // same request receive it. Lost publication state is terminal.
             self.checkpoint = None;
             if matches!(error, checkpoint::CaptureFailure::Refused(_)) {
-                self.checkpoint_refusal = Some(error.to_string());
+                self.checkpoint_refusal = Some(Refusal::new(checkpoint.request_id, &error));
             }
             if matches!(error, checkpoint::CaptureFailure::Publication(_)) {
                 self.terminal = true;

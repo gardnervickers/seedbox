@@ -906,6 +906,53 @@ fn run_workers_change_capacity_without_changing_identity_and_quantum_is_retained
 }
 
 #[test]
+fn allowed_crashes_and_progress_budget_reach_the_executor_on_run_and_replay() {
+    let mut fixture = Fixture::new();
+    fixture.simulation.simulator.progress_budget = std::num::NonZeroU32::new(77).unwrap().into();
+    fixture
+        .simulation
+        .services
+        .insert("app".into(), fixture.simulation.services["oracle"].clone());
+    fixture
+        .simulation
+        .services
+        .get_mut("app")
+        .unwrap()
+        .allow_crashes = true;
+    assert!(!fixture.simulation.services["oracle"].allow_crashes);
+    let image = fixture.preparer.inputs.images["oracle"].clone();
+    let guest = fixture.preparer.inputs.guests["oracle"].clone();
+    fixture.preparer.inputs.images.insert("app".into(), image);
+    fixture.preparer.inputs.guests.insert("app".into(), guest);
+    fixture
+        .preparer
+        .inputs
+        .placement
+        .insert("app".into(), "app".into());
+    let seen = std::sync::Mutex::new(Vec::new());
+    let executor = fixture.executing(|request| {
+        seen.lock()
+            .unwrap()
+            .push((request.allow_crashes.clone(), request.progress_budget.get()));
+        Ok(fixture.backend.report.clone())
+    });
+    let run = fixture
+        .orchestrator
+        .run(
+            &fixture.simulation,
+            RunOptions::default(),
+            &fixture.preparer,
+            &executor,
+        )
+        .unwrap();
+    assert_eq!(run.record.outcome, Outcome::Pass);
+    let replay = replay_retained(&fixture.orchestrator, &run.directory, &executor).unwrap();
+    assert_eq!(replay.comparison.status, ComparisonStatus::Match);
+    let expected = (std::collections::BTreeSet::from(["app".to_string()]), 77);
+    assert_eq!(*seen.lock().unwrap(), vec![expected.clone(), expected]);
+}
+
+#[test]
 fn performance_changes_are_recorded_without_changing_identity_or_bypassing_comparison() {
     let mut fixture = Fixture::new();
     let first = fixture.run();
