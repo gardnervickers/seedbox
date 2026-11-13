@@ -221,7 +221,11 @@ pub trait Round {
     ) -> Result<(), Error>;
 }
 
-/// A [`Nemesis`] that runs one [`Round`] pattern over [`Phases`].
+/// A [`Nemesis`] that runs one [`Round`] pattern over [`Phases`]: it reads
+/// the world's clock when the warm-up ends, runs a first round, then starts
+/// another whenever less than `hold` has passed since. Every schedule runs
+/// at least one round, so a zero `hold` runs exactly one. A round is never
+/// cut short, so the last one can run past `hold`.
 pub struct Schedule<R> {
     pub phases: Phases,
     pub round: R,
@@ -254,10 +258,13 @@ impl<R: Round> Nemesis for Schedule<R> {
         self.pace.wait(world, self.phases.warm_up)?;
         let start = world.now_ns()?;
         let hold = u64::try_from(self.phases.hold.as_nanos()).unwrap_or(u64::MAX);
-        while world.now_ns()?.saturating_sub(start) < hold {
+        loop {
             self.rounds += 1;
             self.round
                 .round(&mut self.faults, world, self.pace.as_mut(), random)?;
+            if world.now_ns()?.saturating_sub(start) >= hold {
+                break;
+            }
         }
         self.pace.wait(world, self.phases.tail)
     }
