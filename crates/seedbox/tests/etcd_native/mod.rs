@@ -30,20 +30,10 @@ struct Cli {
 impl Cli {
     fn command(&self) -> Command {
         let mut command = Command::new(&self.executable);
-        // This case owns a complete embedded Driver build. Inherited bootstrap
-        // paths (including nix develop's static mke2fs) select legacy mode and
-        // must not override that build. Preserve the engine connection settings.
-        for key in [
-            "SEEDBOX_VMM",
-            "SEEDBOX_KERNEL",
-            "SEEDBOX_RUNTIME_ASSETS",
-            "SEEDBOX_GUEST_INIT",
-            "SEEDBOX_MKE2FS",
-            "SEEDBOX_ASSET_DIR",
-        ] {
-            command.env_remove(key);
-        }
+        // This case owns a complete embedded Driver build; an inherited asset
+        // directory must not override it. Preserve the engine connection settings.
         command
+            .env_remove("SEEDBOX_ASSET_DIR")
             .env("SEEDBOX_STATE", &self.state)
             .stdin(Stdio::null())
             .kill_on_drop(true);
@@ -1156,7 +1146,7 @@ esac
     }
 
     #[test]
-    fn normal_cli_command_clears_legacy_bootstrap_overrides() {
+    fn normal_cli_command_clears_the_inherited_asset_directory() {
         let cli = Cli {
             executable: "unused-cli".into(),
             directory: "unused-reports".into(),
@@ -1168,16 +1158,10 @@ esac
             .get_envs()
             .map(|(key, value)| (key.to_owned(), value.map(OsStr::to_os_string)))
             .collect();
-        for key in [
-            "SEEDBOX_VMM",
-            "SEEDBOX_KERNEL",
-            "SEEDBOX_RUNTIME_ASSETS",
-            "SEEDBOX_GUEST_INIT",
-            "SEEDBOX_MKE2FS",
-            "SEEDBOX_ASSET_DIR",
-        ] {
-            assert_eq!(environment.get(OsStr::new(key)), Some(&None), "{key}");
-        }
+        assert_eq!(
+            environment.get(OsStr::new("SEEDBOX_ASSET_DIR")),
+            Some(&None)
+        );
         assert_eq!(
             environment.get(OsStr::new("SEEDBOX_STATE")),
             Some(&Some(cli.state.into_os_string()))

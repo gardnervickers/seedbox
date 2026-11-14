@@ -24,7 +24,7 @@ fn recomputed_valid_unsupported_versions_and_unknown_fixed_fields_are_rejected()
     )
     .unwrap();
     assert_eq!(inspect(root.path()).unwrap(), original);
-    for version in [1, 999] {
+    for version in [0, 999] {
         let mut record = original.clone();
         record.identity.version = version;
         record.run_id = ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());

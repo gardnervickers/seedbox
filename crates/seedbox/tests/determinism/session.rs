@@ -72,7 +72,6 @@ impl Session {
     pub fn cli(&self, args: &[&str]) -> Result<Vec<u8>, String> {
         let output = Command::new(&self.cli)
             .args(args)
-            .env_remove("SEEDBOX_VMM")
             .env("SEEDBOX_STATE", &self.state)
             .guarded_output()
             .map_err(|error| format!("{}: {error}", self.cli.display()))?;
@@ -546,7 +545,6 @@ impl Server {
         ]);
         let mut server = Self(
             command
-                .env_remove("SEEDBOX_VMM")
                 .env("SEEDBOX_STATE", state)
                 .stdout(Stdio::piped())
                 .guarded_spawn()

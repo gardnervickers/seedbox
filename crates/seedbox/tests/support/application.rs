@@ -79,7 +79,6 @@ fn run(
     let mut command = Command::new(cli);
     command
         .args(args)
-        .env_remove("SEEDBOX_VMM")
         .env("SEEDBOX_STATE", state)
         .stdout(stdout)
         .stderr(stderr);
@@ -155,10 +154,7 @@ pub fn first_run(
                 ),
             ] {
                 let mut command = Command::new(cli);
-                command
-                    .args(args)
-                    .env_remove("SEEDBOX_VMM")
-                    .env("SEEDBOX_STATE", state);
+                command.args(args).env("SEEDBOX_STATE", state);
                 if let Err(error) = failure_capture::command(command, &failure, label, &guard) {
                     failure_capture::note(&failure, &format!("{label}: {error}"));
                 }
@@ -251,10 +247,7 @@ pub fn compare(
                 ("logs", vec!["logs", id, "--tail", "100"]),
             ] {
                 let mut command = Command::new(cli);
-                command
-                    .args(&args)
-                    .env_remove("SEEDBOX_VMM")
-                    .env("SEEDBOX_STATE", state);
+                command.args(&args).env("SEEDBOX_STATE", state);
                 if let Err(error) = failure_capture::command(
                     command,
                     &failure,

@@ -131,7 +131,6 @@ fn guest_properties_decide_runs_whose_oracle_passes() {
             let log = directory.join("first.log");
             let status = Command::new(cli)
                 .args(["run", project.to_str().unwrap(), "--wall-time", "30m"])
-                .env_remove("SEEDBOX_VMM")
                 .env("SEEDBOX_STATE", state)
                 .stdout(fs::File::create(&log).map_err(|e| e.to_string())?)
                 .stderr(Stdio::inherit())

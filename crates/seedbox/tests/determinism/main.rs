@@ -189,7 +189,6 @@ impl Run {
             ] {
                 let output = Command::new(&self.cli)
                     .args(&args)
-                    .env_remove("SEEDBOX_VMM")
                     .env("SEEDBOX_STATE", &self.live)
                     .guarded_output();
                 let text = match output {
