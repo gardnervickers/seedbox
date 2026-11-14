@@ -24,17 +24,11 @@
       shell = system:
         let
           pkgs = import nixpkgs { inherit system; };
-          filesystemTools = (import ./nix/filesystem-tools.nix { inherit pkgs; }).filesystemTools;
           tcgQemu = import ./nix/tcg.nix { inherit pkgs; };
           tcgLinux = import ./nix/tcg-linux.nix { inherit pkgs; };
           checker = import ./nix/seedbox-check.nix { inherit pkgs; };
-          linuxEnvironment = {
-            SEEDBOX_IP = "${pkgs.iproute2}/bin/ip";
-            SEEDBOX_TC = "${pkgs.iproute2}/bin/tc";
-            SEEDBOX_MKE2FS = "${filesystemTools.bin}/bin/mke2fs";
-          };
         in {
-          default = pkgs.mkShell ({
+          default = pkgs.mkShell {
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
             # Provisioned before invocation: wrappers never compile or download.
             SEEDBOX_CHECK = "${checker}/bin/seedbox-check";
@@ -50,7 +44,7 @@
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               elfutils elfutils.dev openssl.dev pkgsStatic.stdenv.cc iproute2 go util-linux patchelf
             ];
-          } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux linuxEnvironment);
+          };
         };
     in {
       devShells = nixpkgs.lib.genAttrs systems shell;
