@@ -318,6 +318,81 @@ fn a_retained_snapshot_is_the_whole_capture_of_its_moment() {
     }
 }
 
+/// What a caller that keeps many snapshots runs with: nothing is compared but
+/// by this test, which finds the snapshot and the machine rewound to it to be
+/// the whole capture of its moment.
+#[test]
+#[ignore = "requires a native PV hypervisor and SEEDBOX_PV_WORKER"]
+fn an_unverified_snapshot_and_rewind_are_the_capture_of_their_moment() {
+    let mut machine = counting(5, None);
+    machine.retain_snapshots(Retention {
+        limit_bytes: u64::MAX,
+        verify: false,
+    });
+    step(&mut machine, 20);
+    let whole = machine.capture().unwrap().bytes();
+    let snapshot = machine.snapshot().unwrap();
+    assert!(snapshot.bytes() == whole);
+    step(&mut machine, 30);
+    let later = machine.capture().unwrap().bytes();
+    assert!(later != whole);
+    let stops = to_power_off(&mut machine, 30);
+
+    let mut branch = restore(&snapshot);
+    assert_eq!(branch.restored(), Some(Restored::Rewound { pages: 1 }));
+    assert!(branch.capture().unwrap().bytes() == whole);
+    step(&mut branch, 30);
+    assert!(branch.capture().unwrap().bytes() == later);
+    assert_eq!(to_power_off(&mut branch, 30), stops);
+}
+
+/// Two threads restore one snapshot at once and keep their machines: its
+/// worker goes back in place for one, and the other is copied out of it into
+/// a worker of its own. Both then run at once while the snapshot is dropped,
+/// which waits its turn in the worker it shares.
+#[test]
+#[ignore = "requires a native PV hypervisor and SEEDBOX_PV_WORKER"]
+fn restores_at_once_of_one_snapshot_get_a_worker_each() {
+    let mut machine = counting(5, None);
+    step(&mut machine, 20);
+    let snapshot = machine.snapshot().unwrap();
+    let worker = process(&machine);
+    let stops = to_power_off(&mut machine, 20);
+    assert_eq!(stops.len(), 3);
+
+    let start = std::sync::Barrier::new(2);
+    let mut branches: Vec<Environment> = std::thread::scope(|scope| {
+        let restores: Vec<_> = (0..2)
+            .map(|_| {
+                scope.spawn(|| {
+                    start.wait();
+                    restore(&snapshot)
+                })
+            })
+            .collect();
+        restores
+            .into_iter()
+            .map(|restore| restore.join().unwrap())
+            .collect()
+    });
+    let restored: Vec<_> = branches.iter().map(|branch| branch.restored()).collect();
+    assert!(
+        restored.contains(&Some(Restored::Rewound { pages: 1 }))
+            && restored.contains(&Some(Restored::Exported)),
+        "{restored:?}"
+    );
+    let rewound = usize::from(restored[1] == Some(Restored::Rewound { pages: 1 }));
+    assert_eq!(process(&branches[rewound]), worker);
+    assert_ne!(process(&branches[1 - rewound]), worker);
+
+    std::thread::scope(|scope| {
+        for branch in &mut branches {
+            scope.spawn(|| assert_eq!(to_power_off(branch, 20), stops));
+        }
+        drop(snapshot);
+    });
+}
+
 #[test]
 #[ignore = "requires a native PV hypervisor and SEEDBOX_PV_WORKER"]
 fn a_full_store_refuses_a_snapshot_and_loses_nothing() {
@@ -331,6 +406,10 @@ fn a_full_store_refuses_a_snapshot_and_loses_nothing() {
     };
     let refused = |machine: &mut Environment, limit_bytes| {
         refusal(&retain(machine, limit_bytes).err().unwrap())
+    };
+    let full = |held_bytes, limit_bytes| SnapshotStoreFull {
+        held_bytes,
+        limit_bytes,
     };
     let error = retain(&mut machine, 0).err().unwrap();
     assert_eq!(
@@ -351,12 +430,10 @@ fn a_full_store_refuses_a_snapshot_and_loses_nothing() {
     // An unchanged machine costs nothing more.
     let same = retain(&mut machine, held).unwrap();
     assert_eq!(same.copied_pages(), Some(0));
+    // Under a lower limit even that is refused: the store is already over it.
+    assert_eq!(refused(&mut machine, held - PAGE), full(held, held - PAGE));
     // A count on, the page holding it does not fit.
     step(&mut machine, 20);
-    let full = |held_bytes, limit_bytes| SnapshotStoreFull {
-        held_bytes,
-        limit_bytes,
-    };
     assert_eq!(refused(&mut machine, held), full(held, held));
     // The refusal lost nothing: the next snapshot still copies that page.
     let second = retain(&mut machine, held + PAGE).unwrap();
