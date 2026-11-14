@@ -608,13 +608,20 @@ impl ExecutionService {
             .map_err(|error| seedbox_application::Error::Setup(error.to_string()))?;
         // A run from its project can prepare machines the oracle spawns, and
         // so can a seed-range member of that project; a replay of a resolved
-        // definition has every one it needs retained.
+        // definition has every one it needs retained. A member prepares from
+        // the project directory as it is when it spawns, so an edit during a
+        // long range can make it differ from a fresh run of its seed (its own
+        // replay still matches).
         let project = match &spec.inputs {
             InputSource::Resolved { .. } => self
                 .manager
                 .read(|catalogue| Ok(catalogue.range_project(id)?.cloned()))
                 .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?
-                .map(|configuration| for_architecture(configuration, architecture))
+                .map(|mut configuration| {
+                    seedbox_api::resolve_architecture(&mut configuration, architecture)
+                        .map(|()| configuration)
+                        .map_err(seedbox_application::Error::Setup)
+                })
                 .transpose()?,
             _ => Some(spec.configuration.clone()),
         };
@@ -862,23 +869,6 @@ impl ExecutionService {
             .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
         Ok(())
     }
-}
-
-/// Resolve a submitted project's platforms for this server, as its own run did.
-fn for_architecture(
-    configuration: Simulation,
-    architecture: seedbox_spec::definition::Architecture,
-) -> seedbox_application::Result<Simulation> {
-    let mut project = seedbox_api::SimulationSpec {
-        configuration,
-        inputs: InputSource::Project,
-        seed: None,
-        program: Vec::new(),
-    };
-    project
-        .resolve_project_architecture(architecture)
-        .map_err(seedbox_application::Error::Setup)?;
-    Ok(project.configuration)
 }
 
 /// Name the prepared execution settings and guest archives in the definition.
