@@ -39,9 +39,9 @@ fn deferred_capture_keeps_configured_memory_after_source_destruction() {
         let source = machine.directory.path().to_owned();
         let snapshot = machine.capture().unwrap();
         let copy = snapshot.clone();
-        assert!(std::sync::Arc::ptr_eq(&snapshot.bytes, &copy.bytes));
+        assert!(Arc::ptr_eq(&snapshot.bytes(), &copy.bytes()));
         assert!(
-            snapshot.bytes.len() < 65536,
+            snapshot.bytes().len() < 65536,
             "deferred snapshot allocates no guest RAM"
         );
         drop(machine);

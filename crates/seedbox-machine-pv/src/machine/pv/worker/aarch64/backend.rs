@@ -65,6 +65,23 @@ pub(in super::super) trait Backend: Sized {
         Ok(())
     }
     fn restore(&mut self, state: &Architecture) -> Result<()>;
+    /// Start recording, in the RAM mapping's dirty set, the pages the guest
+    /// writes. Until then guest writes are not recorded and cost nothing.
+    fn track(&mut self) -> Result<()> {
+        Err("PV retained snapshots are unavailable on this backend".into())
+    }
+    /// Bring the dirty set up to date with every guest write so far, and
+    /// record the next write to each of those pages again.
+    fn collect(&mut self) -> Result<()> {
+        Err("PV retained snapshots are unavailable on this backend".into())
+    }
+    /// Bring the dirty set up to date as `collect` does, then discard all
+    /// hypervisor state: over the same mappings, and still tracking writes,
+    /// the backend is as `create` left it, so `restore` applies as it does to
+    /// a new machine.
+    fn reset(&mut self) -> Result<()> {
+        Err("PV retained snapshots are unavailable on this backend".into())
+    }
 }
 
 // Closed persisted record: exhaustive destructuring prevents silently omitting new fields.

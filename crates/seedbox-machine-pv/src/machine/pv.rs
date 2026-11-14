@@ -19,6 +19,9 @@
 //! never the Shutdown request itself.
 //! Snapshots preserve both layers without promotion and share the immutable
 //! base, independent of the source machine.
+//! A machine told to retain its snapshots ([`Retention`]) keeps those of a
+//! live boot in the boot's worker, which then outlives the boot and the
+//! machine for as long as one of them can rewind it.
 //! Guest PV rendezvous define accepted time; host interruptions are invisible.
 //! The Driver owns idle advancement. A standard virtio-console port named
 //! `seedbox-lifecycle` carries `shutdown\n` to a cooperating guest supervisor.
@@ -28,9 +31,9 @@
 //! as `Shutdown` and a guest reset request (deliberate reboot or panic restart)
 //! as `Crashed`; the worker never resets itself. Terminal requests before the
 //! handshake, unknown exits and hypervisor failures are errors.
-//! Snapshot bytes own boot inputs and all stopped worker/device state. Native
-//! architectural snapshot support currently requires macOS/HVF or x86-64 KVM;
-//! Linux ARM64 KVM snapshots are unsupported.
+//! An encoded snapshot owns boot inputs and all stopped worker/device state.
+//! Native architectural snapshot support currently requires macOS/HVF or
+//! x86-64 KVM; Linux ARM64 KVM snapshots are unsupported.
 mod boot;
 mod client;
 mod codec;
@@ -46,7 +49,7 @@ mod retained;
 mod shm;
 mod wire;
 mod worker;
-use client::Worker;
+use client::Occupant;
 pub use factory::Factory;
 use protocol::{BootDisk, Request, Response, Stop};
 use seedbox_machine::definition::{BackendPolicy, DiskImage};
@@ -58,6 +61,7 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use tempfile::TempDir;
 pub(crate) use worker::serve as serve_worker;
@@ -71,7 +75,7 @@ enum State {
     Crashed,
     Invalid,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Capture {
     memory_bytes: u64,
     layout_version: u32,
@@ -94,21 +98,120 @@ struct Capture {
     /// Declared breakpoint names. A held machine is never captured.
     breaks: Vec<String>,
 }
-/// An owned capture of internal machine state, including pending resets.
-/// It contains no live worker, mapping or hypervisor handles.
+/// A stopped machine's internal state, including pending resets. It is
+/// immutable, cheap to clone, and independent of the machine it was taken
+/// from, which may run on or be dropped.
+///
+/// A snapshot of a live boot is a whole capture of the boot's worker, all of
+/// RAM included, unless the machine retains its snapshots ([`Retention`]).
+/// A retained snapshot stays in the worker instead. It keeps that worker,
+/// and the scratch directory of the machine that took it, until it is
+/// dropped, and using or dropping it waits for a run in progress there.
 #[derive(Clone)]
 pub struct Snapshot {
-    // The immutable body owns the exact resource/boot/native state; the
-    // separately owned disk base closes the capture independently of temp files.
-    #[cfg_attr(not(test), allow(dead_code))]
-    // Capture bytes are immutable; sharing the owned Vec avoids full-RAM copies
-    // when a caller retains multiple restore branches.
-    bytes: std::sync::Arc<Vec<u8>>,
-    /// The immutable base, shared rather than copied into `bytes`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    body: Body,
+    /// The immutable base, shared rather than copied into the body.
     disk: Option<DiskImage>,
     aux: retained::Aux,
 }
+// Every kind is immutable and shared, so a caller that keeps many restore
+// branches copies none of it.
+#[derive(Clone)]
+enum Body {
+    /// A whole capture, as [`assemble`] lays it out: a decoded snapshot, a
+    /// machine between boots, or a live boot copied out of its worker.
+    Image(Arc<Vec<u8>>),
+    /// A live boot kept in its worker.
+    Retained(Arc<Retained>),
+}
+/// The part of a snapshot that is outside any worker.
+struct Inputs {
+    capture: Capture,
+    kernel: Arc<Vec<u8>>,
+    initrd: Arc<Vec<u8>>,
+}
+struct Retained {
+    inputs: Inputs,
+    version: client::Version,
+    /// RAM pages the worker copied to keep it.
+    copied: u64,
+    /// A rewind to it compares all of RAM with it afterwards.
+    verify: bool,
+}
+/// How a machine keeps the snapshots of its live boots.
+///
+/// Without it each is a whole capture: taking one copies all of RAM out of
+/// the worker and restoring one loads all of it into a new worker. With it
+/// the boot's worker keeps the snapshot and copies only the RAM pages written
+/// since its last one, and [`PVMachine::from_snapshot`] rewinds that worker
+/// in place when no machine is running in it ([`Restored`]).
+///
+/// This is host authority, like the scratch root: no snapshot carries it,
+/// and a restored machine retains nothing until it is told to. A retained
+/// snapshot does keep the `verify` it was taken with, since a rewind to it
+/// happens before the restored machine can be told anything. Backends that
+/// cannot record guest writes (all but macOS/HVF) capture whole regardless.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Retention {
+    /// The most bytes of RAM pages one worker's snapshots may hold together;
+    /// a page they share counts once. Once a worker has taken a snapshot it
+    /// holds a copy of RAM as the base of its next, snapshots or none.
+    ///
+    /// This bounds RAM pages only. Each snapshot also holds, uncounted, its
+    /// machine state (about 130 KB on HVF, nearly all of it the GIC's), a
+    /// copy of the 16 KiB PV page, 2 KiB of page table for each 4 MiB of RAM
+    /// in which it copied a page (at most an eighth of the pages it copied),
+    /// and one map entry for each sector the disk holds, durable or not yet
+    /// flushed; the sectors themselves are shared. A caller that keeps many
+    /// snapshots bounds how many as well.
+    pub limit_bytes: u64,
+    /// Check each snapshot against a whole capture taken with it, and all of
+    /// RAM after each rewind. Each check costs as much as the capture it
+    /// replaces; for tests and soak runs.
+    pub verify: bool,
+}
+/// The machine's worker refused a snapshot because its snapshots would then
+/// hold, or already hold, more than [`Retention::limit_bytes`]. Nothing was
+/// kept and the machine is unchanged: drop snapshots held in that worker,
+/// whichever machines took them, and take it again.
+///
+/// The inner error of the [`std::io::ErrorKind::QuotaExceeded`] error that
+/// [`Machine::snapshot`] then returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SnapshotStoreFull {
+    /// Bytes of RAM pages the worker's snapshots hold.
+    pub held_bytes: u64,
+    pub limit_bytes: u64,
+}
+impl std::fmt::Display for SnapshotStoreFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "PV snapshot store is full: {} bytes held, limit {}",
+            self.held_bytes, self.limit_bytes
+        )
+    }
+}
+impl std::error::Error for SnapshotStoreFull {}
+/// How [`PVMachine::from_snapshot`] produced a machine. Only `Rewound` costs
+/// less than loading all of RAM into a new worker, so a caller that expects
+/// rewinds counts the others.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Restored {
+    /// The snapshot's worker was parked and went back to it in place,
+    /// rewriting this many RAM pages.
+    Rewound { pages: u64 },
+    /// A machine was running in the snapshot's worker, so the snapshot was
+    /// copied out of it and loaded into a new one.
+    Exported,
+    /// A whole capture was loaded into a new worker.
+    Loaded,
+    /// The machine was between boots: no worker starts until it next runs.
+    Deferred,
+}
+/// Whether this backend records guest writes, which retained snapshots need.
+const RETAINS: bool = cfg!(all(target_arch = "aarch64", target_os = "macos"));
 /// The machine's disk: its immutable base and, between boots, its store.
 // Exactly one owner at a time (the worker during a boot, this machine between
 // boots) keeps boot-end loss a single client decision.
@@ -137,14 +240,20 @@ impl Disk {
 /// A single native PV guest. Construction is its only backend-specific API.
 pub struct PVMachine {
     memory_bytes: u64,
-    kernel: Vec<u8>,
-    initrd: Vec<u8>,
+    kernel: Arc<Vec<u8>>,
+    initrd: Arc<Vec<u8>>,
     command_line: String,
     seed: u64,
     reached: u64,
     state: State,
-    worker: Option<Worker>,
-    directory: TempDir,
+    worker: Option<Occupant>,
+    /// Shared with the workers this machine starts, which outlive it while a
+    /// retained snapshot refers to them.
+    directory: Arc<TempDir>,
+    /// The boot inputs are written beneath `directory`.
+    staged: bool,
+    retention: Option<Retention>,
+    restored: Option<Restored>,
     console: Vec<u8>,
     executable: PathBuf,
     shutdown: bool,
@@ -204,8 +313,129 @@ impl Snapshot {
     ) -> Result<(), String> {
         policy::authority(self.aux.policy.as_ref(), name, expected)
     }
+    /// The RAM pages the worker copied to keep this snapshot: those written
+    /// since its previous one. `None` unless it is retained in a worker.
+    pub fn copied_pages(&self) -> Option<u64> {
+        match &self.body {
+            Body::Retained(retained) => Some(retained.copied),
+            _ => None,
+        }
+    }
+    /// The snapshot as one whole capture, which is what an encoded snapshot
+    /// carries. A retained snapshot is copied out of its worker on each call.
+    fn image(&self) -> Result<Arc<Vec<u8>>, String> {
+        match &self.body {
+            Body::Image(bytes) => Ok(bytes.clone()),
+            Body::Retained(retained) => {
+                let directory = tempfile::Builder::new()
+                    .prefix("export-")
+                    .tempdir_in(retained.version.scratch())
+                    .map_err(|e| format!("PV snapshot path: {e}"))?;
+                let image = directory.path().join("image");
+                retained.version.export(&image)?;
+                // The worker's image carries its disk's overlays.
+                let overlays = retained.inputs.capture.disk.map(|_| Vec::new());
+                assemble(&retained.inputs, Some(&image), overlays).map(Arc::new)
+            }
+        }
+    }
+    #[cfg(test)]
+    fn bytes(&self) -> Arc<Vec<u8>> {
+        self.image().expect("snapshot image")
+    }
+}
+// Checkpoints are kept and restored across the Driver's worker threads.
+const _: fn() = || {
+    fn shared<T: Clone + Send + Sync>() {}
+    shared::<Snapshot>();
+};
+/// Lay out a whole capture: the framed header, the boot inputs, the image a
+/// live boot's worker wrote at `image` and, with a disk, the store's overlays
+/// (empty when the worker's image carries them).
+fn assemble(
+    inputs: &Inputs,
+    image: Option<&Path>,
+    overlays: Option<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
+    let mut image = match image {
+        Some(path) => {
+            let file = fs::File::open(path).map_err(|e| format!("PV snapshot image: {e}"))?;
+            let length = file
+                .metadata()
+                .map_err(|e| format!("PV snapshot size: {e}"))?
+                .len();
+            Some((file, length))
+        }
+        None => None,
+    };
+    let mut bytes = Vec::new();
+    protocol::send(&mut bytes, &inputs.capture)?;
+    let image_len = image.as_ref().map_or(0, |(_, length)| *length);
+    let extra = (inputs.kernel.len() as u64)
+        .checked_add(inputs.initrd.len() as u64)
+        .and_then(|v| v.checked_add(image_len))
+        .and_then(|v| v.checked_add(overlays.as_ref().map_or(0, |v| v.len()) as u64))
+        .and_then(|v| v.checked_add(if overlays.is_some() { 32 } else { 24 }))
+        .and_then(|v| usize::try_from(v).ok())
+        .ok_or("PV snapshot size overflow")?;
+    bytes
+        .try_reserve_exact(extra)
+        .map_err(|e| format!("PV snapshot allocation: {e}"))?;
+    for blob in [&inputs.kernel[..], &inputs.initrd[..]] {
+        bytes.extend_from_slice(&(blob.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(blob);
+    }
+    bytes.extend_from_slice(&image_len.to_le_bytes());
+    if let Some((file, length)) = &mut image {
+        let count = std::io::copy(&mut file.take(*length), &mut bytes)
+            .map_err(|e| format!("PV snapshot image read: {e}"))?;
+        if count != *length {
+            return Err("PV snapshot truncated image".into());
+        }
+    }
+    if let Some(overlays) = overlays {
+        bytes.extend_from_slice(&(overlays.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&overlays);
+    }
+    Ok(bytes)
+}
+/// Whether two files hold the same bytes.
+fn same_contents(a: &Path, b: &Path) -> Result<bool, String> {
+    let open = |path: &Path| {
+        let file = fs::File::open(path).map_err(|e| format!("PV snapshot image: {e}"))?;
+        let length = file
+            .metadata()
+            .map_err(|e| format!("PV snapshot size: {e}"))?
+            .len();
+        Ok::<_, String>((file, length))
+    };
+    let ((mut a, length), (mut b, other)) = (open(a)?, open(b)?);
+    if length != other {
+        return Ok(false);
+    }
+    let read = |e| format!("PV snapshot image read: {e}");
+    let (mut left, mut right) = (vec![0; 1 << 20], vec![0; 1 << 20]);
+    loop {
+        let count = a.read(&mut left).map_err(read)?;
+        if count == 0 {
+            return Ok(true);
+        }
+        b.read_exact(&mut right[..count]).map_err(read)?;
+        if left[..count] != right[..count] {
+            return Ok(false);
+        }
+    }
 }
 impl PVMachine {
+    /// Keep the snapshots this machine takes of its live boots in their
+    /// workers from now on.
+    pub fn retain_snapshots(&mut self, retention: Retention) {
+        self.retention = Some(retention);
+    }
+    /// How this machine came out of a snapshot; `None` if it did not.
+    pub fn restored(&self) -> Option<Restored> {
+        self.restored
+    }
     fn configure_policy(&mut self, name: &str, p: &BackendPolicy) -> Result<(), std::io::Error> {
         if self.worker.is_some()
             || self.aux.policy.is_some()
@@ -351,18 +581,36 @@ impl PVMachine {
         memory_bytes: u64,
         scratch_root: Option<&Path>,
     ) -> Result<Self, String> {
+        let mut machine = Self::unstaged(
+            executable,
+            kernel,
+            initrd,
+            command_line,
+            disk,
+            network,
+            memory_bytes,
+            scratch_root,
+        )?;
+        machine.stage()?;
+        Ok(machine)
+    }
+    /// A machine whose boot inputs are not yet beneath its scratch directory.
+    // A machine rewound into a parked worker boots nothing, so it writes none.
+    #[allow(clippy::too_many_arguments)]
+    fn unstaged(
+        executable: &Path,
+        kernel: impl Into<Arc<Vec<u8>>>,
+        initrd: impl Into<Arc<Vec<u8>>>,
+        command_line: String,
+        disk: Option<DiskImage>,
+        network: Option<[u8; 6]>,
+        memory_bytes: u64,
+        scratch_root: Option<&Path>,
+    ) -> Result<Self, String> {
+        let (kernel, initrd) = (kernel.into(), initrd.into());
         boot::arguments(&command_line)?;
         let layout = boot::RamLayout::native(memory_bytes)?;
         boot::layout_for(&layout, &kernel, &initrd)?;
-        let directory = scratch_directory(scratch_root)?;
-        fs::write(directory.path().join("kernel"), &kernel)
-            .map_err(|e| format!("PV kernel input: {e}"))?;
-        fs::write(directory.path().join("initrd"), &initrd)
-            .map_err(|e| format!("PV initrd input: {e}"))?;
-        if let Some(image) = disk.as_ref().and_then(DiskImage::image) {
-            fs::write(directory.path().join("disk-base"), &image[..])
-                .map_err(|e| format!("PV disk base input: {e}"))?;
-        }
         Ok(Self {
             memory_bytes: layout.capacity,
             kernel,
@@ -372,7 +620,10 @@ impl PVMachine {
             reached: 0,
             state: State::Ready,
             worker: None,
-            directory,
+            directory: Arc::new(scratch_directory(scratch_root)?),
+            staged: false,
+            retention: None,
+            restored: None,
             console: Vec::new(),
             executable: executable.to_owned(),
             pending_boots: 1,
@@ -390,6 +641,23 @@ impl PVMachine {
             aux: Default::default(),
         })
     }
+    /// Write the boot inputs every worker of this machine reads, once.
+    fn stage(&mut self) -> Result<(), String> {
+        if self.staged {
+            return Ok(());
+        }
+        let directory = self.directory.path();
+        fs::write(directory.join("kernel"), &self.kernel[..])
+            .map_err(|e| format!("PV kernel input: {e}"))?;
+        fs::write(directory.join("initrd"), &self.initrd[..])
+            .map_err(|e| format!("PV initrd input: {e}"))?;
+        if let Some(image) = self.disk.as_ref().and_then(|disk| disk.base.image()) {
+            fs::write(directory.join("disk-base"), &image[..])
+                .map_err(|e| format!("PV disk base input: {e}"))?;
+        }
+        self.staged = true;
+        Ok(())
+    }
     fn boot(&mut self, seed: u64, now: u64) -> Result<(), String> {
         self.boot_restore(seed, now, None)
     }
@@ -399,6 +667,7 @@ impl PVMachine {
         now: u64,
         restore: Option<PathBuf>,
     ) -> Result<(), String> {
+        self.stage()?;
         let disk = match &self.disk {
             Some(disk) => {
                 let store = disk
@@ -428,7 +697,7 @@ impl PVMachine {
         };
         let selected = self.aux.policy.as_ref().map(|p| p.setup(owner));
         let witness = self.witness_setup(owner)?;
-        let mut worker = Worker::spawn(&self.executable)?;
+        let mut worker = Occupant::spawn(&self.executable, &self.directory)?;
         protocol::ready(
             worker.call(Request::Boot {
                 witness: Box::new(witness.clone()),
@@ -458,8 +727,9 @@ impl PVMachine {
         Ok(())
     }
     /// End the live boot, if any: export its stopped disk, discard the
-    /// unflushed writes exactly once, then terminate the worker. Ended boots
-    /// have no worker, so repeating this never discards twice.
+    /// unflushed writes exactly once, then leave the worker, which exits
+    /// unless a retained snapshot refers to it. Ended boots have no worker,
+    /// so repeating this never discards twice.
     fn end_boot(&mut self, shutdown: bool, at: u64, mark: u8) -> Result<(), String> {
         let boot = self.aux.active.unwrap_or(self.aux.logical);
         if self.aux.last.as_ref().is_some_and(|e| e.boot >= boot) {
@@ -525,8 +795,8 @@ impl PVMachine {
             }
             self.disk.as_mut().expect("store has disk").store = Some(next);
         }
-        if let Some(mut worker) = self.worker.take() {
-            worker.terminate()?;
+        if let Some(worker) = self.worker.take() {
+            worker.leave()?;
         }
         self.aux.active = None;
         let end = retained::Ended {
@@ -652,7 +922,7 @@ impl PVMachine {
         self.state = State::Ready;
         Ok(())
     }
-    fn worker(&mut self) -> Result<&mut Worker, String> {
+    fn worker(&mut self) -> Result<&mut Occupant, String> {
         self.worker.as_mut().ok_or("PV worker unavailable".into())
     }
     fn fault_call(
@@ -803,15 +1073,52 @@ impl PVMachine {
             _ => Err("PV worker returned invalid stop".into()),
         }
     }
-    fn capture(&mut self) -> Result<Snapshot, String> {
+    fn capturable(&self) -> Result<(), String> {
         if self.state == State::Invalid {
             return Err("cannot snapshot invalid PV machine".into());
         }
         if self.held || self.released {
             return Err("cannot snapshot PV machine held at a breakpoint".into());
         }
-        let live = self.worker.is_some();
-        let mut image = if live {
+        Ok(())
+    }
+    /// What a snapshot of the machine as it stands holds outside a worker.
+    fn inputs(&self) -> Inputs {
+        Inputs {
+            capture: Capture {
+                memory_bytes: self.memory_bytes,
+                layout_version: boot::LAYOUT_VERSION,
+                command_line: self.command_line.clone(),
+                seed: self.seed,
+                reached: self.reached,
+                state: self.state,
+                live: self.worker.is_some(),
+                shutdown: self.shutdown,
+                pending_boots: self.pending_boots,
+                pending_at: self.pending_at,
+                writes: self.writes.clone(),
+                input: self.input.clone(),
+                guest: self.guest.clone(),
+                disk: self.disk.as_ref().map(|disk| disk.base.sectors()),
+                network: self.network,
+                breaks: self.breaks.clone(),
+            },
+            kernel: self.kernel.clone(),
+            initrd: self.initrd.clone(),
+        }
+    }
+    fn snapshot_of(&self, body: Body) -> Snapshot {
+        Snapshot {
+            body,
+            aux: self.aux.clone(),
+            disk: self.disk.as_ref().map(|disk| disk.base.clone()),
+        }
+    }
+    /// A snapshot that depends on no worker: a live boot copied whole out of
+    /// its worker, or the machine as it stands between boots.
+    fn capture(&mut self) -> Result<Snapshot, String> {
+        self.capturable()?;
+        let body = if self.worker.is_some() {
             let directory = tempfile::Builder::new()
                 .prefix("capture-")
                 .tempdir_in(self.directory.path())
@@ -823,78 +1130,74 @@ impl PVMachine {
             ) {
                 return Err("PV unexpected snapshot response".into());
             }
-            let file = fs::File::open(&artifact).map_err(|e| format!("PV snapshot image: {e}"))?;
-            let length = file
-                .metadata()
-                .map_err(|e| format!("PV snapshot size: {e}"))?
-                .len();
-            Some((directory, file, length))
+            // A live worker's image already carries its disk's overlays.
+            let overlays = self.disk.as_ref().map(|_| Vec::new());
+            Body::Image(Arc::new(assemble(
+                &self.inputs(),
+                Some(&artifact),
+                overlays,
+            )?))
         } else {
-            None
+            // Between boots the machine owns its disk's store.
+            let overlays = match &self.disk {
+                Some(disk) => {
+                    let store = disk.store.as_ref().ok_or("PV disk has no owner")?;
+                    Some(store.encode_overlays())
+                }
+                None => None,
+            };
+            Body::Image(Arc::new(assemble(&self.inputs(), None, overlays)?))
         };
-        let mut bytes = Vec::new();
-        protocol::send(
-            &mut bytes,
-            &Capture {
-                memory_bytes: self.memory_bytes,
-                layout_version: boot::LAYOUT_VERSION,
-                command_line: self.command_line.clone(),
-                seed: self.seed,
-                reached: self.reached,
-                state: self.state,
-                live,
-                shutdown: self.shutdown,
-                pending_boots: self.pending_boots,
-                pending_at: self.pending_at,
-                writes: self.writes.clone(),
-                input: self.input.clone(),
-                guest: self.guest.clone(),
-                disk: self.disk.as_ref().map(|disk| disk.base.sectors()),
-                network: self.network,
-                breaks: self.breaks.clone(),
-            },
-        )?;
-        // A live worker's image already carries its disk's overlays.
-        let overlays = match &self.disk {
-            Some(Disk {
-                store: Some(store), ..
-            }) if !live => Some(store.encode_overlays()),
-            Some(_) if live => Some(Vec::new()),
-            Some(_) => return Err("PV disk has no owner".into()),
-            None => None,
-        };
-        let image_len = image.as_ref().map_or(0, |(_, _, length)| *length);
-        let extra = (self.kernel.len() as u64)
-            .checked_add(self.initrd.len() as u64)
-            .and_then(|v| v.checked_add(image_len))
-            .and_then(|v| v.checked_add(overlays.as_ref().map_or(0, |v| v.len()) as u64))
-            .and_then(|v| v.checked_add(if overlays.is_some() { 32 } else { 24 }))
-            .and_then(|v| usize::try_from(v).ok())
-            .ok_or("PV snapshot size overflow")?;
-        bytes
-            .try_reserve_exact(extra)
-            .map_err(|e| format!("PV snapshot allocation: {e}"))?;
-        for blob in [&self.kernel[..], &self.initrd[..]] {
-            bytes.extend_from_slice(&(blob.len() as u64).to_le_bytes());
-            bytes.extend_from_slice(blob);
+        Ok(self.snapshot_of(body))
+    }
+    /// Keep the live boot in its worker as a retained snapshot.
+    fn retain(&mut self, retention: Retention) -> Result<Snapshot, std::io::Error> {
+        self.capturable().map_err(std::io::Error::other)?;
+        let taken = self
+            .worker()
+            .and_then(|worker| worker.snapshot(retention.limit_bytes, retention.verify))
+            .map_err(std::io::Error::other)?
+            .map_err(|held_bytes| {
+                std::io::Error::new(
+                    std::io::ErrorKind::QuotaExceeded,
+                    SnapshotStoreFull {
+                        held_bytes,
+                        limit_bytes: retention.limit_bytes,
+                    },
+                )
+            })?;
+        if retention.verify {
+            // A failure drops the snapshot, which the worker then forgets.
+            self.verify_retained(&taken.version)
+                .map_err(std::io::Error::other)?;
         }
-        bytes.extend_from_slice(&image_len.to_le_bytes());
-        if let Some((_, file, length)) = &mut image {
-            let count = std::io::copy(&mut file.take(*length), &mut bytes)
-                .map_err(|e| format!("PV snapshot image read: {e}"))?;
-            if count != *length {
-                return Err("PV snapshot truncated image".into());
-            }
+        Ok(self.snapshot_of(Body::Retained(Arc::new(Retained {
+            inputs: self.inputs(),
+            version: taken.version,
+            copied: taken.pages,
+            verify: retention.verify,
+        }))))
+    }
+    /// Check that a retained snapshot just taken exports, byte for byte, the
+    /// image a capture of the machine writes now.
+    fn verify_retained(&mut self, version: &client::Version) -> Result<(), String> {
+        let directory = tempfile::Builder::new()
+            .prefix("verify-")
+            .tempdir_in(self.directory.path())
+            .map_err(|e| format!("PV snapshot path: {e}"))?;
+        let capture = directory.path().join("capture");
+        if !matches!(
+            self.worker()?.call(Request::Capture(capture.clone()))?,
+            Response::Captured
+        ) {
+            return Err("PV unexpected snapshot response".into());
         }
-        if let Some(overlays) = overlays {
-            bytes.extend_from_slice(&(overlays.len() as u64).to_le_bytes());
-            bytes.extend_from_slice(&overlays);
+        let export = directory.path().join("export");
+        version.export(&export)?;
+        if !same_contents(&capture, &export)? {
+            return Err("PV retained snapshot differs from a capture of the machine".into());
         }
-        Ok(Snapshot {
-            bytes: std::sync::Arc::new(bytes),
-            aux: self.aux.clone(),
-            disk: self.disk.as_ref().map(|disk| disk.base.clone()),
-        })
+        Ok(())
     }
     /// The durable disk between boots; `None` while a worker owns it.
     #[cfg(test)]
@@ -912,6 +1215,12 @@ impl PVMachine {
     /// clocks, RNG streams or simulation queues. The default temporary directory's
     /// effective absolute path must be UTF-8 for the worker JSON transport;
     /// invalid encoding is rejected before scratch creation or worker startup.
+    ///
+    /// A retained snapshot ([`Retention`]) needs no new worker when none is
+    /// running a machine in its own: that worker goes back to the snapshot in
+    /// place and the new machine continues in it, so `executable` starts only
+    /// the machine's later boots. [`Self::restored`] reports which of these
+    /// happened.
     pub fn from_snapshot(executable: &Path, snapshot: &Snapshot) -> Result<Self, String> {
         Self::from_snapshot_with_scratch(executable, snapshot, None)
     }
@@ -919,8 +1228,9 @@ impl PVMachine {
     /// Restore with all named boot, disk, capture and restore scratch beneath an
     /// existing caller-owned directory. Each machine owns a unique child, removed
     /// on construction failure or Drop; the caller's root is never removed.
-    /// The caller must retain the root until the machine is dropped and reclaim
-    /// its session after abrupt worker death. No global environment/cwd changes
+    /// The caller must retain the root until the machine and the snapshots it
+    /// retains ([`Retention`]) are dropped, and reclaim its session after
+    /// abrupt worker death. No global environment/cwd changes
     /// occur. Snapshots contain no scratch authority: a branch always uses this
     /// new root, independently of source-machine files. The effective absolute
     /// scratch pathname must be UTF-8 for the worker's JSON transport, including
@@ -941,7 +1251,92 @@ impl PVMachine {
         snapshot: &Snapshot,
         scratch_root: Option<&Path>,
     ) -> Result<Self, String> {
-        let mut input = &snapshot.bytes[..];
+        match &snapshot.body {
+            Body::Image(bytes) => Self::from_image(executable, snapshot, bytes, scratch_root),
+            Body::Retained(retained) => {
+                let mut machine =
+                    Self::from_inputs(executable, snapshot, &retained.inputs, scratch_root)?;
+                match retained
+                    .version
+                    .rewind(retained.verify, &machine.directory)?
+                {
+                    // The worker holds the whole boot, disk included, as
+                    // after a restoring boot.
+                    Some((worker, pages)) => {
+                        machine.worker = Some(worker);
+                        if let Some(disk) = &mut machine.disk {
+                            disk.store = None;
+                        }
+                        machine.restored = Some(Restored::Rewound { pages });
+                    }
+                    None => {
+                        let directory = tempfile::Builder::new()
+                            .prefix("restore-")
+                            .tempdir_in(machine.directory.path())
+                            .map_err(|e| format!("PV restore image path: {e}"))?;
+                        let image = directory.path().join("image");
+                        retained.version.export(&image)?;
+                        let capture = &retained.inputs.capture;
+                        machine.boot_restore(capture.seed, capture.reached, Some(image))?;
+                        directory
+                            .close()
+                            .map_err(|e| format!("PV restore image cleanup: {e}"))?;
+                        machine.restored = Some(Restored::Exported);
+                    }
+                }
+                Ok(machine)
+            }
+        }
+    }
+    /// A machine for a snapshot whose worker state is not in `inputs`: it has
+    /// no worker yet, and its disk, if any, an empty store.
+    fn from_inputs(
+        executable: &Path,
+        snapshot: &Snapshot,
+        inputs: &Inputs,
+        scratch_root: Option<&Path>,
+    ) -> Result<Self, String> {
+        let capture = &inputs.capture;
+        snapshot.aux.validate(capture)?;
+        if capture.layout_version != boot::LAYOUT_VERSION {
+            return Err("PV snapshot layout version".into());
+        }
+        if capture.disk != snapshot.disk.as_ref().map(DiskImage::sectors) {
+            return Err("PV snapshot disk base mismatch".into());
+        }
+        let mut machine = Self::unstaged(
+            executable,
+            inputs.kernel.clone(),
+            inputs.initrd.clone(),
+            capture.command_line.clone(),
+            snapshot.disk.clone(),
+            capture.network,
+            capture.memory_bytes,
+            scratch_root,
+        )?;
+        machine.aux = snapshot.aux.clone();
+        machine.resume(capture.clone());
+        Ok(machine)
+    }
+    /// Take up the client's part of a captured machine.
+    fn resume(&mut self, capture: Capture) {
+        self.input = capture.input;
+        self.guest = capture.guest;
+        self.writes = capture.writes;
+        self.reached = capture.reached;
+        self.state = capture.state;
+        self.shutdown = capture.shutdown;
+        self.seed = capture.seed;
+        self.pending_boots = capture.pending_boots;
+        self.pending_at = capture.pending_at;
+        self.breaks = capture.breaks;
+    }
+    fn from_image(
+        executable: &Path,
+        snapshot: &Snapshot,
+        mut input: &[u8],
+        scratch_root: Option<&Path>,
+    ) -> Result<Self, String> {
         let capture: Capture =
             protocol::receive(&mut input)?.ok_or("PV snapshot header missing")?;
         snapshot.aux.validate(&capture)?;
@@ -963,7 +1358,7 @@ impl PVMachine {
             executable,
             kernel.to_vec(),
             initrd.to_vec(),
-            capture.command_line,
+            capture.command_line.clone(),
             snapshot.disk.clone(),
             capture.network,
             capture.memory_bytes,
@@ -984,19 +1379,11 @@ impl PVMachine {
             let image = restore_image(machine.directory.path(), image)?;
             machine.boot_restore(capture.seed, capture.reached, Some(image.path().to_owned()))?;
             remove_restore_image(image)?;
+            machine.restored = Some(Restored::Loaded);
         } else {
-            drop(machine.worker.take());
+            machine.restored = Some(Restored::Deferred);
         }
-        machine.input = capture.input;
-        machine.guest = capture.guest;
-        machine.writes = capture.writes;
-        machine.reached = capture.reached;
-        machine.state = capture.state;
-        machine.shutdown = capture.shutdown;
-        machine.seed = capture.seed;
-        machine.pending_boots = capture.pending_boots;
-        machine.pending_at = capture.pending_at;
-        machine.breaks = capture.breaks;
+        machine.resume(capture);
         Ok(machine)
     }
 }
@@ -1237,7 +1624,10 @@ impl Machine for PVMachine {
         Ok(self.aux.cache.as_ref().map(retained::Cached::evidence))
     }
     fn snapshot(&mut self) -> Result<Snapshot, Self::Error> {
-        self.capture().map_err(std::io::Error::other)
+        match self.retention {
+            Some(retention) if RETAINS && self.worker.is_some() => self.retain(retention),
+            _ => self.capture().map_err(std::io::Error::other),
+        }
     }
     fn take_fault_counts(
         &mut self,
@@ -1250,6 +1640,8 @@ impl Machine for PVMachine {
 mod lifecycle_tests;
 #[cfg(test)]
 mod resource_tests;
+#[cfg(test)]
+mod retention_tests;
 #[cfg(any(test, feature = "test-support"))]
 mod test_image;
 

@@ -36,7 +36,7 @@ fn cold_capture_restores_only_under_new_caller_root_after_source_deletion() {
     }
     let snapshot = m.capture().unwrap();
     assert!(!snapshot
-        .bytes
+        .bytes()
         .windows(owned.as_os_str().len())
         .any(|s| s == owned.to_str().unwrap().as_bytes()));
     drop(m);
@@ -54,7 +54,7 @@ fn cold_capture_restores_only_under_new_caller_root_after_source_deletion() {
             PVMachine::from_snapshot_in(Path::new("/never-launched"), &snapshot, &root).unwrap();
         let dir = m.directory.path().to_owned();
         assert!(dir.starts_with(&root));
-        assert_eq!(m.capture().unwrap().bytes, snapshot.bytes);
+        assert_eq!(m.capture().unwrap().bytes(), snapshot.bytes());
         // Deferred reboots retain this machine's scratch authority, not a path
         // from the captured source. They do not start a worker until run().
         m.request_reboot(Timestamp::from_nanos(0)).unwrap();
@@ -93,9 +93,13 @@ fn invalid_root_has_context_and_never_falls_back_to_global_temp() {
 fn restore_overlay_error_removes_partial_target_but_not_caller_root() {
     let source = tempfile::tempdir().unwrap();
     let mut m = rooted(source.path());
-    let mut snapshot = m.capture().unwrap();
-    let bytes = std::sync::Arc::make_mut(&mut snapshot.bytes);
+    let snapshot = m.capture().unwrap();
+    let mut bytes = Arc::unwrap_or_clone(snapshot.bytes());
     *bytes.last_mut().unwrap() = 255; // invalid last overlay-map count; framing unchanged
+    let snapshot = Snapshot {
+        body: Body::Image(Arc::new(bytes)),
+        ..snapshot
+    };
     drop(m);
     let target = tempfile::tempdir().unwrap();
     fs::write(target.path().join("marker"), b"keep").unwrap();
@@ -122,7 +126,7 @@ fn all_unwound_operation_files_remain_reclaimable_under_session() {
     // Model abandoned named files without pretending to execute a native guest:
     // retain this cold fixture's directory, then let the caller reclaim its tree.
     // Remaining cold fields still drop normally; no RAM or child is leaked.
-    let retained = m.directory.keep();
+    let retained = Arc::into_inner(m.directory).unwrap().keep();
     assert_eq!(retained, machine);
     assert!(machine.exists());
     fs::remove_dir_all(session.path()).unwrap();

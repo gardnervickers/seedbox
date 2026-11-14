@@ -131,8 +131,9 @@ struct Parts<'a> {
     disk: Option<&'a DiskImage>,
 }
 impl<'a> Parts<'a> {
-    fn new(snapshot: &'a Snapshot) -> Result<Self> {
-        let mut input = &snapshot.bytes[..];
+    /// `whole` is the snapshot as one capture ([`Snapshot::image`]).
+    fn new(snapshot: &'a Snapshot, whole: &'a [u8]) -> Result<Self> {
+        let mut input = whole;
         let capture: Capture = protocol::receive(&mut input)
             .map_err(|_| invalid("private capture header"))?
             .ok_or(invalid("capture absent"))?;
@@ -253,13 +254,17 @@ impl Snapshot {
     /// Stream a complete, versioned, source-independent PV capture, including
     /// exact boot inputs, native state, immutable disk base and both disk layers.
     /// Borrows this capture without execution, RNG draws or publication. Raw
-    /// bodies are written in bounded chunks without staging another RAM image.
+    /// bodies are written in bounded chunks without staging another RAM image;
+    /// a snapshot retained in a worker is first copied out of it, whole.
     /// Ordinary I/O failure leaves caller-owned partial output; retrying from
     /// this unchanged capture is supported. No file/CAS transaction is implied.
     // Each concrete snapshot owns its encoding; a generic machine serializer
     // would expose private native and bridge representation.
     pub fn write_to(&self, output: &mut impl Write) -> Result<()> {
-        let parts = Parts::new(self)?;
+        let whole = self
+            .image()
+            .map_err(|e| CodecError::Io(std::io::Error::other(e)))?;
+        let parts = Parts::new(self, &whole)?;
         let mut sink = std::io::sink();
         let mut count = Writer::new(&mut sink);
         parts.write(&mut count)?;
@@ -481,7 +486,7 @@ impl Snapshot {
         };
         r.finish()?;
         Ok(Snapshot {
-            bytes: std::sync::Arc::new(bytes),
+            body: Body::Image(Arc::new(bytes)),
             aux,
             disk,
         })
