@@ -299,12 +299,7 @@ fn draw_at(frame: &mut Frame, app: &App, now: Instant) {
     match (app.screen, app.focus.as_ref()) {
         (Screen::Simulation, Some(focus)) => simulation(frame, app, focus, body, now),
         (Screen::Timeline, _) => {
-            if let Some(draft) = app.timelines.get(app.timeline_source) {
-                let path = app
-                    .timeline_directory
-                    .as_ref()
-                    .map(|dir| draft.path(dir))
-                    .unwrap_or_default();
+            if let Some(draft) = app.focused_timeline() {
                 let world = app
                     .focus
                     .as_ref()
@@ -320,14 +315,13 @@ fn draw_at(frame: &mut Frame, app: &App, now: Instant) {
                     body,
                     draft,
                     app.timeline_row,
-                    &path,
                     world,
                     (app.details, &app.hitboxes),
                 );
             } else {
                 frame.render_widget(
                     Paragraph::new(
-                        "No saved fault timelines yet. Open a simulation and inject a fault with :",
+                        "No fault timeline yet. Open a simulation and inject a fault with :",
                     )
                     .fg(DIM)
                     .block(block("fault timelines", true)),
@@ -557,12 +551,10 @@ fn footer(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
                 ("⏎", "run edited"),
                 ("p", "pause before next"),
                 ("N", "next fault"),
-                ("w", "save definition"),
                 ("n", "name"),
                 ("u", "undo"),
                 ("C", "clear"),
                 ("R", "reset"),
-                ("[]", "recording"),
                 ("esc", "back"),
             ] {
                 push(k, l.into());
@@ -666,9 +658,7 @@ fn help(frame: &mut Frame, app: &App, area: Rect) {
             ("d", "remove or restore it in the edited timeline"),
             ("u / C / R", "undo · clear all · reset to recorded"),
             ("⏎", "run the edited timeline as a new simulation"),
-            ("w", "save the edited definition to a file"),
             ("p / N", "pause before the next fault · select it"),
-            ("[ ]", "switch between saved recordings"),
             ("esc", "back"),
         ],
         Screen::Simulation => &[

@@ -2197,9 +2197,7 @@ dependencies = [
  "seedbox-client",
  "seedbox-spec",
  "seedbox-test-time",
- "serde",
  "serde_json",
- "tempfile",
  "tokio",
 ]
 
