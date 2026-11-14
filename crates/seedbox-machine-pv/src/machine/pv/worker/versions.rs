@@ -6,7 +6,8 @@
 //! pages in which live RAM can differ from it. An exported version is, byte
 //! for byte, the file a capture at that moment would have written.
 //!
-//! Tracking starts at the first snapshot kept. From then on live RAM equals
+//! Tracking starts once a first version has been built, so a first snapshot
+//! refused for want of room tracks nothing. From then on live RAM equals
 //! `current` everywhere but on the pages in the mapping's dirty set: guest
 //! writes reach that set through the backend, host writes through
 //! [`super::memory::Ram`].
@@ -103,8 +104,8 @@ impl<B: Backend> Machine<B> {
                 return Ok(Err(Full));
             }
         };
-        // Writes are recorded from the first version kept: a refused first
-        // snapshot withholds nothing from the guest afterwards.
+        // Writes are recorded from the first version built: a first snapshot
+        // refused before this withholds nothing from the guest afterwards.
         if !tracked {
             self.native.track()?;
             self.ram.track();

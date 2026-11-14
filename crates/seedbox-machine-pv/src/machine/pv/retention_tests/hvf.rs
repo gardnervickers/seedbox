@@ -348,8 +348,9 @@ fn an_unverified_snapshot_and_rewind_are_the_capture_of_their_moment() {
 
 /// Two threads restore one snapshot at once and keep their machines: its
 /// worker goes back in place for one, and the other is copied out of it into
-/// a worker of its own. Both then run at once while the snapshot is dropped,
-/// which waits its turn in the worker it shares.
+/// a worker of its own, whichever thread gets there first. Both then run on
+/// threads of their own as the snapshot is dropped; nothing forces the drop
+/// to meet a run in the worker it shares, which it waits for when it does.
 #[test]
 #[ignore = "requires a native PV hypervisor and SEEDBOX_PV_WORKER"]
 fn restores_at_once_of_one_snapshot_get_a_worker_each() {
