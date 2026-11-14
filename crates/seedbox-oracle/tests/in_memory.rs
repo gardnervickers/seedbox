@@ -306,6 +306,7 @@ fn run<S: Scenario>(scenario: &mut S, world: &mut dyn World) -> Report {
             .iter()
             .map(|c| (c.name().to_string(), c.check(&records, &reads)))
             .collect(),
+        ..Report::default()
     }
 }
 
@@ -363,8 +364,62 @@ fn appends_lost_by_a_partition_are_a_violation() {
     assert_eq!(unknown.condition(), None);
     let undecided = Report {
         verdicts: vec![("check".into(), unknown)],
+        ..Report::default()
     };
     assert_eq!(undecided.exit_code(), Report::UNKNOWN);
+}
+
+/// A violated check fails the run whatever else happened; otherwise a failed
+/// step, an undecided check or no check at all leaves it incomplete.
+#[test]
+fn exit_codes_rank_violations_then_failed_steps_and_undecided_checks() {
+    let verdict = |validity| Verdict {
+        validity,
+        summary: String::new(),
+        details: Value::Null,
+    };
+    let report = |validities: &[Validity], failed: bool| Report {
+        verdicts: validities
+            .iter()
+            .map(|v| ("check".to_string(), verdict(*v)))
+            .collect(),
+        run_error: failed.then(|| Error("shape: invalid_request".into())),
+        ..Report::default()
+    };
+    use Validity::*;
+    for (validities, failed, code) in [
+        (&[Valid][..], false, Report::OK),
+        (&[Valid], true, Report::UNKNOWN),
+        (&[Valid, Unknown], false, Report::UNKNOWN),
+        (&[], false, Report::UNKNOWN),
+        (&[], true, Report::UNKNOWN),
+        (&[Valid, Invalid], false, Report::INVALID),
+        (&[Valid, Invalid], true, Report::INVALID),
+        (&[Unknown, Invalid], true, Report::INVALID),
+    ] {
+        let report = report(validities, failed);
+        assert_eq!(report.exit_code(), code, "{report:?}");
+    }
+    let mut failed = report(&[Valid], false);
+    failed.heal_error = Some(Error("heal p1: no such handle".into()));
+    assert_eq!(failed.exit_code(), Report::UNKNOWN);
+    failed.heal_error = None;
+    failed.panics.push(ClientPanic {
+        client: 0,
+        message: "boom".into(),
+    });
+    assert_eq!(failed.exit_code(), Report::UNKNOWN);
+    assert_eq!(failed.failures(), ["client 0 panicked: boom"]);
+    for step in [
+        |r: &mut Report| r.restart_errors.push(Error("restart n1: refused".into())),
+        |r: &mut Report| r.break_error = Some(Error("handler failed".into())),
+        |r: &mut Report| r.flush_error = Some(Error("no flush reply".into())),
+    ] {
+        let mut failed = report(&[Valid], false);
+        step(&mut failed);
+        assert_eq!(failed.exit_code(), Report::UNKNOWN, "{failed:?}");
+        assert_eq!(failed.failures().len(), 1, "{failed:?}");
+    }
 }
 
 /// Every kind the profile has, overlapping: faults hold for up to three
@@ -377,8 +432,11 @@ max_faults: 20
 targets: [n1, n2, n3]
 faults:
   - {kind: partition, weight: 2, duration_ns: {min: 500000000, max: 3000000000}}
+  - {kind: partition, duration_ns: {min: 500000000, max: 3000000000}, targets: [n1, n2], from: [n3]}
   - {kind: shape, duration_ns: {min: 500000000, max: 3000000000},
      latency_ns: {min: 1000000, max: 50000000}, jitter_ns: 500000, to: [n1, n2, n3, client]}
+  - {kind: shape, duration_ns: {min: 500000000, max: 3000000000},
+     latency_ns: {min: 1000000, max: 50000000}, targets: [n1, n2], to: [n3]}
   - {kind: crash, downtime_ns: {min: 500000000, max: 3000000000}}
   - {kind: pause, duration_ns: {min: 500000000, max: 3000000000}}
   - {kind: pause_process, duration_ns: {min: 500000000, max: 3000000000}}
@@ -401,7 +459,10 @@ struct Modelled {
     now_ns: u64,
     applied: Vec<(u64, Action)>,
     attempts: usize,
-    handles: BTreeSet<String>,
+    /// Faults in force with a handle, and the machine each holds.
+    handles: std::collections::BTreeMap<String, String>,
+    /// Faults started on a machine another fault held.
+    overlaps: usize,
     /// Machines with a lifecycle fault in force, by the action that undoes it.
     down: std::collections::BTreeMap<String, &'static str>,
     refuse: Refusal,
@@ -416,7 +477,8 @@ impl Modelled {
             now_ns: 5_000_000_000,
             applied: Vec::new(),
             attempts: 0,
-            handles: BTreeSet::new(),
+            handles: Default::default(),
+            overlaps: 0,
             down: Default::default(),
             refuse: Box::new(refuse),
         }
@@ -424,6 +486,15 @@ impl Modelled {
 
     fn in_force(&self) -> usize {
         self.handles.len() + self.down.len()
+    }
+
+    fn held(&self, machine: &str) -> bool {
+        self.down.contains_key(machine) || self.handles.values().any(|held| held == machine)
+    }
+
+    fn hold(&mut self, handle: &str, machine: &str) {
+        self.overlaps += usize::from(self.held(machine));
+        assert!(self.handles.insert(handle.into(), machine.into()).is_none());
     }
 }
 
@@ -456,37 +527,41 @@ impl World for Modelled {
             | Action::Reboot { machine } => {
                 assert_eq!(self.down.remove(machine), Some(action.name()), "{action:?}");
             }
-            Action::Heal { handle } => assert!(self.handles.remove(handle), "{action:?}"),
+            Action::Heal { handle } => assert!(self.handles.remove(handle).is_some(), "{action:?}"),
             Action::Partition {
                 handle,
                 left,
                 right,
             } => {
                 assert!(left.iter().chain(right).all(known) && !right.contains(&left[0]));
-                assert!(self.handles.insert(handle.clone()));
+                self.hold(handle, &left[0]);
             }
             Action::Shape {
                 handle, from, to, ..
             } => {
                 assert!(from.iter().chain(to).all(known) && !to.contains(&from[0]));
-                assert!(self.handles.insert(handle.clone()));
+                self.hold(handle, &from[0]);
             }
             Action::ClockSkew {
                 handle,
+                machine,
                 offset_ns: Some(_),
                 max_offset_ns: None,
                 ..
             }
             | Action::ClockDrift {
                 handle,
+                machine,
                 rate_ppb: Some(_),
                 max_rate_ppb: None,
                 ..
             }
-            | Action::Throttle { handle, .. }
-            | Action::Preempt { handle, .. } => {
-                assert!(self.handles.insert(handle.clone()));
+            | Action::Throttle {
+                handle, machine, ..
             }
+            | Action::Preempt {
+                handle, machine, ..
+            } => self.hold(handle, machine),
             Action::DiskError {
                 handle, machine, ..
             }
@@ -494,12 +569,13 @@ impl World for Modelled {
                 handle, machine, ..
             } => {
                 assert!(["n1", "n2"].contains(&machine.as_str()), "{action:?}");
-                assert!(self.handles.insert(handle.clone()));
+                self.hold(handle, machine);
             }
             other => {
                 let machine = other.machine().expect("a lifecycle action names a machine");
                 assert!(known(&machine.to_owned()));
                 let undo = undo.unwrap_or_else(|| panic!("unexpected {other:?}"));
+                self.overlaps += usize::from(self.held(machine));
                 assert!(
                     self.down.insert(machine.into(), undo).is_none(),
                     "{other:?} on a machine already down"
@@ -551,11 +627,47 @@ fn a_profile_applies_the_same_sequence_for_the_same_seed() {
     assert!(starts
         .iter()
         .all(|(at, _)| (6_000_000_000..35_000_000_000).contains(at)));
-    let kinds: BTreeSet<_> = (0..20)
+    let all: Vec<_> = (0..20)
         .flat_map(applied)
-        .map(|(_, action)| action.name())
+        .map(|(_, action)| action)
         .collect();
+    let kinds: BTreeSet<_> = all.iter().map(Action::name).collect();
     assert_eq!(kinds.len(), 17, "{kinds:?}");
+    // The narrowed partition and shape cut or shape n1 or n2 to n3 alone;
+    // the others face their side without the target. Both kinds of each
+    // come up.
+    let faces = |near: &String, far: &[String], side: &[&str]| {
+        let rest: Vec<_> = side.iter().filter(|m| **m != near).collect();
+        (far == ["n3"] && ["n1", "n2"].contains(&near.as_str())) || far.iter().eq(rest)
+    };
+    let mut sides = BTreeSet::new();
+    for action in &all {
+        let (near, far, side) = match action {
+            Action::Partition { left, right, .. } => (&left[0], right, &["n1", "n2", "n3"][..]),
+            Action::Shape { from, to, .. } => (&from[0], to, &["n1", "n2", "n3", "client"][..]),
+            _ => continue,
+        };
+        assert!(faces(near, far, side), "{action:?}");
+        sides.insert((action.name(), far.len()));
+    }
+    assert_eq!(
+        sides,
+        BTreeSet::from([
+            ("partition", 1),
+            ("partition", 2),
+            ("shape", 1),
+            ("shape", 3)
+        ])
+    );
+}
+
+#[test]
+fn a_profile_overlaps_faults_of_different_domains_on_one_target() {
+    // Modelled refuses a second lifecycle fault on a machine, so the run
+    // keeps those apart while faults of other domains overlap them.
+    let mut world = Modelled::new(|_, _| false);
+    profile().run(&mut world, &mut Rng::new(7)).unwrap();
+    assert!(world.overlaps > 0);
 }
 
 #[test]

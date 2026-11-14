@@ -3,9 +3,10 @@
 //! fault profile in `profile.yaml` runs as its nemesis, heals, then reads
 //! every node. It prints every action the world applied or refused, and two
 //! checks decide the run: every node serves after the heal, and the profile
-//! ran and healed without a failure. The profile skips the kinds the engine
-//! refuses as unsupported; the second check allows only preempt there, on
-//! x86_64 PV, which has no guest yield hook.
+//! applied faults and skipped only the kinds its engine lacks. The profile
+//! skips the kinds the engine refuses as unsupported; the second check allows
+//! only preempt there, on x86_64 PV, which has no guest yield hook. A failed
+//! run or heal leaves the run incomplete through the runner.
 use seedbox_oracle::{
     nemesis::Profile, Checker, Checkers, Client, Completion, Error, FinalRead, History, Nemesis,
     Random, RandomExt, Read, Record, Recorder, Scenario, Validity, Verdict, World,
@@ -99,12 +100,11 @@ impl Client for Pinger {
     }
 }
 
-/// What the profile applied and skipped, and any failure it reported.
+/// What the profile applied and skipped.
 #[derive(Default)]
 struct Outcome {
     applied: usize,
     unsupported: Vec<&'static str>,
-    failures: Vec<String>,
 }
 
 /// The world, printing every action it applies.
@@ -141,16 +141,6 @@ struct Logged {
     outcome: Arc<Mutex<Outcome>>,
 }
 
-impl Logged {
-    fn record(&self, phase: &str, result: Result<(), Error>) -> Result<(), Error> {
-        if let Err(error) = &result {
-            let failure = format!("{phase}: {error}");
-            self.outcome.lock().unwrap().failures.push(failure);
-        }
-        result
-    }
-}
-
 impl Nemesis for Logged {
     fn run(&mut self, world: &mut dyn World, random: &mut dyn Random) -> Result<(), Error> {
         let outcome = self.outcome.clone();
@@ -160,7 +150,7 @@ impl Nemesis for Logged {
         };
         let result = self.profile.run(&mut world, random);
         self.outcome.lock().unwrap().unsupported = self.profile.unsupported().collect();
-        self.record("run", result)
+        result
     }
     fn heal(&mut self, world: &mut dyn World) -> Result<(), Error> {
         let outcome = self.outcome.clone();
@@ -168,8 +158,7 @@ impl Nemesis for Logged {
             world,
             outcome: &outcome,
         };
-        let result = self.profile.heal(&mut world);
-        self.record("heal", result)
+        self.profile.heal(&mut world)
     }
 }
 
@@ -245,7 +234,7 @@ struct Ran(Arc<Mutex<Outcome>>);
 
 impl Checker<usize, (), ()> for Ran {
     fn name(&self) -> &str {
-        "the fault profile runs and heals, skipping only what its engine lacks"
+        "the fault profile applies faults, skipping only what its engine lacks"
     }
     fn check(&self, _: &[Record<usize, ()>], _: &[Read<()>]) -> Verdict {
         let outcome = self.0.lock().unwrap();
@@ -259,10 +248,9 @@ impl Checker<usize, (), ()> for Ran {
             "{} actions applied, unsupported {:?}",
             outcome.applied, outcome.unsupported
         );
-        let holds = outcome.failures.is_empty()
-            && outcome.applied > 0
-            && outcome.unsupported.iter().all(|kind| lacks.contains(kind));
-        let details = json!({ "failures": outcome.failures, "unsupported": outcome.unsupported });
+        let holds =
+            outcome.applied > 0 && outcome.unsupported.iter().all(|kind| lacks.contains(kind));
+        let details = json!({ "applied": outcome.applied, "unsupported": outcome.unsupported });
         verdict(holds, summary, details)
     }
 }

@@ -584,8 +584,10 @@ mod tests {
             CheckpointState, ControlCommand, ControlReceipt, ControlRequest, ControlState,
             PlaybackObservation, PlaybackRate, PlaybackStatus,
         };
+        use seedbox_engine_protocol::host_control::ControlError;
         use std::{num::NonZeroU32, time::Duration};
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        const REFUSAL: &str = "checkpoint refused: no space left on device";
         let limited = PlaybackRate::Limited {
             numerator: NonZeroU32::new(1).unwrap(),
             denominator: NonZeroU32::new(10).unwrap(),
@@ -597,7 +599,14 @@ mod tests {
             (PlaybackRate::Unlimited, true),
             (limited, true),
         ] {
-            for outcome in ["captured", "deferred", "rejected", "cancelled", "not-ready"] {
+            for outcome in [
+                "captured",
+                "deferred",
+                "refused",
+                "rejected",
+                "cancelled",
+                "not-ready",
+            ] {
                 let directory = tempfile::tempdir().unwrap();
                 let socket = directory.path().join("api.sock");
                 let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -617,7 +626,7 @@ mod tests {
                         1
                     } else {
                         2 + usize::from(rate != PlaybackRate::Paused) * 2
-                            + usize::from(outcome == "deferred")
+                            + usize::from(matches!(outcome, "deferred" | "refused"))
                     };
                     let mut commands = Vec::new();
                     let mut pending: Option<ControlReceipt> = None;
@@ -689,11 +698,22 @@ mod tests {
                                 }
                                 _ => panic!("unexpected command"),
                             }
+                            let refused = request.command == ControlCommand::Checkpoint
+                                && outcome == "refused";
                             let receipt = ControlReceipt {
                                 request,
                                 revision: 1,
                                 state: if rejected {
                                     ControlState::Unsupported
+                                } else if refused {
+                                    // The worker could not write the capture.
+                                    ControlState::Acknowledged {
+                                        status: status.clone(),
+                                        error: Some(ControlError::InvalidCheckpoint),
+                                        intervention: None,
+                                        detail: Some(REFUSAL.into()),
+                                        checkpoint: None,
+                                    }
                                 } else {
                                     ControlState::Acknowledged {
                                         status: status.clone(),
@@ -705,7 +725,13 @@ mod tests {
                                 },
                             };
                             pending = Some(receipt.clone());
-                            serde_json::to_vec(&receipt).unwrap()
+                            // The server keeps a refused checkpoint's receipt
+                            // accepted until the worker answers it.
+                            let mut public = receipt;
+                            if refused {
+                                public.state = ControlState::Accepted;
+                            }
+                            serde_json::to_vec(&public).unwrap()
                         };
                         let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len());
                         connection
@@ -735,6 +761,11 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
+                if outcome == "refused" {
+                    let error = result.as_ref().unwrap_err().to_string();
+                    assert!(error.contains("invalidCheckpoint"), "{error}");
+                    assert!(error.contains(REFUSAL), "{error}");
+                }
                 if outcome == "not-ready" {
                     assert!(commands.is_empty());
                     assert!(result.unwrap_err().to_string().contains("seedbox wait"));

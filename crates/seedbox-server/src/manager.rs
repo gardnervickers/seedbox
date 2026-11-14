@@ -248,11 +248,6 @@ pub(crate) struct ResultEvidence {
     pub record: seedbox_artifacts::record::RunRecord,
 }
 
-pub(crate) struct DeletionTarget {
-    pub id: SimulationId,
-    pub worker: Option<Arc<Mutex<crate::worker::Worker>>>,
-}
-
 impl State {
     fn persist(&mut self, mut resource: Simulation) -> Result<Simulation, Error> {
         // An operational control failure survives execution cancellation and
@@ -642,31 +637,29 @@ impl Manager {
         Ok(seedbox_api::SimulationList { items, next_cursor })
     }
 
-    pub(crate) fn begin_delete(&self, id: &SimulationId) -> Result<Vec<DeletionTarget>, Error> {
-        let targets = {
+    /// Mark `id` for deletion and stop it; returns its control worker, if any.
+    pub(crate) fn begin_delete(
+        &self,
+        id: &SimulationId,
+    ) -> Result<Option<Arc<Mutex<crate::worker::Worker>>>, Error> {
+        let worker = {
             let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
-            let ids = state.catalogue.begin_delete(id)?;
-            let mut targets = Vec::with_capacity(ids.len());
-            for id in ids {
-                let worker = if let Some(live) = state.live.get(&id) {
-                    live.publish(state.catalogue.get(&id)?);
+            state.catalogue.begin_delete(id)?;
+            match state.live.get(id) {
+                Some(live) => {
+                    live.publish(state.catalogue.get(id)?);
                     live.worker.clone()
-                } else {
-                    None
-                };
-                targets.push(DeletionTarget { id, worker });
-            }
-            targets
-        };
-        for target in &targets {
-            match self.stop(&target.id) {
-                Err(Error::NotFound(_)) => {}
-                result => {
-                    result?;
                 }
+                None => None,
+            }
+        };
+        match self.stop(id) {
+            Err(Error::NotFound(_)) => {}
+            result => {
+                result?;
             }
         }
-        Ok(targets)
+        Ok(worker)
     }
 
     pub(crate) fn delete(&self, id: &SimulationId) -> Result<(), Error> {

@@ -730,7 +730,7 @@ impl Drop for SetupChild {
 }
 
 fn management_pair() -> Result<(UnixStream, Stdio), Error> {
-    let (parent, child) = UnixStream::pair()?;
+    let (parent, child) = seedbox_exec::cloexec(UnixStream::pair)?;
     parent.set_read_timeout(Some(TIMEOUT))?;
     parent.set_write_timeout(Some(TIMEOUT))?;
     Ok((parent, Stdio::from(std::os::fd::OwnedFd::from(child))))

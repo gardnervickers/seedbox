@@ -3,14 +3,20 @@
 //! Captured checkpoint state and imported binaries are owned cache objects
 //! (`ContentStore::put_*_owned`). After a deletion, every owned object that no
 //! remaining resource, retained input file, checkpoint exported from a remaining
-//! source or unsubmitted checkpoint upload names is removed. Reusable inputs
+//! source or unreleased checkpoint upload names is removed. Reusable inputs
 //! (kernels, prepared images and guests) are never owned, so this is not cache
-//! pruning. Work that creates an owned object holds `references` for reading
-//! until a resource or one of those registries names it; reclamation holds it
-//! for writing, after the evidence lock that orders imports, exports and deletes.
-//! The catalogue remembers what a deletion reclaimed, so a later submission
-//! that names it fails at admission; an upload or export that puts the content
-//! back clears that record.
+//! pruning. The catalogue remembers what a deletion reclaimed, so a later
+//! submission that names it fails at admission; an upload or export that puts
+//! the content back clears that record.
+//!
+//! Work that creates an owned object holds `references` for reading until a
+//! resource or one of those registries names it, and so does admission of a
+//! submission. Deletion holds it for writing from removing the catalogue entry
+//! until the reclaimed content is recorded, so an import or admission sees
+//! either the catalogue before the deletion or its finished reclamation. Lock
+//! order: `evidence`, then `references`, then `pins`, then the content store.
+//! The manager's catalogue lock is never held while taking another, and
+//! nothing that holds `references` waits for a resource to complete.
 use super::{Error, ExecutionService};
 use crate::catalogue;
 use seedbox_api::SimulationId;
@@ -18,6 +24,7 @@ use seedbox_application::store::ContentDigest;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    sync::RwLockWriteGuard,
 };
 
 /// Content an export or an upload pinned until a resource names it.
@@ -27,7 +34,10 @@ pub(super) struct Pins {
     /// fetched branch stays submittable while its source remains.
     exports: BTreeMap<SimulationId, BTreeMap<String, BTreeSet<ContentDigest>>>,
     /// Uploaded checkpoints, with the resources that existed at upload. Each
-    /// lasts until a later resource names all its content.
+    /// lasts until a reclamation finds a resource created after it, remaining
+    /// or just deleted, that names all its content. One resource can release
+    /// several uploads of the same file, so one not yet submitted can be
+    /// reclaimed; its submission then fails with the reclaimed error.
     uploads: Vec<(BTreeSet<SimulationId>, BTreeSet<ContentDigest>)>,
     /// The latest exported checkpoint that named each digest, for the error a
     /// submission gets after deletion reclaims it.
@@ -78,22 +88,29 @@ impl ExecutionService {
             .evidence
             .lock()
             .map_err(|_| catalogue::Error::StorageFailed)?;
-        self.reclaim_unreferenced(None)
+        let references = self.write_references()?;
+        self.reclaim_unreferenced(&references, None)
     }
 
-    /// Callers hold the evidence lock. The catalogue records what deleting
-    /// `deleted` reclaimed.
-    pub(super) fn reclaim_unreferenced(
-        &self,
-        deleted: Option<&SimulationId>,
-    ) -> Result<Vec<ContentDigest>, Error> {
-        let _references = self
+    /// Exclude imports, exports, admissions and completions from reclamation.
+    pub(super) fn write_references(&self) -> Result<RwLockWriteGuard<'_, ()>, Error> {
+        Ok(self
             .references
             .write()
-            .map_err(|_| catalogue::Error::StorageFailed)?;
+            .map_err(|_| catalogue::Error::StorageFailed)?)
+    }
+
+    /// The content each resource (or only `only`) names in the catalogue and
+    /// its retained input file.
+    pub(super) fn resource_digests(
+        &self,
+        only: Option<&SimulationId>,
+    ) -> Result<BTreeMap<SimulationId, BTreeSet<ContentDigest>>, Error> {
         let mut resources: BTreeMap<SimulationId, BTreeSet<ContentDigest>> = BTreeMap::new();
         for (id, value) in self.manager.content()? {
-            digests_in(&value, resources.entry(id).or_default());
+            if only.is_none_or(|only| *only == id) {
+                digests_in(&value, resources.entry(id).or_default());
+            }
         }
         for (id, digests) in &mut resources {
             match fs::read(self.root.join("inputs").join(format!("{id}.json"))) {
@@ -105,6 +122,19 @@ impl ExecutionService {
                 Err(e) => return Err(e.into()),
             }
         }
+        Ok(resources)
+    }
+
+    /// Callers hold the evidence lock and `references` for writing. `deleted`
+    /// is the resource just deleted with the content it named: it can still
+    /// release the upload it was submitted from, and the catalogue records what
+    /// its deletion reclaimed.
+    pub(super) fn reclaim_unreferenced(
+        &self,
+        _references: &RwLockWriteGuard<'_, ()>,
+        deleted: Option<(&SimulationId, BTreeSet<ContentDigest>)>,
+    ) -> Result<Vec<ContentDigest>, Error> {
+        let resources = self.resource_digests(None)?;
         let mut roots: BTreeSet<ContentDigest> = resources.values().flatten().cloned().collect();
         let mut pins = self
             .pins
@@ -112,13 +142,16 @@ impl ExecutionService {
             .map_err(|_| catalogue::Error::StorageFailed)?;
         pins.exports
             .retain(|source, _| resources.contains_key(source));
+        let named: Vec<_> = deleted
+            .as_ref()
+            .map(|(id, digests)| (*id, digests))
+            .into_iter()
+            .chain(&resources)
+            .collect();
         pins.uploads.retain(|(existing, digests)| {
-            let named: BTreeSet<_> = resources
+            !named
                 .iter()
-                .filter(|(id, _)| !existing.contains(*id))
-                .flat_map(|(_, digests)| digests)
-                .collect();
-            !digests.iter().all(|digest| named.contains(digest))
+                .any(|(id, named)| !existing.contains(*id) && digests.is_subset(named))
         });
         roots.extend(
             pins.exports
@@ -137,7 +170,7 @@ impl ExecutionService {
             .iter()
             .filter_map(|digest| {
                 let checkpoint = pins.exported.remove(digest);
-                let deleted = deleted?.clone();
+                let deleted = deleted.as_ref()?.0.clone();
                 let checkpoint = checkpoint
                     .map(|(source, name)| format!("checkpoint {name} of simulation {source}"));
                 Some((

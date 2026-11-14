@@ -28,6 +28,10 @@ use std::{
 const NODE_PORT: u16 = 7000;
 
 /// Crash a child with SIGABRT, a core-dumping signal the kernel reports.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a guest program that writes no executable while it forks"
+)]
 fn crash() {
     let status = Command::new("/property-probe")
         .arg("abort")
@@ -74,7 +78,10 @@ impl Control {
 /// boot's records were flushed, so the engine has reduced them.
 fn until_node_serves(control: &mut Control) {
     for _ in 0..120 {
-        let address = ("node", NODE_PORT).to_socket_addrs().ok().and_then(|mut a| a.next());
+        let address = ("node", NODE_PORT)
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut a| a.next());
         let served = address
             .and_then(|address| TcpStream::connect_timeout(&address, Duration::from_secs(1)).ok())
             .and_then(|stream| {
@@ -92,13 +99,14 @@ fn until_node_serves(control: &mut Control) {
 
 fn main() -> ExitCode {
     let mode = std::env::args().nth(1).unwrap_or_default();
+    let sum = 2 + 2;
     match mode.as_str() {
         "abort" => std::process::abort(),
         "pass" => {
             seedbox_guest::require("probe: arithmetic holds");
             seedbox_guest::require("node: booted");
-            seedbox_guest::always("probe: arithmetic holds", 2 + 2 == 4, json!({"sum": 4}));
-            seedbox_guest::never("probe: two plus two is five", 2 + 2 == 5, json!(null));
+            seedbox_guest::always("probe: arithmetic holds", sum == 4, json!({"sum": sum}));
+            seedbox_guest::never("probe: two plus two is five", sum == 5, json!(null));
             assert!(std::env::var_os("SEEDBOX_GUEST_SOCKET").is_some());
             // This machine allows crashes, so the child's is no violation.
             crash();
@@ -118,7 +126,9 @@ fn main() -> ExitCode {
                 let _ = stream.write_all(b"flushed\n");
             }
         }
-        "violate" => seedbox_guest::always("probe: arithmetic holds", 2 + 2 == 5, json!({"sum": 4})),
+        "violate" => {
+            seedbox_guest::always("probe: arithmetic holds", sum == 5, json!({"sum": sum}))
+        }
         "unmet" => seedbox_guest::require("probe: never evaluated"),
         "unexpected-crash" => crash(),
         "lose" => {
@@ -163,7 +173,7 @@ fn main() -> ExitCode {
             };
             assert_eq!(mounted, 0, "{}", std::io::Error::last_os_error());
             assert!(!std::path::Path::new("/run/seedbox/guest.sock").exists());
-            seedbox_guest::never("probe: two plus two is four", 2 + 2 == 4, json!({"sum": 4}));
+            seedbox_guest::never("probe: two plus two is four", sum == 4, json!({"sum": sum}));
         }
         _ => {
             eprintln!(

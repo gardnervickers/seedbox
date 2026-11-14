@@ -62,7 +62,7 @@ fn codec5_service_envelope_preserves_controller_and_disabled_authority() {
         source.step(Timestamp::from_nanos(20)).unwrap();
         let expected = session_events(source.drain_observations().events);
         drop(source);
-        let envelope = read(&manifest).unwrap();
+        let envelope = load(&manifest).unwrap();
         assert_eq!(
             envelope.inventory.backend_policy(),
             inventory.backend_policy()
