@@ -1,5 +1,43 @@
 use super::Result;
 use std::{marker::PhantomData, ptr::NonNull, rc::Rc};
+/// Guest RAM as a host device model sees it. Reading is free; every write goes
+/// through `write`, so the mapping sees each one.
+pub(super) trait Ram {
+    fn bytes(&self) -> &[u8];
+    /// Panics outside the mapping, as slice indexing does.
+    fn write(&mut self, at: usize, bytes: &[u8]);
+}
+// Device unit tests run against plain buffers. Production code cannot: only
+// `Guest` implements `Ram` there, so a host write cannot go around it.
+#[cfg(test)]
+impl Ram for [u8] {
+    fn bytes(&self) -> &[u8] {
+        self
+    }
+    fn write(&mut self, at: usize, bytes: &[u8]) {
+        self[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+}
+#[cfg(test)]
+impl Ram for Vec<u8> {
+    fn bytes(&self) -> &[u8] {
+        self
+    }
+    fn write(&mut self, at: usize, bytes: &[u8]) {
+        self[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+}
+/// The stopped guest's RAM, handed to device models by [`Memory::guest`].
+pub(super) struct Guest<'a>(&'a Memory);
+impl Ram for Guest<'_> {
+    fn bytes(&self) -> &[u8] {
+        unsafe { self.0.bytes() }
+    }
+    fn write(&mut self, at: usize, bytes: &[u8]) {
+        let ram = unsafe { std::slice::from_raw_parts_mut(self.0.ptr(), self.0.length) };
+        ram[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+}
 /// Process-local mappings; all access is confined to the stopped worker thread.
 pub(super) struct Memory {
     pointer: NonNull<u8>,
@@ -57,6 +95,11 @@ impl Memory {
     }
     pub(super) unsafe fn modify<T>(&self, f: impl FnOnce(&mut [u8]) -> T) -> T {
         f(std::slice::from_raw_parts_mut(self.ptr(), self.length))
+    }
+    /// Device access to stopped guest RAM: writes go through [`Ram::write`].
+    /// Caller must hold a stopped vCPU and no outstanding host borrow.
+    pub(super) unsafe fn guest<T>(&self, f: impl FnOnce(&mut Guest<'_>) -> T) -> T {
+        f(&mut Guest(self))
     }
     pub(super) fn write(&mut self, offset: usize, bytes: &[u8]) -> Result<()> {
         if offset

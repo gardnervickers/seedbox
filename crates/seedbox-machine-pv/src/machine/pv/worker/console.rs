@@ -3,6 +3,7 @@
 //! (`virtio.rs`).
 #[cfg(test)]
 use super::boot::RAM_BASE as BASE;
+use super::memory::Ram;
 use super::virtio::*;
 use super::Result;
 use seedbox_machine::pv::transport::LifecycleOutput;
@@ -93,7 +94,7 @@ impl Console {
     }
     pub(super) fn write(
         &mut self,
-        ram: &mut [u8],
+        ram: &mut (impl Ram + ?Sized),
         offset: u64,
         value: u32,
         now: u64,
@@ -138,19 +139,19 @@ impl Console {
         }
         self.process(ram, now)
     }
-    pub(super) fn process(&mut self, ram: &mut [u8], now: u64) -> Result<()> {
+    pub(super) fn process(&mut self, ram: &mut (impl Ram + ?Sized), now: u64) -> Result<()> {
         if self.status & STATUS_DRIVER_OK == 0 {
             return Ok(());
         }
         for queue in [CONTROL_TX, PORT_TX] {
-            while let Some((head, descriptors)) = self.queues[queue].take(ram, false)? {
+            while let Some((head, descriptors)) = self.queues[queue].take(ram.bytes(), false)? {
                 let mut bytes = Vec::new();
                 for d in descriptors {
                     debug_assert!(!d.writable);
                     if bytes.len() + d.length > 65536 {
                         return Err("virtio console tx exceeds bound".into());
                     }
-                    bytes.extend_from_slice(&ram[d.address..d.address + d.length]);
+                    bytes.extend_from_slice(&ram.bytes()[d.address..d.address + d.length]);
                 }
                 if queue == CONTROL_TX {
                     if bytes.len() != 8 {
@@ -194,8 +195,13 @@ impl Console {
         }
         Ok(())
     }
-    fn receive(&mut self, ram: &mut [u8], queue: usize, bytes: &[u8]) -> Result<bool> {
-        let Some((head, descriptors)) = self.queues[queue].take(ram, true)? else {
+    fn receive(
+        &mut self,
+        ram: &mut (impl Ram + ?Sized),
+        queue: usize,
+        bytes: &[u8],
+    ) -> Result<bool> {
+        let Some((head, descriptors)) = self.queues[queue].take(ram.bytes(), true)? else {
             return Ok(false);
         };
         let capacity: usize = descriptors.iter().map(|d| d.length).sum();
@@ -205,7 +211,7 @@ impl Console {
         let mut cursor = 0;
         for d in descriptors {
             let length = d.length.min(bytes.len() - cursor);
-            ram[d.address..d.address + length].copy_from_slice(&bytes[cursor..cursor + length]);
+            ram.write(d.address, &bytes[cursor..cursor + length]);
             cursor += length;
         }
         if self.queues[queue].finish(ram, head, bytes.len())? {
@@ -213,16 +219,16 @@ impl Console {
         }
         Ok(true)
     }
-    fn receive_data(&mut self, ram: &mut [u8], bytes: &[u8]) -> Result<usize> {
+    fn receive_data(&mut self, ram: &mut (impl Ram + ?Sized), bytes: &[u8]) -> Result<usize> {
         let mut cursor = 0;
         while cursor < bytes.len() {
-            let Some((head, descriptors)) = self.queues[PORT_RX].take(ram, true)? else {
+            let Some((head, descriptors)) = self.queues[PORT_RX].take(ram.bytes(), true)? else {
                 break;
             };
             let start = cursor;
             for d in descriptors {
                 let length = d.length.min(bytes.len() - cursor);
-                ram[d.address..d.address + length].copy_from_slice(&bytes[cursor..cursor + length]);
+                ram.write(d.address, &bytes[cursor..cursor + length]);
                 cursor += length;
             }
             if cursor == start {

@@ -30,6 +30,7 @@
 //
 // Dropping a frame that does not fit a short RX buffer, rather than truncating
 // it, matches the TCG device and cannot stall the ring; Linux posts 1526 bytes.
+use super::memory::Ram;
 use super::virtio::*;
 use super::Result;
 use seedbox_machine::pv::ethernet::{
@@ -180,7 +181,7 @@ impl Net {
     /// stamps its frames with `now`; an RX notify drains the backlog.
     pub(super) fn write(
         &mut self,
-        ram: &mut [u8],
+        ram: &mut (impl Ram + ?Sized),
         offset: u64,
         width: u8,
         value: u32,
@@ -235,24 +236,32 @@ impl Net {
     fn ready(&self) -> bool {
         self.status & STATUS_DRIVER_OK != 0
     }
-    fn complete(&mut self, ram: &mut [u8], queue: usize, head: u16, length: usize) -> Result<()> {
+    fn complete(
+        &mut self,
+        ram: &mut (impl Ram + ?Sized),
+        queue: usize,
+        head: u16,
+        length: usize,
+    ) -> Result<()> {
         if self.queues[queue].finish(ram, head, length)? {
             self.interrupt |= USED_RING_INTERRUPT;
         }
         Ok(())
     }
-    fn transmit(&mut self, ram: &mut [u8], now: u64) -> Result<()> {
+    fn transmit(&mut self, ram: &mut (impl Ram + ?Sized), now: u64) -> Result<()> {
         if !self.ready() {
             return Ok(());
         }
-        while let Some((head, chain)) = self.queues[TX].take_chain(ram, Direction::Readable)? {
+        while let Some((head, chain)) =
+            self.queues[TX].take_chain(ram.bytes(), Direction::Readable)?
+        {
             // At most QUEUE_LIMIT descriptors of < 2^32 bytes: no overflow.
             let length: usize = chain.iter().map(|d| d.length).sum();
             let mut frame = None;
             if (HEADER + MIN_FRAME..=HEADER + MAX_FRAME).contains(&length) {
                 let mut bytes = Vec::with_capacity(length);
                 for d in &chain {
-                    bytes.extend_from_slice(&ram[d.address..d.address + d.length]);
+                    bytes.extend_from_slice(&ram.bytes()[d.address..d.address + d.length]);
                 }
                 if bytes[..OFFLOAD_FIELDS].iter().all(|&b| b == 0) {
                     bytes.drain(..HEADER);
@@ -273,7 +282,11 @@ impl Net {
     /// Admit one host frame. It is always consumed; see the module docs.
     /// A frame outside [`MIN_FRAME`]..=[`MAX_FRAME`] violates the caller's
     /// contract and is an error, not a guest-visible drop.
-    pub(super) fn receive(&mut self, ram: &mut [u8], frame: Vec<u8>) -> Result<Received> {
+    pub(super) fn receive(
+        &mut self,
+        ram: &mut (impl Ram + ?Sized),
+        frame: Vec<u8>,
+    ) -> Result<Received> {
         if !(MIN_FRAME..=MAX_FRAME).contains(&frame.len()) {
             return Err(format!("virtio net {}-byte host frame", frame.len()));
         }
@@ -296,7 +309,7 @@ impl Net {
         self.backlog.push_back(frame);
         Ok(Received::Backlogged)
     }
-    fn drain(&mut self, ram: &mut [u8]) -> Result<()> {
+    fn drain(&mut self, ram: &mut (impl Ram + ?Sized)) -> Result<()> {
         if !self.ready() {
             return Ok(());
         }
@@ -310,8 +323,9 @@ impl Net {
     }
     /// Offer `frame` to the next RX chain: `None` when no chain is free,
     /// `Some(false)` when the chain was too short and the frame was dropped.
-    fn deliver(&mut self, ram: &mut [u8], frame: &[u8]) -> Result<Option<bool>> {
-        let Some((head, chain)) = self.queues[RX].take_chain(ram, Direction::Writable)? else {
+    fn deliver(&mut self, ram: &mut (impl Ram + ?Sized), frame: &[u8]) -> Result<Option<bool>> {
+        let Some((head, chain)) = self.queues[RX].take_chain(ram.bytes(), Direction::Writable)?
+        else {
             return Ok(None);
         };
         // At most QUEUE_LIMIT descriptors of < 2^32 bytes: no overflow.
@@ -329,7 +343,7 @@ impl Net {
         let mut written = 0;
         for d in &chain {
             let length = d.length.min(packet.len() - written);
-            ram[d.address..d.address + length].copy_from_slice(&packet[written..written + length]);
+            ram.write(d.address, &packet[written..written + length]);
             written += length;
         }
         self.stats.rx_frames += 1;
