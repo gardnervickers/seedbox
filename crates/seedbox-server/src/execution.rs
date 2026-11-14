@@ -91,8 +91,9 @@ pub struct ExecutionService {
     backends: Arc<dyn BackendProvider>,
     preparation_limit: Duration,
     evidence: Mutex<()>,
-    /// Read while creating owned content until something names it; written by
-    /// reclamation (`content.rs`).
+    /// Read while creating owned content until something names it and while
+    /// admitting a submission; written by deletion and reclamation
+    /// (`content.rs`).
     references: RwLock<()>,
     pins: Mutex<content::Pins>,
     admission: Mutex<(usize, BTreeMap<tokio::task::Id, SimulationId>)>,
@@ -152,49 +153,77 @@ impl ExecutionService {
         Ok(self.manager.capacity(admission.0, &occupying)?)
     }
 
-    /// Foreground cascading deletion: stop the frozen ownership tree, wait for
-    /// execution cleanup, then remove dependents before their parents, and
-    /// finally the owned content no remaining resource references.
+    /// Foreground deletion of one resource: stop it, wait for execution
+    /// cleanup, remove its files and catalogue entry, and finally the owned
+    /// content no remaining resource references.
     pub fn delete(&self, id: &SimulationId) -> Result<(), Error> {
         let _evidence = self
             .evidence
             .lock()
             .map_err(|_| catalogue::Error::StorageFailed)?;
-        let targets = self.manager.begin_delete(id)?;
+        let worker = self.manager.begin_delete(id)?;
         // Join control transport and journal I/O without holding the catalogue
         // mutex. Retirement prevents already cloned handles from starting later.
-        for target in &targets {
-            if let Some(worker) = &target.worker {
-                crate::worker::lock_for_retirement(worker)
-                    .map_err(|_| Error::Catalogue(catalogue::Error::StorageFailed))?
-                    .retire();
-            }
+        if let Some(worker) = &worker {
+            crate::worker::lock_for_retirement(worker)
+                .map_err(|_| Error::Catalogue(catalogue::Error::StorageFailed))?
+                .retire();
         }
-        for target in targets {
-            let id = target.id;
-            loop {
-                match self.manager.describe(&id) {
-                    Ok(resource) if resource.status.phase != Phase::Completed => {
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                    Ok(_) | Err(catalogue::Error::NotFound(_)) => break,
-                    Err(error) => return Err(error.into()),
+        loop {
+            match self.manager.describe(id) {
+                Ok(resource) if resource.status.phase != Phase::Completed => {
+                    std::thread::sleep(Duration::from_millis(50));
                 }
+                Ok(_) | Err(catalogue::Error::NotFound(_)) => break,
+                Err(error) => return Err(error.into()),
             }
-            // Paths are derived from validated IDs, never from retained metadata.
-            let directory = self.root.join("runs").join(id.as_str());
-            match fs::remove_dir_all(directory) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                result => result?,
-            }
-            match fs::remove_file(self.root.join("inputs").join(format!("{id}.json"))) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                result => result?,
-            }
-            self.manager.delete(&id)?;
         }
-        self.reclaim_unreferenced(Some(id))?;
+        // Read before its files go: what it named can release its upload pin.
+        let named = self
+            .resource_digests(Some(id))?
+            .remove(id)
+            .unwrap_or_default();
+        // Paths are derived from validated IDs, never from retained metadata.
+        let directory = self.root.join("runs").join(id.as_str());
+        match fs::remove_dir_all(directory) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            result => result?,
+        }
+        match fs::remove_file(self.root.join("inputs").join(format!("{id}.json"))) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            result => result?,
+        }
+        // Removing the entry and reclaiming are one step for imports and
+        // admissions: an import that saw this resource never lets it release
+        // the upload, and a submission is either a root or refused as reclaimed.
+        let references = self.write_references()?;
+        self.manager.delete(id)?;
+        self.reclaim_unreferenced(&references, Some((id, named)))?;
         Ok(())
+    }
+
+    /// Admit a submission while no deletion is reclaiming (`content.rs`).
+    pub fn submit(
+        &self,
+        request: seedbox_api::SubmitRequest,
+    ) -> Result<(seedbox_api::Simulation, bool), Error> {
+        let _references = self
+            .references
+            .read()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
+        Ok(self.manager.submit(request)?)
+    }
+
+    /// Admit a seed range while no deletion is reclaiming (`content.rs`).
+    pub fn submit_seeds(
+        &self,
+        request: seedbox_api::SeedRangeRequest,
+    ) -> Result<(seedbox_api::Simulation, bool), Error> {
+        let _references = self
+            .references
+            .read()
+            .map_err(|_| catalogue::Error::StorageFailed)?;
+        Ok(self.manager.submit_seeds(request)?)
     }
 
     /// Snapshot the atomically published semantic journal using owned paths.
@@ -205,8 +234,10 @@ impl ExecutionService {
         Ok(crate::timeline::project(&resource, &history, &world))
     }
 
-    /// Return the immutable submitted inputs enriched with recorded external overrides.
-    /// This is an export projection; the catalogue's admitted definition stays immutable.
+    /// Return the immutable submitted inputs enriched with recorded external overrides
+    /// and the Driver closure the run retained, which names the machines its spawns
+    /// prepared. This is an export projection; the catalogue's admitted definition
+    /// stays immutable, so a seed-range member gets the submitted definition.
     pub fn describe(&self, id: &SimulationId) -> Result<seedbox_api::Simulation, Error> {
         self.recorded_snapshot(id).map(|(resource, _)| resource)
     }
@@ -227,6 +258,12 @@ impl ExecutionService {
             Ok(file) => {
                 let retained: RetainedInputs =
                     serde_json::from_reader(file).map_err(seedbox_application::Error::from)?;
+                if let InputSource::Resolved { definition } = &mut resource.spec.inputs {
+                    seedbox_application::definition::with_run_closure(
+                        definition,
+                        &retained.prepared,
+                    )?;
+                }
                 if let Some(attempt) = retained.attempt {
                     // Published attempts always have an explicit journal; missing
                     // input here is an error, never an empty timeline.
@@ -334,17 +371,15 @@ impl ExecutionService {
         &self,
         baseline: &SimulationId,
         simulation: &SimulationId,
-    ) -> seedbox_application::Result<seedbox_api::SimulationComparison> {
+    ) -> Result<seedbox_api::SimulationComparison, Error> {
         let _evidence = self
             .evidence
             .lock()
-            .map_err(|_| seedbox_application::Error::Setup("evidence lock failed".into()))?;
-        let record = |id: &SimulationId| {
-            self.manager
-                .result_evidence(id)
-                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))
-        };
-        let (Some(first), Some(second)) = (record(baseline)?, record(simulation)?) else {
+            .map_err(|_| catalogue::Error::StorageFailed)?;
+        let (Some(first), Some(second)) = (
+            self.manager.result_evidence(baseline)?,
+            self.manager.result_evidence(simulation)?,
+        ) else {
             return Ok(seedbox_api::SimulationComparison {
                 baseline: baseline.clone(),
                 simulation: simulation.clone(),
@@ -562,16 +597,34 @@ impl ExecutionService {
             .describe(id)
             .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?
             .options;
+        let architecture = seedbox_driver_execution::driver_world::platform::Host::current()
+            .project_architecture(options.backend.unwrap_or_default());
         let mut resolved_spec = spec.clone();
         resolved_spec
-            .resolve_project_architecture(
-                seedbox_driver_execution::driver_world::platform::Host::current()
-                    .project_architecture(options.backend.unwrap_or_default()),
-            )
+            .resolve_project_architecture(architecture)
             .map_err(seedbox_application::Error::Setup)?;
         let spec = &resolved_spec;
         let program = crate::catalogue::resolve_program(spec)
             .map_err(|error| seedbox_application::Error::Setup(error.to_string()))?;
+        // A run from its project can prepare machines the oracle spawns, and
+        // so can a seed-range member of that project; a replay of a resolved
+        // definition has every one it needs retained. A member prepares from
+        // the project directory as it is when it spawns, so an edit during a
+        // long range can make it differ from a fresh run of its seed (its own
+        // replay still matches).
+        let project = match &spec.inputs {
+            InputSource::Resolved { .. } => self
+                .manager
+                .read(|catalogue| Ok(catalogue.range_project(id)?.cloned()))
+                .map_err(|e| seedbox_application::Error::Setup(e.to_string()))?
+                .map(|mut configuration| {
+                    seedbox_api::resolve_architecture(&mut configuration, architecture)
+                        .map(|()| configuration)
+                        .map_err(seedbox_application::Error::Setup)
+                })
+                .transpose()?,
+            _ => Some(spec.configuration.clone()),
+        };
         let budget = crate::preparation_budget::Budget::start(
             cancellation,
             preparation_expired,
@@ -624,12 +677,10 @@ impl ExecutionService {
         if let Some(checkpoint) = checkpoint {
             orchestrator = orchestrator.with_checkpoint(checkpoint);
         }
-        // A run from its project can prepare machines the oracle spawns; a
-        // replay of a resolved definition has every one it needs retained.
-        if !matches!(spec.inputs, InputSource::Resolved { .. }) {
+        if let Some(project) = project {
             orchestrator = orchestrator.with_spawner(Arc::new(spawn::ProjectSpawner::new(
                 self.backends.clone(),
-                spec.configuration.clone(),
+                project,
                 options.backend.unwrap_or_default(),
                 self.store.clone(),
                 cancellation.clone(),
@@ -651,21 +702,12 @@ impl ExecutionService {
                 executor.as_ref(),
                 |progress| self.observe_run_progress(id, spec, &mut retained, progress),
             )?;
-        // Machines the run's spawns prepared join its retained inputs, so the
-        // definition replays without preparing them again.
+        // Machines the run's spawns prepared join its own retained inputs, so
+        // its described definition replays without preparing them again. The
+        // catalogue keeps the submitted definition (see `describe`).
         if run.record.identity.inputs != retained.prepared {
             retained.prepared = run.record.identity.inputs.clone();
             save_inputs(&self.root.join("inputs"), id, &retained, true)?;
-            let execution = seedbox_application::definition::execution_settings_with_inputs(
-                &retained.prepared,
-            )?;
-            self.manager
-                .update(id, |s| {
-                    if let InputSource::Resolved { definition } = &mut s.spec.inputs {
-                        definition.runtime.execution = execution;
-                    }
-                })
-                .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
         }
         Ok(run)
     }
@@ -994,8 +1036,7 @@ mod tests {
 
     #[test]
     fn project_execution_preserves_settings_through_canonical_resolution() {
-        use seedbox_application::{execution::*, image::Launch};
-        use seedbox_driver_execution::driver_world::{platform, DriverExecutor};
+        use seedbox_application::execution::*;
         #[derive(Clone)]
         struct FixtureBackend(PreparedInputs);
         impl PreparationBackend for FixtureBackend {
@@ -1046,6 +1087,7 @@ mod tests {
                     witness: Some(self.0.guests["oracle"].clone()),
                     full_state: None,
                     faults: vec![],
+                    machines: vec![],
                     detail: None,
                     properties: None,
                 })
@@ -1075,6 +1117,72 @@ mod tests {
         }
         let temporary = tempfile::tempdir().unwrap();
         let store = ContentStore::new(temporary.path().join("store"));
+        let (configuration, inputs, architecture) = project_fixture(&store);
+        let manager = Arc::new(Manager::new(catalogue::Catalogue::in_memory()));
+        let service = ExecutionService::new(
+            manager.clone(),
+            temporary.path().join("execution"),
+            store,
+            Arc::new(Provider(FixtureBackend(inputs))),
+        )
+        .unwrap();
+        let spec = SimulationSpec {
+            configuration,
+            inputs: InputSource::Project,
+            seed: Some(1),
+            program: vec![],
+        };
+        let resource = manager
+            .submit_seeds(seedbox_api::SeedRangeRequest {
+                metadata: Default::default(),
+                options: seedbox_api::ExecutionOptions {
+                    machine_workers: Some(4),
+                    ..Default::default()
+                },
+                request_id: "mixed-memory".into(),
+                spec,
+                count: 2,
+            })
+            .unwrap()
+            .0;
+        service.execute(resource.metadata.id.clone()).unwrap();
+        let finished = manager.describe(&resource.metadata.id).unwrap();
+        let InputSource::Resolved { definition } = &finished.spec.inputs else {
+            panic!("project execution must retain its canonical definition");
+        };
+        assert_eq!(definition.architecture, architecture);
+        assert_eq!(finished.options.machine_workers, Some(4));
+        assert_eq!(finished.status.oracle_exit_code, Some(0));
+        assert_eq!(
+            finished.status.termination,
+            Some(seedbox_api::ExecutionTermination::OracleExited)
+        );
+
+        let second_id = manager.advance_seeds().unwrap().unwrap();
+        let second = manager.describe(&second_id).unwrap();
+        assert_eq!(second.spec.seed, Some(2));
+        assert_eq!(second.options.machine_workers, Some(4));
+        service.execute(second_id.clone()).unwrap();
+        let finished_second = manager.describe(&second_id).unwrap();
+        assert_eq!(finished_second.options.machine_workers, Some(4));
+        assert_eq!(finished_second.status.oracle_exit_code, Some(0));
+        assert_eq!(
+            finished_second.status.termination,
+            Some(seedbox_api::ExecutionTermination::OracleExited)
+        );
+    }
+
+    /// A three-machine project and the inputs a fixture preparation returns
+    /// for it, with the architecture the server resolves for PV.
+    fn project_fixture(
+        store: &ContentStore,
+    ) -> (
+        Simulation,
+        PreparedInputs,
+        seedbox_spec::definition::Architecture,
+    ) {
+        use seedbox_application::{execution::*, image::Launch};
+        use seedbox_driver_execution::driver_world::{platform, DriverExecutor};
         let digest = store.put(b"test-only-binary").unwrap();
         let architecture =
             platform::Host::current().project_architecture(seedbox_spec::backend::CpuBackend::Pv);
@@ -1137,57 +1245,165 @@ mod tests {
             ]),
             provenance: BTreeMap::new(),
         };
+        (configuration, inputs, architecture)
+    }
+
+    // A seed-range member spawns as a fresh run of its range's project would:
+    // its spawner prepares from the submitted project file, not from the
+    // resolved definition the member runs (which names no project directory).
+    #[test]
+    fn seed_range_members_spawn_from_their_ranges_submitted_project() {
+        use seedbox_application::execution::*;
+        use seedbox_engine_protocol::driver_world as wire;
+        const REFUSAL: &str = "this run cannot prepare new machines; start it from its project";
+        /// Records the project each spawn prepares from. Its preparation
+        /// error stands in for a prepared machine: the executor only needs
+        /// to know which project answered.
+        #[derive(Clone)]
+        struct Spawning(PreparedInputs, Arc<Mutex<Vec<PathBuf>>>);
+        impl PreparationBackend for Spawning {
+            fn prepare(
+                &self,
+                _: &Simulation,
+                _: &ContentStore,
+            ) -> seedbox_application::Result<PreparedInputs> {
+                Ok(self.0.clone())
+            }
+            fn prepare_cancellable(
+                &self,
+                simulation: &Simulation,
+                store: &ContentStore,
+                _: &PreparationContext,
+            ) -> seedbox_application::Result<PreparedInputs> {
+                self.prepare(simulation, store)
+            }
+            fn prepare_spawn(
+                &self,
+                simulation: &Simulation,
+                _: &ContentStore,
+                _: &CancellationToken,
+                request: &wire::SpawnRequest,
+                _: &Path,
+            ) -> seedbox_application::Result<(wire::Machine, wire::Environment)> {
+                self.1.lock().unwrap().push(simulation.source.clone());
+                Err(seedbox_application::Error::Setup(format!(
+                    "fixture prepared {} from {}",
+                    request.name,
+                    simulation.source.display()
+                )))
+            }
+        }
+        impl ExecutionBackend for Spawning {
+            fn profile(&self) -> ExecutionProfile {
+                self.0.profile.clone()
+            }
+            fn execute(
+                &self,
+                request: ExecutionRequest<'_>,
+            ) -> seedbox_application::Result<ExecutionReport> {
+                // As the Driver executor answers a spawn without a spawner.
+                let spawner = request
+                    .spawner
+                    .ok_or_else(|| seedbox_application::Error::Setup(REFUSAL.into()))?;
+                let answer = spawner
+                    .prepare(
+                        &wire::SpawnRequest {
+                            name: "replica".into(),
+                            spec: "{}".into(),
+                            number: 9,
+                        },
+                        request.output,
+                    )
+                    .unwrap_err();
+                assert_eq!(
+                    answer.to_string(),
+                    "fixture prepared replica from /project/seedbox.yaml"
+                );
+                Ok(ExecutionReport {
+                    simulated_time_ns: Some(1),
+                    host_wait_ns: 0,
+                    reason: StopReason::Completed,
+                    workload_exit: Some(WorkloadExit {
+                        service: "oracle".into(),
+                        code: 0,
+                    }),
+                    witness: Some(self.0.guests["oracle"].clone()),
+                    full_state: None,
+                    faults: vec![],
+                    machines: vec![],
+                    detail: None,
+                    properties: None,
+                })
+            }
+        }
+        struct Provider(Spawning);
+        impl BackendProvider for Provider {
+            fn project(
+                &self,
+                _: &Simulation,
+                _: seedbox_spec::backend::CpuBackend,
+                _: &ContentStore,
+                _: &CancellationToken,
+            ) -> seedbox_application::Result<Backends> {
+                Ok(Backends {
+                    preparation: Box::new(self.0.clone()),
+                    execution: Box::new(self.0.clone()),
+                })
+            }
+            fn retained(
+                &self,
+                inputs: &PreparedInputs,
+                _: &ContentStore,
+            ) -> seedbox_application::Result<Box<dyn ExecutionBackend>> {
+                Ok(Box::new(Spawning(inputs.clone(), self.0 .1.clone())))
+            }
+        }
+        let temporary = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(temporary.path().join("store"));
+        let (configuration, inputs, _) = project_fixture(&store);
+        let sources = Arc::new(Mutex::new(Vec::new()));
         let manager = Arc::new(Manager::new(catalogue::Catalogue::in_memory()));
         let service = ExecutionService::new(
             manager.clone(),
             temporary.path().join("execution"),
             store,
-            Arc::new(Provider(FixtureBackend(inputs))),
+            Arc::new(Provider(Spawning(inputs, sources.clone()))),
         )
         .unwrap();
-        let spec = SimulationSpec {
-            configuration,
-            inputs: InputSource::Project,
-            seed: Some(1),
-            program: vec![],
-        };
-        let resource = manager
+        let source = manager
             .submit_seeds(seedbox_api::SeedRangeRequest {
                 metadata: Default::default(),
-                options: seedbox_api::ExecutionOptions {
-                    machine_workers: Some(4),
-                    ..Default::default()
+                options: Default::default(),
+                request_id: "spawning-range".into(),
+                spec: SimulationSpec {
+                    configuration,
+                    inputs: InputSource::Project,
+                    seed: Some(1),
+                    program: vec![],
                 },
-                request_id: "mixed-memory".into(),
-                spec,
                 count: 2,
             })
             .unwrap()
-            .0;
-        service.execute(resource.metadata.id.clone()).unwrap();
-        let finished = manager.describe(&resource.metadata.id).unwrap();
-        let InputSource::Resolved { definition } = &finished.spec.inputs else {
-            panic!("project execution must retain its canonical definition");
-        };
-        assert_eq!(definition.architecture, architecture);
-        assert_eq!(finished.options.machine_workers, Some(4));
-        assert_eq!(finished.status.oracle_exit_code, Some(0));
+            .0
+            .metadata
+            .id;
+        service.execute(source.clone()).unwrap();
+        let member = manager.advance_seeds().unwrap().unwrap();
+        assert!(matches!(
+            manager.describe(&member).unwrap().spec.inputs,
+            InputSource::Resolved { .. }
+        ));
+        service.execute(member.clone()).unwrap();
+        for id in [&source, &member] {
+            assert_eq!(
+                manager.describe(id).unwrap().status.termination,
+                Some(seedbox_api::ExecutionTermination::OracleExited),
+                "{id}"
+            );
+        }
         assert_eq!(
-            finished.status.termination,
-            Some(seedbox_api::ExecutionTermination::OracleExited)
-        );
-
-        let second_id = manager.advance_seeds().unwrap().unwrap();
-        let second = manager.describe(&second_id).unwrap();
-        assert_eq!(second.spec.seed, Some(2));
-        assert_eq!(second.options.machine_workers, Some(4));
-        service.execute(second_id.clone()).unwrap();
-        let finished_second = manager.describe(&second_id).unwrap();
-        assert_eq!(finished_second.options.machine_workers, Some(4));
-        assert_eq!(finished_second.status.oracle_exit_code, Some(0));
-        assert_eq!(
-            finished_second.status.termination,
-            Some(seedbox_api::ExecutionTermination::OracleExited)
+            *sources.lock().unwrap(),
+            vec![PathBuf::from("/project/seedbox.yaml"); 2]
         );
     }
 

@@ -84,6 +84,7 @@ impl ExecutionBackend for Paused {
         Ok(ExecutionReport {
             reason: StopReason::Cancelled,
             workload_exit: None,
+            machines: vec![],
             detail: None,
             witness: None,
             full_state: None,

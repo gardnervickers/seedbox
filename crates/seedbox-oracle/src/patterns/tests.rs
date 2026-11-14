@@ -2,16 +2,19 @@ use super::*;
 use crate::random::Rng;
 
 /// Simulated time that sleeps advance, and every action applied; actions
-/// named in `refuse` are refused.
+/// named in `refuse` are refused. Each clock read and action also takes
+/// `call_ns`, as the guest control calls do while the world runs on.
 #[derive(Default)]
 struct Log {
     now_ns: u64,
+    call_ns: u64,
     applied: Vec<(u64, Action)>,
     refuse: Vec<Action>,
 }
 
 impl World for Log {
     fn now_ns(&mut self) -> Result<u64, Error> {
+        self.now_ns += self.call_ns;
         Ok(self.now_ns)
     }
     fn sleep(&mut self, duration: Duration) -> Result<(), Error> {
@@ -19,6 +22,7 @@ impl World for Log {
         Ok(())
     }
     fn apply(&mut self, action: &Action) -> Result<(), Error> {
+        self.now_ns += self.call_ns;
         if self.refuse.contains(action) {
             return Err(Error("refused".into()));
         }
@@ -224,6 +228,7 @@ fn quiet_and_pauses_run_for_their_phases() {
     let mut quiet = Schedule::new(phases(3), Quiet);
     quiet.run(&mut world, &mut Rng::new(1)).unwrap();
     assert!(world.applied.is_empty());
+    assert_eq!(quiet.rounds, 3);
     assert_eq!(world.now_ns, 6_000_000_000);
     let mut pauses = Schedule::new(
         phases(2),
@@ -263,4 +268,120 @@ fn too_few_nodes_are_an_error_not_a_panic() {
     );
     assert!(pauses.run(&mut world, &mut Rng::new(1)).is_err());
     assert!(world.applied.is_empty());
+}
+
+/// A world whose every call takes a microsecond.
+fn ticking() -> Log {
+    Log {
+        call_ns: 1_000,
+        ..Default::default()
+    }
+}
+
+fn crash_all() -> CrashAll {
+    CrashAll {
+        nodes: nodes(),
+        down: SECOND,
+        up: SECOND,
+    }
+}
+
+/// A schedule that holds for `hold` nanoseconds after a one-second warm-up.
+fn short(hold: u64) -> Phases {
+    Phases {
+        warm_up: SECOND,
+        hold: Duration::from_nanos(hold),
+        tail: SECOND,
+    }
+}
+
+#[test]
+fn a_hold_shorter_than_a_clock_read_still_runs_one_round() {
+    for hold in [0, 500] {
+        let mut world = ticking();
+        let mut schedule = Schedule::new(short(hold), crash_all());
+        schedule.run(&mut world, &mut Rng::new(1)).unwrap();
+        assert_eq!(schedule.rounds, 1, "hold {hold} ns");
+        let names: Vec<_> = world.applied.iter().map(|(_, a)| a.name()).collect();
+        assert_eq!(names, [["crash"; 5], ["reboot"; 5]].concat());
+        assert!(world.applied[0].0 >= 1_000_000_000, "after the warm-up");
+        // The round healed itself: nothing is left in force.
+        schedule.heal(&mut world).unwrap();
+        assert_eq!(world.applied.len(), 10);
+    }
+}
+
+/// Installs a partition and stops `n1`, then crashes `n2`.
+struct Partial;
+
+impl Round for Partial {
+    fn round(
+        &mut self,
+        faults: &mut InForce,
+        world: &mut dyn World,
+        pace: &mut dyn Pace,
+        _: &mut dyn Random,
+    ) -> Result<(), Error> {
+        let handle = faults.name("partition");
+        faults.apply(
+            world,
+            &Action::Partition {
+                handle,
+                left: vec!["n1".into()],
+                right: vec!["n2".into()],
+            },
+        )?;
+        faults.apply(
+            world,
+            &Action::Stop {
+                machine: "n1".into(),
+            },
+        )?;
+        pace.wait(world, SECOND)?;
+        faults.apply(
+            world,
+            &Action::Crash {
+                machine: "n2".into(),
+            },
+        )?;
+        pace.wait(world, SECOND)
+    }
+}
+
+#[test]
+fn heal_undoes_what_a_failed_round_started_and_reports_heal_failures() {
+    let mut world = ticking();
+    world.refuse = vec![
+        Action::Crash {
+            machine: "n2".into(),
+        },
+        Action::Heal {
+            handle: "partition-1".into(),
+        },
+    ];
+    let mut schedule = Schedule::new(short(0), Partial);
+    let error = schedule.run(&mut world, &mut Rng::new(1)).unwrap_err();
+    assert_eq!(error.0, "refused");
+    assert_eq!(world.applied.len(), 2);
+    // The refused heal is reported after the restart was still tried.
+    let error = schedule.heal(&mut world).unwrap_err();
+    assert_eq!(error.0, "heal: refused");
+    assert_eq!(
+        world.applied[2].1,
+        Action::Restart {
+            machine: "n1".into()
+        }
+    );
+    assert_eq!(world.applied.len(), 3);
+    // What stayed in force is undone by the next heal.
+    world.refuse.clear();
+    schedule.heal(&mut world).unwrap();
+    assert_eq!(
+        world.applied[3].1,
+        Action::Heal {
+            handle: "partition-1".into()
+        }
+    );
+    schedule.heal(&mut world).unwrap();
+    assert_eq!(world.applied.len(), 4);
 }

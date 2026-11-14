@@ -282,7 +282,7 @@ impl GuestWorld {
     /// handler runs while the machine is suspended and gets that thread's
     /// world; the machine resumes when the handler returns, unless the handler
     /// crashed it. A handler error stops serving: its machine stays suspended
-    /// and [`Self::break_error`] reports the error.
+    /// and [`World::break_error`] reports the error.
     pub fn on_break(
         &mut self,
         name: &str,
@@ -311,11 +311,6 @@ impl GuestWorld {
             self.breaks.serving = true;
         }
         Ok(())
-    }
-
-    /// The error that stopped serving breakpoints, if any.
-    pub fn break_error(&self) -> Option<Error> {
-        self.breaks.error.lock().unwrap().clone()
     }
 
     fn serve_breaks(
@@ -395,6 +390,10 @@ impl Drop for GuestWorld {
 }
 
 impl World for GuestWorld {
+    fn break_error(&self) -> Option<Error> {
+        self.breaks.error.lock().unwrap().clone()
+    }
+
     fn now_ns(&mut self) -> Result<u64, Error> {
         let result = self.control.call("now", json!({}))?;
         match result.get("now_ns").and_then(Value::as_u64) {

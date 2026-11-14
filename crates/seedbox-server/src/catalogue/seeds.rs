@@ -172,6 +172,17 @@ impl Catalogue {
                 return Ok(None);
             }
         };
+        // A member's spawns prepare from its range's submitted project, never
+        // from what the source run spawned (that stays on the source's record).
+        if matches!(entry.request.spec.inputs, InputSource::Project) {
+            let member_id = member.0.metadata.id.clone();
+            let mut admitted = self
+                .entries
+                .remove(&member_id)
+                .ok_or(Error::StorageFailed)?;
+            admitted.range_project = Some(entry.request.spec.configuration.clone());
+            self.store(member_id, admitted);
+        }
         range.next += 1;
         self.store(id, entry);
         Ok(Some(member))
@@ -267,6 +278,43 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    // A member runs the source's resolved definition, but spawns from the
+    // project its range was submitted from; a range submitted as a
+    // definition has no project to spawn from.
+    #[test]
+    fn members_carry_their_ranges_submitted_project() {
+        let mut catalogue = Catalogue::in_memory();
+        let project = SeedRangeRequest {
+            count: 2,
+            ..request("project-range")
+        };
+        let (source, _) = catalogue.submit_seeds(project).unwrap();
+        let id = source.metadata.id.clone();
+        let submitted = catalogue.entries[&id].request.spec.configuration.clone();
+        assert_eq!(submitted.source, Path::new("/project/seedbox.yaml"));
+        assert_eq!(catalogue.range_project(&id).unwrap(), None);
+        complete(&mut catalogue, source);
+        let (member, _) = catalogue.advance_seeds().unwrap().unwrap();
+        assert_eq!(
+            catalogue.range_project(&member.metadata.id).unwrap(),
+            Some(&submitted)
+        );
+
+        let definition = crate::test_support::resolved_request("definition-range");
+        let (source, _) = catalogue
+            .submit_seeds(SeedRangeRequest {
+                metadata: definition.metadata,
+                options: definition.options,
+                request_id: definition.request_id,
+                spec: definition.spec,
+                count: 2,
+            })
+            .unwrap();
+        complete(&mut catalogue, source);
+        let (member, _) = catalogue.advance_seeds().unwrap().unwrap();
+        assert_eq!(catalogue.range_project(&member.metadata.id).unwrap(), None);
     }
 
     #[test]

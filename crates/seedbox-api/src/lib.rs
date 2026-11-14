@@ -32,8 +32,8 @@ pub use events::{
 pub use http::{ApiError, ErrorCode, ServerInfo, SimulationList, SimulationSummary};
 pub use id::{InvalidSimulationId, SimulationId};
 pub use resource::{
-    ApiVersion, ExecutionOptions, InputSource, Metadata, ResourceKind, Simulation,
-    SimulationDocument, SimulationSpec, SimulationStatus, SubmitRequest,
+    resolve_architecture, ApiVersion, ExecutionOptions, InputSource, Metadata, ResourceKind,
+    Simulation, SimulationDocument, SimulationSpec, SimulationStatus, SubmitRequest,
 };
 pub use status::{ExecutionTermination, Phase, Stage, StageTiming, TestVerdict};
 

@@ -97,7 +97,10 @@ The oracle can add a machine during a run: the Python client's
 entry as `machines`, with paths relative to `seedbox.yaml`. The simulation
 waits while Seedbox prepares the image, and a failed preparation ends the run
 with its error. The run keeps the prepared machine, so `replay` boots it without
-building it again. See [the spawn project](examples/spawn/seedbox.yaml).
+building it again. With `--count`, each seed prepares what it spawns from the
+project directory as it is at that moment, so editing the project during a long
+range can make later seeds differ from a fresh run of the same seed; replaying a
+seed still matches. See [the spawn project](examples/spawn/seedbox.yaml).
 
 `network.latency` sets the one-way delay between machines and defaults to `1ms`.
 `simulator.quantum` sets the timeslice:

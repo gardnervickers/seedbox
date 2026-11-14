@@ -311,10 +311,11 @@ fn copy_inventory(inventory: &Inventory, staging: &Path, published: &Path) -> Re
     Ok(retained)
 }
 
-/// Decode service metadata and verify the whole referenced closure before any
+/// Decode and validate the service envelope only. No body is opened or hashed
+/// here: [`open`] verifies the whole referenced closure, once, before any
 /// backend decode or native restore. Service JSON has a finite byte envelope;
 /// the large Driver/native bodies use their own explicit closed codec budgets.
-pub(super) fn read(path: &Path) -> Result<wire::Checkpoint> {
+pub(super) fn load(path: &Path) -> Result<wire::Checkpoint> {
     let file = File::open(path)?;
     if file.metadata()?.len() > wire::MAX_ENVELOPE_BYTES {
         return Err(integrity("Driver service envelope exceeds limit"));
@@ -328,16 +329,6 @@ pub(super) fn read(path: &Path) -> Result<wire::Checkpoint> {
     metadata::validate(&bytes)?;
     let checkpoint: wire::Checkpoint = serde_json::from_slice(&bytes)?;
     checkpoint.validate().map_err(integrity)?;
-    // Verify the entire closure first, including unused future-bootstrap inputs.
-    for artifact in checkpoint
-        .inventory
-        .artifacts()
-        .into_iter()
-        .chain([&checkpoint.driver])
-        .chain(&checkpoint.machines)
-    {
-        verified(artifact)?;
-    }
     Ok(checkpoint)
 }
 
@@ -369,6 +360,10 @@ fn validate_machine_names<'a>(
     Ok(())
 }
 
+/// Verify the whole closure, hashing each artifact exactly once in place, and
+/// only then decode. Factory inputs include unused future-bootstrap inputs.
+/// The Driver metadata is decoded, and each native body handed out, from the
+/// descriptor that was hashed.
 pub(super) fn open(
     envelope: &wire::Checkpoint,
     limits: seedbox_driver::driver::DecodeLimits,
@@ -378,6 +373,18 @@ pub(super) fn open(
         verified(artifact)?;
     }
     let mut metadata = verified(&envelope.driver)?;
+    let mut bodies = envelope
+        .machines
+        .iter()
+        .map(|artifact| {
+            Ok(Opened {
+                file: verified(artifact)?.into_inner(),
+                length: artifact.length,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter();
+    // Every digest in the closure has matched: decoding starts here.
     let captured =
         Checkpoint::read_from(&mut metadata, limits).map_err(|e| integrity(e.to_string()))?;
     validate_machine_names(
@@ -396,9 +403,8 @@ pub(super) fn open(
                 "Driver native snapshot reference differs from service inventory",
             ));
         }
-        Ok::<_, Error>(Opened {
-            file: verified(artifact)?.into_inner(),
-            length: artifact.length,
+        bodies.next().ok_or_else(|| {
+            integrity("fewer verified native bodies than Driver snapshot references")
         })
     })?;
     if index != envelope.machines.len() {

@@ -120,7 +120,7 @@ fn service_name_substitution_is_refused_before_any_native_mapping() {
         encode,
     )
     .unwrap();
-    let mut envelope = read(&path).unwrap();
+    let mut envelope = load(&path).unwrap();
     let bodies: Vec<_> = envelope
         .machines
         .iter()
@@ -168,7 +168,7 @@ fn simultaneous_restores_share_verified_descriptors_not_reader_positions() {
     source.step(Timestamp::from_nanos(20)).unwrap();
     let expected = session_events(source.drain_observations().events);
     drop(source);
-    let envelope = read(&path).unwrap();
+    let envelope = load(&path).unwrap();
     let checkpoint = open(&envelope, limits())
         .unwrap()
         .try_map_snapshots(|file| Ok::<_, Error>(LazySaved::Stored(file)))
@@ -251,7 +251,7 @@ fn descriptor_backed_restore_has_one_decoded_body_at_a_time_and_cleans_partial_t
     source.step(Timestamp::from_nanos(20)).unwrap();
     let expected = session_events(source.drain_observations().events);
     drop(source);
-    let envelope = read(&manifest).unwrap();
+    let envelope = load(&manifest).unwrap();
     let checkpoint = open(&envelope, limits())
         .unwrap()
         .try_map_snapshots(|file| Ok::<_, Error>(LazySaved::Stored(file)))

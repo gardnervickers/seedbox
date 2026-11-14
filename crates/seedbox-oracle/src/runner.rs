@@ -1,7 +1,7 @@
 //! The runner that drives a [`Scenario`] through its phases.
 use crate::{
-    control::Action, random::Rng, Checkers, Client, Completion, Error, FinalRead, Read, Report,
-    Scenario, Validity, Verdict, World,
+    control::Action, random::Rng, Checkers, Client, ClientPanic, Completion, Error, FinalRead,
+    Read, Report, Scenario, Validity, Verdict, World,
 };
 use serde_json::{json, Value};
 use std::{
@@ -46,9 +46,15 @@ impl Guest<'_> {
 /// 4. Check, evaluate each decided verdict's property (valid holds, invalid
 ///    violates; unknown evaluates nothing), flush.
 ///
-/// Nemesis and heal failures are reported on stderr; the run still reads
-/// and checks, so they surface as unknown verdicts when they cost evidence,
-/// and [`Report::exit_code`] then reports the run incomplete.
+/// A failed [`crate::Nemesis::run`] does not end the run: the clients
+/// stop, and the heal, final reads and checks run as they would otherwise.
+/// The [`Report`] keeps that error beside the verdicts, with a failed
+/// heal's error, each client thread's panic, each restart the final reads
+/// asked for and the world refused, the world's [`World::break_error`] and
+/// a failed property flush, and the runner prints a line naming them. Any
+/// of them makes [`Report::exit_code`] report the run incomplete unless a
+/// check was violated, whatever the verdicts say: a step the scenario
+/// describes did not happen as described.
 pub fn run<S: Scenario>(scenario: &mut S, world: &mut dyn World, random: &mut Rng) -> Report {
     drive_scenario(scenario, world, random, Guest::Process)
 }
@@ -73,13 +79,21 @@ fn drive_scenario<S: Scenario>(
     if let Err(error) = scenario.setup(world) {
         warn("setup", &error);
         let verdicts = unknown(&checkers, &format!("setup failed: {error}"));
-        return finish(guest, verdicts);
+        return finish(
+            guest,
+            Report {
+                verdicts,
+                break_error: world.break_error(),
+                ..Report::default()
+            },
+        );
     }
     let history = scenario.history();
     let clients = scenario.clients();
     let processes = clients.len() as u64;
     let stop = AtomicBool::new(false);
     let mut nemesis = scenario.nemesis();
+    let mut report = Report::default();
     std::thread::scope(|scope| {
         let workers: Vec<_> = clients
             .into_iter()
@@ -91,25 +105,45 @@ fn drive_scenario<S: Scenario>(
             .collect();
         if let Err(error) = nemesis.run(world, random) {
             warn("nemesis", &error);
+            report.run_error = Some(error);
         }
         stop.store(true, Ordering::SeqCst);
-        for worker in workers {
-            if worker.join().is_err() {
-                warn("client", &Error("a client thread panicked".into()));
+        for (client, worker) in workers.into_iter().enumerate() {
+            if let Err(panic) = worker.join() {
+                report.panics.push(ClientPanic {
+                    client,
+                    message: panic_message(panic.as_ref()),
+                });
             }
         }
     });
     if let Err(error) = nemesis.heal(world) {
         warn("heal", &error);
+        report.heal_error = Some(error);
     }
     let mut reader = scenario.final_read();
-    let reads = final_reads(reader.as_mut(), world);
+    let FinalReads {
+        reads,
+        restart_errors,
+    } = final_reads(reader.as_mut(), world);
+    report.restart_errors = restart_errors;
+    report.break_error = world.break_error();
     let records = history.records();
-    let verdicts = checkers
+    report.verdicts = checkers
         .iter()
         .map(|checker| (checker.name().to_owned(), checker.check(&records, &reads)))
         .collect();
-    finish(guest, verdicts)
+    finish(guest, report)
+}
+
+/// A panic's message, when it has one; the panic hook has already printed it
+/// with its location.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    match (panic.downcast_ref::<&str>(), panic.downcast_ref::<String>()) {
+        (Some(message), _) => (*message).to_owned(),
+        (_, Some(message)) => message.clone(),
+        _ => "(no message)".to_owned(),
+    }
 }
 
 /// One client's workload: generate, invoke and record until stopped. After
@@ -143,8 +177,12 @@ fn drive<C: Client>(
 /// [`FinalRead::settle`] passes regardless, and read each node in order.
 /// A node that could not be read keeps its error, which checkers treat as
 /// unknown evidence.
-pub fn final_reads<R>(reader: &mut dyn FinalRead<Read = R>, world: &mut dyn World) -> Vec<Read<R>> {
+pub fn final_reads<R>(
+    reader: &mut dyn FinalRead<Read = R>,
+    world: &mut dyn World,
+) -> FinalReads<R> {
     let nodes = reader.nodes();
+    let mut restart_errors = Vec::new();
     if !reader.ready() {
         let exited: Vec<_> = nodes
             .iter()
@@ -155,20 +193,33 @@ pub fn final_reads<R>(reader: &mut dyn FinalRead<Read = R>, world: &mut dyn Worl
             if let Err(error) = world.apply(&Action::Restart {
                 machine: machine.clone(),
             }) {
-                eprintln!("seedbox-oracle: restart {machine}: {error}");
+                warn(&format!("restart {machine}"), &error);
+                restart_errors.push(Error(format!("restart {machine}: {error}")));
             }
         }
         // Readiness is the readers' own check; reading reports what is left.
         reader.ready();
     }
     settle(reader, world, &nodes);
-    nodes
+    let reads = nodes
         .into_iter()
         .map(|node| Read {
             result: reader.read(&node),
             node,
         })
-        .collect()
+        .collect();
+    FinalReads {
+        reads,
+        restart_errors,
+    }
+}
+
+/// What [`final_reads`] read, node by node, and each restart it asked for
+/// that the world refused.
+#[derive(Debug, PartialEq)]
+pub struct FinalReads<R> {
+    pub reads: Vec<Read<R>>,
+    pub restart_errors: Vec<Error>,
 }
 
 /// Poll views until they agree for `agree_for` or `settle` passes. Times are
@@ -213,9 +264,11 @@ fn warn(phase: &str, error: &Error) {
 }
 
 /// Evaluate each decided checker's property and flush, so the verdicts are
-/// part of the run's results before the oracle exits.
-fn finish(guest: Guest<'_>, verdicts: Vec<(String, Verdict)>) -> Report {
-    for (name, verdict) in &verdicts {
+/// part of the run's results before the oracle exits. Print each verdict,
+/// then one line naming the steps that failed, if any did, a failed flush
+/// among them.
+fn finish(guest: Guest<'_>, mut report: Report) -> Report {
+    for (name, verdict) in &report.verdicts {
         println!("{name}: {:?}: {}", verdict.validity, verdict.summary);
         if let Some(condition) = verdict.condition() {
             let details = json!({"summary": verdict.summary, "details": verdict.details});
@@ -223,9 +276,15 @@ fn finish(guest: Guest<'_>, verdicts: Vec<(String, Verdict)>) -> Report {
         }
     }
     if let Err(error) = guest.flush() {
-        eprintln!("seedbox-oracle: property flush failed: {error}");
+        let error = Error(error.to_string());
+        warn("property flush", &error);
+        report.flush_error = Some(error);
     }
-    Report { verdicts }
+    let failures = report.failures();
+    if !failures.is_empty() {
+        println!("execution failures: {}", failures.join("; "));
+    }
+    report
 }
 
 /// A client type for scenarios whose operations happen elsewhere and

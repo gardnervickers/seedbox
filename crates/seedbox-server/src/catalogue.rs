@@ -61,6 +61,9 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone)]
 struct Entry {
     range: Option<seeds::Range>,
+    /// For a seed-range member, the project its range was submitted from, so
+    /// its spawns prepare machines as a fresh run of that project would.
+    range_project: Option<seedbox_application::config::Simulation>,
     request: SubmitRequest,
     resource: Simulation,
     controls: BTreeMap<String, ControlReceipt>,
@@ -100,48 +103,68 @@ impl Catalogue {
             .ok_or_else(|| Error::NotFound(id.clone()))
     }
 
+    /// The project a seed-range member's range was submitted from, if any.
+    pub fn range_project(
+        &self,
+        id: &SimulationId,
+    ) -> Result<Option<&seedbox_application::config::Simulation>> {
+        self.entries
+            .get(id)
+            .map(|e| e.range_project.as_ref())
+            .ok_or_else(|| Error::NotFound(id.clone()))
+    }
+
     pub fn list(&self) -> impl Iterator<Item = &Simulation> {
         self.entries.values().map(|e| &e.resource)
     }
 
-    /// Freeze the ownership tree before cancellation; submission uses this same
-    /// catalogue lock and cannot create new descendants after the mark.
-    pub fn begin_delete(&mut self, root: &SimulationId) -> Result<Vec<SimulationId>> {
-        let mut ids = vec![root.clone()];
-        for id in &ids {
-            if let Some(entry) = self.entries.get(id) {
-                let mut entry = entry.clone();
-                entry.deleting = true;
-                if entry
-                    .resource
-                    .metadata
-                    .deletion_requested_at_unix_ms
-                    .is_none()
-                {
-                    entry.resource.metadata.deletion_requested_at_unix_ms = Some(
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .map_err(|e| Error::Invalid(e.to_string()))?
-                            .as_millis()
-                            .try_into()
-                            .map_err(|_| Error::Invalid("host time overflow".into()))?,
-                    );
-                    entry.resource.metadata.revision = entry
-                        .resource
-                        .metadata
-                        .revision
-                        .checked_add(1)
-                        .ok_or_else(|| Error::Invalid("resource revision exhausted".into()))?;
-                }
-
-                if let Some(range) = &mut entry.range {
-                    range.stop_requested = true;
-                }
-                self.store(id.clone(), entry);
-            }
+    /// Mark one resource for deletion before cancellation; submission uses this
+    /// same catalogue lock and cannot reference it after the mark. Deletion does
+    /// not cascade: a seed range source is refused, unmarked, while a member it
+    /// admitted is still active, and the mark stops it admitting more.
+    pub fn begin_delete(&mut self, id: &SimulationId) -> Result<()> {
+        let Some(entry) = self.entries.get(id) else {
+            return Ok(());
+        };
+        if entry.range.is_some()
+            && self
+                .seed_range(id)?
+                .members
+                .iter()
+                .any(|member| member.metadata.id != *id && member.status.phase != Phase::Completed)
+        {
+            return Err(Error::Invalid(
+                "stop the seed range and wait for completion before deleting it".into(),
+            ));
         }
-        ids.reverse();
-        Ok(ids)
+        let mut entry = entry.clone();
+        entry.deleting = true;
+        if entry
+            .resource
+            .metadata
+            .deletion_requested_at_unix_ms
+            .is_none()
+        {
+            entry.resource.metadata.deletion_requested_at_unix_ms = Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|e| Error::Invalid(e.to_string()))?
+                    .as_millis()
+                    .try_into()
+                    .map_err(|_| Error::Invalid("host time overflow".into()))?,
+            );
+            entry.resource.metadata.revision = entry
+                .resource
+                .metadata
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| Error::Invalid("resource revision exhausted".into()))?;
+        }
+        if let Some(range) = &mut entry.range {
+            range.stop_requested = true;
+        }
+        self.store(id.clone(), entry);
+        Ok(())
     }
 
     /// Delete only terminal, unreferenced resources. Request identity lasts for
@@ -287,6 +310,7 @@ impl Catalogue {
             controls: BTreeMap::new(),
             deleting: false,
             range,
+            range_project: None,
         };
         self.requests
             .insert(entry.request.request_id.clone(), id.clone());
@@ -449,6 +473,7 @@ impl Catalogue {
             controls: original.controls.clone(),
             deleting: original.deleting,
             range: original.range.clone(),
+            range_project: original.range_project.clone(),
         };
         if resource.status.phase == Phase::Completed {
             for control in entry.controls.values_mut() {

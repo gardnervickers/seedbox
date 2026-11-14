@@ -571,7 +571,7 @@ fn checkpoint_receipt_follows_durable_manifest_and_is_not_recaptured() {
     let captured = worker.capture_pending().unwrap().unwrap();
     assert_eq!(captured.state, host::CheckpointState::Captured);
     let path = worker.output.join("checkpoint-saved.json");
-    let envelope = checkpoint::read(&path).unwrap();
+    let envelope = checkpoint::load(&path).unwrap();
     assert_eq!(
         serde_json::to_value(&envelope.state).unwrap(),
         serde_json::to_value(&worker.state).unwrap()
@@ -591,9 +591,13 @@ fn checkpoint_receipt_follows_durable_manifest_and_is_not_recaptured() {
 }
 /// A requested checkpoint whose capture fails is never acknowledged or held:
 /// failing before writing, while writing, or on the second machine after the
-/// first was written leaves no manifest or bodies, reports the refusal once,
-/// and is not retried. A run that then ends refuses checkpoints as completed
-/// instead of fabricating one.
+/// first was written leaves no manifest or bodies and is not retried. Polling
+/// the same request under a fresh wire ID, as the server does until the
+/// request resolves, returns the refusal instead of capturing again; status
+/// reads stay clean, and a new request starts afresh: once the failure
+/// clears it captures normally. A run that then ends still answers the
+/// refused request with its refusal and refuses others as completed instead
+/// of fabricating a checkpoint.
 #[test]
 fn failed_capture_is_never_acknowledged_and_completion_fabricates_nothing() {
     let attempts: [(&str, WriteSnapshot); 3] = [
@@ -632,8 +636,13 @@ fn failed_capture_is_never_acknowledged_and_completion_fabricates_nothing() {
                 .filter(|name| name.starts_with("checkpoint-"))
                 .collect::<Vec<_>>()
         };
-        for attempt in 0..2u64 {
-            let requested = playback(&mut worker, 10 + attempt, checkpoint("saved"));
+        let mut wire = 10;
+        let mut next = |worker: &mut Worker<Mock>, command: Command| {
+            wire += 1;
+            playback(worker, wire, command)
+        };
+        for name in ["saved", "again"] {
+            let requested = next(&mut worker, checkpoint(name));
             assert_eq!(requested.error, None, "{stage}");
             assert_eq!(
                 requested.checkpoint.unwrap().state,
@@ -646,22 +655,53 @@ fn failed_capture_is_never_acknowledged_and_completion_fabricates_nothing() {
                 "{stage}: {error}"
             );
             assert_eq!(published(&worker), Vec::<String>::new(), "{stage}");
-            let status = playback(&mut worker, 20 + attempt, Command::Status);
-            assert_eq!(status.checkpoint, None, "{stage}: held after failure");
-            assert_eq!(
-                status.error,
-                Some(ControlError::InvalidCheckpoint),
-                "{stage}"
-            );
-            assert!(
-                status.detail.unwrap().contains(&error.to_string()),
-                "{stage}"
-            );
-            assert!(
-                worker.capture_pending().unwrap().is_none(),
-                "{stage}: retried"
-            );
+            for _ in 0..2 {
+                let polled = next(&mut worker, checkpoint(name));
+                assert_eq!(
+                    polled.error,
+                    Some(ControlError::InvalidCheckpoint),
+                    "{stage}: {name}"
+                );
+                assert_eq!(polled.checkpoint, None, "{stage}: held after failure");
+                assert_eq!(polled.detail, Some(error.to_string()), "{stage}");
+                assert!(
+                    worker.capture_pending().unwrap().is_none(),
+                    "{stage}: retried"
+                );
+                // A refusal is the request's answer, not a worker failure.
+                let status = next(&mut worker, Command::Status);
+                assert_eq!(status.error, None, "{stage}");
+                assert_eq!(status.detail, None, "{stage}");
+                assert_eq!(status.checkpoint, None, "{stage}");
+            }
         }
+
+        // Once the failure clears, a new request captures normally.
+        let failing = worker.write_snapshot;
+        worker.write_snapshot = |saved, writer| {
+            serde_json::to_writer(writer, &saved.0)?;
+            Ok(())
+        };
+        let requested = next(&mut worker, checkpoint("recovered"));
+        assert_eq!(requested.error, None, "{stage}");
+        let captured = worker.capture_pending().unwrap().unwrap();
+        assert_eq!(captured.request_id, "recovered", "{stage}");
+        assert_eq!(captured.state, host::CheckpointState::Captured, "{stage}");
+        let recovered = published(&worker);
+        assert!(!recovered.is_empty(), "{stage}");
+        let polled = next(&mut worker, checkpoint("recovered"));
+        assert_eq!(polled.error, None, "{stage}");
+        assert_eq!(polled.checkpoint, Some(captured), "{stage}");
+
+        // The failure returns and refuses one more request.
+        worker.write_snapshot = failing;
+        let requested = next(&mut worker, checkpoint("last"));
+        assert_eq!(requested.error, None, "{stage}");
+        let refusal = worker.capture_pending().unwrap_err();
+        assert!(
+            matches!(refusal, checkpoint::CaptureFailure::Refused(_)),
+            "{stage}: {refusal}"
+        );
 
         // The run ends: no capture is fabricated and later requests are refused.
         worker
@@ -673,12 +713,17 @@ fn failed_capture_is_never_acknowledged_and_completion_fabricates_nothing() {
             .unwrap();
         let at = worker.playback().unwrap().position.at;
         worker.step(at).unwrap();
-        let late = playback(&mut worker, 30, checkpoint("saved"));
+        let late = next(&mut worker, checkpoint("saved"));
         assert_eq!(late.error, Some(ControlError::Completed), "{stage}");
         assert!(late.terminal, "{stage}");
         assert_eq!(late.checkpoint, None, "{stage}");
+        // A poll of the refused request after the end still gets its reason.
+        let late = next(&mut worker, checkpoint("last"));
+        assert_eq!(late.error, Some(ControlError::InvalidCheckpoint), "{stage}");
+        assert_eq!(late.detail, Some(refusal.to_string()), "{stage}");
+        assert!(late.terminal, "{stage}");
         assert!(worker.capture_pending().unwrap().is_none(), "{stage}");
-        assert_eq!(published(&worker), Vec::<String>::new(), "{stage}");
+        assert_eq!(published(&worker), recovered, "{stage}");
     }
 }
 #[test]

@@ -46,7 +46,13 @@ impl Service {
                 );
             }
         };
-        Self::check_machine_effect(mode, &requester, &self.requested(&facts), &effect)?;
+        Self::check_machine_effect(
+            mode,
+            &requester,
+            &self.requested(&facts),
+            self.commanded(&facts),
+            &effect,
+        )?;
         let fault = self.token()?;
         let pending = Pending {
             network: None,
@@ -124,12 +130,19 @@ impl Service {
         }
         facts
     }
+    /// Whether a guest command admitted for this boot is still waiting for the
+    /// guest's acknowledgment.
+    fn commanded(&self, facts: &Facts) -> bool {
+        (self.pending.values())
+            .any(|p| p.effect.guest_command() && p.scope.is_machine(&facts.name, facts.boot))
+    }
     /// Machine-effect admission checks, in order: the control-only
     /// availability preflight, target state policy, then requester mode.
     fn check_machine_effect(
         mode: AdmissionMode,
         requester: &Requester,
         facts: &Facts,
+        commanded: bool,
         effect: &Effect,
     ) -> Result<(), PreparationError> {
         // The control API's physical-availability preflight precedes Faults'
@@ -156,7 +169,10 @@ impl Service {
                             ApplicationCommand::Resume => facts.process == Process::Frozen,
                         })
             }
-            Effect::Pause => facts.vm == Vm::Up,
+            // A paused machine cannot acknowledge, so a pause would run a
+            // waiting guest command out of deadline: refuse it while one
+            // waits, as a process command for a paused machine is refused.
+            Effect::Pause => facts.vm == Vm::Up && !commanded,
             Effect::Resume => facts.vm == Vm::Paused,
             Effect::Crash => facts.vm != Vm::Down,
             Effect::Reboot => facts.vm == Vm::Down,
@@ -435,7 +451,9 @@ impl Service {
             ))));
         }
         let allowed = match pending.effect {
-            Effect::Pause => facts.vm == Vm::Up,
+            // A guest command admitted after this pause but before its turn
+            // would run out of deadline on the paused machine.
+            Effect::Pause => facts.vm == Vm::Up && !self.commanded(&facts),
             Effect::Resume => facts.vm == Vm::Paused,
             Effect::Crash => facts.vm != Vm::Down,
             Effect::Reboot => facts.vm == Vm::Down,

@@ -246,7 +246,7 @@ fn held_crash_partition_and_same_time_order_survive_binary_capture_one_and_four_
                 .session
                 .applied_faults
                 .is_empty());
-            let envelope = checkpoint::read(&source.output.join("checkpoint-held.json")).unwrap();
+            let envelope = checkpoint::load(&source.output.join("checkpoint-held.json")).unwrap();
             assert!(envelope
                 .state
                 .world

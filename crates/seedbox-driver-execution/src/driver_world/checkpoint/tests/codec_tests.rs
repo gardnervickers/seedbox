@@ -180,7 +180,7 @@ fn codec_service_descriptor_roundtrip_distinguishes_none_and_some_zero() {
             },
         )
         .unwrap();
-        let envelope = read(&path).unwrap();
+        let envelope = load(&path).unwrap();
         envelope.validate().unwrap();
         let checkpoint = open(&envelope, limits())
             .unwrap()
