@@ -567,3 +567,97 @@ esac
         }
     }
 }
+
+/// TEMPORARY PROBE (never merge): repeat the `profile` workload's fresh
+/// same-seed run and replay, tallying replay mismatches instead of stopping.
+#[test]
+fn profile_soak() {
+    let Some(rounds) = std::env::var("SEEDBOX_TEST_SOAK_ROUNDS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+    else {
+        return;
+    };
+    let workload = workload("profile");
+    let workload = workload.to_str().unwrap();
+    let tally = std::sync::Mutex::new(Vec::new());
+    for round in 0..rounds {
+        with_server(
+            "soak",
+            &format!("profile-{round}"),
+            |cli, directory, state| {
+                let lenient = |name: &str, args: &[&str]| -> String {
+                    invoke(cli, directory, state, name, args).unwrap_or_else(|_| {
+                        fs::read_to_string(directory.join(format!("{name}.log")))
+                            .unwrap_or_default()
+                    })
+                };
+                let first_output = lenient("first", &["run", workload, "--wall-time", "30m"]);
+                let Ok(first) = simulation_id(&first_output).map(str::to_owned) else {
+                    println!(
+                        "SOAK round {round} first did not pass: {}",
+                        first_output.trim()
+                    );
+                    tally.lock().unwrap().push((String::new(), "ERROR"));
+                    return Ok(());
+                };
+                let described = lenient(
+                    "describe",
+                    &["show", "--view", "definition", &first, "--json"],
+                );
+                let resource: seedbox_api::Simulation =
+                    serde_json::from_str(&described).map_err(|error| error.to_string())?;
+                let seed = resource.spec.seed.ok_or("no seed")?.to_string();
+                let second_output = lenient(
+                    "second",
+                    &["run", workload, "--seed", &seed, "--wall-time", "30m"],
+                );
+                let Ok(second) = simulation_id(&second_output).map(str::to_owned) else {
+                    println!(
+                        "SOAK round {round} second did not pass: {}",
+                        second_output.trim()
+                    );
+                    tally.lock().unwrap().push((seed, "ERROR"));
+                    return Ok(());
+                };
+                let fresh = lenient("compare-fresh", &["compare", &first, &second, "--json"]);
+                let replay = lenient("replay", &["replay", &first, "--wall-time", "30m"]);
+                let replayed = replay
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("MATCH: ")
+                            .or_else(|| line.strip_prefix("MISMATCH: "))
+                    })
+                    .map(str::to_owned);
+                let verdict = if replay.lines().any(|line| line.starts_with("MATCH: ")) {
+                    "MATCH"
+                } else {
+                    "MISMATCH"
+                };
+                println!("SOAK round {round} seed {seed} fresh: {}", fresh.trim());
+                println!(
+                    "SOAK round {round} seed {seed} replay {verdict}: {}",
+                    replay.trim()
+                );
+                if let (Some(replayed), "MISMATCH") = (replayed.as_deref(), verdict) {
+                    for (name, args) in [
+                        ("cmp-replay", vec!["compare", &first, replayed, "--json"]),
+                        ("show-first", vec!["show", &first, "--json"]),
+                        ("show-replayed", vec!["show", replayed, "--json"]),
+                    ] {
+                        println!("SOAK round {round} {name}: {}", lenient(name, &args).trim());
+                    }
+                }
+                tally.lock().unwrap().push((seed, verdict));
+                Ok(())
+            },
+        );
+    }
+    let tally = tally.into_inner().unwrap();
+    let mismatches = tally.iter().filter(|(_, v)| *v == "MISMATCH").count();
+    println!(
+        "SOAK TOTAL {} rounds, {mismatches} replay mismatches: {tally:?}",
+        tally.len()
+    );
+    assert_eq!(mismatches, 0);
+}
