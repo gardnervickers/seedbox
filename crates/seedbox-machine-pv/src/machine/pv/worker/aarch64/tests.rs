@@ -1,4 +1,4 @@
-use super::super::{State, Stop, IRQ_DEFERRED, LAST, NOW, SYSCALL_COST};
+use super::super::{memory::GRANULE, State, Stop, IRQ_DEFERRED, LAST, NOW, SYSCALL_COST};
 use super::*;
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -58,11 +58,28 @@ impl Backend for Scripted {
             &(&self.core[..], &self.system),
         )?])
     }
+    // Retained snapshots keep no native state of the script; guest writes are
+    // never scripted, so there is nothing to track, collect or reset.
     fn capture(&self) -> Result<Architecture> {
-        Err("script capture unused".into())
+        Ok(Architecture {
+            core: Vec::new(),
+            system: BTreeMap::new(),
+            simd: Vec::new(),
+            icc: BTreeMap::new(),
+            gic: Vec::new(),
+        })
     }
     fn restore(&mut self, _: &Architecture) -> Result<()> {
-        Err("script restore unused".into())
+        Ok(())
+    }
+    fn track(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn collect(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn reset(&mut self) -> Result<()> {
+        Ok(())
     }
 }
 fn machine() -> Machine<Scripted> {
@@ -431,4 +448,41 @@ fn only_raised_lines_are_lowered() {
     vm.irq(UART, false).unwrap();
     vm.irq(UART, false).unwrap();
     assert_eq!(vm.native.irqs, [(UART, true), (UART, false)]);
+}
+
+/// Write a byte to each of these RAM pages behind tracking's back, as a write
+/// that escaped it would.
+fn escape(vm: &Machine<Scripted>, pages: &[usize]) {
+    for &page in pages {
+        unsafe { *vm.ram.ptr().add(page * GRANULE + 1) ^= 0xa5 };
+    }
+}
+
+#[test]
+fn a_snapshot_that_finds_a_missed_write_loses_no_tracked_one() {
+    let mut vm = machine();
+    vm.snapshot(u64::MAX, true).unwrap().unwrap();
+    vm.ram.set_word(300 * GRANULE, 1);
+    escape(&vm, &[100, 200]);
+    let error = vm.snapshot(u64::MAX, true).err().expect("a missed write");
+    assert!(error.contains("missed a write to RAM page 100"), "{error}");
+    // Nothing was written since: the next snapshot takes every change,
+    // tracked or not, and verifies.
+    vm.snapshot(u64::MAX, true).unwrap().unwrap();
+}
+
+#[test]
+fn a_rewind_that_finds_a_missed_write_can_be_rewound_again() {
+    let mut vm = machine();
+    let version = vm.snapshot(u64::MAX, true).unwrap().unwrap().id;
+    let saved = unsafe { vm.ram.bytes() }.to_vec();
+    vm.ram.set_word(300 * GRANULE, 1);
+    vm.rewind(version, false).unwrap();
+    escape(&vm, &[100, 200]);
+    let error = vm.rewind(version, true).expect_err("a missed write");
+    assert!(error.contains("left RAM page 100 differing"), "{error}");
+    // The failed rewind already made the version current; the next one must
+    // still rewrite what differs from it.
+    vm.rewind(version, false).unwrap();
+    assert!(unsafe { vm.ram.bytes() } == &saved[..]);
 }

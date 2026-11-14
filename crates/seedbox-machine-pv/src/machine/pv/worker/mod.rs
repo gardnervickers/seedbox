@@ -18,6 +18,7 @@ mod evidence;
 mod memory;
 mod net;
 pub(super) mod snapshot;
+mod versions;
 mod virtio;
 mod witness;
 use super::{
@@ -96,7 +97,7 @@ struct State {
 }
 /// Snapshot header. With a disk, the file ends with the store's encoded
 /// overlays after RAM; its base stays with the boot inputs.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Capture {
     memory_bytes: u64,
     layout_version: u32,
@@ -123,6 +124,9 @@ struct Effect {
 }
 struct Machine<B: Backend = Native> {
     native: B,
+    /// Where the loaded boot starts: a rewind resets the vCPU to it before
+    /// restoring a version, as a restore into a new machine does.
+    entry: arch::Entry,
     ram: Rc<Memory>,
     page: Rc<Memory>,
     state: State,
@@ -135,6 +139,8 @@ struct Machine<B: Backend = Native> {
     /// The client released the machine from a hold: the next run continues
     /// a held disk request before anything else, even with no budget.
     resume: bool,
+    /// The retained snapshots of this machine.
+    versions: versions::Versions,
 }
 impl<B: Backend> Machine<B> {
     #[cfg(test)]
@@ -187,6 +193,7 @@ impl<B: Backend> Machine<B> {
         arch::reset(&mut native, &entry)?;
         Ok(Self {
             native,
+            entry,
             ram,
             page,
             state: State {
@@ -199,6 +206,7 @@ impl<B: Backend> Machine<B> {
             output: Vec::new(),
             ended: false,
             resume: false,
+            versions: versions::Versions::new(),
         })
     }
     /// When the machine next has work of its own: its timer, or a pending
@@ -748,7 +756,8 @@ impl<B: Backend> Machine<B> {
             .is_ok()
             .then(|| name.to_owned()))
     }
-    fn capture(&mut self, path: &Path) -> Result<()> {
+    /// The header of a snapshot of the stopped machine as it is now.
+    fn header(&mut self) -> Result<Capture> {
         // The client owns an ended boot's exit state without a live worker.
         if self.ended {
             return Err("PV capture after the guest ended its boot".into());
@@ -757,7 +766,7 @@ impl<B: Backend> Machine<B> {
             return Err("PV capture while a guest disk request is held".into());
         }
         let layout = self.ram.layout()?;
-        let state = Capture {
+        Ok(Capture {
             memory_bytes: layout.capacity,
             layout_version: boot::LAYOUT_VERSION,
             page_bytes: PAGE_BYTES as u64,
@@ -770,27 +779,19 @@ impl<B: Backend> Machine<B> {
             architecture: self.native.capture()?,
             block: self.block.as_ref().map(|block| block.transport().clone()),
             disk_faults: self.block.as_ref().map(|block| block.faults().clone()),
-        };
-        let mut file = File::options()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(|e| format!("PV snapshot create: {e}"))?;
-        protocol::send(&mut file, &state)?;
-        unsafe { file.write_all(self.page.bytes()) }
-            .map_err(|e| format!("PV snapshot page: {e}"))?;
-        for region in &layout.segments {
-            let offset = layout.offset(region.start, (region.end - region.start) as usize)?;
-            let bytes =
-                unsafe { &self.ram.bytes()[offset..offset + (region.end - region.start) as usize] };
-            file.write_all(bytes)
-                .map_err(|e| format!("PV snapshot RAM: {e}"))?;
-        }
-        if let Some(block) = &self.block {
-            file.write_all(&block.store().encode_overlays())
-                .map_err(|e| format!("PV snapshot disk: {e}"))?;
-        }
-        Ok(())
+        })
+    }
+    fn capture(&mut self, path: &Path) -> Result<()> {
+        let capture = self.header()?;
+        let ram = unsafe { self.ram.bytes() };
+        write_snapshot(
+            path,
+            &capture,
+            unsafe { self.page.bytes() },
+            self.ram.layout()?,
+            |file, offset, count| file.write_all(&ram[offset..offset + count]),
+            self.block.as_ref().map(block::Block::store),
+        )
     }
     /// Write the disk's encoded overlays, unchanged, to a new file. Unlike a
     /// capture this is allowed after the guest ended its boot.
@@ -803,6 +804,36 @@ impl<B: Backend> Machine<B> {
             .and_then(|mut file| file.write_all(&block.store().encode_overlays()))
             .map_err(|e| format!("PV disk export: {e}"))
     }
+}
+/// Write a new snapshot file: the header, the PV page, each RAM segment in
+/// layout order as `ram` writes it from its offset in the mapping, then the
+/// disk's encoded overlays.
+fn write_snapshot(
+    path: &Path,
+    capture: &Capture,
+    page: &[u8],
+    layout: &boot::RamLayout,
+    mut ram: impl FnMut(&mut File, usize, usize) -> std::io::Result<()>,
+    disk: Option<&Store>,
+) -> Result<()> {
+    let mut file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| format!("PV snapshot create: {e}"))?;
+    protocol::send(&mut file, capture)?;
+    file.write_all(page)
+        .map_err(|e| format!("PV snapshot page: {e}"))?;
+    for region in &layout.segments {
+        let count = (region.end - region.start) as usize;
+        ram(&mut file, layout.offset(region.start, count)?, count)
+            .map_err(|e| format!("PV snapshot RAM: {e}"))?;
+    }
+    if let Some(store) = disk {
+        file.write_all(&store.encode_overlays())
+            .map_err(|e| format!("PV snapshot disk: {e}"))?;
+    }
+    Ok(())
 }
 /// The boot's disk with the client's overlays applied, plus its base alone
 /// for later restores.
@@ -1133,6 +1164,40 @@ pub(crate) fn serve() -> Result<()> {
                     .ok_or("PV fault change before boot")?
                     .change_faults(change)?,
             )),
+            Request::Snapshot { limit, verify } => {
+                let vm = machine.as_mut().ok_or("PV snapshot before boot")?;
+                Ok(match vm.snapshot(limit, verify)? {
+                    Ok(taken) => Response::Snapshotted {
+                        id: taken.id,
+                        pages: taken.pages as u64,
+                        held: vm.versions.held(),
+                    },
+                    Err(versions::Full) => Response::Full {
+                        held: vm.versions.held(),
+                    },
+                })
+            }
+            Request::Rewind { id, verify } => Ok(Response::Rewound {
+                pages: machine
+                    .as_mut()
+                    .ok_or("PV rewind before boot")?
+                    .rewind(id, verify)? as u64,
+            }),
+            Request::Release(id) => {
+                machine
+                    .as_mut()
+                    .ok_or("PV release before boot")?
+                    .versions
+                    .release(id)?;
+                Ok(Response::Released)
+            }
+            Request::Export { id, path } => {
+                machine
+                    .as_ref()
+                    .ok_or("PV export before boot")?
+                    .export(id, &path)?;
+                Ok(Response::Exported)
+            }
         })();
         let response = match result {
             Ok(answer) => answer,
