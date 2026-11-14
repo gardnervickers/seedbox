@@ -112,7 +112,7 @@ impl Control {
             }
         }
     }
-    pub(super) fn raw(&self, peer: &Path, bytes: &[u8]) {
+    fn raw(&self, peer: &Path, bytes: &[u8]) {
         let _ = self.socket.send_to(bytes, peer);
     }
     pub(super) fn waiting(&mut self, waiting: bool) -> io::Result<()> {

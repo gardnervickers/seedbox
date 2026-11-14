@@ -144,7 +144,7 @@ impl DriverExecutor {
     fn admit_execution(&self, controller: bool) -> Result<()> {
         super::policy::admit_execution(self.backend, controller).map_err(Error::Setup)
     }
-    /// Descriptive current-host metadata and explicit owned launch contract. No
+    /// Descriptive current-host metadata and launch kind. No
     /// revision, source/build hash, qualification or provenance admission gate.
     pub fn descriptor(guest_arch: &str) -> crate::execution::EngineDescriptor {
         crate::execution::EngineDescriptor {
