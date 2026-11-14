@@ -118,11 +118,9 @@ pub struct Snapshot {
 // branches copies none of it.
 #[derive(Clone)]
 enum Body {
-    /// A whole capture, as [`assemble`] lays it out: a decoded snapshot, or a
-    /// live boot copied out of its worker.
+    /// A whole capture, as [`assemble`] lays it out: a decoded snapshot, a
+    /// machine between boots, or a live boot copied out of its worker.
     Image(Arc<Vec<u8>>),
-    /// A machine between boots.
-    Stopped(Arc<Stopped>),
     /// A live boot kept in its worker.
     Retained(Arc<Retained>),
 }
@@ -131,11 +129,6 @@ struct Inputs {
     capture: Capture,
     kernel: Arc<Vec<u8>>,
     initrd: Arc<Vec<u8>>,
-}
-struct Stopped {
-    inputs: Inputs,
-    /// The disk's store, which the machine owns between boots.
-    store: Option<Store>,
 }
 struct Retained {
     inputs: Inputs,
@@ -154,7 +147,9 @@ struct Retained {
 /// in place when no machine is running in it ([`Restored`]).
 ///
 /// This is host authority, like the scratch root: no snapshot carries it,
-/// and a restored machine retains nothing until it is told to. Backends that
+/// and a restored machine retains nothing until it is told to. A retained
+/// snapshot does keep the `verify` it was taken with, since a rewind to it
+/// happens before the restored machine can be told anything. Backends that
 /// cannot record guest writes (all but macOS/HVF) capture whole regardless.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Retention {
@@ -166,7 +161,8 @@ pub struct Retention {
     /// machine state (about 130 KB on HVF, nearly all of it the GIC's), a
     /// copy of the 16 KiB PV page, 2 KiB of page table for each 4 MiB of RAM
     /// in which it copied a page (at most an eighth of the pages it copied),
-    /// and the disk's writes not yet flushed. A caller that keeps many
+    /// and one map entry for each sector the disk holds, durable or not yet
+    /// flushed; the sectors themselves are shared. A caller that keeps many
     /// snapshots bounds how many as well.
     pub limit_bytes: u64,
     /// Check each snapshot against a whole capture taken with it, and all of
@@ -174,9 +170,10 @@ pub struct Retention {
     /// replaces; for tests and soak runs.
     pub verify: bool,
 }
-/// The machine's worker refused a snapshot that would take its snapshots
-/// over [`Retention::limit_bytes`]. Nothing was kept and the machine is
-/// unchanged: drop snapshots of this boot and take it again.
+/// The machine's worker refused a snapshot because its snapshots would then
+/// hold, or already hold, more than [`Retention::limit_bytes`]. Nothing was
+/// kept and the machine is unchanged: drop snapshots held in that worker,
+/// whichever machines took them, and take it again.
 ///
 /// The inner error of the [`std::io::ErrorKind::QuotaExceeded`] error that
 /// [`Machine::snapshot`] then returns.
@@ -329,10 +326,6 @@ impl Snapshot {
     fn image(&self) -> Result<Arc<Vec<u8>>, String> {
         match &self.body {
             Body::Image(bytes) => Ok(bytes.clone()),
-            Body::Stopped(stopped) => {
-                let overlays = stopped.store.as_ref().map(Store::encode_overlays);
-                assemble(&stopped.inputs, None, overlays).map(Arc::new)
-            }
             Body::Retained(retained) => {
                 let directory = tempfile::Builder::new()
                     .prefix("export-")
@@ -1145,14 +1138,15 @@ impl PVMachine {
                 overlays,
             )?))
         } else {
-            let store = match &self.disk {
-                Some(disk) => Some(disk.store.clone().ok_or("PV disk has no owner")?),
+            // Between boots the machine owns its disk's store.
+            let overlays = match &self.disk {
+                Some(disk) => {
+                    let store = disk.store.as_ref().ok_or("PV disk has no owner")?;
+                    Some(store.encode_overlays())
+                }
                 None => None,
             };
-            Body::Stopped(Arc::new(Stopped {
-                inputs: self.inputs(),
-                store,
-            }))
+            Body::Image(Arc::new(assemble(&self.inputs(), None, overlays)?))
         };
         Ok(self.snapshot_of(body))
     }
@@ -1259,16 +1253,6 @@ impl PVMachine {
     ) -> Result<Self, String> {
         match &snapshot.body {
             Body::Image(bytes) => Self::from_image(executable, snapshot, bytes, scratch_root),
-            Body::Stopped(stopped) => {
-                let mut machine =
-                    Self::from_inputs(executable, snapshot, &stopped.inputs, scratch_root)?;
-                machine.stage()?;
-                if let (Some(disk), Some(store)) = (&mut machine.disk, &stopped.store) {
-                    disk.store = Some(store.clone());
-                }
-                machine.restored = Some(Restored::Deferred);
-                Ok(machine)
-            }
             Body::Retained(retained) => {
                 let mut machine =
                     Self::from_inputs(executable, snapshot, &retained.inputs, scratch_root)?;

@@ -204,7 +204,7 @@ fn failed_writer_bounded_chunks_no_source_mutation_and_error_reader() {
         };
         assert!(matches!(s.write_to(&mut sink), Err(CodecError::Io(_))));
         assert_eq!(encode(&s), initial);
-        assert_eq!(s.bytes(), original);
+        assert!(Arc::ptr_eq(&s.bytes(), &original));
     }
     let mut sink = Sink {
         count: 0,

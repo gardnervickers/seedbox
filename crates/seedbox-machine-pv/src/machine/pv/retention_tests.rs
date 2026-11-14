@@ -55,7 +55,7 @@ fn a_machine_between_boots_retains_nothing() {
         verify: true,
     });
     let snapshot = machine.snapshot().unwrap();
-    assert!(matches!(snapshot.body, Body::Stopped(_)));
+    assert!(matches!(snapshot.body, Body::Image(_)));
     assert_eq!(snapshot.copied_pages(), None);
     assert_eq!(snapshot.bytes(), plain.bytes());
     assert_eq!(machine.restored(), None);

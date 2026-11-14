@@ -39,10 +39,7 @@ fn deferred_capture_keeps_configured_memory_after_source_destruction() {
         let source = machine.directory.path().to_owned();
         let snapshot = machine.capture().unwrap();
         let copy = snapshot.clone();
-        assert!(matches!(
-            (&snapshot.body, &copy.body),
-            (Body::Stopped(one), Body::Stopped(other)) if Arc::ptr_eq(one, other)
-        ));
+        assert!(Arc::ptr_eq(&snapshot.bytes(), &copy.bytes()));
         assert!(
             snapshot.bytes().len() < 65536,
             "deferred snapshot allocates no guest RAM"
