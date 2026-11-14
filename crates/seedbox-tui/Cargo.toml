@@ -11,10 +11,8 @@ seedbox-client.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
 serde_json.workspace = true
-serde.workspace = true
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 
 [dev-dependencies]
 seedbox-test-time.workspace = true
-tempfile.workspace = true

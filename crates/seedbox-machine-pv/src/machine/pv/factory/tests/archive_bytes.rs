@@ -42,12 +42,12 @@ fn pure_configured_assembly_is_exact_creation_input_including_the_pv_budget() {
         let machine = factory
             .create_configured(&definition, &environment)
             .unwrap();
-        assert_eq!(machine.initrd, expected);
+        assert_eq!(*machine.initrd, expected);
         let direct = factory
             .create_boot_archive(&definition, expected.clone())
             .unwrap();
         assert_eq!(
-            direct.initrd, expected,
+            *direct.initrd, expected,
             "complete boot bytes must be used verbatim"
         );
         assert_eq!(definition, original);

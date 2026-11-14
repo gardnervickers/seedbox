@@ -1,6 +1,10 @@
 //! One process owns one Hypervisor.framework VM. GIC state requires macOS 15.
 use super::{Architecture, Backend, Exit, Memory, Result};
-use crate::machine::pv::worker::evidence::arm;
+use crate::machine::pv::worker::{
+    boot::RAM_BASE as RAM,
+    evidence::arm,
+    memory::{PageSet, GRANULE},
+};
 use std::{
     collections::BTreeMap,
     ffi::{c_void, CStr},
@@ -27,6 +31,7 @@ unsafe extern "C" {
     fn hv_vm_create(config: *mut c_void) -> i32;
     fn hv_vm_destroy() -> i32;
     fn hv_vm_map(pointer: *const c_void, address: u64, length: usize, flags: u64) -> i32;
+    fn hv_vm_protect(address: u64, length: usize, flags: u64) -> i32;
     fn hv_vcpu_create(cpu: *mut u64, exit: *mut *const Landing, config: *mut c_void) -> i32;
     fn hv_vcpu_destroy(cpu: u64) -> i32;
     fn hv_vcpu_run(cpu: u64) -> i32;
@@ -43,6 +48,9 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn seedbox_pv_set_vector(cpu: u64, register: u32, value: *const u8) -> i32;
 }
+// Stage-2 access: read, write and execute are bits 0, 1 and 2.
+const ALL: u64 = 7;
+const NO_WRITE: u64 = 5;
 fn checked(operation: &str, status: i32) -> Result<()> {
     if status == 0 {
         Ok(())
@@ -77,6 +85,8 @@ struct Registers {
     simd: Vec<[u8; 16]>,
 }
 pub(crate) struct Native {
+    /// This process's one VM exists.
+    created: bool,
     cpu: Option<u64>,
     landing: *const Landing,
     held: Option<Held>,
@@ -85,11 +95,100 @@ pub(crate) struct Native {
     /// Guest entries so far, interrupted ones included.
     #[cfg(test)]
     entries: u64,
+    /// Once writes are tracked, the RAM pages the guest can write without a
+    /// fault. RAM is otherwise mapped without write access, and each of
+    /// these pages is already in the mapping's dirty set.
+    writable: Option<PageSet>,
     // The VM is destroyed in Drop before the last RAM mapping references die.
-    _ram: Rc<Memory>,
-    _page: Rc<Memory>,
+    ram: Rc<Memory>,
+    page: Rc<Memory>,
 }
 impl Native {
+    /// Create the VM, its GIC, both mappings and the vCPU.
+    unsafe fn build(&mut self) -> Result<()> {
+        checked("HVF VM create", hv_vm_create(std::ptr::null_mut()))?;
+        self.created = true;
+        Self::create_gic()?;
+        let access = if self.writable.is_some() {
+            NO_WRITE
+        } else {
+            ALL
+        };
+        checked(
+            "HVF map RAM",
+            hv_vm_map(self.ram.ptr().cast(), RAM, self.ram.len(), access),
+        )?;
+        checked(
+            "HVF map PV page",
+            hv_vm_map(self.page.ptr().cast(), 0x0a00_0000, self.page.len(), ALL),
+        )?;
+        let mut cpu = 0;
+        checked(
+            "HVF vCPU create",
+            hv_vcpu_create(&mut cpu, &mut self.landing, std::ptr::null_mut()),
+        )?;
+        self.cpu = Some(cpu);
+        checked(
+            "HVF virtual timer mask",
+            hv_vcpu_set_vtimer_mask(cpu, false),
+        )
+    }
+    /// Destroy the vCPU and the VM, whichever exist.
+    fn destroy(&mut self) -> Result<()> {
+        unsafe {
+            let cpu = match self.cpu.take() {
+                Some(cpu) => checked("HVF vCPU destroy", hv_vcpu_destroy(cpu)),
+                None => Ok(()),
+            };
+            let vm = match std::mem::take(&mut self.created) {
+                true => checked("HVF VM destroy", hv_vm_destroy()),
+                false => Ok(()),
+            };
+            cpu.and(vm)
+        }
+    }
+    /// Whether this exception is the guest's first write to a RAM page since
+    /// its writes were last collected. If so the page is recorded and made
+    /// writable; the faulting instruction has not run, so entering the guest
+    /// again repeats it with nothing for the guest to observe.
+    fn admit_write(&mut self, exception: &Exception) -> Result<bool> {
+        let Some(writable) = &mut self.writable else {
+            return Ok(false);
+        };
+        // A data abort, or an instruction abort whose stage-1 walk had to
+        // write a translation table. Unmapped addresses stay MMIO.
+        // Any data abort into RAM counts, whatever its status code or
+        // direction: tracked RAM is mapped to read and execute, so a write
+        // is all stage 2 refuses there, and taking some other abort for one
+        // only records a page that was not written.
+        // No guest here makes the walker write a table: the test guests
+        // leave TCR_EL1.HA and HD clear, and whether HVF offers hardware
+        // table updates at all is ID_AA64MMFR1_EL1.HAFDBS as the guest sees
+        // it. Only constructed exceptions test the walk case.
+        let class = exception.syndrome >> 26;
+        let walk = exception.syndrome & (1 << 7) != 0;
+        let offset = exception.physical_address.wrapping_sub(RAM);
+        if !(class == 0x24 || class == 0x20 && walk) || offset >= self.ram.len() as u64 {
+            return Ok(false);
+        }
+        let page = offset as usize / GRANULE;
+        // A second fault on a writable page is not a write we withheld;
+        // entering again would repeat it forever.
+        if !writable.insert(page) {
+            return Err(format!(
+                "PV HVF fault {:#x} on writable RAM at {:#x}",
+                exception.syndrome, exception.physical_address
+            ));
+        }
+        self.ram.mark_page(page);
+        unsafe {
+            checked(
+                "HVF admit RAM write",
+                hv_vm_protect(RAM + (page * GRANULE) as u64, GRANULE, ALL),
+            )?;
+        }
+        Ok(true)
+    }
     fn cpu(&self) -> Result<u64> {
         self.cpu.ok_or("PV vCPU absent".into())
     }
@@ -219,10 +318,8 @@ impl Native {
 }
 impl Backend for Native {
     fn create(ram: Rc<Memory>, page: Rc<Memory>) -> Result<Self> {
-        unsafe {
-            checked("HVF VM create", hv_vm_create(std::ptr::null_mut()))?;
-        }
         let mut native = Self {
+            created: false,
             cpu: None,
             landing: std::ptr::null(),
             held: None,
@@ -230,35 +327,11 @@ impl Backend for Native {
             #[cfg(test)]
             entries: 0,
             poisoned: false,
-            _ram: ram,
-            _page: page,
+            writable: None,
+            ram,
+            page,
         };
-        unsafe {
-            Self::create_gic()?;
-            checked(
-                "HVF map RAM",
-                hv_vm_map(native._ram.ptr().cast(), 0x4000_0000, native._ram.len(), 7),
-            )?;
-            checked(
-                "HVF map PV page",
-                hv_vm_map(
-                    native._page.ptr().cast(),
-                    0x0a00_0000,
-                    native._page.len(),
-                    7,
-                ),
-            )?;
-            let mut cpu = 0;
-            checked(
-                "HVF vCPU create",
-                hv_vcpu_create(&mut cpu, &mut native.landing, std::ptr::null_mut()),
-            )?;
-            native.cpu = Some(cpu);
-            checked(
-                "HVF virtual timer mask",
-                hv_vcpu_set_vtimer_mask(cpu, false),
-            )?;
-        }
+        unsafe { native.build()? };
         Ok(native)
     }
     fn core(&self, register: u32) -> Result<u64> {
@@ -306,10 +379,15 @@ impl Backend for Native {
         {
             self.entries += 1;
         }
-        unsafe {
-            checked("HVF run", hv_vcpu_run(self.cpu()?))?;
-        }
-        let landing = unsafe { *self.landing };
+        let landing = loop {
+            unsafe {
+                checked("HVF run", hv_vcpu_run(self.cpu()?))?;
+            }
+            let landing = unsafe { *self.landing };
+            if landing.reason != 1 || !self.admit_write(&landing.exception)? {
+                break landing;
+            }
+        };
         if landing.reason == 0 {
             return Ok(Exit::Interrupted);
         }
@@ -523,20 +601,63 @@ impl Backend for Native {
         self.poisoned = false;
         Ok(())
     }
+    fn track(&mut self) -> Result<()> {
+        if self.writable.is_none() {
+            unsafe {
+                checked(
+                    "HVF track RAM writes",
+                    hv_vm_protect(RAM, self.ram.len(), NO_WRITE),
+                )?;
+            }
+            self.writable = Some(PageSet::new(self.ram.pages()));
+        }
+        Ok(())
+    }
+    // Each write was recorded as it was admitted; what remains is to withhold
+    // the next one, a run of adjacent pages at a time.
+    fn collect(&mut self) -> Result<()> {
+        let writable = self
+            .writable
+            .as_mut()
+            .ok_or("PV HVF RAM writes are not tracked")?;
+        let mut pages = writable.take();
+        pages.sort_unstable();
+        // A page left writable but no longer listed would lose its writes.
+        self.poisoned = true;
+        for run in pages.chunk_by(|a, b| a + 1 == *b) {
+            unsafe {
+                checked(
+                    "HVF track RAM writes",
+                    hv_vm_protect(
+                        RAM + run[0] as u64 * GRANULE as u64,
+                        run.len() * GRANULE,
+                        NO_WRITE,
+                    ),
+                )?;
+            }
+        }
+        self.poisoned = false;
+        Ok(())
+    }
+    // The new VM maps tracked RAM without write access, so no page is
+    // writable and there is nothing to collect first.
+    fn reset(&mut self) -> Result<()> {
+        self.poisoned = true;
+        self.destroy()?;
+        if let Some(writable) = &mut self.writable {
+            writable.take();
+        }
+        unsafe { self.build()? };
+        self.held = None;
+        self.entered = false;
+        self.poisoned = false;
+        Ok(())
+    }
 }
 impl Drop for Native {
     fn drop(&mut self) {
-        unsafe {
-            if let Some(cpu) = self.cpu.take() {
-                let code = hv_vcpu_destroy(cpu);
-                if code != 0 {
-                    eprintln!("PV HVF vCPU destroy {code:#x}");
-                }
-            }
-            let code = hv_vm_destroy();
-            if code != 0 {
-                eprintln!("PV HVF VM destroy {code:#x}");
-            }
+        if let Err(error) = self.destroy() {
+            eprintln!("PV {error}");
         }
     }
 }
@@ -553,6 +674,39 @@ mod tests {
             Rc::new(Memory::new(1 << 16).unwrap()),
         )
         .unwrap()
+    }
+
+    /// Feeds constructed exceptions to the write tracker; no guest runs.
+    #[test]
+    #[ignore = "requires HVF and a test executable signed with the hypervisor entitlement"]
+    fn only_aborts_that_write_ram_are_admitted_once_each() {
+        const DATA_WRITE: u64 = 0x24 << 26 | 1 << 6;
+        const TABLE_WALK: u64 = 0x20 << 26 | 1 << 7;
+        const FETCH: u64 = 0x20 << 26;
+        let abort = |syndrome, physical_address| Exception {
+            syndrome,
+            virtual_address: 0,
+            physical_address,
+        };
+        let page = |n: usize| RAM + (n * GRANULE) as u64;
+        let mut vm = native();
+        // Untracked, every abort is the caller's.
+        assert!(!vm.admit_write(&abort(DATA_WRITE, page(3))).unwrap());
+        vm.track().unwrap();
+        vm.ram.track();
+        assert!(vm.admit_write(&abort(DATA_WRITE, page(3) + 8)).unwrap());
+        assert!(vm.admit_write(&abort(TABLE_WALK, page(5))).unwrap());
+        assert!(!vm.admit_write(&abort(FETCH, page(7))).unwrap());
+        assert!(!vm.admit_write(&abort(DATA_WRITE, 0x0a01_0020)).unwrap());
+        let end = RAM + vm.ram.len() as u64;
+        assert!(!vm.admit_write(&abort(DATA_WRITE, end)).unwrap());
+        assert_eq!(vm.ram.take_dirty(), [3, 5]);
+        // An admitted page is writable, so a fault there is not one to repeat.
+        assert!(vm.admit_write(&abort(DATA_WRITE, page(3))).is_err());
+        // Once collected, its next write is withheld again.
+        vm.collect().unwrap();
+        assert!(vm.admit_write(&abort(DATA_WRITE, page(3))).unwrap());
+        assert_eq!(vm.ram.take_dirty(), [3]);
     }
 
     #[test]

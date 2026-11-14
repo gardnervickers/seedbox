@@ -14,6 +14,9 @@
 //!   before its EOI; `MASKED` masks IRQs across each deadline and unmasks
 //!   only once the machine publishes the deferred interrupt, as the PV kernel
 //!   does at its next rendezvous.
+//! * `PATCH`: each round calls a routine and adds what it returned (x27), then
+//!   rewrites the routine's instruction to return the round's number (x26), as
+//!   a guest that patches its own code does.
 //!
 //! HVF allows one VM per process: run these with `--test-threads=1` in a test
 //! executable signed with the hypervisor entitlement.
@@ -21,7 +24,7 @@ use super::*;
 use crate::machine::pv::{
     policy::Named,
     protocol::{self, Stop},
-    worker::{read_snapshot, restore_machine, BootInputs, Machine},
+    worker::{memory::Ram, read_snapshot, restore_machine, BootInputs, Machine},
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -38,6 +41,9 @@ const FUTEX: u32 = 0;
 const PENDING: u32 = 1;
 const ACTIVE: u32 = 2;
 const MASKED: u32 = 3;
+const PATCH: u32 = 4;
+/// Rounds of the patching guest.
+const PATCH_ROUNDS: u64 = 4_096;
 /// Timer period of the interrupt modes, in guest ns.
 const PERIOD: u64 = 1_000;
 const FUTEX_ITERATIONS: u64 = 1 << 20;
@@ -103,6 +109,8 @@ Lsb_code:
     orr x2, x2, #0x1000
     msr sctlr_el1, x2
     isb
+    cmp w21, #{patch}
+    b.eq 90f
     cbz w21, 50f
     // GICv3: wake the redistributor, enable group 1 and SPIs 33 and 40.
     movz x1, #0x0800, lsl #16
@@ -230,6 +238,28 @@ Lsb_code:
 66: add x16, x16, #1
     b 56b
 99: brk #1                              // a lock word the guest never wrote
+    // PATCH: call the routine, then make it return this round's number.
+90: adr x1, Lsb_routine
+    mov x26, #0
+    mov x27, #0
+91: str x0, [x23, #24]                  // yield to the run bound
+    blr x1
+    add x27, x27, x5
+    add x26, x26, #1
+    movz w3, #0x0005                    // movz x5, #round
+    movk w3, #0xd280, lsl #16
+    orr w3, w3, w26, lsl #5
+    str w3, [x1]
+    ic ivau, x1
+    dsb ish
+    isb
+    cmp x26, #{rounds}
+    b.lo 91b
+92: str x0, [x23, #16]
+    b 92b
+Lsb_routine:
+    movz x5, #0
+    ret
     // Raise the PL011 transmit interrupt.
 70: movz x13, #0x0900, lsl #16
     mov w14, #0x101
@@ -293,6 +323,8 @@ Lsb_end:
     active = const ACTIVE,
     tid = const FUTEX_TID,
     iterations = const FUTEX_ITERATIONS,
+    patch = const PATCH,
+    rounds = const PATCH_ROUNDS,
 );
 
 unsafe extern "C" {
@@ -393,6 +425,63 @@ struct Run {
     retries: u32,
 }
 
+/// Where the futex guest's words are in the RAM mapping.
+fn futex_words_at(vm: &Machine) -> usize {
+    let layout = vm.ram.layout().unwrap();
+    layout
+        .offset(layout.base + 4096 + offset(Layout::Words) as u64, 16)
+        .unwrap()
+}
+
+/// The futex guest's three words, read from a stopped machine.
+fn futex_words(vm: &Machine) -> [u32; 3] {
+    let at = futex_words_at(vm);
+    // The vCPU is stopped; nothing else writes guest RAM.
+    let ram = unsafe { vm.ram.bytes() };
+    std::array::from_fn(|index| {
+        u32::from_le_bytes(ram[at + index * 4..at + index * 4 + 4].try_into().unwrap())
+    })
+}
+
+/// Drive the futex guest on from `horizon` through fixed bounds to its end,
+/// then through a few bounds of its final idle loop. `stopped` is called with
+/// the machine and its horizon at each bound.
+fn futex_drive(vm: &mut Machine, mut horizon: u64, mut stopped: impl FnMut(&mut Machine, u64)) {
+    // Bounds left in the final idle loop.
+    let mut idle = 4;
+    while idle > 0 {
+        if core(vm, 27) != 0 || horizon >= 4_000_000 {
+            idle -= 1;
+        }
+        horizon += 1_000;
+        let now = vm.state.now;
+        vm.run(now, horizon, 1000, false, &[], Vec::new(), &[])
+            .unwrap();
+        stopped(vm, horizon);
+    }
+}
+
+/// What the futex guest left at its end.
+fn futex_result(vm: &mut Machine) -> Run {
+    let words = futex_words(vm);
+    let at = futex_words_at(vm);
+    // Store failures the guest retried: host-dependent, so cleared before comparison.
+    let retries = u32::from_le_bytes(
+        unsafe { vm.ram.bytes() }[at + 12..at + 16]
+            .try_into()
+            .unwrap(),
+    );
+    // The vCPU is stopped; nothing else borrows guest RAM.
+    unsafe { vm.ram.guest(|ram| ram.write(at + 12, &[0; 4])) };
+    Run {
+        evidence: evidence(vm),
+        words,
+        registers: [core(vm, 26), core(vm, 27), core(vm, 28)],
+        entries: entries(vm),
+        retries,
+    }
+}
+
 /// Run the futex guest through fixed bounds. With `interrupt`, another thread
 /// keeps forcing the vCPU out of guest execution (`hv_vcpus_exit`) while host
 /// threads compete for CPUs.
@@ -419,44 +508,12 @@ fn futex_run(interrupt: bool) -> Run {
             }));
         }
     }
-    let mut horizon = 0;
-    while core(&vm, 27) == 0 && horizon < 4_000_000 {
-        horizon += 1_000;
-        let now = vm.state.now;
-        vm.run(now, horizon, 1000, false, &[], Vec::new(), &[])
-            .unwrap();
-    }
-    // A few more bounds in the final idle loop.
-    for _ in 0..4 {
-        horizon += 1_000;
-        let now = vm.state.now;
-        vm.run(now, horizon, 1000, false, &[], Vec::new(), &[])
-            .unwrap();
-    }
+    futex_drive(&mut vm, 0, |_, _| ());
     stop.store(true, Ordering::Release);
     for helper in helpers {
         helper.join().unwrap();
     }
-    // The vCPU is stopped; nothing else writes guest RAM.
-    let layout = vm.ram.layout().unwrap().clone();
-    let at = layout
-        .offset(layout.base + 4096 + offset(Layout::Words) as u64, 16)
-        .unwrap();
-    let mut words = [0u32; 3];
-    let ram = unsafe { vm.ram.bytes() };
-    for (index, word) in words.iter_mut().enumerate() {
-        *word = u32::from_le_bytes(ram[at + index * 4..at + index * 4 + 4].try_into().unwrap());
-    }
-    // Store failures the guest retried: host-dependent, so cleared before comparison.
-    let retries = u32::from_le_bytes(ram[at + 12..at + 16].try_into().unwrap());
-    unsafe { vm.ram.modify(|ram| ram[at + 12..at + 16].fill(0)) };
-    Run {
-        evidence: evidence(&mut vm),
-        words,
-        registers: [core(&vm, 26), core(&vm, 27), core(&vm, 28)],
-        entries: entries(&vm),
-        retries,
-    }
+    futex_result(&mut vm)
 }
 
 /// Host-only interruptions during exclusive retry loops (vCPU cancellation
@@ -530,6 +587,25 @@ fn run_to(vm: &mut Machine, to: u64) {
     }
 }
 
+/// What a new worker is booted with to restore a snapshot file of `vm`.
+fn inputs(vm: &Machine, kernel: &[u8]) -> BootInputs {
+    BootInputs {
+        witness: protocol::BootWitness {
+            mark: None,
+            boot: vm.state.witness_boot,
+            initial: vm.state.witness_origin,
+        },
+        memory_bytes: MEMORY,
+        kernel: kernel.to_vec(),
+        initrd: INITRD.to_vec(),
+        seed: 1,
+        command_line: String::new(),
+        disk: None,
+        network: None,
+        policy: Some(policy()),
+    }
+}
+
 /// Run an interrupt-mode guest to `capture`, checkpoint it and continue to
 /// `end`; then (HVF allows one VM per process) restore the checkpoint into a
 /// fresh VM and run it to `end`. Returns both results, the captured deferred
@@ -549,21 +625,7 @@ fn capture_and_restore(
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("machine.snapshot");
     original.capture(&path).unwrap();
-    let inputs = BootInputs {
-        witness: protocol::BootWitness {
-            mark: None,
-            boot: original.state.witness_boot,
-            initial: original.state.witness_origin,
-        },
-        memory_bytes: MEMORY,
-        kernel: kernel.clone(),
-        initrd: INITRD.to_vec(),
-        seed: 1,
-        command_line: String::new(),
-        disk: None,
-        network: None,
-        policy: Some(policy()),
-    };
+    let inputs = inputs(&original, &kernel);
     run_to(&mut original, end);
     let continued = finish(&mut original);
     drop(original);
@@ -623,3 +685,5 @@ fn checkpoints_restore_pending_active_and_masked_interrupts() {
         assert_eq!(restored.evidence, continued.evidence, "{name}");
     }
 }
+
+mod retained;

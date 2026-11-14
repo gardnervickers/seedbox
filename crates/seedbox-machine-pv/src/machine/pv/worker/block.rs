@@ -18,6 +18,7 @@
 //! time a request is decoded again from guest RAM and completes exactly as
 //! an immediate one would. The queue belongs to the transport, so a driver
 //! reset drops it; the faults survive a reset.
+use super::memory::Ram;
 use super::virtio::*;
 use super::Result;
 use seedbox_machine::machine::disk::{
@@ -142,7 +143,12 @@ impl Block {
         })
     }
     #[cfg(test)]
-    pub(super) fn write(&mut self, ram: &mut [u8], offset: u64, value: u32) -> Result<()> {
+    pub(super) fn write(
+        &mut self,
+        ram: &mut (impl Ram + ?Sized),
+        offset: u64,
+        value: u32,
+    ) -> Result<()> {
         self.write_traced(ram, offset, value, 0, &mut |_, _, _| {})
             .map(|_| ())
     }
@@ -151,7 +157,7 @@ impl Block {
     /// and the machine must not be entered again before [`Self::resume`].
     pub(super) fn write_traced(
         &mut self,
-        ram: &mut [u8],
+        ram: &mut (impl Ram + ?Sized),
         offset: u64,
         value: u32,
         now: u64,
@@ -196,7 +202,7 @@ impl Block {
     }
     fn process(
         &mut self,
-        ram: &mut [u8],
+        ram: &mut (impl Ram + ?Sized),
         now: u64,
         completed: Completed<'_>,
     ) -> Result<Option<Hold>> {
@@ -207,7 +213,7 @@ impl Block {
             return Ok(None);
         }
         while let Some((head, chain)) =
-            self.transport.queue[0].take_chain(ram, Direction::ReadThenWrite)?
+            self.transport.queue[0].take_chain(ram.bytes(), Direction::ReadThenWrite)?
         {
             let arrival = if self.faults.is_empty() {
                 Arrival::Now
@@ -231,7 +237,7 @@ impl Block {
     /// as a notify does.
     pub(super) fn resume(
         &mut self,
-        ram: &mut [u8],
+        ram: &mut (impl Ram + ?Sized),
         now: u64,
         completed: Completed<'_>,
     ) -> Result<Option<Hold>> {
@@ -240,7 +246,7 @@ impl Block {
             .take()
             .ok_or("virtio block resume without a hold")?;
         let (head, chain) = self.transport.queue[0]
-            .take_chain(ram, Direction::ReadThenWrite)?
+            .take_chain(ram.bytes(), Direction::ReadThenWrite)?
             .ok_or("virtio block held request left the queue")?;
         self.admit(ram, head, chain, arrival, arrived, now, completed)?;
         // Complete what is due by `now` in submission order: the resumed
@@ -254,7 +260,7 @@ impl Block {
     #[allow(clippy::too_many_arguments)]
     fn admit(
         &mut self,
-        ram: &mut [u8],
+        ram: &mut (impl Ram + ?Sized),
         head: u16,
         chain: Vec<Descriptor>,
         arrival: Arrival,
@@ -283,7 +289,7 @@ impl Block {
     /// each again from guest RAM, in submission order.
     pub(super) fn complete_due(
         &mut self,
-        ram: &mut [u8],
+        ram: &mut (impl Ram + ?Sized),
         now: u64,
         completed: Completed<'_>,
     ) -> Result<()> {
@@ -292,7 +298,8 @@ impl Block {
                 break;
             }
             self.transport.pending.pop_front();
-            let chain = self.transport.queue[0].chain(ram, head, Direction::ReadThenWrite)?;
+            let chain =
+                self.transport.queue[0].chain(ram.bytes(), head, Direction::ReadThenWrite)?;
             self.complete(ram, head, chain, false, completed)?;
         }
         Ok(())
@@ -301,7 +308,7 @@ impl Block {
     /// the available cursor, for a request completed when it is taken.
     fn complete(
         &mut self,
-        ram: &mut [u8],
+        ram: &mut (impl Ram + ?Sized),
         head: u16,
         chain: Vec<Descriptor>,
         take: bool,
@@ -345,7 +352,7 @@ impl Block {
 
 /// Classify a taken request from its header for the fault policy, without
 /// any effect. Chains too long to answer fail as they would on completion.
-fn classify(ram: &mut [u8], chain: &[Descriptor]) -> Result<Request> {
+fn classify(ram: &mut (impl Ram + ?Sized), chain: &[Descriptor]) -> Result<Request> {
     let (readable, writable): (Vec<_>, Vec<_>) = chain.iter().partition(|d| !d.writable);
     let mut buffers = Chain {
         ram,
@@ -398,13 +405,13 @@ impl Streams {
 
 /// A request's descriptors over guest RAM. Accesses copy through RAM in chain
 /// order, so aliasing descriptors observe earlier writes.
-struct Chain<'a> {
-    ram: &'a mut [u8],
+struct Chain<'a, R: Ram + ?Sized> {
+    ram: &'a mut R,
     readable: Streams,
     writable: Streams,
 }
 
-impl Buffers for Chain<'_> {
+impl<R: Ram + ?Sized> Buffers for Chain<'_, R> {
     fn readable(&self) -> usize {
         self.readable.length
     }
@@ -414,7 +421,7 @@ impl Buffers for Chain<'_> {
     fn read(&mut self, offset: usize, out: &mut [u8]) {
         let mut done = 0;
         self.readable.each(offset, out.len(), |at, count| {
-            out[done..done + count].copy_from_slice(&self.ram[at..at + count]);
+            out[done..done + count].copy_from_slice(&self.ram.bytes()[at..at + count]);
             done += count;
         });
     }
@@ -422,7 +429,7 @@ impl Buffers for Chain<'_> {
         let mut done = 0;
         let ram = &mut *self.ram;
         self.writable.each(offset, bytes.len(), |at, count| {
-            ram[at..at + count].copy_from_slice(&bytes[done..done + count]);
+            ram.write(at, &bytes[done..done + count]);
             done += count;
         });
     }

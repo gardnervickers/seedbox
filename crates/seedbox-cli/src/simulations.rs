@@ -28,13 +28,9 @@ pub(super) fn tui(server: &ServerArgs, id: Option<SimulationId>) -> Result<u8> {
     let client = daemon::connect(server)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
-        seedbox_tui::run(
-            client,
-            id,
-            daemon::state_directory(server.state.clone())?.join("timelines"),
-        )
-        .await
-        .map_err(|e| Error::Setup(format!("terminal: {e}")))
+        seedbox_tui::run(client, id)
+            .await
+            .map_err(|e| Error::Setup(format!("terminal: {e}")))
     })?;
     Ok(0)
 }

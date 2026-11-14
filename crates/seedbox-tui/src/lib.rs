@@ -18,12 +18,8 @@ use seedbox_client::Client;
 
 /// Run the console on the current terminal until the user quits. With `focus`,
 /// open that simulation first; otherwise start in the catalogue.
-pub async fn run(
-    client: Client,
-    focus: Option<SimulationId>,
-    timeline_directory: std::path::PathBuf,
-) -> std::io::Result<()> {
-    let app = model::App::new(focus).with_timelines(timeline_directory)?;
+pub async fn run(client: Client, focus: Option<SimulationId>) -> std::io::Result<()> {
+    let app = model::App::new(focus);
     let mut terminal = ratatui::try_init()?;
     if let Err(error) = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)
     {

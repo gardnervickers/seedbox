@@ -2,6 +2,7 @@
 //! worker's devices. Rings and chains are checked in full before every DMA;
 //! device personalities, features and request semantics stay with each device.
 use super::boot::RAM_BASE as BASE;
+use super::memory::Ram;
 use super::Result;
 use serde::{Deserialize, Serialize};
 pub(super) const MAGIC: u64 = 0x00;
@@ -167,20 +168,30 @@ impl Queue {
         self.cursor = self.cursor.wrapping_add(1);
     }
     /// Write the used entry of a consumed chain; whether to interrupt.
-    pub(super) fn used(&mut self, ram: &mut [u8], head: u16, length: usize) -> Result<bool> {
-        let index = u16_at(ram, add(self.used, 2)?)?;
+    pub(super) fn used(
+        &mut self,
+        ram: &mut (impl Ram + ?Sized),
+        head: u16,
+        length: usize,
+    ) -> Result<bool> {
+        let index = u16_at(ram.bytes(), add(self.used, 2)?)?;
         let at = offset(
-            ram,
+            ram.bytes(),
             add(self.used, 4 + (index % self.size) as usize * 8)?,
             8,
         )?;
-        ram[at..at + 4].copy_from_slice(&(head as u32).to_le_bytes());
-        ram[at + 4..at + 8].copy_from_slice(&(length as u32).to_le_bytes());
-        let at = offset(ram, add(self.used, 2)?, 2)?;
-        ram[at..at + 2].copy_from_slice(&index.wrapping_add(1).to_le_bytes());
-        Ok(u16_at(ram, self.available)? & AVAILABLE_NO_INTERRUPT == 0)
+        ram.write(at, &(head as u32).to_le_bytes());
+        ram.write(at + 4, &(length as u32).to_le_bytes());
+        let at = offset(ram.bytes(), add(self.used, 2)?, 2)?;
+        ram.write(at, &index.wrapping_add(1).to_le_bytes());
+        Ok(u16_at(ram.bytes(), self.available)? & AVAILABLE_NO_INTERRUPT == 0)
     }
-    pub(super) fn finish(&mut self, ram: &mut [u8], head: u16, length: usize) -> Result<bool> {
+    pub(super) fn finish(
+        &mut self,
+        ram: &mut (impl Ram + ?Sized),
+        head: u16,
+        length: usize,
+    ) -> Result<bool> {
         let interrupt = self.used(ram, head, length)?;
         self.consume();
         Ok(interrupt)

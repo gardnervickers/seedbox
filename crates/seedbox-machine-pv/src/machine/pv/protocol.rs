@@ -84,6 +84,33 @@ pub(super) enum Request {
     ExportDisk(PathBuf),
     /// Change the stopped boot's device faults; answered with [`Response::Faults`].
     Fault(FaultChange),
+    /// Keep the stopped machine in the worker's memory as a retained
+    /// snapshot, which shares its unchanged RAM pages with those already
+    /// there. Answered with [`Response::Snapshotted`], or with
+    /// [`Response::Full`] if the snapshots would then hold more than `limit`
+    /// bytes of RAM pages.
+    Snapshot {
+        limit: u64,
+        /// Also compare all of RAM with the snapshot, failing if a write
+        /// escaped tracking.
+        verify: bool,
+    },
+    /// Make the machine the one a retained snapshot was taken from, whatever
+    /// it has done since; answered with [`Response::Rewound`].
+    Rewind {
+        id: u64,
+        /// Also compare all of RAM with the snapshot afterwards.
+        verify: bool,
+    },
+    /// Forget a retained snapshot; answered with [`Response::Released`].
+    Release(u64),
+    /// Write a retained snapshot to a new file, byte for byte what
+    /// [`Request::Capture`] would have written when it was taken; answered
+    /// with [`Response::Exported`].
+    Export {
+        id: u64,
+        path: PathBuf,
+    },
 }
 /// The device faults a boot starts with. Streams draw on `boot`, the
 /// physical boot ordinal; counts start at zero, holds at their `seen`.
@@ -157,6 +184,23 @@ pub(super) enum Response {
     Exported,
     Evidence(NativeEvidence),
     Faults(FaultReport),
+    /// Retained snapshot `id` copied `pages` RAM pages; the worker's
+    /// snapshots together now hold `held` bytes of RAM pages.
+    Snapshotted {
+        id: u64,
+        pages: u64,
+        held: u64,
+    },
+    /// No snapshot was kept: with it the worker's snapshots, which hold
+    /// `held` bytes of RAM pages, would exceed the request's limit.
+    Full {
+        held: u64,
+    },
+    /// The rewind rewrote `pages` RAM pages.
+    Rewound {
+        pages: u64,
+    },
+    Released,
     Error(String),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
