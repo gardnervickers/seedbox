@@ -571,7 +571,7 @@ fn checkpoint_receipt_follows_durable_manifest_and_is_not_recaptured() {
     let captured = worker.capture_pending().unwrap().unwrap();
     assert_eq!(captured.state, host::CheckpointState::Captured);
     let path = worker.output.join("checkpoint-saved.json");
-    let envelope = checkpoint::read(&path).unwrap();
+    let envelope = checkpoint::load(&path).unwrap();
     assert_eq!(
         serde_json::to_value(&envelope.state).unwrap(),
         serde_json::to_value(&worker.state).unwrap()

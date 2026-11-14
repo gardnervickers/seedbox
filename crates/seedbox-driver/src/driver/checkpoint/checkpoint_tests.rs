@@ -725,7 +725,7 @@ fn seeded_clock_fault_cursor_and_pending_input_rejections_continue() {
                         ),
                     ),
                     (
-                        12,
+                        14,
                         call(
                             2,
                             r#""op":"clock_skew","target":{"machine":"fixture-1"},"max_offset_ns":100"#,
@@ -741,19 +741,19 @@ fn seeded_clock_fault_cursor_and_pending_input_rejections_continue() {
     // One live key and a future already-invalid state transition: neither may
     // disappear or be admitted twice when its boundary is restored.
     d.schedule(
-        at(8),
+        at(10),
         key("pause"),
         Action::Pause(Target::Machine(MachineId(1))),
     )
     .unwrap();
     d.schedule(
-        at(9),
+        at(11),
         key("reject-pause"),
         Action::Pause(Target::Machine(MachineId(1))),
     )
     .unwrap();
     d.schedule(
-        at(10),
+        at(12),
         key("resume"),
         Action::Resume(Target::Machine(MachineId(1))),
     )
@@ -765,7 +765,7 @@ fn seeded_clock_fault_cursor_and_pending_input_rejections_continue() {
     ));
     let c = d.checkpoint().unwrap();
     reference_observer_session(&mut d);
-    let expected = advance(&mut d, 25);
+    let expected = advance(&mut d, 40);
     assert_eq!(
         states(&d)[1]
             .received
@@ -780,7 +780,7 @@ fn seeded_clock_fault_cursor_and_pending_input_rejections_continue() {
     ));
     for workers in [1, 4] {
         let mut b = restore(&c, workers);
-        assert_eq!(advance(&mut b, 25), expected);
+        assert_eq!(advance(&mut b, 40), expected);
         assert_eq!(states(&b), states(&d));
     }
 }

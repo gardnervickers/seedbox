@@ -6,8 +6,16 @@ use super::*;
 use seedbox_engine_protocol::driver_world::{Environment, SpawnRequest, SpawnResponse, Spawned};
 use std::{fs, io::Write};
 
-/// The attempt output subdirectory both sides of the round trip use.
+/// The subdirectory of the worker's output both sides of the round trip use.
 pub(crate) const DIRECTORY: &str = "spawn";
+
+/// The round trip's directory for an attempt whose output is `output`. The
+/// worker's own output is that attempt's machine output directory.
+pub(crate) fn directory(output: &Path) -> std::path::PathBuf {
+    output
+        .join(crate::execution::MACHINE_OUTPUT_DIR)
+        .join(DIRECTORY)
+}
 const REQUEST: &str = ".request.json";
 const RESPONSE: &str = ".response.json";
 

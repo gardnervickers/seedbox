@@ -87,7 +87,14 @@ the world's own), the standard fault `patterns` (kill/restart, process pauses,
 partitions, crash-all) and the `queue` checker. Each `Checker` turns the history
 and reads into a `Verdict`, evaluated as an `always` property named by the
 checker. An undecided verdict evaluates nothing and the oracle exits 3, which
-marks the run incomplete:
+marks the run incomplete. So does a failed step: `Nemesis::run` or
+`Nemesis::heal` returning an error, a client thread panicking, the world
+refusing a final read's restart, breakpoint serving stopping (a handler error
+or a failed wait or resume: the world's `break_error`) or the final property
+flush failing. The runner
+still stops the clients, heals, reads and checks after a failed `run`, keeps
+each failure in its `Report` beside the verdicts and prints a line naming them;
+the oracle exits 3 unless a check was violated, which exits 1:
 
 ```rust
 impl Checker<Publish, Ack, Stream> for Queue {
@@ -120,18 +127,44 @@ faults:
 
 Each entry is named by the action it starts and carries that action's fields,
 with `{min, max}` ranges for drawn values. Each start draws an entry by weight,
-a target with no fault of the profile in force (or skips the start when there is
-none), then the entry's values. It applies the fault through `World::apply` and
+a target free for it (below), or skips the start when there is none, then the
+entry's values. It applies the fault through `World::apply` and
 ends it with the action's counterpart after its drawn duration, so faults may
 overlap. Every draw comes from the scenario's `Random`, so a seed fixes the
 applied sequence. `run` checks every entry with its action's own validator
 before applying anything, and refuses an invalid entry with that action's
 message. `heal` ends every fault still in force. A partition cuts its target off
 from `from`, and a shape delays traffic to `to`; each defaults to the other
-targets. `disk_error` and `disk_latency` entries may narrow the targets to the
-machines with a volume. The world checks what needs the world, such as the
-network's latency floor, when the action is applied, and a refusal fails `run`.
+targets. Partition, shape, `disk_error` and `disk_latency` entries may narrow
+the targets with their own `targets`, such as the machines with a volume, or
+the targets that have a far side when `from` or `to` names one of them.
+Narrowing picks only the target: a narrowed partition with no `from` still cuts
+it off from every other target of the profile. The world checks
+what needs the world, such as the network's latency floor, when the action is
+applied, and a refusal fails `run`, which leaves the run incomplete unless a
+check is violated.
 With `skip_unsupported: true`, the profile instead skips a kind the engine
 refuses as `unsupported` (`preempt` on x86_64 PV) and never draws it again;
 `run` fails if no kind is left, and `unsupported()` lists the kinds skipped. See
 [the acceptance oracle](../harness/acceptance/images/profile/src/main.rs).
+
+A target is free for an entry while no fault of the profile holds it in the
+same exclusion domain, so faults of different domains overlap on one machine:
+
+| Domain | Kinds |
+|---|---|
+| lifecycle | `crash`, `stop`, `pause`, `pause_process`, and `clock_skew` |
+| network | `partition`, `shape` |
+| clock | `clock_skew`, `clock_drift` |
+| disk error | `disk_error` |
+| disk latency | `disk_latency` |
+| scheduler | `throttle`, `preempt` |
+
+`clock_skew` holds both the clock and the lifecycle domain, because the engine
+refuses a realtime step, or its heal, on a paused VM, and fails one on a crashed
+VM. For `pause_process` and `stop` the grouping is deliberately conservative: a
+step is a guest command, so it is kept away from every lifecycle fault. Ending a
+fault frees only its own domains on its target: a disk latency that ends during
+a crash's downtime lets another latency start before the reboot, but no second
+crash. Every start still comes from one weighted stream, with one `max_faults`
+budget.

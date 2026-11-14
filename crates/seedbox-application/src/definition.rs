@@ -365,6 +365,31 @@ pub fn execution_settings_with_inputs(inputs: &PreparedInputs) -> Result<serde_j
     Ok(settings)
 }
 
+/// The definition a run replays: its submitted `definition` with the Driver
+/// closure from the run's own retained `inputs`, which also names the
+/// machines its spawns prepared. That closure must extend the submitted one;
+/// every other input stays as submitted.
+pub fn with_run_closure(definition: &mut Definition, inputs: &PreparedInputs) -> Result<()> {
+    use seedbox_driver_execution::driver_world::retained::Closure;
+    let Some(closure) = Closure::from_inputs(inputs)? else {
+        return Ok(());
+    };
+    let settings = definition
+        .runtime
+        .execution
+        .as_object_mut()
+        .ok_or_else(|| Error::Integrity("runtime execution settings are not an object".into()))?;
+    let submitted: Closure =
+        serde_json::from_value(settings.get("driver_world").cloned().ok_or_else(|| {
+            Error::Integrity("submitted definition has no retained Driver closure".into())
+        })?)?;
+    if closure != submitted {
+        closure.extends(&submitted)?;
+        settings.insert("driver_world".into(), serde_json::to_value(closure)?);
+    }
+    Ok(())
+}
+
 pub fn execution_settings(profile: &ExecutionProfile) -> Result<serde_json::Value> {
     let mut value = serde_json::to_value(profile)?;
     if let Some(parameters) = value
@@ -472,6 +497,64 @@ mod tests {
         };
         let definition = resolve(&configuration, &inputs, 1, vec![]).unwrap();
         (temporary, store, definition, boot)
+    }
+
+    #[test]
+    fn a_run_closure_replaces_the_submitted_one_only_when_it_extends_it() {
+        let (_temporary, store, mut definition, _) = fixture();
+        let digest = |bytes: &[u8]| store.put(bytes).unwrap();
+        let base = prepared(&definition, &store).unwrap();
+        let closure = |manifest: &[u8], executable: &[u8], objects: &[&[u8]]| {
+            let mut inputs = base.clone();
+            inputs
+                .auxiliary
+                .insert("driver-world/executable".into(), digest(executable));
+            inputs
+                .auxiliary
+                .insert("driver-world/manifest".into(), digest(manifest));
+            for (index, object) in objects.iter().enumerate() {
+                inputs
+                    .auxiliary
+                    .insert(format!("driver-world/object/{index:08}"), digest(object));
+            }
+            inputs
+        };
+        let submitted = closure(b"submitted", b"engine", &[b"kernel"]);
+        definition.runtime.execution = execution_settings_with_inputs(&submitted).unwrap();
+        let settings = definition.runtime.execution.clone();
+        // A run that spawned nothing keeps the submitted definition.
+        with_run_closure(&mut definition, &submitted).unwrap();
+        assert_eq!(definition.runtime.execution, settings);
+        // A spawn adds the machine to the manifest and its objects.
+        let spawned = closure(b"spawned", b"engine", &[b"kernel", b"replica"]);
+        let mut replayed = definition.clone();
+        with_run_closure(&mut replayed, &spawned).unwrap();
+        assert_eq!(
+            replayed.runtime.execution,
+            execution_settings_with_inputs(&spawned).unwrap()
+        );
+        for (inputs, error) in [
+            (
+                closure(b"spawned", b"other engine", &[b"kernel", b"replica"]),
+                "input integrity: a run's retained Driver closure must keep its submitted executable"
+                    .to_owned(),
+            ),
+            (
+                closure(b"spawned", b"engine", &[b"replica"]),
+                format!(
+                    "input integrity: a run's retained Driver closure must keep its submitted object sha256:{}",
+                    ContentDigest::of(b"kernel").hex()
+                ),
+            ),
+        ] {
+            let mut replayed = definition.clone();
+            assert_eq!(
+                with_run_closure(&mut replayed, &inputs)
+                    .unwrap_err()
+                    .to_string(),
+                error
+            );
+        }
     }
 
     #[test]
@@ -665,6 +748,19 @@ mod tests {
             "rootfs",
             &tar::Builder::new(Vec::new()).into_inner().unwrap(),
         );
+        // The fixture's oracle declares one anonymous volume.
+        let oracle_environment = |control_socket| wire::Environment {
+            hostname: "oracle".into(),
+            hosts: "127.0.0.1 localhost\n".into(),
+            anonymous_volumes: vec!["/tmp/data".into()],
+            named_volumes: vec![],
+            configs: BTreeMap::new(),
+            limits: wire::GuestLimits {
+                max_map_count: std::num::NonZeroU32::MIN,
+                nofile: std::num::NonZeroU32::MIN,
+            },
+            control_socket,
+        };
         let rootfs = ContentDigest::try_from(filesystem.sha256.clone()).unwrap();
         inputs.guests.insert("oracle".into(), rootfs.clone());
         let prepared_world = wire::Prepared {
@@ -682,9 +778,12 @@ mod tests {
                 progress: artifact("progress", b"fixture progress"),
                 runtime: artifact("runtime", b"fixture runtime"),
                 formatter: None,
-                environments: Default::default(),
+                environments: BTreeMap::from([(
+                    "oracle".into(),
+                    oracle_environment(definition.simulator.oracle_control),
+                )]),
                 boot_archives: Default::default(),
-                progress_budget: std::num::NonZeroU32::new(32).unwrap().into(),
+                progress_budget: definition.simulator.progress_budget,
                 epoch_seconds: 86400,
             },
             oracle: wire::Machine {
@@ -762,7 +861,6 @@ mod tests {
             .unwrap()
             .contains(directory.to_str().unwrap()));
         definition.oracle.process.argv.push("--changed".into());
-        definition.clock.epoch_seconds += 1;
         let edited = prepared(&definition, &store).unwrap();
         let settings = execution_settings_with_inputs(&edited).unwrap();
         assert!(settings.get("driver_world").is_some());
@@ -795,6 +893,8 @@ mod tests {
             seed: 42,
             program: &[],
             quantum_ns: simulation.simulator.quantum_ns,
+            progress_budget: simulation.simulator.progress_budget,
+            allow_crashes: &Default::default(),
             limits: &simulation.limits,
             network: &simulation.network,
             schedule: &simulation.schedule,
@@ -1015,7 +1115,7 @@ mod tests {
                     b"fixture runtime",
                 ),
                 formatter: None,
-                environments: Default::default(),
+                environments: BTreeMap::from([("oracle".into(), oracle_environment(true))]),
                 boot_archives: BTreeMap::from([(
                     "oracle".into(),
                     artifact(&format!("tcg-paired-boot-{process_changed}"), &boot),

@@ -12,7 +12,9 @@ use std::{
 };
 
 pub mod support;
-use support::application::{compare, first_run, invoke, simulation_id, with_server};
+use support::application::{
+    compare, first_run, invoke, invoke_stdout, replayed, simulation_id, with_server,
+};
 use support::failure_capture;
 
 // Every discovered workload proves a PASS. These retain the expensive
@@ -163,6 +165,124 @@ fn guest_properties_decide_runs_whose_oracle_passes() {
             }
         }
         Ok(())
+    });
+}
+
+/// The README's spawn example: the oracle adds `replica` mid-run, so the
+/// run's faults and full state name a machine its configuration does not.
+/// It must PASS, an independent fresh run of its seed must spawn the same
+/// machine and MATCH it, and its replay must boot the retained machine and
+/// MATCH in full state.
+#[test]
+fn spawn_example_passes_and_replays_the_spawned_machine() {
+    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/spawn");
+    let project = project.to_str().unwrap();
+    with_server("applications", "spawn", |cli, directory, state| {
+        let first_output = first_run(
+            cli,
+            directory,
+            state,
+            &["run", project, "--wall-time", "30m"],
+        )?;
+        let first = simulation_id(&first_output)?;
+        let described = invoke(
+            cli,
+            directory,
+            state,
+            "describe-first",
+            &["show", "--view", "definition", first, "--json"],
+        )?;
+        let resource: seedbox_api::Simulation =
+            serde_json::from_str(&described).map_err(|error| format!("describe first: {error}"))?;
+        let seed = resource
+            .spec
+            .seed
+            .ok_or("first simulation has no seed")?
+            .to_string();
+        let second_output = invoke(
+            cli,
+            directory,
+            state,
+            "second",
+            &["run", project, "--seed", &seed, "--wall-time", "30m"],
+        )?;
+        let second = simulation_id(&second_output)?;
+        compare(cli, directory, state, "compare", first, second)?;
+        let repeated = invoke(
+            cli,
+            directory,
+            state,
+            "replay",
+            &["replay", first, "--wall-time", "30m"],
+        )?;
+        let replayed = repeated
+            .lines()
+            .find_map(|line| line.strip_prefix("MATCH: "))
+            .ok_or_else(|| format!("missing replay MATCH: {repeated}"))?;
+        compare(cli, directory, state, "compare-replay", first, replayed)
+    });
+}
+
+/// A seed-range member of `examples/spawn` runs the source's prepared
+/// inputs and spawns from the project, as a fresh run of its seed would.
+/// The range must PASS, a fresh run of the member's seed must MATCH it,
+/// and the member's replay must boot its own retained machine and MATCH.
+#[test]
+fn spawn_example_seed_range_members_spawn_and_replay() {
+    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/spawn");
+    let project = project.to_str().unwrap();
+    with_server("applications", "spawn-range", |cli, directory, state| {
+        let output = invoke_stdout(
+            cli,
+            directory,
+            state,
+            "range",
+            &[
+                "run",
+                project,
+                "--count",
+                "2",
+                "--wall-time",
+                "30m",
+                "--json",
+            ],
+        )?;
+        let range: seedbox_api::SeedRangeStatus =
+            serde_json::from_str(&output).map_err(|error| format!("range: {error}"))?;
+        if !range.complete() || range.error.is_some() || range.members.len() != 2 {
+            return Err(format!("incomplete range: {output}"));
+        }
+        for member in &range.members {
+            if member.status.verdict() != seedbox_api::TestVerdict::Passed {
+                return Err(format!("{} did not PASS: {output}", member.metadata.id));
+            }
+        }
+        let member = range.members[1].metadata.id.as_str();
+        let seed = (range.first_seed + 1).to_string();
+        let fresh_output = invoke(
+            cli,
+            directory,
+            state,
+            "fresh",
+            &["run", project, "--seed", &seed, "--wall-time", "30m"],
+        )?;
+        let fresh = simulation_id(&fresh_output)?;
+        compare(cli, directory, state, "compare-fresh", member, fresh)?;
+        let repeated = invoke(
+            cli,
+            directory,
+            state,
+            "replay",
+            &["replay", member, "--wall-time", "30m"],
+        )?;
+        compare(
+            cli,
+            directory,
+            state,
+            "compare-replay",
+            member,
+            &replayed(&repeated)?,
+        )
     });
 }
 

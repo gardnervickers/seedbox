@@ -353,6 +353,7 @@ pub fn coordinate<C: Commands>(
     }
     if options.suites.contains(&Suite::Portable) {
         checks.step("fmt", words(&["cargo", "fmt", "--all", "--check"]));
+        standalone_fmt(checks);
         // --all-features type-checks every feature-gated target (native service
         // suites, worker-failure hooks) without a second full test build.
         checks.step(
@@ -458,7 +459,77 @@ pub fn portable<C: Commands>(checks: &mut Checks<C>) -> Result<(), String> {
     // seedbox-cli's native_acceptance_projects_round_trip_through_submission_json
     // discovers and validates every workload in the workspace tests above.
     // The public `check` command also probes the host and is not a portable check.
+    timed(checks, "standalone-packages", |checks| {
+        Ok(standalone_packages(checks, std::env::consts::OS))
+    })?;
     Ok(())
+}
+/// Check the formatting of every [`STANDALONE_PACKAGES`] entry through its
+/// manifest, on every host. It runs beside the workspace's fmt, so a slip
+/// shows before the long workspace tests. Every check runs even after one
+/// fails.
+pub fn standalone_fmt<C: Commands>(checks: &mut Checks<C>) -> bool {
+    let mut passed = true;
+    for package in STANDALONE_PACKAGES {
+        let manifest = package.manifest;
+        let name = manifest.trim_end_matches("/Cargo.toml");
+        passed &= checks.step(
+            &format!("fmt {name}"),
+            words(&["cargo", "fmt", "--manifest-path", manifest, "--check"]),
+        );
+    }
+    passed
+}
+/// Check the lints and unit tests of every [`STANDALONE_PACKAGES`] entry
+/// through its manifest; `os` is the host's [`std::env::consts::OS`]. A
+/// package for another host is skipped ([`standalone_fmt`] still checks its
+/// formatting). Every check runs even after one fails.
+///
+/// The packages build into `standalone-packages` under the suite's
+/// `CARGO_TARGET_DIR` (the checkout's `target` when unset, and a relative
+/// value resolved against the checkout), apart from the workspace's
+/// artifacts. `cargo test` runs a package's test targets, never its program.
+pub fn standalone_packages<C: Commands>(checks: &mut Checks<C>, os: &str) -> bool {
+    let target = match checks.environment.get("CARGO_TARGET_DIR") {
+        Some(dir) => checks.root.join(dir),
+        None => checks.root.join("target"),
+    };
+    let target = target.join("standalone-packages");
+    let target = target.to_string_lossy();
+    let mut passed = true;
+    for package in STANDALONE_PACKAGES {
+        let manifest = package.manifest;
+        let name = manifest.trim_end_matches("/Cargo.toml");
+        let cargo = |command: &str, rest: &[&str]| {
+            let mut args = words(&["cargo", command, "--manifest-path", manifest]);
+            args.extend(words(rest));
+            args
+        };
+        if package.hosts == Hosts::Linux && os != "linux" {
+            println!("{name}: clippy and tests need a Linux host; formatting checked only");
+            continue;
+        }
+        passed &= checks.step(
+            &format!("clippy {name}"),
+            cargo(
+                "clippy",
+                &[
+                    "--target-dir",
+                    &target,
+                    "--all-targets",
+                    "--locked",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+            ),
+        );
+        passed &= checks.step(
+            &format!("test {name}"),
+            cargo("test", &["--target-dir", &target, "--locked"]),
+        );
+    }
+    passed
 }
 pub fn machine_suite_runs(suites: &[Suite], environment: &Environment, root: &Path) -> Vec<Job> {
     let mut environment = environment.clone();

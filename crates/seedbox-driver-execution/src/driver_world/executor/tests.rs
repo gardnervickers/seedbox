@@ -285,11 +285,15 @@ impl Spawner for Preparer {
 fn each_spawn_request_gets_one_answer_and_failures_are_answers() {
     use crate::driver_world::worker::spawn;
     use seedbox_engine_protocol::driver_world::{SpawnRequest, SpawnResponse};
-    let output = tempfile::tempdir().unwrap();
-    let directory = output.path().join(spawn::DIRECTORY);
+    let attempt = tempfile::tempdir().unwrap();
+    // The worker's output is the attempt's machine output; it asks and reads
+    // answers beneath that, where the parent serves the attempt's spawns.
+    let output = attempt.path().join(crate::execution::MACHINE_OUTPUT_DIR);
+    let directory = spawn::directory(attempt.path());
+    assert_eq!(directory, output.join(spawn::DIRECTORY));
     // Nothing to answer before the worker asks for anything.
     serve_spawns(&directory, None).unwrap();
-    std::fs::create_dir(&directory).unwrap();
+    std::fs::create_dir_all(&directory).unwrap();
     for (name, number) in [("broken", 7), ("replica", 8)] {
         let request = SpawnRequest {
             name: name.into(),
@@ -304,7 +308,7 @@ fn each_spawn_request_gets_one_answer_and_failures_are_answers() {
         .unwrap();
     }
     serve_spawns(&directory, Some(&Preparer)).unwrap();
-    let failed = |name| match spawn::answer(output.path(), name).unwrap() {
+    let failed = |name| match spawn::answer(&output, name).unwrap() {
         Some(SpawnResponse::Failed { error }) => error,
         other => panic!("{other:?}"),
     };
@@ -312,7 +316,7 @@ fn each_spawn_request_gets_one_answer_and_failures_are_answers() {
     let Some(SpawnResponse::Prepared {
         spawned,
         environment,
-    }) = spawn::answer(output.path(), "replica").unwrap()
+    }) = spawn::answer(&output, "replica").unwrap()
     else {
         panic!("replica was not prepared");
     };
@@ -322,7 +326,7 @@ fn each_spawn_request_gets_one_answer_and_failures_are_answers() {
     // An answered request is not prepared again.
     serve_spawns(&directory, None).unwrap();
     assert!(matches!(
-        spawn::answer(output.path(), "replica").unwrap(),
+        spawn::answer(&output, "replica").unwrap(),
         Some(SpawnResponse::Prepared { .. })
     ));
     // Without a spawner, a new request is answered with why.

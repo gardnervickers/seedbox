@@ -197,6 +197,36 @@ pub fn build_requirements(host: &Host, env: &Environment) -> Vec<String> {
         }
     }
 }
+/// Where a standalone package can be linted and unit-tested.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hosts {
+    /// Every development host.
+    Any,
+    /// Linux only, for a package that calls Linux-only APIs. Other hosts
+    /// check only its formatting.
+    Linux,
+}
+/// A Cargo package with its own workspace that builds against workspace
+/// crates, such as an acceptance image's oracle or guest program. The
+/// workspace's fmt, clippy and tests never build it, so the portable checks
+/// run them on it through its manifest.
+#[derive(Clone, Copy, Debug)]
+pub struct Standalone {
+    pub manifest: &'static str,
+    pub hosts: Hosts,
+}
+pub const STANDALONE_PACKAGES: &[Standalone] = &[
+    // The fault-profile oracle, on seedbox-oracle.
+    Standalone {
+        manifest: "harness/acceptance/images/profile/Cargo.toml",
+        hosts: Hosts::Any,
+    },
+    // The guest property probe, on seedbox-guest; one mode calls mount(2).
+    Standalone {
+        manifest: "harness/acceptance/images/properties/Cargo.toml",
+        hosts: Hosts::Linux,
+    },
+];
 /// The static x86-64 cpu-loop ELF that both named machine suites run through
 /// the public service (`machinePvTestFixtures/bin/cpu-loop`; building it needs
 /// no KVM). Backend-neutral: it selects no backend.

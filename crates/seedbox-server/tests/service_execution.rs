@@ -12,7 +12,7 @@ use seedbox_api::{ComparisonStatus, ErrorCode, ExecutionTermination, Phase, Test
 use seedbox_application::{
     execution::{
         CancellationToken, ExecutionBackend, ExecutionProfile, ExecutionReport, ExecutionRequest,
-        PreparedInputs, StopReason, WorkloadExit,
+        FaultEvent, PreparedInputs, StopReason, WorkloadExit, SPAWN_ACTION,
     },
     store::{ContentDigest, ContentStore},
 };
@@ -40,7 +40,12 @@ enum Behavior {
     WithWitness,
     ChangingWitness,
     MissingJournal,
+    /// Completes after the oracle spawned `replica` and crashed it, and
+    /// retains that machine in a new Driver manifest.
+    Spawning,
 }
+
+const SPAWNED_MANIFEST: &[u8] = b"host fixture manifest with replica";
 
 struct FixtureProvider {
     calls: Arc<AtomicUsize>,
@@ -87,7 +92,11 @@ impl ExecutionBackend for FixtureExecutor {
         request: ExecutionRequest<'_>,
     ) -> seedbox_application::Result<ExecutionReport> {
         let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(request.seed, 123);
+        // Only a spawning run's seed-range member runs another seed.
+        assert!(
+            request.seed == 123
+                || (matches!(self.behavior, Behavior::Spawning) && request.seed == 124)
+        );
         assert!(request.resume_checkpoint.is_none());
         assert!(request.output.is_dir());
         for (digest, path) in request.artifacts {
@@ -134,7 +143,8 @@ impl ExecutionBackend for FixtureExecutor {
                 Behavior::MissingWitness
                 | Behavior::WithWitness
                 | Behavior::ChangingWitness
-                | Behavior::MissingJournal => StopReason::Completed,
+                | Behavior::MissingJournal
+                | Behavior::Spawning => StopReason::Completed,
                 Behavior::BackendError => StopReason::Error,
                 Behavior::UntilCancelled => StopReason::Cancelled,
             },
@@ -146,22 +156,80 @@ impl ExecutionBackend for FixtureExecutor {
                     code: 0,
                 })
             },
+            machines: if matches!(self.behavior, Behavior::Spawning) {
+                vec!["oracle".into(), "replica".into()]
+            } else {
+                vec![]
+            },
             detail: matches!(self.behavior, Behavior::BackendError)
                 .then(|| "host fixture: interaction witness unavailable".into()),
             witness: match self.behavior {
-                Behavior::WithWitness | Behavior::MissingJournal => {
+                Behavior::WithWitness | Behavior::MissingJournal | Behavior::Spawning => {
                     Some(ContentDigest::of(b"host fixture witness"))
                 }
                 Behavior::ChangingWitness => Some(ContentDigest::of(&attempt.to_le_bytes())),
                 _ => None,
             },
             full_state: None,
-            faults: Vec::new(),
+            faults: if matches!(self.behavior, Behavior::Spawning) {
+                [(SPAWN_ACTION, 5), ("crash", 7)]
+                    .into_iter()
+                    .map(|(action, at)| FaultEvent {
+                        requested_at_ns: at,
+                        applied_at_ns: at,
+                        service: "replica".into(),
+                        action: action.into(),
+                        detail: String::new(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
             host_wait_ns: 0,
             simulated_time_ns: Some(42),
             properties: None,
         })
     }
+    fn retain_spawned(
+        &self,
+        inputs: &mut PreparedInputs,
+        _: &std::path::Path,
+        store: &ContentStore,
+    ) -> seedbox_application::Result<bool> {
+        if !matches!(self.behavior, Behavior::Spawning) {
+            return Ok(false);
+        }
+        let manifest = store.put(SPAWNED_MANIFEST)?;
+        Ok(inputs
+            .auxiliary
+            .insert("driver-world/manifest".into(), manifest.clone())
+            != Some(manifest))
+    }
+}
+
+/// A resolved Driver-world submission whose retained closure names the
+/// inert catalogue binary as its executable and manifest.
+fn driver_world_request(id: &str) -> seedbox_api::SubmitRequest {
+    let mut request = test_support::resolved_request(id);
+    let seedbox_api::InputSource::Resolved { definition } = &mut request.spec.inputs else {
+        unreachable!()
+    };
+    let binary = ContentDigest::of(b"catalogue-only-binary");
+    let execution = &mut definition.runtime.execution;
+    execution["semantic_parameters"]["engine"] = serde_json::json!({
+        "kind": "driver-world-v1",
+        "simulator_version": "host-fixture",
+        "host_os": "host-fixture",
+        "host_arch": "host-fixture",
+        "guest_arch": seedbox_driver_execution::driver_world::platform::architecture_name(
+            definition.architecture,
+        ),
+        "engine_timebase": "host-fixture",
+    });
+    execution["driver_world"] =
+        serde_json::json!({"manifest": binary, "executable": binary, "objects": []});
+    request.spec = seedbox_api::SimulationSpec::resolved(definition.as_ref().clone()).unwrap();
+    request
 }
 
 struct HostService {
@@ -306,6 +374,7 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
                     service: "oracle".into(),
                     code: 0,
                 }),
+                machines: vec![],
                 detail: None,
                 witness: Some(ContentDigest::of(policy)),
                 full_state: None,
@@ -593,6 +662,114 @@ async fn interactive_fault_replays_via_resolved_definition() {
     })
     .await
     .expect("interactive host fixture exceeded its hang guard");
+}
+
+fn driver_closure(spec: &seedbox_api::SimulationSpec) -> &serde_json::Value {
+    let seedbox_api::InputSource::Resolved { definition } = &spec.inputs else {
+        panic!("a run records its resolved definition")
+    };
+    &definition.runtime.execution["driver_world"]
+}
+
+fn manifest(contents: &[u8]) -> serde_json::Value {
+    serde_json::to_value(ContentDigest::of(contents)).unwrap()
+}
+
+// A spawned machine is absent from the configuration and the initial
+// guests, and joins the run's own retained closure only after it stops.
+// The catalogue keeps the submitted definition; describing the run adds
+// the closure, so its replay boots the spawned machine.
+#[tokio::test]
+async fn spawning_run_completes_and_its_definition_replays_the_spawned_machine() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let host = HostService::start(Behavior::Spawning).await;
+        let source = host
+            .client
+            .submit(&driver_world_request("spawning-host-fixture"))
+            .await
+            .unwrap();
+        let completed = host.completed(&source.metadata.id).await;
+        assert_eq!(
+            completed.status.termination,
+            Some(ExecutionTermination::OracleExited)
+        );
+        assert_eq!(completed.status.verdict(), TestVerdict::Passed);
+        assert_eq!(
+            driver_closure(&completed.spec)["manifest"],
+            manifest(b"catalogue-only-binary")
+        );
+        let recorded = host.client.describe(&source.metadata.id).await.unwrap();
+        assert_eq!(
+            driver_closure(&recorded.spec)["manifest"],
+            manifest(SPAWNED_MANIFEST)
+        );
+        let replay = host
+            .client
+            .submit_definition(&serde_json::to_value(&recorded).unwrap(), false)
+            .await
+            .unwrap();
+        let replayed = host.completed(&replay.metadata.id).await;
+        assert_eq!(replayed.status.verdict(), TestVerdict::Passed);
+        assert_eq!(replayed.spec, recorded.spec);
+        assert_eq!(
+            host.client
+                .compare(&source.metadata.id, &replay.metadata.id)
+                .await
+                .unwrap()
+                .status,
+            ComparisonStatus::Match
+        );
+        host.shutdown().await;
+    })
+    .await
+    .expect("spawning host fixture exceeded its hang guard");
+}
+
+// A seed-range member's inputs are the source's submitted definition, never
+// what the source run's spawns added to its own record.
+#[tokio::test]
+async fn seed_range_members_of_a_spawning_run_start_from_its_submitted_definition() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let host = HostService::start(Behavior::Spawning).await;
+        let request = driver_world_request("spawning-seed-range");
+        let range = host
+            .client
+            .submit_seeds(&seedbox_api::SeedRangeRequest {
+                options: request.options,
+                metadata: request.metadata,
+                request_id: request.request_id,
+                spec: request.spec,
+                count: 2,
+            })
+            .await
+            .unwrap();
+        let source = host.completed(&range.source).await;
+        assert_eq!(source.status.verdict(), TestVerdict::Passed);
+        let recorded = host.client.describe(&range.source).await.unwrap();
+        assert_eq!(
+            driver_closure(&recorded.spec)["manifest"],
+            manifest(SPAWNED_MANIFEST)
+        );
+        // Each fixture execution signals its entry; a member is admitted
+        // before it executes.
+        let member = loop {
+            let status = host.client.seed_range(&range.source).await.unwrap();
+            if let Some(member) = status.members.get(1) {
+                break member.metadata.id.clone();
+            }
+            host.entered.notified().await;
+        };
+        let member = host.completed(&member).await;
+        assert_eq!(member.spec.seed, Some(124));
+        assert_eq!(driver_closure(&member.spec), driver_closure(&source.spec));
+        assert_eq!(
+            driver_closure(&member.spec)["manifest"],
+            manifest(b"catalogue-only-binary")
+        );
+        host.shutdown().await;
+    })
+    .await
+    .expect("spawning seed-range host fixture exceeded its hang guard");
 }
 
 // These are synthetic witnesses for comparison composition, not proof of native determinism.

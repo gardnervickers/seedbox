@@ -917,6 +917,7 @@ mod tests {
                 witness: Some(digest.clone()),
                 full_state: Some(BTreeMap::from([("oracle".into(), digest)])),
                 faults: vec![],
+                machines: vec![],
                 detail: None,
                 properties: None,
             }),

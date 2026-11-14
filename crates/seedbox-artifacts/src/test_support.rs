@@ -92,6 +92,7 @@ pub fn fixture() -> sb::record::RunRecord {
             witness: Some(digest),
             full_state: None,
             faults: vec![],
+            machines: vec![],
             detail: None,
             properties: None,
         }),

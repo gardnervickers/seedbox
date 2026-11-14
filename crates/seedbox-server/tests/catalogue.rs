@@ -564,3 +564,32 @@ fn state_dependent_heal_can_be_submitted_for_deterministic_runtime_rejection() {
     let (accepted, _) = catalogue.submit(submission).unwrap();
     assert_eq!(accepted.spec.program[0].id, "heal-removed-prior-action");
 }
+
+// A run's spawned machines stay on its own record; its catalogue spec is the
+// submitted definition, which seed-range members clone.
+#[test]
+fn finalizing_runs_keep_their_submitted_driver_closure() {
+    use seedbox_api::InputSource;
+    let mut catalogue = Catalogue::in_memory();
+    let (mut resource, _) = catalogue
+        .submit(test_support::resolved_request("finalizing-closure"))
+        .unwrap();
+    resource.status.phase = Phase::Preparing;
+    resource = catalogue.update(resource).unwrap();
+    for phase in [Phase::Running, Phase::Finalizing] {
+        resource.status.phase = phase;
+        resource = catalogue.update(resource).unwrap();
+        let mut spawned = resource.clone();
+        let InputSource::Resolved { definition } = &mut spawned.spec.inputs else {
+            panic!("resolved fixture")
+        };
+        definition.runtime.execution["driver_world"] = serde_json::json!({ "manifest": "spawned" });
+        assert!(
+            matches!(
+                catalogue.update(spawned),
+                Err(Error::Invalid(message)) if message == "simulation inputs are immutable after preparation"
+            ),
+            "{phase:?}"
+        );
+    }
+}
