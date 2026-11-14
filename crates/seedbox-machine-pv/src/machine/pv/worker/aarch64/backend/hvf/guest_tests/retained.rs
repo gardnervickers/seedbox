@@ -80,7 +80,9 @@ fn an_exported_version_is_the_capture_of_its_moment() {
 /// with its MMU on and writes only inside exclusive pairs, so after every
 /// snapshot the first write fault of tracking lands inside one; its words,
 /// registers, execution chain and stopped state must be those of a run that
-/// never tracked, whether snapshots come at every bound or a few.
+/// never tracked, whether snapshots come at every bound or a few. How many
+/// stores it retried is not compared: a fault between a load and its store
+/// adds a retry, as any host interruption does without tracking.
 #[test]
 #[ignore = "requires HVF and a test executable signed with the hypervisor entitlement"]
 fn write_tracking_is_invisible_to_the_guest() {

@@ -134,7 +134,9 @@ impl Pages {
     /// `base` with each of `written` replaced by its contents in `live` RAM.
     /// A page that still equals `base` stays shared and an all-zero page is
     /// stored as absent. Returns the version and the pages it had to copy, or
-    /// [`Full`] if the store would hold more than `limit` bytes.
+    /// [`Full`] if the store would hold more than `limit` bytes: also when it
+    /// already does, under a limit lower than the one its versions were taken
+    /// with, and this version would copy nothing.
     pub(super) fn version(
         &self,
         base: &Tree,
@@ -142,6 +144,9 @@ impl Pages {
         live: &[u8],
         limit: u64,
     ) -> Result<(Tree, usize), Full> {
+        if self.held() > limit {
+            return Err(Full);
+        }
         let mut tree = base.clone();
         let mut copied = 0;
         for page in written {
@@ -288,5 +293,29 @@ mod tests {
         let (second, copied) = store.version(&first, [1], &live, limit).unwrap();
         assert_eq!(copied, 1);
         assert_eq!(second.page(1).unwrap()[0], 1);
+    }
+
+    #[test]
+    fn a_store_over_a_lowered_limit_refuses_a_version_that_copies_nothing() {
+        let store = Pages::new();
+        let mut live = ram();
+        live[0] = 1;
+        live[GRANULE] = 1;
+        let (first, _) = store
+            .version(&Tree::zero(PAGES), all(), &live, UNLIMITED)
+            .unwrap();
+        let held = store.held();
+        assert_eq!(held, 2 * GRANULE as u64);
+        // Nothing written, a page written back to what it held, and a page
+        // zeroed: none would copy a page.
+        assert_eq!(store.version(&first, [], &live, held - 1).err(), Some(Full));
+        assert_eq!(store.version(&first, [0], &live, 0).err(), Some(Full));
+        live[GRANULE] = 0;
+        assert_eq!(store.version(&first, [1], &live, 0).err(), Some(Full));
+        assert_eq!(store.held(), held);
+        // At the limit exactly, a version that copies nothing is kept.
+        let (second, copied) = store.version(&first, [1], &live, held).unwrap();
+        assert_eq!(copied, 0);
+        assert!(second.page(1).is_none());
     }
 }

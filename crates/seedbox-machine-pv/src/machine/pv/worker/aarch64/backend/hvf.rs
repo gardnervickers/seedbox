@@ -1,6 +1,7 @@
 //! One process owns one Hypervisor.framework VM. GIC state requires macOS 15.
 use super::{Architecture, Backend, Exit, Memory, Result};
 use crate::machine::pv::worker::{
+    boot::RAM_BASE as RAM,
     evidence::arm,
     memory::{PageSet, GRANULE},
 };
@@ -47,8 +48,6 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn seedbox_pv_set_vector(cpu: u64, register: u32, value: *const u8) -> i32;
 }
-/// Where guest RAM starts in the guest's physical address space.
-const RAM: u64 = 0x4000_0000;
 // Stage-2 access: read, write and execute are bits 0, 1 and 2.
 const ALL: u64 = 7;
 const NO_WRITE: u64 = 5;
@@ -158,6 +157,10 @@ impl Native {
         };
         // A data abort, or an instruction abort whose stage-1 walk had to
         // write a translation table. Unmapped addresses stay MMIO.
+        // Any data abort into RAM counts, whatever its status code or
+        // direction: tracked RAM is mapped to read and execute, so a write
+        // is all stage 2 refuses there, and taking some other abort for one
+        // only records a page that was not written.
         // No guest here makes the walker write a table: the test guests
         // leave TCR_EL1.HA and HD clear, and whether HVF offers hardware
         // table updates at all is ID_AA64MMFR1_EL1.HAFDBS as the guest sees

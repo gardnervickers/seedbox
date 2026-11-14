@@ -6,7 +6,7 @@
 //! pages in which live RAM can differ from it. An exported version is, byte
 //! for byte, the file a capture at that moment would have written.
 //!
-//! Tracking starts at the first snapshot. From then on live RAM equals
+//! Tracking starts at the first snapshot kept. From then on live RAM equals
 //! `current` everywhere but on the pages in the mapping's dirty set: guest
 //! writes reach that set through the backend, host writes through
 //! [`super::memory::Ram`].
@@ -74,11 +74,9 @@ impl<B: Backend> Machine<B> {
         verify: bool,
     ) -> Result<std::result::Result<Taken, Full>> {
         let capture = self.header()?;
-        if self.ram.tracked() {
+        let tracked = self.ram.tracked();
+        if tracked {
             self.native.collect()?;
-        } else {
-            self.native.track()?;
-            self.ram.track();
         }
         let written = self.ram.take_dirty();
         let pages = self.ram.pages();
@@ -105,6 +103,12 @@ impl<B: Backend> Machine<B> {
                 return Ok(Err(Full));
             }
         };
+        // Writes are recorded from the first version kept: a refused first
+        // snapshot withholds nothing from the guest afterwards.
+        if !tracked {
+            self.native.track()?;
+            self.ram.track();
+        }
         if verify {
             if let Some(page) = ram.mismatch(live) {
                 // The dirty set no longer holds what was written since
