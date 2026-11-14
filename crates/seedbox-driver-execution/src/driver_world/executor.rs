@@ -144,13 +144,11 @@ impl DriverExecutor {
     fn admit_execution(&self, controller: bool) -> Result<()> {
         super::policy::admit_execution(self.backend, controller).map_err(Error::Setup)
     }
-    /// Descriptive current-host metadata and explicit owned launch contract. No
+    /// Descriptive current-host metadata and launch kind. No
     /// revision, source/build hash, qualification or provenance admission gate.
     pub fn descriptor(guest_arch: &str) -> crate::execution::EngineDescriptor {
         crate::execution::EngineDescriptor {
             kind: crate::engine::ExecutableKind::DriverWorld,
-            owner_pipe: true,
-            live_observations: true,
             simulator_version: crate::engine::SIMULATOR_VERSION.into(),
             host_os: std::env::consts::OS.into(),
             host_arch: std::env::consts::ARCH.into(),
@@ -165,12 +163,6 @@ impl ExecutionBackend for DriverExecutor {
     }
     fn performance_parameters(&self) -> BTreeMap<String, String> {
         BTreeMap::from([("SEEDBOX_MACHINE_WORKERS".into(), self.workers.to_string())])
-    }
-    fn preflight_workers(&self, workers: u32) -> Result<()> {
-        if !(1..=64).contains(&workers) {
-            return Err(Error::Setup("--workers: use 1..64".into()));
-        }
-        self.preflight(None)
     }
     fn preflight(&self, _: Option<&std::path::Path>) -> Result<()> {
         // Fail before opening a native admission device or preparing workers.

@@ -85,7 +85,7 @@ impl ExecutionService {
 }
 
 /// Ignore only provenance at its owning schema paths. Actual architecture,
-/// backend, launch kind/ownership/observation contract, policies, binaries and
+/// backend, launch kind, policies, binaries and
 /// checkpoint state remain comparable execution inputs.
 pub(super) fn semantic_definition(
     mut definition: Box<seedbox_spec::definition::Definition>,

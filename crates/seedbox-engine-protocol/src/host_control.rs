@@ -47,13 +47,7 @@ pub struct RateMeasurement {
     pub wall_time_ns: std::num::NonZeroU64,
 }
 
-/// Pause at the next slice boundary; acknowledged with `PAUSED`.
-pub const PAUSE: &[u8] = b"pause";
-/// Leave a pause; acknowledged with `RUNNING`.
-pub const RESUME: &[u8] = b"resume";
-pub const PAUSED: &[u8] = b"paused";
-pub const RUNNING: &[u8] = b"running";
-/// Reply to any other request.
+/// Reply to a datagram that is not a request.
 pub const INVALID: &[u8] = b"invalid";
 /// Largest datagram either side sends or reads.
 pub const MAX_DATAGRAM: usize = 4096;
