@@ -247,7 +247,7 @@ impl<B: Backend> Machine<B> {
         };
         let h = &mut self.state.witness;
         unsafe {
-            self.ram.modify(|ram| {
+            self.ram.guest(|ram| {
                 block.complete_due(ram, now, &mut |kind, status, sector| {
                     *h = seedbox_machine::machine::execution_evidence::chain::record(
                         h,
@@ -272,7 +272,7 @@ impl<B: Backend> Machine<B> {
         let block = self.block.as_mut().expect("held block");
         let h = &mut self.state.witness;
         let reached = unsafe {
-            self.ram.modify(|ram| {
+            self.ram.guest(|ram| {
                 block.resume(ram, now, &mut |kind, status, sector| {
                     *h = seedbox_machine::machine::execution_evidence::chain::record(
                         h,
@@ -437,7 +437,7 @@ impl<B: Backend> Machine<B> {
         self.boundary()?;
         let net = self.state.net.as_mut().expect("checked NIC");
         for frame in frames {
-            unsafe { self.ram.modify(|ram| net.receive(ram, frame)) }?;
+            unsafe { self.ram.guest(|ram| net.receive(ram, frame)) }?;
         }
         self.interrupts()
     }
@@ -490,7 +490,7 @@ impl<B: Backend> Machine<B> {
             self.state.console.input(input);
             unsafe {
                 self.ram
-                    .modify(|ram| self.state.console.process(ram, self.state.now))
+                    .guest(|ram| self.state.console.process(ram, self.state.now))
             }?;
             self.interrupts()?;
         }
@@ -502,7 +502,7 @@ impl<B: Backend> Machine<B> {
             self.state.console.shutdown();
             unsafe {
                 self.ram
-                    .modify(|ram| self.state.console.process(ram, self.state.now))
+                    .guest(|ram| self.state.console.process(ram, self.state.now))
             }?;
             self.interrupts()?;
         }
@@ -573,7 +573,7 @@ impl<B: Backend> Machine<B> {
                     let offset = address - LIFECYCLE_MMIO;
                     if write {
                         unsafe {
-                            self.ram.modify(|ram| {
+                            self.ram.guest(|ram| {
                                 self.state
                                     .console
                                     .write(ram, offset, value as u32, self.state.now)
@@ -599,7 +599,7 @@ impl<B: Backend> Machine<B> {
                         let h = &mut self.state.witness;
                         let now = self.state.now;
                         let reached = unsafe {
-                            self.ram.modify(|ram| block.write_traced(ram, offset, value as u32, now, &mut |kind, status, sector| {
+                            self.ram.guest(|ram| block.write_traced(ram, offset, value as u32, now, &mut |kind, status, sector| {
                                 *h = seedbox_machine::machine::execution_evidence::chain::record(h, b'd', 0, now, sector, kind as u64 | ((status as u64) << 32));
                             }))
                         }?;
@@ -623,7 +623,7 @@ impl<B: Backend> Machine<B> {
                         let now = self.state.now;
                         unsafe {
                             self.ram
-                                .modify(|ram| net.write(ram, offset, width, value as u32, now))
+                                .guest(|ram| net.write(ram, offset, width, value as u32, now))
                         }?;
                         self.collect_network();
                     } else {
