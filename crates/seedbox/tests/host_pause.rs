@@ -116,9 +116,7 @@ fn pause_wait_probe_requires_a_new_open_wait_signal() {
 
 fn cli(binary: &Path, state: &Path) -> Command {
     let mut command = Command::new(binary);
-    command
-        .env_remove("SEEDBOX_VMM")
-        .env("SEEDBOX_STATE", state);
+    command.env("SEEDBOX_STATE", state);
     command
 }
 

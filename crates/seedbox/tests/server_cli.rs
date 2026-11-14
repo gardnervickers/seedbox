@@ -51,8 +51,7 @@ fn cli(root: &Path) -> Command {
         .env_clear()
         .env("HOME", root)
         .env("PATH", "/usr/bin:/bin")
-        .env("SEEDBOX_STATE", root.join("state"))
-        .env("SEEDBOX_KERNEL", root.join("missing-kernel"));
+        .env("SEEDBOX_STATE", root.join("state"));
     command
 }
 
