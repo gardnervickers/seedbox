@@ -54,14 +54,13 @@ fn closure(s: &Snapshot) {
     let wire = encode(s);
     for _ in 0..2 {
         let d = decode(&wire).unwrap();
-        assert_eq!(&*d.bytes, &*s.bytes);
+        assert_eq!(d.bytes(), s.bytes());
         assert_eq!(d.disk, s.disk);
         assert_eq!(encode(&d), wire);
     }
 }
 fn metadata(s: &Snapshot) -> Capture {
-    let mut b = &s.bytes[..];
-    protocol::receive(&mut b).unwrap().unwrap()
+    protocol::receive(&mut &s.bytes()[..]).unwrap().unwrap()
 }
 fn envelope(body: Vec<u8>, native: u8, extra: u64) -> Vec<u8> {
     let mut out = vec![];
@@ -196,7 +195,7 @@ fn failed_writer_bounded_chunks_no_source_mutation_and_error_reader() {
     );
     let s = m.capture().unwrap();
     let initial = encode(&s);
-    let original = s.bytes.clone();
+    let original = s.bytes();
     for fail in [0, 7, 24, 100, initial.len() - 1] {
         let mut sink = Sink {
             count: 0,
@@ -205,7 +204,7 @@ fn failed_writer_bounded_chunks_no_source_mutation_and_error_reader() {
         };
         assert!(matches!(s.write_to(&mut sink), Err(CodecError::Io(_))));
         assert_eq!(encode(&s), initial);
-        assert!(std::sync::Arc::ptr_eq(&s.bytes, &original));
+        assert_eq!(s.bytes(), original);
     }
     let mut sink = Sink {
         count: 0,
@@ -361,7 +360,7 @@ fn live(disk: bool) -> Snapshot {
         bytes.extend_from_slice(&0u64.to_le_bytes());
     }
     Snapshot {
-        bytes: std::sync::Arc::new(bytes),
+        body: Body::Image(Arc::new(bytes)),
         aux: retained::Aux {
             active: Some(0),
             ..Default::default()
@@ -379,8 +378,9 @@ fn synthetic_live_native_diskless_and_both_owned_layers_roundtrip_without_restor
         let s = live(disk);
         closure(&s);
         let d = decode(&encode(&s)).unwrap();
-        assert_eq!(d.bytes.len(), d.bytes.capacity());
-        let p = Parts::new(&d).unwrap();
+        let whole = d.bytes();
+        assert_eq!(whole.len(), whole.capacity());
+        let p = Parts::new(&d, &whole).unwrap();
         assert_eq!(p.ram.len(), (2 << 20) + PAGE as usize);
         assert!(p.ram.iter().all(|b| *b == 0x4a));
         assert!(p.client.is_empty());
@@ -507,9 +507,9 @@ fn live_raw_streams_borrow_capture_and_decode_directly_into_final_owned_body() {
         }
     }
     let s = live(false);
-    let start = s.bytes.as_ptr() as usize;
+    let start = s.bytes().as_ptr() as usize;
     let mut witness = BorrowWitness {
-        source: start..start + s.bytes.len(),
+        source: start..start + s.bytes().len(),
         large: 0,
     };
     s.write_to(&mut witness).unwrap();
@@ -534,8 +534,8 @@ fn live_raw_streams_borrow_capture_and_decode_directly_into_final_owned_body() {
         large: vec![],
     };
     let restored = Snapshot::read_from(&mut witness, &limits()).unwrap();
-    let start = restored.bytes.as_ptr() as usize;
-    let end = start + restored.bytes.len();
+    let start = restored.bytes().as_ptr() as usize;
+    let end = start + restored.bytes().len();
     assert!(!witness.large.is_empty());
     for range in witness.large {
         assert!(
@@ -697,7 +697,8 @@ fn production_outer_mac_invariant_rejects_zero_and_multicast_but_not_missing_ip_
 #[test]
 fn public_live_codec_accepts_actual_mmio_backlog_without_driver_ok() {
     let source = live(false);
-    let p = Parts::new(&source).unwrap();
+    let whole = source.bytes();
+    let p = Parts::new(&source, &whole).unwrap();
     let mut c = metadata(&source);
     c.network = Some([2, 0, 0, 0, 0, 1]);
     let header = worker::snapshot::backlog_without_driver_ok_fixture(c.memory_bytes, c.reached);
@@ -711,7 +712,7 @@ fn public_live_codec_accepts_actual_mmio_backlog_without_driver_ok() {
         bytes.extend_from_slice(body);
     }
     let s = Snapshot {
-        bytes: std::sync::Arc::new(bytes),
+        body: Body::Image(Arc::new(bytes)),
         aux: retained::Aux {
             active: Some(0),
             ..Default::default()

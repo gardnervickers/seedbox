@@ -1,4 +1,4 @@
-use super::{boot, PVMachine};
+use super::{boot, PVMachine, Retention};
 use seedbox_machine::application::{
     boot_derived, boot_derived_configured, with_runtime, GuestBootstrap, GuestEnvironment, Kernel,
 };
@@ -19,6 +19,7 @@ pub struct Factory {
     formatter: Option<Vec<u8>>,
     scratch_root: Option<PathBuf>,
     policy: Option<BackendPolicy>,
+    retention: Option<Retention>,
     progress_budget: seedbox_spec::progress::ProgressBudget,
 }
 impl Factory {
@@ -74,6 +75,7 @@ impl Factory {
             formatter,
             scratch_root: None,
             policy: None,
+            retention: None,
             progress_budget: seedbox_spec::progress::ProgressBudget::MACHINE_DEFAULT,
         })
     }
@@ -110,7 +112,7 @@ impl Factory {
     /// Place subsequently created machines' private host files under `root`.
     /// This applies to both create and create_configured. The path is owned,
     /// but the caller owns the existing directory and must keep it available
-    /// until its machines are dropped. No filesystem work occurs in this
+    /// until its machines, and the snapshots they retain, are dropped. No filesystem work occurs in this
     /// builder; creation reports an invalid or unavailable root as an error.
     /// The effective absolute root must be UTF-8 (including relative-path
     /// resolution); unsupported encoding is refused before private files exist.
@@ -119,6 +121,14 @@ impl Factory {
     /// must supply new authority with [`PVMachine::from_snapshot_in`].
     pub fn with_scratch_root(mut self, root: &Path) -> Self {
         self.scratch_root = Some(root.to_owned());
+        self
+    }
+    /// Have subsequently created machines keep the snapshots of their live
+    /// boots in their workers ([`Retention`]). Like the scratch root this is
+    /// host authority, not a snapshot field: a restored machine is told with
+    /// [`PVMachine::retain_snapshots`].
+    pub fn with_retained_snapshots(mut self, retention: Retention) -> Self {
+        self.retention = Some(retention);
         self
     }
     /// Construct with explicit per-guest setup, retaining it in the boot bytes.
@@ -236,6 +246,9 @@ impl Factory {
         // worker exists. Restore bypasses this factory and validates saved policy.
         if let Some(policy) = &self.policy {
             machine.configure_policy(&definition.name, policy)?;
+        }
+        if let Some(retention) = self.retention {
+            machine.retain_snapshots(retention);
         }
         Ok(machine)
     }
