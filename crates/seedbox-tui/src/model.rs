@@ -2545,7 +2545,7 @@ pub fn rate_label(rate: PlaybackRate) -> String {
     }
 }
 
-/// Project the admitted opaque payload immediately, before a user can quit.
+/// Project the admitted opaque payload into the focused timeline as soon as it is admitted.
 fn receipt_timeline_entry(receipt: &serde_json::Value) -> Option<seedbox_api::TimelineEntry> {
     let intervention = receipt.get("state")?.get("intervention")?;
     let plan = intervention.get("plan")?;
@@ -3555,6 +3555,25 @@ pub(crate) mod tests {
         )));
         assert!(requests.is_empty());
         assert_eq!(app.focused_timeline().unwrap().modified_count(), 1);
+    }
+
+    #[test]
+    fn unknown_admitted_fault_enters_the_focused_timeline() {
+        let mut app = app(&["a"]);
+        app.focus.as_mut().unwrap().resource = Some(timeline_resource(10));
+        app.apply(Update::FaultReceipt {
+            title: "future_action".into(),
+            request: serde_json::json!({"command":{"type":"injectFault","action":{"action":"future_action","newField":{"value":7}}}}).to_string(),
+            result: Ok(serde_json::json!({"state":{"type":"acknowledged","error":null,
+                "intervention":{"requestId":"new-request","position":{"boundaryIndex":4,"completedRounds":3,"simulatedTimeNs":100},
+                "plan":{"id":1,"at_ns":100,"deadline_ns":200,"action":"future_action","newField":{"value":7}}}}})),
+        });
+        let timeline = app.focused_timeline().unwrap();
+        assert_eq!(timeline.entries()[0].id, "program:new-request");
+        assert_eq!(
+            timeline.entries()[0].action,
+            serde_json::json!({"action":"future_action","newField":{"value":7}})
+        );
     }
 
     fn heal_catalogue() -> FaultCatalogue {
