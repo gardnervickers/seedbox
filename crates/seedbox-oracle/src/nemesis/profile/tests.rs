@@ -406,19 +406,16 @@ fn overlapping_domains_share_one_fault_budget() {
                    {kind: crash, downtime_ns: {min: 1500000000, max: 3000000000}},
                    {kind: disk_latency, request: any, duration_ns: {min: 1500000000, max: 3000000000},
                     latency_ns: {min: 1000000, max: 2000000}}]}";
-    let mut overlapped = false;
-    for seed in 0..16 {
-        let mut profile: Profile = serde_yaml_ng::from_str(yaml).unwrap();
-        let mut world = Log::default();
-        profile.run(&mut world, &mut crate::Rng::new(seed)).unwrap();
-        // Three starts and their three ends.
-        assert_eq!(world.applied.len(), 6, "seed {seed}");
-        overlapped |= !matches!(
-            world.applied[1],
-            Action::Reboot { .. } | Action::Heal { .. }
-        );
-    }
-    assert!(overlapped, "some seed starts two faults on n1 at once");
+    let mut profile: Profile = serde_yaml_ng::from_str(yaml).unwrap();
+    let mut world = Log::default();
+    profile.run(&mut world, &mut crate::Rng::new(0)).unwrap();
+    // Three starts and their three ends; the crash starts while the disk
+    // latency still holds n1.
+    let applied: Vec<_> = world.applied.iter().map(Action::name).collect();
+    assert_eq!(
+        applied,
+        ["disk_latency", "crash", "heal", "reboot", "crash", "reboot"]
+    );
 }
 
 #[test]

@@ -175,11 +175,13 @@ impl Catalogue {
         // A member's spawns prepare from its range's submitted project, never
         // from what the source run spawned (that stays on the source's record).
         if matches!(entry.request.spec.inputs, InputSource::Project) {
-            let admitted = self
+            let member_id = member.0.metadata.id.clone();
+            let mut admitted = self
                 .entries
-                .get_mut(&member.0.metadata.id)
+                .remove(&member_id)
                 .ok_or(Error::StorageFailed)?;
             admitted.range_project = Some(entry.request.spec.configuration.clone());
+            self.store(member_id, admitted);
         }
         range.next += 1;
         self.store(id, entry);
