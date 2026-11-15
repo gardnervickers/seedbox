@@ -40,6 +40,25 @@ Checkpoints do not retain log/event/frame sessions; restore starts fresh observe
 Draining, evicting or resizing observations therefore changes neither continuation nor policy evidence.
 The [capture boundary](internals.md#checkpoint-capture) preserves input cursors rather than replaying events.
 
+## A branch is a run
+
+A host that saves a world and restores it many times still has only runs: each
+restored world is defined by its machines, its seed and the inputs delivered
+to it so far. [seedbox-branch](../crates/seedbox-branch/src/lib.rs) keeps that
+true by keeping the input program outside the Driver and scheduling each input
+at the barrier it falls due, as the service worker does. A saved point then
+holds no future input, and what follows it is whatever program its branch is
+given.
+Two things follow. A branch any number of saves deep is reproduced from boot by
+its delivered inputs alone. And a line one run wrote at time `t` is written at
+`t` by every run that takes the same inputs up to `t`, so its time is a place
+to go back to: `Branch::rewind` restores an earlier point, replays the run's
+own inputs to just before `t` and checks the replay against the run.
+Stops and saves are not inputs: where a run stops must not change what its
+machines do, which the crate's tests check on scripted machines only.
+The trace compares lines and lifecycle changes, which have times of their own;
+a settlement is stamped by the commit that confirmed it and is not compared.
+
 ## Definitions do not borrow resource ownership
 
 A resolved definition owns its binary closure by digest; source IDs and image names are provenance.
