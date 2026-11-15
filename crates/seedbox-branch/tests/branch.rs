@@ -505,8 +505,12 @@ fn judge_recovers_tells_the_oracle_to_finish_and_reads_its_exit() {
     );
     scout.advance(at(30)).unwrap();
     let saved = scout.save().unwrap();
+    let exit = ExitReason::ProgramExit { code: 0 };
     for _ in 0..2 {
         let mut judged = restored(&saved);
+        judged
+            .extend_pending([input(500, "never", Action::Crash(machine(1)))])
+            .unwrap();
         let verdict = judged
             .judge(
                 "finish",
@@ -515,9 +519,22 @@ fn judge_recovers_tells_the_oracle_to_finish_and_reads_its_exit() {
             )
             .unwrap();
         assert!(verdict.recovered && verdict.signalled);
-        assert_eq!(verdict.finished, Some(ExitReason::ProgramExit { code: 0 }));
+        assert_eq!(verdict.finished, Some(exit));
         // Recovery took one look of 10 ns; the oracle exited in the next round.
         assert!(verdict.at <= at(60), "{:?}", verdict.at);
+        // The input it never took is named, and the oracle heard the first ask.
+        assert_eq!(verdict.dropped, [key("never")]);
+        assert!(judged.missed().is_empty());
+        let delivered = judged.program().delivered();
+        let keys: Vec<&str> = delivered.iter().map(|input| input.key.as_str()).collect();
+        assert_eq!(keys, ["pause", "judge-0-resume-1", "judge-finish-0"]);
+
+        // The judged run's program alone, from boot, ends the same way at the
+        // same time.
+        let mut cold = run(waiting_oracle(), delivered.to_vec());
+        assert_eq!(cold.advance(at(1000)).unwrap(), Stop::Finished(exit));
+        assert_eq!(cold.now(), verdict.at);
+        assert_eq!(occurrences(&cold), occurrences(&judged));
     }
     // The scout was not spent: it is still running, still paused.
     scout.advance(at(100)).unwrap();
@@ -537,6 +554,31 @@ fn judge_waits_out_an_oracle_that_never_declares_the_breakpoint() {
         .unwrap();
     assert!(verdict.recovered && !verdict.signalled);
     assert_eq!((verdict.finished, verdict.at), (None, at(230)));
+    // It asked every 10 ns from 30 to 220, and each ask is on record as missed.
+    let asks: Vec<&str> = run.missed().iter().map(InputKey::as_str).collect();
+    assert_eq!(asks.len(), 20);
+    assert_eq!((asks[0], asks[19]), ("judge-finish-0", "judge-finish-19"));
+    assert_eq!(run.program().delivered().len(), 20);
+}
+
+#[test]
+fn a_breakpoint_no_machine_declared_is_reported_as_missed() {
+    // The oracle declares `finish` at 1 ns and nothing else, ever.
+    let inputs = vec![
+        Input::host_break(at(0), key("early"), "finish"),
+        Input::host_break(at(10), key("other"), "start"),
+        Input::host_break(at(20), key("heard"), "finish"),
+    ];
+    let mut scout = run(waiting_oracle(), inputs);
+    scout.advance(at(15)).unwrap();
+    assert_eq!(scout.missed(), [key("early"), key("other")]);
+    // A saved point remembers them, and the run restored from it adds none
+    // for the breakpoint the oracle was waiting on.
+    let saved = scout.save().unwrap();
+    let mut heard = restored(&saved);
+    let exit = ExitReason::ProgramExit { code: 0 };
+    assert_eq!(heard.advance(at(100)).unwrap(), Stop::Finished(exit));
+    assert_eq!(heard.missed(), [key("early"), key("other")]);
 }
 
 #[test]

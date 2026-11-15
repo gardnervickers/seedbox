@@ -16,8 +16,10 @@
 //!   before something a run has already seen, and checks it each time.
 //!
 //! [`Run::recover`] and [`Run::judge`] bring a run to a verdict: end what is
-//! in force, tell the oracle to finish, and read the outcome. They spend the
-//! run, so they are for a branch restored for the purpose.
+//! in force, tell the oracle to finish, and read the outcome. Everything
+//! they do is an input of the program, so the verdict is reproduced with the
+//! run. They spend the run, so they are for a branch restored for the
+//! purpose.
 //!
 //! Which points to save, where to go back to and what to try from there are
 //! the caller's: this crate holds no policy.

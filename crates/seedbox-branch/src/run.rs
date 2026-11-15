@@ -30,6 +30,7 @@ pub struct Run<M: Machine> {
     now: Timestamp,
     program: Program,
     trace: Trace,
+    missed: Vec<InputKey>,
     finished: Option<ExitReason>,
 }
 
@@ -60,6 +61,7 @@ where
             now,
             program,
             trace,
+            missed: Vec::new(),
             finished: None,
         })
     }
@@ -81,6 +83,12 @@ where
             program: &self.program,
             trace: &self.trace,
         }
+    }
+
+    /// The breakpoint inputs that fell due when no machine had declared
+    /// their name, and so did nothing.
+    pub fn missed(&self) -> &[InputKey] {
+        &self.missed
     }
 
     /// The oracle's exit, once it has finished.
@@ -134,11 +142,7 @@ where
             if let Some(reason) = self.finished {
                 return Ok(Stop::Finished(reason));
             }
-            let mut delivered = false;
-            while let Some(input) = self.program.take_due(self.now) {
-                self.deliver(input)?;
-                delivered = true;
-            }
+            let delivered = self.deliver_due()?;
             if self.now >= until {
                 return Ok(Stop::Reached);
             }
@@ -175,22 +179,38 @@ where
         }
     }
 
+    /// Deliver every input due now; whether there was one.
+    fn deliver_due(&mut self) -> Result<bool, Error<M::Error>> {
+        let mut delivered = false;
+        while let Some(input) = self.program.take_due(self.now) {
+            self.deliver(input)?;
+            delivered = true;
+        }
+        Ok(delivered)
+    }
+
     fn deliver(&mut self, input: Input) -> Result<(), Error<M::Error>> {
         if input.at < self.now {
             return Err(Error::Stale);
         }
         let now = self.now;
-        self.driver.with_barrier(|barrier| match input.what {
+        let key = input.key.clone();
+        let heard = self.driver.with_barrier(|barrier| match input.what {
             What::Action {
                 action,
                 handle: Some(handle),
-            } => barrier.schedule_with_handle(now, input.key, action, handle),
+            } => barrier
+                .schedule_with_handle(now, input.key, action, handle)
+                .map(|_| true),
             What::Action {
                 action,
                 handle: None,
-            } => barrier.schedule(now, input.key, action),
-            What::Break(name) => barrier.host_break(&name).map(drop),
+            } => barrier.schedule(now, input.key, action).map(|_| true),
+            What::Break(name) => barrier.host_break(&name),
         })?;
+        if !heard {
+            self.missed.push(key);
+        }
         Ok(())
     }
 
@@ -202,6 +222,7 @@ where
             checkpoint: self.driver.checkpoint()?,
             program: self.program.clone(),
             trace: self.trace.fork(),
+            missed: self.missed.clone(),
         })
     }
 
@@ -240,6 +261,11 @@ where
     /// finishes or `patience` passes. An oracle that has not declared
     /// `finish` is asked again every `settle`.
     ///
+    /// Each time the oracle is asked is an input of the program, keyed
+    /// `judge-finish-N`, so the judged run's program reproduces its verdict
+    /// from boot. The inputs that were still to come are dropped, as
+    /// [`Self::recover`] drops them, and the judgement names them.
+    ///
     /// This spends the run. Judge a branch restored for the purpose, and
     /// continue from its saved point.
     pub fn judge(
@@ -248,12 +274,21 @@ where
         settle: Duration,
         patience: Duration,
     ) -> Result<Judgement, Error<M::Error>> {
+        let dropped = self.program.pending().iter();
+        let dropped = dropped.map(|input| input.key.clone()).collect();
         let recovered = self.recover("judge-", settle, 8)?;
         let deadline = after(self.now, patience);
         let mut signalled = false;
+        let mut asked = 0;
         while self.finished.is_none() && self.now < deadline {
             if !signalled {
-                signalled = self.barrier(|barrier| barrier.host_break(finish))?;
+                let key = InputKey::new(format!("judge-finish-{asked}"));
+                let key = key.expect("a valid input key");
+                asked += 1;
+                let missed = self.missed.len();
+                self.extend_pending([Input::host_break(self.now, key, finish)])?;
+                self.deliver_due()?;
+                signalled = self.missed.len() == missed;
             }
             let pause = if signalled { patience } else { settle };
             self.advance(after(self.now, pause).min(deadline))?;
@@ -262,6 +297,7 @@ where
             at: self.now,
             recovered,
             signalled,
+            dropped,
             finished: self.finished,
             properties: self.properties(),
         })
@@ -282,6 +318,9 @@ pub struct Judgement {
     pub recovered: bool,
     /// The oracle had declared the finish breakpoint and was hit.
     pub signalled: bool,
+    /// The inputs that were still to come when the run was judged, which it
+    /// therefore never took.
+    pub dropped: Vec<InputKey>,
     /// The oracle's exit; `None` when it had not finished in time.
     pub finished: Option<ExitReason>,
     pub properties: Option<Assessment>,
@@ -367,6 +406,7 @@ pub struct Branch<S> {
     checkpoint: Checkpoint<S>,
     program: Program,
     trace: Trace,
+    missed: Vec<InputKey>,
 }
 
 impl<S> Branch<S> {
@@ -402,6 +442,7 @@ impl<S> Branch<S> {
             now: self.at,
             program: self.program.clone(),
             trace: self.trace.continued(),
+            missed: self.missed.clone(),
             finished: None,
         })
     }

@@ -17,8 +17,9 @@ pub enum What {
         action: Action,
         handle: Option<FaultHandle>,
     },
-    /// A breakpoint hit from the host (see `Barrier::host_break`). An
-    /// undeclared name does nothing; the run's trace does not record it.
+    /// A breakpoint hit from the host (see `Barrier::host_break`). A name no
+    /// machine has declared does nothing; the trace does not record it, and
+    /// `Run::missed` lists the input.
     Break(String),
 }
 
@@ -39,6 +40,14 @@ impl Input {
                 action,
                 handle: None,
             },
+        }
+    }
+
+    pub fn host_break(at: Timestamp, key: InputKey, name: &str) -> Self {
+        Self {
+            at,
+            key,
+            what: What::Break(name.to_owned()),
         }
     }
 }
