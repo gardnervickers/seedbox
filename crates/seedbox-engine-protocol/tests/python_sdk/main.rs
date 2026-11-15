@@ -1077,7 +1077,12 @@ fn invalid_markers_timeouts_and_reply_identity() {
 fn wait_break_returns_each_hit_source_and_block_request_is_reserved() {
     let program = json!({"break_id":1,"source":"program","machine":"db-vm","boot":0,"name":"leader","at_ns":5});
     let block = json!({"break_id":2,"source":"block_request","machine":"db-vm","boot":1,"name":"block_request","request":"flush","nth":20,"at_ns":25});
-    let mut sdk = Sdk::open(replies(&[(1, program, json!({})), (2, block, json!({}))]));
+    let host = json!({"break_id":3,"source":"host","name":"finish","at_ns":40});
+    let mut sdk = Sdk::open(replies(&[
+        (1, program, json!({})),
+        (2, block, json!({})),
+        (3, host, json!({})),
+    ]));
     let hit = call(&mut sdk, "wait_break", json!([1]));
     typed(ok(&hit), "Hit");
     assert_eq!(
@@ -1089,6 +1094,12 @@ fn wait_break_returns_each_hit_source_and_block_request_is_reserved() {
         ok(&hit)["fields"],
         json!({"id":2,"machine":"db-vm","boot":1,"name":"block_request","at_ns":25,"source":"block_request","request":"flush","nth":20})
     );
+    // A host hit has no machine or boot.
+    let hit = call(&mut sdk, "wait_break", json!([1]));
+    assert_eq!(
+        ok(&hit)["fields"],
+        json!({"id":3,"machine":null,"boot":null,"name":"finish","at_ns":40,"source":"host","request":null,"nth":null})
+    );
     // A program cannot declare the block request hits' name.
     error(
         &call(
@@ -1098,7 +1109,7 @@ fn wait_break_returns_each_hit_source_and_block_request_is_reserved() {
         ),
         "ValueError",
     );
-    assert_eq!(sdk.close()["requests"].as_array().unwrap().len(), 2);
+    assert_eq!(sdk.close()["requests"].as_array().unwrap().len(), 3);
     // A hit whose source and fields disagree is a protocol error.
     for invalid in [
         json!({"break_id":1,"machine":"m","boot":0,"name":"leader","at_ns":5}),
@@ -1106,6 +1117,7 @@ fn wait_break_returns_each_hit_source_and_block_request_is_reserved() {
         json!({"break_id":1,"source":"block_request","machine":"m","boot":0,"name":"leader","request":"flush","nth":1,"at_ns":5}),
         json!({"break_id":1,"source":"program","machine":"m","boot":0,"name":"leader","request":"flush","nth":1,"at_ns":5}),
         json!({"break_id":1,"source":"disk","machine":"m","boot":0,"name":"leader","at_ns":5}),
+        json!({"break_id":1,"source":"host","machine":"m","boot":0,"name":"finish","at_ns":5}),
     ] {
         let mut sdk = Sdk::open(reply(1, invalid, json!({})));
         error(&call(&mut sdk, "wait_break", json!([1])), "ProtocolError");

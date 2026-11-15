@@ -114,6 +114,8 @@ struct State {
     /// Kinds the world refused as unsupported.
     unsupported: BTreeSet<&'static str>,
     pace: Box<dyn Pace>,
+    /// The faults started so far, while [`Profile::plan`] runs.
+    planned: Option<Vec<Planned>>,
 }
 
 impl Default for State {
@@ -124,6 +126,7 @@ impl Default for State {
             busy: BTreeSet::new(),
             unsupported: BTreeSet::new(),
             pace: Box::new(Sleep),
+            planned: None,
         }
     }
 }
@@ -142,10 +145,41 @@ impl std::fmt::Debug for State {
 #[derive(Debug)]
 struct Ending {
     at_ns: u64,
-    action: Action,
+    /// `None` for a fault another plan ends: it only holds its domains.
+    action: Option<Action>,
     target: String,
     /// The domains its fault holds on `target`, freed when it ends.
     domains: &'static [Domain],
+}
+
+/// One fault of a [`Profile::plan`]: the action that starts it and the one
+/// that ends it, each with its time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Planned {
+    pub start_ns: u64,
+    pub start: Action,
+    pub end_ns: u64,
+    pub end: Action,
+    /// The machine whose domains it holds from `start_ns` to `end_ns`.
+    pub target: String,
+    pub domains: &'static [Domain],
+}
+
+/// A world that only keeps time: sleeping advances it and every action is
+/// accepted at once.
+struct Clockwork(u64);
+
+impl World for Clockwork {
+    fn now_ns(&mut self) -> Result<u64, Error> {
+        Ok(self.0)
+    }
+    fn sleep(&mut self, duration: Duration) -> Result<(), Error> {
+        self.0 = self.0.saturating_add(duration.as_nanos() as u64);
+        Ok(())
+    }
+    fn apply(&mut self, _: &Action) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 impl Profile {
@@ -202,6 +236,42 @@ impl Profile {
             self.interval_ns - half,
             self.interval_ns.saturating_add(half),
         )
+    }
+
+    /// The faults a run of this profile beginning at `origin_ns` would apply,
+    /// in start order, without a world: the same draws from `random` in the
+    /// same order as [`Nemesis::run`], with every action taking no time. A
+    /// host that schedules the faults itself turns each into two inputs.
+    ///
+    /// `label` prefixes every handle the plan names, so the plans of one run
+    /// never share a handle. A fault of `in_force` still holds its domains on
+    /// its target until its `end_ns`, so the plan starts nothing there that
+    /// could not hold with it; the plan does not end it. Nothing is refused
+    /// here: what needs the world is the world's when the inputs are admitted.
+    pub fn plan(
+        &mut self,
+        origin_ns: u64,
+        label: &str,
+        in_force: &[Planned],
+        random: &mut dyn Random,
+    ) -> Result<Vec<Planned>, Error> {
+        let kept = std::mem::take(&mut self.state);
+        self.state.faults = InForce::labelled(label);
+        self.state.planned = Some(Vec::new());
+        for fault in in_force.iter().filter(|fault| fault.end_ns > origin_ns) {
+            for domain in fault.domains {
+                self.state.busy.insert((*domain, fault.target.clone()));
+            }
+            self.state.ending.push(Ending {
+                at_ns: fault.end_ns,
+                action: None,
+                target: fault.target.clone(),
+                domains: fault.domains,
+            });
+        }
+        let result = self.run(&mut Clockwork(origin_ns), random);
+        let planned = std::mem::replace(&mut self.state, kept).planned;
+        result.map(|()| planned.unwrap_or_default())
     }
 
     /// The kinds skipped because the world refused them as unsupported.
@@ -279,9 +349,20 @@ impl Profile {
         for domain in domains {
             self.state.busy.insert((*domain, target.clone()));
         }
+        let end_ns = applied.saturating_add(drawn.hold_ns);
+        if let Some(planned) = &mut self.state.planned {
+            planned.push(Planned {
+                start_ns: applied,
+                start: drawn.action,
+                end_ns,
+                end: drawn.teardown.clone(),
+                target: target.clone(),
+                domains,
+            });
+        }
         self.state.ending.push(Ending {
-            at_ns: applied.saturating_add(drawn.hold_ns),
-            action: drawn.teardown,
+            at_ns: end_ns,
+            action: Some(drawn.teardown),
             target,
             domains,
         });
@@ -290,8 +371,9 @@ impl Profile {
 
     /// End the fault of `ending[index]`, freeing its domains on its target.
     fn end(&mut self, world: &mut dyn World, index: usize) -> Result<(), Error> {
-        let action = self.state.ending[index].action.clone();
-        self.state.faults.apply(world, &action)?;
+        if let Some(action) = self.state.ending[index].action.clone() {
+            self.state.faults.apply(world, &action)?;
+        }
         let ended = self.state.ending.remove(index);
         for domain in ended.domains {
             self.state.busy.remove(&(*domain, ended.target.clone()));

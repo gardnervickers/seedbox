@@ -60,11 +60,13 @@ class Hit:
     """A breakpoint hit. Its machine stays suspended until resumed or crashed.
 
     source is "program" for a breakpoint write and "block_request" for a held
-    disk request, whose hit also carries the hold's request kind and nth.
+    disk request, whose hit also carries the hold's request kind and nth. A
+    "host" hit came from the host: it suspends nothing, has no machine or boot
+    and has already ended.
     """
     id: int
-    machine: str
-    boot: int
+    machine: Optional[str]
+    boot: Optional[int]
     name: str
     at_ns: int
     source: str = "program"
@@ -612,11 +614,17 @@ class World:
         if not result:
             return None
         try:
-            hit = Hit(result["break_id"], result["machine"], result["boot"], result["name"], result["at_ns"],
-                      result["source"], result.get("request"), result.get("nth"))
+            hit = Hit(result["break_id"], result.get("machine"), result.get("boot"), result["name"],
+                      result["at_ns"], result["source"], result.get("request"), result.get("nth"))
         except KeyError as error:
             self.close()
             raise ProtocolError("invalid breakpoint hit") from error
+        if hit.source == "host":
+            if (hit.machine is not None or hit.boot is not None or hit.request is not None or hit.nth is not None
+                    or type(hit.id) is not int or type(hit.at_ns) is not int or not isinstance(hit.name, str)):
+                self.close()
+                raise ProtocolError("invalid breakpoint hit")
+            return hit
         if hit.source == BLOCK_REQUEST:
             held = (hit.name == BLOCK_REQUEST and hit.request in ("read", "write", "flush", "any")
                     and type(hit.nth) is int and hit.nth >= 1)
@@ -649,14 +657,15 @@ class World:
         return self._call("break_on_block_request", target=_target(target), request=request, nth=nth)[1]
 
     def on_break(self, name, handler):
-        """Call handler(world, hit) whenever a machine hits breakpoint `name`.
+        """Call handler(world, hit) whenever a machine, or the host, hits breakpoint `name`.
 
         The first registration opens a second connection and serves hits on a
         background thread, so this connection stays free for other calls. The
         handler runs while the machine is suspended and gets that thread's
         World; the machine resumes when the handler returns, unless the
-        handler crashed it. A handler that raises stops serving: its machine
-        stays suspended and the exception is kept in break_error.
+        handler crashed it. A host hit suspends no machine, so nothing is
+        resumed. A handler that raises stops serving: its machine stays
+        suspended and the exception is kept in break_error.
         """
         if not callable(handler):
             raise TypeError("on_break expects a callable handler")
@@ -679,6 +688,8 @@ class World:
                 handler = self._handlers.get(hit.name)
                 if handler is not None:
                     handler(world, hit)
+                if hit.source == "host":
+                    continue
                 try:
                     world.resume_break(hit)
                 except FaultError as error:

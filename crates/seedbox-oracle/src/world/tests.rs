@@ -315,7 +315,8 @@ fn on_break_serves_hits_on_its_own_connection_and_resumes_them() {
             boot: 0,
             name: "leader".into(),
             at_ns: 25,
-            block_request: None
+            block_request: None,
+            host: false,
         }
     );
     drop(world);
@@ -380,6 +381,7 @@ fn block_request_hits_carry_their_request_and_need_no_declaration() {
             name: "block_request".into(),
             at_ns: 40,
             block_request: Some((crate::control::DiskOp::Flush, 3)),
+            host: false,
         }
     );
     drop(world);
@@ -389,6 +391,40 @@ fn block_request_hits_carry_their_request_and_need_no_declaration() {
     assert_eq!(main[0]["names"], json!([]));
     assert_eq!(main[1]["names"], json!(["leader"]));
     assert_eq!(main.len(), 2);
+}
+
+#[test]
+fn a_host_hit_names_no_machine_and_is_not_resumed() {
+    let hit = json!({"break_id": 3, "source": "host", "name": "finish", "at_ns": 60});
+    let delivered = std::sync::atomic::AtomicBool::new(false);
+    let (directory, server) =
+        serve_connections(2, move |request| match request["op"].as_str().unwrap() {
+            "wait_break" if !delivered.swap(true, Ordering::SeqCst) => ok(hit.clone()),
+            _ => ok(json!({})),
+        });
+    let mut world = GuestWorld::connect_to(directory.path().join("control.sock")).unwrap();
+    let (handled, seen) = std::sync::mpsc::channel();
+    world
+        .on_break("finish", move |_, hit| {
+            handled.send(hit.clone()).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        seen.recv().unwrap(),
+        Hit {
+            id: 3,
+            machine: String::new(),
+            boot: 0,
+            name: "finish".into(),
+            at_ns: 60,
+            block_request: None,
+            host: true,
+        }
+    );
+    drop(world);
+    let served = server.join().unwrap().into_iter().nth(1).unwrap();
+    assert!(served.iter().all(|request| request["op"] == "wait_break"));
 }
 
 #[test]
@@ -408,4 +444,30 @@ fn hits_whose_source_and_fields_disagree_are_refused() {
         drop(world);
         server.join().unwrap();
     }
+}
+
+#[test]
+fn host_finish_runs_until_the_host_hits_its_breakpoint() {
+    use crate::Nemesis;
+    let hit = json!({"break_id": 1, "source": "host", "name": "finish", "at_ns": 60});
+    // The hit arrives on the serving connection's third wait.
+    let waits = std::sync::atomic::AtomicUsize::new(0);
+    let (directory, server) =
+        serve_connections(2, move |request| match request["op"].as_str().unwrap() {
+            "wait_break" if waits.fetch_add(1, Ordering::SeqCst) == 2 => ok(hit.clone()),
+            _ => ok(json!({})),
+        });
+    let mut world = GuestWorld::connect_to(directory.path().join("control.sock")).unwrap();
+    let mut nemesis = crate::patterns::HostFinish::serve(&mut world).unwrap();
+    nemesis.run(&mut world, &mut crate::Rng::new(1)).unwrap();
+    nemesis.heal(&mut world).unwrap();
+    drop(world);
+    let mut connections = server.join().unwrap().into_iter();
+    let main = connections.next().unwrap();
+    assert_eq!(main[0]["names"], json!(["finish"]));
+    // It applied nothing: after the declaration it only slept.
+    assert!(main[1..].iter().all(|request| request["op"] == "sleep"));
+    // The host hit suspended nothing, so nothing was resumed.
+    let served = connections.next().unwrap();
+    assert!(served.iter().all(|request| request["op"] == "wait_break"));
 }
