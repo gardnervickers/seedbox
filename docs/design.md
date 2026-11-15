@@ -53,7 +53,8 @@ Two things follow. A branch any number of saves deep is reproduced from boot by
 its delivered inputs alone. And a line one run wrote at time `t` is written at
 `t` by every run that takes the same inputs up to `t`, so its time is a place
 to go back to: `Branch::rewind` restores an earlier point, replays the run's
-own inputs to just before `t` and checks the replay against the run.
+own inputs to just before `t` and checks the replay against the run. An input
+due at the point it returns to is delivered there, as it was in the run.
 Stops and saves are not inputs: where a run stops must not change what its
 machines do, which the crate's tests check on scripted machines only.
 The trace compares lines and lifecycle changes, which have times of their own;

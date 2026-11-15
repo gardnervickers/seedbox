@@ -408,9 +408,12 @@ impl<S> Branch<S> {
 
     /// Go back to just before something `history` saw: restore this branch,
     /// which must be an earlier point of the same run, and replay
-    /// `history`'s own inputs up to `until`. The run returned is at `until`
-    /// with no input pending, and nothing `history` did at `until` or later
-    /// has happened in it.
+    /// `history`'s own inputs up to `until`. The run returned is where
+    /// `history` stood at `until`: every input due at or before `until` is
+    /// delivered, as [`Run::advance`] delivers them, and nothing its
+    /// machines did at `until` or later has happened. No input is pending;
+    /// `history`'s later ones are dropped, so what follows is this run's own.
+    /// To leave out an input due at `until`, rewind to a nanosecond earlier.
     ///
     /// The replay is checked against `history`: every machine must say and
     /// do the same things at the same times. A difference is
@@ -436,7 +439,7 @@ impl<S> Branch<S> {
         let between: Vec<Input> = history.program.delivered()[delivered..]
             .iter()
             .chain(history.program.pending())
-            .filter(|input| input.at < until)
+            .filter(|input| input.at <= until)
             .cloned()
             .collect();
         let mut run = self.restore(world)?;

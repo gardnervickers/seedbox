@@ -348,6 +348,50 @@ fn rewind_returns_to_just_before_a_line_the_run_already_wrote() {
 }
 
 #[test]
+fn rewind_delivers_an_input_due_at_the_point_it_returns_to() {
+    // The inputs arrive after the saved point, the first due at that point.
+    let mut scout = run(talk(), vec![]);
+    scout.advance(at(39)).unwrap();
+    let earlier = scout.save().unwrap();
+    scout.advance(at(40)).unwrap();
+    let saved = scout.save().unwrap();
+    scout
+        .extend_pending([
+            input(40, "pause", Action::Pause(machine(1))),
+            input(70, "resume", Action::Resume(machine(1))),
+        ])
+        .unwrap();
+    scout.advance(at(100)).unwrap();
+    let history = scout.history();
+    let keys = |run: &Run<Speaker>| -> Vec<String> {
+        let delivered = run.program().delivered().iter();
+        delivered
+            .map(|input| input.key.as_str().to_owned())
+            .collect()
+    };
+
+    // Back at the saved point the pause is in force, as it was in the scout.
+    let mut paused = saved.rewind(history, at(40), &mut restore).unwrap();
+    assert_eq!(paused.now(), at(40));
+    assert_eq!(keys(&paused), ["pause"]);
+    assert!(paused.program().pending().is_empty());
+    paused.advance(at(100)).unwrap();
+    assert!(lines(&paused).is_empty());
+
+    // A nanosecond earlier it is not, and the server ends its line on time.
+    let mut free = earlier.rewind(history, at(39), &mut restore).unwrap();
+    assert!(keys(&free).is_empty());
+    free.advance(at(50)).unwrap();
+    assert_eq!(lines(&free), [(5, "bootelectleader".to_owned())]);
+
+    // The resume is due where this rewind stops, so the scout's lines follow.
+    let mut resumed = saved.rewind(history, at(70), &mut restore).unwrap();
+    assert_eq!(keys(&resumed), ["pause", "resume"]);
+    resumed.advance(at(100)).unwrap();
+    assert_eq!(occurrences(&resumed), occurrences(&scout));
+}
+
+#[test]
 fn rewind_refuses_a_branch_of_another_run_and_a_replay_that_differs() {
     let mut scout = run(talk(), vec![input(40, "pause", Action::Pause(machine(1)))]);
     scout.advance(at(50)).unwrap();
