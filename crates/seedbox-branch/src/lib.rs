@@ -28,7 +28,7 @@ mod run;
 mod trace;
 
 pub use program::{Input, InvalidProgram, Program, What};
-pub use run::{recovery, Branch, History, Judgement, Restore, Run, Stop};
+pub use run::{recovery, Branch, History, Judgement, Recovered, Restore, Run, Stop};
 pub use trace::{Entry, Record, Trace};
 
 /// A run could not continue, or was asked for something it cannot do.

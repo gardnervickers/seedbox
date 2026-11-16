@@ -231,7 +231,8 @@ where
     /// again every `settle` until nothing is left to undo. A machine can hide
     /// one condition behind another (a frozen application in a paused
     /// machine), so this takes as many looks as there are layers, up to
-    /// `rounds`. Returns whether the world came back clean.
+    /// `rounds`. Returns whether the world came back clean, and the inputs
+    /// it dropped.
     ///
     /// Each undo is an input of the program, keyed under `label`.
     pub fn recover(
@@ -239,21 +240,32 @@ where
         label: &str,
         settle: Duration,
         rounds: usize,
-    ) -> Result<bool, Error<M::Error>> {
+    ) -> Result<Recovered, Error<M::Error>> {
+        let dropped = self.program.pending().iter();
+        let dropped = dropped.map(|input| input.key.clone()).collect();
         self.replace_pending(Vec::new())?;
+        let mut clean = None;
         for round in 0..rounds {
             let view = self.barrier(|barrier| barrier.view())?;
             let undo = recovery(&view, self.now, &format!("{label}{round}-"));
             if undo.is_empty() {
-                return Ok(true);
+                clean = Some(true);
+                break;
             }
             self.extend_pending(undo)?;
             if let Stop::Finished(_) = self.advance(after(self.now, settle))? {
-                return Ok(false);
+                clean = Some(false);
+                break;
             }
         }
-        let view = self.barrier(|barrier| barrier.view())?;
-        Ok(recovery(&view, self.now, "").is_empty())
+        let clean = match clean {
+            Some(clean) => clean,
+            None => {
+                let view = self.barrier(|barrier| barrier.view())?;
+                recovery(&view, self.now, "").is_empty()
+            }
+        };
+        Ok(Recovered { clean, dropped })
     }
 
     /// Bring the run to a verdict: [`Self::recover`], hit the host
@@ -266,6 +278,9 @@ where
     /// from boot. The inputs that were still to come are dropped, as
     /// [`Self::recover`] drops them, and the judgement names them.
     ///
+    /// Recovery starts where the run stands and the first ask follows it, so
+    /// advance to the time to judge from before calling.
+    ///
     /// This spends the run. Judge a branch restored for the purpose, and
     /// continue from its saved point.
     pub fn judge(
@@ -274,9 +289,10 @@ where
         settle: Duration,
         patience: Duration,
     ) -> Result<Judgement, Error<M::Error>> {
-        let dropped = self.program.pending().iter();
-        let dropped = dropped.map(|input| input.key.clone()).collect();
-        let recovered = self.recover("judge-", settle, 8)?;
+        let Recovered {
+            clean: recovered,
+            dropped,
+        } = self.recover("judge-", settle, 8)?;
         let deadline = after(self.now, patience);
         let mut signalled = false;
         let mut asked = 0;
@@ -307,6 +323,16 @@ where
 fn after(now: Timestamp, duration: Duration) -> Timestamp {
     let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
     Timestamp::from_nanos(now.as_nanos().saturating_add(nanos))
+}
+
+/// What [`Run::recover`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Recovered {
+    /// Every fault was ended and every machine was running.
+    pub clean: bool,
+    /// The inputs that were still to come, which the run therefore never
+    /// took.
+    pub dropped: Vec<InputKey>,
 }
 
 /// How a judged run ended.

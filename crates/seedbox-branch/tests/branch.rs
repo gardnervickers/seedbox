@@ -458,7 +458,9 @@ fn recover_ends_every_fault_and_drops_what_was_still_to_come() {
         ]
     );
     assert_eq!(view.handles.len(), 1);
-    assert!(run.recover("r-", Duration::from_nanos(10), 4).unwrap());
+    let recovered = run.recover("r-", Duration::from_nanos(10), 4).unwrap();
+    assert!(recovered.clean);
+    assert_eq!(recovered.dropped, [key("never")]);
     let view = run.barrier(|barrier| barrier.view()).unwrap();
     assert!(view.handles.is_empty());
     assert!(view
