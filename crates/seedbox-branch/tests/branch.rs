@@ -3,8 +3,8 @@
 use seedbox_branch::{Branch, Entry, Error, Input, Program, Record, Run, Stop};
 use seedbox_driver::{
     driver::{
-        faults::Engine, Action, Checkpoint, Driver, InputKey, MachineId, NetworkConfig, Target,
-        Transition,
+        faults::Engine, Action, Checkpoint, Driver, InputKey, MachineId, MachineState,
+        NetworkConfig, Target, Transition,
     },
     pv::{Output, Request, Response, SimulationControlId, Stream},
     test_support::definition,
@@ -431,6 +431,63 @@ fn rewind_refuses_a_branch_of_another_run_and_a_replay_that_differs() {
     }
 }
 
+#[test]
+fn recover_ends_every_fault_and_drops_what_was_still_to_come() {
+    let scripts = vec![vec![], vec![], vec![], vec![]];
+    let throttle = Action::Throttle {
+        target: machine(3),
+        config: seedbox_machine::execution::ExecutionConfig::new(2000).unwrap(),
+    };
+    let inputs = vec![
+        input(10, "pause", Action::Pause(machine(1))),
+        input(10, "crash", Action::Crash(machine(2))),
+        input(10, "throttle", throttle),
+        input(500, "never", Action::Crash(machine(3))),
+    ];
+    let mut run = run(scripts, inputs);
+    run.advance(at(30)).unwrap();
+    let view = run.barrier(|barrier| barrier.view()).unwrap();
+    let states: Vec<MachineState> = view.machines.iter().map(|m| m.state).collect();
+    assert_eq!(
+        states,
+        [
+            MachineState::Running,
+            MachineState::Paused,
+            MachineState::Down,
+            MachineState::Running
+        ]
+    );
+    assert_eq!(view.handles.len(), 1);
+    let recovered = run.recover("r-", Duration::from_nanos(10), 4).unwrap();
+    assert!(recovered.clean);
+    assert_eq!(recovered.dropped, [key("never")]);
+    let view = run.barrier(|barrier| barrier.view()).unwrap();
+    assert!(view.handles.is_empty());
+    assert!(view
+        .machines
+        .iter()
+        .all(|machine| machine.state == MachineState::Running));
+    // Every undo is an input of the program; the future crash is gone.
+    let keys: Vec<&str> = run
+        .program()
+        .delivered()
+        .iter()
+        .map(|input| input.key.as_str())
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "pause",
+            "crash",
+            "throttle",
+            "r-0-heal-0",
+            "r-0-resume-1",
+            "r-0-reboot-2"
+        ]
+    );
+    assert!(run.program().pending().is_empty());
+}
+
 /// An oracle that declares `finish` and waits for it, beside a server.
 fn waiting_oracle() -> Scripts {
     vec![
@@ -440,6 +497,70 @@ fn waiting_oracle() -> Scripts {
         ],
         vec![(5, says("serving\n"))],
     ]
+}
+
+#[test]
+fn judge_recovers_tells_the_oracle_to_finish_and_reads_its_exit() {
+    let mut scout = run(
+        waiting_oracle(),
+        vec![input(10, "pause", Action::Pause(machine(1)))],
+    );
+    scout.advance(at(30)).unwrap();
+    let saved = scout.save().unwrap();
+    let exit = ExitReason::ProgramExit { code: 0 };
+    for _ in 0..2 {
+        let mut judged = restored(&saved);
+        judged
+            .extend_pending([input(500, "never", Action::Crash(machine(1)))])
+            .unwrap();
+        let verdict = judged
+            .judge(
+                "finish",
+                Duration::from_nanos(10),
+                Duration::from_nanos(500),
+            )
+            .unwrap();
+        assert!(verdict.recovered && verdict.signalled);
+        assert_eq!(verdict.finished, Some(exit));
+        // Recovery took one look of 10 ns; the oracle exited in the next round.
+        assert!(verdict.at <= at(60), "{:?}", verdict.at);
+        // The input it never took is named, and the oracle heard the first ask.
+        assert_eq!(verdict.dropped, [key("never")]);
+        assert!(judged.missed().is_empty());
+        let delivered = judged.program().delivered();
+        let keys: Vec<&str> = delivered.iter().map(|input| input.key.as_str()).collect();
+        assert_eq!(keys, ["pause", "judge-0-resume-1", "judge-finish-0"]);
+
+        // The judged run's program alone, from boot, ends the same way at the
+        // same time.
+        let mut cold = run(waiting_oracle(), delivered.to_vec());
+        assert_eq!(cold.advance(at(1000)).unwrap(), Stop::Finished(exit));
+        assert_eq!(cold.now(), verdict.at);
+        assert_eq!(occurrences(&cold), occurrences(&judged));
+    }
+    // The scout was not spent: it is still running, still paused.
+    scout.advance(at(100)).unwrap();
+    assert_eq!(scout.finished(), None);
+}
+
+#[test]
+fn judge_waits_out_an_oracle_that_never_declares_the_breakpoint() {
+    let mut run = run(talk(), vec![]);
+    run.advance(at(30)).unwrap();
+    let verdict = run
+        .judge(
+            "finish",
+            Duration::from_nanos(10),
+            Duration::from_nanos(200),
+        )
+        .unwrap();
+    assert!(verdict.recovered && !verdict.signalled);
+    assert_eq!((verdict.finished, verdict.at), (None, at(230)));
+    // It asked every 10 ns from 30 to 220, and each ask is on record as missed.
+    let asks: Vec<&str> = run.missed().iter().map(InputKey::as_str).collect();
+    assert_eq!(asks.len(), 20);
+    assert_eq!((asks[0], asks[19]), ("judge-finish-0", "judge-finish-19"));
+    assert_eq!(run.program().delivered().len(), 20);
 }
 
 #[test]
