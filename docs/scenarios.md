@@ -147,6 +147,15 @@ refuses as `unsupported` (`preempt` on x86_64 PV) and never draws it again;
 `run` fails if no kind is left, and `unsupported()` lists the kinds skipped. See
 [the acceptance oracle](../harness/acceptance/images/profile/src/main.rs).
 
+`Profile::plan` returns the faults a run would apply without a world: each
+with the action that starts it, the action that ends it and their times, from
+the same draws in the same order as `run`, every action taking no time. A host
+that applies the faults itself schedules each as two inputs. Its `label`
+prefixes the handles, so several plans of one run never share one, and a fault
+passed as in force keeps its domains on its target until it ends. The oracle
+of such a run uses `patterns::HostFinish` as its nemesis: its workload runs
+until the host hits the [`finish` breakpoint](breakpoints.md#hits-from-the-host).
+
 A target is free for an entry while no fault of the profile holds it in the
 same exclusion domain, so faults of different domains overlap on one machine:
 

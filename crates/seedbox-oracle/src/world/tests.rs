@@ -445,3 +445,29 @@ fn hits_whose_source_and_fields_disagree_are_refused() {
         server.join().unwrap();
     }
 }
+
+#[test]
+fn host_finish_runs_until_the_host_hits_its_breakpoint() {
+    use crate::Nemesis;
+    let hit = json!({"break_id": 1, "source": "host", "name": "finish", "at_ns": 60});
+    // The hit arrives on the serving connection's third wait.
+    let waits = std::sync::atomic::AtomicUsize::new(0);
+    let (directory, server) =
+        serve_connections(2, move |request| match request["op"].as_str().unwrap() {
+            "wait_break" if waits.fetch_add(1, Ordering::SeqCst) == 2 => ok(hit.clone()),
+            _ => ok(json!({})),
+        });
+    let mut world = GuestWorld::connect_to(directory.path().join("control.sock")).unwrap();
+    let mut nemesis = crate::patterns::HostFinish::serve(&mut world).unwrap();
+    nemesis.run(&mut world, &mut crate::Rng::new(1)).unwrap();
+    nemesis.heal(&mut world).unwrap();
+    drop(world);
+    let mut connections = server.join().unwrap().into_iter();
+    let main = connections.next().unwrap();
+    assert_eq!(main[0]["names"], json!(["finish"]));
+    // It applied nothing: after the declaration it only slept.
+    assert!(main[1..].iter().all(|request| request["op"] == "sleep"));
+    // The host hit suspended nothing, so nothing was resumed.
+    let served = connections.next().unwrap();
+    assert!(served.iter().all(|request| request["op"] == "wait_break"));
+}
