@@ -109,8 +109,7 @@ nobody waited for ends silently with the run.
 
 Its use is a run whose faults the host applies: the oracle cannot know when
 they are over, and a deadline fixed at its launch is restored with every
-checkpoint. `seedbox-oracle`'s `patterns::HostFinish` is a nemesis that
-applies nothing and returns when the host hits `finish`.
+checkpoint.
 
 ### Several oracle connections
 
