@@ -680,3 +680,123 @@ fn a_resume_admitted_behind_a_crash_of_its_machine_does_nothing() {
         1
     );
 }
+
+fn host_hit(driver: &mut Driver<Guest>, name: &str) -> bool {
+    driver
+        .with_barrier(|barrier| barrier.host_break(name))
+        .unwrap()
+}
+
+#[test]
+fn a_host_hit_answers_a_parked_waiter_and_suspends_nothing() {
+    let mut driver = build(
+        vec![
+            (1, call(1, DECLARE)),
+            (2, call(2, WAIT)),
+            (50, call(3, r#""op":"resume_break","break_id":1"#)),
+        ],
+        vec![],
+    );
+    run_to(&mut driver, 20);
+    assert!(host_hit(&mut driver, "leader"));
+    // The hit left with the waiter: nothing is live, so a checkpoint is taken.
+    assert!(driver.checkpoint().is_ok());
+    run_to(&mut driver, 100);
+    let r = replies(&driver);
+    assert_eq!(
+        r[1]["result"],
+        json!({"break_id":1,"source":"host","name":"leader","at_ns":20})
+    );
+    // It ended when it was returned.
+    assert_eq!(r[2]["error"]["code"], "invalid_state");
+    let worker = guest(&driver, 1);
+    assert!(!worker.held && worker.resumed.is_empty());
+    assert!(break_events(&driver.drain_events()).is_empty());
+}
+
+#[test]
+fn a_host_hit_waits_for_the_next_wait_break_across_a_checkpoint() {
+    let mut driver = build(vec![(1, call(1, DECLARE)), (40, call(2, WAIT))], vec![]);
+    run_to(&mut driver, 20);
+    assert!(host_hit(&mut driver, "leader"));
+    let checkpoint = driver.checkpoint().unwrap();
+    let mut restored = Driver::<Guest>::from_checkpoint(
+        &checkpoint,
+        1,
+        || Ok(()),
+        |saved| Ok(saved.clone()),
+        |_| unreachable!("no spawns"),
+    )
+    .map_err(|e| e.to_string())
+    .unwrap();
+    restored.set_engine(pv());
+    for driver in [&mut driver, &mut restored] {
+        run_to(driver, 100);
+        assert_eq!(
+            replies(driver)[1]["result"],
+            json!({"break_id":1,"source":"host","name":"leader","at_ns":20})
+        );
+        assert!(break_events(&driver.drain_events()).is_empty());
+    }
+}
+
+#[test]
+fn host_and_machine_hits_are_returned_in_break_id_order() {
+    let mut driver = build(
+        vec![
+            (1, call(1, DECLARE)),
+            (40, call(2, WAIT)),
+            (45, call(3, WAIT)),
+            (50, call(4, r#""op":"resume_break","break_id":1"#)),
+        ],
+        vec![(25, hit("leader"))],
+    );
+    run_to(&mut driver, 30);
+    assert!(host_hit(&mut driver, "leader"));
+    run_to(&mut driver, 100);
+    let r = replies(&driver);
+    assert_eq!(r[1]["result"]["break_id"], 1);
+    assert_eq!(r[1]["result"]["source"], "program");
+    assert_eq!(
+        r[2]["result"],
+        json!({"break_id":2,"source":"host","name":"leader","at_ns":30})
+    );
+    assert_eq!(guest(&driver, 1).resumed, [50]);
+}
+
+#[test]
+fn a_host_hit_needs_a_declared_name() {
+    let mut driver = build(vec![(30, call(1, DECLARE)), (60, call(2, WAIT))], vec![]);
+    run_to(&mut driver, 20);
+    // Nobody has declared it yet, and the reserved name is never declared.
+    assert!(!host_hit(&mut driver, "leader"));
+    run_to(&mut driver, 40);
+    assert!(!host_hit(&mut driver, "follower"));
+    assert!(!host_hit(&mut driver, "block_request"));
+    run_to(&mut driver, 2000);
+    // Nothing was queued: the wait timed out.
+    assert_eq!(replies(&driver)[1]["result"], json!({}));
+}
+
+#[test]
+fn a_host_hit_nobody_waited_for_ends_silently_with_the_run() {
+    let mut driver = build(
+        vec![
+            (1, call(1, DECLARE)),
+            (30, Response::ApplicationOutcome { code: 0 }),
+        ],
+        vec![],
+    );
+    run_to(&mut driver, 20);
+    assert!(host_hit(&mut driver, "leader"));
+    run_to(&mut driver, 100);
+    assert!(matches!(
+        driver.step(at(100)).unwrap(),
+        StepOutcome::Finished { .. }
+    ));
+    assert!(break_events(&driver.drain_events()).is_empty());
+    // The run is over: no further hit is taken.
+    assert!(driver
+        .with_barrier(|barrier| barrier.host_break("leader"))
+        .is_err());
+}

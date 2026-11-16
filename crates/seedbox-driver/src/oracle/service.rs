@@ -707,6 +707,12 @@ fn error(code: ErrorCode, message: impl Into<String>) -> OperationError {
     }
 }
 impl Service {
+    /// Every active fault handle, in the order `inspect` lists them.
+    pub(crate) fn active_handles(&self) -> Result<Vec<String>, String> {
+        self.handles
+            .active_handles()
+            .map_err(|e| format!("handles: {e}"))
+    }
     /// Transfer confirmed facts once, in confirmation order.
     pub(crate) fn take_notices(&mut self) -> Vec<Notice> {
         std::mem::take(&mut self.notices)

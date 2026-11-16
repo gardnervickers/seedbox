@@ -126,12 +126,14 @@ impl Control {
 }
 
 /// A breakpoint hit. Its machine stays suspended until it is resumed or
-/// crashed. A held block request's hit is named [`BLOCK_REQUEST`].
+/// crashed. A held block request's hit is named [`BLOCK_REQUEST`]. A hit
+/// from the host suspends nothing and has already ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hit {
     pub id: u32,
-    /// The machine's name, as actions target it.
+    /// The machine's name, as actions target it; empty for a host hit.
     pub machine: String,
+    /// The machine's boot; zero for a host hit.
     pub boot: u64,
     pub name: String,
     /// The simulated time of the breakpoint write or held request.
@@ -139,6 +141,8 @@ pub struct Hit {
     /// The held request's kind and `nth`, for a block request hit; `None`
     /// for a program's breakpoint write.
     pub block_request: Option<(crate::control::DiskOp, u64)>,
+    /// The host hit this name: no machine wrote it and none is suspended.
+    pub host: bool,
 }
 
 /// The name of every block request hit. A program cannot declare it.
@@ -174,6 +178,31 @@ impl Control {
         let request = result
             .get("request")
             .map(|r| serde_json::from_value::<crate::control::DiskOp>(r.clone()).ok());
+        let host = text("source").as_deref() == Some("host");
+        if host {
+            // A host hit names no machine, boot or request.
+            let extra = ["machine", "boot", "request", "nth"];
+            return match (
+                number("break_id").and_then(|id| u32::try_from(id).ok()),
+                text("name"),
+                number("at_ns"),
+            ) {
+                (Some(id), Some(name), Some(at_ns))
+                    if extra.iter().all(|key| result.get(*key).is_none()) =>
+                {
+                    Ok(Some(Hit {
+                        id,
+                        machine: String::new(),
+                        boot: 0,
+                        name,
+                        at_ns,
+                        block_request: None,
+                        host,
+                    }))
+                }
+                _ => self.fail("invalid breakpoint hit".into()),
+            };
+        }
         let block_request = match (text("source").as_deref(), request, number("nth")) {
             (Some("program"), None, None) if result.get("nth").is_none() => Some(None),
             (Some(BLOCK_REQUEST), Some(Some(op)), Some(nth))
@@ -199,6 +228,7 @@ impl Control {
                     name,
                     at_ns,
                     block_request,
+                    host,
                 }))
             }
             _ => self.fail("invalid breakpoint hit".into()),
@@ -223,7 +253,8 @@ impl Control {
         .map(drop)
     }
 
-    /// Let a suspended machine run again; its breakpoint write returns.
+    /// Let a suspended machine run again; its breakpoint write returns. A
+    /// host hit suspended nothing and is refused as already ended.
     pub fn resume_break(&mut self, hit: &Hit) -> Result<(), Error> {
         self.call("resume_break", json!({ "break_id": hit.id }))
             .map(drop)
@@ -275,13 +306,14 @@ impl GuestWorld {
         })
     }
 
-    /// Call `handler` whenever a machine hits breakpoint `name`.
+    /// Call `handler` whenever a machine, or the host, hits breakpoint `name`.
     ///
     /// The first registration opens a second connection and serves hits on a
     /// background thread, so this world stays free for other calls. The
     /// handler runs while the machine is suspended and gets that thread's
     /// world; the machine resumes when the handler returns, unless the handler
-    /// crashed it. A handler error stops serving: its machine stays suspended
+    /// crashed it. A host hit ([`Hit::host`]) suspends no machine, so nothing
+    /// is resumed. A handler error stops serving: its machine stays suspended
     /// and [`World::break_error`] reports the error.
     pub fn on_break(
         &mut self,
@@ -324,6 +356,9 @@ impl GuestWorld {
             };
             if let Some(handler) = handlers.lock().unwrap().get_mut(&hit.name) {
                 handler(self, &hit)?;
+            }
+            if hit.host {
+                continue;
             }
             match self.control.resume_break(&hit) {
                 // The handler crashed the machine, which ended the hit.

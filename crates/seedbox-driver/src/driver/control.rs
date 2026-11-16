@@ -492,11 +492,7 @@ impl<M> Adapter for View<'_, M> {
         handles: &[String],
         triggers: &[crate::oracle::triggers::Record],
     ) -> Result<Value, OperationError> {
-        use crate::oracle::{
-            observation::ApplicationCondition,
-            service::{Process, Vm},
-            triggers::{Status, TriggerAction},
-        };
+        use crate::oracle::triggers::{Status, TriggerAction};
         let network = self
             .network
             .ok_or_else(|| OperationError::invalid("network view missing"))?;
@@ -509,47 +505,9 @@ impl<M> Adapter for View<'_, M> {
         };
         let mut services = BTreeMap::new();
         let mut machines = Vec::new();
-        for (i, entry) in self.entries.iter().enumerate() {
-            let name = entry
-                .name
-                .clone()
-                .unwrap_or_else(|| Control::source(MachineId(i)));
+        for (name, state) in states(self.entries, self.machines).map_err(OperationError::invalid)? {
             services.insert(name.clone(), name.clone());
-            let state = self.lifecycle(i).map_err(OperationError::invalid)?;
-            let facts = state
-                .facts()
-                .map_err(|_| OperationError::invalid("unavailable observation"))?;
-            let view = state
-                .view()
-                .map_err(|_| OperationError::invalid("unavailable observation"))?;
-            let state = if facts.vm == Vm::Down {
-                "Down".into()
-            } else if facts.physically_ended {
-                match view.first_terminal.map(|t| t.reason) {
-                    Some(crate::machine::ExitReason::ProgramExit { code }) => {
-                        format!("Exited({code})")
-                    }
-                    Some(crate::machine::ExitReason::Crashed) => "Down".into(),
-                    _ => "Exited(0)".into(),
-                }
-            } else if facts.vm == Vm::Paused {
-                "Paused".into()
-            } else if let (ApplicationCondition::Exited, Some(code)) =
-                (view.application.condition, view.application.exit_code)
-            {
-                // The application's leader exited by itself while the machine
-                // stays up, as the world API reports it. Its process is only
-                // eligible for Start; a commanded Stop still shows Stopped.
-                format!("Exited({code})")
-            } else {
-                match facts.process {
-                    Process::Running => "Running",
-                    Process::Stopped => "Stopped",
-                    Process::Frozen => "Frozen",
-                }
-                .into()
-            };
-            machines.push(serde_json::json!({"name":name,"state":state}));
+            machines.push(serde_json::json!({"name":name,"state":state.to_string()}));
         }
         let mut result = serde_json::json!({"services":services,"machines":machines,"active_handles":handles,"network_counters":network.inspect_counts()});
         if !triggers.is_empty() {
@@ -592,6 +550,83 @@ impl<M> Adapter for View<'_, M> {
             result["triggers"] = serde_json::json!(records);
         }
         Ok(result)
+    }
+}
+
+/// Every machine's display name and state in identity order: what `inspect`
+/// reports to the oracle and [`Barrier::view`](super::Barrier::view) to the host.
+fn states<M>(
+    entries: &[Observed],
+    machines: &[Entry<M>],
+) -> Result<Vec<(String, super::MachineState)>, String> {
+    use super::MachineState;
+    use crate::oracle::{
+        observation::ApplicationCondition,
+        service::{Process, Vm},
+    };
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let name = entry
+                .name
+                .clone()
+                .unwrap_or_else(|| Control::source(MachineId(i)));
+            let state = &machines
+                .get(i)
+                .ok_or("machine lacks a lifecycle record")?
+                .lifecycle;
+            let facts = state.facts().map_err(|_| "unavailable observation")?;
+            let view = state.view().map_err(|_| "unavailable observation")?;
+            let state = if facts.vm == Vm::Down {
+                MachineState::Down
+            } else if facts.physically_ended {
+                match view.first_terminal.map(|t| t.reason) {
+                    Some(crate::machine::ExitReason::ProgramExit { code }) => {
+                        MachineState::Exited(code)
+                    }
+                    Some(crate::machine::ExitReason::Crashed) => MachineState::Down,
+                    _ => MachineState::Exited(0),
+                }
+            } else if facts.vm == Vm::Paused {
+                MachineState::Paused
+            } else if let (ApplicationCondition::Exited, Some(code)) =
+                (view.application.condition, view.application.exit_code)
+            {
+                // The application's leader exited by itself while the machine
+                // stays up, as the world API reports it. Its process is only
+                // eligible for Start; a commanded Stop still shows Stopped.
+                MachineState::Exited(i32::from(code))
+            } else {
+                match facts.process {
+                    Process::Running => MachineState::Running,
+                    Process::Stopped => MachineState::Stopped,
+                    Process::Frozen => MachineState::Frozen,
+                }
+            };
+            Ok((name, state))
+        })
+        .collect()
+}
+impl Control {
+    /// The machines and active handles `inspect` would report now.
+    pub(super) fn world_view<M>(&self, machines: &[Entry<M>]) -> Result<super::WorldView, String> {
+        let machines = states(&self.entries, machines)?
+            .into_iter()
+            .enumerate()
+            .map(|(i, (_, state))| super::MachineView {
+                id: MachineId(i),
+                name: self.entries[i].name.clone(),
+                state,
+            })
+            .collect();
+        let handles = self
+            .service
+            .active_handles()?
+            .into_iter()
+            .map(super::FaultHandle)
+            .collect();
+        Ok(super::WorldView { machines, handles })
     }
 }
 

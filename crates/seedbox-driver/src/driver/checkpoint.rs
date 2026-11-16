@@ -145,7 +145,7 @@ fn validate<T>(
     if !control.checkpoint_size(machines.len()) || !network.checkpoint_size(machines.len()) {
         return Err("machine identity tables differ");
     }
-    if control.service.breaks.hits().next().is_some() {
+    if control.service.breaks.any_suspended() {
         return Err("machine suspended at a breakpoint");
     }
     for entry in machines {

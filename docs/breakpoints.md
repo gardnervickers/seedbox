@@ -41,7 +41,8 @@ device is absent, so instrumented code checks for it once and skips the write.
 
 ## Hits
 
-Each hit has a `break_id`, a `source` (`program` or `block_request`), its
+Each hit has a `break_id`, a `source` (`program`, `block_request` or
+[`host`](#hits-from-the-host)), its
 `name`, the `machine` and its `boot`, and `at_ns`, the projected simulation
 time of the hit. A hit becomes visible to the oracle after the round that
 contains it commits. Hits are numbered in committed order, not in the order
@@ -91,6 +92,24 @@ def crash_new_leader(world, hit):
 
 world.on_break("leader-elected", crash_new_leader)
 ```
+
+### Hits from the host
+
+A host that drives the Driver itself can hit a declared name with
+`Barrier::host_break(name)`. The oracle receives the hit from `wait_break`
+like any other, in break ID order with machine hits, with `source` `host` and
+no `machine` or `boot`. It suspends nothing and ends when `wait_break` returns
+it, so `resume_break` refuses its ID with `invalid_state` and the libraries'
+`on_break` loop resumes nothing after its handler. It publishes no
+`break_hit` or `break_ended` event.
+
+An undeclared name queues nothing, and the call says so. A host hit waiting
+for a `wait_break` is checkpoint state and does not prevent a checkpoint; one
+nobody waited for ends silently with the run.
+
+Its use is a run whose faults the host applies: the oracle cannot know when
+they are over, and a deadline fixed at its launch is restored with every
+checkpoint.
 
 ### Several oracle connections
 
