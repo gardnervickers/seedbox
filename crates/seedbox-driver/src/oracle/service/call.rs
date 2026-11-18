@@ -69,18 +69,13 @@ impl Service {
             Err(e) => Err(e),
             Ok(Operation::Now {}) => Ok(json!({"now_ns":now})),
             Ok(Operation::Inspect {}) => adapter
-                .inspect(
-                    &self
-                        .handles
-                        .active_handles()
-                        .map_err(|e| format!("handles: {e}"))?,
-                    self.triggers.records(),
-                )
+                .inspect(&self.active_handles()?, self.triggers.records())
                 .map(|mut inspected| {
                     // Suspended machines, each with its live hit.
                     inspected["breaks"] = self
                         .breaks
                         .hits()
+                        .filter(|(_, hit)| hit.suspends())
                         .map(|(id, hit)| breaks::Breaks::json(id, hit))
                         .collect();
                     inspected

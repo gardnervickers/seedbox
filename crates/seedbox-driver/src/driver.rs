@@ -65,6 +65,8 @@ pub use network::{
 };
 use playback::Playback;
 pub use playback::{PlaybackRate, PlaybackStatus};
+mod view;
+pub use view::{MachineState, MachineView, WorldView};
 
 #[cfg(test)]
 use crate::pv::Output;
@@ -2159,6 +2161,55 @@ where
         Ok(self.driver.entry(id)?.lifecycle.paused())
     }
 
+    /// The machines' states and every active fault handle at this barrier:
+    /// what the oracle's `inspect` reports, typed. A host that must end
+    /// whatever is in force reads it here; handles installed by guest calls
+    /// are listed with its own. This reads committed state only: it runs no
+    /// machine, draws no RNG and changes no evidence.
+    // The oracle can ask the world what is in force; a host deciding a
+    // recovery had no way to, short of tracking every origin's settlements.
+    pub fn view(&self) -> Result<WorldView, Error<M::Error>> {
+        self.driver.check_valid()?;
+        self.driver
+            .execution
+            .control
+            .world_view(&self.driver.execution.machines)
+            .map_err(Error::Control)
+    }
+
+    /// Hit the breakpoint `name` from the host. The oracle receives the hit
+    /// from `wait_break` like any other, with source `host` and no machine:
+    /// a parked `wait_break` returns it at this barrier, otherwise the next
+    /// one does, in break ID order with machine hits. It suspends nothing,
+    /// publishes no event and ends when it is returned; `resume_break`
+    /// refuses its ID as already ended.
+    ///
+    /// Returns false, and queues nothing, when no oracle has declared `name`
+    /// (always on an engine without breakpoints). A waiting host hit is part
+    /// of checkpoints and does not prevent one.
+    // A host that schedules the faults itself has no other way to tell the
+    // oracle that its part is over: the oracle's own deadline is fixed at
+    // launch and restored with every checkpoint.
+    pub fn host_break(&mut self, name: &str) -> Result<bool, Error<M::Error>> {
+        self.check_mutation()?;
+        let driver = &mut *self.driver;
+        driver.check_valid()?;
+        let now = driver.now().as_nanos();
+        let plans = driver
+            .execution
+            .control
+            .service
+            .host_break(name, now)
+            .map_err(|failure| Error::Control(failure.message))?;
+        match plans {
+            Some(plans) => {
+                driver.control_plans(plans)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     /// Supply the definition a [`StepOutcome::NeedsMachine`] requested. Its
     /// name and spec must match an admitted spawn that has none yet, and its
     /// MAC must be new. Nothing is constructed here and no time passes: the
@@ -2724,6 +2775,8 @@ mod queue_tests;
 mod spawn_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod view_tests;
 
 #[cfg(test)]
 mod execution_tests;

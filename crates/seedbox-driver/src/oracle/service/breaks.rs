@@ -1,7 +1,8 @@
 //! Breakpoints: the declared names, live hits and parked `wait_break` calls.
 //! A hit suspends its machine from the commit that reported it until the
 //! oracle resumes it, the machine crashes or the run ends. Hits are numbered
-//! in commit order and returned to waiters oldest first.
+//! in commit order and returned to waiters oldest first. A hit from the host
+//! suspends nothing: it waits for a `wait_break` and ends when one returns it.
 use super::*;
 use std::collections::BTreeSet;
 
@@ -24,19 +25,21 @@ pub(crate) enum HitSource {
     Program(String),
     /// Its device holds the `nth` disk request of kind `op`, unwritten.
     BlockRequest { op: crate::pv::DiskOp, nth: u64 },
+    /// The host hit this declared name. No machine is suspended.
+    Host(String),
 }
 impl HitSource {
     /// The name the hit carries; a block request hit is named `block_request`.
     pub(crate) fn name(&self) -> &str {
         match self {
-            Self::Program(name) => name,
+            Self::Program(name) | Self::Host(name) => name,
             Self::BlockRequest { .. } => BLOCK_REQUEST,
         }
     }
 }
 
 /// A live hit: its machine is suspended at a breakpoint write or a held
-/// block request.
+/// block request. A host hit has no machine or boot.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Hit {
     /// The machine's canonical key.
@@ -48,6 +51,12 @@ pub(crate) struct Hit {
     pub(crate) at: u64,
     /// A `wait_break` call has returned this hit.
     pub(crate) delivered: bool,
+}
+impl Hit {
+    /// Whether this hit holds a machine suspended.
+    pub(crate) fn suspends(&self) -> bool {
+        !matches!(self.source, HitSource::Host(_))
+    }
 }
 
 #[derive(Clone, Default)]
@@ -69,7 +78,13 @@ impl Breaks {
     }
     /// Whether the machine with this canonical key is suspended.
     pub(crate) fn suspended(&self, machine: &str) -> bool {
-        self.hits.values().any(|hit| hit.machine == machine)
+        self.hits
+            .values()
+            .any(|hit| hit.suspends() && hit.machine == machine)
+    }
+    /// Whether any machine is suspended. A waiting host hit suspends none.
+    pub(crate) fn any_suspended(&self) -> bool {
+        self.hits.values().any(Hit::suspends)
     }
     /// Whether `break_id` has been allocated.
     pub(crate) fn allocated(&self, break_id: u32) -> bool {
@@ -79,6 +94,9 @@ impl Breaks {
         self.hits.iter().map(|(&id, hit)| (id, hit))
     }
     pub(super) fn json(id: u32, hit: &Hit) -> Value {
+        if let HitSource::Host(name) = &hit.source {
+            return json!({"break_id": id, "source": "host", "name": name, "at_ns": hit.at});
+        }
         let mut value = json!({
             "break_id": id,
             "source": "program",
@@ -140,6 +158,9 @@ impl Service {
         if let Some((&id, hit)) = self.breaks.hits.iter_mut().find(|(_, h)| !h.delivered) {
             hit.delivered = true;
             let result = Breaks::json(id, hit);
+            if !hit.suspends() {
+                self.breaks.hits.remove(&id);
+            }
             return Ok(vec![self.reply(call, now, Some(now), Ok(result))?]);
         }
         self.last_wake = self
@@ -181,6 +202,17 @@ impl Service {
         now: u64,
     ) -> Result<(Value, Vec<Plan>), OperationError> {
         self.breaks_supported()?;
+        if self
+            .breaks
+            .hits
+            .get(&break_id)
+            .is_some_and(|hit| !hit.suspends())
+        {
+            return Err(error(
+                ErrorCode::InvalidState,
+                "a host breakpoint hit suspends no machine",
+            ));
+        }
         let hit = self.breaks.hits.remove(&break_id).ok_or_else(|| {
             error(
                 ErrorCode::InvalidState,
@@ -259,13 +291,54 @@ impl Service {
         self.breaks.hits.insert(id, hit);
         Ok(plans)
     }
+    /// Queue a hit from the host for `name`. The oldest parked waiter returns
+    /// it at once; otherwise the next `wait_break` does, in break ID order
+    /// with machine hits. It suspends no machine and ends when it is returned.
+    /// `None` when no oracle has declared the name: nothing is queued.
+    pub(crate) fn host_break(
+        &mut self,
+        name: &str,
+        now: u64,
+    ) -> Result<Option<Vec<Plan>>, Failure> {
+        self.valid()?;
+        if !self.breaks.declared.contains(name) {
+            return Ok(None);
+        }
+        self.breaks.last = self
+            .breaks
+            .last
+            .checked_add(1)
+            .ok_or("break IDs exhausted")?;
+        let id = self.breaks.last;
+        let hit = Hit {
+            machine: String::new(),
+            display: String::new(),
+            boot: 0,
+            source: HitSource::Host(name.to_owned()),
+            at: now,
+            delivered: false,
+        };
+        let waiter = self
+            .breaks
+            .waiters
+            .values_mut()
+            .find(|waiter| waiter.is_some())
+            .and_then(Option::take);
+        Ok(Some(match waiter {
+            Some(call) => vec![self.reply(call, now, Some(now), Ok(Breaks::json(id, &hit)))?],
+            None => {
+                self.breaks.hits.insert(id, hit);
+                vec![]
+            }
+        }))
+    }
     /// End the live hit of a machine that crashed or rebooted.
     pub(crate) fn break_crashed(&mut self, machine: &str, at: u64) {
         let ended: Vec<u32> = self
             .breaks
             .hits
             .iter()
-            .filter(|(_, hit)| hit.machine == machine)
+            .filter(|(_, hit)| hit.suspends() && hit.machine == machine)
             .map(|(&id, _)| id)
             .collect();
         for break_id in ended {
@@ -278,8 +351,12 @@ impl Service {
         }
     }
     /// The run ended: suspended machines stay suspended and every hit ends.
+    /// A host hit nobody waited for was never published, so it ends silently.
     pub(crate) fn cut_off_breaks(&mut self, at: u64) {
-        for break_id in std::mem::take(&mut self.breaks.hits).into_keys() {
+        for (break_id, hit) in std::mem::take(&mut self.breaks.hits) {
+            if !hit.suspends() {
+                continue;
+            }
             self.notices.push(Notice::BreakEnded {
                 break_id,
                 at,
@@ -305,7 +382,7 @@ impl Service {
 }
 
 wire_enum!(BreakEnd; units {0=>Resumed,1=>Crashed,2=>RunEnded} tuples {} records {});
-wire_enum!(HitSource; units {} tuples {0=>Program(v0)} records {1=>BlockRequest{op,nth}});
+wire_enum!(HitSource; units {} tuples {0=>Program(v0),2=>Host(v0)} records {1=>BlockRequest{op,nth}});
 wire_struct!(Hit {
     machine,
     display,
@@ -330,8 +407,19 @@ impl Breaks {
         exists: &impl Fn(&str) -> bool,
     ) -> crate::persistence::Result<()> {
         use crate::persistence::require;
-        // No checkpoint is taken while a machine is suspended.
-        require(self.hits.is_empty(), "machine suspended at a breakpoint")?;
+        // No checkpoint is taken while a machine is suspended. A host hit
+        // waiting for a `wait_break` suspends none and is kept.
+        require(!self.any_suspended(), "machine suspended at a breakpoint")?;
+        for (&id, hit) in &self.hits {
+            require(
+                id > 0
+                    && id <= self.last
+                    && !hit.delivered
+                    && hit.at <= now
+                    && crate::pv::break_name_valid(hit.source.name().as_bytes()),
+                "host breakpoint hit",
+            )?;
+        }
         require(
             self.supported || (self.declared.is_empty() && self.waiters.is_empty()),
             "breakpoints without engine support",
