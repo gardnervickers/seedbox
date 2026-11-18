@@ -465,3 +465,118 @@ fn a_narrowed_entry_without_a_side_faces_all_other_profile_targets() {
         assert_eq!(far, ["db2", "db3"]);
     }
 }
+
+/// A plan's actions in the order a run applies them: by time, a fault's end
+/// before a start due with it.
+fn flattened(plan: &[Planned]) -> Vec<(u64, Action)> {
+    let mut actions: Vec<(u64, u8, usize, Action)> = Vec::new();
+    for (index, fault) in plan.iter().enumerate() {
+        actions.push((fault.start_ns, 1, index, fault.start.clone()));
+        actions.push((fault.end_ns, 0, index, fault.end.clone()));
+    }
+    actions.sort_by_key(|(at, kind, index, _)| (*at, *kind, *index));
+    actions
+        .into_iter()
+        .map(|(at, _, _, action)| (at, action))
+        .collect()
+}
+
+#[test]
+fn a_plan_is_what_a_run_applies_with_the_same_draws() {
+    let mut world = Log::default();
+    documented()
+        .run(&mut world, &mut crate::Rng::new(7))
+        .unwrap();
+    let mut profile = documented();
+    let plan = profile.plan(0, "", &[], &mut crate::Rng::new(7)).unwrap();
+    assert!(plan.len() > 4);
+    let planned: Vec<Action> = flattened(&plan).into_iter().map(|(_, a)| a).collect();
+    assert_eq!(planned, world.applied);
+    // Every fault ends, inside the window or once its hold is over.
+    assert!(plan
+        .iter()
+        .all(|fault| fault.start_ns >= 2_000_000_000 && fault.end_ns > fault.start_ns));
+    // Planning kept nothing: the profile still runs, and plans the same again.
+    assert_eq!(
+        profile.plan(0, "", &[], &mut crate::Rng::new(7)).unwrap(),
+        plan
+    );
+    let mut again = Log::default();
+    profile.run(&mut again, &mut crate::Rng::new(7)).unwrap();
+    assert_eq!(again.applied, world.applied);
+}
+
+#[test]
+fn a_plan_labels_its_handles_and_starts_at_its_origin() {
+    let origin = 40_000_000_000;
+    let plain = documented()
+        .plan(0, "", &[], &mut crate::Rng::new(3))
+        .unwrap();
+    let moved = documented()
+        .plan(origin, "b2-", &[], &mut crate::Rng::new(3))
+        .unwrap();
+    assert_eq!(plain.len(), moved.len());
+    for (plain, moved) in plain.iter().zip(&moved) {
+        assert_eq!(moved.start_ns, plain.start_ns + origin);
+        assert_eq!(moved.end_ns, plain.end_ns + origin);
+        assert_eq!(
+            (&moved.target, moved.domains),
+            (&plain.target, plain.domains)
+        );
+        let handle = |action: &Action| serde_json::to_value(action).unwrap()["handle"].clone();
+        match handle(&plain.start) {
+            Value::String(name) => {
+                assert_eq!(handle(&moved.start), json!(format!("b2-{name}")));
+                assert_eq!(handle(&moved.end), json!(format!("b2-{name}")));
+            }
+            _ => assert_eq!(moved.start, plain.start),
+        }
+    }
+}
+
+#[test]
+fn a_plan_starts_nothing_on_domains_a_fault_in_force_holds() {
+    let mut profile: Profile = serde_yaml_ng::from_str(
+        "{end_ns: 20000000000, interval_ns: 1000000000, targets: [n1, n2], faults: [
+           {kind: crash, downtime_ns: {min: 1000000000, max: 2000000000}},
+           {kind: pause, duration_ns: {min: 1000000000, max: 2000000000}}]}",
+    )
+    .unwrap();
+    let held = |target: &str| Planned {
+        start_ns: 0,
+        start: Action::Crash {
+            machine: target.into(),
+        },
+        end_ns: 12_000_000_000,
+        end: Action::Reboot {
+            machine: target.into(),
+        },
+        target: target.into(),
+        domains: &[Domain::Lifecycle],
+    };
+    let free = profile.plan(0, "", &[], &mut crate::Rng::new(5)).unwrap();
+    assert!(free
+        .iter()
+        .any(|fault| fault.target == "n1" && fault.start_ns < 12_000_000_000));
+    let plan = profile
+        .plan(0, "", &[held("n1")], &mut crate::Rng::new(5))
+        .unwrap();
+    // n1 is taken until the inherited crash ends, and free afterwards.
+    assert!(plan
+        .iter()
+        .all(|fault| fault.target != "n1" || fault.start_ns >= 12_000_000_000));
+    assert!(plan.iter().any(|fault| fault.target == "n1"));
+    // The plan never ends the fault it inherited.
+    assert!(plan
+        .iter()
+        .all(|fault| fault.end != held("n1").end || fault.start_ns >= 12_000_000_000));
+    // A fault already over at the origin holds nothing.
+    assert_eq!(
+        profile
+            .plan(12_000_000_000, "", &[held("n1")], &mut crate::Rng::new(5))
+            .unwrap(),
+        profile
+            .plan(12_000_000_000, "", &[], &mut crate::Rng::new(5))
+            .unwrap()
+    );
+}

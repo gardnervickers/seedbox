@@ -105,13 +105,22 @@ pub struct InForce {
     paused: BTreeSet<String>,
     crashed: BTreeSet<String>,
     issued: u64,
+    label: String,
 }
 
 impl InForce {
+    /// Faults whose handle names all begin with `label`.
+    pub fn labelled(label: &str) -> Self {
+        Self {
+            label: label.to_owned(),
+            ..Self::default()
+        }
+    }
+
     /// A fresh handle name for this nemesis's next fault.
     pub fn name(&mut self, kind: &str) -> String {
         self.issued += 1;
-        format!("{kind}-{}", self.issued)
+        format!("{}{kind}-{}", self.label, self.issued)
     }
 
     /// Apply `action` and record its effect.
@@ -286,6 +295,48 @@ impl Round for Quiet {
         _: &mut dyn Random,
     ) -> Result<(), Error> {
         pace.wait(world, Duration::from_secs(1))
+    }
+}
+
+/// The nemesis of a run whose faults the host applies: it applies nothing,
+/// and the workload runs until the host hits breakpoint [`HostFinish::NAME`].
+/// The runner then stops the clients, reads and checks as after any nemesis.
+/// So the host, not a duration fixed when the oracle started, decides when
+/// the run is judged.
+pub struct HostFinish {
+    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl HostFinish {
+    /// The breakpoint the host hits to end the workload.
+    pub const NAME: &'static str = "finish";
+
+    /// Declare [`Self::NAME`] and serve its hit, as
+    /// [`GuestWorld::on_break`](crate::GuestWorld::on_break) serves any.
+    pub fn serve(world: &mut crate::GuestWorld) -> Result<Self, Error> {
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = finished.clone();
+        world.on_break(Self::NAME, move |_, _| {
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })?;
+        Ok(Self { finished })
+    }
+}
+
+impl Nemesis for HostFinish {
+    fn run(&mut self, world: &mut dyn World, _: &mut dyn Random) -> Result<(), Error> {
+        while !self.finished.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Some(error) = world.break_error() {
+                return Err(error);
+            }
+            world.sleep(Duration::from_millis(100))?;
+        }
+        Ok(())
+    }
+
+    fn heal(&mut self, _: &mut dyn World) -> Result<(), Error> {
+        Ok(())
     }
 }
 
