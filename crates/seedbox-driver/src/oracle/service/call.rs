@@ -75,6 +75,7 @@ impl Service {
                     inspected["breaks"] = self
                         .breaks
                         .hits()
+                        .filter(|(_, hit)| hit.suspends())
                         .map(|(id, hit)| breaks::Breaks::json(id, hit))
                         .collect();
                     inspected
