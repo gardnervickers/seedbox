@@ -346,10 +346,11 @@ impl<S> Branch<S> {
                 .take_while(|(expected, found)| expected == found)
                 .count();
             // What history has beyond the replay must not have happened yet
-            // at `until`; a line may have begun before it and ended after.
-            let ahead = expected[agree..].iter().find(|record| {
-                record.at < until && !matches!(record.entry, crate::Entry::Line { .. })
-            });
+            // at `until`; a line may have begun before it and ended after,
+            // and the replay then holds its beginning.
+            let ahead = expected[agree..]
+                .iter()
+                .find(|record| record.at < until && !run.trace.begins(record));
             if let Some(unexpected) = found.get(agree) {
                 return Err(Error::diverged(expected.get(agree), Some(unexpected)));
             }

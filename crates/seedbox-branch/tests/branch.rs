@@ -392,6 +392,32 @@ fn rewind_delivers_an_input_due_at_the_point_it_returns_to() {
 }
 
 #[test]
+fn rewind_refuses_a_replay_missing_a_line_the_history_wrote() {
+    // The history ended a line at 75 that the replay never writes.
+    let mut scripts = talk();
+    scripts[1].insert(4, (75, says("gone\n")));
+    let mut imposter = run(scripts, vec![]);
+    imposter.advance(at(100)).unwrap();
+    let mut honest = run(talk(), vec![]);
+    honest.advance(at(20)).unwrap();
+    let early = honest.save().unwrap();
+    match early.rewind(imposter.history(), at(80), &mut restore) {
+        Err(Error::Diverged {
+            expected,
+            found: None,
+        }) => assert!(matches!(
+            expected.unwrap().entry,
+            Entry::Line { text, .. } if text == "gone"
+        )),
+        other => panic!("{:?}", other.map(|run| run.now())),
+    }
+    // Before the line began, nothing is missing yet.
+    assert!(early
+        .rewind(imposter.history(), at(75), &mut restore)
+        .is_ok());
+}
+
+#[test]
 fn rewind_refuses_a_branch_of_another_run_and_a_replay_that_differs() {
     let mut scout = run(talk(), vec![input(40, "pause", Action::Pause(machine(1)))]);
     scout.advance(at(50)).unwrap();

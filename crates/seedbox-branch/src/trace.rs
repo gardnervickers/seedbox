@@ -92,6 +92,24 @@ impl Trace {
         self.len() == 0
     }
 
+    /// Whether an incomplete line could still end as `record`: one of the
+    /// same machine, boot and stream, begun at the same time, whose bytes so
+    /// far begin its text.
+    pub(crate) fn begins(&self, record: &Record) -> bool {
+        let Entry::Line { stream, text, .. } = &record.entry else {
+            return false;
+        };
+        self.partial.iter().any(|partial| {
+            Some(partial.machine) == record.machine
+                && partial.boot == record.boot
+                && partial.stream == *stream
+                && partial.at == record.at
+                && text
+                    .as_bytes()
+                    .starts_with(partial.bytes.strip_suffix(b"\r").unwrap_or(&partial.bytes))
+        })
+    }
+
     /// A trace that continues from this one's records and incomplete lines.
     /// Both keep recording independently.
     pub fn fork(&mut self) -> Trace {
