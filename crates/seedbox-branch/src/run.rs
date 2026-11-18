@@ -7,7 +7,8 @@ use seedbox_machine::machine::{ExitReason, Machine, Timestamp};
 /// Why [`Run::advance`] returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stop {
-    /// The run is at the time asked for.
+    /// The run is at the time asked for or just past it: at the first
+    /// barrier the run would have reached without being asked to stop.
     Reached,
     /// The caller's watch asked to stop at this barrier.
     Watched,
@@ -121,6 +122,14 @@ where
     }
 
     /// Run to `until`, delivering each input at the barrier it falls due.
+    ///
+    /// The run stops at the first barrier at or after `until` that it would
+    /// have reached anyway, at most one Driver round past it, never at
+    /// `until` itself. The Driver stamps a guest's effects, such as control
+    /// and property replies, with the round that committed them, so a round
+    /// cut short at an arbitrary time would move every later one and change
+    /// what the machines do. Inputs are delivered at their own times; one
+    /// for a time the run has passed is refused as stale.
     pub fn advance(&mut self, until: Timestamp) -> Result<Stop, Error<M::Error>> {
         self.advance_watching(until, |_, _| false)
     }
@@ -142,7 +151,12 @@ where
             if self.now >= until {
                 return Ok(Stop::Reached);
             }
-            let upto = self.program.next_at().map_or(until, |at| at.min(until));
+            // Only an input cuts a round short; every stop schedule then
+            // sees the same rounds.
+            let upto = self
+                .program
+                .next_at()
+                .unwrap_or(Timestamp::from_nanos(u64::MAX));
             // Time moves toward the caller's bound also while every machine
             // is idle: the next input, or the caller, is waiting there.
             let outcome = self.driver.step_toward_external(upto)?;
@@ -203,6 +217,7 @@ where
                 handle: None,
             } => barrier.schedule(now, input.key, action).map(|_| true),
             What::Break(name) => barrier.host_break(&name),
+            What::Stop => Ok(true),
         })?;
         if !heard {
             self.missed.push(key);
@@ -303,6 +318,8 @@ impl<S> Branch<S> {
     /// machines did at `until` or later has happened. No input is pending;
     /// `history`'s later ones are dropped, so what follows is this run's own.
     /// To leave out an input due at `until`, rewind to a nanosecond earlier.
+    /// Unless an input already falls due there, the run's program gains a
+    /// [`What::Stop`] at `until`, so the stop is part of the run.
     ///
     /// The replay is checked against `history`: every machine must say and
     /// do the same things at the same times. A difference is
@@ -325,12 +342,17 @@ impl<S> Branch<S> {
         {
             return Err(Error::NotOnHistory);
         }
-        let between: Vec<Input> = history.program.delivered()[delivered..]
+        let mut between: Vec<Input> = history.program.delivered()[delivered..]
             .iter()
             .chain(history.program.pending())
             .filter(|input| input.at <= until)
             .cloned()
             .collect();
+        if until > self.at && !between.iter().any(|input| input.at == until) {
+            let key = InputKey::new(format!("rewind-{}", until.as_nanos()))
+                .expect("a rewind key is a valid input key");
+            between.push(Input::stop(until, key));
+        }
         let mut run = self.restore(world)?;
         run.replace_pending(between)?;
         run.advance(until)?;
