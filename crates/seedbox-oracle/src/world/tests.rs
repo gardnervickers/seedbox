@@ -298,7 +298,7 @@ fn on_break_serves_hits_on_its_own_connection_and_resumes_them() {
     world
         .on_break("leader", move |world, hit| {
             world.apply(&Action::Stop {
-                machine: hit.machine.clone(),
+                machine: hit.machine.clone().unwrap(),
             })?;
             handled.send(hit.clone()).unwrap();
             Ok(())
@@ -311,8 +311,8 @@ fn on_break_serves_hits_on_its_own_connection_and_resumes_them() {
         hit,
         Hit {
             id: 1,
-            machine: "n1".into(),
-            boot: 0,
+            machine: Some("n1".into()),
+            boot: Some(0),
             name: "leader".into(),
             at_ns: 25,
             block_request: None,
@@ -376,8 +376,8 @@ fn block_request_hits_carry_their_request_and_need_no_declaration() {
         hit,
         Hit {
             id: 2,
-            machine: "n1".into(),
-            boot: 1,
+            machine: Some("n1".into()),
+            boot: Some(1),
             name: "block_request".into(),
             at_ns: 40,
             block_request: Some((crate::control::DiskOp::Flush, 3)),
@@ -414,8 +414,8 @@ fn a_host_hit_names_no_machine_and_is_not_resumed() {
         seen.recv().unwrap(),
         Hit {
             id: 3,
-            machine: String::new(),
-            boot: 0,
+            machine: None,
+            boot: None,
             name: "finish".into(),
             at_ns: 60,
             block_request: None,

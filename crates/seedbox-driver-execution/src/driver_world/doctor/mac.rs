@@ -14,13 +14,15 @@ unsafe extern "C" {
     fn hv_vcpu_get_sys_reg(cpu: u64, register: u16, value: *mut u64) -> i32;
     fn os_release(pointer: *mut c_void);
 }
+/// `HV_NO_RESOURCES` (hv_kern_types.h): a host holding all the VMs it can, not
+/// a setup fault. The PV worker's HVF backend keeps its own copy of the same name.
+const NO_RESOURCES: u32 = 0xfae9_4005;
 fn checked(operation: &str, code: i32) -> Result<()> {
     if code == 0 {
         Ok(())
     } else {
-        // HV_NO_RESOURCES is a host holding all the VMs it can, not a setup fault.
         let cause = match code as u32 {
-            0xfae9_4005 => "the host is out of hypervisor resources, usually too many VMs at once",
+            NO_RESOURCES => "the host is out of hypervisor resources, usually too many VMs at once",
             _ => "signed hypervisor entitlement and macOS 15 GIC required",
         };
         Err(Error::Setup(format!(

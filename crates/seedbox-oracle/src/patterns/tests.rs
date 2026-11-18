@@ -385,3 +385,54 @@ fn heal_undoes_what_a_failed_round_started_and_reports_heal_failures() {
     schedule.heal(&mut world).unwrap();
     assert_eq!(world.applied.len(), 4);
 }
+
+/// A [`Log`] whose breakpoint serving stopped with an error once `fails_at`
+/// nanoseconds of simulated time passed.
+struct Broken {
+    log: Log,
+    fails_at: u64,
+}
+
+impl World for Broken {
+    fn now_ns(&mut self) -> Result<u64, Error> {
+        self.log.now_ns()
+    }
+    fn sleep(&mut self, duration: Duration) -> Result<(), Error> {
+        self.log.sleep(duration)
+    }
+    fn apply(&mut self, action: &Action) -> Result<(), Error> {
+        self.log.apply(action)
+    }
+    fn break_error(&self) -> Option<Error> {
+        (self.log.now_ns >= self.fails_at).then(|| Error("handler failed".into()))
+    }
+}
+
+/// Records every wait, then sleeps through the world.
+struct Recorded(std::sync::Arc<std::sync::Mutex<Vec<Duration>>>);
+
+impl Pace for Recorded {
+    fn wait(&mut self, world: &mut dyn World, duration: Duration) -> Result<(), Error> {
+        self.0.lock().unwrap().push(duration);
+        world.sleep(duration)
+    }
+}
+
+#[test]
+fn host_finish_reports_a_break_error_instead_of_waiting_on() {
+    let mut world = Broken {
+        log: Log::default(),
+        fails_at: 2_000_000_000,
+    };
+    let waits = std::sync::Arc::default();
+    let finished = std::sync::Arc::default();
+    let mut nemesis =
+        HostFinish::until(finished).with_pace(Recorded(std::sync::Arc::clone(&waits)));
+    let error = nemesis.run(&mut world, &mut Rng::new(1)).unwrap_err();
+    assert_eq!(error.0, "handler failed");
+    // It waited a second through its pace until the error, then stopped.
+    assert_eq!(*waits.lock().unwrap(), [SECOND, SECOND]);
+    assert!(world.log.applied.is_empty());
+    nemesis.heal(&mut world).unwrap();
+    assert!(world.log.applied.is_empty());
+}
