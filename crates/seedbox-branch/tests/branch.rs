@@ -6,7 +6,7 @@ use seedbox_driver::{
         faults::Engine, Action, Checkpoint, Driver, InputKey, MachineId, MachineState,
         NetworkConfig, Target, Transition,
     },
-    pv::{Output, Request, Response, SimulationControlId, Stream},
+    pv::{CommandResult, Output, Request, Response, SimulationControlId, Stream},
     test_support::definition,
 };
 use seedbox_machine::machine::{ExitReason, Machine, RunContext, StopReason, Timestamp};
@@ -35,8 +35,9 @@ fn call(n: u32, fields: &str) -> Response {
 }
 
 /// A machine that emits its script at the scripted times after each boot,
-/// later when it was not run in time, and whose application exits once the
-/// host hits a breakpoint it waits on.
+/// later when it was not run in time, that acknowledges each process command
+/// as it arrives, and whose application exits once the host hits a breakpoint
+/// it waits on.
 #[derive(Clone, Default)]
 struct Speaker {
     script: Vec<(u64, Response)>,
@@ -55,8 +56,10 @@ impl Machine for Speaker {
         upto: Timestamp,
     ) -> Result<StopReason, Self::Error> {
         let now = context.clock.now();
+        let mut commands = Vec::new();
         while let Some(input) = context.inbox.take() {
             match input.payload {
+                Request::Application { id, .. } => commands.push(id),
                 Request::Crash => self.crashed = true,
                 Request::Reboot => {
                     self.crashed = false;
@@ -83,6 +86,10 @@ impl Machine for Speaker {
             };
             context.outbox.emit(output).unwrap()
         };
+        for id in commands {
+            let result = CommandResult::Completed;
+            emit(now, Response::CommandAcknowledged { id, result });
+        }
         if std::mem::take(&mut self.exiting) {
             emit(now, Response::ApplicationOutcome { code: 0 });
         }
@@ -587,6 +594,101 @@ fn judge_waits_out_an_oracle_that_never_declares_the_breakpoint() {
     assert_eq!(asks.len(), 20);
     assert_eq!((asks[0], asks[19]), ("judge-finish-0", "judge-finish-19"));
     assert_eq!(run.program().delivered().len(), 20);
+}
+
+/// [`waiting_oracle`] with a server that is ready for process commands.
+fn ready_server() -> Scripts {
+    let mut scripts = waiting_oracle();
+    scripts[1].insert(0, (0, Response::Ready));
+    scripts
+}
+/// The server has its application frozen at 10 and its machine paused at 20,
+/// so the pause hides the freeze.
+fn frozen_then_paused() -> Run<Speaker> {
+    let freeze = Action::PauseProcess {
+        target: machine(1),
+        deadline: Duration::from_nanos(1000),
+    };
+    let inputs = vec![
+        input(10, "freeze", freeze),
+        input(20, "pause", Action::Pause(machine(1))),
+    ];
+    let mut run = run(ready_server(), inputs);
+    run.advance(at(30)).unwrap();
+    run
+}
+fn state(run: &mut Run<Speaker>, index: usize) -> MachineState {
+    run.barrier(|barrier| Ok(barrier.view()?.machines[index].state))
+        .unwrap()
+}
+fn delivered(run: &Run<Speaker>) -> Vec<String> {
+    let delivered = run.program().delivered().iter();
+    delivered
+        .map(|input| input.key.as_str().to_owned())
+        .collect()
+}
+
+#[test]
+fn recover_and_judge_look_again_for_what_a_pause_hid() {
+    let mut scout = frozen_then_paused();
+    assert_eq!(state(&mut scout, 1), MachineState::Paused);
+    let saved = scout.save().unwrap();
+    let settle = Duration::from_nanos(10);
+
+    // One look resumes the machine and finds its application still frozen.
+    let mut short = restored(&saved);
+    assert!(!short.recover("r-", settle, 1).unwrap().clean);
+    assert_eq!(state(&mut short, 1), MachineState::Frozen);
+
+    // A second look thaws it.
+    let mut enough = restored(&saved);
+    assert!(enough.recover("r-", settle, 4).unwrap().clean);
+    assert_eq!(state(&mut enough, 1), MachineState::Running);
+    assert_eq!(
+        delivered(&enough),
+        ["freeze", "pause", "r-0-resume-1", "r-1-thaw-1"]
+    );
+
+    // Judging takes the same two looks before it asks the oracle to finish,
+    // and its program alone reproduces the verdict from boot.
+    let mut judged = restored(&saved);
+    let verdict = judged
+        .judge("finish", settle, Duration::from_nanos(500))
+        .unwrap();
+    let exit = ExitReason::ProgramExit { code: 0 };
+    assert!(verdict.recovered && verdict.signalled);
+    assert_eq!(verdict.finished, Some(exit));
+    assert_eq!(
+        delivered(&judged),
+        [
+            "freeze",
+            "pause",
+            "judge-0-resume-1",
+            "judge-1-thaw-1",
+            "judge-finish-0"
+        ]
+    );
+    let mut cold = run(ready_server(), judged.program().delivered().to_vec());
+    assert_eq!(cold.advance(at(1000)).unwrap(), Stop::Finished(exit));
+    assert_eq!(cold.now(), verdict.at);
+    assert_eq!(occurrences(&cold), occurrences(&judged));
+}
+
+#[test]
+fn recover_refuses_a_label_that_makes_an_invalid_key() {
+    let mut run = frozen_then_paused();
+    run.extend_pending([input(500, "later", Action::Crash(machine(1)))])
+        .unwrap();
+    for label in ["not a key", "slash/"] {
+        assert!(matches!(
+            run.recover(label, Duration::from_nanos(10), 4),
+            Err(Error::Label(_))
+        ));
+    }
+    // It refused before changing anything.
+    assert_eq!(delivered(&run), ["freeze", "pause"]);
+    assert_eq!(run.program().pending().len(), 1);
+    assert_eq!(state(&mut run, 1), MachineState::Paused);
 }
 
 #[test]
