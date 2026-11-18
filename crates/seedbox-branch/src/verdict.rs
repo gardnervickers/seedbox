@@ -20,13 +20,22 @@ where
     /// `rounds`. Returns whether the world came back clean, and the inputs
     /// it dropped.
     ///
-    /// Each undo is an input of the program, keyed under `label`.
+    /// A machine that went down is rebooted whether a fault or the guest
+    /// itself crashed it, so `clean` says the world runs again, not that
+    /// nothing went wrong: an unallowed crash stays a violation in
+    /// [`Run::properties`].
+    ///
+    /// Each undo is an input of the program, keyed under `label`. A zero
+    /// `settle` is refused, since time could not move between looks.
     pub fn recover(
         &mut self,
         label: &str,
         settle: Duration,
         rounds: usize,
     ) -> Result<Recovered, Error<M::Error>> {
+        if settle.is_zero() {
+            return Err(Error::NoSettle);
+        }
         let dropped = self.program().pending().iter();
         let dropped = dropped.map(|input| input.key.clone()).collect();
         self.replace_pending(Vec::new())?;
@@ -75,6 +84,9 @@ where
         settle: Duration,
         patience: Duration,
     ) -> Result<Judgement, Error<M::Error>> {
+        if settle.is_zero() {
+            return Err(Error::NoSettle);
+        }
         let Recovered {
             clean: recovered,
             dropped,
@@ -127,7 +139,8 @@ pub struct Recovered {
 pub struct Judgement {
     pub at: Timestamp,
     /// Every fault was ended and every machine was running before the
-    /// oracle was asked to finish.
+    /// oracle was asked to finish. See [`Run::recover`]: a crash the guest
+    /// caused itself shows in `properties`, not here.
     pub recovered: bool,
     /// The oracle had declared the finish breakpoint and was hit.
     pub signalled: bool,

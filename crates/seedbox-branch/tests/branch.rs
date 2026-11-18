@@ -564,6 +564,23 @@ fn judge_waits_out_an_oracle_that_never_declares_the_breakpoint() {
 }
 
 #[test]
+fn recover_and_judge_refuse_a_zero_settle() {
+    let mut run = run(talk(), vec![]);
+    run.advance(at(30)).unwrap();
+    assert!(matches!(
+        run.recover("r-", Duration::ZERO, 4),
+        Err(Error::NoSettle)
+    ));
+    assert!(matches!(
+        run.judge("finish", Duration::ZERO, Duration::from_nanos(200)),
+        Err(Error::NoSettle)
+    ));
+    // Nothing was asked or scheduled.
+    assert!(run.missed().is_empty());
+    assert!(run.program().delivered().is_empty());
+}
+
+#[test]
 fn a_breakpoint_no_machine_declared_is_reported_as_missed() {
     // The oracle declares `finish` at 1 ns and nothing else, ever.
     let inputs = vec![

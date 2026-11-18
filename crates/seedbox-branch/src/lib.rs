@@ -52,6 +52,9 @@ pub enum Error<E> {
         expected: Option<Box<Record>>,
         found: Option<Box<Record>>,
     },
+    /// [`Run::recover`] or [`Run::judge`] was given no time to settle, so
+    /// simulated time could not move between its looks.
+    NoSettle,
 }
 
 impl<E> From<seedbox_driver::driver::Error<E>> for Error<E> {
@@ -80,6 +83,7 @@ impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
                 f,
                 "the replay differs from its history: expected {expected:?}, found {found:?}"
             ),
+            Self::NoSettle => f.write_str("settle must be longer than zero"),
         }
     }
 }
