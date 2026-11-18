@@ -800,3 +800,33 @@ fn a_host_hit_nobody_waited_for_ends_silently_with_the_run() {
         .with_barrier(|barrier| barrier.host_break("leader"))
         .is_err());
 }
+
+#[test]
+fn a_waiting_host_hit_is_not_listed_or_resumed() {
+    let mut driver = build(
+        vec![
+            (1, call(1, DECLARE)),
+            (40, call(2, r#""op":"inspect""#)),
+            (50, call(3, r#""op":"resume_break","break_id":1"#)),
+            (60, call(4, WAIT)),
+        ],
+        vec![],
+    );
+    run_to(&mut driver, 20);
+    assert!(host_hit(&mut driver, "leader"));
+    run_to(&mut driver, 100);
+    let r = replies(&driver);
+    // It suspends no machine, so it is neither listed nor resumed.
+    assert_eq!(r[1]["result"]["breaks"], json!([]));
+    assert_eq!(
+        r[2]["error"]["message"],
+        "a host breakpoint hit suspends no machine"
+    );
+    // The refusal left it for the next waiter.
+    assert_eq!(
+        r[3]["result"],
+        json!({"break_id":1,"source":"host","name":"leader","at_ns":20})
+    );
+    assert!(guest(&driver, 1).resumed.is_empty());
+    assert!(break_events(&driver.drain_events()).is_empty());
+}
