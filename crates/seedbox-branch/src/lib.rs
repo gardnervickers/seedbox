@@ -15,15 +15,23 @@
 //!   same inputs up to `t`. [`Branch::rewind`] uses that to go back to just
 //!   before something a run has already seen, and checks it each time.
 //!
+//! [`Run::recover`] and [`Run::judge`] bring a run to a verdict: end what is
+//! in force, tell the oracle to finish, and read the outcome. Everything
+//! they do is an input of the program, so the verdict is reproduced with the
+//! run. They spend the run, so they are for a branch restored for the
+//! purpose.
+//!
 //! Which points to save, where to go back to and what to try from there are
 //! the caller's: this crate holds no policy.
 mod program;
 mod run;
 mod trace;
+mod verdict;
 
 pub use program::{Input, InvalidProgram, Program, What};
 pub use run::{Branch, History, Restore, Run, Stop};
 pub use trace::{Entry, Record, Trace};
+pub use verdict::{recovery, Judgement, Recovered};
 
 /// A run could not continue, or was asked for something it cannot do.
 #[derive(Debug)]
@@ -44,6 +52,9 @@ pub enum Error<E> {
         expected: Option<Box<Record>>,
         found: Option<Box<Record>>,
     },
+    /// [`Run::recover`] or [`Run::judge`] was given no time to settle, so
+    /// simulated time could not move between its looks.
+    NoSettle,
 }
 
 impl<E> From<seedbox_driver::driver::Error<E>> for Error<E> {
@@ -72,6 +83,7 @@ impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
                 f,
                 "the replay differs from its history: expected {expected:?}, found {found:?}"
             ),
+            Self::NoSettle => f.write_str("settle must be longer than zero"),
         }
     }
 }
