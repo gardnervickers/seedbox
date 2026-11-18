@@ -18,8 +18,13 @@ fn checked(operation: &str, code: i32) -> Result<()> {
     if code == 0 {
         Ok(())
     } else {
+        // HV_NO_RESOURCES is a host holding all the VMs it can, not a setup fault.
+        let cause = match code as u32 {
+            0xfae9_4005 => "the host is out of hypervisor resources, usually too many VMs at once",
+            _ => "signed hypervisor entitlement and macOS 15 GIC required",
+        };
         Err(Error::Setup(format!(
-            "{operation}: HVF {:#x}; signed hypervisor entitlement and macOS 15 GIC required",
+            "{operation}: HVF {:#x}; {cause}",
             code as u32
         )))
     }
