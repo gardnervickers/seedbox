@@ -55,11 +55,18 @@ fn checked(operation: &str, status: i32) -> Result<()> {
     if status == 0 {
         Ok(())
     } else {
-        Err(format!(
-            "{operation}: HVF {:#x}; signed hypervisor entitlement and macOS 15 GIC required",
-            status as u32
-        ))
+        Err(failure(operation, status as u32))
     }
+}
+/// `HV_NO_RESOURCES` (hv_kern_types.h): what a host holding all the VMs it
+/// can returns for the next one.
+const NO_RESOURCES: u32 = 0xfae9_4005;
+fn failure(operation: &str, status: u32) -> String {
+    let cause = match status {
+        NO_RESOURCES => "the host is out of hypervisor resources, usually too many VMs at once",
+        _ => "signed hypervisor entitlement and macOS 15 GIC required",
+    };
+    format!("{operation}: HVF {status:#x}; {cause}")
 }
 unsafe fn api(name: &CStr) -> Result<*mut c_void> {
     let pointer = libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr());
@@ -667,6 +674,20 @@ mod guest_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_host_is_not_reported_as_a_missing_entitlement() {
+        assert_eq!(
+            failure("HVF VM create", 0xfae9_4005),
+            "HVF VM create: HVF 0xfae94005; the host is out of hypervisor resources, \
+             usually too many VMs at once"
+        );
+        // HV_DENIED, as every other status, keeps the setup hint.
+        assert_eq!(
+            failure("HVF VM create", 0xfae9_4007),
+            "HVF VM create: HVF 0xfae94007; signed hypervisor entitlement and macOS 15 GIC required"
+        );
+    }
 
     fn native() -> Native {
         Native::create(
