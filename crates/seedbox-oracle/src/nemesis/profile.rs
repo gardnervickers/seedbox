@@ -248,6 +248,11 @@ impl Profile {
     /// its target until its `end_ns`, so the plan starts nothing there that
     /// could not hold with it; the plan does not end it. Nothing is refused
     /// here: what needs the world is the world's when the inputs are admitted.
+    ///
+    /// A fault may start at the very time another one on the same target
+    /// ends; apply every end due at a time before any start due then, as
+    /// [`Nemesis::run`] does. `skip_unsupported` plays no part: a plan names
+    /// every fault the profile draws, supported by the target or not.
     pub fn plan(
         &mut self,
         origin_ns: u64,
