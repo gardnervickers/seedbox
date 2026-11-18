@@ -1,8 +1,10 @@
-//! Jepsen's standard fault schedules over the [`World`]'s actions: kill and
-//! restart rounds, process pauses, partition rounds and coordinated power
-//! failures. Every choice is drawn from the scenario's [`Random`] and every
-//! fault still in force is recorded, so [`Nemesis::heal`] undoes it. A
-//! pattern given too few nodes to act on returns an error.
+//! Fault schedules over the [`World`]'s actions, modelled on Jepsen's
+//! nemeses: kill and restart rounds, process pauses, partition rounds and
+//! coordinated power failures, a [`Quiet`] schedule and [`HostFinish`] for a
+//! run whose faults the host applies. Every choice is drawn from the
+//! scenario's [`Random`] and every fault still in force is recorded, so
+//! [`Nemesis::heal`] undoes it. A pattern given too few nodes to act on
+//! returns an error.
 use crate::{control::Action, random::RandomExt, Error, Nemesis, Pace, Random, World};
 use std::{collections::BTreeSet, time::Duration};
 
@@ -302,9 +304,11 @@ impl Round for Quiet {
 /// and the workload runs until the host hits breakpoint [`HostFinish::NAME`].
 /// The runner then stops the clients, reads and checks as after any nemesis.
 /// So the host, not a duration fixed when the oracle started, decides when
-/// the run is judged.
+/// the run is judged. It checks for the hit every second of simulated time,
+/// waiting through its [`Pace`].
 pub struct HostFinish {
     finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pace: Box<dyn Pace>,
 }
 
 impl HostFinish {
@@ -320,7 +324,21 @@ impl HostFinish {
             seen.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         })?;
-        Ok(Self { finished })
+        Ok(Self::until(finished))
+    }
+
+    /// Run until `finished` is set.
+    fn until(finished: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self {
+            finished,
+            pace: Box::new(Sleep),
+        }
+    }
+
+    /// Wait through `pace` instead of the world's sleep.
+    pub fn with_pace(mut self, pace: impl Pace + 'static) -> Self {
+        self.pace = Box::new(pace);
+        self
     }
 }
 
@@ -330,7 +348,7 @@ impl Nemesis for HostFinish {
             if let Some(error) = world.break_error() {
                 return Err(error);
             }
-            world.sleep(Duration::from_millis(100))?;
+            self.pace.wait(world, Duration::from_secs(1))?;
         }
         Ok(())
     }
