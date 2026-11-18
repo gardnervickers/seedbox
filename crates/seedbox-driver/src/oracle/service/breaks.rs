@@ -54,7 +54,7 @@ pub(crate) struct Hit {
 }
 impl Hit {
     /// Whether this hit holds a machine suspended.
-    fn suspends(&self) -> bool {
+    pub(crate) fn suspends(&self) -> bool {
         !matches!(self.source, HitSource::Host(_))
     }
 }
@@ -202,6 +202,17 @@ impl Service {
         now: u64,
     ) -> Result<(Value, Vec<Plan>), OperationError> {
         self.breaks_supported()?;
+        if self
+            .breaks
+            .hits
+            .get(&break_id)
+            .is_some_and(|hit| !hit.suspends())
+        {
+            return Err(error(
+                ErrorCode::InvalidState,
+                "a host breakpoint hit suspends no machine",
+            ));
+        }
         let hit = self.breaks.hits.remove(&break_id).ok_or_else(|| {
             error(
                 ErrorCode::InvalidState,
