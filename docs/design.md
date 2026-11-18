@@ -46,7 +46,7 @@ A host that saves a world and restores it many times still has only runs: each
 restored world is defined by its machines, its seed and the inputs delivered
 to it so far. [seedbox-branch](../crates/seedbox-branch/src/lib.rs) keeps that
 true by keeping the input program outside the Driver and scheduling each input
-at the barrier it falls due, as the service worker does. A saved point then
+at the barrier it falls due. A saved point then
 holds no future input, and what follows it is whatever program its branch is
 given.
 Two things follow. A branch any number of saves deep is reproduced from boot by
@@ -58,8 +58,9 @@ due at the point it returns to is delivered there, as it was in the run.
 Stops and saves are not inputs: where a run stops must not change what its
 machines do, which the crate's tests check on scripted machines only.
 Real guests have held it for stops. Frequent saves have changed a guest's
-later work, the same way each time, for a reason not yet found; so a
-reproduction names where it saved as well as its program.
+later work, the same way each time; that is a bug
+([#459](https://github.com/gardnervickers/seedbox/issues/459)), since a
+snapshot must not change what follows it.
 The trace compares lines and lifecycle changes, which have times of their own;
 a settlement is stamped by the commit that confirmed it and is not compared.
 
