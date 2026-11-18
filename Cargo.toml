@@ -19,6 +19,7 @@ seedbox-machine-pv = { path = "crates/seedbox-machine-pv" }
 seedbox-machine-tcg = { path = "crates/seedbox-machine-tcg" }
 seedbox-driver-execution = { path = "crates/seedbox-driver-execution" }
 seedbox-driver = { path = "crates/seedbox-driver" }
+seedbox-branch = { path = "crates/seedbox-branch" }
 bollard = { version = "0.21", features = ["buildkit", "chrono"] }
 hex = "0.4"
 seedbox-artifacts = { path = "crates/seedbox-artifacts" }

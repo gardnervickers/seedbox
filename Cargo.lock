@@ -1919,6 +1919,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-branch"
+version = "0.1.0"
+dependencies = [
+ "seedbox-driver",
+ "seedbox-engine-protocol",
+ "seedbox-machine",
+ "seedbox-spec",
+ "serde_json",
+]
+
+[[package]]
 name = "seedbox-check"
 version = "0.1.0"
 dependencies = [
