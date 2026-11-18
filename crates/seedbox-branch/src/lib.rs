@@ -22,7 +22,8 @@
 //! purpose.
 //!
 //! Which points to save, where to go back to and what to try from there are
-//! the caller's: this crate holds no policy.
+//! the caller's. The crate's one policy is how a verdict ends a run: what
+//! counts as in force and the input that undoes each, in [`recovery`].
 mod program;
 mod run;
 mod trace;
@@ -31,7 +32,7 @@ mod verdict;
 pub use program::{Input, InvalidProgram, Program, What};
 pub use run::{Branch, History, Restore, Run, Stop};
 pub use trace::{Entry, Record, Trace};
-pub use verdict::{recovery, Judgement, Recovered};
+pub use verdict::{recovery, Judgement, Recovered, JUDGE_ROUNDS};
 
 /// A run could not continue, or was asked for something it cannot do.
 #[derive(Debug)]
@@ -55,6 +56,8 @@ pub enum Error<E> {
     /// [`Run::recover`] or [`Run::judge`] was given no time to settle, so
     /// simulated time could not move between its looks.
     NoSettle,
+    /// [`Run::recover`] was given a label that makes an invalid input key.
+    Label(seedbox_driver::driver::InvalidInputKey),
 }
 
 impl<E> From<seedbox_driver::driver::Error<E>> for Error<E> {
@@ -84,6 +87,7 @@ impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
                 "the replay differs from its history: expected {expected:?}, found {found:?}"
             ),
             Self::NoSettle => f.write_str("settle must be longer than zero"),
+            Self::Label(error) => write!(f, "invalid recovery label: {error}"),
         }
     }
 }

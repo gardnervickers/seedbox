@@ -4,6 +4,11 @@ use seedbox_driver::driver::{Barrier, Checkpoint, Driver, InputKey, StepOutcome}
 use seedbox_engine_protocol::property::Assessment;
 use seedbox_machine::machine::{ExitReason, Machine, Timestamp};
 
+/// Steps in a row that may return at the run's time with nothing delivered
+/// before the run counts as stuck: a step can end at the same instant while
+/// the Driver settles work due then, but not indefinitely.
+const STALL_LIMIT: u32 = 2;
+
 /// Why [`Run::advance`] returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stop {
@@ -97,14 +102,14 @@ where
         self.driver.properties()
     }
 
-    /// Read the world at the current barrier. Changing it here, other than
-    /// through the program, makes the run something its program no longer
-    /// describes.
+    /// Read the world at the current barrier. Only reads are offered: every
+    /// change goes through the program, so the program keeps describing the
+    /// run.
     pub fn barrier<R>(
         &mut self,
-        read: impl FnOnce(&mut Barrier<'_, M>) -> Result<R, seedbox_driver::driver::Error<M::Error>>,
+        read: impl FnOnce(&Barrier<'_, M>) -> Result<R, seedbox_driver::driver::Error<M::Error>>,
     ) -> Result<R, Error<M::Error>> {
-        Ok(self.driver.with_barrier(read)?)
+        Ok(self.driver.with_barrier(|barrier| read(barrier))?)
     }
 
     /// Replace everything the program has not yet delivered.
@@ -161,7 +166,7 @@ where
             } else {
                 0
             };
-            if stalled > 2 {
+            if stalled > STALL_LIMIT {
                 return Err(Error::Held(format!(
                     "no progress at {} ns toward {} ns",
                     at.as_nanos(),
