@@ -256,7 +256,11 @@ impl Coordinator<'_> {
         let asleep = self.bell.words.word(ASLEEP);
         asleep.store(ticket, SeqCst);
         let wake = if self.rung() && asleep.swap(0, SeqCst) == ticket {
-            Ok(Wake::Published)
+            // Cancelled, perhaps by a ring from an executor this park does
+            // not watch. Such rings could cancel every park, so look without
+            // waiting for a watched executor that exited: no later park may
+            // get as far as the poll that would report it.
+            poll(&mut fds[1..], 0).map(|()| exited(&fds).map_or(Wake::Published, Wake::Exited))
         } else {
             self.sleep(ticket, &mut fds)
         };

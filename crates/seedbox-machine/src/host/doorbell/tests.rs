@@ -181,6 +181,33 @@ fn a_park_ends_when_a_watched_executor_exits() {
 }
 
 #[test]
+fn a_cancelled_park_still_reports_a_watched_executor_that_exited() {
+    let bell = Doorbell::create().unwrap();
+    let mut coordinator = bell.claim().unwrap();
+    let ringer = bell.ringer().unwrap();
+    let (live, _keep) = std::io::pipe().unwrap();
+    let (read, write) = std::io::pipe().unwrap();
+    // An executor this park does not watch rings before every park, so each
+    // park is cancelled before it would poll.
+    let mut cancelled_park = || {
+        coordinator.mark();
+        ringer.ring(&AtomicU64::new(0)).unwrap();
+        let watched = vec![live.as_raw_fd(), read.as_raw_fd()];
+        coordinator.park(|_| Some(watched)).unwrap()
+    };
+    assert_eq!(cancelled_park(), Wake::Published);
+    drop(write);
+    // The hang-up shows once no forked child of another test still holds a
+    // copy of the pipe; until then a cancelled park reports only the ring.
+    let wake = HangGuard::new("a cancelled park reports the exit", Duration::from_secs(60))
+        .wait_for(|| Some(cancelled_park()).filter(|wake| *wake != Wake::Published))
+        .unwrap();
+    assert_eq!(wake, Wake::Exited(1));
+    assert_eq!(bell.words.word(ASLEEP).load(SeqCst), 0);
+    assert_eq!(bell.tickets_read(), 0);
+}
+
+#[test]
 fn an_executor_inherits_the_doorbell_at_its_descriptors() {
     const CHILD: &str = "SEEDBOX_TEST_INHERITED_DOORBELL";
     if std::env::var_os(CHILD).is_some() {
