@@ -182,9 +182,9 @@ pub(super) fn inherit(descriptor: OwnedFd, command: &mut Command) -> Result<()> 
     Ok(())
 }
 
-/// The worker's end of start-up: map the region the client passed, and the
-/// process doorbell if it passed one, answer its attach request on `wake`,
-/// then serve through the region.
+/// The worker's end of start-up: map the region and the process doorbell the
+/// client passed, answer its attach request on `wake`, then serve through the
+/// region.
 pub(crate) fn accept<R: Read, W: Write>(
     capacity: u64,
     sleep: R,
@@ -264,7 +264,8 @@ pub(crate) struct Stream<R, W> {
     /// Tail of a message larger than its ring. Only the client keeps this
     /// between duty cycles. Small messages stay entirely in shared memory.
     tail: io::Cursor<Vec<u8>>,
-    /// The process doorbell, rung at every publish (a worker's, if given).
+    /// The process doorbell, which a worker rings at every publish. A client
+    /// has none.
     bell: Option<Ringer>,
 }
 impl<R: Read, W: Write> Stream<R, W> {
@@ -363,7 +364,12 @@ impl<R: Read, W: Write> Stream<R, W> {
             .filter(|&n| n <= self.region.capacity)
             .ok_or_else(corrupt)?;
         let capacity = (self.region.capacity - used) as usize;
-        debug_assert!(self.tail.get_ref().is_empty());
+        if !self.tail.get_ref().is_empty() {
+            // Its bytes would land inside the message still being sent.
+            return Err(io::Error::other(
+                "PV message begun before the last was sent",
+            ));
+        }
         self.drained = drained;
         Ok(Claim {
             stream: self,
@@ -451,8 +457,10 @@ impl<R: Read, W: Write> Stream<R, W> {
         }
         Ok(())
     }
-    /// The pipe this side sleeps on; it reaches EOF when the peer exits.
-    pub(super) fn sleeper(&self, ticket: u64) -> &R {
+    /// Name the coordinator's park `ticket` to the worker, which takes that
+    /// park's mark if it rings. Returns the pipe this side sleeps on, which
+    /// reaches EOF when the peer exits.
+    pub(super) fn watch(&self, ticket: u64) -> &R {
         self.region.word(WATCH).store(ticket, SeqCst);
         &self.sleep
     }
