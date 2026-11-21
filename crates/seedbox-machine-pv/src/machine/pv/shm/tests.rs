@@ -1,17 +1,50 @@
 use super::*;
+use seedbox_machine::host::idle::SpinThenSleep;
 use std::io::{PipeReader, PipeWriter};
+use std::time::Duration;
 
 type End = Stream<PipeReader, PipeWriter>;
 
+/// How a test's ends wait: a strategy, or spin-then-sleep with this spin.
+#[derive(Clone, Copy, Debug)]
+enum Wait {
+    Spin(Duration),
+    Strategy(Idle),
+}
+impl Wait {
+    fn build(self) -> Box<dyn IdleStrategy> {
+        match self {
+            Self::Spin(spin) => Box::new(SpinThenSleep::new(spin)),
+            Self::Strategy(idle) => idle.build(),
+        }
+    }
+}
+/// Every way a test's ends can wait: no spin, so every wait sleeps, and each
+/// built-in strategy.
+fn waits() -> Vec<Wait> {
+    std::iter::once(Wait::Spin(Duration::ZERO))
+        .chain(Idle::ALL.map(Wait::Strategy))
+        .collect()
+}
+
 /// Both ends of one region in this process, each with its own pipe.
 fn pair(capacity: u64, spin: Duration) -> (End, End) {
+    pair_waiting(capacity, Wait::Spin(spin))
+}
+fn pair_waiting(capacity: u64, wait: Wait) -> (End, End) {
     let (region, descriptor) = Region::create(capacity).unwrap();
     let peer = Region::map(&descriptor, capacity).unwrap();
     let (client_sleep, worker_wake) = std::io::pipe().unwrap();
     let (worker_sleep, client_wake) = std::io::pipe().unwrap();
     (
-        Stream::new(region, Side::Client, client_sleep, client_wake, spin),
-        Stream::new(peer, Side::Worker, worker_sleep, worker_wake, spin),
+        Stream::new(
+            region,
+            Side::Client,
+            client_sleep,
+            client_wake,
+            wait.build(),
+        ),
+        Stream::new(peer, Side::Worker, worker_sleep, worker_wake, wait.build()),
     )
 }
 
@@ -47,9 +80,9 @@ fn bounded<T: Send + 'static>(reason: &str, body: impl FnOnce() -> T + Send + 's
 }
 
 /// The worker echoes each message and the client checks every echo.
-fn echo(capacity: u64, spin: Duration, lengths: Vec<usize>) -> (End, End) {
+fn echo(capacity: u64, wait: Wait, lengths: Vec<usize>) -> (End, End) {
     bounded("every message echoed", move || {
-        let (mut client, mut worker) = pair(capacity, spin);
+        let (mut client, mut worker) = pair_waiting(capacity, wait);
         let count = lengths.len();
         let echo = std::thread::spawn(move || {
             for _ in 0..count {
@@ -79,9 +112,10 @@ fn no_pending_wakeup(end: &mut End) {
 #[test]
 fn messages_round_trip_through_small_and_wrapping_rings() {
     let lengths = vec![0, 1, 59, 60, 61, 64, 65, 200, 4096, 100_000];
-    for spin in [SPIN, Duration::ZERO] {
-        echo(64, spin, lengths.clone());
-        echo(CAPACITY, spin, lengths.clone());
+    // Every strategy delivers the same bytes in the same order.
+    for wait in waits() {
+        echo(64, wait, lengths.clone());
+        echo(CAPACITY, wait, lengths.clone());
     }
 }
 
@@ -89,7 +123,7 @@ fn messages_round_trip_through_small_and_wrapping_rings() {
 fn every_sleep_takes_exactly_one_wakeup() {
     // Without spinning every wait sleeps, so marks often race with progress.
     let lengths: Vec<usize> = (0..20_000).map(|i| i % 97).collect();
-    let (mut client, mut worker) = echo(64, Duration::ZERO, lengths);
+    let (mut client, mut worker) = echo(64, Wait::Spin(Duration::ZERO), lengths);
     no_pending_wakeup(&mut client);
     no_pending_wakeup(&mut worker);
     for ring in [Ring::Requests, Ring::Responses] {
@@ -102,9 +136,9 @@ fn every_sleep_takes_exactly_one_wakeup() {
 #[test]
 fn a_closed_peer_ends_reads_and_breaks_writes() {
     bounded("reads and writes end at a closed peer", || {
-        for spin in [SPIN, Duration::ZERO] {
+        for wait in waits() {
             // Published bytes stay readable; then EOF.
-            let (mut client, mut worker) = pair(64, spin);
+            let (mut client, mut worker) = pair_waiting(64, wait);
             worker.write_all(&[1, 2, 3]).unwrap();
             worker.flush().unwrap();
             drop(worker);
@@ -114,50 +148,11 @@ fn a_closed_peer_ends_reads_and_breaks_writes() {
             assert_eq!(client.read(&mut bytes).unwrap(), 0);
 
             // A writer waiting for room learns that the reader is gone.
-            let (mut client, worker) = pair(64, spin);
+            let (mut client, worker) = pair_waiting(64, wait);
             drop(worker);
             let error = client.write_all(&[0; 65]).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
         }
-    })
-}
-
-#[test]
-fn a_side_whose_spins_run_out_spins_again_only_on_probes() {
-    // The peer publishes only once the reader marks its wait, so every spin
-    // runs out.
-    bounded("each wait whose spin runs out", || {
-        let (mut client, mut worker) = pair(64, Duration::ZERO);
-        let waits = PROBE as u32;
-        let peer = std::thread::spawn(move || {
-            let guard = seedbox_test_time::HangGuard::new("reader sleeps", Duration::from_secs(60));
-            for _ in 0..waits {
-                let mark = worker.region.word(Ring::Responses.word(READER_ASLEEP));
-                guard
-                    .wait_for(|| (mark.load(SeqCst) != 0).then_some(()))
-                    .unwrap();
-                worker.write_all(&[0]).unwrap();
-                worker.flush().unwrap();
-            }
-        });
-        let futile: Vec<u32> = (0..waits)
-            .map(|_| {
-                assert_eq!(client.read(&mut [0]).unwrap(), 1);
-                client.futile
-            })
-            .collect();
-        peer.join().unwrap();
-        // FUTILE spins run out; then only the PROBE-th wait spins.
-        let expected: Vec<u32> = (1..=waits)
-            .map(|wait| {
-                if wait == waits {
-                    FUTILE + 1
-                } else {
-                    wait.min(FUTILE)
-                }
-            })
-            .collect();
-        assert_eq!(futile, expected);
     })
 }
 
@@ -196,13 +191,13 @@ fn assert_corrupt(result: io::Result<usize>) {
 #[test]
 fn positions_outside_the_ring_are_errors_not_reads() {
     // The writer claims more than a whole ring.
-    let (mut client, worker) = pair(64, SPIN);
+    let (mut client, worker) = pair(64, SpinThenSleep::SPIN);
     let written = worker.region.word(Ring::Responses.word(WRITTEN));
     written.store(65, SeqCst);
     assert_corrupt(client.read(&mut [0; 8]));
 
     // The writer's position moves back behind bytes already read.
-    let (mut client, mut worker) = pair(64, SPIN);
+    let (mut client, mut worker) = pair(64, SpinThenSleep::SPIN);
     worker.write_all(&[0; 8]).unwrap();
     worker.flush().unwrap();
     assert_eq!(client.read(&mut [0; 8]).unwrap(), 8);
@@ -211,14 +206,14 @@ fn positions_outside_the_ring_are_errors_not_reads() {
     assert_corrupt(client.read(&mut [0; 8]));
 
     // The reader claims bytes written but not yet published.
-    let (mut client, worker) = pair(64, SPIN);
+    let (mut client, worker) = pair(64, SpinThenSleep::SPIN);
     client.write_all(&[0; 64]).unwrap();
     let read = worker.region.word(Ring::Requests.word(READ));
     read.store(1, SeqCst);
     assert_corrupt(client.write(&[0]));
 
     // The reader's position moves back behind room already reused.
-    let (mut client, worker) = pair(64, SPIN);
+    let (mut client, worker) = pair(64, SpinThenSleep::SPIN);
     client.write_all(&[0; 64]).unwrap();
     client.flush().unwrap();
     let read = worker.region.word(Ring::Requests.word(READ));
