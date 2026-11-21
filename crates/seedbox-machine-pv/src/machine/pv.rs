@@ -55,7 +55,7 @@ use protocol::{BootDisk, Request, Response, Stop};
 use seedbox_machine::definition::{BackendPolicy, DiskImage};
 use seedbox_machine::machine::disk::Store;
 use seedbox_machine::machine::{EvidenceDisposition, StateEvidence};
-use seedbox_machine::machine::{ExitReason, Machine, RunContext, StopReason, Timestamp};
+use seedbox_machine::machine::{ExitReason, Machine, RunContext, SplitRun, StopReason, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -1466,21 +1466,54 @@ impl Machine for PVMachine {
     type Context = ();
     type Error = std::io::Error;
     type Snapshot = Snapshot;
-    fn run(
+    fn split_run(&mut self) -> Option<&mut dyn SplitRun<(), Self::Error>> {
+        Some(self)
+    }
+
+    fn execution_evidence(
         &mut self,
-        context: &mut RunContext<'_, ()>,
-        upto: Timestamp,
-    ) -> Result<StopReason, Self::Error> {
-        match self.start(context, upto)? {
-            Some(stopped) => Ok(stopped),
-            None => self.finish(context),
+    ) -> Result<Option<seedbox_machine::machine::ExecutionEvidence>, Self::Error> {
+        self.read_execution().map_err(std::io::Error::other)
+    }
+    fn state_evidence(&mut self) -> Result<Option<StateEvidence>, Self::Error> {
+        if self.state == State::Invalid {
+            return Err(std::io::Error::other("PV machine is invalid"));
+        }
+        if !self
+            .aux
+            .policy
+            .as_ref()
+            .is_some_and(|p| p.settings.full_state)
+        {
+            return Ok(None);
+        }
+        if self.worker.is_some() {
+            let owner = self
+                .aux
+                .active
+                .ok_or_else(|| std::io::Error::other("PV native evidence has no physical owner"))?;
+            let store = self.stopped_store().map_err(std::io::Error::other)?;
+            return self
+                .capture_evidence(owner, EvidenceDisposition::Live, store.as_ref())
+                .map(Some)
+                .map_err(std::io::Error::other);
+        }
+        Ok(self.aux.cache.as_ref().map(retained::Cached::evidence))
+    }
+    fn snapshot(&mut self) -> Result<Snapshot, Self::Error> {
+        match self.retention {
+            Some(retention) if RETAINS && self.worker.is_some() => self.retain(retention),
+            _ => self.capture().map_err(std::io::Error::other),
         }
     }
-    /// The guest runs in the worker process, so a run is in flight between
-    /// sending its request and receiving its stop.
-    fn splits(&self) -> bool {
-        true
+    fn take_fault_counts(
+        &mut self,
+        id: u64,
+    ) -> Result<Option<seedbox_machine::pv::FaultCounts>, Self::Error> {
+        Ok(self.aux.faults.take(id))
     }
+}
+impl SplitRun<(), std::io::Error> for PVMachine {
     fn ready(&mut self) -> bool {
         self.worker.as_ref().is_none_or(Occupant::ready)
     }
@@ -1488,7 +1521,7 @@ impl Machine for PVMachine {
         &mut self,
         context: &mut RunContext<'_, ()>,
         upto: Timestamp,
-    ) -> Result<Option<StopReason>, Self::Error> {
+    ) -> Result<Option<StopReason>, std::io::Error> {
         if self.in_flight.is_some() {
             return Err(std::io::Error::other("PV run already in flight"));
         }
@@ -1611,7 +1644,7 @@ impl Machine for PVMachine {
             std::io::Error::other(error)
         })
     }
-    fn finish(&mut self, context: &mut RunContext<'_, ()>) -> Result<StopReason, Self::Error> {
+    fn finish(&mut self, context: &mut RunContext<'_, ()>) -> Result<StopReason, std::io::Error> {
         let Some(InFlight { now, upto, held }) = self.in_flight.take() else {
             return Err(std::io::Error::other("PV finish without a run in flight"));
         };
@@ -1644,49 +1677,6 @@ impl Machine for PVMachine {
             drop(self.worker.take());
             std::io::Error::other(error)
         })
-    }
-
-    fn execution_evidence(
-        &mut self,
-    ) -> Result<Option<seedbox_machine::machine::ExecutionEvidence>, Self::Error> {
-        self.read_execution().map_err(std::io::Error::other)
-    }
-    fn state_evidence(&mut self) -> Result<Option<StateEvidence>, Self::Error> {
-        if self.state == State::Invalid {
-            return Err(std::io::Error::other("PV machine is invalid"));
-        }
-        if !self
-            .aux
-            .policy
-            .as_ref()
-            .is_some_and(|p| p.settings.full_state)
-        {
-            return Ok(None);
-        }
-        if self.worker.is_some() {
-            let owner = self
-                .aux
-                .active
-                .ok_or_else(|| std::io::Error::other("PV native evidence has no physical owner"))?;
-            let store = self.stopped_store().map_err(std::io::Error::other)?;
-            return self
-                .capture_evidence(owner, EvidenceDisposition::Live, store.as_ref())
-                .map(Some)
-                .map_err(std::io::Error::other);
-        }
-        Ok(self.aux.cache.as_ref().map(retained::Cached::evidence))
-    }
-    fn snapshot(&mut self) -> Result<Snapshot, Self::Error> {
-        match self.retention {
-            Some(retention) if RETAINS && self.worker.is_some() => self.retain(retention),
-            _ => self.capture().map_err(std::io::Error::other),
-        }
-    }
-    fn take_fault_counts(
-        &mut self,
-        id: u64,
-    ) -> Result<Option<seedbox_machine::pv::FaultCounts>, Self::Error> {
-        Ok(self.aux.faults.take(id))
     }
 }
 #[cfg(test)]

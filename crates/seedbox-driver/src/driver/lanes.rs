@@ -4,7 +4,7 @@
 //! machine can affect another before the round commits, so lanes run side by
 //! side and only each machine's own runs are ordered.
 //!
-//! A machine that executes elsewhere ([`Machine::splits`], a PV worker
+//! A machine that executes elsewhere ([`Machine::split_run`], a PV worker
 //! process) is not lent to a worker thread: the Driver's thread starts its
 //! run, keeps it in flight beside the others, and finishes whichever stops
 //! first, so a round crosses no thread inside the Driver.

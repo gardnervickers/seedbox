@@ -23,7 +23,7 @@ pub(super) struct RunResult<M: Machine> {
 
 /// A split machine's run in flight on the Driver's thread: what
 /// [`Driver::run_job`] lends a worker job, held while the machine executes
-/// elsewhere (see [`Machine::splits`]).
+/// elsewhere (see [`Machine::split_run`]).
 pub(super) struct Flight<M: Machine> {
     id: MachineId,
     machine: M,
@@ -68,12 +68,23 @@ impl<M: Machine> Flight<M> {
 
     /// Whether the run has stopped, so that finishing it will not wait.
     pub(super) fn ready(&mut self) -> bool {
-        catch_unwind(AssertUnwindSafe(|| self.machine.ready())).unwrap_or(true)
+        catch_unwind(AssertUnwindSafe(|| {
+            self.machine
+                .split_run()
+                .expect("split run in flight")
+                .ready()
+        }))
+        .unwrap_or(true)
     }
 
     /// Wait for the run to stop and return it as a worker job would.
     pub(super) fn finish(mut self, worker: &mut M::Context) -> RunResult<M> {
-        let stopped = self.call(worker, |machine, context| machine.finish(context));
+        let stopped = self.call(worker, |machine, context| {
+            machine
+                .split_run()
+                .expect("split run in flight")
+                .finish(context)
+        });
         self.result(stopped)
     }
 
@@ -299,11 +310,12 @@ where
     /// Whether machine `id` executes elsewhere, so that the Driver's thread
     /// can keep its runs in flight beside others' instead of lending it to a
     /// worker.
-    pub(super) fn splits(&self, id: MachineId) -> bool {
+    pub(super) fn splits(&mut self, id: MachineId) -> bool {
         self.execution.machines[id.0]
             .machine
-            .as_ref()
-            .is_some_and(M::splits)
+            .as_mut()
+            .and_then(M::split_run)
+            .is_some()
     }
 
     /// Start one view's run on this thread, as [`Driver::run_job`]'s job
@@ -321,7 +333,10 @@ where
             execution: entry.lifecycle.execution(),
         };
         match flight.call(self.workers.caller(), |machine, context| {
-            machine.start(context, bound)
+            machine
+                .split_run()
+                .expect("split run")
+                .start(context, bound)
         }) {
             Ok(None) => Started::Flying(flight),
             Ok(Some(stopped)) => Started::Finished(flight.result(Ok(stopped))),

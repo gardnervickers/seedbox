@@ -3,7 +3,7 @@
 mod tests;
 use super::checkpoint::Opened;
 use seedbox_engine_protocol::driver_world::Inventory;
-use seedbox_machine::machine::{Machine, RunContext, StopReason, Timestamp};
+use seedbox_machine::machine::{Machine, RunContext, SplitRun, StopReason, Timestamp};
 use std::{
     io::{Read, Write},
     path::Path,
@@ -40,6 +40,39 @@ pub(super) enum Snapshot {
     /// Only an already-verified descriptor, never a decoded native RAM image.
     Retained(Opened),
 }
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+))]
+impl Native {
+    fn split_pv(&mut self) -> &mut pv::PVMachine {
+        match self {
+            Self::Pv { machine, .. } => machine,
+            Self::Tcg { .. } => unreachable!("only PV exposes split runs"),
+        }
+    }
+}
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+))]
+impl SplitRun<(), String> for Native {
+    fn start(
+        &mut self,
+        context: &mut RunContext<'_, ()>,
+        upto: Timestamp,
+    ) -> Result<Option<StopReason>, String> {
+        self.split_pv()
+            .start(context, upto)
+            .map_err(|e| e.to_string())
+    }
+    fn ready(&mut self) -> bool {
+        self.split_pv().ready()
+    }
+    fn finish(&mut self, context: &mut RunContext<'_, ()>) -> Result<StopReason, String> {
+        self.split_pv().finish(context).map_err(|e| e.to_string())
+    }
+}
 impl Machine for Native {
     type Context = ();
     type Error = String;
@@ -58,48 +91,14 @@ impl Machine for Native {
             Self::Tcg { machine, .. } => machine.run(context, upto).map_err(|e| e.to_string()),
         }
     }
-    fn splits(&self) -> bool {
+    fn split_run(&mut self) -> Option<&mut dyn SplitRun<(), String>> {
         match self {
             #[cfg(any(
                 all(target_os = "linux", target_arch = "x86_64"),
                 all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
             ))]
-            Self::Pv { machine, .. } => machine.splits(),
-            Self::Tcg { machine, .. } => machine.splits(),
-        }
-    }
-    fn start(
-        &mut self,
-        context: &mut RunContext<'_, ()>,
-        upto: Timestamp,
-    ) -> Result<Option<StopReason>, String> {
-        match self {
-            #[cfg(any(
-                all(target_os = "linux", target_arch = "x86_64"),
-                all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
-            ))]
-            Self::Pv { machine, .. } => machine.start(context, upto).map_err(|e| e.to_string()),
-            Self::Tcg { machine, .. } => machine.start(context, upto).map_err(|e| e.to_string()),
-        }
-    }
-    fn ready(&mut self) -> bool {
-        match self {
-            #[cfg(any(
-                all(target_os = "linux", target_arch = "x86_64"),
-                all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
-            ))]
-            Self::Pv { machine, .. } => machine.ready(),
-            Self::Tcg { machine, .. } => machine.ready(),
-        }
-    }
-    fn finish(&mut self, context: &mut RunContext<'_, ()>) -> Result<StopReason, String> {
-        match self {
-            #[cfg(any(
-                all(target_os = "linux", target_arch = "x86_64"),
-                all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
-            ))]
-            Self::Pv { machine, .. } => machine.finish(context).map_err(|e| e.to_string()),
-            Self::Tcg { machine, .. } => machine.finish(context).map_err(|e| e.to_string()),
+            Self::Pv { .. } => Some(self),
+            Self::Tcg { .. } => None,
         }
     }
     fn execution_evidence(

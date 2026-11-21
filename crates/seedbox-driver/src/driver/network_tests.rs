@@ -3,6 +3,7 @@ use super::fixture::{auto_key, definition};
 use super::*;
 use crate::definition::{MacAddress, NetworkInterface};
 use seedbox_machine::host::idle::Idle;
+use seedbox_machine::machine::SplitRun;
 use std::sync::Mutex;
 
 fn at(n: u64) -> Timestamp {
@@ -42,7 +43,7 @@ struct Net {
     exited: bool,
     reached: u64,
     log: Arc<Mutex<Log>>,
-    /// Report [`Machine::splits`]: the run executes in `start` and is held
+    /// Report [`Machine::split_run`]: the run executes in `start` and is held
     /// as in flight until `finish`, ready only on every third poll.
     split: bool,
     flight: Option<Result<StopReason, std::io::Error>>,
@@ -131,20 +132,23 @@ impl Machine for Net {
         })
     }
 
-    fn splits(&self) -> bool {
-        self.split
+    fn split_run(&mut self) -> Option<&mut dyn SplitRun<(), Self::Error>> {
+        self.split.then_some(self)
     }
 
+    fn snapshot(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+impl SplitRun<(), std::io::Error> for Net {
     fn start(
         &mut self,
         context: &mut RunContext<'_, ()>,
         upto: Timestamp,
-    ) -> Result<Option<StopReason>, Self::Error> {
+    ) -> Result<Option<StopReason>, std::io::Error> {
         assert!(self.flight.is_none(), "one run in flight");
         let result = self.run(context, upto);
-        if !self.split {
-            return result.map(Some);
-        }
         self.flight = Some(result);
         Ok(None)
     }
@@ -154,12 +158,8 @@ impl Machine for Net {
         self.polls.is_multiple_of(3)
     }
 
-    fn finish(&mut self, _: &mut RunContext<'_, ()>) -> Result<StopReason, Self::Error> {
+    fn finish(&mut self, _: &mut RunContext<'_, ()>) -> Result<StopReason, std::io::Error> {
         self.flight.take().expect("a run in flight")
-    }
-
-    fn snapshot(&mut self) -> Result<(), Self::Error> {
-        Ok(())
     }
 }
 
