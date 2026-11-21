@@ -2,7 +2,12 @@
 use super::fixture::{auto_key, definition};
 use super::*;
 use crate::definition::{MacAddress, NetworkInterface};
-use std::sync::Mutex;
+use seedbox_machine::host::doorbell::{Doorbell, Ringer};
+use seedbox_machine::host::idle::Idle;
+use seedbox_machine::machine::SplitRun;
+use std::os::fd::AsRawFd;
+use std::sync::atomic::Ordering::SeqCst;
+use std::sync::{atomic::AtomicBool, Mutex};
 
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
@@ -22,6 +27,8 @@ fn frame(to: [u8; 6], tag: u8) -> Vec<u8> {
 struct Log {
     /// (machine, start, upto) of every run, in machine time.
     runs: Vec<(usize, u64, u64)>,
+    /// Machine identities as the coordinator collects completed split runs.
+    finishes: Vec<usize>,
     /// (machine, offered machine time, tag) of every accepted frame.
     received: Vec<(usize, u64, u8)>,
     /// (machine, offered machine time, bytes) of every accepted frame.
@@ -41,6 +48,33 @@ struct Net {
     exited: bool,
     reached: u64,
     log: Arc<Mutex<Log>>,
+    /// Report [`Machine::split_run`]: the run executes in `start` and is held
+    /// as in flight until `finish`, ready only on every third poll.
+    split: bool,
+    flight: Option<Result<StopReason, std::io::Error>>,
+    polls: u32,
+    bell: Option<Bell>,
+}
+
+struct Bell {
+    ringer: Arc<Ringer>,
+    back: Arc<AtomicBool>,
+    ticket: Arc<std::sync::atomic::AtomicU64>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// The executor's exit descriptor; its write end stays open.
+    exit: (std::io::PipeReader, std::io::PipeWriter),
+}
+impl Bell {
+    fn new() -> Self {
+        let doorbell = Doorbell::process().expect("process doorbell");
+        Self {
+            ringer: Arc::new(doorbell.ringer().unwrap()),
+            back: Arc::new(AtomicBool::new(false)),
+            ticket: Default::default(),
+            thread: None,
+            exit: std::io::pipe().unwrap(),
+        }
+    }
 }
 
 impl Machine for Net {
@@ -125,8 +159,56 @@ impl Machine for Net {
         })
     }
 
+    fn split_run(&mut self) -> Option<&mut dyn SplitRun<(), Self::Error>> {
+        self.split.then_some(self)
+    }
+
     fn snapshot(&mut self) -> Result<(), Self::Error> {
         Ok(())
+    }
+}
+
+impl SplitRun<(), std::io::Error> for Net {
+    fn start(
+        &mut self,
+        context: &mut RunContext<'_, ()>,
+        upto: Timestamp,
+    ) -> Result<Option<StopReason>, std::io::Error> {
+        assert!(self.flight.is_none(), "one run in flight");
+        let result = self.run(context, upto);
+        self.flight = Some(result);
+        if let Some(bell) = &mut self.bell {
+            bell.back.store(false, SeqCst);
+            let (back, ringer) = (bell.back.clone(), bell.ringer.clone());
+            let ticket = bell.ticket.clone();
+            bell.thread = Some(std::thread::spawn(move || {
+                back.store(true, SeqCst);
+                ringer.ring(&ticket).unwrap();
+            }));
+        }
+        Ok(None)
+    }
+
+    fn ready(&mut self) -> bool {
+        if let Some(bell) = &self.bell {
+            return bell.back.load(SeqCst);
+        }
+        self.polls += 1;
+        self.polls.is_multiple_of(3)
+    }
+
+    fn watch_reply(&mut self, ticket: u64) -> Option<std::os::fd::RawFd> {
+        let bell = self.bell.as_ref()?;
+        bell.ticket.store(ticket, SeqCst);
+        self.flight.is_some().then(|| bell.exit.0.as_raw_fd())
+    }
+
+    fn finish(&mut self, _: &mut RunContext<'_, ()>) -> Result<StopReason, std::io::Error> {
+        if let Some(thread) = self.bell.as_mut().and_then(|bell| bell.thread.take()) {
+            thread.join().unwrap();
+        }
+        self.log.lock().unwrap().finishes.push(self.id);
+        self.flight.take().expect("a run in flight")
     }
 }
 
@@ -138,6 +220,8 @@ struct Spec {
     busy: bool,
     echo: Option<[u8; 6]>,
     answer: Option<[u8; 6]>,
+    split: bool,
+    bell: bool,
 }
 fn spec(nic: Option<u8>) -> Spec {
     Spec {
@@ -146,9 +230,21 @@ fn spec(nic: Option<u8>) -> Spec {
         busy: false,
         echo: None,
         answer: None,
+        split: false,
+        bell: false,
     }
 }
 impl Spec {
+    fn split(mut self) -> Self {
+        self.split = true;
+        self
+    }
+    /// Split, coming back on another thread that rings the doorbell.
+    fn bell(mut self) -> Self {
+        self.split = true;
+        self.bell = true;
+        self
+    }
     fn send(self, at: u64, bytes: Vec<u8>) -> Self {
         self.emit(at, Response::TransmitFrame { bytes })
     }
@@ -215,6 +311,10 @@ fn world(
                     exited: false,
                     reached: 0,
                     log: log.clone(),
+                    split: spec.split,
+                    flight: None,
+                    polls: 0,
+                    bell: spec.bell.then(Bell::new),
                 },
             )
         })
@@ -226,11 +326,11 @@ fn world(
     let spawnable: Vec<_> = definitions
         .map(crate::test_support::spawn_definition)
         .collect();
-    let driver = Driver::new(
+    let driver = Driver::new_seeded(
         at(start),
         Duration::from_nanos(quantum),
         workers,
-        crate::rng::SeededRng::new(5),
+        5,
         || Ok(()),
         oracle,
         others,
@@ -598,6 +698,10 @@ fn spawned_machines_join_the_network_and_host_additions_stay_unattached() {
                     exited: false,
                     reached: 0,
                     log,
+                    split: false,
+                    flight: None,
+                    polls: 0,
+                    bell: None,
                 })
             })
         })
@@ -1460,4 +1564,127 @@ fn a_frame_dropped_inside_a_lane_still_holds_the_quiescent_end() {
         .map(|fact| fact.due)
         .collect();
     assert_eq!(dropped, [Some(at(MS))]);
+}
+
+/// Barriers, sorted runs and sorted received frames.
+type Observed = (
+    Vec<StepOutcome>,
+    Vec<(usize, u64, u64)>,
+    Vec<(usize, u64, u8)>,
+    Vec<u8>,
+);
+
+/// Echo chains between busy and blocked machines at 1 ms latency, each
+/// machine split (its runs in flight on the Driver's thread) or lent to a
+/// worker as `split` says; returns the barriers and the sorted log.
+fn echo_world(workers: usize, split: [bool; 3]) -> Observed {
+    echo_world_waiting(workers, split, Idle::DEFAULT, false)
+}
+
+/// As [`echo_world`], each split machine coming back on another thread and
+/// ringing the doorbell if `bell`, and the Driver waiting as `idle` says.
+fn echo_world_waiting(workers: usize, split: [bool; 3], idle: Idle, bell: bool) -> Observed {
+    let config = NetworkConfig::new(Duration::from_millis(1), Duration::ZERO, 0).unwrap();
+    let specs = vec![
+        spec(Some(1))
+            .send(0, frame(mac(2), 1))
+            .send(2 * MS + 500, frame(mac(3), 30))
+            .echo(mac(3))
+            .busy(),
+        spec(Some(2)).echo(mac(3)),
+        spec(Some(3)).echo(mac(1)),
+    ];
+    let specs = specs
+        .into_iter()
+        .zip(split)
+        .map(|(spec, split)| match (split, bell) {
+            (false, _) => spec,
+            (true, false) => spec.split(),
+            (true, true) => spec.bell(),
+        })
+        .collect();
+    let (mut driver, log) = world(0, MS, workers, config, specs, Vec::new()).unwrap();
+    driver.workers.set_idle(idle);
+    let seen = barriers(&mut driver, 40 * MS);
+    let log = log.lock().unwrap();
+    let mut runs = log.runs.clone();
+    runs.sort();
+    let mut received = log.received.clone();
+    received.sort();
+    let mut evidence = Vec::new();
+    driver
+        .with_barrier(|barrier| {
+            barrier.write_policy_evidence(&mut evidence).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    (seen, runs, received, evidence)
+}
+
+#[test]
+fn the_coordinator_collects_a_later_machine_while_the_first_is_still_running() {
+    let config = NetworkConfig::new(Duration::from_millis(1), Duration::ZERO, 0).unwrap();
+    let (mut driver, log) = simple(
+        MS,
+        config,
+        vec![spec(None).busy().split(), spec(None).busy().split()],
+    );
+    // The second machine is ready on the first scan. The first needs three
+    // polls. Blocking on the first submitted job would reverse this order.
+    driver.execution.machines[1].machine.as_mut().unwrap().polls = 2;
+    driver.step(at(MS)).unwrap();
+    assert_eq!(log.lock().unwrap().finishes, [1, 0]);
+}
+
+#[test]
+fn split_machines_run_their_lanes_as_lent_machines_do() {
+    let lent = echo_world(1, [false; 3]);
+    assert!(lent.2.len() > 20, "frames crossed every lane: {:?}", lent.2);
+    for workers in [1, 2, 4] {
+        assert_eq!(
+            echo_world(workers, [false; 3]),
+            lent,
+            "lent, {workers} workers"
+        );
+        assert_eq!(
+            echo_world(workers, [true; 3]),
+            lent,
+            "split, {workers} workers"
+        );
+        assert_eq!(
+            echo_world(workers, [true, false, true]),
+            lent,
+            "mixed, {workers} workers"
+        );
+    }
+}
+
+#[test]
+fn every_idle_strategy_runs_split_lanes_to_the_same_results() {
+    let lent = echo_world(1, [false; 3]);
+    for idle in Idle::ALL {
+        for workers in [1, 3] {
+            assert_eq!(
+                echo_world_waiting(workers, [true; 3], idle, false),
+                lent,
+                "{idle:?}, {workers} workers"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_idle_strategy_runs_doorbell_lanes_to_the_same_results() {
+    let lent = echo_world(1, [false; 3]);
+    for idle in Idle::ALL {
+        for workers in [1, 3] {
+            for split in [[true; 3], [true, false, true]] {
+                assert_eq!(
+                    echo_world_waiting(workers, split, idle, true),
+                    lent,
+                    "{idle:?}, {workers} workers, {split:?}"
+                );
+            }
+        }
+    }
 }

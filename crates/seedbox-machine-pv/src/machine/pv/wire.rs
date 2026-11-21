@@ -22,7 +22,7 @@ use seedbox_machine::pv::{
     ethernet::{MAX_FRAME_BYTES, MIN_FRAME_BYTES},
     transport::{GuestWrite, LifecycleWrite},
 };
-use std::io::{BufWriter, Read, Write};
+use std::io::{Read, Write};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -30,7 +30,6 @@ const CONSOLE: u8 = 0;
 const LIFECYCLE: u8 = 1;
 const FRAME: u8 = 2;
 const END: u8 = 0xff;
-const BUFFER: usize = 64 << 10;
 
 fn frame_length(length: usize) -> Result<()> {
     if (MIN_FRAME_BYTES..=MAX_FRAME_BYTES).contains(&length) {
@@ -66,8 +65,8 @@ fn read_bytes(input: &mut impl Read, length: usize) -> Result<Vec<u8>> {
 }
 
 /// Send `writes` in order. The JSON message before it carries `writes.len()`.
+/// Pieces go straight to `out`, which buffers or claims them itself.
 pub(super) fn send_writes(out: &mut impl Write, writes: &[GuestWrite]) -> Result<()> {
-    let mut out = BufWriter::with_capacity(BUFFER, out);
     for write in writes {
         let (tag, write) = match write {
             GuestWrite::Console(write) => (CONSOLE, write),
@@ -118,8 +117,8 @@ pub(super) fn receive_writes(input: &mut impl Read, count: u64) -> Result<Vec<Gu
 }
 
 /// Send host frames in inbox order. The JSON message carries `frames.len()`.
+/// Pieces go straight to `out`, which buffers or claims them itself.
 pub(super) fn send_frames(out: &mut impl Write, frames: &[Vec<u8>]) -> Result<()> {
-    let mut out = BufWriter::with_capacity(BUFFER, out);
     for frame in frames {
         frame_length(frame.len())?;
         out.write_all(&(frame.len() as u16).to_le_bytes())

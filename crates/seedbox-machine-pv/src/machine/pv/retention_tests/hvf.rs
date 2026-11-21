@@ -181,11 +181,17 @@ fn a_snapshot_whose_worker_is_occupied_is_copied_out_into_a_new_one() {
     let mut machine = counting(5, None);
     step(&mut machine, 20);
     let snapshot = machine.snapshot().unwrap();
+    // The snapshot uses the same worker after a run has been submitted and
+    // before its owner collects it. Export must preserve the outstanding stop.
+    let now = machine.send_run(20, 30, 1000, &[]).unwrap();
     let mut branch = restore(&snapshot);
     assert_eq!(branch.restored(), Some(Restored::Exported));
     assert_ne!(process(&branch), process(&machine));
     // The two run on from the same count, neither seeing the other's.
-    step(&mut machine, 30);
+    assert_eq!(
+        machine.receive_run(now, 30).unwrap(),
+        StopReason::BoundaryReached
+    );
     step(&mut machine, 40);
     step(&mut branch, 30);
     let stops = to_power_off(&mut machine, 40);
