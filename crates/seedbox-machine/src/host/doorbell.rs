@@ -99,18 +99,28 @@ pub struct Doorbell {
     next_ticket: AtomicU64,
 }
 
-static PROCESS: OnceLock<io::Result<Doorbell>> = OnceLock::new();
+static PROCESS: OnceLock<Doorbell> = OnceLock::new();
 
 impl Doorbell {
     /// The shared notification word for workers spawned in this process.
     pub fn process() -> io::Result<&'static Doorbell> {
-        PROCESS
-            .get_or_init(Self::create)
-            .as_ref()
-            .map_err(|e| io::Error::new(e.kind(), e.to_string()))
+        Self::get_or_create(&PROCESS, Self::create)
     }
     pub fn existing() -> Option<&'static Doorbell> {
-        PROCESS.get().and_then(|bell| bell.as_ref().ok())
+        PROCESS.get()
+    }
+    /// Only a created doorbell is kept. A creation that failed, for want of
+    /// descriptors say, is tried again by the next caller.
+    fn get_or_create(
+        cell: &OnceLock<Doorbell>,
+        create: impl FnOnce() -> io::Result<Doorbell>,
+    ) -> io::Result<&Doorbell> {
+        if let Some(bell) = cell.get() {
+            return Ok(bell);
+        }
+        let bell = create()?;
+        // A creator that lost the race adopts the winner's and drops its own.
+        Ok(cell.get_or_init(|| bell))
     }
     fn create() -> io::Result<Self> {
         let region = super::shared_memory(LENGTH)?;

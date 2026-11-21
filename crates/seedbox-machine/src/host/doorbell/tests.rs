@@ -15,6 +15,17 @@ fn bounded<T: Send + 'static>(reason: &str, body: impl FnOnce() -> T + Send + 's
 }
 
 #[test]
+fn a_failed_creation_is_tried_again_and_a_created_doorbell_is_kept() {
+    let cell = OnceLock::new();
+    let failed = Doorbell::get_or_create(&cell, || Err(io::Error::other("no descriptors")));
+    assert_eq!(failed.err().unwrap().to_string(), "no descriptors");
+    assert!(cell.get().is_none(), "a failure is not kept");
+    let created = Doorbell::get_or_create(&cell, Doorbell::create).unwrap();
+    let kept = Doorbell::get_or_create(&cell, || panic!("created once")).unwrap();
+    assert!(std::ptr::eq(created, kept));
+}
+
+#[test]
 fn a_ring_after_the_mark_is_seen_on_the_word() {
     let bell = Doorbell::create().unwrap();
     let ringer = bell.ringer().unwrap();
