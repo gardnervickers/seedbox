@@ -408,12 +408,17 @@ impl World for Broken {
     }
 }
 
-/// Records every wait, then sleeps through the world.
+/// Records every wait, then sleeps through the world. Fails from the tenth
+/// wait on, so a pattern that never stops waiting ends the test.
 struct Recorded(std::sync::Arc<std::sync::Mutex<Vec<Duration>>>);
 
 impl Pace for Recorded {
     fn wait(&mut self, world: &mut dyn World, duration: Duration) -> Result<(), Error> {
-        self.0.lock().unwrap().push(duration);
+        let mut waits = self.0.lock().unwrap();
+        if waits.len() >= 10 {
+            return Err(Error("waited too long".into()));
+        }
+        waits.push(duration);
         world.sleep(duration)
     }
 }
