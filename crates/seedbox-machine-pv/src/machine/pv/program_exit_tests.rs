@@ -52,47 +52,6 @@ fn application(code: u32) -> Vec<u8> {
     elf.extend_from_slice(&code);
     elf
 }
-fn replace_application(archive: &[u8], application: &[u8]) -> Vec<u8> {
-    let mut result = Vec::new();
-    let mut offset = 0;
-    let mut replaced = false;
-    loop {
-        let mut header = archive[offset..offset + 110].to_vec();
-        assert_eq!(&header[..6], b"070701");
-        let number =
-            |a, b| usize::from_str_radix(std::str::from_utf8(&header[a..b]).unwrap(), 16).unwrap();
-        let size = number(54, 62);
-        let namesize = number(94, 102);
-        let name = &archive[offset + 110..offset + 110 + namesize];
-        let start = (offset + 110 + namesize + 3) & !3;
-        let end = start + size;
-        let data = if name == b"application\0"
-            || name == b"./application\0"
-            || name == b"rootfs/application\0"
-        {
-            replaced = true;
-            header[54..62].copy_from_slice(format!("{:08x}", application.len()).as_bytes());
-            application
-        } else {
-            &archive[start..end]
-        };
-        result.extend(header);
-        result.extend_from_slice(name);
-        while !result.len().is_multiple_of(4) {
-            result.push(0);
-        }
-        result.extend_from_slice(data);
-        while !result.len().is_multiple_of(4) {
-            result.push(0);
-        }
-        if name == b"TRAILER!!!\0" {
-            break;
-        }
-        offset = (end + 3) & !3;
-    }
-    assert!(replaced);
-    result
-}
 fn run(
     machine: &mut PVMachine,
     now: u64,
@@ -141,18 +100,16 @@ fn next(progress: &mut GuestProgress, now: u64, last: &str) -> u64 {
         .as_nanos().try_into().unwrap()
 }
 #[test]
-#[ignore = "requires signed SEEDBOX_PV_WORKER, SEEDBOX_PV_KERNEL and SEEDBOX_PV_SERVICE_INITRD"]
+#[ignore = "requires a signed PV worker and native kernel/init assets"]
 fn native_linux_program_exit_zero_and_nonzero_survive_snapshot_and_zero_runs() {
     let worker = input("SEEDBOX_PV_WORKER");
-    let kernel = fs::read(input("SEEDBOX_PV_KERNEL")).unwrap();
-    let archive = fs::read(input("SEEDBOX_PV_SERVICE_INITRD")).unwrap();
+    let bootstrap = seedbox_machine::test_support::prepared_fixture::bootstrap("PV");
     for code in [0, 23] {
-        let mut machine = PVMachine::from_boot_inputs(
-            &worker,
-            kernel.clone(),
-            replace_application(&archive, &application(code as u32)),
-        )
-        .unwrap();
+        let definition = seedbox_machine::test_support::prepared_application::from_program(
+            &application(code as u32),
+            128 << 20,
+        );
+        let mut machine = PVMachine::new(&worker, &bootstrap, definition).unwrap();
         let guard = HangGuard::new(
             "native exit/start/shutdown worker transport",
             Duration::from_secs(300),
