@@ -679,7 +679,9 @@ fn recover_refuses_a_label_that_makes_an_invalid_key() {
     let mut run = frozen_then_paused();
     run.extend_pending([input(500, "later", Action::Crash(machine(1)))])
         .unwrap();
-    for label in ["not a key", "slash/"] {
+    // The last one is valid alone but too long for the keys it would make.
+    let long = "r".repeat(120);
+    for label in ["not a key", "slash/", &long] {
         assert!(matches!(
             run.recover(label, Duration::from_nanos(10), 4),
             Err(Error::Label(_))

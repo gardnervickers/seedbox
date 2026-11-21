@@ -44,7 +44,10 @@ where
         if settle.is_zero() {
             return Err(Error::NoSettle);
         }
-        InputKey::new(format!("{label}0")).map_err(Error::Label)?;
+        // Check the longest key recovery can make before dropping anything.
+        let last = rounds.saturating_sub(1);
+        let longest = format!("{label}{last}-restart-{}", usize::MAX);
+        InputKey::new(longest).map_err(Error::Label)?;
         let dropped = self.program().pending().iter();
         let dropped = dropped.map(|input| input.key.clone()).collect();
         self.replace_pending(Vec::new())?;
