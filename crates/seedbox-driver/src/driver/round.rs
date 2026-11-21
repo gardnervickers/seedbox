@@ -128,7 +128,7 @@ where
                     });
                     // A lent job reports through its channel, not the doorbell.
                     let lent = runs.lent.as_ref().is_some_and(|s| s.outstanding() > 0);
-                    if let Some(bell) = bell.as_ref().filter(|_| !lent) {
+                    if let Some(bell) = bell.as_mut().filter(|_| !lent) {
                         match bell.park(|ticket| {
                             runs.flying
                                 .iter_mut()

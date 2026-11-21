@@ -246,7 +246,10 @@ impl Coordinator<'_> {
     /// Arm the watch set for this park. A writer outside the set may also
     /// publish, but it cannot take this ticket: its death could otherwise
     /// strand the coordinator while none of its watched pipes has closed.
-    pub fn park(&self, watch: impl FnOnce(u64) -> Option<Vec<RawFd>>) -> io::Result<Wake> {
+    ///
+    /// One park at a time: a second would overwrite the first's mark, and the
+    /// first would never be paid its ticket.
+    pub fn park(&mut self, watch: impl FnOnce(u64) -> Option<Vec<RawFd>>) -> io::Result<Wake> {
         let ticket = self.bell.next_ticket.fetch_add(1, SeqCst);
         let Some(watch) = watch(ticket) else {
             return Ok(Wake::Unwatched);
