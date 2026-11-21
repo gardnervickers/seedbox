@@ -105,6 +105,8 @@ impl Native {
         let mut list = allocate(0)?;
         match self.cpu.get_reg_list(&mut list) {
             Err(e) if e.errno() == libc::E2BIG => {
+                // The header now counts entries this empty wrapper does not
+                // hold: read only the count, never its slice.
                 let count = list.as_fam_struct_ref().n as usize;
                 list = allocate(count)?;
                 checked(
