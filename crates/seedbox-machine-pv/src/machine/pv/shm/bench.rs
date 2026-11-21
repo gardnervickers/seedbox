@@ -35,8 +35,8 @@ impl Mode {
 
 // In a strategy trial, start the clock only after the worker has entered its
 // selected spin tier, and keep it there instead of asleep. The additional
-// mapping keeps the notification word live. A peer left waiting past TIMEOUT
-// has lost its parent: it then sleeps as its strategy says, and the transport
+// mapping keeps the notification word live. A peer left waiting for TIMEOUT
+// has lost its parent: it then sleeps, whatever its budget, and the transport
 // sees the end of its pipe.
 struct SpinningPeer {
     region: Region,
@@ -45,6 +45,10 @@ struct SpinningPeer {
 }
 impl IdleStrategy for SpinningPeer {
     fn idle(&mut self, attempt: u64, elapsed: Duration) -> Action {
+        if elapsed >= TIMEOUT {
+            // Whatever budget the trial asked for.
+            return Action::Sleep;
+        }
         let action = self.idle.idle(attempt, elapsed);
         let reached = match self.policy {
             Idle::Monitor => matches!(action, Action::Monitor(_)),
@@ -56,7 +60,7 @@ impl IdleStrategy for SpinningPeer {
                 self.region.word(READY).store(seq, SeqCst);
             }
         }
-        if action == Action::Sleep && elapsed < TIMEOUT {
+        if action == Action::Sleep {
             Action::Spin
         } else {
             action
