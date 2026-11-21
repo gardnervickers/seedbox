@@ -51,7 +51,7 @@ type Result<T> = std::result::Result<T, String>;
 /// their fixed descriptors at 197 to 199 and keep sources at 200 and above.
 pub(super) const DESCRIPTOR: i32 = 196;
 /// Bytes in each ring; a longer message passes through in pieces.
-pub(super) const CAPACITY: u64 = 256 << 10;
+pub(super) const CAPACITY: u64 = 1 << 20;
 /// Workers wait between requests across whole Driver rounds. Park after this
 /// bounded spin, or sooner when consecutive spins have found no work.
 const WORKER_SPIN: Duration = Duration::from_micros(1000);
