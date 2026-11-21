@@ -81,11 +81,21 @@ fn a_park_ends_when_a_watched_executor_exits() {
     bounded("a hang-up ends the park", move || {
         let mut coordinator = bell.claim().unwrap();
         coordinator.mark();
-        drop(write);
-        let fired = coordinator
-            .park(|_| Some(vec![_live.as_raw_fd(), read.as_raw_fd()]))
-            .unwrap();
-        assert_eq!(fired, Wake::Exited(1));
+        let asleep = bell.words.word(ASLEEP);
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                // Simulate an executor dying after taking the wakeup debt
+                // but before it can write the ticket.
+                while asleep.swap(0, SeqCst) == 0 {
+                    std::hint::spin_loop();
+                }
+                drop(write);
+            });
+            let fired = coordinator
+                .park(|_| Some(vec![_live.as_raw_fd(), read.as_raw_fd()]))
+                .unwrap();
+            assert_eq!(fired, Wake::Exited(1));
+        });
     });
 }
 
