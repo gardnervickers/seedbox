@@ -27,6 +27,8 @@ fn frame(to: [u8; 6], tag: u8) -> Vec<u8> {
 struct Log {
     /// (machine, start, upto) of every run, in machine time.
     runs: Vec<(usize, u64, u64)>,
+    /// Machine identities as the coordinator collects completed split runs.
+    finishes: Vec<usize>,
     /// (machine, offered machine time, tag) of every accepted frame.
     received: Vec<(usize, u64, u8)>,
     /// (machine, offered machine time, bytes) of every accepted frame.
@@ -205,6 +207,7 @@ impl SplitRun<(), std::io::Error> for Net {
         if let Some(thread) = self.bell.as_mut().and_then(|bell| bell.thread.take()) {
             thread.join().unwrap();
         }
+        self.log.lock().unwrap().finishes.push(self.id);
         self.flight.take().expect("a run in flight")
     }
 }
@@ -1613,6 +1616,21 @@ fn echo_world_waiting(workers: usize, split: [bool; 3], idle: Idle, bell: bool) 
         .with_barrier(|barrier| Ok(barrier.write_policy_evidence(&mut evidence).unwrap()))
         .unwrap();
     (seen, runs, received, evidence)
+}
+
+#[test]
+fn the_coordinator_collects_a_later_machine_while_the_first_is_still_running() {
+    let config = NetworkConfig::new(Duration::from_millis(1), Duration::ZERO, 0).unwrap();
+    let (mut driver, log) = simple(
+        MS,
+        config,
+        vec![spec(None).busy().split(), spec(None).busy().split()],
+    );
+    // The second machine is ready on the first scan. The first needs three
+    // polls. Blocking on the first submitted job would reverse this order.
+    driver.execution.machines[1].machine.as_mut().unwrap().polls = 2;
+    driver.step(at(MS)).unwrap();
+    assert_eq!(log.lock().unwrap().finishes, [1, 0]);
 }
 
 #[test]
