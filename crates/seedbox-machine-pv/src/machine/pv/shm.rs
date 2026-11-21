@@ -26,12 +26,12 @@
 // that yields without marking its wait is owed no wakeup, so on a busy host it
 // can stay descheduled long after its peer publishes, while a thread asleep
 // on its pipe wakes when the byte lands; strategies yield only briefly.
-// The default strategy spins briefly and parks sooner after repeated waits
-// without progress.
+// A VM can spin across the gap between rounds. The coordinator uses a
+// shorter spin. Both park sooner after repeated waits without progress.
 use super::protocol::{self, Response};
 use seedbox_machine::host::{
     doorbell::Ringer,
-    idle::{Action, Idle, IdleStrategy, Outcome},
+    idle::{Action, Idle, IdleStrategy, Outcome, SpinThenSleep},
 };
 use std::{
     io::{self, Read, Write},
@@ -42,7 +42,7 @@ use std::{
     process::Command,
     ptr::NonNull,
     sync::atomic::{AtomicU64, Ordering::SeqCst},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 type Result<T> = std::result::Result<T, String>;
@@ -52,6 +52,9 @@ type Result<T> = std::result::Result<T, String>;
 pub(super) const DESCRIPTOR: i32 = 196;
 /// Bytes in each ring; a longer message passes through in pieces.
 pub(super) const CAPACITY: u64 = 256 << 10;
+/// Workers wait between requests across whole Driver rounds. Park after this
+/// bounded spin, or sooner when consecutive spins have found no work.
+const WORKER_SPIN: Duration = Duration::from_micros(1000);
 /// Control words, each on its own 128-byte line, fill the first 16 KiB. The
 /// request ring follows, then the response ring.
 const LINE: usize = 128;
@@ -198,7 +201,8 @@ pub(crate) fn accept<R: Read + AsRawFd, W: Write>(
     };
     protocol::send(&mut wake, &answer)?;
     let (region, bell) = attached?;
-    let mut stream = Stream::new(region, Side::Worker, sleep, wake, Idle::DEFAULT.build());
+    let idle = Box::new(SpinThenSleep::new(WORKER_SPIN));
+    let mut stream = Stream::new(region, Side::Worker, sleep, wake, idle);
     stream.bell = Some(bell);
     Ok(stream)
 }
