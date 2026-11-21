@@ -34,7 +34,10 @@ impl Mode {
 }
 
 // In a strategy trial, start the clock only after the worker has entered its
-// selected spin tier. The additional mapping keeps the notification word live.
+// selected spin tier, and keep it there instead of asleep. The additional
+// mapping keeps the notification word live. A peer left waiting past TIMEOUT
+// has lost its parent: it then sleeps as its strategy says, and the transport
+// sees the end of its pipe.
 struct SpinningPeer {
     region: Region,
     policy: Idle,
@@ -53,7 +56,7 @@ impl IdleStrategy for SpinningPeer {
                 self.region.word(READY).store(seq, SeqCst);
             }
         }
-        if action == Action::Sleep {
+        if action == Action::Sleep && elapsed < TIMEOUT {
             Action::Spin
         } else {
             action
@@ -420,22 +423,23 @@ fn case(mode: Mode, size: usize, count: u64, capacity: u64) -> Result<()> {
 
 pub fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
-    if let [_, role, mode, size, count, capacity] = args.as_slice() {
-        if role == "peer" {
-            let mode = match mode.as_str() {
-                "ping-spin" => Mode::Spin,
-                "ping-park" => Mode::Park,
-                "one-way" => Mode::Bulk,
-                _ => return Err("unknown benchmark mode".into()),
-            };
-            let number = |what: &str| format!("benchmark peer {what}");
-            return peer(
-                mode,
-                size.parse().map_err(|_| number("size"))?,
-                count.parse().map_err(|_| number("count"))?,
-                capacity.parse().map_err(|_| number("capacity"))?,
-            );
-        }
+    if args.get(1).map(String::as_str) == Some("peer") {
+        let [mode, size, count, capacity] = &args[2..] else {
+            return Err("benchmark peer takes a mode, size, count and capacity".into());
+        };
+        let mode = match mode.as_str() {
+            "ping-spin" => Mode::Spin,
+            "ping-park" => Mode::Park,
+            "one-way" => Mode::Bulk,
+            _ => return Err("unknown benchmark mode".into()),
+        };
+        let number = |what: &str| format!("benchmark peer {what}");
+        return peer(
+            mode,
+            size.parse().map_err(|_| number("size"))?,
+            count.parse().map_err(|_| number("count"))?,
+            capacity.parse().map_err(|_| number("capacity"))?,
+        );
     }
     let capacity = std::env::var("PV_BENCH_CAPACITY").map_or(Ok(CAPACITY), |s| {
         s.parse().map_err(|e| format!("benchmark capacity: {e}"))
