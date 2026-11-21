@@ -8,7 +8,7 @@
 //! process) is not lent to a worker thread: the Driver's thread starts its
 //! run, keeps it in flight beside the others, and finishes whichever stops
 //! first, so a round crosses no thread inside the Driver.
-use super::batch::{BatchBounds, RunResult};
+use super::batch::RunResult;
 use super::round::Runs;
 use super::*;
 
@@ -26,7 +26,9 @@ struct Arrival {
 struct LaneRun {
     start: Timestamp,
     upto: Timestamp,
-    bounds: BatchBounds,
+    machine_start: Timestamp,
+    machine_bound: Timestamp,
+    offered: usize,
     offered_commands: Vec<(MachineId, NonZeroU32, Timestamp)>,
     offered_stops: Vec<NonZeroU32>,
 }
@@ -204,15 +206,18 @@ where
             let ids = [id];
             let offered_commands = self.offered_commands(&ids);
             let offered_stops = self.offered_stops(&ids);
-            let (bounds, mut views) = self.batch_views(&ids, start, upto)?;
-            let view = views.pop().expect("one lane view");
+            let view = self.batch_view(id, start, upto)?;
+            let (_, machine_start, machine_bound, ref inbox) = view;
+            let offered = inbox.len();
             self.submit_run(view, runs);
             window.running.insert(
                 id,
                 LaneRun {
                     start,
                     upto,
-                    bounds,
+                    machine_start,
+                    machine_bound,
+                    offered,
                     offered_commands,
                     offered_stops,
                 },
@@ -228,12 +233,16 @@ where
         result: RunResult<M>,
         run: LaneRun,
     ) -> Result<(), Error<M::Error>> {
-        let id = result.id;
-        let (start, bound, offered) = run.bounds[&id];
-        let report = self.receive_run(result, offered);
-        let accepted = self.accept_run(report, start, bound, run.start, run.upto)?;
+        let report = self.receive_run(result, run.offered);
+        let accepted = self.accept_run(
+            report,
+            run.machine_start,
+            run.machine_bound,
+            run.start,
+            run.upto,
+        )?;
         self.confirm_offered_commands(&run.offered_commands, run.upto, None)?;
-        self.commit_runs(vec![accepted], &run.offered_stops, None);
+        self.commit_runs([accepted], &run.offered_stops, None);
         Ok(())
     }
 }

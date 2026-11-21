@@ -107,6 +107,24 @@ fn an_executor_inherits_the_doorbell_at_its_descriptors() {
         "host::doorbell::tests::an_executor_inherits_the_doorbell_at_its_descriptors",
     ]);
     bell.inherit(&mut command).unwrap();
-    assert!(command.status().unwrap().success());
+    assert!(seedbox_test::process::status(&mut command)
+        .unwrap()
+        .success());
     assert!(coordinator.rung());
+}
+
+#[test]
+fn an_unwatched_publisher_cannot_claim_the_ticket() {
+    let bell = Doorbell::create().unwrap();
+    let ringer = bell.ringer().unwrap();
+    let armed = bell.words.word(ASLEEP);
+    let ticket = 27;
+    armed.store(ticket, SeqCst);
+    ringer.ring(&AtomicU64::new(ticket - 1)).unwrap();
+    assert_eq!(armed.load(SeqCst), ticket);
+    ringer.ring(&AtomicU64::new(ticket)).unwrap();
+    assert_eq!(armed.load(SeqCst), 0);
+    let mut bytes = [0; 8];
+    std::io::Read::read_exact(&mut &bell.read, &mut bytes).unwrap();
+    assert_eq!(u64::from_ne_bytes(bytes), ticket);
 }

@@ -63,7 +63,7 @@ where
         if runs.bell.is_none() {
             runs.bell = Doorbell::existing().and_then(Doorbell::claim);
         }
-        let wait = Instant::now();
+        let mut wait = Instant::now();
         let mut attempt = 0;
         loop {
             // Mark before scanning. A reply racing any ring read will
@@ -71,11 +71,23 @@ where
             if let Some(bell) = runs.bell.as_mut() {
                 bell.mark();
             }
-            if let Some(i) = runs.flying.iter_mut().position(Flight::ready) {
+            let mut i = 0;
+            while i < runs.flying.len() {
+                let result = match runs.flying[i].ready() {
+                    Ok(false) => {
+                        i += 1;
+                        continue;
+                    }
+                    Ok(true) => runs.flying.remove(i).finish(self.workers.caller()),
+                    Err(error) => runs.flying.remove(i).result(Err(error)),
+                };
+                runs.finished.push_back(result);
+            }
+            if let Some(result) = runs.finished.pop_front() {
                 if attempt > 0 {
                     self.workers.idle().reset(Outcome::Progress);
                 }
-                return runs.flying.remove(i).finish(self.workers.caller());
+                return result;
             }
             if let Some(result) = runs.lent.as_mut().and_then(|s| self.workers.try_next(s)) {
                 return result;
@@ -109,6 +121,7 @@ where
                         }) {
                             Ok(Wake::Published) => {
                                 attempt = 0;
+                                wait = Instant::now();
                                 continue;
                             }
                             Ok(Wake::Exited(i)) => {

@@ -67,14 +67,14 @@ impl<M: Machine> Flight<M> {
     }
 
     /// Whether the run has stopped, so that finishing it will not wait.
-    pub(super) fn ready(&mut self) -> bool {
+    pub(super) fn ready(&mut self) -> Result<bool, Error<M::Error>> {
         catch_unwind(AssertUnwindSafe(|| {
             self.machine
                 .split_run()
                 .expect("split run in flight")
                 .ready()
         }))
-        .unwrap_or(true)
+        .map_err(|_| Error::Panicked { id: self.id })
     }
 
     pub(super) fn watch_reply(&mut self, ticket: u64) -> Option<std::os::fd::RawFd> {
@@ -91,7 +91,7 @@ impl<M: Machine> Flight<M> {
         self.result(stopped)
     }
 
-    fn result(self, stopped: Result<StopReason, Error<M::Error>>) -> RunResult<M> {
+    pub(super) fn result(self, stopped: Result<StopReason, Error<M::Error>>) -> RunResult<M> {
         RunResult {
             id: self.id,
             remaining: self.inbox.len(),
@@ -227,24 +227,35 @@ where
         let mut bounds = BTreeMap::new();
         let mut views = Vec::with_capacity(ids.len());
         for &id in ids {
-            let entry = &self.execution.machines[id.0];
-            let start = entry.machine_time(id, now)?;
-            let bound = entry.machine_time(id, upto)?;
-            let anchor = Timestamp::from_nanos(entry.time.anchor());
-            let inbox = entry
-                .inbox
-                .iter()
-                .map(|input| {
-                    Ok(Input {
-                        at: entry.machine_time(id, input.at.max(anchor))?.min(start),
-                        payload: input.payload.clone(),
-                    })
-                })
-                .collect::<Result<VecDeque<_>, ClockOverflow>>()?;
-            bounds.insert(id, (start, bound, inbox.len()));
-            views.push((id, start, bound, inbox));
+            let view = self.batch_view(id, now, upto)?;
+            bounds.insert(id, (view.1, view.2, view.3.len()));
+            views.push(view);
         }
         Ok((bounds, views))
+    }
+
+    /// Inputs and bounds for one machine, also used directly by a lane.
+    pub(super) fn batch_view(
+        &self,
+        id: MachineId,
+        now: Timestamp,
+        upto: Timestamp,
+    ) -> Result<BatchView, Error<M::Error>> {
+        let entry = &self.execution.machines[id.0];
+        let start = entry.machine_time(id, now)?;
+        let bound = entry.machine_time(id, upto)?;
+        let anchor = Timestamp::from_nanos(entry.time.anchor());
+        let inbox = entry
+            .inbox
+            .iter()
+            .map(|input| {
+                Ok(Input {
+                    at: entry.machine_time(id, input.at.max(anchor))?.min(start),
+                    payload: input.payload.clone(),
+                })
+            })
+            .collect::<Result<VecDeque<_>, ClockOverflow>>()?;
+        Ok((id, start, bound, inbox))
     }
 
     /// Run every view on the workers and return each machine and its RNG to
@@ -509,7 +520,7 @@ where
     /// timer, and staged outputs.
     pub(super) fn commit_runs(
         &mut self,
-        accepted: Vec<AcceptedRun>,
+        accepted: impl IntoIterator<Item = AcceptedRun>,
         offered_stops: &[NonZeroU32],
         rebooting: Option<u64>,
     ) {
