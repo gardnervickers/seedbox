@@ -66,6 +66,9 @@ impl SplitRun<(), String> for Native {
             .start(context, upto)
             .map_err(|e| e.to_string())
     }
+    fn exit_fd(&mut self) -> Option<std::os::fd::RawFd> {
+        self.split_pv().exit_fd()
+    }
     fn ready(&mut self) -> bool {
         self.split_pv().ready()
     }

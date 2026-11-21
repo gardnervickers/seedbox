@@ -1203,10 +1203,16 @@ pub(crate) fn serve() -> Result<()> {
             Ok(answer) => answer,
             Err(error) => Response::Error(error),
         };
-        protocol::send(io.get_mut(), &response)?;
+        let ring = io.get_mut();
+        let mut claim = ring.claim().map_err(|e| e.to_string())?;
+        claim.header(&response)?;
         if let Some(writes) = writes {
-            super::wire::send_writes(io.get_mut(), &writes)?;
+            super::wire::send_writes(&mut claim, &writes)?;
         }
+        claim
+            .commit()
+            .and_then(|()| ring.finish_send())
+            .map_err(|e| format!("PV protocol write: {e}"))?;
     }
     Ok(())
 }

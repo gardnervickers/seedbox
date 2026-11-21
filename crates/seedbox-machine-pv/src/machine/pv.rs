@@ -1514,8 +1514,11 @@ impl Machine for PVMachine {
     }
 }
 impl SplitRun<(), std::io::Error> for PVMachine {
+    fn exit_fd(&mut self) -> Option<std::os::fd::RawFd> {
+        self.worker.as_ref().and_then(Occupant::doorbell)
+    }
     fn ready(&mut self) -> bool {
-        self.worker.as_ref().is_none_or(Occupant::ready)
+        self.worker.as_mut().is_none_or(Occupant::ready)
     }
     fn start(
         &mut self,

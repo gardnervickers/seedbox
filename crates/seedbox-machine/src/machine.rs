@@ -81,6 +81,12 @@ pub trait SplitRun<C, E> {
     /// the transport failure. Polling never advances guest time.
     fn ready(&mut self) -> bool;
 
+    /// A run that signals the process reply doorbell supplies its worker's
+    /// exit descriptor while in flight. EOF lets a parked caller collect an error.
+    fn exit_fd(&mut self) -> Option<std::os::fd::RawFd> {
+        None
+    }
+
     /// Collect the run, waiting if necessary. An error ends the execution.
     fn finish(&mut self, context: &mut RunContext<'_, C>) -> Result<StopReason, E>;
 }
