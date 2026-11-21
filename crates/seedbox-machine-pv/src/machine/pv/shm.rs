@@ -7,19 +7,19 @@
 //! only wakeups, and their EOF still means the peer exited.
 //!
 //! A side waiting for bytes or room follows its idle strategy
-//! ([`seedbox_machine::host::idle`]): it may spin or briefly yield, then marks
+//! ([`seedbox_machine::host::idle`]): it may spin for a bounded time, then marks
 //! that wait in the ring and blocks reading one byte from its pipe. A side that
 //! publishes bytes or frees room and finds the matching mark clears it and
 //! writes that byte, so every sleep takes exactly one wakeup.
 // While the peer answers within the spin, a call costs a cache-line handoff
-// instead of two cross-process wakeups and several pipe syscalls. A thread
-// that yields without marking its wait is owed no wakeup, so on a busy host it
-// can stay descheduled long after its peer publishes, while a thread asleep
-// on its pipe wakes when the byte lands; strategies yield only briefly.
+// instead of two cross-process wakeups and several pipe syscalls. The spin
+// never yields: a thread that yields without marking its wait is owed no
+// wakeup, so on a busy host it can stay descheduled long after its peer
+// publishes, while a thread asleep on its pipe wakes when the byte lands.
 // The default strategy spins briefly and parks sooner after repeated waits
 // without progress.
 use super::protocol::{self, Response};
-use seedbox_machine::host::idle::{Action, Idle, IdleStrategy, Outcome};
+use seedbox_machine::host::idle::{Action, IdleStrategy, Outcome, SpinThenSleep};
 use std::{
     io::{self, Read, Write},
     os::{
@@ -238,7 +238,7 @@ pub(crate) fn accept<R: Read, W: Write>(
         Side::Worker,
         sleep,
         wake,
-        Idle::DEFAULT.build(),
+        Box::new(SpinThenSleep::default()),
     ))
 }
 
@@ -318,37 +318,25 @@ impl<R: Read, W: Write> Stream<R, W> {
     }
     /// The client's end of an attached region.
     pub(super) fn client(region: Region, sleep: R, wake: W) -> Self {
-        Self::new(region, Side::Client, sleep, wake, Idle::DEFAULT.build())
+        let idle = Box::new(SpinThenSleep::default());
+        Self::new(region, Side::Client, sleep, wake, idle)
     }
-    /// Wait until control word `position` differs from `seen`: spin or yield
-    /// as the idle strategy says, then set the `mark` word and sleep on this
-    /// side's pipe. Returns the new position, or `None` if the peer exited
+    /// Wait until control word `position` differs from `seen`: spin as the
+    /// idle strategy says, then set the `mark` word and sleep on this side's
+    /// pipe. Returns the new position, or `None` if the peer exited
     /// without moving it.
     fn wait(&mut self, position: usize, seen: u64, mark: usize) -> io::Result<Option<u64>> {
         let word = self.region.word(position);
         let started = Instant::now();
         let mut attempt = 0;
-        loop {
-            match self.idle.idle(attempt, started.elapsed()) {
-                Action::Spin => {
-                    for _ in 0..64 {
-                        let now = word.load(SeqCst);
-                        if now != seen {
-                            self.idle.reset(Outcome::Progress);
-                            return Ok(Some(now));
-                        }
-                        std::hint::spin_loop();
-                    }
+        while self.idle.idle(attempt, started.elapsed()) == Action::Spin {
+            for _ in 0..64 {
+                let now = word.load(SeqCst);
+                if now != seen {
+                    self.idle.reset(Outcome::Progress);
+                    return Ok(Some(now));
                 }
-                Action::Yield => {
-                    std::thread::yield_now();
-                    let now = word.load(SeqCst);
-                    if now != seen {
-                        self.idle.reset(Outcome::Progress);
-                        return Ok(Some(now));
-                    }
-                }
-                Action::Sleep => break,
+                std::hint::spin_loop();
             }
             attempt += 1;
         }
