@@ -5,7 +5,7 @@ use super::batch::{BatchView, Flight, RunResult, Started};
 use super::workers::Stream;
 use super::*;
 use seedbox_machine::host::{
-    doorbell::{Coordinator, Doorbell, Wake},
+    doorbell::Wake,
     idle::{Action, Outcome},
 };
 
@@ -15,7 +15,6 @@ pub(super) struct Runs<M: Machine> {
     flying: Vec<Flight<M>>,
     finished: VecDeque<RunResult<M>>,
     lent: Option<Stream<Job<M>, RunResult<M>>>,
-    bell: Option<Coordinator<'static>>,
 }
 impl<M: Machine> Runs<M> {
     pub(super) fn new() -> Self {
@@ -23,7 +22,6 @@ impl<M: Machine> Runs<M> {
             flying: Vec::new(),
             finished: VecDeque::new(),
             lent: None,
-            bell: None,
         }
     }
 }
@@ -60,15 +58,12 @@ where
                 .next(runs.lent.as_mut().expect("outstanding jobs"))
                 .expect("job reports");
         }
-        if runs.bell.is_none() {
-            runs.bell = Doorbell::existing().and_then(Doorbell::claim);
-        }
         let mut wait = Instant::now();
         let mut attempt = 0;
         loop {
             // Mark before scanning. A reply racing any ring read will
             // either be observed here or invalidate the mark before park.
-            if let Some(bell) = runs.bell.as_mut() {
+            if let Some(bell) = self.workers.bell() {
                 bell.mark();
             }
             let mut i = 0;
@@ -94,8 +89,9 @@ where
             }
             match self.workers.idle().idle(attempt, wait.elapsed()) {
                 Action::Spin => {
+                    let bell = self.workers.bell();
                     for _ in 0..64 {
-                        if runs.bell.as_ref().is_none_or(Coordinator::rung) {
+                        if bell.as_ref().is_none_or(|bell| bell.rung()) {
                             break;
                         }
                         std::hint::spin_loop();
@@ -107,11 +103,9 @@ where
                     } else {
                         Outcome::SleptAfterTrying
                     });
-                    let watch = runs
-                        .bell
-                        .as_ref()
-                        .filter(|_| runs.lent.as_ref().is_none_or(|s| s.outstanding() == 0));
-                    if let Some(bell) = watch {
+                    // A lent job reports through its channel, not the doorbell.
+                    let lent = runs.lent.as_ref().is_some_and(|s| s.outstanding() > 0);
+                    if let Some(bell) = self.workers.bell().filter(|_| !lent) {
                         match bell.park(|ticket| {
                             runs.flying
                                 .iter_mut()

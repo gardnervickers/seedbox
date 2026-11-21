@@ -63,9 +63,11 @@ struct Bell {
     thread: Option<std::thread::JoinHandle<()>>,
     /// The executor's exit descriptor; its write end stays open.
     exit: (std::io::PipeReader, std::io::PipeWriter),
+    /// Come back only once the Driver has subscribed the run to a park.
+    parked: bool,
 }
 impl Bell {
-    fn new() -> Self {
+    fn new(parked: bool) -> Self {
         let doorbell = Doorbell::process().expect("process doorbell");
         Self {
             ringer: Arc::new(doorbell.ringer().unwrap()),
@@ -73,6 +75,7 @@ impl Bell {
             ticket: Default::default(),
             thread: None,
             exit: std::io::pipe().unwrap(),
+            parked,
         }
     }
 }
@@ -181,7 +184,17 @@ impl SplitRun<(), std::io::Error> for Net {
             bell.back.store(false, SeqCst);
             let (back, ringer) = (bell.back.clone(), bell.ringer.clone());
             let ticket = bell.ticket.clone();
+            // The last park's ticket: this run's park names a later one.
+            let earlier = bell.parked.then(|| ticket.load(SeqCst));
             bell.thread = Some(std::thread::spawn(move || {
+                if let Some(earlier) = earlier {
+                    seedbox_test_time::HangGuard::new(
+                        "the Driver subscribes its run in flight to a park",
+                        Duration::from_secs(60),
+                    )
+                    .wait_for(|| (ticket.load(SeqCst) != earlier).then_some(()))
+                    .unwrap();
+                }
                 back.store(true, SeqCst);
                 ringer.ring(&ticket).unwrap();
             }));
@@ -222,6 +235,7 @@ struct Spec {
     answer: Option<[u8; 6]>,
     split: bool,
     bell: bool,
+    parked: bool,
 }
 fn spec(nic: Option<u8>) -> Spec {
     Spec {
@@ -232,6 +246,7 @@ fn spec(nic: Option<u8>) -> Spec {
         answer: None,
         split: false,
         bell: false,
+        parked: false,
     }
 }
 impl Spec {
@@ -244,6 +259,13 @@ impl Spec {
         self.split = true;
         self.bell = true;
         self
+    }
+    /// As [`Spec::bell`], coming back only once the Driver has parked: a
+    /// Driver that waits any other way never sees the run stop. Every machine
+    /// of the world must split, since the Driver parks with no lent job out.
+    fn parked(mut self) -> Self {
+        self.parked = true;
+        self.bell()
     }
     fn send(self, at: u64, bytes: Vec<u8>) -> Self {
         self.emit(at, Response::TransmitFrame { bytes })
@@ -314,7 +336,7 @@ fn world(
                     split: spec.split,
                     flight: None,
                     polls: 0,
-                    bell: spec.bell.then(Bell::new),
+                    bell: spec.bell.then(|| Bell::new(spec.parked)),
                 },
             )
         })
@@ -1585,6 +1607,23 @@ fn echo_world(workers: usize, split: [bool; 3]) -> Observed {
 /// ringing the doorbell if `bell`, and the Driver spinning for `spin` before
 /// each sleep.
 fn echo_world_waiting(workers: usize, split: [bool; 3], spin: Duration, bell: bool) -> Observed {
+    let back = |spec: Spec, splits| match (splits, bell) {
+        (false, _) => spec,
+        (true, false) => spec.split(),
+        (true, true) => spec.bell(),
+    };
+    echo_world_as(workers, back, split, spin).0
+}
+
+/// The echo world with each machine's spec passed through `split` with its
+/// place in `split_machines`; also returns the parks of the Driver that a
+/// ring ended and the split runs it finished.
+fn echo_world_as(
+    workers: usize,
+    split: impl Fn(Spec, bool) -> Spec,
+    split_machines: [bool; 3],
+    spin: Duration,
+) -> (Observed, u64, usize) {
     let config = NetworkConfig::new(Duration::from_millis(1), Duration::ZERO, 0).unwrap();
     let specs = vec![
         spec(Some(1))
@@ -1597,12 +1636,8 @@ fn echo_world_waiting(workers: usize, split: [bool; 3], spin: Duration, bell: bo
     ];
     let specs = specs
         .into_iter()
-        .zip(split)
-        .map(|(spec, split)| match (split, bell) {
-            (false, _) => spec,
-            (true, false) => spec.split(),
-            (true, true) => spec.bell(),
-        })
+        .zip(split_machines)
+        .map(|(spec, splits)| split(spec, splits))
         .collect();
     let (mut driver, log) = world(0, MS, workers, config, specs, Vec::new()).unwrap();
     driver.workers.set_idle(Box::new(SpinThenSleep::new(spin)));
@@ -1619,7 +1654,8 @@ fn echo_world_waiting(workers: usize, split: [bool; 3], spin: Duration, bell: bo
             Ok(())
         })
         .unwrap();
-    (seen, runs, received, evidence)
+    let woken = driver.workers.bell().map_or(0, |bell| bell.woken());
+    ((seen, runs, received, evidence), woken, log.finishes.len())
 }
 
 #[test]
@@ -1687,5 +1723,22 @@ fn doorbell_lanes_reach_the_same_results_spinning_or_sleeping_at_once() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn runs_that_stop_only_for_a_parked_driver_are_woken_through_the_doorbell() {
+    let lent = echo_world(1, [false; 3]);
+    for spin in [SpinThenSleep::SPIN, Duration::ZERO] {
+        let back = |spec: Spec, _| spec.parked();
+        let (observed, woken, finishes) = echo_world_as(1, back, [true; 3], spin);
+        assert_eq!(observed, lent, "{spin:?}");
+        // No run stops before a park names it, and one park names at most
+        // every machine's run.
+        assert!(finishes > 20, "{finishes} split runs");
+        assert!(
+            woken as usize * 3 >= finishes,
+            "{woken} parks ended {finishes} runs"
+        );
     }
 }
