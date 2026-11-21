@@ -565,8 +565,11 @@ pub(super) fn receive<R: Read, W: Write, H: serde::de::DeserializeOwned, T>(
             .word(ring.incoming.word(MESSAGE_END))
             .load(SeqCst);
         if ring.readable == end && available <= size - start {
-            // SAFETY: the interval was published by the producer. The read
+            // SAFETY: the interval was published by the producer, which
+            // writes there again only once the read cursor passes it. The
             // cursor stays pinned until decode has returned its owned result.
+            // This rests on the peer keeping to the protocol: it is Seedbox's
+            // own worker or client, never the guest.
             let bytes = unsafe {
                 std::slice::from_raw_parts(ring.region.data(ring.incoming).add(start), available)
             };
@@ -715,7 +718,8 @@ impl<'a, R: Read, W: Write> Claim<'a, R, W> {
         if room >= 128 {
             let data = self.stream.region.data(self.stream.outgoing);
             // SAFETY: the claim exclusively owns this contiguous unpublished
-            // interval until commit. No read or credit can expose the interval.
+            // interval until commit. No read or credit can expose the interval
+            // to a peer that keeps to the protocol, as Seedbox's own does.
             let mut slice = unsafe { std::slice::from_raw_parts_mut(data.add(start), room) };
             match serde_json::to_writer(&mut slice, value) {
                 Ok(()) => {
