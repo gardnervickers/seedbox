@@ -17,8 +17,8 @@
 //! workers can park in one place.
 //!
 //! A side waiting for bytes or room follows its idle strategy
-//! ([`seedbox_machine::host::idle`]): it may spin or briefly yield, then marks
-//! that wait in the ring and blocks reading one byte from its pipe. A side that
+//! ([`seedbox_machine::host::idle`]). Spinners periodically poll the pipe for
+//! hangup. A side that parks marks its wait and reads one byte from its pipe. A side that
 //! publishes bytes or frees room and finds the matching mark clears it and
 //! writes that byte, so every sleep takes exactly one wakeup.
 // While the peer answers within the spin, a call costs a cache-line handoff
@@ -36,7 +36,7 @@ use seedbox_machine::host::{
 use std::{
     io::{self, Read, Write},
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::process::CommandExt,
     },
     process::Command,
@@ -182,7 +182,7 @@ pub(super) fn inherit(descriptor: OwnedFd, command: &mut Command) -> Result<()> 
 /// The worker's end of start-up: map the region the client passed, and the
 /// process doorbell if it passed one, answer its attach request on `wake`,
 /// then serve through the region.
-pub(crate) fn accept<R: Read, W: Write>(
+pub(crate) fn accept<R: Read + AsRawFd, W: Write>(
     capacity: u64,
     sleep: R,
     mut wake: W,
@@ -247,6 +247,9 @@ pub(crate) struct Stream<R, W> {
     incoming: Ring,
     outgoing: Ring,
     sleep: R,
+    /// Borrowed from `sleep`, which remains in this stream until drop.
+    peer: RawFd,
+    empty_polls: u64,
     wake: W,
     idle: Box<dyn IdleStrategy>,
     /// Incoming bytes read, and the peer's written position as last seen.
@@ -270,12 +273,17 @@ impl<R: Read, W: Write> Stream<R, W> {
         sleep: R,
         wake: W,
         idle: Box<dyn IdleStrategy>,
-    ) -> Self {
+    ) -> Self
+    where
+        R: AsRawFd,
+    {
         let (incoming, outgoing) = side.rings();
         Self {
             region,
             incoming,
             outgoing,
+            peer: sleep.as_raw_fd(),
+            empty_polls: 0,
             sleep,
             wake,
             idle,
@@ -289,7 +297,10 @@ impl<R: Read, W: Write> Stream<R, W> {
         }
     }
     /// The client's end of an attached region.
-    pub(super) fn client(region: Region, sleep: R, wake: W) -> Self {
+    pub(super) fn client(region: Region, sleep: R, wake: W) -> Self
+    where
+        R: AsRawFd,
+    {
         Self::new(region, Side::Client, sleep, wake, Idle::DEFAULT.build())
     }
     /// Wait until control word `position` differs from `seen`: spin or yield
@@ -301,6 +312,10 @@ impl<R: Read, W: Write> Stream<R, W> {
         let started = Instant::now();
         let mut attempt = 0;
         loop {
+            if peer_exited(self.peer, attempt)? {
+                let now = word.load(SeqCst);
+                return Ok((now != seen).then_some(now));
+            }
             match self.idle.idle(attempt, started.elapsed()) {
                 Action::Spin => {
                     for _ in 0..64 {
@@ -426,8 +441,16 @@ impl<R: Read, W: Write> Stream<R, W> {
     pub(super) fn poll_message(&mut self, prefix: &mut Vec<u8>) -> io::Result<bool> {
         let written = self.region.word(self.incoming.word(WRITTEN)).load(SeqCst);
         if written == self.read {
+            self.empty_polls = self.empty_polls.wrapping_add(1);
+            // A peer can commit its last reply just before closing.
+            if peer_exited(self.peer, self.empty_polls)?
+                && self.region.word(self.incoming.word(WRITTEN)).load(SeqCst) == self.read
+            {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
             return Ok(false);
         }
+        self.empty_polls = 0;
         let end = self
             .region
             .word(self.incoming.word(MESSAGE_END))
@@ -474,6 +497,27 @@ impl<R: Read, W: Write> Stream<R, W> {
         Ok(())
     }
 }
+/// A pipe hangup is visible even to a pure spinner. Amortize the host call
+/// across empty scans. Short waits normally complete entirely in memory.
+fn peer_exited(peer: RawFd, attempt: u64) -> io::Result<bool> {
+    if attempt == 0 || !attempt.is_multiple_of(256) {
+        return Ok(false);
+    }
+    let mut fd = libc::pollfd {
+        fd: peer,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: the stream owns the pipe and the pollfd is valid for this call.
+    if unsafe { libc::poll(&mut fd, 1, 0) } < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    Ok(fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0)
+}
+
 /// Take one wakeup; false at EOF.
 fn doorbell(sleep: &mut impl Read) -> io::Result<bool> {
     let mut byte = [0];

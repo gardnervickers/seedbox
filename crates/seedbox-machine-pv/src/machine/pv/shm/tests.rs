@@ -298,3 +298,30 @@ fn polling_fragments_preserves_a_wrapped_header_and_large_trailer() {
         prefix.clear();
     }
 }
+
+#[test]
+fn polling_a_dead_worker_observes_eof_without_parking() {
+    bounded("a polling client observes the worker's pipe hangup", || {
+        for bytes in [0, 96] {
+            let (mut client, mut worker) = pair_waiting(64, Wait::Strategy(Idle::BusySpin));
+            if bytes > 0 {
+                let mut claim = worker.claim().unwrap();
+                claim.write_all(&vec![7; bytes]).unwrap();
+                claim.commit().unwrap();
+            }
+            drop(worker);
+            let mut prefix = Vec::new();
+            loop {
+                match client.poll_message(&mut prefix) {
+                    Ok(false) => continue,
+                    Ok(true) => panic!("no complete reply was published"),
+                    Err(error) => {
+                        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+                        assert_eq!(prefix, vec![7; bytes.min(64)]);
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}

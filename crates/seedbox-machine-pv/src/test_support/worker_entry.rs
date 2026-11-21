@@ -144,7 +144,7 @@ pub fn preboot_requests(binary: &Path) {
 /// The worker's end of the client's shared region, for synthetic workers:
 /// answers `Attach { capacity }` on `wake` and returns the attached stream.
 #[cfg(seedbox_pv)]
-pub fn accept_transport<R: std::io::Read, W: Write>(
+pub fn accept_transport<R: std::io::Read + std::os::fd::AsRawFd, W: Write>(
     capacity: u64,
     sleep: R,
     wake: W,

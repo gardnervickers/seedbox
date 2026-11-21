@@ -56,7 +56,7 @@ pub enum Idle {
     /// [`IdleSpin`]: a long spin while the host has idle cores, else
     /// `SpinThenSleep`.
     IdleSpin,
-    /// [`BusySpin`]: no sleep while the host has idle cores.
+    /// [`BusySpin`]: poll continuously without sleeping.
     BusySpin,
     /// [`Backoff`]: spin, then yield, then sleep.
     Backoff,
@@ -74,7 +74,7 @@ impl Idle {
         match self {
             Self::SpinThenSleep => Box::new(SpinThenSleep::default()),
             Self::IdleSpin => Box::new(IdleSpin::default()),
-            Self::BusySpin => Box::new(BusySpin::default()),
+            Self::BusySpin => Box::new(BusySpin),
             Self::Backoff => Box::new(Backoff::default()),
         }
     }
@@ -184,24 +184,13 @@ impl IdleStrategy for IdleSpin {
     }
 }
 
-/// Spin while the host has [`IDLE_CORES`] idle cores, so a waiting thread
-/// costs a whole core; sleep once it has fewer. A wait still sleeps after
-/// [`BusySpin::LIMIT`], far beyond a round, so that a sleeping caller can
-/// notice a peer that exited.
+/// Dedicate the calling thread to polling. PV observes its peer's exit on
+/// the transport even if the idle policy never parks.
 #[derive(Default)]
-pub struct BusySpin {
-    cores: IdleCores,
-}
-impl BusySpin {
-    pub const LIMIT: Duration = Duration::from_millis(10);
-}
+pub struct BusySpin;
 impl IdleStrategy for BusySpin {
-    fn idle(&mut self, attempt: u64, waited: Duration) -> Action {
-        if attempt == 0 || waited < Self::LIMIT && self.cores.idle() >= IDLE_CORES {
-            Action::Spin
-        } else {
-            Action::Sleep
-        }
+    fn idle(&mut self, _: u64, _: Duration) -> Action {
+        Action::Spin
     }
     fn reset(&mut self, _: Outcome) {}
 }
@@ -284,12 +273,17 @@ mod tests {
     }
 
     #[test]
-    fn every_strategy_tries_once_then_bounds_its_wait() {
+    fn every_strategy_spins_initially_and_only_busy_spin_keeps_spinning() {
         for idle in Idle::ALL {
             let mut strategy = idle.build();
             assert_eq!(strategy.idle(0, Duration::ZERO), Action::Spin, "{idle:?}");
             let action = strategy.idle(1_000_000, Duration::from_secs(10));
-            assert_eq!(action, Action::Sleep, "{idle:?} bounds its wait");
+            let expected = if idle == Idle::BusySpin {
+                Action::Spin
+            } else {
+                Action::Sleep
+            };
+            assert_eq!(action, expected, "{idle:?}");
         }
     }
 }
