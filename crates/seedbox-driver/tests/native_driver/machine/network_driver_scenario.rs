@@ -357,9 +357,13 @@ pub(crate) fn check_worker_invariance(one: &Run, other: &Run) {
 /// destination address and port, sequence number and payload length.
 type Segment = (usize, [u8; 4], u16, [u8; 4], u16, u32, usize);
 
-/// Parse an unfragmented Ethernet II IPv4 TCP frame carrying a nonempty
-/// payload. Anything malformed, truncated or fragmented is `None`.
-fn segment(from: usize, frame: &[u8]) -> Option<Segment> {
+/// A TCP flow: source address and port, destination address and port.
+type Flow = ([u8; 4], u16, [u8; 4], u16);
+
+/// Parse an unfragmented Ethernet II IPv4 TCP frame into its flow, TCP
+/// header (options included) and payload length. Anything malformed,
+/// truncated or fragmented is `None`.
+fn tcp(frame: &[u8]) -> Option<(Flow, &[u8], usize)> {
     if frame.get(12..14)? != [0x08, 0x00] {
         return None;
     }
@@ -381,19 +385,59 @@ fn segment(from: usize, frame: &[u8]) -> Option<Segment> {
     if offset < 20 || offset > tcp.len() {
         return None;
     }
-    let payload = Some(tcp.len() - offset).filter(|&n| n > 0)?;
     let address = |at: usize| -> [u8; 4] { ip[at..at + 4].try_into().unwrap() };
     let port = |at: usize| u16::from_be_bytes([tcp[at], tcp[at + 1]]);
-    let sequence = u32::from_be_bytes(tcp[4..8].try_into().unwrap());
-    Some((
-        from,
-        address(12),
-        port(0),
-        address(16),
-        port(2),
-        sequence,
-        payload,
-    ))
+    let flow = (address(12), port(0), address(16), port(2));
+    Some((flow, &tcp[..offset], tcp.len() - offset))
+}
+
+/// Parse an unfragmented Ethernet II IPv4 TCP frame carrying a nonempty
+/// payload. Anything malformed, truncated or fragmented is `None`.
+fn segment(from: usize, frame: &[u8]) -> Option<Segment> {
+    let ((source, sport, destination, dport), header, payload) = tcp(frame)?;
+    let payload = Some(payload).filter(|&n| n > 0)?;
+    let sequence = u32::from_be_bytes(header[4..8].try_into().unwrap());
+    Some((from, source, sport, destination, dport, sequence, payload))
+}
+
+/// The duplicate range a TCP acknowledgment reports (RFC 2883 D-SACK), keyed
+/// by the flow of the data it acknowledges: a first SACK block below the
+/// cumulative acknowledgment, or one inside the second block. Only a receiver
+/// that already had those bytes sends one.
+fn dsack(frame: &[u8]) -> Option<(Flow, u32, u32)> {
+    let ((source, sport, destination, dport), header, _) = tcp(frame)?;
+    if header[13] & 0x10 == 0 {
+        return None;
+    }
+    let ack = u32::from_be_bytes(header[8..12].try_into().unwrap());
+    let mut options = &header[20..];
+    let blocks = loop {
+        match *options.first()? {
+            0 => return None,
+            1 => options = &options[1..],
+            kind => {
+                let length = usize::from(*options.get(1)?);
+                if length < 2 || length > options.len() {
+                    return None;
+                }
+                if kind == 5 {
+                    break &options[2..length];
+                }
+                options = &options[length..];
+            }
+        }
+    };
+    let block = |at: usize| -> Option<(u32, u32)> {
+        let edge = |at: usize| Some(u32::from_be_bytes(blocks.get(at..at + 4)?.try_into().ok()?));
+        Some((edge(at)?, edge(at + 4)?))
+    };
+    let before = |a: u32, b: u32| (a.wrapping_sub(b) as i32) < 0;
+    let (left, right) = block(0)?;
+    let duplicate = before(left, ack)
+        || block(8).is_some_and(|(outer_left, outer_right)| {
+            !before(left, outer_left) && !before(outer_right, right)
+        });
+    duplicate.then_some(((destination, dport, source, sport), left, right))
 }
 
 impl Run {
@@ -566,6 +610,49 @@ impl Run {
         // The first event cannot repeat an earlier segment.
         self.tcp_retransmissions_between(0, self.events.len())
     }
+
+    /// TCP data segments sent again that no later D-SACK from their receiver
+    /// covers: resends of bytes the receiver did not already have. A spurious
+    /// resend, such as a tail-loss probe racing its acknowledgment, is
+    /// reported back as a duplicate and so is not counted.
+    pub(crate) fn tcp_unexplained_retransmissions(&self) -> usize {
+        let before = |a: u32, b: u32| (a.wrapping_sub(b) as i32) < 0;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut resent = Vec::new();
+        let mut duplicates = Vec::new();
+        for (position, event) in self.events.iter().enumerate() {
+            let EventKind::Output(output) = &event.kind else {
+                continue;
+            };
+            let Response::TransmitFrame { bytes } = &output.payload else {
+                continue;
+            };
+            if let Some((_, source, sport, destination, dport, sequence, length)) =
+                segment(0, bytes)
+            {
+                let flow = (source, sport, destination, dport);
+                if !seen.insert((flow, sequence)) {
+                    resent.push((
+                        position,
+                        flow,
+                        sequence,
+                        sequence.wrapping_add(length as u32),
+                    ));
+                }
+            }
+            if let Some(duplicate) = dsack(bytes) {
+                duplicates.push((position, duplicate));
+            }
+        }
+        resent
+            .into_iter()
+            .filter(|&(sent, flow, start, end)| {
+                !duplicates.iter().any(|&(at, (of, left, right))| {
+                    at > sent && of == flow && before(left, end) && before(start, right)
+                })
+            })
+            .count()
+    }
 }
 
 /// Partition evidence, by publication (routing) order rather than stamps:
@@ -667,7 +754,13 @@ pub(crate) fn clean_exchange(runner: impl Fn(&Scenario) -> Run) {
     let run = both(&runner, Scenario::default());
     let transcript = check(&run);
     // On ARM64 Linux the server probes the tail of a flight while the client's
-    // covering ACK is already on the return link. Both sends must be routed.
+    // covering ACK is already on the return link. Both sends must be routed,
+    // and the client must report the probe as a duplicate: nothing was lost.
+    assert_eq!(
+        run.tcp_unexplained_retransmissions(),
+        0,
+        "a clean link lost TCP data"
+    );
     let mut last_due = [None; 2];
     let mut routes = run.routes.iter();
     for (sent, from, to, _, _) in transcript.frames {
@@ -700,7 +793,8 @@ pub(crate) fn seeded_loss(runner: impl Fn(&Scenario) -> Run) {
         },
     );
     check(&run);
-    assert!(run.tcp_retransmissions() > 0);
+    // Some resends replace dropped data, which the receiver never had.
+    assert!(run.tcp_unexplained_retransmissions() > 0);
 }
 
 /// A partition 2 ms after the barrier at which the client's first TCP data
@@ -1106,6 +1200,71 @@ mod tests {
         );
         assert_eq!(run.client_exit(), None);
         assert!(std::panic::catch_unwind(|| check(&run)).is_err());
+    }
+
+    /// A server-to-client acknowledgment of `ack` carrying `options`.
+    fn server_ack(ack: u32, options: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0; 14];
+        bytes[12..14].copy_from_slice(&[0x08, 0x00]);
+        let header = 20 + options.len();
+        let mut ip = vec![
+            0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2,
+        ];
+        ip[2..4].copy_from_slice(&((20 + header) as u16).to_be_bytes());
+        let mut tcp = vec![0; 20];
+        tcp[0..2].copy_from_slice(&7000u16.to_be_bytes());
+        tcp[2..4].copy_from_slice(&40000u16.to_be_bytes());
+        tcp[8..12].copy_from_slice(&ack.to_be_bytes());
+        tcp[12] = ((header / 4) as u8) << 4;
+        tcp[13] = 0x10;
+        bytes.extend(ip);
+        bytes.extend(tcp);
+        bytes.extend(options);
+        bytes
+    }
+
+    /// SACK option bytes, after two NOPs, for `blocks`.
+    fn sack(blocks: &[(u32, u32)]) -> Vec<u8> {
+        let mut bytes = vec![1, 1, 5, (2 + 8 * blocks.len()) as u8];
+        for (left, right) in blocks {
+            bytes.extend(left.to_be_bytes());
+            bytes.extend(right.to_be_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn duplicate_reports_are_recognized_and_keyed_by_the_data_flow() {
+        let flow = ([10, 0, 0, 2], 40000, [10, 0, 0, 1], 7000);
+        // A first block below the cumulative acknowledgment is a D-SACK,
+        // also across sequence wraparound.
+        assert_eq!(
+            dsack(&server_ack(200, &sack(&[(100, 200)]))),
+            Some((flow, 100, 200))
+        );
+        assert_eq!(
+            dsack(&server_ack(5, &sack(&[(u32::MAX - 10, 5)]))),
+            Some((flow, u32::MAX - 10, 5))
+        );
+        // A first block inside the second is a D-SACK above the acknowledgment.
+        assert_eq!(
+            dsack(&server_ack(100, &sack(&[(300, 400), (200, 500)]))),
+            Some((flow, 300, 400))
+        );
+        // Ordinary SACKs, acknowledgments without SACK, non-ACKs and
+        // malformed options are not.
+        assert_eq!(dsack(&server_ack(100, &sack(&[(200, 300)]))), None);
+        assert_eq!(
+            dsack(&server_ack(100, &sack(&[(200, 300), (400, 500)]))),
+            None
+        );
+        assert_eq!(dsack(&server_ack(200, &[1, 1, 1, 1])), None);
+        let mut no_ack = server_ack(200, &sack(&[(100, 200)]));
+        no_ack[14 + 20 + 13] = 0;
+        assert_eq!(dsack(&no_ack), None);
+        let mut truncated = sack(&[(100, 200)]);
+        truncated[3] = 40;
+        assert_eq!(dsack(&server_ack(200, &truncated)), None);
     }
 
     #[test]
