@@ -762,7 +762,32 @@ impl<'a, R: Read, W: Write> Claim<'a, R, W> {
     }
     /// Encode the length-prefixed JSON header directly into the claim.
     pub(super) fn header(&mut self, value: &impl serde::Serialize) -> Result<()> {
+        // Most headers fit before the wrap. Let serde write to a shrinking
+        // slice directly, then fill the length prefix. A header crossing the
+        // wrap or the limit of current credit uses the full claim writer.
         let at = self.used;
+        let size = self.stream.region.capacity as usize;
+        let start = (self.stream.written as usize + at + 4) & (size - 1);
+        let room = self.capacity.saturating_sub(at + 4).min(size - start);
+        if room >= 128 {
+            let data = self.stream.region.data(self.stream.outgoing);
+            // SAFETY: the claim exclusively owns this contiguous unpublished
+            // interval until commit. No read or credit can expose the interval.
+            let mut slice = unsafe { std::slice::from_raw_parts_mut(data.add(start), room) };
+            match serde_json::to_writer(&mut slice, value) {
+                Ok(()) => {
+                    let length = room - slice.len();
+                    if length > protocol::MAX_MESSAGE {
+                        return Err("PV protocol message too large".into());
+                    }
+                    self.copy(at, &(length as u32).to_le_bytes());
+                    self.used += 4 + length;
+                    return Ok(());
+                }
+                Err(error) if error.io_error_kind() == Some(io::ErrorKind::WriteZero) => {}
+                Err(error) => return Err(format!("PV encode: {error}")),
+            }
+        }
         self.write_all(&[0; 4]).map_err(|e| e.to_string())?;
         serde_json::to_writer(&mut *self, value).map_err(|e| format!("PV encode: {e}"))?;
         let len = self.used - at - 4;

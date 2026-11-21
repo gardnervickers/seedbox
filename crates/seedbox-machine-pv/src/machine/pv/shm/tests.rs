@@ -441,3 +441,19 @@ fn invalid_last_record_leaves_a_long_reply_unpublished() {
         0
     );
 }
+
+#[test]
+fn a_direct_json_header_can_wrap_its_prefix_or_outgrow_its_first_slice() {
+    for alignment in [252, 510] {
+        let (mut writer, mut reader) = pair(512, Duration::ZERO);
+        writer.write_all(&vec![0; alignment]).unwrap();
+        writer.flush().unwrap();
+        reader.read_exact(&mut vec![0; alignment]).unwrap();
+        let expected = vec![255_u8; 100];
+        let mut claim = writer.claim().unwrap();
+        claim.header(&expected).unwrap();
+        claim.commit().unwrap();
+        let got: Vec<u8> = protocol::receive(&mut reader).unwrap().unwrap();
+        assert_eq!(got, expected);
+    }
+}
