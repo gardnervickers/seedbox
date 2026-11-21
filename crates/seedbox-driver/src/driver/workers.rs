@@ -156,7 +156,7 @@ impl<C: 'static> Workers<C> {
                 pool: None,
                 threads,
                 caller,
-                idle: seedbox_machine::host::idle::Idle::DEFAULT.build(),
+                idle: Box::new(seedbox_machine::host::idle::SpinThenSleep::default()),
                 #[cfg(test)]
                 result_observer: None,
             });
@@ -205,7 +205,7 @@ impl<C: 'static> Workers<C> {
                 pool: Some(pool),
                 threads,
                 caller,
-                idle: seedbox_machine::host::idle::Idle::DEFAULT.build(),
+                idle: Box::new(seedbox_machine::host::idle::SpinThenSleep::default()),
                 #[cfg(test)]
                 result_observer: None,
             }),
@@ -349,8 +349,8 @@ impl<C: 'static> Workers<C> {
 
     /// Wait for runs in flight with `idle` instead.
     #[cfg(test)]
-    pub(super) fn set_idle(&mut self, idle: seedbox_machine::host::idle::Idle) {
-        self.idle = idle.build();
+    pub(super) fn set_idle(&mut self, idle: Box<dyn seedbox_machine::host::idle::IdleStrategy>) {
+        self.idle = idle;
     }
 
     /// How the calling thread waits for runs in flight.

@@ -87,7 +87,7 @@ armed VM to claim that sleep writes its ticket to a shared pipe. The coordinator
 also watches the individual worker pipes for EOF, including while a ticket is
 owed. The default spin before parking is 200 µs in the coordinator and
 1,000 µs in the VM. Both park sooner after consecutive unproductive spins.
-A continuously spinning transport checks for pipe hangup during empty scans. [Round loop](../crates/seedbox-driver/src/driver/round.rs) ·
+[Round loop](../crates/seedbox-driver/src/driver/round.rs) ·
 [Wake protocol](../crates/seedbox-machine/src/host/doorbell.rs)
 
 ## Same-time controls

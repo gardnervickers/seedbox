@@ -5,46 +5,23 @@ use std::time::Duration;
 
 type End = Stream<PipeReader, PipeWriter>;
 
-/// How a test's ends wait: a strategy, or spin-then-sleep with this spin.
-#[derive(Clone, Copy, Debug)]
-enum Wait {
-    Spin(Duration),
-    Strategy(Idle),
-}
-impl Wait {
-    fn build(self) -> Box<dyn IdleStrategy> {
-        match self {
-            Self::Spin(spin) => Box::new(SpinThenSleep::new(spin)),
-            Self::Strategy(idle) => idle.build(),
-        }
-    }
-}
-/// Every way a test's ends can wait: no spin, so every wait sleeps, and each
-/// built-in strategy.
-fn waits() -> Vec<Wait> {
-    std::iter::once(Wait::Spin(Duration::ZERO))
-        .chain(Idle::ALL.map(Wait::Strategy))
-        .collect()
-}
-
 /// Both ends of one region in this process, each with its own pipe.
 fn pair(capacity: u64, spin: Duration) -> (End, End) {
-    pair_waiting(capacity, Wait::Spin(spin))
+    let idle = || Box::new(SpinThenSleep::new(spin));
+    pair_waiting(capacity, idle(), idle())
 }
-fn pair_waiting(capacity: u64, wait: Wait) -> (End, End) {
+fn pair_waiting(
+    capacity: u64,
+    client: Box<dyn IdleStrategy>,
+    worker: Box<dyn IdleStrategy>,
+) -> (End, End) {
     let (region, descriptor) = Region::create(capacity).unwrap();
     let peer = Region::map(&descriptor, capacity).unwrap();
     let (client_sleep, worker_wake) = std::io::pipe().unwrap();
     let (worker_sleep, client_wake) = std::io::pipe().unwrap();
     (
-        Stream::new(
-            region,
-            Side::Client,
-            client_sleep,
-            client_wake,
-            wait.build(),
-        ),
-        Stream::new(peer, Side::Worker, worker_sleep, worker_wake, wait.build()),
+        Stream::new(region, Side::Client, client_sleep, client_wake, client),
+        Stream::new(peer, Side::Worker, worker_sleep, worker_wake, worker),
     )
 }
 
@@ -80,9 +57,9 @@ fn bounded<T: Send + 'static>(reason: &str, body: impl FnOnce() -> T + Send + 's
 }
 
 /// The worker echoes each message and the client checks every echo.
-fn echo(capacity: u64, wait: Wait, lengths: Vec<usize>) -> (End, End) {
+fn echo(capacity: u64, spin: Duration, lengths: Vec<usize>) -> (End, End) {
     bounded("every message echoed", move || {
-        let (mut client, mut worker) = pair_waiting(capacity, wait);
+        let (mut client, mut worker) = pair(capacity, spin);
         let count = lengths.len();
         let echo = std::thread::spawn(move || {
             for _ in 0..count {
@@ -112,10 +89,9 @@ fn no_pending_wakeup(end: &mut End) {
 #[test]
 fn messages_round_trip_through_small_and_wrapping_rings() {
     let lengths = vec![0, 1, 59, 60, 61, 64, 65, 200, 4096, 100_000];
-    // Every strategy delivers the same bytes in the same order.
-    for wait in waits() {
-        echo(64, wait, lengths.clone());
-        echo(CAPACITY, wait, lengths.clone());
+    for spin in [SpinThenSleep::SPIN, Duration::ZERO] {
+        echo(64, spin, lengths.clone());
+        echo(CAPACITY, spin, lengths.clone());
     }
 }
 
@@ -123,7 +99,7 @@ fn messages_round_trip_through_small_and_wrapping_rings() {
 fn every_sleep_takes_exactly_one_wakeup() {
     // Without spinning every wait sleeps, so marks often race with progress.
     let lengths: Vec<usize> = (0..20_000).map(|i| i % 97).collect();
-    let (mut client, mut worker) = echo(64, Wait::Spin(Duration::ZERO), lengths);
+    let (mut client, mut worker) = echo(64, Duration::ZERO, lengths);
     no_pending_wakeup(&mut client);
     no_pending_wakeup(&mut worker);
     for ring in [Ring::Requests, Ring::Responses] {
@@ -136,9 +112,9 @@ fn every_sleep_takes_exactly_one_wakeup() {
 #[test]
 fn a_closed_peer_ends_reads_and_breaks_writes() {
     bounded("reads and writes end at a closed peer", || {
-        for wait in waits() {
+        for spin in [SpinThenSleep::SPIN, Duration::ZERO] {
             // Published bytes stay readable; then EOF.
-            let (mut client, mut worker) = pair_waiting(64, wait);
+            let (mut client, mut worker) = pair(64, spin);
             worker.write_all(&[1, 2, 3]).unwrap();
             worker.flush().unwrap();
             drop(worker);
@@ -148,10 +124,73 @@ fn a_closed_peer_ends_reads_and_breaks_writes() {
             assert_eq!(client.read(&mut bytes).unwrap(), 0);
 
             // A writer waiting for room learns that the reader is gone.
-            let (mut client, worker) = pair_waiting(64, wait);
+            let (mut client, worker) = pair(64, spin);
             drop(worker);
             let error = client.write_all(&[0; 65]).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        }
+    })
+}
+
+/// A strategy that waits as scripted and reports what its stream tells it.
+struct Scripted {
+    /// Spins before a wait sleeps; `None` spins until progress and says so.
+    spins: Option<u64>,
+    events: std::sync::mpsc::Sender<Event>,
+}
+#[derive(Debug, PartialEq)]
+enum Event {
+    Spinning,
+    Ended(Outcome),
+}
+impl IdleStrategy for Scripted {
+    fn idle(&mut self, attempt: u64, _: Duration) -> Action {
+        match self.spins {
+            None if attempt == 0 => self.events.send(Event::Spinning).unwrap(),
+            Some(spins) if attempt >= spins => return Action::Sleep,
+            _ => {}
+        }
+        Action::Spin
+    }
+    fn reset(&mut self, outcome: Outcome) {
+        self.events.send(Event::Ended(outcome)).unwrap();
+    }
+}
+
+#[test]
+fn a_wait_tells_its_strategy_how_it_ended() {
+    bounded("each scripted wait ends", || {
+        for (spins, expected) in [
+            (None, Outcome::Progress),
+            (Some(1), Outcome::SleptAfterTrying),
+            (Some(0), Outcome::SleptAtOnce),
+        ] {
+            let (events, seen) = std::sync::mpsc::channel();
+            let (mut client, mut worker) = pair_waiting(
+                64,
+                Box::new(Scripted { spins, events }),
+                Box::new(SpinThenSleep::new(Duration::ZERO)),
+            );
+            // The peer publishes only once the reader is where its script
+            // puts it: inside its spin, or asleep with its wait marked.
+            let peer = std::thread::spawn(move || {
+                let guard =
+                    seedbox_test_time::HangGuard::new("the reader waits", Duration::from_secs(60));
+                if spins.is_none() {
+                    assert_eq!(guard.recv(&seen).unwrap(), Event::Spinning);
+                } else {
+                    let mark = worker.region.word(Ring::Responses.word(READER_ASLEEP));
+                    guard
+                        .wait_for(|| (mark.load(SeqCst) != 0).then_some(()))
+                        .unwrap();
+                }
+                worker.write_all(&[0]).unwrap();
+                worker.flush().unwrap();
+                seen
+            });
+            assert_eq!(client.read(&mut [0]).unwrap(), 1);
+            let ended: Vec<Event> = peer.join().unwrap().try_iter().collect();
+            assert_eq!(ended, [Event::Ended(expected)], "{spins:?}");
         }
     })
 }
@@ -251,8 +290,8 @@ fn a_claimed_message_is_published_whole_at_its_commit() {
 
 #[test]
 fn a_claim_larger_than_the_ring_streams_through_it() {
-    for wait in waits() {
-        let (mut client, mut worker) = pair_waiting(64, wait);
+    for spin in [SpinThenSleep::SPIN, Duration::ZERO] {
+        let (mut client, mut worker) = pair(64, spin);
         let bytes = message(1000, 3);
         let reader = std::thread::spawn(move || {
             let got = receive(&mut worker);
@@ -269,7 +308,7 @@ fn a_claim_larger_than_the_ring_streams_through_it() {
             drop(client);
             received
         });
-        assert_eq!(got, bytes, "{wait:?}");
+        assert_eq!(got, bytes, "{spin:?}");
         drop(worker);
     }
 }
@@ -297,31 +336,4 @@ fn polling_fragments_preserves_a_wrapped_header_and_large_trailer() {
         assert_eq!(received, payload);
         prefix.clear();
     }
-}
-
-#[test]
-fn polling_a_dead_worker_observes_eof_without_parking() {
-    bounded("a polling client observes the worker's pipe hangup", || {
-        for bytes in [0, 96] {
-            let (mut client, mut worker) = pair_waiting(64, Wait::Strategy(Idle::BusySpin));
-            if bytes > 0 {
-                let mut claim = worker.claim().unwrap();
-                claim.write_all(&vec![7; bytes]).unwrap();
-                claim.commit().unwrap();
-            }
-            drop(worker);
-            let mut prefix = Vec::new();
-            loop {
-                match client.poll_message(&mut prefix) {
-                    Ok(false) => continue,
-                    Ok(true) => panic!("no complete reply was published"),
-                    Err(error) => {
-                        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
-                        assert_eq!(prefix, vec![7; bytes.min(64)]);
-                        break;
-                    }
-                }
-            }
-        }
-    });
 }

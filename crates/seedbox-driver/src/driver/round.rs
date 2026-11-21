@@ -101,7 +101,6 @@ where
                         std::hint::spin_loop();
                     }
                 }
-                Action::Yield => std::thread::yield_now(),
                 Action::Sleep => {
                     self.workers.idle().reset(if attempt == 0 {
                         Outcome::SleptAtOnce

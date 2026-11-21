@@ -3,7 +3,7 @@ use super::fixture::{auto_key, definition};
 use super::*;
 use crate::definition::{MacAddress, NetworkInterface};
 use seedbox_machine::host::doorbell::{Doorbell, Ringer};
-use seedbox_machine::host::idle::Idle;
+use seedbox_machine::host::idle::SpinThenSleep;
 use seedbox_machine::machine::SplitRun;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::Ordering::SeqCst;
@@ -1578,12 +1578,13 @@ type Observed = (
 /// machine split (its runs in flight on the Driver's thread) or lent to a
 /// worker as `split` says; returns the barriers and the sorted log.
 fn echo_world(workers: usize, split: [bool; 3]) -> Observed {
-    echo_world_waiting(workers, split, Idle::DEFAULT, false)
+    echo_world_waiting(workers, split, SpinThenSleep::SPIN, false)
 }
 
 /// As [`echo_world`], each split machine coming back on another thread and
-/// ringing the doorbell if `bell`, and the Driver waiting as `idle` says.
-fn echo_world_waiting(workers: usize, split: [bool; 3], idle: Idle, bell: bool) -> Observed {
+/// ringing the doorbell if `bell`, and the Driver spinning for `spin` before
+/// each sleep.
+fn echo_world_waiting(workers: usize, split: [bool; 3], spin: Duration, bell: bool) -> Observed {
     let config = NetworkConfig::new(Duration::from_millis(1), Duration::ZERO, 0).unwrap();
     let specs = vec![
         spec(Some(1))
@@ -1604,7 +1605,7 @@ fn echo_world_waiting(workers: usize, split: [bool; 3], idle: Idle, bell: bool) 
         })
         .collect();
     let (mut driver, log) = world(0, MS, workers, config, specs, Vec::new()).unwrap();
-    driver.workers.set_idle(idle);
+    driver.workers.set_idle(Box::new(SpinThenSleep::new(spin)));
     let seen = barriers(&mut driver, 40 * MS);
     let log = log.lock().unwrap();
     let mut runs = log.runs.clone();
@@ -1660,29 +1661,29 @@ fn split_machines_run_their_lanes_as_lent_machines_do() {
 }
 
 #[test]
-fn every_idle_strategy_runs_split_lanes_to_the_same_results() {
+fn split_lanes_reach_the_same_results_spinning_or_sleeping_at_once() {
     let lent = echo_world(1, [false; 3]);
-    for idle in Idle::ALL {
+    for spin in [SpinThenSleep::SPIN, Duration::ZERO] {
         for workers in [1, 3] {
             assert_eq!(
-                echo_world_waiting(workers, [true; 3], idle, false),
+                echo_world_waiting(workers, [true; 3], spin, false),
                 lent,
-                "{idle:?}, {workers} workers"
+                "{spin:?}, {workers} workers"
             );
         }
     }
 }
 
 #[test]
-fn every_idle_strategy_runs_doorbell_lanes_to_the_same_results() {
+fn doorbell_lanes_reach_the_same_results_spinning_or_sleeping_at_once() {
     let lent = echo_world(1, [false; 3]);
-    for idle in Idle::ALL {
+    for spin in [SpinThenSleep::SPIN, Duration::ZERO] {
         for workers in [1, 3] {
             for split in [[true; 3], [true, false, true]] {
                 assert_eq!(
-                    echo_world_waiting(workers, split, idle, true),
+                    echo_world_waiting(workers, split, spin, true),
                     lent,
-                    "{idle:?}, {workers} workers, {split:?}"
+                    "{spin:?}, {workers} workers, {split:?}"
                 );
             }
         }

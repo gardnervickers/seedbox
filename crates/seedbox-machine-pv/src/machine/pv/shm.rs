@@ -17,26 +17,26 @@
 //! workers can park in one place.
 //!
 //! A side waiting for bytes or room follows its idle strategy
-//! ([`seedbox_machine::host::idle`]). Spinners periodically poll the pipe for
-//! hangup. A side that parks marks its wait and reads one byte from its pipe. A side that
+//! ([`seedbox_machine::host::idle`]): it may spin for a bounded time, then marks
+//! that wait in the ring and blocks reading one byte from its pipe. A side that
 //! publishes bytes or frees room and finds the matching mark clears it and
 //! writes that byte, so every sleep takes exactly one wakeup.
 // While the peer answers within the spin, a call costs a cache-line handoff
-// instead of two cross-process wakeups and several pipe syscalls. A thread
-// that yields without marking its wait is owed no wakeup, so on a busy host it
-// can stay descheduled long after its peer publishes, while a thread asleep
-// on its pipe wakes when the byte lands; strategies yield only briefly.
+// instead of two cross-process wakeups and several pipe syscalls. The spin
+// never yields: a thread that yields without marking its wait is owed no
+// wakeup, so on a busy host it can stay descheduled long after its peer
+// publishes, while a thread asleep on its pipe wakes when the byte lands.
 // A VM can spin across the gap between rounds. The coordinator uses a
 // shorter spin. Both park sooner after repeated waits without progress.
 use super::protocol::{self, Response};
 use seedbox_machine::host::{
     doorbell::Ringer,
-    idle::{Action, Idle, IdleStrategy, Outcome, SpinThenSleep},
+    idle::{Action, IdleStrategy, Outcome, SpinThenSleep},
 };
 use std::{
     io::{self, Read, Write},
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+        fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::process::CommandExt,
     },
     process::Command,
@@ -185,7 +185,7 @@ pub(super) fn inherit(descriptor: OwnedFd, command: &mut Command) -> Result<()> 
 /// The worker's end of start-up: map the region the client passed, and the
 /// process doorbell if it passed one, answer its attach request on `wake`,
 /// then serve through the region.
-pub(crate) fn accept<R: Read + AsRawFd, W: Write>(
+pub(crate) fn accept<R: Read, W: Write>(
     capacity: u64,
     sleep: R,
     mut wake: W,
@@ -251,9 +251,6 @@ pub(crate) struct Stream<R, W> {
     incoming: Ring,
     outgoing: Ring,
     sleep: R,
-    /// Borrowed from `sleep`, which remains in this stream until drop.
-    peer: Peer,
-    empty_polls: u64,
     wake: W,
     idle: Box<dyn IdleStrategy>,
     /// Incoming bytes read, and the peer's written position as last seen.
@@ -277,20 +274,12 @@ impl<R: Read, W: Write> Stream<R, W> {
         sleep: R,
         wake: W,
         idle: Box<dyn IdleStrategy>,
-    ) -> Self
-    where
-        R: AsRawFd,
-    {
+    ) -> Self {
         let (incoming, outgoing) = side.rings();
         Self {
             region,
             incoming,
             outgoing,
-            peer: Peer {
-                fd: sleep.as_raw_fd(),
-                checked: Instant::now(),
-            },
-            empty_polls: 0,
             sleep,
             wake,
             idle,
@@ -304,45 +293,26 @@ impl<R: Read, W: Write> Stream<R, W> {
         }
     }
     /// The client's end of an attached region.
-    pub(super) fn client(region: Region, sleep: R, wake: W) -> Self
-    where
-        R: AsRawFd,
-    {
-        Self::new(region, Side::Client, sleep, wake, Idle::DEFAULT.build())
+    pub(super) fn client(region: Region, sleep: R, wake: W) -> Self {
+        let idle = Box::new(SpinThenSleep::default());
+        Self::new(region, Side::Client, sleep, wake, idle)
     }
-    /// Wait until control word `position` differs from `seen`: spin or yield
-    /// as the idle strategy says, then set the `mark` word and sleep on this
-    /// side's pipe. Returns the new position, or `None` if the peer exited
+    /// Wait until control word `position` differs from `seen`: spin as the
+    /// idle strategy says, then set the `mark` word and sleep on this side's
+    /// pipe. Returns the new position, or `None` if the peer exited
     /// without moving it.
     fn wait(&mut self, position: usize, seen: u64, mark: usize) -> io::Result<Option<u64>> {
         let word = self.region.word(position);
         let started = Instant::now();
         let mut attempt = 0;
-        loop {
-            if self.peer.exited(attempt)? {
+        while self.idle.idle(attempt, started.elapsed()) == Action::Spin {
+            for _ in 0..64 {
                 let now = word.load(SeqCst);
-                return Ok((now != seen).then_some(now));
-            }
-            match self.idle.idle(attempt, started.elapsed()) {
-                Action::Spin => {
-                    for _ in 0..64 {
-                        let now = word.load(SeqCst);
-                        if now != seen {
-                            self.idle.reset(Outcome::Progress);
-                            return Ok(Some(now));
-                        }
-                        std::hint::spin_loop();
-                    }
+                if now != seen {
+                    self.idle.reset(Outcome::Progress);
+                    return Ok(Some(now));
                 }
-                Action::Yield => {
-                    std::thread::yield_now();
-                    let now = word.load(SeqCst);
-                    if now != seen {
-                        self.idle.reset(Outcome::Progress);
-                        return Ok(Some(now));
-                    }
-                }
-                Action::Sleep => break,
+                std::hint::spin_loop();
             }
             attempt += 1;
         }
@@ -448,16 +418,8 @@ impl<R: Read, W: Write> Stream<R, W> {
     pub(super) fn poll_message(&mut self, prefix: &mut Vec<u8>) -> io::Result<bool> {
         let written = self.region.word(self.incoming.word(WRITTEN)).load(SeqCst);
         if written == self.read {
-            self.empty_polls = self.empty_polls.wrapping_add(1);
-            // A peer can commit its last reply just before closing.
-            if self.peer.exited(self.empty_polls)?
-                && self.region.word(self.incoming.word(WRITTEN)).load(SeqCst) == self.read
-            {
-                return Err(io::ErrorKind::UnexpectedEof.into());
-            }
             return Ok(false);
         }
-        self.empty_polls = 0;
         let end = self
             .region
             .word(self.incoming.word(MESSAGE_END))
@@ -504,40 +466,6 @@ impl<R: Read, W: Write> Stream<R, W> {
         Ok(())
     }
 }
-/// A continuously polling client or worker still sees the peer close its
-/// pipe. Check host time only once per group of scans, and enter the kernel
-/// at most once per interval. A parked caller observes EOF immediately.
-struct Peer {
-    fd: RawFd,
-    checked: Instant,
-}
-impl Peer {
-    #[inline]
-    fn exited(&mut self, attempt: u64) -> io::Result<bool> {
-        if attempt == 0 || !attempt.is_multiple_of(256) {
-            return Ok(false);
-        }
-        let now = Instant::now();
-        if now.duration_since(self.checked) < std::time::Duration::from_millis(10) {
-            return Ok(false);
-        }
-        self.checked = now;
-        let mut fd = libc::pollfd {
-            fd: self.fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: the stream owns the pipe and the pollfd is valid for this call.
-        if unsafe { libc::poll(&mut fd, 1, 0) } < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
-            }
-        }
-        Ok(fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0)
-    }
-}
-
 /// Take one wakeup; false at EOF.
 fn doorbell(sleep: &mut impl Read) -> io::Result<bool> {
     let mut byte = [0];
