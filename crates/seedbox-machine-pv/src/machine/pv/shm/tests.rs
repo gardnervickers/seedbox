@@ -276,7 +276,8 @@ fn a_claim_larger_than_the_ring_streams_through_it() {
 
 #[test]
 fn polling_fragments_preserves_a_wrapped_header_and_large_trailer() {
-    let (mut client, mut worker) = pair(64, Duration::ZERO);
+    let (mut client, worker) = pair(64, Duration::ZERO);
+    let mut worker = io::BufReader::new(worker);
     let mut prefix = Vec::new();
     for len in [63, 257, 4096, 7] {
         let payload = message(len, 19);
@@ -286,14 +287,17 @@ fn polling_fragments_preserves_a_wrapped_header_and_large_trailer() {
         claim.commit().unwrap();
         // The peer takes one available interval per pass. Neither side has
         // a helper thread: a blocking operation here cannot make progress.
-        while !worker.poll_message(&mut prefix).unwrap() {
+        while !worker.get_mut().poll_message(&mut prefix).unwrap() {
             client.advance_send().unwrap();
         }
-        let mut input = prefix.as_slice().chain(&mut worker);
-        let header: Vec<u8> = protocol::receive(&mut input).unwrap().unwrap();
+        let (header, received) = super::receive(&mut worker, &prefix, |header: Vec<u8>, input| {
+            let mut bytes = vec![0; len];
+            input.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+            Ok((header, bytes))
+        })
+        .unwrap()
+        .unwrap();
         assert_eq!(header, payload);
-        let mut received = vec![0; len];
-        input.read_exact(&mut received).unwrap();
         assert_eq!(received, payload);
         prefix.clear();
     }
@@ -324,4 +328,44 @@ fn polling_a_dead_worker_observes_eof_without_parking() {
             }
         }
     });
+}
+
+#[test]
+fn packet_decoder_borrows_whole_contiguous_messages_and_streams_the_rest() {
+    use crate::machine::pv::wire::Input;
+    for (alignment, length, contiguous) in [(0, 15, true), (61, 15, false), (0, 137, false)] {
+        let (mut client, mut worker) = pair(64, Duration::ZERO);
+        worker.write_all(&vec![0; alignment]).unwrap();
+        worker.flush().unwrap();
+        client.read_exact(&mut vec![0; alignment]).unwrap();
+        let expected = message(length, 19);
+        let sent = expected.clone();
+        bounded(
+            "the fragmented receiver returns credit to the writer",
+            move || {
+                let producer = std::thread::spawn(move || {
+                    worker
+                        .message(&length, |claim| {
+                            claim.write_all(&sent).map_err(|e| e.to_string())
+                        })
+                        .unwrap();
+                    worker.finish_send().unwrap();
+                });
+                let got = super::receive(
+                    &mut io::BufReader::new(client),
+                    &[],
+                    |count: usize, input| {
+                        assert_eq!(matches!(input, Input::Slice(_)), contiguous);
+                        let mut bytes = vec![0; count];
+                        input.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+                        Ok(bytes)
+                    },
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(got, expected);
+                producer.join().unwrap();
+            },
+        );
+    }
 }

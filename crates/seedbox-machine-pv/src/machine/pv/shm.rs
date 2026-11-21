@@ -244,8 +244,8 @@ impl Side {
 }
 
 /// One side of the region as a byte stream. It sleeps on `sleep` and wakes
-/// its peer through `wake`. Written bytes reach the peer at `flush`. Every
-/// read publishes its position, so a reader of small pieces buffers it.
+/// its peer through `wake`. A complete contiguous packet returns its credit
+/// after decoding. Buffered stream reads return credit as they consume fragments.
 pub(crate) struct Stream<R, W> {
     region: Region,
     incoming: Ring,
@@ -474,6 +474,45 @@ impl<R: Read, W: Write> Stream<R, W> {
         self.read_exact(&mut prefix[start..])?;
         Ok(false)
     }
+    /// Published input remaining, waiting for the first byte or peer exit.
+    fn available(&mut self) -> io::Result<usize> {
+        let ring = self.incoming;
+        let capacity = self.region.capacity;
+        if self.readable == self.read {
+            let written = ring.word(WRITTEN);
+            let mut now = self.region.word(written).load(SeqCst);
+            if now == self.read {
+                match self.wait(written, self.read, ring.word(READER_ASLEEP))? {
+                    Some(position) => now = position,
+                    None => return Ok(0),
+                }
+            }
+            if now < self.read || now - self.read > capacity {
+                return Err(corrupt());
+            }
+            self.readable = now;
+        }
+        Ok((self.readable - self.read) as usize)
+    }
+
+    /// Return consumed bytes to the producer after the last use of their contents.
+    fn release(&mut self, count: usize) -> io::Result<()> {
+        let ring = self.incoming;
+        self.read += count as u64;
+        self.region.word(ring.word(READ)).store(self.read, SeqCst);
+        self.wake(ring.word(WRITER_ASLEEP))?;
+        if let Some(bell) = &self.bell {
+            // A fragmented request needs another coordinator pass to send
+            // its next piece. Whole requests produce only the reply ring.
+            if self.read < self.region.word(ring.word(MESSAGE_END)).load(SeqCst)
+                && self.read == self.readable
+            {
+                bell.ring(self.region.word(WATCH))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Publish every written byte and wake a waiting peer.
     fn publish(&mut self) -> io::Result<()> {
         if self.published != self.written {
@@ -503,6 +542,50 @@ impl<R: Read, W: Write> Stream<R, W> {
         }
         Ok(())
     }
+}
+/// Decode one whole packet before releasing its ring interval. The returned
+/// value owns all data needed after this call. A prefetched byte, wrap or
+/// fragment takes the stream path, which also returns credit as it reads.
+pub(super) fn receive<R: Read, W: Write, H: serde::de::DeserializeOwned, T>(
+    io: &mut std::io::BufReader<Stream<R, W>>,
+    prefix: &[u8],
+    decode: impl FnOnce(H, &mut super::wire::Input<'_>) -> Result<T>,
+) -> Result<Option<T>> {
+    use super::wire::Input;
+    if prefix.is_empty() && io.buffer().is_empty() {
+        let ring = io.get_mut();
+        let available = ring.available().map_err(|e| e.to_string())?;
+        if available == 0 {
+            return Ok(None);
+        }
+        let size = ring.region.capacity as usize;
+        let start = ring.read as usize & (size - 1);
+        let end = ring
+            .region
+            .word(ring.incoming.word(MESSAGE_END))
+            .load(SeqCst);
+        if ring.readable == end && available <= size - start {
+            // SAFETY: the interval was published by the producer. The read
+            // cursor stays pinned until decode has returned its owned result.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(ring.region.data(ring.incoming).add(start), available)
+            };
+            let mut input = Input::Slice(bytes);
+            let header = input.header()?.ok_or("PV missing protocol header")?;
+            let value = decode(header, &mut input)?;
+            if !matches!(input, Input::Slice([])) {
+                return Err("PV trailing bytes in message".into());
+            }
+            ring.release(available).map_err(|e| e.to_string())?;
+            return Ok(Some(value));
+        }
+    }
+    let mut stream = prefix.chain(io);
+    let mut input = Input::Stream(&mut stream);
+    input
+        .header()?
+        .map(|header| decode(header, &mut input))
+        .transpose()
 }
 /// A continuously polling client or worker still sees the peer close its
 /// pipe. Check host time only once per group of scans, and enter the kernel
@@ -557,23 +640,13 @@ impl<R: Read, W: Write> Read for Stream<R, W> {
         if buf.is_empty() {
             return Ok(0);
         }
-        let ring = self.incoming;
-        let capacity = self.region.capacity;
-        if self.readable == self.read {
-            let written = ring.word(WRITTEN);
-            let mut now = self.region.word(written).load(SeqCst);
-            if now == self.read {
-                match self.wait(written, self.read, ring.word(READER_ASLEEP))? {
-                    Some(position) => now = position,
-                    None => return Ok(0),
-                }
-            }
-            if now < self.read || now - self.read > capacity {
-                return Err(corrupt());
-            }
-            self.readable = now;
+        let available = self.available()?;
+        if available == 0 {
+            return Ok(0);
         }
-        let count = buf.len().min((self.readable - self.read) as usize);
+        let capacity = self.region.capacity;
+        let ring = self.incoming;
+        let count = buf.len().min(available);
         let start = (self.read % capacity) as usize;
         let first = count.min(capacity as usize - start);
         let data = self.region.data(ring);
@@ -583,18 +656,7 @@ impl<R: Read, W: Write> Read for Stream<R, W> {
             std::ptr::copy_nonoverlapping(data.add(start), buf.as_mut_ptr(), first);
             std::ptr::copy_nonoverlapping(data, buf.as_mut_ptr().add(first), count - first);
         }
-        self.read += count as u64;
-        self.region.word(ring.word(READ)).store(self.read, SeqCst);
-        self.wake(ring.word(WRITER_ASLEEP))?;
-        if let Some(bell) = &self.bell {
-            // A fragmented request needs another coordinator pass to send
-            // its next piece. Whole requests produce only the reply ring.
-            if self.read < self.region.word(ring.word(MESSAGE_END)).load(SeqCst)
-                && self.read == self.readable
-            {
-                bell.ring(self.region.word(WATCH))?;
-            }
-        }
+        self.release(count)?;
         Ok(count)
     }
 }

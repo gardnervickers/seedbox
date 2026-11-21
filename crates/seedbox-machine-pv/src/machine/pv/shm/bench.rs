@@ -58,14 +58,15 @@ fn send<R: Read, W: Write>(io: &mut Connection<R, W>, seq: u64, data: &[GuestWri
 }
 
 fn receive<R: Read, W: Write>(io: &mut Connection<R, W>, seq: u64) -> Result<Vec<GuestWrite>> {
-    match protocol::receive(io)? {
-        Some(Response::Stopped {
+    super::receive(io, &[], |header, body| match header {
+        Response::Stopped {
             time,
             stop: Stop::Horizon,
             writes: 1,
-        }) if time == seq => wire::receive_writes(io, 1),
+        } if time == seq => wire::receive_writes(body, 1),
         _ => Err("transport benchmark received the wrong header".into()),
-    }
+    })?
+    .ok_or_else(|| "transport benchmark peer closed".into())
 }
 
 // The same monotonic clock in both processes. One-way latency ends at the

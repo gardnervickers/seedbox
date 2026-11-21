@@ -51,17 +51,53 @@ fn read_exact<const N: usize>(input: &mut impl Read, what: &str) -> Result<[u8; 
     Ok(bytes)
 }
 
-/// Read exactly `length` bytes, growing only with bytes actually received.
-fn read_bytes(input: &mut impl Read, length: usize) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    input
-        .take(length as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("PV trailer body: {e}"))?;
-    if bytes.len() != length {
-        return Err("PV trailer truncated body".into());
+/// A complete contiguous packet can lend its bytes until decoding returns.
+/// Wrapped packets and messages larger than the ring use the buffered stream.
+pub(super) enum Input<'a> {
+    Slice(&'a [u8]),
+    Stream(&'a mut dyn Read),
+}
+impl Read for Input<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Slice(slice) => slice.read(buffer),
+            Self::Stream(reader) => reader.read(buffer),
+        }
     }
-    Ok(bytes)
+}
+impl Input<'_> {
+    pub(super) fn header<T: serde::de::DeserializeOwned>(&mut self) -> Result<Option<T>> {
+        match self {
+            Self::Stream(reader) => super::protocol::receive(reader),
+            Self::Slice(slice) => {
+                let length = super::protocol::header_length(read_exact(slice, "header")?)?;
+                let body = slice
+                    .split_off(..length)
+                    .ok_or("PV protocol truncated header")?;
+                serde_json::from_slice(body)
+                    .map(Some)
+                    .map_err(|e| format!("PV protocol decode: {e}"))
+            }
+        }
+    }
+
+    fn body(&mut self, length: usize) -> Result<Vec<u8>> {
+        if let Self::Slice(slice) = self {
+            return slice
+                .split_off(..length)
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| "PV trailer truncated body".into());
+        }
+        // Grow only with bytes actually received from the stream.
+        let mut bytes = Vec::new();
+        self.take(length as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("PV trailer body: {e}"))?;
+        if bytes.len() != length {
+            return Err("PV trailer truncated body".into());
+        }
+        Ok(bytes)
+    }
 }
 
 /// Send `writes` in order. The JSON message before it carries `writes.len()`.
@@ -89,7 +125,7 @@ pub(super) fn send_writes(out: &mut impl Write, writes: &[GuestWrite]) -> Result
 }
 
 /// Receive exactly `count` writes and the end tag.
-pub(super) fn receive_writes(input: &mut impl Read, count: u64) -> Result<Vec<GuestWrite>> {
+pub(super) fn receive_writes(input: &mut Input<'_>, count: u64) -> Result<Vec<GuestWrite>> {
     let mut writes = Vec::new();
     for _ in 0..count {
         // Judge the tag before reading further: a live peer that sent END or
@@ -107,7 +143,7 @@ pub(super) fn receive_writes(input: &mut impl Read, count: u64) -> Result<Vec<Gu
         if tag == FRAME {
             frame_length(length)?;
         }
-        let bytes = read_bytes(input, length)?;
+        let bytes = input.body(length)?;
         writes.push(variant(LifecycleWrite { time, bytes }));
     }
     match read_exact::<1>(input, "end")? {
@@ -131,7 +167,7 @@ pub(super) fn send_frames(out: &mut impl Write, frames: &[Vec<u8>]) -> Result<()
 }
 
 /// Receive exactly `count` host frames and the end mark.
-pub(super) fn receive_frames(input: &mut impl Read, count: u64) -> Result<Vec<Vec<u8>>> {
+pub(super) fn receive_frames(input: &mut Input<'_>, count: u64) -> Result<Vec<Vec<u8>>> {
     let mut frames = Vec::new();
     for _ in 0..count {
         let length = u16::from_le_bytes(read_exact(input, "length")?) as usize;
@@ -139,7 +175,7 @@ pub(super) fn receive_frames(input: &mut impl Read, count: u64) -> Result<Vec<Ve
             return Err("PV trailer ended before its count".into());
         }
         frame_length(length)?;
-        frames.push(read_bytes(input, length)?);
+        frames.push(input.body(length)?);
     }
     match u16::from_le_bytes(read_exact(input, "end")?) {
         0 => Ok(frames),
