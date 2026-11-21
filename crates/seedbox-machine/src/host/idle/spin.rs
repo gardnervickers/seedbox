@@ -107,21 +107,33 @@ fn monitor(_: &AtomicU64, _: u64, _: std::time::Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seedbox_test_time::HangGuard;
     use std::time::Duration;
 
     #[test]
-    fn a_monitored_wait_returns_at_a_store_and_at_its_deadline() {
-        let word = AtomicU64::new(7);
-        let monitor = Action::Monitor(Duration::from_micros(50));
-        // Already written: no wait.
-        assert_eq!(wait_on_word(monitor, &word, 6), 7);
-        // Never written: the wait still returns.
-        assert_eq!(wait_on_word(monitor, &word, 7), 7);
-        // Written from another thread while this one waits again and again.
-        std::thread::scope(|scope| {
-            scope.spawn(|| word.store(8, SeqCst));
-            while wait_on_word(monitor, &word, 7) == 7 {}
+    fn a_monitored_wait_returns_by_its_deadline_and_a_store_is_observed() {
+        // On its own thread: a wait whose deadline were broken would hang
+        // inside its first call, where only an outer guard can see it.
+        let (done, waited) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let word = AtomicU64::new(7);
+            let monitor = Action::Monitor(Duration::from_micros(50));
+            // Already written: no wait.
+            assert_eq!(wait_on_word(monitor, &word, 6), 7);
+            // Never written: the wait still returns.
+            assert_eq!(wait_on_word(monitor, &word, 7), 7);
+            // Written from another thread, at any point before or during a
+            // wait: some wait, in the end, returns the new value. This shows
+            // the store is observed, not that the monitor woke for it.
+            std::thread::scope(|scope| {
+                scope.spawn(|| word.store(8, SeqCst));
+                while wait_on_word(monitor, &word, 7) == 7 {}
+            });
+            assert_eq!(wait_on_word(Action::Spin, &word, 7), 8);
+            done.send(()).unwrap();
         });
-        assert_eq!(wait_on_word(Action::Spin, &word, 7), 8);
+        HangGuard::new("every monitored wait returns", Duration::from_secs(60))
+            .recv(&waited)
+            .unwrap();
     }
 }
