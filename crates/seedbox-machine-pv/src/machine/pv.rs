@@ -1466,6 +1466,10 @@ fn priced_syscall_ns(factor_permille: u32) -> u64 {
 }
 
 impl Machine for PVMachine {
+    fn always_split() -> bool {
+        true
+    }
+
     type Context = ();
     type Error = std::io::Error;
     type Snapshot = Snapshot;
