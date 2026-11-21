@@ -66,7 +66,10 @@ use std::{
 use tempfile::TempDir;
 pub(crate) use worker::serve as serve_worker;
 #[cfg(feature = "test-support")]
-pub(crate) use {client::preboot_errors, shm::accept};
+pub(crate) use {
+    client::preboot_errors,
+    shm::{accept, Stream},
+};
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq)]
 enum State {
     Ready,

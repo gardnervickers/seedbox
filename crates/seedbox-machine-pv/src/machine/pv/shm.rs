@@ -381,6 +381,21 @@ impl<R: Read, W: Write> Stream<R, W> {
         })
     }
 
+    /// Encode one complete message, including its binary trailer. On error
+    /// the uncommitted interval is still free for the producer.
+    pub(crate) fn message(
+        &mut self,
+        header: &impl serde::Serialize,
+        trailer: impl FnOnce(&mut Claim<'_, R, W>) -> Result<()>,
+    ) -> Result<()> {
+        let mut claim = self.claim().map_err(|e| e.to_string())?;
+        claim.header(header)?;
+        trailer(&mut claim)?;
+        claim
+            .commit()
+            .map_err(|e| format!("PV protocol write: {e}"))
+    }
+
     /// Copy as much of the outstanding request as the worker has made room
     /// for. A worker draining a partial request rings the same shared bell.
     pub(super) fn advance_send(&mut self) -> io::Result<()> {
@@ -401,7 +416,7 @@ impl<R: Read, W: Write> Stream<R, W> {
         Ok(())
     }
     /// The synchronous caller can wait for space using the ordinary pipe.
-    pub(super) fn finish_send(&mut self) -> io::Result<()> {
+    pub(crate) fn finish_send(&mut self) -> io::Result<()> {
         let tail = std::mem::take(&mut self.tail);
         self.write_all(&tail.get_ref()[tail.position() as usize..])?;
         self.publish()
@@ -564,7 +579,7 @@ impl<R: Read, W: Write> Write for Stream<R, W> {
 
 /// A single producer owns both sides of the wrap point until commit. Only
 /// messages larger than the free interval allocate a spill buffer.
-pub(super) struct Claim<'a, R, W> {
+pub(crate) struct Claim<'a, R, W> {
     stream: &'a mut Stream<R, W>,
     capacity: usize,
     used: usize,

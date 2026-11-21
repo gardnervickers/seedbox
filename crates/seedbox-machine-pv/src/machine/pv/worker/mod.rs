@@ -1204,14 +1204,11 @@ pub(crate) fn serve() -> Result<()> {
             Err(error) => Response::Error(error),
         };
         let ring = io.get_mut();
-        let mut claim = ring.claim().map_err(|e| e.to_string())?;
-        claim.header(&response)?;
-        if let Some(writes) = writes {
-            super::wire::send_writes(&mut claim, &writes)?;
-        }
-        claim
-            .commit()
-            .and_then(|()| ring.finish_send())
+        ring.message(&response, |claim| match writes {
+            Some(writes) => super::wire::send_writes(claim, &writes),
+            None => Ok(()),
+        })?;
+        ring.finish_send()
             .map_err(|e| format!("PV protocol write: {e}"))?;
     }
     Ok(())

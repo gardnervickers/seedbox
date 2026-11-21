@@ -114,7 +114,7 @@ impl Worker {
             return Err("PV run requires its frame trailer".into());
         }
         let response = self.exchange(|stream| {
-            message(stream, &request, |_| Ok(()))?;
+            stream.get_mut().message(&request, |_| Ok(()))?;
             stream.get_mut().finish_send().map_err(|e| e.to_string())?;
             match answer(stream)? {
                 Response::Stopped { .. } => Err("PV unexpected run response".into()),
@@ -133,7 +133,9 @@ impl Worker {
         };
         *count = frames.len() as u64;
         self.exchange(|stream| {
-            message(stream, &request, |claim| wire::send_frames(claim, frames))
+            stream
+                .get_mut()
+                .message(&request, |claim| wire::send_frames(claim, frames))
         })?;
         self.running = true;
         Ok(())
@@ -199,20 +201,6 @@ impl Worker {
         Ok(())
     }
 }
-/// Write one request and its trailer into the ring under one claim, so the
-/// worker sees, and wakes for, the whole request at once.
-fn message(
-    stream: &mut Stream,
-    header: &Request,
-    trailer: impl FnOnce(&mut shm::Claim<'_, ChildStdout, ChildStdin>) -> Result<()>,
-) -> Result<()> {
-    let mut claim = stream.get_mut().claim().map_err(|e| e.to_string())?;
-    claim.header(header)?;
-    trailer(&mut claim)?;
-    claim
-        .commit()
-        .map_err(|e| format!("PV protocol write: {e}"))
-}
 fn answer(stream: &mut impl Read) -> Result<Response> {
     receive(stream)?.ok_or_else(|| "PV worker closed its protocol".into())
 }
@@ -234,10 +222,22 @@ impl Drop for Worker {
 struct Slot {
     seat: Mutex<Seat>,
 }
+type RunReply = (u64, Stop, Vec<GuestWrite>);
+
 struct Seat {
     worker: Worker,
+    /// A snapshot operation needed the protocol between start and finish.
+    completed: Option<Result<RunReply>>,
     /// A machine is running in the worker; a parked worker has none.
     occupied: bool,
+}
+impl Seat {
+    fn snapshot_call(&mut self, request: Request) -> Result<Response> {
+        if self.worker.running {
+            self.completed = Some(self.worker.receive_run());
+        }
+        self.worker.call(request)
+    }
 }
 impl Slot {
     fn seat(&self) -> MutexGuard<'_, Seat> {
@@ -266,6 +266,7 @@ impl Occupant {
             slot: Arc::new(Slot {
                 seat: Mutex::new(Seat {
                     worker: Worker::spawn(executable)?,
+                    completed: None,
                     occupied: true,
                 }),
             }),
@@ -296,7 +297,10 @@ impl Occupant {
     }
     /// As [`Worker::receive_run`].
     pub(super) fn receive_run(&mut self) -> Result<(u64, Stop, Vec<GuestWrite>)> {
-        self.slot.seat().worker.receive_run()
+        let mut seat = self.slot.seat();
+        seat.completed
+            .take()
+            .unwrap_or_else(|| seat.worker.receive_run())
     }
     /// Keep the stopped machine in the worker as a retained snapshot. `Err`
     /// carries the bytes of RAM pages the worker's snapshots hold when
@@ -377,8 +381,9 @@ impl Version {
             id: self.id,
             verify,
         };
-        match seat.worker.call(request)? {
+        match seat.snapshot_call(request)? {
             Response::Rewound { pages } => {
+                seat.completed = None;
                 seat.occupied = true;
                 let occupant = Occupant {
                     slot: self.slot.clone(),
@@ -396,7 +401,7 @@ impl Version {
             id: self.id,
             path: path.to_owned(),
         };
-        match self.slot.seat().worker.call(request)? {
+        match self.slot.seat().snapshot_call(request)? {
             Response::Exported => Ok(()),
             _ => Err("PV unexpected export response".into()),
         }
@@ -417,7 +422,7 @@ impl Drop for Version {
         if seat.worker.lost {
             return;
         }
-        if let Err(error) = seat.worker.call(Request::Release(self.id)) {
+        if let Err(error) = seat.snapshot_call(Request::Release(self.id)) {
             eprintln!("PV retained snapshot release: {error}");
         }
     }
