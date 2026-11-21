@@ -248,7 +248,7 @@ pub(crate) struct Stream<R, W> {
     outgoing: Ring,
     sleep: R,
     /// Borrowed from `sleep`, which remains in this stream until drop.
-    peer: RawFd,
+    peer: Peer,
     empty_polls: u64,
     wake: W,
     idle: Box<dyn IdleStrategy>,
@@ -282,7 +282,10 @@ impl<R: Read, W: Write> Stream<R, W> {
             region,
             incoming,
             outgoing,
-            peer: sleep.as_raw_fd(),
+            peer: Peer {
+                fd: sleep.as_raw_fd(),
+                checked: Instant::now(),
+            },
             empty_polls: 0,
             sleep,
             wake,
@@ -312,7 +315,7 @@ impl<R: Read, W: Write> Stream<R, W> {
         let started = Instant::now();
         let mut attempt = 0;
         loop {
-            if peer_exited(self.peer, attempt)? {
+            if self.peer.exited(attempt)? {
                 let now = word.load(SeqCst);
                 return Ok((now != seen).then_some(now));
             }
@@ -443,7 +446,7 @@ impl<R: Read, W: Write> Stream<R, W> {
         if written == self.read {
             self.empty_polls = self.empty_polls.wrapping_add(1);
             // A peer can commit its last reply just before closing.
-            if peer_exited(self.peer, self.empty_polls)?
+            if self.peer.exited(self.empty_polls)?
                 && self.region.word(self.incoming.word(WRITTEN)).load(SeqCst) == self.read
             {
                 return Err(io::ErrorKind::UnexpectedEof.into());
@@ -497,25 +500,38 @@ impl<R: Read, W: Write> Stream<R, W> {
         Ok(())
     }
 }
-/// A pipe hangup is visible even to a pure spinner. Amortize the host call
-/// across empty scans. Short waits normally complete entirely in memory.
-fn peer_exited(peer: RawFd, attempt: u64) -> io::Result<bool> {
-    if attempt == 0 || !attempt.is_multiple_of(256) {
-        return Ok(false);
-    }
-    let mut fd = libc::pollfd {
-        fd: peer,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: the stream owns the pipe and the pollfd is valid for this call.
-    if unsafe { libc::poll(&mut fd, 1, 0) } < 0 {
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
+/// A continuously polling client or worker still sees the peer close its
+/// pipe. Check host time only once per group of scans, and enter the kernel
+/// at most once per interval. A parked caller observes EOF immediately.
+struct Peer {
+    fd: RawFd,
+    checked: Instant,
+}
+impl Peer {
+    #[inline]
+    fn exited(&mut self, attempt: u64) -> io::Result<bool> {
+        if attempt == 0 || !attempt.is_multiple_of(256) {
+            return Ok(false);
         }
+        let now = Instant::now();
+        if now.duration_since(self.checked) < std::time::Duration::from_millis(10) {
+            return Ok(false);
+        }
+        self.checked = now;
+        let mut fd = libc::pollfd {
+            fd: self.fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: the stream owns the pipe and the pollfd is valid for this call.
+        if unsafe { libc::poll(&mut fd, 1, 0) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+        Ok(fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0)
     }
-    Ok(fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0)
 }
 
 /// Take one wakeup; false at EOF.
