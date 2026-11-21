@@ -1,28 +1,34 @@
 //! One place for a coordinator to park while many executors in other processes
 //! run: the process's doorbell.
 //!
-//! The doorbell is a small shared-memory region holding two words, `pending`
-//! and `asleep`, and a pipe. Every executor process spawned by this process
-//! inherits the region and the pipe's write end ([`Doorbell::inherit`]). An
-//! executor that publishes a reply [rings](Ringer::ring): it bumps `pending`,
-//! and if it then takes the `asleep` mark it writes the ticket to the pipe.
+//! The doorbell is a small shared-memory region and a pipe. The region holds a
+//! `pending` word and one `asleep` word for each coordinator in the process.
+//! Every executor process spawned by this process inherits the region and the
+//! pipe's write end ([`Doorbell::inherit`]). An executor that publishes a reply
+//! [rings](Ringer::ring): it bumps `pending`, and if it then takes the `asleep`
+//! mark of the coordinator watching it, it writes that mark, a ticket, to the
+//! pipe.
 //!
-//! Before scanning the rings, the coordinator samples `pending`. To park,
-//! it sets `asleep` and checks the sample again. If it sees progress it can
-//! cancel only a mark no writer has taken. Once a writer takes the mark,
-//! the coordinator consumes the owed ticket even if it has already observed
-//! the reply. The per-worker pipes share the poll set so a worker that dies
+//! Before scanning the rings, a coordinator samples `pending`. To park, it
+//! names a ticket to the executors it waits for, sets its `asleep` word to the
+//! ticket and checks the sample again. If it sees progress it can cancel only
+//! a mark no executor has taken. Once an executor takes the mark, the
+//! coordinator consumes the owed ticket even if it has already observed the
+//! reply. The per-worker pipes share the poll set so a worker that dies
 //! between updating either word and writing the ticket cannot strand the wait.
 //!
-//! Only the claiming coordinator touches `asleep`, so a process has at most
-//! one at a time; another caller finds the doorbell claimed and waits its own
-//! way. Rings from executors the coordinator is not waiting for only wake it
-//! early.
+//! An executor is bound to no coordinator: a worker one Driver spawned can
+//! later run a machine of another, so each park names its coordinator anew. A
+//! ticket carries its coordinator's slot. Every parked coordinator reads the
+//! one pipe, and one that reads another's ticket forwards it through that
+//! coordinator's own pipe. A process with a single coordinator reads only its
+//! own tickets. Rings from executors a coordinator is not waiting for only
+//! wake it early.
 //!
-//! The doorbell decides only when the coordinator looks; it carries no data,
+//! The doorbell decides only when a coordinator looks; it carries no data,
 //! so it cannot change what any run returns.
 use std::{
-    io,
+    io::{self, PipeReader, PipeWriter, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::process::CommandExt,
@@ -30,8 +36,8 @@ use std::{
     process::Command,
     ptr::NonNull,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering::SeqCst},
-        OnceLock,
+        atomic::{AtomicU64, Ordering::SeqCst},
+        Mutex, MutexGuard, OnceLock, PoisonError,
     },
 };
 
@@ -41,10 +47,19 @@ use std::{
 pub const REGION_DESCRIPTOR: RawFd = 194;
 /// The pipe's write end in an executor.
 pub const BELL_DESCRIPTOR: RawFd = 195;
-/// Each word on its own line.
-const PENDING: usize = 0;
-const ASLEEP: usize = 128;
-const LENGTH: usize = 4096;
+/// Each word on its own line: `pending`, then every slot's `asleep`.
+const LINE: usize = 128;
+/// A ticket's low bits name its coordinator's slot.
+const SLOT_BITS: u32 = 7;
+/// Coordinators one process can hold at once.
+const SLOTS: usize = (1 << SLOT_BITS) - 1;
+const LENGTH: usize = (1 + SLOTS) * LINE;
+
+/// The slot a ticket names; none for zero, which is no ticket.
+fn slot_of(ticket: u64) -> Option<usize> {
+    let slot = (ticket & ((1 << SLOT_BITS) - 1)) as usize;
+    (ticket != 0 && slot < SLOTS).then_some(slot)
+}
 
 /// The mapped region.
 struct Words {
@@ -75,10 +90,17 @@ impl Words {
             base: NonNull::new(base.cast()).ok_or_else(|| io::Error::other("mapped at null"))?,
         })
     }
-    fn word(&self, offset: usize) -> &AtomicU64 {
-        // SAFETY: both words are aligned and inside the mapping, which lives
-        // as long as self, and are only accessed atomically.
-        unsafe { AtomicU64::from_ptr(self.base.as_ptr().add(offset).cast()) }
+    fn word(&self, line: usize) -> &AtomicU64 {
+        assert!(line <= SLOTS, "doorbell word {line}");
+        // SAFETY: every line is aligned and inside the mapping, which lives
+        // as long as self, and is only accessed atomically.
+        unsafe { AtomicU64::from_ptr(self.base.as_ptr().add(line * LINE).cast()) }
+    }
+    fn pending(&self) -> &AtomicU64 {
+        self.word(0)
+    }
+    fn asleep(&self, slot: usize) -> &AtomicU64 {
+        self.word(1 + slot)
     }
 }
 impl Drop for Words {
@@ -88,41 +110,78 @@ impl Drop for Words {
     }
 }
 
+/// Make reads or writes of `pipe` return instead of waiting.
+fn nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
+    // SAFETY: F_SETFL on a descriptor the caller owns.
+    if unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Take one ticket from a nonblocking pipe that carries only whole tickets;
+/// none while it is empty.
+fn take(mut pipe: &PipeReader) -> io::Result<Option<u64>> {
+    let mut bytes = [0; 8];
+    loop {
+        match pipe.read(&mut bytes) {
+            Ok(8) => return Ok(Some(u64::from_ne_bytes(bytes))),
+            Ok(0) => return Ok(None),
+            Ok(_) => return Err(io::Error::other("doorbell pipe split a ticket")),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// The process's doorbell: its region, and both ends of its pipe.
 pub struct Doorbell {
     words: Words,
     region: OwnedFd,
-    /// Only the claiming coordinator reads it.
-    read: std::io::PipeReader,
+    /// Nonblocking: every parked coordinator reads it.
+    read: PipeReader,
     write: OwnedFd,
-    claimed: AtomicBool,
+    /// Each claimed slot's pipe for tickets another coordinator read.
+    slots: Mutex<Vec<Option<PipeWriter>>>,
     next_ticket: AtomicU64,
 }
 
-static PROCESS: OnceLock<io::Result<Doorbell>> = OnceLock::new();
+static PROCESS: OnceLock<Doorbell> = OnceLock::new();
 
 impl Doorbell {
     /// The shared notification word for workers spawned in this process.
     pub fn process() -> io::Result<&'static Doorbell> {
-        PROCESS
-            .get_or_init(Self::create)
-            .as_ref()
-            .map_err(|e| io::Error::new(e.kind(), e.to_string()))
+        Self::get_or_create(&PROCESS, || Self::create(SLOTS))
     }
     pub fn existing() -> Option<&'static Doorbell> {
-        PROCESS.get().and_then(|bell| bell.as_ref().ok())
+        PROCESS.get()
     }
-    fn create() -> io::Result<Self> {
+    /// Only a created doorbell is kept. A creation that failed, for want of
+    /// descriptors say, is tried again by the next caller.
+    fn get_or_create(
+        cell: &OnceLock<Doorbell>,
+        create: impl FnOnce() -> io::Result<Doorbell>,
+    ) -> io::Result<&Doorbell> {
+        if let Some(bell) = cell.get() {
+            return Ok(bell);
+        }
+        let bell = create()?;
+        // A creator that lost the race adopts the winner's and drops its own.
+        Ok(cell.get_or_init(|| bell))
+    }
+    /// A doorbell whose first `slots` slots can be claimed.
+    fn create(slots: usize) -> io::Result<Self> {
         let region = super::shared_memory(LENGTH)?;
         let words = Words::map(&region)?;
         let (read, write) = std::io::pipe()?;
-        let write: OwnedFd = write.into();
+        nonblocking(&read)?;
         Ok(Self {
             words,
             region,
             read,
-            write,
-            claimed: AtomicBool::new(false),
+            write: write.into(),
+            slots: Mutex::new((0..slots.min(SLOTS)).map(|_| None).collect()),
             next_ticket: AtomicU64::new(1),
         })
     }
@@ -156,16 +215,24 @@ impl Doorbell {
         }
         Ok(())
     }
-    /// Become the doorbell's coordinator until the result drops; `None` while
-    /// another caller is.
-    pub fn claim(&self) -> Option<Coordinator<'_>> {
-        if self.claimed.swap(true, SeqCst) {
-            return None;
-        }
-        Some(Coordinator {
+    /// Become one of the doorbell's coordinators until the result drops;
+    /// `None` while every slot is taken.
+    pub fn claim(&self) -> io::Result<Option<Coordinator<'_>>> {
+        let mut slots = self.slots();
+        let Some(slot) = slots.iter().position(Option::is_none) else {
+            return Ok(None);
+        };
+        let (forwarded, forward) = std::io::pipe()?;
+        nonblocking(&forwarded)?;
+        nonblocking(&forward)?;
+        slots[slot] = Some(forward);
+        Ok(Some(Coordinator {
             bell: self,
-            seen: self.words.word(PENDING).load(SeqCst),
-        })
+            slot,
+            seen: self.words.pending().load(SeqCst),
+            forwarded,
+            woken: 0,
+        }))
     }
     /// A ringer in this process, as an executor's would be.
     pub fn ringer(&self) -> io::Result<Ringer> {
@@ -175,37 +242,62 @@ impl Doorbell {
             write,
         })
     }
+    fn slots(&self) -> MutexGuard<'_, Vec<Option<PipeWriter>>> {
+        self.slots.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+    /// Pass a ticket read from the shared pipe to the coordinator it names.
+    /// A ticket for a slot no one holds is a late payment to a coordinator
+    /// that has gone, and so is one its coordinator's pipe has no room for.
+    fn forward(&self, ticket: u64) {
+        let slots = self.slots();
+        let forward = slot_of(ticket).and_then(|slot| slots.get(slot)?.as_ref());
+        if let Some(mut forward) = forward {
+            // A whole ticket or nothing: the pipe is nonblocking.
+            let _ = forward.write(&ticket.to_ne_bytes());
+        }
+    }
 }
 
-/// The claiming coordinator's side.
+/// One coordinator's side.
 pub struct Coordinator<'a> {
     bell: &'a Doorbell,
+    slot: usize,
     /// `pending` at the last mark.
     seen: u64,
+    /// Tickets naming this slot that another coordinator read.
+    forwarded: PipeReader,
+    woken: u64,
 }
 impl Coordinator<'_> {
     /// Note `pending` before a pass over the runs' replies, so that a reply
     /// published during the pass is seen by [`Coordinator::rung`].
     pub fn mark(&mut self) {
-        self.seen = self.bell.words.word(PENDING).load(SeqCst);
+        self.seen = self.bell.words.pending().load(SeqCst);
     }
     /// Whether an executor rang since the last mark.
     pub fn rung(&self) -> bool {
-        self.bell.words.word(PENDING).load(SeqCst) != self.seen
+        self.bell.words.pending().load(SeqCst) != self.seen
+    }
+    /// Parks that a ring ended, by its ticket or before the sleep began. A
+    /// witness for tests that a wait went through the doorbell.
+    pub fn woken(&self) -> u64 {
+        self.woken
     }
     /// Wait on the same publication word sampled before the reply scan.
     pub fn spin(&self, action: super::idle::Action) {
-        super::idle::wait_on_word(action, self.bell.words.word(PENDING), self.seen);
+        super::idle::wait_on_word(action, self.bell.words.pending(), self.seen);
     }
     /// Arm the watch set for this park. A writer outside the set may also
     /// publish, but it cannot take this ticket: its death could otherwise
     /// strand the coordinator while none of its watched pipes has closed.
-    pub fn park(&self, watch: impl FnOnce(u64) -> Option<Vec<RawFd>>) -> io::Result<Wake> {
-        let ticket = self.bell.next_ticket.fetch_add(1, SeqCst);
+    pub fn park(&mut self, watch: impl FnOnce(u64) -> Option<Vec<RawFd>>) -> io::Result<Wake> {
+        let sequence = self.bell.next_ticket.fetch_add(1, SeqCst);
+        let ticket = (sequence << SLOT_BITS) | self.slot as u64;
         let Some(watch) = watch(ticket) else {
             return Ok(Wake::Unwatched);
         };
-        let mut fds: Vec<_> = std::iter::once(self.bell.read.as_raw_fd())
+        let mut fds: Vec<_> = [self.bell.read.as_raw_fd(), self.forwarded.as_raw_fd()]
+            .into_iter()
             .chain(watch)
             .map(|fd| libc::pollfd {
                 fd,
@@ -213,33 +305,51 @@ impl Coordinator<'_> {
                 revents: 0,
             })
             .collect();
-        let asleep = self.bell.words.word(ASLEEP);
+        let asleep = self.bell.words.asleep(self.slot);
         asleep.store(ticket, SeqCst);
-        if self.rung() && asleep.swap(0, SeqCst) == ticket {
-            return Ok(Wake::Published);
+        let wake = if self.rung() && asleep.swap(0, SeqCst) == ticket {
+            Ok(Wake::Published)
+        } else {
+            self.sleep(ticket, &mut fds)
+        };
+        match wake {
+            Ok(Wake::Published) => self.woken += 1,
+            // An executor that took the mark first pays late, and a later
+            // park discards that ticket.
+            _ => asleep.store(0, SeqCst),
         }
+        wake
+    }
+    /// Wait for `ticket`, on either pipe, or for a watched pipe's event.
+    fn sleep(&self, ticket: u64, fds: &mut [libc::pollfd]) -> io::Result<Wake> {
         loop {
             // SAFETY: fds is initialized and its descriptors outlive this wait.
-            let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) };
-            if n < 0 {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::Interrupted {
+            if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) } < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
-                asleep.store(0, SeqCst);
-                return Err(err);
+                return Err(error);
             }
+            // A ticket of this slot other than `ticket` was owed to an earlier
+            // park, which ended at a watched pipe's event.
             if fds[0].revents != 0 {
-                let mut bytes = [0; 8];
-                std::io::Read::read_exact(&mut &self.bell.read, &mut bytes)?;
-                if u64::from_ne_bytes(bytes) == ticket {
-                    return Ok(Wake::Published);
+                // None if another coordinator read the pipe first.
+                match take(&self.bell.read)? {
+                    Some(read) if read == ticket => return Ok(Wake::Published),
+                    Some(read) if slot_of(read) == Some(self.slot) => {}
+                    Some(read) => self.bell.forward(read),
+                    None => {}
                 }
-                // An earlier park observed EOF after a live writer took
-                // its ticket. Consume that writer's late payment here.
             }
-            if let Some(i) = fds[1..].iter().position(|fd| fd.revents != 0) {
-                asleep.store(0, SeqCst);
+            if fds[1].revents != 0 {
+                while let Some(read) = take(&self.forwarded)? {
+                    if read == ticket {
+                        return Ok(Wake::Published);
+                    }
+                }
+            }
+            if let Some(i) = fds[2..].iter().position(|fd| fd.revents != 0) {
                 return Ok(Wake::Exited(i));
             }
         }
@@ -247,7 +357,8 @@ impl Coordinator<'_> {
 }
 impl Drop for Coordinator<'_> {
     fn drop(&mut self) {
-        self.bell.claimed.store(false, SeqCst);
+        self.bell.words.asleep(self.slot).store(0, SeqCst);
+        self.bell.slots()[self.slot] = None;
     }
 }
 
@@ -309,13 +420,17 @@ impl Ringer {
         })
     }
     /// Announce a published reply: bump `pending`, then wake the coordinator
-    /// if it marked a sleep.
+    /// whose ticket `watch` holds, if it marked a sleep with that ticket.
     pub fn ring(&self, watch: &AtomicU64) -> io::Result<()> {
-        self.words.word(PENDING).fetch_add(1, SeqCst);
-        let asleep = self.words.word(ASLEEP);
-        let ticket = asleep.load(SeqCst);
-        if ticket != 0
-            && watch.load(SeqCst) == ticket
+        self.words.pending().fetch_add(1, SeqCst);
+        // A parking coordinator stores `watch`, then its mark, then looks at
+        // `pending` again: it sees this ring, or these loads see both stores.
+        let ticket = watch.load(SeqCst);
+        let Some(slot) = slot_of(ticket) else {
+            return Ok(());
+        };
+        let asleep = self.words.asleep(slot);
+        if asleep.load(SeqCst) == ticket
             && asleep.compare_exchange(ticket, 0, SeqCst, SeqCst).is_ok()
         {
             let bytes = ticket.to_ne_bytes();
@@ -326,6 +441,9 @@ impl Ringer {
                 };
                 if count == bytes.len() as isize {
                     return Ok(());
+                }
+                if count >= 0 {
+                    return Err(io::Error::other("doorbell pipe split a ticket"));
                 }
                 let error = io::Error::last_os_error();
                 if error.kind() != io::ErrorKind::Interrupted {

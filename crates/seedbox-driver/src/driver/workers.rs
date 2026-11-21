@@ -8,6 +8,7 @@
 
 use super::Error;
 use rayon::{ThreadPool, ThreadPoolBuilder};
+use seedbox_machine::host::doorbell::{Coordinator, Doorbell};
 use std::{
     any::Any,
     cell::{Cell, RefCell},
@@ -136,6 +137,9 @@ pub(super) struct Workers<C> {
     caller: C,
     /// How the calling thread waits for runs in flight.
     idle: Box<dyn seedbox_machine::host::idle::IdleStrategy>,
+    /// The calling thread's place at the process doorbell, held from its first
+    /// wait for a run in a worker process that rings it.
+    bell: Option<Coordinator<'static>>,
     // Private unit-test witness after a job has published its result. Not
     // present in runtime builds or part of Driver snapshots.
     #[cfg(test)]
@@ -157,6 +161,7 @@ impl<C: 'static> Workers<C> {
                 threads,
                 caller,
                 idle: seedbox_machine::host::idle::Idle::default().build(),
+                bell: None,
                 #[cfg(test)]
                 result_observer: None,
             });
@@ -206,6 +211,7 @@ impl<C: 'static> Workers<C> {
                 threads,
                 caller,
                 idle: seedbox_machine::host::idle::Idle::default().build(),
+                bell: None,
                 #[cfg(test)]
                 result_observer: None,
             }),
@@ -349,8 +355,18 @@ impl<C: 'static> Workers<C> {
 
     /// Wait for runs in flight with `idle` instead.
     #[cfg(test)]
-    pub(super) fn set_idle(&mut self, idle: seedbox_machine::host::idle::Idle) {
-        self.idle = idle.build();
+    pub(super) fn set_idle(&mut self, idle: Box<dyn seedbox_machine::host::idle::IdleStrategy>) {
+        self.idle = idle;
+    }
+
+    /// The calling thread's coordinator, once this process has a doorbell.
+    /// `None` also while every slot is taken or its pipe cannot be made; the
+    /// caller then waits in one run, and the next wait asks again.
+    pub(super) fn bell(&mut self) -> Option<&mut Coordinator<'static>> {
+        if self.bell.is_none() {
+            self.bell = Doorbell::existing().and_then(|bell| bell.claim().ok().flatten());
+        }
+        self.bell.as_mut()
     }
 
     /// How the calling thread waits for runs in flight.

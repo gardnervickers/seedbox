@@ -161,7 +161,7 @@ impl Worker {
     /// With a run in flight in a worker that rings the process doorbell: the
     /// pipe that reaches EOF if the worker exits.
     pub(super) fn doorbell(&self, ticket: u64) -> Option<RawFd> {
-        (self.running && !self.lost).then(|| self.stream.get_ref().sleeper(ticket).as_raw_fd())
+        (self.running && !self.lost).then(|| self.stream.get_ref().watch(ticket).as_raw_fd())
     }
     /// The second half of [`Worker::send_run`]: the stop and the guest's writes.
     pub(super) fn receive_run(&mut self) -> Result<(u64, Stop, Vec<GuestWrite>)> {

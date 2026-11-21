@@ -44,9 +44,8 @@ impl IdleStrategy for SpinningPeer {
     fn idle(&mut self, attempt: u64, elapsed: Duration) -> Action {
         let action = self.idle.idle(attempt, elapsed);
         let reached = match self.policy {
-            Idle::PauseBackoff => matches!(action, Action::Pause(_)),
             Idle::Monitor => matches!(action, Action::Monitor(_)),
-            _ => true,
+            Idle::SpinThenSleep => true,
         };
         if reached || action == Action::Sleep {
             let seq = self.region.word(SPIN_SEQUENCE).load(SeqCst);
@@ -60,8 +59,8 @@ impl IdleStrategy for SpinningPeer {
             action
         }
     }
-    fn reset(&mut self, outcome: Outcome, started: Instant) {
-        self.idle.reset(outcome, started);
+    fn reset(&mut self, outcome: Outcome) {
+        self.idle.reset(outcome);
     }
 }
 
@@ -69,13 +68,11 @@ fn selected() -> Result<Option<Idle>> {
     match std::env::var("PV_BENCH_IDLE").ok().as_deref() {
         None => Ok(None),
         Some("bounded") => Ok(Some(Idle::SpinThenSleep)),
-        Some("adaptive") => Ok(Some(Idle::Adaptive)),
-        Some("pause") => Ok(Some(Idle::PauseBackoff)),
         Some("monitor") => Ok(Some(Idle::Monitor)),
         Some(_) => Err("unknown PV_BENCH_IDLE".into()),
     }
 }
-fn connection<R: Read + AsRawFd, W: Write>(
+fn connection<R: Read, W: Write>(
     region: Region,
     side: Side,
     input: R,

@@ -3,7 +3,7 @@
 use super::Action;
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
-/// Take one spin step on the sampled position. The caller handles Yield and Sleep.
+/// Take one spin step on the sampled position. The caller handles Sleep.
 pub fn wait_on_word(action: Action, word: &AtomicU64, seen: u64) -> u64 {
     match action {
         Action::Spin => {
@@ -15,13 +15,8 @@ pub fn wait_on_word(action: Action, word: &AtomicU64, seen: u64) -> u64 {
                 std::hint::spin_loop();
             }
         }
-        Action::Pause(count) => {
-            for _ in 0..count {
-                std::hint::spin_loop();
-            }
-        }
         Action::Monitor(remaining) => monitor(word, seen, remaining),
-        _ => unreachable!("only spin actions wait on an address"),
+        Action::Sleep => unreachable!("only spin actions wait on an address"),
     }
     word.load(SeqCst)
 }

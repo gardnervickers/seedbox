@@ -5,7 +5,7 @@ use super::batch::{BatchView, Flight, RunResult, Started};
 use super::workers::Stream;
 use super::*;
 use seedbox_machine::host::{
-    doorbell::{Coordinator, Doorbell, Wake},
+    doorbell::Wake,
     idle::{Action, Outcome},
 };
 
@@ -15,7 +15,6 @@ pub(super) struct Runs<M: Machine> {
     flying: Vec<Flight<M>>,
     finished: VecDeque<RunResult<M>>,
     lent: Option<Stream<Job<M>, RunResult<M>>>,
-    bell: Option<Coordinator<'static>>,
 }
 impl<M: Machine> Runs<M> {
     pub(super) fn new() -> Self {
@@ -23,7 +22,6 @@ impl<M: Machine> Runs<M> {
             flying: Vec::new(),
             finished: VecDeque::new(),
             lent: None,
-            bell: None,
         }
     }
 }
@@ -60,15 +58,12 @@ where
                 .next(runs.lent.as_mut().expect("outstanding jobs"))
                 .expect("job reports");
         }
-        if runs.bell.is_none() {
-            runs.bell = Doorbell::existing().and_then(Doorbell::claim);
-        }
         let mut wait = Instant::now();
         let mut attempt = 0;
         loop {
             // Mark before scanning. A reply racing any ring read will
             // either be observed here or invalidate the mark before park.
-            if let Some(bell) = runs.bell.as_mut() {
+            if let Some(bell) = self.workers.bell() {
                 bell.mark();
             }
             let mut i = 0;
@@ -85,7 +80,7 @@ where
             }
             if let Some(result) = runs.finished.pop_front() {
                 if attempt > 0 {
-                    self.workers.idle().reset(Outcome::Progress, wait);
+                    self.workers.idle().reset(Outcome::Progress);
                 }
                 return result;
             }
@@ -93,44 +88,38 @@ where
                 return result;
             }
             match self.workers.idle().idle(attempt, wait.elapsed()) {
-                action @ (Action::Spin | Action::Pause(_) | Action::Monitor(_)) => {
-                    if let Some(bell) = &runs.bell {
-                        bell.spin(action);
-                    }
-                }
-                Action::Yield => std::thread::yield_now(),
+                // Wait on the publication word sampled before the scan.
+                action @ (Action::Spin | Action::Monitor(_)) => match self.workers.bell() {
+                    Some(bell) => bell.spin(action),
+                    None => std::hint::spin_loop(),
+                },
                 Action::Sleep => {
-                    let outcome = if attempt == 0 {
+                    self.workers.idle().reset(if attempt == 0 {
                         Outcome::SleptAtOnce
                     } else {
                         Outcome::SleptAfterTrying
-                    };
-                    let watch = runs
-                        .bell
-                        .as_ref()
-                        .filter(|_| runs.lent.as_ref().is_none_or(|s| s.outstanding() == 0));
-                    let mut index = 0;
-                    if let Some(bell) = watch {
-                        let wake = bell.park(|ticket| {
+                    });
+                    // A lent job reports through its channel, not the doorbell.
+                    let lent = runs.lent.as_ref().is_some_and(|s| s.outstanding() > 0);
+                    if let Some(bell) = self.workers.bell().filter(|_| !lent) {
+                        match bell.park(|ticket| {
                             runs.flying
                                 .iter_mut()
                                 .map(|f| f.watch_reply(ticket))
                                 .collect()
-                        });
-                        match wake {
+                        }) {
                             Ok(Wake::Published) => {
-                                self.workers.idle().reset(outcome, wait);
                                 attempt = 0;
                                 wait = Instant::now();
                                 continue;
                             }
-                            Ok(Wake::Exited(i)) => index = i,
+                            Ok(Wake::Exited(i)) => {
+                                return runs.flying.remove(i).finish(self.workers.caller())
+                            }
                             Ok(Wake::Unwatched) | Err(_) => {}
                         }
                     }
-                    let result = runs.flying.remove(index).finish(self.workers.caller());
-                    self.workers.idle().reset(outcome, wait);
-                    return result;
+                    return runs.flying.remove(0).finish(self.workers.caller());
                 }
             }
             attempt += 1;

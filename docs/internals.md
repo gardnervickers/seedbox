@@ -85,11 +85,12 @@ a partial request. The coordinator samples the counter before scanning, arms
 the outstanding VMs for one sleep, then checks the counter again. The first
 armed VM to claim that sleep writes its ticket to a shared pipe. The coordinator
 also watches the individual worker pipes for EOF, including while a ticket is
-owed. The default spin ceiling is 200 µs in the coordinator. macOS ARM64 with
-timed WFE uses a monitored wait and a 400 µs VM ceiling. Other hosts use
-bounded spinning and a 500 µs VM ceiling. Both park sooner after consecutive
-unproductive spins.
-A continuously spinning transport checks for pipe hangup during empty scans. [Round loop](../crates/seedbox-driver/src/driver/round.rs) ·
+owed. Each Driver in a process has its own sleep mark, which its tickets name:
+a parked Driver that reads another's ticket forwards it. The default spin
+ceiling is 200 µs in the coordinator. macOS ARM64 with timed WFE uses a
+monitored wait and a 400 µs VM ceiling. Other hosts use bounded spinning and a
+500 µs VM ceiling. Both park sooner after consecutive unproductive spins.
+[Round loop](../crates/seedbox-driver/src/driver/round.rs) ·
 [Wake protocol](../crates/seedbox-machine/src/host/doorbell.rs)
 
 ## Same-time controls
