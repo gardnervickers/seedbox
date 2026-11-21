@@ -143,11 +143,14 @@ where
         mut watch: impl FnMut(&Trace, usize) -> bool,
     ) -> Result<Stop, Error<M::Error>> {
         let mut stalled = 0;
+        // Inputs due at a barrier are delivered before `watch` sees it, so a
+        // round an input cut is always one the program delivered.
+        let mut delivered = false;
         loop {
             if let Some(reason) = self.finished {
                 return Ok(Stop::Finished(reason));
             }
-            let delivered = self.deliver_due()?;
+            delivered |= self.deliver_due()?;
             if self.now >= until {
                 return Ok(Stop::Reached);
             }
@@ -183,6 +186,7 @@ where
                 )));
             }
             self.now = at;
+            delivered = self.deliver_due()?;
             if watch(&self.trace, first) {
                 return Ok(Stop::Watched);
             }

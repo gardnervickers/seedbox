@@ -713,3 +713,32 @@ fn a_branch_is_reproduced_by_its_program_from_boot() {
     }
     assert_eq!(occurrences(&halting), occurrences(&end));
 }
+
+/// The oracle crashes the server at 13 ns; the server writes at 5 and 17.
+fn crash_scripts() -> Scripts {
+    vec![
+        vec![(13, call(1, r#""op":"crash","target":{"machine":"m1"}"#))],
+        vec![(5, says("boot\n")), (17, says("late\n"))],
+    ]
+}
+
+#[test]
+fn a_watched_stop_delivers_the_input_that_cut_its_round() {
+    // The watch stops at the barrier the programmed stop at 15 cut; the
+    // stop is delivered by then, so dropping what is pending keeps it.
+    let mut watched = run(crash_scripts(), vec![Input::stop(at(15), key("p"))]);
+    let mut seen = 0;
+    let stop = watched.advance_watching(at(100), |_, _| {
+        seen += 1;
+        seen == 2
+    });
+    assert_eq!(stop.unwrap(), Stop::Watched);
+    assert_eq!(watched.now(), at(15));
+    assert!(watched.program().pending().is_empty());
+    watched.replace_pending(Vec::new()).unwrap();
+    watched.advance(at(100)).unwrap();
+    // Its program, run from boot, reproduces it.
+    let mut cold = run(crash_scripts(), watched.program().delivered().to_vec());
+    cold.advance(at(100)).unwrap();
+    assert_eq!(occurrences(&cold), occurrences(&watched));
+}
