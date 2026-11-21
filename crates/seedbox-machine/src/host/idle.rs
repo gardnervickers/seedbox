@@ -13,13 +13,17 @@
 //! Strategies decide only host scheduling. Every strategy delivers the same
 //! bytes in the same order, so none can change a simulation's results.
 use super::IdleCores;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The next step of a wait that has not seen progress.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Check again after a short busy loop.
     Spin,
+    /// Pause between position loads. The count increases during one wait.
+    Pause(u32),
+    /// Wait for a write to the watched cache line, up to this remaining budget.
+    Monitor(Duration),
     /// Give the core away once, then check again.
     Yield,
     /// Sleep until the peer's guaranteed wakeup.
@@ -44,8 +48,9 @@ pub trait IdleStrategy: Send {
     /// What to do after `attempt` checks without progress, `waited` into the
     /// wait.
     fn idle(&mut self, attempt: u64, waited: Duration) -> Action;
-    /// The wait ended.
-    fn reset(&mut self, outcome: Outcome);
+    /// The wait ended. A learning policy samples total elapsed time, including
+    /// a kernel sleep. Other policies need only the outcome.
+    fn reset(&mut self, outcome: Outcome, started: Instant);
 }
 
 /// The built-in strategies.
@@ -60,23 +65,117 @@ pub enum Idle {
     BusySpin,
     /// [`Backoff`]: spin, then yield, then sleep.
     Backoff,
+    /// Set the budget from recent wait lengths on this endpoint.
+    Adaptive,
+    /// Increase the number of CPU pause hints between reads, then park.
+    PauseBackoff,
+    /// Wait for a write to the monitored cache line, then park.
+    Monitor,
 }
+impl Default for Idle {
+    fn default() -> Self {
+        if spin::monitor_by_default() {
+            Self::Monitor
+        } else {
+            Self::SpinThenSleep
+        }
+    }
+}
+
 impl Idle {
-    /// Spin briefly for a reply, then park with a guaranteed wakeup.
-    pub const DEFAULT: Self = Self::SpinThenSleep;
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 7] = [
         Self::SpinThenSleep,
         Self::IdleSpin,
         Self::BusySpin,
         Self::Backoff,
+        Self::Adaptive,
+        Self::PauseBackoff,
+        Self::Monitor,
     ];
     pub fn build(self) -> Box<dyn IdleStrategy> {
+        self.with_budget(SpinThenSleep::SPIN)
+    }
+    /// The worker can wait across a whole round while the coordinator waits
+    /// for the first reply. Each endpoint keeps its own observations.
+    pub fn with_budget(self, ceiling: Duration) -> Box<dyn IdleStrategy> {
         match self {
-            Self::SpinThenSleep => Box::new(SpinThenSleep::default()),
+            Self::SpinThenSleep => Box::new(SpinThenSleep::new(ceiling)),
+            Self::Adaptive => Box::new(Adaptive::new(ceiling)),
+            Self::PauseBackoff | Self::Monitor => Box::new(QuietSpin {
+                monitor: self == Self::Monitor,
+                limit: ceiling,
+                spin: SpinThenSleep::new(ceiling),
+            }),
             Self::IdleSpin => Box::new(IdleSpin::default()),
             Self::BusySpin => Box::new(BusySpin),
             Self::Backoff => Box::new(Backoff::default()),
         }
+    }
+}
+
+mod spin;
+pub use spin::wait_on_word;
+
+/// An EWMA of actual wait times and of how often even the maximum spin
+/// would have missed. Parked samples keep updating both estimates, allowing
+/// a previously inactive endpoint to begin spinning again without a probe.
+/// Each sample has 1/8 weight. Spin for three recent mean waits, between
+/// half and all of the ceiling. Park immediately once 3/4 of the weight
+/// exceeds that ceiling.
+struct Adaptive {
+    ceiling_ns: u64,
+    mean_ns: u64,
+    long_fraction: u64,
+}
+impl Adaptive {
+    fn new(ceiling: Duration) -> Self {
+        // Bound intermediates in the 7/8-weighted sum even for an arbitrary Duration.
+        let ceiling_ns = ceiling.as_nanos().min(u128::from(u64::MAX / 16)) as u64;
+        Self {
+            ceiling_ns,
+            mean_ns: ceiling_ns / 8,
+            long_fraction: 0,
+        }
+    }
+    fn observe(&mut self, elapsed: Duration) {
+        let ns = elapsed.as_nanos().min(u128::from(self.ceiling_ns) * 2) as u64;
+        self.mean_ns = (7 * self.mean_ns + ns) / 8;
+        self.long_fraction = (7 * self.long_fraction + 256 * u64::from(ns > self.ceiling_ns)) / 8;
+    }
+}
+impl IdleStrategy for Adaptive {
+    fn idle(&mut self, _: u64, waited: Duration) -> Action {
+        let ns = (3 * self.mean_ns)
+            .max(self.ceiling_ns / 2)
+            .min(self.ceiling_ns);
+        if self.long_fraction >= 192 || waited.as_nanos() >= u128::from(ns) {
+            Action::Sleep
+        } else {
+            Action::Spin
+        }
+    }
+    fn reset(&mut self, _: Outcome, started: Instant) {
+        self.observe(started.elapsed());
+    }
+}
+
+struct QuietSpin {
+    monitor: bool,
+    limit: Duration,
+    spin: SpinThenSleep,
+}
+impl IdleStrategy for QuietSpin {
+    fn idle(&mut self, attempt: u64, waited: Duration) -> Action {
+        match self.spin.idle(attempt, waited) {
+            Action::Spin if attempt > 0 && self.monitor => {
+                Action::Monitor(self.limit.saturating_sub(waited))
+            }
+            Action::Spin if attempt > 0 => Action::Pause(1 << attempt.min(5)),
+            other => other,
+        }
+    }
+    fn reset(&mut self, outcome: Outcome, started: Instant) {
+        self.spin.reset(outcome, started);
     }
 }
 
@@ -134,7 +233,7 @@ impl IdleStrategy for SpinThenSleep {
             Action::Sleep
         }
     }
-    fn reset(&mut self, outcome: Outcome) {
+    fn reset(&mut self, outcome: Outcome, _: Instant) {
         match outcome {
             Outcome::Progress => self.futile = 0,
             Outcome::SleptAfterTrying => self.futile = self.futile.saturating_add(1),
@@ -179,8 +278,8 @@ impl IdleStrategy for IdleSpin {
             false => short,
         }
     }
-    fn reset(&mut self, outcome: Outcome) {
-        self.short.reset(outcome);
+    fn reset(&mut self, outcome: Outcome, started: Instant) {
+        self.short.reset(outcome, started);
     }
 }
 
@@ -192,7 +291,7 @@ impl IdleStrategy for BusySpin {
     fn idle(&mut self, _: u64, _: Duration) -> Action {
         Action::Spin
     }
-    fn reset(&mut self, _: Outcome) {}
+    fn reset(&mut self, _: Outcome, _: Instant) {}
 }
 
 /// Aeron's backoff: spin for `spin`, yield until `yield_until`, then sleep
@@ -224,12 +323,40 @@ impl IdleStrategy for Backoff {
             Action::Sleep
         }
     }
-    fn reset(&mut self, _: Outcome) {}
+    fn reset(&mut self, _: Outcome, _: Instant) {}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adaptive_parks_after_long_waits_and_recovers_from_parked_samples() {
+        let mut policy = Adaptive::new(Duration::from_micros(200));
+        for _ in 0..32 {
+            policy.observe(Duration::from_millis(3));
+        }
+        assert_eq!(policy.idle(0, Duration::ZERO), Action::Sleep);
+        for _ in 0..32 {
+            policy.observe(Duration::from_micros(10));
+        }
+        assert_eq!(policy.idle(0, Duration::ZERO), Action::Spin);
+        assert_eq!(policy.idle(1, Duration::from_micros(110)), Action::Sleep);
+    }
+
+    #[test]
+    fn pause_backoff_spaces_reads_and_monitor_uses_the_remaining_budget() {
+        let limit = Duration::from_micros(200);
+        let mut pause = Idle::PauseBackoff.with_budget(limit);
+        let mut monitor = Idle::Monitor.with_budget(limit);
+        for policy in [&mut pause, &mut monitor] {
+            assert_eq!(policy.idle(0, Duration::ZERO), Action::Spin);
+        }
+        assert_eq!(pause.idle(1, Duration::ZERO), Action::Pause(2));
+        assert_eq!(pause.idle(9, Duration::ZERO), Action::Pause(32));
+        assert_eq!(monitor.idle(1, limit / 2), Action::Monitor(limit / 2));
+        assert_eq!(monitor.idle(2, limit), Action::Sleep);
+    }
 
     /// One wait whose spin runs out: the actions until it sleeps.
     fn run_out(strategy: &mut SpinThenSleep) -> Vec<Action> {
@@ -242,7 +369,7 @@ mod tests {
         } else {
             Outcome::SleptAtOnce
         };
-        strategy.reset(outcome);
+        strategy.reset(outcome, Instant::now());
         actions
     }
 
@@ -259,7 +386,7 @@ mod tests {
         assert_eq!(spun, expected);
         assert_eq!(strategy.futile(), SpinThenSleep::FUTILE + 1);
         // Progress restores spinning.
-        strategy.reset(Outcome::Progress);
+        strategy.reset(Outcome::Progress, Instant::now());
         assert_eq!(strategy.idle(0, Duration::ZERO), Action::Spin);
     }
 

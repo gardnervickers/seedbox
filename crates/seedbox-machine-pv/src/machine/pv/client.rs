@@ -3,7 +3,7 @@ use super::{shm, wire};
 use seedbox_machine::host::doorbell::Doorbell;
 use seedbox_machine::pv::transport::GuestWrite;
 use std::{
-    io::{BufReader, Read},
+    io::BufReader,
     os::fd::{AsRawFd, RawFd},
     path::Path,
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
@@ -116,10 +116,11 @@ impl Worker {
         let response = self.exchange(|stream| {
             stream.get_mut().message(&request, |_| Ok(()))?;
             stream.get_mut().finish_send().map_err(|e| e.to_string())?;
-            match answer(stream)? {
+            shm::receive(stream, &[], |response, _| match response {
                 Response::Stopped { .. } => Err("PV unexpected run response".into()),
                 other => Ok(other),
-            }
+            })?
+            .ok_or_else(|| "PV worker closed its protocol".into())
         })?;
         match response {
             Response::Error(error) => Err(error),
@@ -174,14 +175,14 @@ impl Worker {
                 return Err(error);
             }
             stream.get_mut().finish_send().map_err(|e| e.to_string())?;
-            let mut reply = prefix.as_slice().chain(stream);
-            match answer(&mut reply)? {
+            shm::receive(stream, &prefix, |response, body| match response {
                 Response::Stopped { time, stop, writes } => {
-                    Ok(Ok((time, stop, wire::receive_writes(&mut reply, writes)?)))
+                    Ok(Ok((time, stop, wire::receive_writes(body, writes)?)))
                 }
                 Response::Error(error) => Ok(Err(error)),
                 _ => Err("PV worker returned unexpected run response".into()),
-            }
+            })?
+            .ok_or_else(|| "PV worker closed its protocol".into())
         })?
     }
     pub(super) fn terminate(&mut self) -> Result<()> {
@@ -200,9 +201,6 @@ impl Worker {
             .map_err(|e| format!("PV worker reap: {e}"))?;
         Ok(())
     }
-}
-fn answer(stream: &mut impl Read) -> Result<Response> {
-    receive(stream)?.ok_or_else(|| "PV worker closed its protocol".into())
 }
 impl Drop for Worker {
     fn drop(&mut self) {

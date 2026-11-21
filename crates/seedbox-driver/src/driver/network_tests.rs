@@ -1578,7 +1578,7 @@ type Observed = (
 /// machine split (its runs in flight on the Driver's thread) or lent to a
 /// worker as `split` says; returns the barriers and the sorted log.
 fn echo_world(workers: usize, split: [bool; 3]) -> Observed {
-    echo_world_waiting(workers, split, Idle::DEFAULT, false)
+    echo_world_waiting(workers, split, Idle::default(), false)
 }
 
 /// As [`echo_world`], each split machine coming back on another thread and

@@ -85,7 +85,7 @@ where
             }
             if let Some(result) = runs.finished.pop_front() {
                 if attempt > 0 {
-                    self.workers.idle().reset(Outcome::Progress);
+                    self.workers.idle().reset(Outcome::Progress, wait);
                 }
                 return result;
             }
@@ -93,44 +93,44 @@ where
                 return result;
             }
             match self.workers.idle().idle(attempt, wait.elapsed()) {
-                Action::Spin => {
-                    for _ in 0..64 {
-                        if runs.bell.as_ref().is_none_or(Coordinator::rung) {
-                            break;
-                        }
-                        std::hint::spin_loop();
+                action @ (Action::Spin | Action::Pause(_) | Action::Monitor(_)) => {
+                    if let Some(bell) = &runs.bell {
+                        bell.spin(action);
                     }
                 }
                 Action::Yield => std::thread::yield_now(),
                 Action::Sleep => {
-                    self.workers.idle().reset(if attempt == 0 {
+                    let outcome = if attempt == 0 {
                         Outcome::SleptAtOnce
                     } else {
                         Outcome::SleptAfterTrying
-                    });
+                    };
                     let watch = runs
                         .bell
                         .as_ref()
                         .filter(|_| runs.lent.as_ref().is_none_or(|s| s.outstanding() == 0));
+                    let mut index = 0;
                     if let Some(bell) = watch {
-                        match bell.park(|ticket| {
+                        let wake = bell.park(|ticket| {
                             runs.flying
                                 .iter_mut()
                                 .map(|f| f.watch_reply(ticket))
                                 .collect()
-                        }) {
+                        });
+                        match wake {
                             Ok(Wake::Published) => {
+                                self.workers.idle().reset(outcome, wait);
                                 attempt = 0;
                                 wait = Instant::now();
                                 continue;
                             }
-                            Ok(Wake::Exited(i)) => {
-                                return runs.flying.remove(i).finish(self.workers.caller())
-                            }
+                            Ok(Wake::Exited(i)) => index = i,
                             Ok(Wake::Unwatched) | Err(_) => {}
                         }
                     }
-                    return runs.flying.remove(0).finish(self.workers.caller());
+                    let result = runs.flying.remove(index).finish(self.workers.caller());
+                    self.workers.idle().reset(outcome, wait);
+                    return result;
                 }
             }
             attempt += 1;

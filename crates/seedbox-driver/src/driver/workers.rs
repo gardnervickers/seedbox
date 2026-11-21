@@ -156,7 +156,7 @@ impl<C: 'static> Workers<C> {
                 pool: None,
                 threads,
                 caller,
-                idle: seedbox_machine::host::idle::Idle::DEFAULT.build(),
+                idle: seedbox_machine::host::idle::Idle::default().build(),
                 #[cfg(test)]
                 result_observer: None,
             });
@@ -205,7 +205,7 @@ impl<C: 'static> Workers<C> {
                 pool: Some(pool),
                 threads,
                 caller,
-                idle: seedbox_machine::host::idle::Idle::DEFAULT.build(),
+                idle: seedbox_machine::host::idle::Idle::default().build(),
                 #[cfg(test)]
                 result_observer: None,
             }),

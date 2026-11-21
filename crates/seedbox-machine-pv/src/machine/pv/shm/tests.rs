@@ -276,7 +276,8 @@ fn a_claim_larger_than_the_ring_streams_through_it() {
 
 #[test]
 fn polling_fragments_preserves_a_wrapped_header_and_large_trailer() {
-    let (mut client, mut worker) = pair(64, Duration::ZERO);
+    let (mut client, worker) = pair(64, Duration::ZERO);
+    let mut worker = io::BufReader::new(worker);
     let mut prefix = Vec::new();
     for len in [63, 257, 4096, 7] {
         let payload = message(len, 19);
@@ -286,14 +287,17 @@ fn polling_fragments_preserves_a_wrapped_header_and_large_trailer() {
         claim.commit().unwrap();
         // The peer takes one available interval per pass. Neither side has
         // a helper thread: a blocking operation here cannot make progress.
-        while !worker.poll_message(&mut prefix).unwrap() {
+        while !worker.get_mut().poll_message(&mut prefix).unwrap() {
             client.advance_send().unwrap();
         }
-        let mut input = prefix.as_slice().chain(&mut worker);
-        let header: Vec<u8> = protocol::receive(&mut input).unwrap().unwrap();
+        let (header, received) = super::receive(&mut worker, &prefix, |header: Vec<u8>, input| {
+            let mut bytes = vec![0; len];
+            input.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+            Ok((header, bytes))
+        })
+        .unwrap()
+        .unwrap();
         assert_eq!(header, payload);
-        let mut received = vec![0; len];
-        input.read_exact(&mut received).unwrap();
         assert_eq!(received, payload);
         prefix.clear();
     }
@@ -324,4 +328,132 @@ fn polling_a_dead_worker_observes_eof_without_parking() {
             }
         }
     });
+}
+
+#[test]
+fn packet_decoder_borrows_whole_contiguous_messages_and_streams_the_rest() {
+    use crate::machine::pv::wire::Input;
+    for (alignment, length, contiguous) in [(0, 15, true), (61, 15, false), (0, 137, false)] {
+        let (mut client, mut worker) = pair(64, Duration::ZERO);
+        worker.write_all(&vec![0; alignment]).unwrap();
+        worker.flush().unwrap();
+        client.read_exact(&mut vec![0; alignment]).unwrap();
+        let expected = message(length, 19);
+        let sent = expected.clone();
+        bounded(
+            "the fragmented receiver returns credit to the writer",
+            move || {
+                let producer = std::thread::spawn(move || {
+                    worker
+                        .message(&length, |claim| {
+                            claim.write_all(&sent).map_err(|e| e.to_string())
+                        })
+                        .unwrap();
+                    worker.finish_send().unwrap();
+                });
+                let got = super::receive(
+                    &mut io::BufReader::new(client),
+                    &[],
+                    |count: usize, input| {
+                        assert_eq!(matches!(input, Input::Slice(_)), contiguous);
+                        let mut bytes = vec![0; count];
+                        input.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+                        Ok(bytes)
+                    },
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(got, expected);
+                producer.join().unwrap();
+            },
+        );
+    }
+}
+
+#[test]
+fn synchronous_reply_streams_its_validated_trailer_across_fragments() {
+    use crate::machine::pv::protocol::Stop;
+    use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
+
+    bounded(
+        "the polling reader returns credit for each reply fragment",
+        || {
+            let (mut client, mut worker) = pair(64, Duration::ZERO);
+            let bytes = message(4096, 73);
+            let writes = vec![GuestWrite::Console(LifecycleWrite { time: 7, bytes })];
+            let response = Response::Stopped {
+                time: 7,
+                stop: Stop::Horizon,
+                writes: 1,
+            };
+            let producer = std::thread::spawn(move || {
+                worker.reply(&response, Some(&writes)).unwrap();
+                writes
+            });
+            let mut prefix = Vec::new();
+            while !client.poll_message(&mut prefix).unwrap() {
+                std::hint::spin_loop();
+            }
+            assert!(prefix.len() >= 64);
+            let got = super::receive(&mut io::BufReader::new(client), &prefix, |header, input| {
+                match header {
+                    Response::Stopped {
+                        time: 7,
+                        stop: Stop::Horizon,
+                        writes,
+                    } => crate::machine::pv::wire::receive_writes(input, writes),
+                    _ => Err("unexpected reply".into()),
+                }
+            })
+            .unwrap()
+            .unwrap();
+            assert_eq!(got, producer.join().unwrap());
+        },
+    );
+}
+
+#[test]
+fn invalid_last_record_leaves_a_long_reply_unpublished() {
+    use crate::machine::pv::protocol::Stop;
+    use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
+    let (client, mut worker) = pair(64, Duration::ZERO);
+    let writes = [
+        GuestWrite::Console(LifecycleWrite {
+            time: 1,
+            bytes: message(128, 11),
+        }),
+        GuestWrite::Frame(LifecycleWrite {
+            time: 2,
+            bytes: vec![0],
+        }),
+    ];
+    let reply = Response::Stopped {
+        time: 2,
+        stop: Stop::Horizon,
+        writes: 2,
+    };
+    assert!(worker.reply(&reply, Some(&writes)).is_err());
+    assert_eq!(
+        client
+            .region
+            .word(Ring::Responses.word(WRITTEN))
+            .load(SeqCst),
+        0
+    );
+}
+
+#[test]
+fn a_direct_json_header_can_wrap_its_prefix_or_outgrow_its_first_slice() {
+    for alignment in [252, 510] {
+        let (mut writer, mut reader) = pair(512, Duration::ZERO);
+        writer.write_all(&vec![0; alignment]).unwrap();
+        writer.flush().unwrap();
+        reader.read_exact(&mut vec![0; alignment]).unwrap();
+        let expected = vec![255_u8; 100];
+        let mut claim = writer.claim().unwrap();
+        claim.header(&expected).unwrap();
+        claim.commit().unwrap();
+        let got: Vec<u8> = protocol::receive(&mut reader).unwrap().unwrap();
+        assert_eq!(got, expected);
+    }
 }
