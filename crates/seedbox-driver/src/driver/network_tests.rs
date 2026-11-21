@@ -2,7 +2,7 @@
 use super::fixture::{auto_key, definition};
 use super::*;
 use crate::definition::{MacAddress, NetworkInterface};
-use seedbox_machine::host::doorbell::{Doorbell, Ringer};
+use seedbox_machine::host::doorbell::{Coordinator, Doorbell, Ringer};
 use seedbox_machine::host::idle::{Idle, SpinThenSleep};
 use seedbox_machine::machine::SplitRun;
 use std::os::fd::AsRawFd;
@@ -29,6 +29,8 @@ struct Log {
     runs: Vec<(usize, u64, u64)>,
     /// Machine identities as the coordinator collects completed split runs.
     finishes: Vec<usize>,
+    /// How the Driver waited for each held run, in order.
+    waits: Vec<Waited>,
     /// (machine, offered machine time, tag) of every accepted frame.
     received: Vec<(usize, u64, u8)>,
     /// (machine, offered machine time, bytes) of every accepted frame.
@@ -36,6 +38,20 @@ struct Log {
     /// (machine, offered machine time, payload) of every control reply.
     replies: Vec<(usize, u64, Vec<u8>)>,
 }
+
+/// One step of the Driver's wait for a [`Spec::held`] run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Waited {
+    /// Asked whether the run had stopped.
+    Scanned(usize),
+    /// Named the run to a park on the doorbell.
+    Watched(usize),
+    /// Entered its finish.
+    Finished(usize),
+}
+
+/// The doorbell as another Driver holds it, until a held run lets it go.
+type Release = Arc<Mutex<Option<Coordinator<'static>>>>;
 
 /// Emits scripted outputs at machine times, optionally replying to every
 /// frame one nanosecond later (`echo`) or in the accepting run (`answer`).
@@ -54,6 +70,10 @@ struct Net {
     flight: Option<Result<StopReason, std::io::Error>>,
     polls: u32,
     bell: Option<Bell>,
+    /// Never report ready, so that only a `finish` the Driver sleeps in ends
+    /// the run; record how the Driver waits; and once it has looked at two
+    /// such runs, release the doorbell.
+    held: Option<Release>,
 }
 
 struct Bell {
@@ -212,6 +232,15 @@ impl SplitRun<(), std::io::Error> for Net {
     }
 
     fn ready(&mut self) -> bool {
+        if let Some(release) = &self.held {
+            let mut log = self.log.lock().unwrap();
+            log.waits.push(Waited::Scanned(self.id));
+            let other = |wait: &Waited| matches!(wait, Waited::Scanned(id) if *id != self.id);
+            if log.waits.iter().any(other) {
+                drop(release.lock().unwrap().take());
+            }
+            return false;
+        }
         if let Some(bell) = &self.bell {
             return bell.back.load(SeqCst);
         }
@@ -220,6 +249,13 @@ impl SplitRun<(), std::io::Error> for Net {
     }
 
     fn watch_reply(&mut self, ticket: u64) -> Option<std::os::fd::RawFd> {
+        if self.held.is_some() {
+            self.log
+                .lock()
+                .unwrap()
+                .waits
+                .push(Waited::Watched(self.id));
+        }
         let bell = self.bell.as_ref()?;
         bell.ticket.store(ticket, SeqCst);
         self.flight.is_some().then(|| bell.exit.0.as_raw_fd())
@@ -229,7 +265,11 @@ impl SplitRun<(), std::io::Error> for Net {
         if let Some(thread) = self.bell.as_mut().and_then(|bell| bell.thread.take()) {
             thread.join().unwrap();
         }
-        self.log.lock().unwrap().finishes.push(self.id);
+        let mut log = self.log.lock().unwrap();
+        if self.held.is_some() {
+            log.waits.push(Waited::Finished(self.id));
+        }
+        log.finishes.push(self.id);
         self.flight.take().expect("a run in flight")
     }
 }
@@ -246,6 +286,7 @@ struct Spec {
     bell: bool,
     parked: bool,
     doorbell: Option<&'static Doorbell>,
+    held: Option<Release>,
 }
 fn spec(nic: Option<u8>) -> Spec {
     Spec {
@@ -258,6 +299,7 @@ fn spec(nic: Option<u8>) -> Spec {
         bell: false,
         parked: false,
         doorbell: None,
+        held: None,
     }
 }
 impl Spec {
@@ -278,6 +320,12 @@ impl Spec {
     fn parked(mut self) -> Self {
         self.parked = true;
         self.bell()
+    }
+    /// Split, with a run that stops only when the Driver sleeps in its
+    /// finish, and that lets go of `release` once two such runs were scanned.
+    fn held(mut self, release: &Release) -> Self {
+        self.held = Some(release.clone());
+        self.split()
     }
     /// Ring `doorbell` in place of the process's.
     fn on(mut self, doorbell: &'static Doorbell) -> Self {
@@ -354,6 +402,7 @@ fn world(
                     flight: None,
                     polls: 0,
                     bell: spec.bell.then(|| Bell::new(spec.doorbell, spec.parked)),
+                    held: spec.held.clone(),
                 },
             )
         })
@@ -741,6 +790,7 @@ fn spawned_machines_join_the_network_and_host_additions_stay_unattached() {
                     flight: None,
                     polls: 0,
                     bell: None,
+                    held: None,
                 })
             })
         })
@@ -1819,5 +1869,52 @@ fn a_driver_without_the_doorbell_sleeps_in_its_oldest_run_to_the_same_results() 
             assert_eq!(observed, lent, "{idle:?} for {spin:?}, {split:?}");
             assert_eq!(tickets, 0, "the Driver never parked on the doorbell");
         }
+    }
+}
+
+#[test]
+fn a_round_without_the_doorbell_scans_every_run_then_sleeps_in_its_oldest() {
+    for (idle, spin) in waits() {
+        let waits = contained("the Driver sleeps in each held run", move || {
+            let doorbell = Doorbell::detached().unwrap();
+            // Another Driver holds the doorbell when the round decides how to
+            // wait, and lets go of it during the round's first scan.
+            let claim = doorbell.claim().expect("an unclaimed doorbell");
+            let release: Release = Arc::new(Mutex::new(Some(claim)));
+            let config = NetworkConfig::new(Duration::from_millis(1), Duration::ZERO, 0).unwrap();
+            let held = || spec(None).busy().held(&release);
+            let (mut driver, log) = simple(MS, config, vec![held(), held()]);
+            driver.workers.set_idle(idle.with_budget(spin));
+            driver.workers.set_doorbell(doorbell);
+            driver.step(at(MS)).unwrap();
+            assert!(release.lock().unwrap().is_none(), "the doorbell was let go");
+            assert_eq!(doorbell.tickets_read(), 0);
+            let waits = log.lock().unwrap().waits.clone();
+            waits
+        });
+        // Neither run ever reports ready: only sleeping in a run ends it.
+        let finished: Vec<_> = (waits.iter().copied())
+            .filter(|wait| matches!(wait, Waited::Finished(_)))
+            .collect();
+        assert_eq!(
+            finished,
+            [Waited::Finished(0), Waited::Finished(1)],
+            "{spin:?}"
+        );
+        let first = waits.iter().position(|wait| *wait == finished[0]).unwrap();
+        for id in [0, 1] {
+            let scanned = waits[..first].contains(&Waited::Scanned(id));
+            assert!(
+                scanned,
+                "run {id} was scanned before the Driver slept, {spin:?}"
+            );
+        }
+        // The doorbell was free for the second run's wait, but the round had
+        // decided: it parks on no doorbell it did not hold at its first scan.
+        let watched = waits.iter().any(|wait| matches!(wait, Waited::Watched(_)));
+        assert!(
+            !watched,
+            "{idle:?} for {spin:?}: the round parked after its first scan"
+        );
     }
 }

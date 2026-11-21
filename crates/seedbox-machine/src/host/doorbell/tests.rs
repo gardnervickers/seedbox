@@ -16,7 +16,7 @@ fn bounded<T: Send + 'static>(reason: &str, body: impl FnOnce() -> T + Send + 's
 }
 
 /// Park on `watch` alone, with no executor pipe.
-fn park(coordinator: &Coordinator<'_>, watch: &AtomicU64) -> Wake {
+fn park(coordinator: &mut Coordinator<'_>, watch: &AtomicU64) -> Wake {
     coordinator
         .park(|ticket| {
             watch.store(ticket, SeqCst);
@@ -121,7 +121,7 @@ fn every_park_ends_at_a_ring_from_another_thread() {
                     }
                     ringer.ring(&watch).unwrap()
                 });
-                assert_eq!(park(&coordinator, &watch), Wake::Published);
+                assert_eq!(park(&mut coordinator, &watch), Wake::Published);
             });
         }
         no_pending_ticket(&bell);
@@ -143,7 +143,7 @@ fn a_park_past_its_last_look_ends_only_by_reading_its_ticket() {
                     asleep(&bell, &watch);
                     ringer.ring(&watch).unwrap()
                 });
-                assert_eq!(park(&coordinator, &watch), Wake::Published);
+                assert_eq!(park(&mut coordinator, &watch), Wake::Published);
             });
         }
         assert_eq!(bell.tickets_read(), parks);
@@ -168,7 +168,7 @@ fn an_executor_rings_whichever_coordinator_watches_it_now() {
                     tickets.push(asleep(&bell, &watch));
                     ringer.ring(&watch).unwrap()
                 });
-                assert_eq!(park(&coordinator, &watch), Wake::Published);
+                assert_eq!(park(&mut coordinator, &watch), Wake::Published);
             });
         }
         assert_ne!(tickets[0], tickets[1]);
@@ -206,28 +206,33 @@ fn a_park_ends_when_a_watched_executor_exits() {
 #[test]
 fn a_cancelled_park_still_reports_a_watched_executor_that_exited() {
     let bell = Doorbell::create().unwrap();
-    let mut coordinator = bell.claim().unwrap();
-    let ringer = bell.ringer().unwrap();
-    let (live, _keep) = std::io::pipe().unwrap();
-    let (read, write) = std::io::pipe().unwrap();
-    // An executor this park does not watch rings before every park, so each
-    // park is cancelled before it would poll.
-    let mut cancelled_park = || {
-        coordinator.mark();
-        ringer.ring(&AtomicU64::new(0)).unwrap();
-        let watched = vec![live.as_raw_fd(), read.as_raw_fd()];
-        coordinator.park(|_| Some(watched)).unwrap()
-    };
-    assert_eq!(cancelled_park(), Wake::Published);
-    drop(write);
-    // The hang-up shows once no forked child of another test still holds a
-    // copy of the pipe; until then a cancelled park reports only the ring.
-    let wake = HangGuard::new("a cancelled park reports the exit", Duration::from_secs(60))
-        .wait_for(|| Some(cancelled_park()).filter(|wake| *wake != Wake::Published))
-        .unwrap();
-    assert_eq!(wake, Wake::Exited(1));
-    assert_eq!(bell.words.word(ASLEEP).load(SeqCst), 0);
-    assert_eq!(bell.tickets_read(), 0);
+    // Guarded from its first park: one that failed to cancel would wait on
+    // pipes that are both still open.
+    bounded("every cancelled park returns", move || {
+        let mut coordinator = bell.claim().unwrap();
+        let ringer = bell.ringer().unwrap();
+        let (live, _keep) = std::io::pipe().unwrap();
+        let (read, write) = std::io::pipe().unwrap();
+        // An executor this park does not watch rings before every park, so
+        // each park is cancelled before it would poll.
+        let mut cancelled_park = || {
+            coordinator.mark();
+            ringer.ring(&AtomicU64::new(0)).unwrap();
+            let watched = vec![live.as_raw_fd(), read.as_raw_fd()];
+            coordinator.park(|_| Some(watched)).unwrap()
+        };
+        assert_eq!(cancelled_park(), Wake::Published);
+        drop(write);
+        // The hang-up shows once no forked child of another test still holds
+        // a copy of the pipe; until then a cancelled park reports only the
+        // ring, however many parks that takes.
+        let wake = HangGuard::new("a cancelled park reports the exit", Duration::from_secs(60))
+            .wait_for(|| Some(cancelled_park()).filter(|wake| *wake != Wake::Published))
+            .unwrap();
+        assert_eq!(wake, Wake::Exited(1));
+        assert_eq!(bell.words.word(ASLEEP).load(SeqCst), 0);
+        assert_eq!(bell.tickets_read(), 0);
+    });
 }
 
 #[test]
@@ -297,7 +302,7 @@ fn a_ticket_from_another_process_wakes_the_sleeping_coordinator() {
                 name.write_all(&ticket.to_ne_bytes()).unwrap();
                 name
             });
-            assert_eq!(park(&coordinator, &watch), Wake::Published);
+            assert_eq!(park(&mut coordinator, &watch), Wake::Published);
         });
         assert_eq!(bell.tickets_read(), 1);
         assert!(child.wait().unwrap().success());
