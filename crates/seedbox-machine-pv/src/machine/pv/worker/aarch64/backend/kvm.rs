@@ -96,13 +96,24 @@ impl Native {
         }
         // Enumerate the actually exposed system bank, then explicitly project
         // architectural IDs/values. No kernel padding, handles or migration data.
-        // The bounded allocation fails explicitly if the native ABI grows past it.
-        let mut list =
-            RegList::new(4096).map_err(|e| format!("PV evidence KVM register inventory: {e}"))?;
-        checked(
-            "evidence KVM register inventory",
-            self.cpu.get_reg_list(&mut list),
-        )?;
+        // KVM reports the required register count in the header on E2BIG.
+        // Size the wrapper for this vCPU, within kvm-bindings' own limit.
+        let allocate = |n| {
+            RegList::new(n)
+                .map_err(|e| format!("PV evidence KVM register inventory ({n} entries): {e}"))
+        };
+        let mut list = allocate(0)?;
+        match self.cpu.get_reg_list(&mut list) {
+            Err(e) if e.errno() == libc::E2BIG => {
+                let count = list.as_fam_struct_ref().n as usize;
+                list = allocate(count)?;
+                checked(
+                    "evidence KVM register inventory",
+                    self.cpu.get_reg_list(&mut list),
+                )?;
+            }
+            result => checked("evidence KVM register inventory", result)?,
+        }
         let mut system = BTreeMap::new();
         for &id in list.as_slice() {
             if id & !0xffff == SYSTEM {
