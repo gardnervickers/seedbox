@@ -5,7 +5,7 @@ use super::batch::{BatchView, Flight, RunResult, Started};
 use super::workers::Stream;
 use super::*;
 use seedbox_machine::host::{
-    doorbell::Wake,
+    doorbell::{Coordinator, Doorbell, Wake},
     idle::{Action, Outcome},
 };
 
@@ -15,6 +15,17 @@ pub(super) struct Runs<M: Machine> {
     flying: Vec<Flight<M>>,
     finished: VecDeque<RunResult<M>>,
     lent: Option<Stream<Job<M>, RunResult<M>>>,
+    /// How the round waits for its runs in flight, decided once, before its
+    /// first scan of them.
+    wait: Option<Wait>,
+}
+/// A process has one doorbell and the doorbell one coordinator at a time.
+enum Wait {
+    /// This round holds the doorbell and parks on it.
+    Doorbell(Coordinator<'static>),
+    /// Another Driver's round holds the doorbell, or the process has none.
+    /// The round sleeps in its oldest run, on that worker's own pipe.
+    OldestRun,
 }
 impl<M: Machine> Runs<M> {
     pub(super) fn new() -> Self {
@@ -22,6 +33,7 @@ impl<M: Machine> Runs<M> {
             flying: Vec::new(),
             finished: VecDeque::new(),
             lent: None,
+            wait: None,
         }
     }
 }
@@ -58,12 +70,21 @@ where
                 .next(runs.lent.as_mut().expect("outstanding jobs"))
                 .expect("job reports");
         }
+        // Claimed before any scan, and never during one: a doorbell claimed
+        // after a scan would not have sampled the rings that scan raced.
+        let mut bell = match runs.wait.get_or_insert_with(|| {
+            let bell = self.workers.doorbell().and_then(Doorbell::claim);
+            bell.map_or(Wait::OldestRun, Wait::Doorbell)
+        }) {
+            Wait::Doorbell(bell) => Some(bell),
+            Wait::OldestRun => None,
+        };
         let mut wait = Instant::now();
         let mut attempt = 0;
         loop {
             // Mark before scanning. A reply racing any ring read will
             // either be observed here or invalidate the mark before park.
-            if let Some(bell) = self.workers.bell() {
+            if let Some(bell) = bell.as_mut() {
                 bell.mark();
             }
             let mut i = 0;
@@ -88,15 +109,17 @@ where
                 return result;
             }
             match self.workers.idle().idle(attempt, wait.elapsed()) {
-                Action::Spin => {
-                    let bell = self.workers.bell();
-                    for _ in 0..64 {
-                        if bell.as_ref().is_none_or(|bell| bell.rung()) {
-                            break;
+                Action::Spin => match bell.as_ref() {
+                    Some(bell) => {
+                        for _ in 0..64 {
+                            if bell.rung() {
+                                break;
+                            }
+                            std::hint::spin_loop();
                         }
-                        std::hint::spin_loop();
                     }
-                }
+                    None => std::hint::spin_loop(),
+                },
                 Action::Sleep => {
                     self.workers.idle().reset(if attempt == 0 {
                         Outcome::SleptAtOnce
@@ -105,7 +128,7 @@ where
                     });
                     // A lent job reports through its channel, not the doorbell.
                     let lent = runs.lent.as_ref().is_some_and(|s| s.outstanding() > 0);
-                    if let Some(bell) = self.workers.bell().filter(|_| !lent) {
+                    if let Some(bell) = bell.as_ref().filter(|_| !lent) {
                         match bell.park(|ticket| {
                             runs.flying
                                 .iter_mut()
@@ -123,6 +146,11 @@ where
                             Ok(Wake::Unwatched) | Err(_) => {}
                         }
                     }
+                    // Without the doorbell, sleep in the oldest run. Its
+                    // finish waits on that worker's ring and pipe alone, so
+                    // it needs no doorbell and ends if the worker exits. The
+                    // other runs keep their replies in their rings, where the
+                    // next scan finds them.
                     return runs.flying.remove(0).finish(self.workers.caller());
                 }
             }

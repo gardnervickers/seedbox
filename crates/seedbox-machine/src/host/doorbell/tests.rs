@@ -15,26 +15,8 @@ fn bounded<T: Send + 'static>(reason: &str, body: impl FnOnce() -> T + Send + 's
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
-fn doorbell() -> Doorbell {
-    Doorbell::create(SLOTS).unwrap()
-}
-fn claim(bell: &Doorbell) -> Coordinator<'_> {
-    bell.claim().unwrap().unwrap()
-}
-
-/// Wait until a parking coordinator has named its ticket in `watch` and set
-/// its mark to it, as an executor would find them.
-fn armed(bell: &Doorbell, slot: usize, watch: &AtomicU64) -> u64 {
-    HangGuard::new("the coordinator arms its park", Duration::from_secs(60))
-        .wait_for(|| {
-            let ticket = watch.load(SeqCst);
-            (ticket != 0 && bell.words.asleep(slot).load(SeqCst) == ticket).then_some(ticket)
-        })
-        .unwrap()
-}
-
 /// Park on `watch` alone, with no executor pipe.
-fn park(coordinator: &mut Coordinator<'_>, watch: &AtomicU64) -> Wake {
+fn park(coordinator: &Coordinator<'_>, watch: &AtomicU64) -> Wake {
     coordinator
         .park(|ticket| {
             watch.store(ticket, SeqCst);
@@ -43,22 +25,45 @@ fn park(coordinator: &mut Coordinator<'_>, watch: &AtomicU64) -> Wake {
         .unwrap()
 }
 
+/// Wait until the park that named its ticket in `watch` has taken its last
+/// look at `pending`: from then on only reading that ticket can end it.
+fn asleep(bell: &Doorbell, watch: &AtomicU64) -> u64 {
+    HangGuard::new("the coordinator sleeps", Duration::from_secs(60))
+        .wait_for(|| {
+            let ticket = watch.load(SeqCst);
+            (ticket != 0 && bell.sleeping() == ticket).then_some(ticket)
+        })
+        .unwrap()
+}
+
+/// No ticket is left unread in the doorbell's pipe.
+fn no_pending_ticket(bell: &Doorbell) {
+    let mut fd = libc::pollfd {
+        fd: bell.read.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one initialized pollfd, zero timeout checks the pipe state.
+    assert_eq!(unsafe { libc::poll(&mut fd, 1, 0) }, 0);
+}
+
 #[test]
 fn a_failed_creation_is_tried_again_and_a_created_doorbell_is_kept() {
     let cell = OnceLock::new();
-    let failed = Doorbell::get_or_create(&cell, || Err(io::Error::other("no descriptors")));
+    let out = || Err(io::Error::other("no descriptors"));
+    let failed = Doorbell::get_or_create(&cell, out);
     assert_eq!(failed.err().unwrap().to_string(), "no descriptors");
     assert!(cell.get().is_none(), "a failure is not kept");
-    let created = Doorbell::get_or_create(&cell, || Doorbell::create(SLOTS)).unwrap();
+    let created = Doorbell::get_or_create(&cell, Doorbell::create).unwrap();
     let kept = Doorbell::get_or_create(&cell, || panic!("created once")).unwrap();
     assert!(std::ptr::eq(created, kept));
 }
 
 #[test]
 fn a_ring_after_the_mark_is_seen_on_the_word() {
-    let bell = doorbell();
+    let bell = Doorbell::create().unwrap();
     let ringer = bell.ringer().unwrap();
-    let mut coordinator = claim(&bell);
+    let mut coordinator = bell.claim().unwrap();
     coordinator.mark();
     assert!(!coordinator.rung());
     ringer.ring(&AtomicU64::new(0)).unwrap();
@@ -68,118 +73,95 @@ fn a_ring_after_the_mark_is_seen_on_the_word() {
 }
 
 #[test]
-fn each_coordinator_holds_its_own_slot_until_it_drops() {
-    let bell = Doorbell::create(2).unwrap();
-    let first = claim(&bell);
-    let second = claim(&bell);
-    assert_ne!(first.slot, second.slot);
-    assert!(bell.claim().unwrap().is_none(), "every slot is taken");
+fn one_coordinator_at_a_time() {
+    let bell = Doorbell::create().unwrap();
+    let first = bell.claim().unwrap();
+    assert!(bell.claim().is_none());
     drop(first);
-    assert!(bell.claim().unwrap().is_some());
-}
-
-/// Park `parks` times, each ended by a ring from another thread that waits
-/// only for the park's ticket to be named.
-fn park_and_ring(bell: &Doorbell, parks: u64) {
-    let mut coordinator = claim(bell);
-    for _ in 0..parks {
-        coordinator.mark();
-        let ringer = bell.ringer().unwrap();
-        let watch = AtomicU64::new(0);
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                while watch.load(SeqCst) == 0 {
-                    std::hint::spin_loop();
-                }
-                ringer.ring(&watch).unwrap()
-            });
-            assert_eq!(park(&mut coordinator, &watch), Wake::Published);
-        });
-    }
-    assert_eq!(coordinator.woken(), parks);
-    assert_eq!(take(&coordinator.forwarded).unwrap(), None);
+    assert!(bell.claim().is_some());
 }
 
 #[test]
 fn every_park_ends_at_a_ring_from_another_thread() {
-    bounded("each ring wakes the parked coordinator", || {
-        let bell = doorbell();
-        park_and_ring(&bell, 2000);
-        assert_eq!(take(&bell.read).unwrap(), None, "every ticket was taken");
-    });
-}
-
-#[test]
-fn coordinators_sharing_a_doorbell_each_wake_at_their_own_rings() {
-    bounded("each coordinator's rings wake it", || {
-        let bell = doorbell();
-        std::thread::scope(|scope| {
-            for _ in 0..3 {
-                scope.spawn(|| park_and_ring(&bell, 1000));
-            }
-        });
-        assert_eq!(take(&bell.read).unwrap(), None, "every ticket was taken");
-    });
-}
-
-#[test]
-fn a_ticket_another_coordinator_read_wakes_its_owner() {
-    bounded("a forwarded ticket ends the park", || {
-        let bell = doorbell();
-        let mut owner = claim(&bell);
-        let slot = owner.slot;
-        owner.mark();
-        let watch = AtomicU64::new(0);
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                // An executor takes the mark, and another coordinator reads
-                // the ticket it wrote from the shared pipe.
-                let ticket = armed(&bell, slot, &watch);
-                assert_eq!(bell.words.asleep(slot).swap(0, SeqCst), ticket);
-                bell.forward(ticket);
+    let bell = Doorbell::create().unwrap();
+    bounded("each ring wakes the parked coordinator", move || {
+        let mut coordinator = bell.claim().unwrap();
+        // The ring races the park: it cancels the park or pays its ticket.
+        for _ in 0..2000 {
+            coordinator.mark();
+            let ringer = bell.ringer().unwrap();
+            let watch = AtomicU64::new(0);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    while watch.load(SeqCst) == 0 {
+                        std::hint::spin_loop();
+                    }
+                    ringer.ring(&watch).unwrap()
+                });
+                assert_eq!(park(&coordinator, &watch), Wake::Published);
             });
-            assert_eq!(park(&mut owner, &watch), Wake::Published);
-        });
+        }
+        no_pending_ticket(&bell);
     });
 }
 
 #[test]
-fn a_parked_coordinator_forwards_a_ticket_that_names_another() {
-    bounded("the ticket reaches the coordinator it names", || {
-        let bell = doorbell();
-        let other = claim(&bell);
-        let mut parked = claim(&bell);
-        let slot = parked.slot;
-        parked.mark();
-        // A late payment to the other coordinator, which is not parked.
-        let late = (1 << 40) | other.slot as u64;
-        let watch = AtomicU64::new(0);
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                armed(&bell, slot, &watch);
-                let mut pipe = std::fs::File::from(bell.write.try_clone().unwrap());
-                pipe.write_all(&late.to_ne_bytes()).unwrap();
-                let guard = HangGuard::new("the late ticket is forwarded", Duration::from_secs(60));
-                let forwarded = guard.wait_for(|| take(&other.forwarded).unwrap());
-                assert_eq!(forwarded.unwrap(), late);
-                // Forwarding did not end the park; its own ring does.
-                bell.ringer().unwrap().ring(&watch).unwrap();
+fn a_park_past_its_last_look_ends_only_by_reading_its_ticket() {
+    let bell = Doorbell::create().unwrap();
+    bounded("each ticket wakes the sleeping coordinator", move || {
+        let mut coordinator = bell.claim().unwrap();
+        let parks = 200;
+        for _ in 0..parks {
+            coordinator.mark();
+            let ringer = bell.ringer().unwrap();
+            let watch = AtomicU64::new(0);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    asleep(&bell, &watch);
+                    ringer.ring(&watch).unwrap()
+                });
+                assert_eq!(park(&coordinator, &watch), Wake::Published);
             });
-            assert_eq!(park(&mut parked, &watch), Wake::Published);
-        });
-        assert_eq!(parked.woken(), 1);
+        }
+        assert_eq!(bell.tickets_read(), parks);
+        no_pending_ticket(&bell);
+    });
+}
+
+#[test]
+fn an_executor_rings_whichever_coordinator_watches_it_now() {
+    let bell = Doorbell::create().unwrap();
+    bounded("each coordinator in turn is woken", move || {
+        // The executor's watch word stays with it when the machine it runs
+        // changes hands, as a retained worker's does when another Driver's
+        // machine is rewound into it.
+        let (ringer, watch) = (bell.ringer().unwrap(), AtomicU64::new(0));
+        let mut tickets = Vec::new();
+        for _ in 0..2 {
+            let mut coordinator = bell.claim().unwrap();
+            coordinator.mark();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    tickets.push(asleep(&bell, &watch));
+                    ringer.ring(&watch).unwrap()
+                });
+                assert_eq!(park(&coordinator, &watch), Wake::Published);
+            });
+        }
+        assert_ne!(tickets[0], tickets[1]);
+        assert_eq!(bell.tickets_read(), 2);
     });
 }
 
 #[test]
 fn a_park_ends_when_a_watched_executor_exits() {
-    let bell = doorbell();
+    let bell = Doorbell::create().unwrap();
     let (read, write) = std::io::pipe().unwrap();
     let (live, _keep) = std::io::pipe().unwrap();
     bounded("a hang-up ends the park", move || {
-        let mut coordinator = claim(&bell);
+        let mut coordinator = bell.claim().unwrap();
         coordinator.mark();
-        let asleep = bell.words.asleep(coordinator.slot);
+        let asleep = bell.words.word(ASLEEP);
         std::thread::scope(|scope| {
             scope.spawn(move || {
                 // Simulate an executor dying after taking the wakeup debt
@@ -194,7 +176,7 @@ fn a_park_ends_when_a_watched_executor_exits() {
                 .unwrap();
             assert_eq!(fired, Wake::Exited(1));
         });
-        assert_eq!(coordinator.woken(), 0);
+        assert_eq!(bell.tickets_read(), 0);
     });
 }
 
@@ -207,8 +189,8 @@ fn an_executor_inherits_the_doorbell_at_its_descriptors() {
         ringer.ring(&AtomicU64::new(0)).unwrap();
         return;
     }
-    let bell = doorbell();
-    let mut coordinator = claim(&bell);
+    let bell = Doorbell::create().unwrap();
+    let mut coordinator = bell.claim().unwrap();
     coordinator.mark();
     let mut command = Command::new(std::env::current_exe().unwrap());
     command.env(CHILD, "1").args([
@@ -223,7 +205,8 @@ fn an_executor_inherits_the_doorbell_at_its_descriptors() {
 }
 
 #[test]
-fn a_ring_from_another_process_ends_the_park() {
+fn a_ticket_from_another_process_wakes_the_sleeping_coordinator() {
+    use std::io::{Read, Write};
     const CHILD: &str = "SEEDBOX_TEST_DOORBELL_RINGER";
     if std::env::var_os(CHILD).is_some() {
         // SAFETY: this test's parent passes both owned descriptors.
@@ -240,50 +223,50 @@ fn a_ring_from_another_process_ends_the_park() {
         assert_eq!(named.read(&mut ticket).unwrap(), 0);
         return;
     }
-    bounded("the child's ring ends the park", || {
-        let bell = doorbell();
-        let mut coordinator = claim(&bell);
+    let bell = Doorbell::create().unwrap();
+    bounded("the child's ticket ends the park", move || {
+        let mut coordinator = bell.claim().unwrap();
         coordinator.mark();
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .env(CHILD, "1")
             .args([
                 "--exact",
-                "host::doorbell::tests::a_ring_from_another_process_ends_the_park",
+                "host::doorbell::tests::a_ticket_from_another_process_wakes_the_sleeping_coordinator",
             ])
             .stdin(std::process::Stdio::piped());
         bell.inherit(&mut command).unwrap();
         let mut child = seedbox_test::process::spawn(&mut command).unwrap();
         let mut name = child.stdin.take().unwrap();
-        let woken = coordinator.park(|ticket| {
-            name.write_all(&ticket.to_ne_bytes()).unwrap();
-            Some(vec![])
+        let watch = AtomicU64::new(0);
+        std::thread::scope(|scope| {
+            // The child learns the ticket only once the park can no longer
+            // be cancelled, so its ring has to pay the ticket.
+            scope.spawn(|| {
+                let ticket = asleep(&bell, &watch);
+                name.write_all(&ticket.to_ne_bytes()).unwrap();
+                name
+            });
+            assert_eq!(park(&coordinator, &watch), Wake::Published);
         });
-        assert_eq!(woken.unwrap(), Wake::Published);
-        drop(name);
+        assert_eq!(bell.tickets_read(), 1);
         assert!(child.wait().unwrap().success());
-        assert_eq!(coordinator.woken(), 1);
+        no_pending_ticket(&bell);
     });
 }
 
 #[test]
-fn only_an_executor_watched_with_the_ticket_can_take_it() {
-    let bell = doorbell();
+fn an_unwatched_publisher_cannot_claim_the_ticket() {
+    let bell = Doorbell::create().unwrap();
     let ringer = bell.ringer().unwrap();
-    let (first, second) = (claim(&bell), claim(&bell));
-    let ticket = (27 << SLOT_BITS) | first.slot as u64;
-    let armed = bell.words.asleep(first.slot);
+    let armed = bell.words.word(ASLEEP);
+    let ticket = 27;
     armed.store(ticket, SeqCst);
-    // Watched for an earlier park of the same coordinator, for another
-    // coordinator's park, and not at all.
-    let earlier = (26 << SLOT_BITS) | first.slot as u64;
-    let another = (27 << SLOT_BITS) | second.slot as u64;
-    for watch in [earlier, another, 0] {
-        ringer.ring(&AtomicU64::new(watch)).unwrap();
-        assert_eq!(armed.load(SeqCst), ticket, "{watch}");
-    }
+    ringer.ring(&AtomicU64::new(ticket - 1)).unwrap();
+    assert_eq!(armed.load(SeqCst), ticket);
     ringer.ring(&AtomicU64::new(ticket)).unwrap();
     assert_eq!(armed.load(SeqCst), 0);
-    assert_eq!(take(&bell.read).unwrap(), Some(ticket));
-    assert_eq!(take(&bell.read).unwrap(), None);
+    let mut bytes = [0; 8];
+    std::io::Read::read_exact(&mut &bell.read, &mut bytes).unwrap();
+    assert_eq!(u64::from_ne_bytes(bytes), ticket);
 }
