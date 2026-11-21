@@ -36,7 +36,7 @@ use std::{
     ptr::NonNull,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering::SeqCst},
-        OnceLock,
+        Mutex, OnceLock, PoisonError,
     },
 };
 
@@ -115,26 +115,32 @@ struct Witness {
 }
 
 static PROCESS: OnceLock<Doorbell> = OnceLock::new();
+static CREATING: Mutex<()> = Mutex::new(());
 
 impl Doorbell {
     /// The shared notification word for workers spawned in this process.
     pub fn process() -> io::Result<&'static Doorbell> {
-        Self::get_or_create(&PROCESS, Self::create)
+        Self::get_or_create(&PROCESS, &CREATING, Self::create)
     }
     pub fn existing() -> Option<&'static Doorbell> {
         PROCESS.get()
     }
     /// Only a created doorbell is kept. A creation that failed, for want of
-    /// descriptors say, is tried again by the next caller.
-    fn get_or_create(
-        cell: &OnceLock<Doorbell>,
+    /// descriptors say, is tried again by the next caller. Creations take
+    /// turns: two at once could each hold descriptors the other needed.
+    fn get_or_create<'a>(
+        cell: &'a OnceLock<Doorbell>,
+        creating: &Mutex<()>,
         create: impl FnOnce() -> io::Result<Doorbell>,
-    ) -> io::Result<&Doorbell> {
+    ) -> io::Result<&'a Doorbell> {
+        if let Some(bell) = cell.get() {
+            return Ok(bell);
+        }
+        let _turn = creating.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(bell) = cell.get() {
             return Ok(bell);
         }
         let bell = create()?;
-        // A creator that lost the race adopts the winner's and drops its own.
         Ok(cell.get_or_init(|| bell))
     }
     /// A doorbell apart from the process's, never dropped: for a test's own

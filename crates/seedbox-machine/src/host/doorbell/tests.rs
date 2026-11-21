@@ -49,14 +49,37 @@ fn no_pending_ticket(bell: &Doorbell) {
 
 #[test]
 fn a_failed_creation_is_tried_again_and_a_created_doorbell_is_kept() {
-    let cell = OnceLock::new();
+    let (cell, creating) = (OnceLock::new(), Mutex::new(()));
     let out = || Err(io::Error::other("no descriptors"));
-    let failed = Doorbell::get_or_create(&cell, out);
+    let failed = Doorbell::get_or_create(&cell, &creating, out);
     assert_eq!(failed.err().unwrap().to_string(), "no descriptors");
     assert!(cell.get().is_none(), "a failure is not kept");
-    let created = Doorbell::get_or_create(&cell, Doorbell::create).unwrap();
-    let kept = Doorbell::get_or_create(&cell, || panic!("created once")).unwrap();
+    let created = Doorbell::get_or_create(&cell, &creating, Doorbell::create).unwrap();
+    let kept = Doorbell::get_or_create(&cell, &creating, || panic!("created once")).unwrap();
     assert!(std::ptr::eq(created, kept));
+}
+
+#[test]
+fn concurrent_first_callers_create_one_doorbell() {
+    let (cell, creating) = (OnceLock::new(), Mutex::new(()));
+    let created = AtomicU64::new(0);
+    let create = || {
+        created.fetch_add(1, SeqCst);
+        Doorbell::create()
+    };
+    let bells: Vec<usize> = std::thread::scope(|scope| {
+        let callers: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    let bell = Doorbell::get_or_create(&cell, &creating, create).unwrap();
+                    std::ptr::from_ref(bell) as usize
+                })
+            })
+            .collect();
+        callers.into_iter().map(|c| c.join().unwrap()).collect()
+    });
+    assert_eq!(created.load(SeqCst), 1, "creations take turns and recheck");
+    assert!(bells.windows(2).all(|pair| pair[0] == pair[1]));
 }
 
 #[test]
