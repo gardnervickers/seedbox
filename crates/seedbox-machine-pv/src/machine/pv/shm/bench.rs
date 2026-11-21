@@ -69,6 +69,22 @@ fn receive<R: Read, W: Write>(io: &mut Connection<R, W>, seq: u64) -> Result<Vec
     .ok_or_else(|| "transport benchmark peer closed".into())
 }
 
+// A real header-only Snapshot request and response, with no hypervisor work.
+fn control_send<R: Read, W: Write>(
+    io: &mut Connection<R, W>,
+    header: &impl serde::Serialize,
+) -> Result<()> {
+    let ring = io.get_mut();
+    ring.message(header, |_| Ok(()))?;
+    ring.finish_send().map_err(|e| e.to_string())
+}
+fn control_receive<R: Read, W: Write, H: serde::de::DeserializeOwned>(
+    io: &mut Connection<R, W>,
+) -> Result<H> {
+    super::receive(io, &[], |header, _| Ok(header))?
+        .ok_or_else(|| "control benchmark peer closed".into())
+}
+
 // The same monotonic clock in both processes. One-way latency ends at the
 // receiver, before its acknowledgment or any payload checking.
 fn now_ns() -> u64 {
@@ -179,8 +195,26 @@ fn peer(mode: Mode, size: usize, count: u64, capacity: u64) -> Result<()> {
             send(&mut io, seq, &expected)?;
         } else {
             io.get_ref().region.word(READY).store(seq, SeqCst);
-            let got = receive(&mut io, seq)?;
-            send(&mut io, seq, &got)?;
+            if size == 0 {
+                match control_receive(&mut io)? {
+                    protocol::Request::Snapshot {
+                        limit,
+                        verify: false,
+                    } if limit == seq => {}
+                    _ => return Err("wrong snapshot request".into()),
+                }
+                control_send(
+                    &mut io,
+                    &Response::Snapshotted {
+                        id: seq,
+                        pages: 0,
+                        held: 0,
+                    },
+                )?;
+            } else {
+                let got = receive(&mut io, seq)?;
+                send(&mut io, seq, &got)?;
+            }
         }
     }
     Ok(())
@@ -214,14 +248,37 @@ fn samples<R: Read, W: Write>(
                 }
             }
             begin = now_ns();
-            send(io, seq, &expected)?;
+            if size == 0 {
+                control_send(
+                    io,
+                    &protocol::Request::Snapshot {
+                        limit: seq,
+                        verify: false,
+                    },
+                )?;
+            } else {
+                send(io, seq, &expected)?;
+            }
         }
-        let got = receive(io, seq)?;
+        let got = if size == 0 {
+            match control_receive(io)? {
+                Response::Snapshotted {
+                    id,
+                    pages: 0,
+                    held: 0,
+                } if id == seq => None,
+                _ => return Err("wrong snapshot reply".into()),
+            }
+        } else {
+            Some(receive(io, seq)?)
+        };
         ended = now_ns();
         if mode == Mode::Bulk {
             begin = io.get_ref().region.word(SENT_AT).load(SeqCst);
         }
-        validate(&got, &expected, seq == 1 || seq == count + warm)?;
+        if let Some(got) = got {
+            validate(&got, &expected, seq == 1 || seq == count + warm)?;
+        }
         if seq == warm + 1 {
             started = begin;
         }
@@ -299,6 +356,12 @@ pub fn run() -> Result<()> {
     let capacity = std::env::var("PV_BENCH_CAPACITY").map_or(Ok(CAPACITY), |s| {
         s.parse().map_err(|e| format!("benchmark capacity: {e}"))
     })?;
+    if args.iter().skip(1).any(|arg| arg == "control") {
+        for mode in [Mode::Spin, Mode::Park] {
+            case(mode, 0, 4096, capacity)?;
+        }
+        return Ok(());
+    }
     for size in [64, 1024] {
         for mode in [Mode::Spin, Mode::Park] {
             case(mode, size, 4096, capacity)?;
