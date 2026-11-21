@@ -223,6 +223,50 @@ fn an_executor_inherits_the_doorbell_at_its_descriptors() {
 }
 
 #[test]
+fn a_ring_from_another_process_ends_the_park() {
+    const CHILD: &str = "SEEDBOX_TEST_DOORBELL_RINGER";
+    if std::env::var_os(CHILD).is_some() {
+        // SAFETY: this test's parent passes both owned descriptors.
+        let ringer = unsafe { Ringer::inherited() }.unwrap();
+        // The parent names its park's ticket on stdin, where a worker reads
+        // its transport's watch word.
+        let mut ticket = [0; 8];
+        let mut named = std::io::stdin().lock();
+        named.read_exact(&mut ticket).unwrap();
+        ringer
+            .ring(&AtomicU64::new(u64::from_ne_bytes(ticket)))
+            .unwrap();
+        // Stay until the parent, awake, closes the pipe.
+        assert_eq!(named.read(&mut ticket).unwrap(), 0);
+        return;
+    }
+    bounded("the child's ring ends the park", || {
+        let bell = doorbell();
+        let mut coordinator = claim(&bell);
+        coordinator.mark();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .env(CHILD, "1")
+            .args([
+                "--exact",
+                "host::doorbell::tests::a_ring_from_another_process_ends_the_park",
+            ])
+            .stdin(std::process::Stdio::piped());
+        bell.inherit(&mut command).unwrap();
+        let mut child = seedbox_test::process::spawn(&mut command).unwrap();
+        let mut name = child.stdin.take().unwrap();
+        let woken = coordinator.park(|ticket| {
+            name.write_all(&ticket.to_ne_bytes()).unwrap();
+            Some(vec![])
+        });
+        assert_eq!(woken.unwrap(), Wake::Published);
+        drop(name);
+        assert!(child.wait().unwrap().success());
+        assert_eq!(coordinator.woken(), 1);
+    });
+}
+
+#[test]
 fn only_an_executor_watched_with_the_ticket_can_take_it() {
     let bell = doorbell();
     let ringer = bell.ringer().unwrap();
