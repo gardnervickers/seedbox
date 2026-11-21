@@ -712,3 +712,6 @@ impl<R: Read, W: Write> Write for Claim<'_, R, W> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "transport-bench")]
+pub(super) mod bench;
