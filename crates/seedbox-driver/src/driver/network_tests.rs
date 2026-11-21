@@ -1613,7 +1613,10 @@ fn echo_world_waiting(workers: usize, split: [bool; 3], idle: Idle, bell: bool) 
     received.sort();
     let mut evidence = Vec::new();
     driver
-        .with_barrier(|barrier| Ok(barrier.write_policy_evidence(&mut evidence).unwrap()))
+        .with_barrier(|barrier| {
+            barrier.write_policy_evidence(&mut evidence).unwrap();
+            Ok(())
+        })
         .unwrap();
     (seen, runs, received, evidence)
 }
