@@ -2,8 +2,10 @@
 //! this benchmark and live outside both rings' protocol headers.
 use super::*;
 use crate::machine::pv::{protocol::Stop, wire};
+use seedbox_machine::host::idle::SpinThenSleep;
 use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
 use std::io::BufReader;
+use std::os::fd::BorrowedFd;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -11,6 +13,7 @@ const READY: usize = 80;
 const RECEIVED: usize = 81;
 const SENT_AT: usize = 82;
 const THREAD: usize = 83;
+const SPIN_SEQUENCE: usize = 84;
 const TIMEOUT: Duration = Duration::from_secs(120);
 type Connection<R, W> = BufReader<Stream<R, W>>;
 
@@ -30,20 +33,85 @@ impl Mode {
     }
 }
 
+// In a strategy trial, start the clock only after the worker has entered its
+// selected spin tier. The additional mapping keeps the notification word live.
+struct SpinningPeer {
+    region: Region,
+    policy: Idle,
+    idle: Box<dyn IdleStrategy>,
+}
+impl IdleStrategy for SpinningPeer {
+    fn idle(&mut self, attempt: u64, elapsed: Duration) -> Action {
+        let action = self.idle.idle(attempt, elapsed);
+        let reached = match self.policy {
+            Idle::PauseBackoff => matches!(action, Action::Pause(_)),
+            Idle::Monitor => matches!(action, Action::Monitor(_)),
+            _ => true,
+        };
+        if reached || action == Action::Sleep {
+            let seq = self.region.word(SPIN_SEQUENCE).load(SeqCst);
+            if self.region.word(READY).load(SeqCst) != seq {
+                self.region.word(READY).store(seq, SeqCst);
+            }
+        }
+        if action == Action::Sleep {
+            Action::Spin
+        } else {
+            action
+        }
+    }
+    fn reset(&mut self, outcome: Outcome, started: Instant) {
+        self.idle.reset(outcome, started);
+    }
+}
+
+fn selected() -> Result<Option<Idle>> {
+    match std::env::var("PV_BENCH_IDLE").ok().as_deref() {
+        None => Ok(None),
+        Some("bounded") => Ok(Some(Idle::SpinThenSleep)),
+        Some("adaptive") => Ok(Some(Idle::Adaptive)),
+        Some("pause") => Ok(Some(Idle::PauseBackoff)),
+        Some("monitor") => Ok(Some(Idle::Monitor)),
+        Some(_) => Err("unknown PV_BENCH_IDLE".into()),
+    }
+}
 fn connection<R: Read + AsRawFd, W: Write>(
     region: Region,
     side: Side,
     input: R,
     output: W,
     mode: Mode,
-) -> Connection<R, W> {
-    let spin = if mode == Mode::Park {
-        Duration::ZERO
-    } else {
-        TIMEOUT
+    spinning: Option<Region>,
+) -> Result<Connection<R, W>> {
+    let idle: Box<dyn IdleStrategy> = match (selected()?, mode) {
+        (_, Mode::Park) => Box::new(SpinThenSleep::new(Duration::ZERO)),
+        (Some(policy), _) => {
+            let budget = match side {
+                Side::Worker => {
+                    std::env::var("PV_BENCH_VM_US").map_or(Ok(worker_spin(policy)), |s| {
+                        s.parse()
+                            .map(Duration::from_micros)
+                            .map_err(|_| "invalid PV_BENCH_VM_US")
+                    })?
+                }
+                Side::Client => SpinThenSleep::SPIN,
+            };
+            let idle = policy.with_budget(budget);
+            if let Some(region) = spinning {
+                Box::new(SpinningPeer {
+                    region,
+                    policy,
+                    idle,
+                })
+            } else {
+                idle
+            }
+        }
+        (None, _) => Box::new(SpinThenSleep::new(TIMEOUT)),
     };
-    let idle = Box::new(SpinThenSleep::new(spin));
-    BufReader::new(Stream::new(region, side, input, output, idle))
+    Ok(BufReader::new(Stream::new(
+        region, side, input, output, idle,
+    )))
 }
 
 fn send<R: Read, W: Write>(io: &mut Connection<R, W>, seq: u64, data: &[GuestWrite]) -> Result<()> {
@@ -174,6 +242,16 @@ fn validate(got: &[GuestWrite], expected: &[GuestWrite], all: bool) -> Result<()
 }
 
 fn peer(mode: Mode, size: usize, count: u64, capacity: u64) -> Result<()> {
+    let signal = mode == Mode::Spin && selected()?.is_some();
+    let spinning = if signal {
+        // SAFETY: the benchmark parent passes this descriptor to the child.
+        let fd = unsafe { BorrowedFd::borrow_raw(DESCRIPTOR) }
+            .try_clone_to_owned()
+            .map_err(|e| e.to_string())?;
+        Some(Region::map(&fd, capacity)?)
+    } else {
+        None
+    };
     let region = Region::inherited(capacity)?;
     let mut io = connection(
         region,
@@ -181,7 +259,8 @@ fn peer(mode: Mode, size: usize, count: u64, capacity: u64) -> Result<()> {
         std::io::stdin().lock(),
         std::io::stdout().lock(),
         mode,
-    );
+        spinning,
+    )?;
     // SAFETY: the parent passed this process its unique inherited descriptors.
     io.get_mut().bell = Some(unsafe { Ringer::inherited() }.map_err(|e| e.to_string())?);
     io.get_ref().region.word(THREAD).store(thread_id(), SeqCst);
@@ -192,7 +271,10 @@ fn peer(mode: Mode, size: usize, count: u64, capacity: u64) -> Result<()> {
             io.get_ref().region.word(SENT_AT).store(now_ns(), SeqCst);
             send(&mut io, seq, &expected)?;
         } else {
-            io.get_ref().region.word(READY).store(seq, SeqCst);
+            io.get_ref()
+                .region
+                .word(if signal { SPIN_SEQUENCE } else { READY })
+                .store(seq, SeqCst);
             if size == 0 {
                 match control_receive(&mut io)? {
                     protocol::Request::Snapshot {
@@ -321,7 +403,8 @@ fn case(mode: Mode, size: usize, count: u64, capacity: u64) -> Result<()> {
         child.stdout.take().unwrap(),
         child.stdin.take().unwrap(),
         Mode::Spin,
-    );
+        None,
+    )?;
     let result = samples(&mut io, child.id(), mode, size, count);
     drop(io);
     if result.is_err() {
@@ -364,6 +447,9 @@ pub fn run() -> Result<()> {
         for mode in [Mode::Spin, Mode::Park] {
             case(mode, size, 4096, capacity)?;
         }
+    }
+    if args.iter().skip(1).any(|arg| arg == "ping") {
+        return Ok(());
     }
     for size in [4 << 10, 64 << 10, 1 << 20, 8 << 20] {
         case(

@@ -31,7 +31,7 @@
 use super::protocol::{self, Response};
 use seedbox_machine::host::{
     doorbell::Ringer,
-    idle::{Action, Idle, IdleStrategy, Outcome, SpinThenSleep},
+    idle::{Action, Idle, IdleStrategy, Outcome},
 };
 use seedbox_machine::pv::transport::GuestWrite;
 use std::{
@@ -53,9 +53,15 @@ type Result<T> = std::result::Result<T, String>;
 pub(super) const DESCRIPTOR: i32 = 196;
 /// Bytes in each ring; a longer message passes through in pieces.
 pub(super) const CAPACITY: u64 = 1 << 20;
-/// Workers wait between requests across whole Driver rounds. Park after this
-/// bounded spin, or sooner when consecutive spins have found no work.
-const WORKER_SPIN: Duration = Duration::from_micros(1000);
+/// Workers wait between requests across whole Driver rounds. These budgets
+/// allow longer waits than the coordinator's 200 µs ceiling.
+fn worker_spin(policy: Idle) -> Duration {
+    Duration::from_micros(match policy {
+        Idle::Monitor => 400,
+        _ => 500,
+    })
+}
+
 /// Control words, each on its own 128-byte line, fill the first 16 KiB. The
 /// request ring follows, then the response ring.
 const LINE: usize = 128;
@@ -202,7 +208,8 @@ pub(crate) fn accept<R: Read + AsRawFd, W: Write>(
     };
     protocol::send(&mut wake, &answer)?;
     let (region, bell) = attached?;
-    let idle = Box::new(SpinThenSleep::new(WORKER_SPIN));
+    let policy = Idle::default();
+    let idle = policy.with_budget(worker_spin(policy));
     let mut stream = Stream::new(region, Side::Worker, sleep, wake, idle);
     stream.bell = Some(bell);
     Ok(stream)
@@ -309,7 +316,7 @@ impl<R: Read, W: Write> Stream<R, W> {
     where
         R: AsRawFd,
     {
-        Self::new(region, Side::Client, sleep, wake, Idle::DEFAULT.build())
+        Self::new(region, Side::Client, sleep, wake, Idle::default().build())
     }
     /// Wait until control word `position` differs from `seen`: spin or yield
     /// as the idle strategy says, then set the `mark` word and sleep on this
@@ -325,21 +332,18 @@ impl<R: Read, W: Write> Stream<R, W> {
                 return Ok((now != seen).then_some(now));
             }
             match self.idle.idle(attempt, started.elapsed()) {
-                Action::Spin => {
-                    for _ in 0..64 {
-                        let now = word.load(SeqCst);
-                        if now != seen {
-                            self.idle.reset(Outcome::Progress);
-                            return Ok(Some(now));
-                        }
-                        std::hint::spin_loop();
+                action @ (Action::Spin | Action::Pause(_) | Action::Monitor(_)) => {
+                    let now = seedbox_machine::host::idle::wait_on_word(action, word, seen);
+                    if now != seen {
+                        self.idle.reset(Outcome::Progress, started);
+                        return Ok(Some(now));
                     }
                 }
                 Action::Yield => {
                     std::thread::yield_now();
                     let now = word.load(SeqCst);
                     if now != seen {
-                        self.idle.reset(Outcome::Progress);
+                        self.idle.reset(Outcome::Progress, started);
                         return Ok(Some(now));
                     }
                 }
@@ -348,11 +352,14 @@ impl<R: Read, W: Write> Stream<R, W> {
             attempt += 1;
         }
         let slept = self.sleep(position, seen, mark);
-        self.idle.reset(if attempt > 0 {
-            Outcome::SleptAfterTrying
-        } else {
-            Outcome::SleptAtOnce
-        });
+        self.idle.reset(
+            if attempt > 0 {
+                Outcome::SleptAfterTrying
+            } else {
+                Outcome::SleptAtOnce
+            },
+            started,
+        );
         slept
     }
     /// Mark the wait in control word `mark` and sleep on this side's pipe
