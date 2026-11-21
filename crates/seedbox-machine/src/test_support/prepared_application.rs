@@ -47,6 +47,11 @@ pub fn definition(archive: Vec<u8>, memory_bytes: u64) -> MachineDefinition {
     let program = entry("rootfs/application")
         .or_else(|| entry("application"))
         .expect("fixture archive missing application");
+    from_program(&program, memory_bytes)
+}
+
+/// A standalone guest executable launched as /application.
+pub fn from_program(program: &[u8], memory_bytes: u64) -> MachineDefinition {
     let mut tar = tar::Builder::new(Vec::new());
     let mut header = tar::Header::new_gnu();
     header.set_size(program.len() as u64);
@@ -55,7 +60,7 @@ pub fn definition(archive: Vec<u8>, memory_bytes: u64) -> MachineDefinition {
     header.set_gid(0);
     header.set_mtime(0);
     header.set_cksum();
-    tar.append_data(&mut header, "application", &program[..])
+    tar.append_data(&mut header, "application", program)
         .unwrap();
     let filesystem = FilesystemArchive::new(tar.into_inner().unwrap()).unwrap();
     MachineDefinition {
