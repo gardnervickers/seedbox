@@ -8,7 +8,7 @@
 
 use super::Error;
 use rayon::{ThreadPool, ThreadPoolBuilder};
-use seedbox_machine::host::doorbell::{Coordinator, Doorbell};
+use seedbox_machine::host::doorbell::Doorbell;
 use std::{
     any::Any,
     cell::{Cell, RefCell},
@@ -137,9 +137,9 @@ pub(super) struct Workers<C> {
     caller: C,
     /// How the calling thread waits for runs in flight.
     idle: Box<dyn seedbox_machine::host::idle::IdleStrategy>,
-    /// The calling thread's place at the process doorbell, held from its first
-    /// wait for a run in a worker process that rings it.
-    bell: Option<Coordinator<'static>>,
+    // Private unit-test doorbell, in place of the process's.
+    #[cfg(test)]
+    doorbell: Option<&'static Doorbell>,
     // Private unit-test witness after a job has published its result. Not
     // present in runtime builds or part of Driver snapshots.
     #[cfg(test)]
@@ -161,7 +161,8 @@ impl<C: 'static> Workers<C> {
                 threads,
                 caller,
                 idle: seedbox_machine::host::idle::Idle::default().build(),
-                bell: None,
+                #[cfg(test)]
+                doorbell: None,
                 #[cfg(test)]
                 result_observer: None,
             });
@@ -211,7 +212,8 @@ impl<C: 'static> Workers<C> {
                 threads,
                 caller,
                 idle: seedbox_machine::host::idle::Idle::default().build(),
-                bell: None,
+                #[cfg(test)]
+                doorbell: None,
                 #[cfg(test)]
                 result_observer: None,
             }),
@@ -359,14 +361,19 @@ impl<C: 'static> Workers<C> {
         self.idle = idle;
     }
 
-    /// The calling thread's coordinator, once this process has a doorbell.
-    /// `None` also while every slot is taken or its pipe cannot be made; the
-    /// caller then waits in one run, and the next wait asks again.
-    pub(super) fn bell(&mut self) -> Option<&mut Coordinator<'static>> {
-        if self.bell.is_none() {
-            self.bell = Doorbell::existing().and_then(|bell| bell.claim().ok().flatten());
+    /// The doorbell that this Driver's worker processes ring, if any exists.
+    pub(super) fn doorbell(&self) -> Option<&'static Doorbell> {
+        #[cfg(test)]
+        if self.doorbell.is_some() {
+            return self.doorbell;
         }
-        self.bell.as_mut()
+        Doorbell::existing()
+    }
+
+    /// Use `doorbell` in place of the process's.
+    #[cfg(test)]
+    pub(super) fn set_doorbell(&mut self, doorbell: &'static Doorbell) {
+        self.doorbell = Some(doorbell);
     }
 
     /// How the calling thread waits for runs in flight.

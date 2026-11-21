@@ -63,12 +63,14 @@ struct Bell {
     thread: Option<std::thread::JoinHandle<()>>,
     /// The executor's exit descriptor; its write end stays open.
     exit: (std::io::PipeReader, std::io::PipeWriter),
-    /// Come back only once the Driver has subscribed the run to a park.
+    /// Come back only once the Driver sleeps in a park that names the run.
     parked: bool,
+    doorbell: &'static Doorbell,
 }
 impl Bell {
-    fn new(parked: bool) -> Self {
-        let doorbell = Doorbell::process().expect("process doorbell");
+    /// On `doorbell`, or else the process's.
+    fn new(doorbell: Option<&'static Doorbell>, parked: bool) -> Self {
+        let doorbell = doorbell.unwrap_or_else(|| Doorbell::process().expect("process doorbell"));
         Self {
             ringer: Arc::new(doorbell.ringer().unwrap()),
             back: Arc::new(AtomicBool::new(false)),
@@ -76,6 +78,7 @@ impl Bell {
             thread: None,
             exit: std::io::pipe().unwrap(),
             parked,
+            doorbell,
         }
     }
 }
@@ -186,13 +189,19 @@ impl SplitRun<(), std::io::Error> for Net {
             let ticket = bell.ticket.clone();
             // The last park's ticket: this run's park names a later one.
             let earlier = bell.parked.then(|| ticket.load(SeqCst));
+            let doorbell = bell.doorbell;
             bell.thread = Some(std::thread::spawn(move || {
                 if let Some(earlier) = earlier {
+                    // Past its last look at the rings' word, the park can end
+                    // only by reading the ticket this ring pays.
                     seedbox_test_time::HangGuard::new(
-                        "the Driver subscribes its run in flight to a park",
+                        "the Driver sleeps in a park that names its run in flight",
                         Duration::from_secs(60),
                     )
-                    .wait_for(|| (ticket.load(SeqCst) != earlier).then_some(()))
+                    .wait_for(|| {
+                        let named = ticket.load(SeqCst);
+                        (named != earlier && doorbell.sleeping() == named).then_some(())
+                    })
                     .unwrap();
                 }
                 back.store(true, SeqCst);
@@ -236,6 +245,7 @@ struct Spec {
     split: bool,
     bell: bool,
     parked: bool,
+    doorbell: Option<&'static Doorbell>,
 }
 fn spec(nic: Option<u8>) -> Spec {
     Spec {
@@ -247,6 +257,7 @@ fn spec(nic: Option<u8>) -> Spec {
         split: false,
         bell: false,
         parked: false,
+        doorbell: None,
     }
 }
 impl Spec {
@@ -260,12 +271,18 @@ impl Spec {
         self.bell = true;
         self
     }
-    /// As [`Spec::bell`], coming back only once the Driver has parked: a
-    /// Driver that waits any other way never sees the run stop. Every machine
-    /// of the world must split, since the Driver parks with no lent job out.
+    /// As [`Spec::bell`], coming back only once the Driver sleeps in a park:
+    /// a Driver that waits any other way never sees the run stop. Every
+    /// machine of the world must split, since the Driver parks with no lent
+    /// job out, and the Driver must hold the doorbell.
     fn parked(mut self) -> Self {
         self.parked = true;
         self.bell()
+    }
+    /// Ring `doorbell` in place of the process's.
+    fn on(mut self, doorbell: &'static Doorbell) -> Self {
+        self.doorbell = Some(doorbell);
+        self
     }
     fn send(self, at: u64, bytes: Vec<u8>) -> Self {
         self.emit(at, Response::TransmitFrame { bytes })
@@ -336,7 +353,7 @@ fn world(
                     split: spec.split,
                     flight: None,
                     polls: 0,
-                    bell: spec.bell.then(|| Bell::new(spec.parked)),
+                    bell: spec.bell.then(|| Bell::new(spec.doorbell, spec.parked)),
                 },
             )
         })
@@ -1618,19 +1635,20 @@ fn echo_world_waiting(
         (true, false) => spec.split(),
         (true, true) => spec.bell(),
     };
-    echo_world_as(workers, back, split, idle, spin).0
+    echo_world_as(workers, back, split, idle, spin, None).0
 }
 
 /// The echo world with each machine's spec passed through `split` with its
-/// place in `split_machines`; also returns the parks of the Driver that a
-/// ring ended and the split runs it finished.
+/// place in `split_machines`, the Driver's worker processes ringing `doorbell`
+/// if given; also returns the split runs the Driver finished.
 fn echo_world_as(
     workers: usize,
     split: impl Fn(Spec, bool) -> Spec,
     split_machines: [bool; 3],
     idle: Idle,
     spin: Duration,
-) -> (Observed, u64, usize) {
+    doorbell: Option<&'static Doorbell>,
+) -> (Observed, usize) {
     let config = NetworkConfig::new(Duration::from_millis(1), Duration::ZERO, 0).unwrap();
     let specs = vec![
         spec(Some(1))
@@ -1648,6 +1666,9 @@ fn echo_world_as(
         .collect();
     let (mut driver, log) = world(0, MS, workers, config, specs, Vec::new()).unwrap();
     driver.workers.set_idle(idle.with_budget(spin));
+    if let Some(doorbell) = doorbell {
+        driver.workers.set_doorbell(doorbell);
+    }
     let seen = barriers(&mut driver, 40 * MS);
     let log = log.lock().unwrap();
     let mut runs = log.runs.clone();
@@ -1661,8 +1682,7 @@ fn echo_world_as(
             Ok(())
         })
         .unwrap();
-    let woken = driver.workers.bell().map_or(0, |bell| bell.woken());
-    ((seen, runs, received, evidence), woken, log.finishes.len())
+    ((seen, runs, received, evidence), log.finishes.len())
 }
 
 /// Each built-in strategy with the coordinator's budget and with none, which
@@ -1741,19 +1761,63 @@ fn doorbell_lanes_reach_the_same_results_however_the_driver_waits() {
     }
 }
 
+/// Run a whole Driver scenario on its own thread, so that a Driver left
+/// asleep fails the test instead of hanging it.
+fn contained<T: Send + 'static>(reason: &str, scenario: impl FnOnce() -> T + Send + 'static) -> T {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        sender.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            scenario,
+        )))
+    });
+    seedbox_test_time::HangGuard::new(reason, Duration::from_secs(300))
+        .recv(&receiver)
+        .unwrap()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
 #[test]
-fn runs_that_stop_only_for_a_parked_driver_are_woken_through_the_doorbell() {
+fn runs_that_stop_only_for_a_sleeping_driver_wake_it_with_their_tickets() {
     let lent = echo_world(1, [false; 3]);
     for (idle, spin) in waits() {
-        let back = |spec: Spec, _| spec.parked();
-        let (observed, woken, finishes) = echo_world_as(1, back, [true; 3], idle, spin);
+        let (observed, finishes, tickets) = contained("every parked run is woken", move || {
+            // Its own doorbell: Drivers of other tests cannot hold it.
+            let doorbell = Doorbell::detached().unwrap();
+            let back = |spec: Spec, _| spec.parked().on(doorbell);
+            let (observed, finishes) =
+                echo_world_as(1, back, [true; 3], idle, spin, Some(doorbell));
+            (observed, finishes, doorbell.tickets_read())
+        });
         assert_eq!(observed, lent, "{idle:?} for {spin:?}");
-        // No run stops before a park names it, and one park names at most
-        // every machine's run.
+        // No run stops before the Driver sleeps in a park that names it. Only
+        // that park's ticket ends it, and one park names at most every
+        // machine's run.
         assert!(finishes > 20, "{finishes} split runs");
         assert!(
-            woken as usize * 3 >= finishes,
-            "{woken} parks ended {finishes} runs"
+            tickets as usize * 3 >= finishes,
+            "{tickets} tickets ended {finishes} runs"
         );
+    }
+}
+
+#[test]
+fn a_driver_without_the_doorbell_sleeps_in_its_oldest_run_to_the_same_results() {
+    let lent = echo_world(1, [false; 3]);
+    for (idle, spin) in waits() {
+        for split in [[true; 3], [true, false, true]] {
+            let (observed, tickets) = contained("every run is finished", move || {
+                let doorbell = Doorbell::detached().unwrap();
+                // Another Driver in the process holds the doorbell throughout.
+                let _held = doorbell.claim().expect("an unclaimed doorbell");
+                let back = |spec: Spec, splits: bool| match splits {
+                    true => spec.bell().on(doorbell),
+                    false => spec,
+                };
+                let (observed, _) = echo_world_as(1, back, split, idle, spin, Some(doorbell));
+                (observed, doorbell.tickets_read())
+            });
+            assert_eq!(observed, lent, "{idle:?} for {spin:?}, {split:?}");
+            assert_eq!(tickets, 0, "the Driver never parked on the doorbell");
+        }
     }
 }
