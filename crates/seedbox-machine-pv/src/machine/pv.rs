@@ -278,6 +278,16 @@ pub struct PVMachine {
     /// its writes.
     hit: Option<seedbox_machine::pv::Response>,
     aux: retained::Aux,
+    /// A run [`Machine::start`] sent to the worker and [`Machine::finish`]
+    /// has not received.
+    in_flight: Option<InFlight>,
+}
+/// A sent run: its interval, and whether the machine was held at its start.
+#[derive(Clone, Copy)]
+struct InFlight {
+    now: u64,
+    upto: u64,
+    held: bool,
 }
 /// Kernel arguments for a definition: the assets' arguments plus, with a
 /// network interface, the guest's static address (`guest_network.h`).
@@ -639,6 +649,7 @@ impl PVMachine {
             released: false,
             hit: None,
             aux: Default::default(),
+            in_flight: None,
         })
     }
     /// Write the boot inputs every worker of this machine reads, once.
@@ -969,19 +980,20 @@ impl PVMachine {
         }
         Ok(())
     }
-    fn execute(
+    /// Send the worker a run over `now..upto`; returns the run's start.
+    fn send_run(
         &mut self,
         now: u64,
         upto: u64,
         syscall_cost_ns: u64,
         frames: &[Vec<u8>],
-    ) -> Result<StopReason, String> {
+    ) -> Result<u64, String> {
         let now = now.max(self.reached);
         let shutdown = false;
         let input = self.input.clone();
         let breaks = self.breaks.clone();
         let resume = std::mem::take(&mut self.released);
-        let (time, stop, writes) = self.worker()?.run(
+        self.worker()?.send_run(
             Request::Run {
                 now,
                 upto,
@@ -994,6 +1006,11 @@ impl PVMachine {
             },
             frames,
         )?;
+        Ok(now)
+    }
+    /// Receive the run [`PVMachine::send_run`] sent, which started at `now`.
+    fn receive_run(&mut self, now: u64, upto: u64) -> Result<StopReason, String> {
+        let (time, stop, writes) = self.worker()?.receive_run()?;
         if time < now || time < self.reached || time > upto {
             return Err("PV worker crossed execution interval".into());
         }
@@ -1454,6 +1471,27 @@ impl Machine for PVMachine {
         context: &mut RunContext<'_, ()>,
         upto: Timestamp,
     ) -> Result<StopReason, Self::Error> {
+        match self.start(context, upto)? {
+            Some(stopped) => Ok(stopped),
+            None => self.finish(context),
+        }
+    }
+    /// The guest runs in the worker process, so a run is in flight between
+    /// sending its request and receiving its stop.
+    fn splits(&self) -> bool {
+        true
+    }
+    fn ready(&mut self) -> bool {
+        self.worker.as_ref().is_none_or(Occupant::ready)
+    }
+    fn start(
+        &mut self,
+        context: &mut RunContext<'_, ()>,
+        upto: Timestamp,
+    ) -> Result<Option<StopReason>, Self::Error> {
+        if self.in_flight.is_some() {
+            return Err(std::io::Error::other("PV run already in flight"));
+        }
         if self.state == State::Invalid {
             return Err(std::io::Error::other("PV machine invalid"));
         }
@@ -1473,7 +1511,7 @@ impl Machine for PVMachine {
         // Frames for the boot that runs next; a Crash or Reboot ends the boot
         // they were admitted for.
         let mut frames = Vec::new();
-        let result: Result<StopReason, String> = (|| {
+        let result: Result<Option<StopReason>, String> = (|| {
             while let Some(input) = context.inbox.front() {
                 match &input.payload {
                     seedbox_machine::pv::Request::Crash => {
@@ -1548,20 +1586,37 @@ impl Machine for PVMachine {
                     return Err("PV exited machine requires a zero-budget run or Reboot".into());
                 }
                 self.flush_ends(context)?;
-                return Ok(StopReason::Exited {
+                return Ok(Some(StopReason::Exited {
                     reached: Timestamp::from_nanos(self.reached),
                     reason: match self.state {
                         State::Crashed => ExitReason::Crashed,
                         _ => ExitReason::Shutdown,
                     },
-                });
+                }));
             }
             let syscall_cost_ns = priced_syscall_ns(context.execution.factor_permille());
             // A held machine admits its inputs at the current time and runs
             // no guest work; time it spends held is a stall to the guest.
             let held = self.held;
             let upto = if held { now.max(self.reached) } else { upto };
-            let mut stopped = self.execute(now, upto, syscall_cost_ns, &frames)?;
+            let now = self.send_run(now, upto, syscall_cost_ns, &frames)?;
+            self.in_flight = Some(InFlight { now, upto, held });
+            Ok(None)
+        })();
+        result.map_err(|error| {
+            if invalidates {
+                self.state = State::Invalid;
+                drop(self.worker.take());
+            }
+            std::io::Error::other(error)
+        })
+    }
+    fn finish(&mut self, context: &mut RunContext<'_, ()>) -> Result<StopReason, Self::Error> {
+        let Some(InFlight { now, upto, held }) = self.in_flight.take() else {
+            return Err(std::io::Error::other("PV finish without a run in flight"));
+        };
+        let result: Result<StopReason, String> = (|| {
+            let mut stopped = self.receive_run(now, upto)?;
             if held {
                 self.state = State::Blocked(None);
                 stopped = StopReason::Blocked {
@@ -1585,10 +1640,8 @@ impl Machine for PVMachine {
             Ok(stopped)
         })();
         result.map_err(|error| {
-            if invalidates {
-                self.state = State::Invalid;
-                drop(self.worker.take());
-            }
+            self.state = State::Invalid;
+            drop(self.worker.take());
             std::io::Error::other(error)
         })
     }

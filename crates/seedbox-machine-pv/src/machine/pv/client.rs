@@ -20,6 +20,8 @@ pub(super) struct Worker {
     /// An exchange failed part-way, so the stream may hold half of one. The
     /// worker was terminated and every later request fails.
     lost: bool,
+    /// A `Run` was sent and its answer not yet received.
+    running: bool,
 }
 impl Worker {
     pub(super) fn spawn(executable: &Path) -> Result<Self> {
@@ -47,6 +49,7 @@ impl Worker {
                 child,
                 stream,
                 lost: false,
+                running: false,
             }),
             Err(error) => {
                 // Not yet a Worker, so Drop would not reap it.
@@ -79,6 +82,9 @@ impl Worker {
     fn exchange<T>(&mut self, exchange: impl FnOnce(&mut Stream) -> Result<T>) -> Result<T> {
         if self.lost {
             return Err(LOST.into());
+        }
+        if self.running {
+            return Err("PV worker has a run in flight".into());
         }
         let result = exchange(&mut self.stream);
         if result.is_err() {
@@ -113,23 +119,42 @@ impl Worker {
     /// guest's writes in emission order.
     pub(super) fn run(
         &mut self,
-        mut request: Request,
+        request: Request,
         frames: &[Vec<u8>],
     ) -> Result<(u64, Stop, Vec<GuestWrite>)> {
+        self.send_run(request, frames)?;
+        self.receive_run()
+    }
+    /// The first half of [`Worker::run`]: send the request and its frames.
+    /// Until [`Worker::receive_run`], every other request fails.
+    pub(super) fn send_run(&mut self, mut request: Request, frames: &[Vec<u8>]) -> Result<()> {
         let Request::Run { frames: count, .. } = &mut request else {
             return Err("PV run requires a Run request".into());
         };
         *count = frames.len() as u64;
         self.exchange(|stream| {
             send(stream.get_mut(), &request)?;
-            wire::send_frames(stream.get_mut(), frames)?;
-            match answer(stream)? {
-                Response::Stopped { time, stop, writes } => {
-                    Ok(Ok((time, stop, wire::receive_writes(stream, writes)?)))
-                }
-                Response::Error(error) => Ok(Err(error)),
-                _ => Err("PV worker returned unexpected run response".into()),
+            wire::send_frames(stream.get_mut(), frames)
+        })?;
+        self.running = true;
+        Ok(())
+    }
+    /// Whether the sent run's answer has begun to arrive, so that
+    /// [`Worker::receive_run`] will not wait for the guest.
+    pub(super) fn ready(&self) -> bool {
+        !self.running || !self.stream.buffer().is_empty() || self.stream.get_ref().readable()
+    }
+    /// The second half of [`Worker::run`]: the stop and the guest's writes.
+    pub(super) fn receive_run(&mut self) -> Result<(u64, Stop, Vec<GuestWrite>)> {
+        if !std::mem::take(&mut self.running) {
+            return Err("PV run answer without a run in flight".into());
+        }
+        self.exchange(|stream| match answer(stream)? {
+            Response::Stopped { time, stop, writes } => {
+                Ok(Ok((time, stop, wire::receive_writes(stream, writes)?)))
             }
+            Response::Error(error) => Ok(Err(error)),
+            _ => Err("PV worker returned unexpected run response".into()),
         })?
     }
     pub(super) fn terminate(&mut self) -> Result<()> {
@@ -218,13 +243,17 @@ impl Occupant {
     pub(super) fn call(&mut self, request: Request) -> Result<Response> {
         self.slot.seat().worker.call(request)
     }
-    /// As [`Worker::run`].
-    pub(super) fn run(
-        &mut self,
-        request: Request,
-        frames: &[Vec<u8>],
-    ) -> Result<(u64, Stop, Vec<GuestWrite>)> {
-        self.slot.seat().worker.run(request, frames)
+    /// As [`Worker::send_run`].
+    pub(super) fn send_run(&mut self, request: Request, frames: &[Vec<u8>]) -> Result<()> {
+        self.slot.seat().worker.send_run(request, frames)
+    }
+    /// As [`Worker::ready`].
+    pub(super) fn ready(&self) -> bool {
+        self.slot.seat().worker.ready()
+    }
+    /// As [`Worker::receive_run`].
+    pub(super) fn receive_run(&mut self) -> Result<(u64, Stop, Vec<GuestWrite>)> {
+        self.slot.seat().worker.receive_run()
     }
     /// Keep the stopped machine in the worker as a retained snapshot. `Err`
     /// carries the bytes of RAM pages the worker's snapshots hold when

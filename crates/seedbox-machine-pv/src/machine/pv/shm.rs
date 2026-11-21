@@ -383,6 +383,11 @@ impl<R: Read, W: Write> Stream<R, W> {
             }
         }
     }
+    /// Whether a read would find bytes without waiting.
+    pub(super) fn readable(&self) -> bool {
+        self.readable != self.read
+            || self.region.word(self.incoming.word(WRITTEN)).load(SeqCst) != self.read
+    }
     /// Wake the peer if it marked a wait in control word `mark`.
     fn wake(&mut self, mark: usize) -> io::Result<()> {
         let mark = self.region.word(mark);

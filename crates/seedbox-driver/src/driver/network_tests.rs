@@ -2,6 +2,7 @@
 use super::fixture::{auto_key, definition};
 use super::*;
 use crate::definition::{MacAddress, NetworkInterface};
+use seedbox_machine::host::idle::Idle;
 use std::sync::Mutex;
 
 fn at(n: u64) -> Timestamp {
@@ -41,6 +42,11 @@ struct Net {
     exited: bool,
     reached: u64,
     log: Arc<Mutex<Log>>,
+    /// Report [`Machine::splits`]: the run executes in `start` and is held
+    /// as in flight until `finish`, ready only on every third poll.
+    split: bool,
+    flight: Option<Result<StopReason, std::io::Error>>,
+    polls: u32,
 }
 
 impl Machine for Net {
@@ -125,6 +131,33 @@ impl Machine for Net {
         })
     }
 
+    fn splits(&self) -> bool {
+        self.split
+    }
+
+    fn start(
+        &mut self,
+        context: &mut RunContext<'_, ()>,
+        upto: Timestamp,
+    ) -> Result<Option<StopReason>, Self::Error> {
+        assert!(self.flight.is_none(), "one run in flight");
+        let result = self.run(context, upto);
+        if !self.split {
+            return result.map(Some);
+        }
+        self.flight = Some(result);
+        Ok(None)
+    }
+
+    fn ready(&mut self) -> bool {
+        self.polls += 1;
+        self.polls.is_multiple_of(3)
+    }
+
+    fn finish(&mut self, _: &mut RunContext<'_, ()>) -> Result<StopReason, Self::Error> {
+        self.flight.take().expect("a run in flight")
+    }
+
     fn snapshot(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -138,6 +171,7 @@ struct Spec {
     busy: bool,
     echo: Option<[u8; 6]>,
     answer: Option<[u8; 6]>,
+    split: bool,
 }
 fn spec(nic: Option<u8>) -> Spec {
     Spec {
@@ -146,9 +180,14 @@ fn spec(nic: Option<u8>) -> Spec {
         busy: false,
         echo: None,
         answer: None,
+        split: false,
     }
 }
 impl Spec {
+    fn split(mut self) -> Self {
+        self.split = true;
+        self
+    }
     fn send(self, at: u64, bytes: Vec<u8>) -> Self {
         self.emit(at, Response::TransmitFrame { bytes })
     }
@@ -215,6 +254,9 @@ fn world(
                     exited: false,
                     reached: 0,
                     log: log.clone(),
+                    split: spec.split,
+                    flight: None,
+                    polls: 0,
                 },
             )
         })
@@ -598,6 +640,9 @@ fn spawned_machines_join_the_network_and_host_additions_stay_unattached() {
                     exited: false,
                     reached: 0,
                     log,
+                    split: false,
+                    flight: None,
+                    polls: 0,
                 })
             })
         })
@@ -1460,4 +1505,82 @@ fn a_frame_dropped_inside_a_lane_still_holds_the_quiescent_end() {
         .map(|fact| fact.due)
         .collect();
     assert_eq!(dropped, [Some(at(MS))]);
+}
+
+/// Barriers, sorted runs and sorted received frames.
+type Observed = (
+    Vec<StepOutcome>,
+    Vec<(usize, u64, u64)>,
+    Vec<(usize, u64, u8)>,
+);
+
+/// Echo chains between busy and blocked machines at 1 ms latency, each
+/// machine split (its runs in flight on the Driver's thread) or lent to a
+/// worker as `split` says; returns the barriers and the sorted log.
+fn echo_world(workers: usize, split: [bool; 3]) -> Observed {
+    echo_world_waiting(workers, split, Idle::DEFAULT)
+}
+
+fn echo_world_waiting(workers: usize, split: [bool; 3], idle: Idle) -> Observed {
+    let config = NetworkConfig::new(Duration::from_millis(1), Duration::ZERO, 0).unwrap();
+    let specs = vec![
+        spec(Some(1))
+            .send(0, frame(mac(2), 1))
+            .send(2 * MS + 500, frame(mac(3), 30))
+            .echo(mac(3))
+            .busy(),
+        spec(Some(2)).echo(mac(3)),
+        spec(Some(3)).echo(mac(1)),
+    ];
+    let specs = specs
+        .into_iter()
+        .zip(split)
+        .map(|(spec, split)| if split { spec.split() } else { spec })
+        .collect();
+    let (mut driver, log) = world(0, MS, workers, config, specs, Vec::new()).unwrap();
+    driver.workers.set_idle(idle);
+    let seen = barriers(&mut driver, 40 * MS);
+    let log = log.lock().unwrap();
+    let mut runs = log.runs.clone();
+    runs.sort();
+    let mut received = log.received.clone();
+    received.sort();
+    (seen, runs, received)
+}
+
+#[test]
+fn split_machines_run_their_lanes_as_lent_machines_do() {
+    let lent = echo_world(1, [false; 3]);
+    assert!(lent.2.len() > 20, "frames crossed every lane: {:?}", lent.2);
+    for workers in [1, 2, 4] {
+        assert_eq!(
+            echo_world(workers, [false; 3]),
+            lent,
+            "lent, {workers} workers"
+        );
+        assert_eq!(
+            echo_world(workers, [true; 3]),
+            lent,
+            "split, {workers} workers"
+        );
+        assert_eq!(
+            echo_world(workers, [true, false, true]),
+            lent,
+            "mixed, {workers} workers"
+        );
+    }
+}
+
+#[test]
+fn every_idle_strategy_runs_split_lanes_to_the_same_results() {
+    let lent = echo_world(1, [false; 3]);
+    for idle in Idle::ALL {
+        for workers in [1, 3] {
+            assert_eq!(
+                echo_world_waiting(workers, [true; 3], idle),
+                lent,
+                "{idle:?}, {workers} workers"
+            );
+        }
+    }
 }

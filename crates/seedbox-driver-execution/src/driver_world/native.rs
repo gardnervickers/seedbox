@@ -58,6 +58,50 @@ impl Machine for Native {
             Self::Tcg { machine, .. } => machine.run(context, upto).map_err(|e| e.to_string()),
         }
     }
+    fn splits(&self) -> bool {
+        match self {
+            #[cfg(any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+            ))]
+            Self::Pv { machine, .. } => machine.splits(),
+            Self::Tcg { machine, .. } => machine.splits(),
+        }
+    }
+    fn start(
+        &mut self,
+        context: &mut RunContext<'_, ()>,
+        upto: Timestamp,
+    ) -> Result<Option<StopReason>, String> {
+        match self {
+            #[cfg(any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+            ))]
+            Self::Pv { machine, .. } => machine.start(context, upto).map_err(|e| e.to_string()),
+            Self::Tcg { machine, .. } => machine.start(context, upto).map_err(|e| e.to_string()),
+        }
+    }
+    fn ready(&mut self) -> bool {
+        match self {
+            #[cfg(any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+            ))]
+            Self::Pv { machine, .. } => machine.ready(),
+            Self::Tcg { machine, .. } => machine.ready(),
+        }
+    }
+    fn finish(&mut self, context: &mut RunContext<'_, ()>) -> Result<StopReason, String> {
+        match self {
+            #[cfg(any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+            ))]
+            Self::Pv { machine, .. } => machine.finish(context).map_err(|e| e.to_string()),
+            Self::Tcg { machine, .. } => machine.finish(context).map_err(|e| e.to_string()),
+        }
+    }
     fn execution_evidence(
         &mut self,
     ) -> Result<Option<seedbox_machine::machine::ExecutionEvidence>, String> {

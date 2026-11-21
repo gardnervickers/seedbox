@@ -172,6 +172,45 @@ pub trait Machine {
         upto: Timestamp,
     ) -> Result<StopReason, Self::Error>;
 
+    /// Whether this machine executes elsewhere, so that [`Machine::start`]
+    /// can hand a run off and return while it executes. One thread can then
+    /// keep several such machines running at once: start each, and finish
+    /// each as it becomes [`Machine::ready`]. Machines that execute on the
+    /// calling thread keep the default and are only [`Machine::run`].
+    fn splits(&self) -> bool {
+        false
+    }
+
+    /// Begin the run that [`Machine::run`] would execute with the same
+    /// arguments. `Some` is a run that finished without being handed off.
+    /// `None` is a run in flight: the next call on this machine must be
+    /// [`Machine::finish`] (or [`Machine::ready`] before it), with a context
+    /// over the same inbox, outbox, clock and RNG.
+    fn start(
+        &mut self,
+        context: &mut RunContext<'_, Self::Context>,
+        upto: Timestamp,
+    ) -> Result<Option<StopReason>, Self::Error> {
+        self.run(context, upto).map(Some)
+    }
+
+    /// Whether an in-flight run has stopped, so that [`Machine::finish`] will
+    /// not wait for its execution.
+    fn ready(&mut self) -> bool {
+        true
+    }
+
+    /// Finish the in-flight run that [`Machine::start`] began, as
+    /// [`Machine::run`] would have returned it. Only a machine whose `start`
+    /// returned `None` has one; the default `start` never does.
+    fn finish(
+        &mut self,
+        context: &mut RunContext<'_, Self::Context>,
+    ) -> Result<StopReason, Self::Error> {
+        let _ = context;
+        unreachable!("Machine::finish without a run in flight")
+    }
+
     /// Capture the stopped machine without advancing execution.
     ///
     /// # Capture point
