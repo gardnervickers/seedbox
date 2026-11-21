@@ -33,6 +33,7 @@ use seedbox_machine::host::{
     doorbell::Ringer,
     idle::{Action, Idle, IdleStrategy, Outcome, SpinThenSleep},
 };
+use seedbox_machine::pv::transport::GuestWrite;
 use std::{
     io::{self, Read, Write},
     os::{
@@ -418,6 +419,28 @@ impl<R: Read, W: Write> Stream<R, W> {
             .map_err(|e| format!("PV protocol write: {e}"))
     }
 
+    /// A synchronous producer owns its response until every byte has gone
+    /// into the ring. Stream a long trailer from its original buffers as the
+    /// reader returns credit, including across the wrap point.
+    pub(super) fn reply(&mut self, header: &Response, writes: Option<&[GuestWrite]>) -> Result<()> {
+        let mut claim = self.claim().map_err(|e| e.to_string())?;
+        claim.header(header)?;
+        if let Some(writes) = writes {
+            let size = super::wire::writes_size(writes)?;
+            if size > claim.capacity.saturating_sub(claim.used) {
+                let ring = claim.seal(size);
+                let tail = std::mem::take(&mut ring.tail);
+                ring.write_all(tail.get_ref()).map_err(|e| e.to_string())?;
+                return super::wire::send_writes(ring, writes);
+            }
+            super::wire::send_writes(&mut claim, writes)?;
+        }
+        claim
+            .commit()
+            .and_then(|()| self.finish_send())
+            .map_err(|e| format!("PV protocol write: {e}"))
+    }
+
     /// Copy as much of the outstanding request as the worker has made room
     /// for. A worker draining a partial request rings the same shared bell.
     pub(super) fn advance_send(&mut self) -> io::Result<()> {
@@ -711,7 +734,7 @@ pub(crate) struct Claim<'a, R, W> {
     used: usize,
     spill: Vec<u8>,
 }
-impl<R: Read, W: Write> Claim<'_, R, W> {
+impl<'a, R: Read, W: Write> Claim<'a, R, W> {
     fn copy(&mut self, offset: usize, bytes: &[u8]) {
         let n = bytes.len().min(self.capacity.saturating_sub(offset));
         if n > 0 {
@@ -750,15 +773,19 @@ impl<R: Read, W: Write> Claim<'_, R, W> {
         Ok(())
     }
     pub(super) fn commit(self) -> io::Result<()> {
+        self.seal(0).publish()
+    }
+    /// Set the complete message boundary before publishing any of its prefix.
+    fn seal(self, following: usize) -> &'a mut Stream<R, W> {
         let stream = self.stream;
-        let end = stream.written + self.used as u64;
+        let end = stream.written + self.used as u64 + following as u64;
         stream
             .region
             .word(stream.outgoing.word(MESSAGE_END))
             .store(end, SeqCst);
         stream.written += self.used.min(self.capacity) as u64;
         stream.tail = io::Cursor::new(self.spill);
-        stream.publish()
+        stream
     }
 }
 impl<R: Read, W: Write> Write for Claim<'_, R, W> {

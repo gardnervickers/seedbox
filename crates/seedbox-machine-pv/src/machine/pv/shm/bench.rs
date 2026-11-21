@@ -52,9 +52,7 @@ fn send<R: Read, W: Write>(io: &mut Connection<R, W>, seq: u64, data: &[GuestWri
         stop: Stop::Horizon,
         writes: 1,
     };
-    let ring = io.get_mut();
-    ring.message(&header, |claim| wire::send_writes(claim, data))?;
-    ring.finish_send().map_err(|e| e.to_string())
+    io.get_mut().reply(&header, Some(data))
 }
 
 fn receive<R: Read, W: Write>(io: &mut Connection<R, W>, seq: u64) -> Result<Vec<GuestWrite>> {

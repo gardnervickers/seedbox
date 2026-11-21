@@ -100,19 +100,33 @@ impl Input<'_> {
     }
 }
 
+fn write_record(write: &GuestWrite) -> Result<(u8, &LifecycleWrite, u32)> {
+    let (tag, write) = match write {
+        GuestWrite::Console(write) => (CONSOLE, write),
+        GuestWrite::Lifecycle(write) => (LIFECYCLE, write),
+        GuestWrite::Frame(write) => {
+            frame_length(write.bytes.len())?;
+            (FRAME, write)
+        }
+    };
+    let length = u32::try_from(write.bytes.len()).map_err(|_| "PV write too large")?;
+    Ok((tag, write, length))
+}
+
+/// Validate the whole trailer before its first fragment becomes visible.
+pub(super) fn writes_size(writes: &[GuestWrite]) -> Result<usize> {
+    // One end tag plus a tag, timestamp and length for each record.
+    writes.iter().try_fold(1usize, |size, write| {
+        let (_, _, length) = write_record(write)?;
+        size.checked_add(13 + length as usize)
+            .ok_or_else(|| "PV write trailer too large".into())
+    })
+}
 /// Send `writes` in order. The JSON message before it carries `writes.len()`.
 /// Pieces go straight to `out`, which buffers or claims them itself.
 pub(super) fn send_writes(out: &mut impl Write, writes: &[GuestWrite]) -> Result<()> {
     for write in writes {
-        let (tag, write) = match write {
-            GuestWrite::Console(write) => (CONSOLE, write),
-            GuestWrite::Lifecycle(write) => (LIFECYCLE, write),
-            GuestWrite::Frame(write) => {
-                frame_length(write.bytes.len())?;
-                (FRAME, write)
-            }
-        };
-        let length = u32::try_from(write.bytes.len()).map_err(|_| "PV write too large")?;
+        let (tag, write, length) = write_record(write)?;
         out.write_all(&[tag])
             .and_then(|_| out.write_all(&write.time.to_le_bytes()))
             .and_then(|_| out.write_all(&length.to_le_bytes()))

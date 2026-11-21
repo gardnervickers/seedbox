@@ -369,3 +369,75 @@ fn packet_decoder_borrows_whole_contiguous_messages_and_streams_the_rest() {
         );
     }
 }
+
+#[test]
+fn synchronous_reply_streams_its_validated_trailer_across_fragments() {
+    use crate::machine::pv::protocol::Stop;
+    use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
+
+    bounded(
+        "the polling reader returns credit for each reply fragment",
+        || {
+            let (mut client, mut worker) = pair(64, Duration::ZERO);
+            let bytes = message(4096, 73);
+            let writes = vec![GuestWrite::Console(LifecycleWrite { time: 7, bytes })];
+            let response = Response::Stopped {
+                time: 7,
+                stop: Stop::Horizon,
+                writes: 1,
+            };
+            let producer = std::thread::spawn(move || {
+                worker.reply(&response, Some(&writes)).unwrap();
+                writes
+            });
+            let mut prefix = Vec::new();
+            while !client.poll_message(&mut prefix).unwrap() {
+                std::hint::spin_loop();
+            }
+            assert!(prefix.len() >= 64);
+            let got = super::receive(&mut io::BufReader::new(client), &prefix, |header, input| {
+                match header {
+                    Response::Stopped {
+                        time: 7,
+                        stop: Stop::Horizon,
+                        writes,
+                    } => crate::machine::pv::wire::receive_writes(input, writes),
+                    _ => Err("unexpected reply".into()),
+                }
+            })
+            .unwrap()
+            .unwrap();
+            assert_eq!(got, producer.join().unwrap());
+        },
+    );
+}
+
+#[test]
+fn invalid_last_record_leaves_a_long_reply_unpublished() {
+    use crate::machine::pv::protocol::Stop;
+    use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
+    let (client, mut worker) = pair(64, Duration::ZERO);
+    let writes = [
+        GuestWrite::Console(LifecycleWrite {
+            time: 1,
+            bytes: message(128, 11),
+        }),
+        GuestWrite::Frame(LifecycleWrite {
+            time: 2,
+            bytes: vec![0],
+        }),
+    ];
+    let reply = Response::Stopped {
+        time: 2,
+        stop: Stop::Horizon,
+        writes: 2,
+    };
+    assert!(worker.reply(&reply, Some(&writes)).is_err());
+    assert_eq!(
+        client
+            .region
+            .word(Ring::Responses.word(WRITTEN))
+            .load(SeqCst),
+        0
+    );
+}

@@ -1203,13 +1203,7 @@ pub(crate) fn serve() -> Result<()> {
             Ok(answer) => answer,
             Err(error) => Response::Error(error),
         };
-        let ring = io.get_mut();
-        ring.message(&response, |claim| match writes {
-            Some(writes) => super::wire::send_writes(claim, &writes),
-            None => Ok(()),
-        })?;
-        ring.finish_send()
-            .map_err(|e| format!("PV protocol write: {e}"))?;
+        io.get_mut().reply(&response, writes.as_deref())?;
     }
     Ok(())
 }
