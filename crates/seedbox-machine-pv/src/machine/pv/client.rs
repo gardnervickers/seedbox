@@ -157,8 +157,8 @@ impl Worker {
     }
     /// With a run in flight in a worker that rings the process doorbell: the
     /// pipe that reaches EOF if the worker exits.
-    pub(super) fn doorbell(&self) -> Option<RawFd> {
-        (self.running && !self.lost).then(|| self.stream.get_ref().sleeper().as_raw_fd())
+    pub(super) fn doorbell(&self, ticket: u64) -> Option<RawFd> {
+        (self.running && !self.lost).then(|| self.stream.get_ref().sleeper(ticket).as_raw_fd())
     }
     /// The second half of [`Worker::send_run`]: the stop and the guest's writes.
     pub(super) fn receive_run(&mut self) -> Result<(u64, Stop, Vec<GuestWrite>)> {
@@ -291,8 +291,8 @@ impl Occupant {
         self.slot.seat().worker.ready()
     }
     /// As [`Worker::doorbell`].
-    pub(super) fn doorbell(&self) -> Option<RawFd> {
-        self.slot.seat().worker.doorbell()
+    pub(super) fn doorbell(&self, ticket: u64) -> Option<RawFd> {
+        self.slot.seat().worker.doorbell(ticket)
     }
     /// As [`Worker::receive_run`].
     pub(super) fn receive_run(&mut self) -> Result<(u64, Stop, Vec<GuestWrite>)> {

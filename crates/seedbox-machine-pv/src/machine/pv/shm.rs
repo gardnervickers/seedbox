@@ -188,7 +188,8 @@ pub(crate) fn accept<R: Read, W: Write>(
     mut wake: W,
 ) -> Result<Stream<R, W>> {
     let attached = Region::inherited(capacity).and_then(|region| {
-        let bell = Ringer::inherited().map_err(|e| format!("PV doorbell: {e}"))?;
+        // SAFETY: accept is the worker entry's one attach handshake.
+        let bell = unsafe { Ringer::inherited() }.map_err(|e| format!("PV doorbell: {e}"))?;
         Ok((region, bell))
     });
     let answer = match &attached {
@@ -221,6 +222,8 @@ const READER_ASLEEP: usize = 2;
 const WRITER_ASLEEP: usize = 3;
 /// Absolute end of the one message in flight, including its trailer.
 const MESSAGE_END: usize = 4;
+/// Coordinator subscription, outside the two five-word ring headers.
+const WATCH: usize = 10;
 
 #[derive(Clone, Copy)]
 pub(super) enum Side {
@@ -436,13 +439,14 @@ impl<R: Read, W: Write> Stream<R, W> {
             self.published = self.written;
             self.wake(ring.word(READER_ASLEEP))?;
             if let Some(bell) = &self.bell {
-                bell.ring()?;
+                bell.ring(self.region.word(WATCH))?;
             }
         }
         Ok(())
     }
     /// The pipe this side sleeps on; it reaches EOF when the peer exits.
-    pub(super) fn sleeper(&self) -> &R {
+    pub(super) fn sleeper(&self, ticket: u64) -> &R {
+        self.region.word(WATCH).store(ticket, SeqCst);
         &self.sleep
     }
     /// Wake the peer if it marked a wait in control word `mark`.
@@ -509,7 +513,7 @@ impl<R: Read, W: Write> Read for Stream<R, W> {
             if self.read < self.region.word(ring.word(MESSAGE_END)).load(SeqCst)
                 && self.read == self.readable
             {
-                bell.ring()?;
+                bell.ring(self.region.word(WATCH))?;
             }
         }
         Ok(count)

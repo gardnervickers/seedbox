@@ -21,7 +21,7 @@ fn a_ring_after_the_mark_is_seen_on_the_word() {
     let mut coordinator = bell.claim().unwrap();
     coordinator.mark();
     assert!(!coordinator.rung());
-    ringer.ring().unwrap();
+    ringer.ring(&AtomicU64::new(0)).unwrap();
     assert!(coordinator.rung());
     coordinator.mark();
     assert!(!coordinator.rung());
@@ -44,12 +44,23 @@ fn every_park_ends_at_a_ring_from_another_thread() {
         for _ in 0..2000 {
             coordinator.mark();
             let ringer = bell.ringer().unwrap();
-            let ring = std::thread::spawn(move || ringer.ring().unwrap());
-            // A park that returns without the ring is an early byte; the
-            // ring itself always ends one.
-            while !coordinator.rung() {
-                assert_eq!(coordinator.park(&[]).unwrap(), None);
-            }
+            let watched = std::sync::Arc::new(AtomicU64::new(0));
+            let subscription = watched.clone();
+            let ring = std::thread::spawn(move || {
+                while subscription.load(SeqCst) == 0 {
+                    std::hint::spin_loop();
+                }
+                ringer.ring(&subscription).unwrap()
+            });
+            assert_eq!(
+                coordinator
+                    .park(|ticket| {
+                        watched.store(ticket, SeqCst);
+                        Some(vec![])
+                    })
+                    .unwrap(),
+                Wake::Published
+            );
             ring.join().unwrap();
         }
         let mut fd = libc::pollfd {
@@ -72,19 +83,30 @@ fn a_park_ends_when_a_watched_executor_exits() {
         coordinator.mark();
         drop(write);
         let fired = coordinator
-            .park(&[_live.as_raw_fd(), read.as_raw_fd()])
+            .park(|_| Some(vec![_live.as_raw_fd(), read.as_raw_fd()]))
             .unwrap();
-        assert_eq!(fired, Some(1));
+        assert_eq!(fired, Wake::Exited(1));
     });
 }
 
 #[test]
 fn an_executor_inherits_the_doorbell_at_its_descriptors() {
+    const CHILD: &str = "SEEDBOX_TEST_INHERITED_DOORBELL";
+    if std::env::var_os(CHILD).is_some() {
+        // SAFETY: this test's parent passes both owned descriptors.
+        let ringer = unsafe { Ringer::inherited() }.unwrap();
+        ringer.ring(&AtomicU64::new(0)).unwrap();
+        return;
+    }
     let bell = Doorbell::create().unwrap();
-    let mut command = Command::new("/bin/sh");
-    command.arg("-c").arg(format!(
-        "test -e /dev/fd/{REGION_DESCRIPTOR} && test -e /dev/fd/{BELL_DESCRIPTOR}"
-    ));
+    let mut coordinator = bell.claim().unwrap();
+    coordinator.mark();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.env(CHILD, "1").args([
+        "--exact",
+        "host::doorbell::tests::an_executor_inherits_the_doorbell_at_its_descriptors",
+    ]);
     bell.inherit(&mut command).unwrap();
     assert!(command.status().unwrap().success());
+    assert!(coordinator.rung());
 }

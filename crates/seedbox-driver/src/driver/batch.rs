@@ -77,6 +77,9 @@ impl<M: Machine> Flight<M> {
         .unwrap_or(true)
     }
 
+    pub(super) fn watch_reply(&mut self, ticket: u64) -> Option<std::os::fd::RawFd> {
+        self.machine.split_run()?.watch_reply(ticket)
+    }
     /// Wait for the run to stop and return it as a worker job would.
     pub(super) fn finish(mut self, worker: &mut M::Context) -> RunResult<M> {
         let stopped = self.call(worker, |machine, context| {
@@ -252,10 +255,17 @@ where
         views: Vec<BatchView>,
         bounds: &BatchBounds,
     ) -> Vec<RunReport<M::Error>> {
-        let jobs = views.into_iter().map(|view| self.run_job(view)).collect();
-        // All jobs finish before changing the clock or returning. Results are
-        // ordered by identity, never by worker completion time.
-        let mut results = self.workers.run(jobs);
+        let mut results = if views.iter().any(|v| self.splits(v.0)) {
+            let mut round = round::Runs::new();
+            let count = views.len();
+            for view in views {
+                self.submit_run(view, &mut round);
+            }
+            (0..count).map(|_| self.next_run(&mut round)).collect()
+        } else {
+            let jobs = views.into_iter().map(|view| self.run_job(view)).collect();
+            self.workers.run(jobs)
+        };
         results.sort_by_key(|result: &RunResult<M>| result.id);
         results
             .into_iter()
@@ -333,10 +343,8 @@ where
             execution: entry.lifecycle.execution(),
         };
         match flight.call(self.workers.caller(), |machine, context| {
-            machine
-                .split_run()
-                .expect("split run")
-                .start(context, bound)
+            let split = machine.split_run().expect("split run");
+            split.start(context, bound)
         }) {
             Ok(None) => Started::Flying(flight),
             Ok(Some(stopped)) => Started::Finished(flight.result(Ok(stopped))),

@@ -5,14 +5,14 @@
 //! and `asleep`, and a pipe. Every executor process spawned by this process
 //! inherits the region and the pipe's write end ([`Doorbell::inherit`]). An
 //! executor that publishes a reply [rings](Ringer::ring): it bumps `pending`,
-//! and if it then takes the `asleep` mark it writes one byte to the pipe.
+//! and if it then takes the `asleep` mark it writes the ticket to the pipe.
 //!
 //! Before scanning the rings, the coordinator samples `pending`. To park,
 //! it sets `asleep` and checks the sample again. If it sees progress it can
 //! cancel only a mark no writer has taken. Once a writer takes the mark,
-//! the coordinator consumes the owed byte even if it has already observed
+//! the coordinator consumes the owed ticket even if it has already observed
 //! the reply. The per-worker pipes share the poll set so a worker that dies
-//! between updating either word and writing the byte cannot strand the wait.
+//! between updating either word and writing the ticket cannot strand the wait.
 //!
 //! Only the claiming coordinator touches `asleep`, so a process has at most
 //! one at a time; another caller finds the doorbell claimed and waits its own
@@ -96,6 +96,7 @@ pub struct Doorbell {
     read: std::io::PipeReader,
     write: OwnedFd,
     claimed: AtomicBool,
+    next_ticket: AtomicU64,
 }
 
 static PROCESS: OnceLock<io::Result<Doorbell>> = OnceLock::new();
@@ -122,6 +123,7 @@ impl Doorbell {
             read,
             write,
             claimed: AtomicBool::new(false),
+            next_ticket: AtomicU64::new(1),
         })
     }
     /// Give the child that `command` spawns the region at
@@ -191,11 +193,16 @@ impl Coordinator<'_> {
     pub fn rung(&self) -> bool {
         self.bell.words.word(PENDING).load(SeqCst) != self.seen
     }
-    /// Wait for a publication or a worker exit. The returned index identifies
-    /// the worker whose pipe closed, so its normal receive reports EOF.
-    pub fn park(&self, watch: &[RawFd]) -> io::Result<Option<usize>> {
+    /// Arm the watch set for this park. A writer outside the set may also
+    /// publish, but it cannot take this ticket: its death could otherwise
+    /// strand the coordinator while none of its watched pipes has closed.
+    pub fn park(&self, watch: impl FnOnce(u64) -> Option<Vec<RawFd>>) -> io::Result<Wake> {
+        let ticket = self.bell.next_ticket.fetch_add(1, SeqCst);
+        let Some(watch) = watch(ticket) else {
+            return Ok(Wake::Unwatched);
+        };
         let mut fds: Vec<_> = std::iter::once(self.bell.read.as_raw_fd())
-            .chain(watch.iter().copied())
+            .chain(watch)
             .map(|fd| libc::pollfd {
                 fd,
                 events: libc::POLLIN,
@@ -203,34 +210,49 @@ impl Coordinator<'_> {
             })
             .collect();
         let asleep = self.bell.words.word(ASLEEP);
-        asleep.store(1, SeqCst);
-        if self.rung() && asleep.swap(0, SeqCst) == 1 {
-            return Ok(None);
+        asleep.store(ticket, SeqCst);
+        if self.rung() && asleep.swap(0, SeqCst) == ticket {
+            return Ok(Wake::Published);
         }
         loop {
-            // SAFETY: fds is initialized and its descriptors outlive this call.
+            // SAFETY: fds is initialized and its descriptors outlive this wait.
             let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) };
-            if n >= 0 {
-                break;
-            }
-            let err = io::Error::last_os_error();
-            if err.kind() != io::ErrorKind::Interrupted {
+            if n < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
                 asleep.store(0, SeqCst);
                 return Err(err);
             }
+            if fds[0].revents != 0 {
+                let mut bytes = [0; 8];
+                std::io::Read::read_exact(&mut &self.bell.read, &mut bytes)?;
+                if u64::from_ne_bytes(bytes) == ticket {
+                    return Ok(Wake::Published);
+                }
+                // An earlier park observed EOF after a live writer took
+                // its ticket. Consume that writer's late payment here.
+            }
+            if let Some(i) = fds[1..].iter().position(|fd| fd.revents != 0) {
+                asleep.store(0, SeqCst);
+                return Ok(Wake::Exited(i));
+            }
         }
-        asleep.store(0, SeqCst);
-        if fds[0].revents != 0 {
-            let mut byte = [0];
-            std::io::Read::read_exact(&mut &self.bell.read, &mut byte)?;
-        }
-        Ok(fds[1..].iter().position(|fd| fd.revents != 0))
     }
 }
 impl Drop for Coordinator<'_> {
     fn drop(&mut self) {
         self.bell.claimed.store(false, SeqCst);
     }
+}
+
+/// How the coordinator should resume its scan.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Wake {
+    Published,
+    Exited(usize),
+    Unwatched,
 }
 
 /// An executor's side.
@@ -241,7 +263,11 @@ pub struct Ringer {
 impl Ringer {
     /// The doorbell this executor's spawner passed at [`REGION_DESCRIPTOR`]
     /// and [`BELL_DESCRIPTOR`].
-    pub fn inherited() -> io::Result<Self> {
+    ///
+    /// # Safety
+    /// The private executor entry owns these two inherited descriptors, and
+    /// calls this exactly once, before starting its own child processes.
+    pub unsafe fn inherited() -> io::Result<Self> {
         for fd in [REGION_DESCRIPTOR, BELL_DESCRIPTOR] {
             // SAFETY: F_GETFD only queries the descriptor table.
             if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
@@ -280,15 +306,21 @@ impl Ringer {
     }
     /// Announce a published reply: bump `pending`, then wake the coordinator
     /// if it marked a sleep.
-    pub fn ring(&self) -> io::Result<()> {
+    pub fn ring(&self, watch: &AtomicU64) -> io::Result<()> {
         self.words.word(PENDING).fetch_add(1, SeqCst);
         let asleep = self.words.word(ASLEEP);
-        if asleep.load(SeqCst) != 0 && asleep.swap(0, SeqCst) != 0 {
+        let ticket = asleep.load(SeqCst);
+        if ticket != 0
+            && watch.load(SeqCst) == ticket
+            && asleep.compare_exchange(ticket, 0, SeqCst, SeqCst).is_ok()
+        {
+            let bytes = ticket.to_ne_bytes();
             loop {
-                // SAFETY: writes one byte from a valid buffer.
-                let count =
-                    unsafe { libc::write(self.write.as_raw_fd(), [0u8].as_ptr().cast(), 1) };
-                if count == 1 {
+                // SAFETY: a ticket fits in PIPE_BUF and is written atomically.
+                let count = unsafe {
+                    libc::write(self.write.as_raw_fd(), bytes.as_ptr().cast(), bytes.len())
+                };
+                if count == bytes.len() as isize {
                     return Ok(());
                 }
                 let error = io::Error::last_os_error();

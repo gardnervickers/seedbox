@@ -8,14 +8,9 @@
 //! process) is not lent to a worker thread: the Driver's thread starts its
 //! run, keeps it in flight beside the others, and finishes whichever stops
 //! first, so a round crosses no thread inside the Driver.
-use super::batch::{BatchBounds, Flight, RunResult, Started};
-use super::workers::Stream;
+use super::batch::{BatchBounds, RunResult};
+use super::round::Runs;
 use super::*;
-use seedbox_machine::host::idle::{Action, Outcome};
-
-/// A lane's run, as a worker job.
-type LaneJob<M> = Box<dyn FnOnce(&mut <M as Machine>::Context) -> RunResult<M> + Send>;
-type Lanes<M> = Stream<LaneJob<M>, RunResult<M>>;
 
 /// A frame taken from the network for a lane, in network order.
 struct Arrival {
@@ -34,13 +29,6 @@ struct LaneRun {
     bounds: BatchBounds,
     offered_commands: Vec<(MachineId, NonZeroU32, Timestamp)>,
     offered_stops: Vec<NonZeroU32>,
-}
-
-/// Split runs: in flight, oldest first, and those that finished as they
-/// started.
-struct Flights<M: Machine> {
-    flying: Vec<Flight<M>>,
-    finished: VecDeque<RunResult<M>>,
 }
 
 /// The lanes of one round.
@@ -111,25 +99,19 @@ where
             });
         }
         let mut errors = BTreeMap::new();
-        let mut stream = Lanes::<M>::default();
-        let mut flights = Flights {
-            flying: Vec::new(),
-            finished: VecDeque::new(),
-        };
+        let mut runs = Runs::new();
         for index in 0..self.execution.machines.len() {
-            if let Err(error) =
-                self.advance_lane(MachineId(index), &mut window, &mut stream, &mut flights)
-            {
+            if let Err(error) = self.advance_lane(MachineId(index), &mut window, &mut runs) {
                 Self::fail_lane(MachineId(index), error, &mut window, &mut errors);
             }
         }
         while !window.running.is_empty() {
-            let result = self.next_lane_result(&mut stream, &mut flights);
+            let result = self.next_run(&mut runs);
             let id = result.id;
             let run = window.running.remove(&id).expect("running lane");
             let finished = self
                 .finish_lane_run(result, run)
-                .and_then(|()| self.advance_lane(id, &mut window, &mut stream, &mut flights));
+                .and_then(|()| self.advance_lane(id, &mut window, &mut runs));
             if let Err(error) = finished {
                 Self::fail_lane(id, error, &mut window, &mut errors);
             }
@@ -168,58 +150,13 @@ where
         errors.insert(id, error);
     }
 
-    /// The next lane run to stop: a split run that finished as it started, a
-    /// split run in flight that stopped, or a worker job's result. With
-    /// nothing stopped, poll as the Driver's idle strategy says, then wait in
-    /// the oldest run in flight.
-    fn next_lane_result(
-        &mut self,
-        stream: &mut Lanes<M>,
-        flights: &mut Flights<M>,
-    ) -> RunResult<M> {
-        if let Some(result) = flights.finished.pop_front() {
-            return result;
-        }
-        if flights.flying.is_empty() {
-            return self.workers.next(stream).expect("lane runs report");
-        }
-        let polling = Instant::now();
-        let mut attempt = 0;
-        loop {
-            if let Some(index) = flights.flying.iter_mut().position(Flight::ready) {
-                self.workers.idle().reset(Outcome::Progress);
-                return flights.flying.remove(index).finish(self.workers.caller());
-            }
-            if stream.outstanding() > 0 {
-                if let Some(result) = self.workers.try_next(stream) {
-                    self.workers.idle().reset(Outcome::Progress);
-                    return result;
-                }
-            }
-            match self.workers.idle().idle(attempt, polling.elapsed()) {
-                Action::Spin => std::hint::spin_loop(),
-                Action::Yield => std::thread::yield_now(),
-                Action::Sleep => {
-                    self.workers.idle().reset(if attempt > 0 {
-                        Outcome::SleptAfterTrying
-                    } else {
-                        Outcome::SleptAtOnce
-                    });
-                    return flights.flying.remove(0).finish(self.workers.caller());
-                }
-            }
-            attempt += 1;
-        }
-    }
-
     /// Take the lane's due frames and submit its next run, if it has one
     /// before the window's end.
     fn advance_lane(
         &mut self,
         id: MachineId,
         window: &mut Window,
-        stream: &mut Lanes<M>,
-        flights: &mut Flights<M>,
+        runs: &mut Runs<M>,
     ) -> Result<(), Error<M::Error>> {
         if window.failed.first().is_some_and(|&first| first < id) {
             return Ok(());
@@ -269,16 +206,7 @@ where
             let offered_stops = self.offered_stops(&ids);
             let (bounds, mut views) = self.batch_views(&ids, start, upto)?;
             let view = views.pop().expect("one lane view");
-            if self.splits(id) {
-                match self.start_flight(view) {
-                    Started::Flying(flight) => flights.flying.push(flight),
-                    Started::Finished(result) => flights.finished.push_back(result),
-                }
-            } else {
-                let (machine, job) = self.run_job(view);
-                self.workers
-                    .submit(stream, machine, Box::new(job) as LaneJob<M>);
-            }
+            self.submit_run(view, runs);
             window.running.insert(
                 id,
                 LaneRun {

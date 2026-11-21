@@ -30,6 +30,7 @@ mod checkpoint;
 mod evidence;
 mod execution_evidence;
 mod lanes;
+mod round;
 pub use crate::persistence::{CodecError, DecodeLimits, SnapshotReference};
 pub use checkpoint::{Checkpoint, CheckpointMapError};
 pub use execution_evidence::ExecutionEvidenceRead;
