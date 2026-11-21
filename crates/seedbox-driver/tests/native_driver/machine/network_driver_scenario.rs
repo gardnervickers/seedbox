@@ -18,8 +18,8 @@ use super::network_scenario::{
 use crate::{
     definition::MachineDefinition,
     driver::{
-        Action, Driver, Event, EventKind, FaultOrigin, FaultTarget, InputKey, MachineId,
-        NetworkConfig, SettlementStatus, StepOutcome, Target,
+        Action, Driver, Event, EventKind, FaultOrigin, FaultTarget, FrameFact, FrameFate, InputKey,
+        MachineId, NetworkConfig, SettlementStatus, StepOutcome, Target,
     },
     machine::{Machine, Timestamp},
     pv::{Response, Stream},
@@ -94,6 +94,8 @@ impl Default for Scenario {
 pub(crate) struct Run {
     /// Every drained event, in publication order.
     pub(crate) events: Vec<Event>,
+    /// Routing decisions in publication order.
+    routes: Vec<FrameFact>,
     /// Identities of oracle, server and client.
     pub(crate) ids: [MachineId; 3],
     /// Committed application stdout of each machine, across its boots.
@@ -154,12 +156,14 @@ where
         factory,
     )
     .expect("driver construction");
+    driver.set_frame_capacity(usize::MAX);
     let ids: Vec<MachineId> = driver
         .with_barrier(|barrier| Ok(barrier.machines().map(|(id, _)| id).collect()))
         .unwrap();
     let ids: [MachineId; 3] = ids.try_into().expect("three machines");
     let mut run = Run {
         events: Vec::new(),
+        routes: Vec::new(),
         ids,
         stdout: Default::default(),
         stderr: Default::default(),
@@ -205,7 +209,10 @@ where
         let outcome = driver
             .step(Timestamp::from_nanos(scenario.limit))
             .unwrap_or_else(|error| panic!("driver step: {error:?}"));
-        for event in driver.drain_observations().events {
+        let batch = driver.drain_observations();
+        assert_eq!(batch.frames.omitted, 0);
+        run.routes.extend(batch.frames.facts);
+        for event in batch.events {
             if let EventKind::Output(output) = &event.kind {
                 let index = ids.iter().position(|id| *id == output.machine).unwrap();
                 match &output.payload {
@@ -304,7 +311,7 @@ impl Run {
 /// the verified 256 KiB TCP echo (every byte compared against the probe's
 /// pattern), with traffic in both directions. The oracle stayed idle, live
 /// and unattached, so the Driver never finished.
-pub(crate) fn check(run: &Run) {
+pub(crate) fn check(run: &Run) -> Transcript {
     let context = || {
         format!(
             "stdout {:?}, stderr {:?}, outcome {:?}",
@@ -325,7 +332,9 @@ pub(crate) fn check(run: &Run) {
     assert_eq!(run.stdout[0], "NETPROBE idle\n", "{}", context());
     assert!(run.transmitted(0).is_empty());
     // The client's markers and the traffic both ways, as for every backend.
-    check_client(&run.transcript());
+    let transcript = run.transcript();
+    check_client(&transcript);
+    transcript
 }
 
 /// Runs of one scenario under different worker counts are identical: every
@@ -335,6 +344,7 @@ pub(crate) fn check_worker_invariance(one: &Run, other: &Run) {
     assert_eq!(one.ids, other.ids);
     assert_eq!(one.outcome, other.outcome);
     assert_eq!(one.scheduled, other.scheduled);
+    assert_eq!(one.routes, other.routes);
     assert_eq!(one.stdout, other.stdout);
     assert_eq!(one.stderr, other.stderr);
     assert_eq!(one.events.len(), other.events.len());
@@ -652,11 +662,30 @@ fn both(runner: &impl Fn(&Scenario) -> Run, scenario: Scenario) -> Run {
     one
 }
 
-/// The fault-free exchange; retransmission evidence stays quiet without faults.
+/// The clean link schedules each peer-addressed frame once, FIFO in each direction.
 pub(crate) fn clean_exchange(runner: impl Fn(&Scenario) -> Run) {
     let run = both(&runner, Scenario::default());
-    check(&run);
-    assert_eq!(run.tcp_retransmissions(), 0);
+    let transcript = check(&run);
+    // On ARM64 Linux the server probes the tail of a flight while the client's
+    // covering ACK is already on the return link. Both sends must be routed.
+    let mut last_due = [None; 2];
+    let mut routes = run.routes.iter();
+    for (sent, from, to, _, _) in transcript.frames {
+        let Some(to) = to else { continue };
+        let route = routes
+            .next()
+            .expect("missing route for peer-addressed frame");
+        assert_eq!(route.fate, FrameFate::Scheduled, "{route:?}");
+        assert_eq!((route.from, route.to), (run.ids[1 + from], run.ids[1 + to]));
+        assert_eq!(route.sent.as_nanos(), sent);
+        let due = route.due.expect("scheduled frame has an arrival time");
+        assert!(
+            last_due[from].is_none_or(|last| last < due),
+            "out of order: {route:?}"
+        );
+        last_due[from] = Some(due);
+    }
+    assert_eq!(routes.next(), None, "unexpected extra route");
 }
 
 /// Seeded jitter and 2% loss: dropped TCP data is resent and the run succeeds.
