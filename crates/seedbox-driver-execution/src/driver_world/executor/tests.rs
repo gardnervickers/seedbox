@@ -348,3 +348,24 @@ fn each_spawn_request_gets_one_answer_and_failures_are_answers() {
     assert_eq!(prepared.len(), 1);
     assert_eq!(prepared[0].0.machine.name, "replica");
 }
+
+#[test]
+fn a_stop_policy_seed_varies_by_run_unless_it_is_exact() {
+    use std::path::Path;
+    let (first, second) = (Path::new("/runs/a/machines"), Path::new("/runs/b/machines"));
+    // A plain seed is mixed with the run's own output directory.
+    let mixed = stop_seed("4242", first).unwrap();
+    assert_eq!(stop_seed("4242", first), Some(mixed));
+    assert_ne!(stop_seed("4242", second), Some(mixed));
+    assert_ne!(stop_seed("4243", first), Some(mixed));
+    // The seed a worker reports repeats its policy in any run.
+    let notice = stop_seed_notice(mixed);
+    let (_, rest) = notice.split_once(&format!("{STOP_POLICY}=")).unwrap();
+    let value = rest.split_whitespace().next().unwrap();
+    assert_eq!(value, format!("exact:{mixed}"));
+    assert_eq!(stop_seed(value, second), Some(mixed));
+    assert_eq!(stop_seed("exact:0", first), Some(0));
+    for invalid in ["", "x", "-1", "exact:", "exact:x", "exact: 7", "Exact:7"] {
+        assert_eq!(stop_seed(invalid, first), None, "{invalid:?}");
+    }
+}

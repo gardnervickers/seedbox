@@ -36,7 +36,33 @@ pub struct DriverExecutor {
 /// StopPolicy`). Whole-run tests use it to check that a real run does not
 /// depend on where its rounds end. Only a worker built with `test-support`
 /// takes it; any other refuses the run, so a test never passes without it.
+///
+/// A plain number is mixed with each run's output directory, so two runs of
+/// one definition stop at different times. The worker writes the seed it
+/// draws from to its stderr; `exact:` and that seed gives a later run the
+/// same policy, for repeating one run's stops.
 pub const STOP_POLICY: &str = "SEEDBOX_STOP_POLICY";
+/// Prefix of a [`STOP_POLICY`] value that is used as given.
+const EXACT: &str = "exact:";
+/// The seed a worker's stop policy draws from: `value` is the
+/// [`STOP_POLICY`] parameter and `output` the run's own output directory.
+pub(super) fn stop_seed(value: &str, output: &std::path::Path) -> Option<u64> {
+    if let Some(seed) = value.strip_prefix(EXACT) {
+        return seed.parse().ok();
+    }
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(output.as_os_str().as_encoded_bytes());
+    let mut bytes = [0; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    Some(value.parse::<u64>().ok()? ^ u64::from_le_bytes(bytes))
+}
+/// What a worker says of the stop policy it runs with, on its stderr.
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn stop_seed_notice(seed: u64) -> String {
+    format!(
+        "seedbox: Driver stop policy seed {seed}; {STOP_POLICY}={EXACT}{seed} repeats its stops"
+    )
+}
 impl DriverExecutor {
     /// Test-only monitor override and original-worker injection. `monitor` must
     /// dispatch the real process_lifetime monitor/anchor compiled with worker-failure
@@ -134,7 +160,7 @@ impl DriverExecutor {
         session_lease: Option<PathBuf>,
     ) -> Self {
         if let Some((_, seed)) = environment.iter().find(|(key, _)| key == STOP_POLICY) {
-            // The run refuses a seed that is not a number.
+            // The run refuses a value that names no seed.
             self.stop_policy = Some(seed.to_string_lossy().into_owned());
         }
         self.environment = environment;

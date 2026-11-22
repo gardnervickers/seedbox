@@ -476,13 +476,13 @@ pub(crate) fn request(
         }
     }
     let workers = workers?;
+    let output = request.output.join(crate::execution::MACHINE_OUTPUT_DIR);
     let stop_policy = request
         .performance_parameters
         .get(super::STOP_POLICY)
         .map(|value| {
-            value
-                .parse::<u64>()
-                .map_err(|_| bad("invalid Driver stop policy seed"))
+            super::executor::stop_seed(value, &output)
+                .ok_or_else(|| bad("invalid Driver stop policy seed"))
         })
         .transpose()?;
     super::build::check_program_engine(request.program, &prepared.inventory)?;
@@ -492,7 +492,7 @@ pub(crate) fn request(
         seed: request.seed,
         program: request.program.to_vec(),
         simulated_time_ns: request.limits.simulated_time_ns,
-        output: request.output.join(crate::execution::MACHINE_OUTPUT_DIR),
+        output,
         machine_workers: workers,
         stop_policy,
         start_paused: request.start_paused,

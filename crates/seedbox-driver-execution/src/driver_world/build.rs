@@ -45,22 +45,17 @@ pub(super) fn open(request: &wire::Request) -> Result<Worker<Native>> {
         fresh(request)
     }
 }
-/// Apply the request's stop policy, which only a test-support build has.
-/// The run's output directory, unique to the attempt, varies the seed, so
-/// two runs of one definition stop at different times.
+/// Apply the request's stop policy, which only a test-support build has,
+/// and say on stderr (the run's retained worker diagnostics) which seed it
+/// draws from, so that the run's stops can be repeated.
 fn stop_policy(driver: &mut Driver<Native>, request: &wire::Request) -> Result<()> {
     let Some(seed) = request.stop_policy else {
         return Ok(());
     };
     #[cfg(feature = "test-support")]
     {
-        use sha2::Digest;
-        let digest = sha2::Sha256::digest(request.output.as_os_str().as_encoded_bytes());
-        let mut bytes = [0; 8];
-        bytes.copy_from_slice(&digest[..8]);
-        driver.set_stop_policy(Some(seedbox_driver::test_support::StopPolicy::seeded(
-            seed ^ u64::from_le_bytes(bytes),
-        )));
+        eprintln!("{}", super::executor::stop_seed_notice(seed));
+        driver.set_stop_policy(Some(seedbox_driver::test_support::StopPolicy::seeded(seed)));
         Ok(())
     }
     #[cfg(not(feature = "test-support"))]

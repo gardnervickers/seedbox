@@ -103,7 +103,9 @@ Where rounds end is the host's: policy [evidence](../crates/seedbox-driver/src/d
 commit count or commit time, so evidence at one time is the same under any stops or quantum.
 Tests end rounds at seeded times with a [stop policy](../crates/seedbox-driver/src/driver/stops.rs): scripted
 machines in `tests/driver_stop_policy.rs`, and whole runs through the worker's `SEEDBOX_STOP_POLICY` performance
-parameter, which only a `test-support` worker (the long suites' CLI build) accepts.
+parameter, which only a `test-support` worker (the long suites' CLI build) accepts. A plain seed is mixed with
+each run's output directory, so runs stop differently; the worker writes the seed it draws from to its stderr
+(the run's `vmm.stderr` diagnostic), and `exact:` with that seed repeats that run's stops.
 
 ## Machine network delivery
 
