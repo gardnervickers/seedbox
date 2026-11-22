@@ -10,7 +10,8 @@
 //! and a checkpoint file exported from the first must branch.
 //! The first session's submissions run on 3 machine workers and the second's
 //! at the server's default. A separate test runs references on one
-//! thread, then reruns and branches them with 2, 3 and 8 workers.
+//! thread, then reruns and branches them with 2, 3 and 8 workers, and another
+//! changes the quantum and where the Driver's rounds end.
 //!
 //! Each test prints and records (under `SEEDBOX_TEST_REPORT_DIR/determinism`)
 //! every oracle's verdict and wall time, and on a failure the observations of
@@ -23,6 +24,7 @@
 mod cross_session;
 mod oracles;
 mod session;
+mod stops;
 mod trace;
 mod workers;
 
@@ -115,8 +117,16 @@ impl Run {
     }
 
     fn server(&mut self, state: &Path) -> Result<Server, String> {
+        self.server_with(state, &[])
+    }
+
+    fn server_with(
+        &mut self,
+        state: &Path,
+        environment: &[(&str, &str)],
+    ) -> Result<Server, String> {
         self.live = state.to_owned();
-        Server::start(&self.cli, state)
+        Server::start_with(&self.cli, state, environment)
     }
 
     fn session(&self, state: &Path, workers: Option<u32>) -> Session {
@@ -332,6 +342,71 @@ fn machine_worker_count_never_changes_results() {
             .await;
             run.release(session.release(&references.ids())).await;
         }
+    });
+    drop(server);
+    run.finish();
+}
+
+/// The quantum and where the Driver's rounds end are host settings. Runs of
+/// the baseline's definition with quanta of 250 µs and 4 ms (the baseline's is
+/// 1 ms) must match it. Then a second server on the same state, whose runs
+/// take a stop policy (`SEEDBOX_STOP_POLICY`, which the long suites' CLI
+/// build accepts), runs the definition twice: each run ends its rounds at its
+/// own seeded times, and the two must match each other and write the
+/// baseline's output. Each is stepped through its first quanta, as a
+/// reference run without the policy is, and commits more barriers on the way,
+/// which shows that the policy acted.
+#[test]
+fn stops_and_quantum_never_change_results() {
+    let mut run = Run::new("stops");
+    let state = run.state("state");
+    let mut server = Some(run.server(&state).unwrap());
+    runtime().block_on(async {
+        let mut session = run.session(&state, Some(3));
+        let Some(baseline) = run.oracle("baseline", session.baseline()).await else {
+            return;
+        };
+        for quantum in [250_000, 4_000_000] {
+            run.oracle(
+                &format!("QuantumInvariance({quantum} ns)"),
+                session.quantum_invariance(&baseline, quantum),
+            )
+            .await;
+            run.release(session.release(&[&baseline])).await;
+        }
+        // A run stepped a quantum at a time must match too; the barriers its
+        // Driver commits on the way are its own.
+        let Some((output, reference)) = run
+            .oracle("StepInvariance", async {
+                let (stepped, counts) = session.stepped().await?;
+                session.same_results(&baseline, &stepped).await?;
+                Ok((session.logs(&baseline).await?, counts))
+            })
+            .await
+        else {
+            return;
+        };
+        run.release(session.release(&[&baseline])).await;
+        // The baseline stays, so the cache keeps the definition's inputs for
+        // the next server on this state.
+        let document = session.document.clone();
+        drop(server.take());
+        let policy = [(seedbox_driver_execution::driver_world::STOP_POLICY, "4242")];
+        server = match run.server_with(&state, &policy) {
+            Ok(server) => Some(server),
+            Err(error) => {
+                run.failures.push(format!("stop-policy server: {error}"));
+                return;
+            }
+        };
+        let mut stopped = run.session(&state, Some(3));
+        stopped.document = document;
+        run.oracle(
+            "StopPolicyInvariance",
+            stopped.stop_invariance(&output, &reference),
+        )
+        .await;
+        run.release(stopped.release(&[])).await;
     });
     drop(server);
     run.finish();
