@@ -268,7 +268,9 @@ fn assert_ack_settlement(driver: &Driver<AckBatchProbe>, events: &[Event]) {
     );
     assert_eq!(*status, SettlementStatus::Applied);
     assert_eq!(*outcome_at, Some(Timestamp::from_nanos(11)));
-    assert_eq!(*committed_at, Timestamp::from_nanos(20));
+    // The settlement is stamped with the acknowledgement's own time, not the
+    // commit at 20 that carried it.
+    assert_eq!(*committed_at, Timestamp::from_nanos(11));
     // An immutable receipt is not permission to enqueue the reply or another
     // effect before the entire committed batch finishes control processing.
     assert!(!driver

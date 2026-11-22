@@ -104,7 +104,7 @@ fn setup(workers: usize, operation: &'static str) -> (Driver<Caller>, Replies, V
         seedbox_driver::test_support::definition("oracle"),
         vec![seedbox_driver::test_support::definition("peer")],
         Vec::new(),
-        seedbox_driver::driver::NetworkConfig::default(),
+        seedbox_driver::test_support::floor(Duration::from_nanos(10)),
         move |_| {
             let label = next;
             next += 1;
@@ -226,7 +226,7 @@ fn queued_pair(
             seedbox_driver::test_support::definition("peer"),
         ],
         Vec::new(),
-        seedbox_driver::driver::NetworkConfig::default(),
+        seedbox_driver::test_support::floor(Duration::from_nanos(10)),
         move |_| {
             let label = next;
             next += 1;

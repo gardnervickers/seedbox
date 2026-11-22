@@ -45,8 +45,9 @@ Each hit has a `break_id`, a `source` (`program`, `block_request` or
 `name`, the `machine` and its `boot`, and `at_ns`, the projected simulation
 time of the hit. A hit becomes visible to the oracle after the round that
 contains it commits. Hits are numbered in committed order, not in the order
-workers reply, and `wait_break` returns the oldest one not yet returned. Hits
-appear as `break_hit` and `break_ended` events.
+workers reply, and `wait_break` returns the oldest one not yet returned; a
+parked `wait_break` returns it one network latency after the hit. Hits appear
+as `break_hit` and `break_ended` events.
 
 A hit ends in one of these ways, recorded on its `break_ended` event:
 
@@ -72,7 +73,8 @@ are not resumed and run no further guest work; their hits end with
 | `break_on_block_request` | `target`, `request`, `nth` | One-shot: holds the target's `nth` disk request of kind `request` (`read`, `write`, `flush`, `any`) unwritten and suspends the machine there. Its hit is named `block_request` and also carries `request` and `nth`; see [faults](faults.md#breakpoint-on-a-block-request). |
 
 `wait_break` parks in Driver state the way `sleep` does. It never blocks the
-Driver thread, and its timeout counts from the commit that admitted it.
+Driver thread, and its timeout counts from its admission, one network latency
+after the call (or one control latency with a controller).
 `inspect` lists each live hit under `breaks`.
 
 The libraries wrap this in `on_break(name, handler)`, in Python's `World` and

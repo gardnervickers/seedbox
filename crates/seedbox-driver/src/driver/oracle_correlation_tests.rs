@@ -55,7 +55,6 @@ fn retired_boot_ack_does_not_complete_current_boot_pending_stop() {
             1,
             command,
             Timestamp::from_nanos(0),
-            Timestamp::from_nanos(0),
         )
         .unwrap();
     let ack = |boot| MachineResponse {
@@ -114,7 +113,6 @@ fn first_terminal_response_wins_and_physical_shutdown_is_only_a_fallback() {
                 &mut driver.execution.machines[0].lifecycle,
                 0,
                 id,
-                Timestamp::from_nanos(0),
                 Timestamp::from_nanos(0),
             )
             .unwrap();

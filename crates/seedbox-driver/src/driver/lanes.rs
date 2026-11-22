@@ -233,7 +233,7 @@ where
         let (start, bound, offered) = run.bounds[&id];
         let report = self.receive_run(result, offered);
         let accepted = self.accept_run(report, start, bound, run.start, run.upto)?;
-        self.confirm_offered_commands(&run.offered_commands, run.upto, None)?;
+        self.confirm_offered_commands(&run.offered_commands, None)?;
         self.commit_runs(vec![accepted], &run.offered_stops, None);
         Ok(())
     }

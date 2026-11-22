@@ -24,8 +24,9 @@ Machines execute concurrently only inside a window bounded by minimum network la
 No frame emitted inside that window can arrive before the round commits.
 Inside it each machine runs to the round's end on its own lane, taking its timers and arriving
 frames at their exact times. A timer or a running receiver's frame therefore never ends a round;
-frames for a paused or suspended receiver still do. Commit-time effects (replies, the finish)
-take the round's end.
+frames for a paused or suspended receiver still do. What follows from an output (a call's
+admission, a reply, a released command) is due one network latency after the output, never at
+the round's end, so every runnable machine bounds the round. The finish still takes the round's end.
 Commit orders output by occurrence, not worker completion; worker count cannot change results.
 The [Driver](../crates/seedbox-driver/src/driver.rs) owns that bound, not the CPU backends.
 
@@ -56,14 +57,14 @@ to go back to: `Branch::rewind` restores an earlier point, replays the run's
 own inputs to just before `t` and checks the replay against the run. An input
 due at the point it returns to is delivered there, as it was in the run.
 Stops and saves are not inputs: where a run stops must not change what its
-machines do. Saves never do. A stop could, because the Driver stamps a guest's
-control and property replies with the round that committed them, so a round
-cut short at an arbitrary time moves every later one
-([#459](https://github.com/gardnervickers/seedbox/issues/459)). `Run::advance`
+machines do. Saves never do. A stop could, because the Driver still ends a run
+at the round that saw the oracle exit and orders outputs of one nanosecond by
+the commit that carried them, so a round cut short at an arbitrary time can
+move later ones ([#459](https://github.com/gardnervickers/seedbox/issues/459)). `Run::advance`
 therefore stops only at a barrier the run would reach anyway, the first one at
 or after the time asked for; only inputs cut rounds short.
 The trace compares lines and lifecycle changes, which have times of their own;
-a settlement is stamped by the commit that confirmed it and is not compared.
+settlements are not compared.
 
 ## Definitions do not borrow resource ownership
 

@@ -258,7 +258,9 @@ impl Service {
                     && id <= self.last
                     && p.admitted <= now
                     && p.deadline >= p.admitted
-                    && p.dispatched.is_none_or(|at| at >= p.admitted && at <= now),
+                    // A command released by an output is sent one floor
+                    // after it, which can be after this barrier.
+                    && p.dispatched.is_none_or(|at| at >= p.admitted && at <= p.deadline),
                 "pending fault",
             )?;
             if let Some(c) = &p.call {

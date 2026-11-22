@@ -256,7 +256,8 @@ fn drift_and_steps_follow_handles_across_reboot_with_resolved_events() {
         "realtime step ended with its machine incarnation"
     );
     // Drift survives the reboot until healed, then nominal; transitions are faults.
-    // A call made from a timer deadline takes effect when its round commits.
+    // A call takes effect one floor (50 ns) after it is made, also one made
+    // from a timer deadline at a round's end.
     let rates: Vec<_> = events
         .iter()
         .filter_map(|e| match e.kind {
@@ -269,7 +270,7 @@ fn drift_and_steps_follow_handles_across_reboot_with_resolved_events() {
             _ => None,
         })
         .collect();
-    assert_eq!(rates, [(150, 100_000_000), (750, 0), (900, drift.ppb())]);
+    assert_eq!(rates, [(150, 100_000_000), (750, 0), (950, drift.ppb())]);
     let replies: Vec<_> = observed.replies.iter().map(|r| &r["result"]).collect();
     assert_eq!(
         replies[0],
@@ -590,7 +591,7 @@ fn isolation(workers: usize, perturb: bool) -> Vec<Observed> {
         vec![crate::test_support::spawn_definition(fixture::definition(
             3,
         ))],
-        crate::driver::NetworkConfig::default(),
+        fixture::floor(Duration::from_nanos(50)),
         move |definition| {
             let index: usize = definition
                 .name

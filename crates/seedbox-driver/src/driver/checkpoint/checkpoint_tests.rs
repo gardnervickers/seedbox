@@ -701,8 +701,9 @@ fn seeded_clock_fault_cursor_and_pending_input_rejections_continue() {
                 true,
                 vec![
                     (0, Response::Ready),
+                    // Admitted one floor later, at 10, ahead of the pause.
                     (
-                        2,
+                        0,
                         call(
                             1,
                             r#""op":"clock_skew","target":{"machine":"fixture-1"},"max_offset_ns":100"#,
@@ -798,7 +799,6 @@ fn staged_prior_boot_ack_does_not_consume_restored_oracle_stop() {
             &mut d.execution.machines[0].lifecycle,
             1,
             command,
-            at(0),
             at(0),
         )
         .unwrap();

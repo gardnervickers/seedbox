@@ -114,8 +114,10 @@ fn undeclared_machines_and_crashes_that_are_not_allowed() {
 #[test]
 fn a_reply_for_an_ended_boot_is_dropped() {
     let mut d = driver();
-    advance(&mut d, 10);
+    // Both flushes are answered one floor (10 ns) after their records.
+    advance(&mut d, 20);
     let delivered = replies(&states(&d)[0]).len();
+    assert_eq!(delivered, 2);
     let now = d.now();
     d.execution
         .events

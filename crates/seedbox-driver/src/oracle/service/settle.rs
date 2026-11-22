@@ -227,7 +227,8 @@ impl Service {
         if let Some((heal, _)) = queued {
             let detail = format!("sequenced behind fault {fault}, which was not applied");
             let result = Err(error(ErrorCode::TargetUnavailable, detail));
-            match self.complete(heal, at, at, result, None, None, false) {
+            // The heal ends with its step's outcome, at the same time.
+            match self.complete(heal, observed, at, result, None, None, false) {
                 Ok(p) => plans.extend(p),
                 Err(mut failure) => {
                     failure.retain_before(plans);
@@ -283,7 +284,9 @@ impl Service {
             .err()
             .map(|e| e.message.clone())
             .unwrap_or_else(|| p.note.unwrap_or("confirmed effect").into());
-        let mut settlement = Self::settlement(fault, p, Some(observed), at, status, detail);
+        // The record takes the outcome's own time; `at` is when the service
+        // acts on it, which times the reply.
+        let mut settlement = Self::settlement(fault, p, Some(observed), observed, status, detail);
         settlement.counts = counts;
         if let Some(handle) = p.handle.as_ref().filter(|_| handle_completion) {
             let completion = if result.is_ok() {

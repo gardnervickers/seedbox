@@ -113,7 +113,7 @@ fn build(
         seedbox_driver::test_support::definition("fixture-0"),
         vec![seedbox_driver::test_support::definition("fixture-1")],
         Vec::new(),
-        seedbox_driver::driver::NetworkConfig::default(),
+        seedbox_driver::test_support::floor(Duration::from_nanos(10)),
         move |definition| {
             Ok(Probe {
                 oracle: definition.name == "fixture-0",
@@ -330,7 +330,7 @@ fn only_a_consumed_stop_with_its_successful_acknowledgment_finishes() {
         seedbox_driver::test_support::definition("oracle"),
         Vec::new(),
         Vec::new(),
-        seedbox_driver::driver::NetworkConfig::default(),
+        seedbox_driver::test_support::floor(Duration::from_nanos(10)),
         move |_| Ok(machine.clone()),
     )
     .unwrap();

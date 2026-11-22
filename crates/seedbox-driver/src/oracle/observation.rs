@@ -158,12 +158,6 @@ impl State {
             poisoned: false,
         }
     }
-    /// Replace the time of the last commit that changed this record and
-    /// return the old one. Only for comparing evidence across stop policies.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn replace_committed_at(&mut self, at: u64) -> u64 {
-        std::mem::replace(&mut self.committed_at, at)
-    }
     fn check(&self, boot: u64, observed: u64, commit: u64) -> Result<Change, Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
@@ -491,13 +485,15 @@ impl State {
         commit: u64,
         reason: ExitReason,
     ) -> Result<Change, Error> {
+        // A repeated observation of the boot's exit changes nothing, even
+        // after a later fact (a logical Crash of the exited boot) was recorded.
+        if !self.poisoned && boot == self.boot && self.terminal.is_some() {
+            return Ok(Change::Unchanged);
+        }
         if self.check(boot, observed, commit)? == Change::Retired {
             return Ok(Change::Retired);
         }
         self.committed_at = commit;
-        if self.terminal.is_some() {
-            return Ok(Change::Unchanged);
-        }
         // A logically crashed boot already shows Down from its Crash.
         if self.vm() != Vm::Down {
             self.since(observed);

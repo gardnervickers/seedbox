@@ -623,10 +623,19 @@ fn due_frames_are_refused_work_but_runnable_machines_are_not() {
     assert_eq!(due(&mut d), DueOutcome::Applied { at: at(15) });
     assert!(!d.execution.machines[2].lifecycle.paused());
     // Its run starts at the deadline with a budget; the call it makes there
-    // is admitted when that round commits.
+    // is admitted one floor (10 ns) later.
     assert_eq!(
         d.step(at(100)).unwrap(),
-        StepOutcome::Blocked { at: at(15) }
+        StepOutcome::BarrierReached { at: at(15) }
+    );
+    assert!(!d.execution.machines[2].lifecycle.paused());
+    assert_eq!(
+        d.step(at(100)).unwrap(),
+        StepOutcome::BarrierReached { at: at(20) }
+    );
+    assert_eq!(
+        d.step(at(100)).unwrap(),
+        StepOutcome::Blocked { at: at(25) }
     );
     assert!(d.execution.machines[2].lifecycle.paused());
 }

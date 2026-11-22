@@ -5,9 +5,8 @@
 //! host-drawn times. The runs must agree on:
 //!
 //! - the event stream, with each event's `position` removed (it counts commits);
-//! - Driver policy evidence, with the quantum end, the round counters and each
-//!   lifecycle's last commit time written as zero
-//!   (`Barrier::write_policy_evidence_without_stops`);
+//! - Driver policy evidence, with the quantum end and the round counters
+//!   written as zero (`Barrier::write_policy_evidence_without_stops`);
 //! - frame facts as a multiset, without positions (their interleaving follows
 //!   commits);
 //! - each machine's own record of what it observed: every input with the
@@ -17,16 +16,19 @@
 //! The ignored tests fail today: a stop policy changes their results. Each
 //! names the rule of the coordination design that will make it pass.
 use seedbox_driver::definition::{MacAddress, MachineDefinition, NetworkInterface};
+use seedbox_driver::driver::faults::Engine;
 use seedbox_driver::driver::{
     Action, Driver, HealTarget, MachineId, NetworkConfig, NetworkFaults, NetworkPolicy,
     NetworkSetup, StepOutcome, Target,
 };
 use seedbox_driver::test_support::{definition, key, StopPolicy};
+use seedbox_engine_protocol::property::Frame;
 use seedbox_machine::{
     clock::ClockRate,
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
-    pv::{Output, Request, Response, SimulationControlId, Stream},
+    pv::{CommandResult, Output, Request, Response, SimulationControlId, Stream},
 };
+use seedbox_spec::{backend::CpuBackend, definition::Architecture};
 use std::{
     collections::VecDeque,
     num::NonZeroU32,
@@ -55,12 +57,26 @@ fn frame(to: [u8; 6], tag: u8, body: &[u8]) -> Vec<u8> {
     bytes
 }
 fn call(request: u32, op: &str) -> Response {
+    call_with(request, &format!(r#""op":"{op}""#))
+}
+/// A guest call with the operation's own fields, such as `"op":"stop",...`.
+fn call_with(request: u32, fields: &str) -> Response {
     Response::SimulationControl {
         id: SimulationControlId {
             session: NonZeroU32::new(1).unwrap(),
             request: NonZeroU32::new(request).unwrap(),
         },
-        payload: format!(r#"{{"version":1,"id":{request},"op":"{op}"}}"#).into_bytes(),
+        payload: format!(r#"{{"version":1,"id":{request},{fields}}}"#).into_bytes(),
+    }
+}
+/// A property record on session `session`.
+fn property(session: u32, seq: u64, record: &str) -> Response {
+    Response::Property {
+        frame: Frame {
+            session,
+            seq,
+            payload: record.as_bytes().to_vec(),
+        },
     }
 }
 
@@ -70,14 +86,30 @@ type Seen = Arc<Mutex<Vec<String>>>;
 /// Emits its script at machine times, blocking on a timer until the next
 /// entry unless it is busy. It echoes each frame it receives one nanosecond
 /// later, with a body drawn from its RNG stream, when it has an echo target.
+/// When it acknowledges, it acknowledges each guest command one nanosecond
+/// after taking it: a realtime step by an odd number of nanoseconds is
+/// refused. It holds at a
+/// declared breakpoint the way a PV machine does, until it is resumed.
 struct Script {
     sends: VecDeque<(u64, Response)>,
     busy: bool,
     echo: Option<[u8; 6]>,
+    acks: bool,
     exit: Option<u64>,
     exited: bool,
+    declared: Vec<String>,
+    held: bool,
     reached: u64,
     seen: Seen,
+}
+
+impl Script {
+    /// Queue `payload` for emission at machine time `when`, behind entries
+    /// already due then.
+    fn later(&mut self, when: u64, payload: Response) {
+        let index = self.sends.partition_point(|(t, _)| *t <= when);
+        self.sends.insert(index, (when, payload));
+    }
 }
 
 impl Machine for Script {
@@ -92,11 +124,16 @@ impl Machine for Script {
     ) -> Result<StopReason, Self::Error> {
         let start = context.clock.now();
         self.reached = self.reached.max(start);
-        let mut seen = self.seen.lock().unwrap();
+        let seen = self.seen.clone();
+        let mut seen = seen.lock().unwrap();
         while let Some(input) = context.inbox.take() {
             seen.push(format!("in {} {:?}", input.at.as_nanos(), input.payload));
+            let ack = |id, result| Response::CommandAcknowledged { id, result };
             match input.payload {
-                Request::Crash => self.exited = true,
+                Request::Crash => {
+                    self.exited = true;
+                    self.held = false;
+                }
                 Request::Reboot => self.exited = false,
                 Request::ReceiveFrame { bytes } if !self.exited => {
                     let mut body = [0; 4];
@@ -107,11 +144,22 @@ impl Machine for Script {
                         let reply = Response::TransmitFrame {
                             bytes: frame(to, tag + 1, &body),
                         };
-                        let when = start + 1;
-                        let index = self.sends.partition_point(|(t, _)| *t <= when);
-                        self.sends.insert(index, (when, reply));
+                        self.later(start + 1, reply);
                     }
                 }
+                Request::Application { id, .. } if self.acks && !self.exited => {
+                    self.later(start + 1, ack(id, CommandResult::Completed));
+                }
+                Request::StepRealtime { id, nanoseconds } if self.acks && !self.exited => {
+                    let result = if nanoseconds.get() % 2 == 0 {
+                        CommandResult::Completed
+                    } else {
+                        CommandResult::Rejected
+                    };
+                    self.later(start + 1, ack(id, result));
+                }
+                Request::DeclareBreaks { names } => self.declared = names,
+                Request::ResumeBreak => self.held = false,
                 _ => {}
             }
         }
@@ -121,13 +169,41 @@ impl Machine for Script {
                 reason: ExitReason::Crashed,
             });
         }
+        if self.held {
+            return Ok(StopReason::Blocked {
+                reached: at(self.reached),
+                deadline: None,
+            });
+        }
         let end = upto.as_nanos();
-        if let Some(exit) = self.exit.filter(|&exit| exit <= end) {
-            let exit = exit.max(start);
-            while self.sends.front().is_some_and(|(t, _)| *t <= exit) {
-                let (t, payload) = self.sends.pop_front().unwrap();
-                emit(context, &mut seen, t.max(start), payload);
+        let exit = self
+            .exit
+            .filter(|&exit| exit <= end)
+            .map(|exit| exit.max(start));
+        while self
+            .sends
+            .front()
+            .is_some_and(|(t, _)| *t <= exit.unwrap_or(end))
+        {
+            let (t, payload) = self.sends.pop_front().unwrap();
+            let t = t.max(start);
+            if let Response::Break { name } = &payload {
+                // An undeclared name never suspends and writes nothing.
+                if !self.declared.contains(name) {
+                    continue;
+                }
+                self.reached = self.reached.max(t);
+                self.held = true;
+                emit(context, &mut seen, t, payload);
+                return Ok(StopReason::Blocked {
+                    reached: at(self.reached),
+                    deadline: None,
+                });
             }
+            self.reached = self.reached.max(t);
+            emit(context, &mut seen, t, payload);
+        }
+        if let Some(exit) = exit {
             self.exited = true;
             self.reached = exit;
             seen.push(format!("exit {exit}"));
@@ -135,12 +211,6 @@ impl Machine for Script {
                 reached: at(exit),
                 reason: ExitReason::Shutdown,
             });
-        }
-        while self.sends.front().is_some_and(|(t, _)| *t <= end) {
-            let (t, payload) = self.sends.pop_front().unwrap();
-            let t = t.max(start);
-            self.reached = self.reached.max(t);
-            emit(context, &mut seen, t, payload);
         }
         if self.busy {
             self.reached = end;
@@ -169,6 +239,7 @@ struct Spec {
     sends: Vec<(u64, Response)>,
     busy: bool,
     echo: Option<[u8; 6]>,
+    acks: bool,
     exit: Option<u64>,
 }
 impl Spec {
@@ -183,6 +254,11 @@ impl Spec {
     }
     fn echo(mut self, to: [u8; 6]) -> Self {
         self.echo = Some(to);
+        self
+    }
+    /// Acknowledge every guest command one nanosecond after taking it.
+    fn acks(mut self) -> Self {
+        self.acks = true;
         self
     }
     /// A frame to `to` every `period` from `first` until `until`.
@@ -216,6 +292,8 @@ struct Scenario {
     network: NetworkSetup,
     inputs: Vec<(u64, &'static str, Action)>,
     end: u64,
+    /// Run on an engine whose machines hold at breakpoints (PV).
+    breaks: bool,
 }
 
 /// Everything a run produced that must not depend on where rounds ended.
@@ -253,8 +331,11 @@ fn run(scenario: &Scenario, policy: Option<u64>) -> (Results, usize) {
             sends: spec.sends.iter().cloned().collect(),
             busy: spec.busy,
             echo: spec.echo,
+            acks: spec.acks,
             exit: spec.exit,
             exited: false,
+            declared: Vec::new(),
+            held: false,
             reached: 0,
             seen: seen.clone(),
         })
@@ -273,6 +354,12 @@ fn run(scenario: &Scenario, policy: Option<u64>) -> (Results, usize) {
         move |_| Ok(machines.pop_front().expect("one machine per definition")),
     )
     .unwrap();
+    if scenario.breaks {
+        driver.set_engine(Engine {
+            backend: CpuBackend::Pv,
+            architecture: Architecture::Aarch64,
+        });
+    }
     driver
         .with_barrier(|barrier| {
             for (t, name, action) in &scenario.inputs {
@@ -447,6 +534,7 @@ fn frames_timers_and_echo_chains_do_not_depend_on_stops() {
             network: jittery(),
             inputs: Vec::new(),
             end,
+            breaks: false,
         },
         400,
     );
@@ -513,6 +601,7 @@ fn partitions_shapes_and_frames_in_flight_do_not_depend_on_stops() {
                 ),
             ],
             end,
+            breaks: false,
         },
         300,
     );
@@ -553,6 +642,7 @@ fn pause_crash_and_reboot_do_not_depend_on_stops() {
                 (11 * MS + 17, "reboot", Action::Reboot(m(2))),
             ],
             end,
+            breaks: false,
         },
         300,
     );
@@ -591,6 +681,7 @@ fn drifting_clocks_do_not_depend_on_stops() {
                 (3 * MS, "slow", drift("m2", -100_000_000)),
             ],
             end,
+            breaks: false,
         },
         300,
     );
@@ -622,6 +713,7 @@ fn controller_calls_do_not_depend_on_stops() {
             network,
             inputs: Vec::new(),
             end,
+            breaks: false,
         },
         100,
     );
@@ -633,10 +725,9 @@ fn controller_calls_do_not_depend_on_stops() {
     assert_eq!(replies, 12, "every call answered");
 }
 
-/// C1: without a controller, a guest call is admitted at the commit of the
-/// round that carried it. It will be admitted one floor after its output.
+/// C1: without a controller, a guest call is admitted one floor after its
+/// output, and answered there, whatever the commit that carried it.
 #[test]
-#[ignore = "C1: SDK-mode calls are stamped with their commit"]
 fn sdk_calls_do_not_depend_on_stops() {
     let end = 10 * MS;
     let mut oracle = Spec::busy();
@@ -649,8 +740,300 @@ fn sdk_calls_do_not_depend_on_stops() {
             network: jittery(),
             inputs: Vec::new(),
             end,
+            breaks: false,
         },
         1,
+    );
+}
+
+/// The SDK replies in `results` to the oracle, with their machine times.
+fn replies(results: &Results) -> Vec<&String> {
+    results.seen[0]
+        .iter()
+        .filter(|seen| seen.contains("SimulationReply"))
+        .collect()
+}
+
+/// Whether a settlement whose event contains `text` has its outcome at `at`.
+fn settled(results: &Results, text: &str, at: u64) -> bool {
+    let outcome = format!("outcome_at: Some(Timestamp({at}))");
+    results.events.iter().any(|event| {
+        event.contains("FaultSettled") && event.contains(text) && event.contains(&outcome)
+    })
+}
+
+/// How many events contain `text`.
+fn events_with(results: &Results, text: &str) -> usize {
+    results
+        .events
+        .iter()
+        .filter(|event| event.contains(text))
+        .count()
+}
+
+/// C1: a guest command that waits for its machine's readiness is sent one
+/// floor after the `Ready`, and a heal queued behind a realtime step one floor
+/// after the step's acknowledgement. A refused step takes its queued heal
+/// along at the refusal. Replies to the oracle's commands follow their
+/// acknowledgements, or their refusal, by one floor.
+#[test]
+fn acknowledgements_and_released_commands_do_not_depend_on_stops() {
+    let end = 20 * MS;
+    let m1 = || Target::Name("m1".into());
+    let step = |nanoseconds: i64| Action::StepRealtime {
+        target: m1(),
+        nanoseconds: std::num::NonZeroI64::new(nanoseconds).unwrap(),
+    };
+    let on = |op: &str, machine: &str| format!(r#""op":"{op}","target":{{"machine":"{machine}"}}"#);
+    let oracle = Spec::busy()
+        .every(29 * US, 613 * US, end, BROADCAST, 0)
+        .emit(6 * MS + 3, call_with(1, &on("stop", "m1")))
+        .emit(8 * MS + 11, call_with(2, &on("restart", "m1")))
+        .emit(10 * MS + 7, call_with(3, &on("pause_process", "m1")))
+        .emit(10 * MS + 501, call_with(4, &on("resume_process", "m1")))
+        .emit(
+            12 * MS + 13,
+            call_with(
+                5,
+                r#""op":"clock_skew","target":{"machine":"m1"},"offset_ns":-3001"#,
+            ),
+        )
+        // Before m2 is ready: sent one floor after its Ready.
+        .emit(13 * MS + 1, call_with(6, &on("stop", "m2")));
+    let own = holds(
+        Scenario {
+            machines: vec![
+                oracle,
+                Spec::idle()
+                    .acks()
+                    .echo(mac(0))
+                    .every(71 * US + 3, 503 * US, end, mac(0), 10)
+                    .emit(MS + 17, Response::Ready),
+                Spec::busy()
+                    .acks()
+                    .every(131 * US + 9, 601 * US, end, mac(1), 20)
+                    .emit(14 * MS + 5, Response::Ready),
+            ],
+            network: jittery(),
+            inputs: vec![
+                // Both wait for m1's Ready; the heal waits for the step too.
+                (300 * US, "skew", step(5_000)),
+                (
+                    400 * US,
+                    "heal-skew",
+                    Action::Heal(HealTarget::Input(key("skew"))),
+                ),
+                // Refused by the guest, which takes the heal behind it along.
+                (4 * MS, "refused", step(-7_001)),
+                (
+                    4 * MS,
+                    "heal-refused",
+                    Action::Heal(HealTarget::Input(key("refused"))),
+                ),
+                (
+                    5 * MS + 9,
+                    "pause-process",
+                    Action::PauseProcess {
+                        target: m1(),
+                        deadline: Duration::from_millis(1),
+                    },
+                ),
+            ],
+            end,
+            breaks: false,
+        },
+        300,
+    );
+    assert_eq!(replies(&own).len(), 6, "every call answered");
+    assert_eq!(events_with(&own, "status: Rejected"), 2, "two refusals");
+    assert_eq!(events_with(&own, "status: Unavailable"), 1, "queued heal");
+    assert_eq!(events_with(&own, "status: Applied"), 8);
+    // Each released command is sent one floor (100 µs) after what released
+    // it and acknowledged one nanosecond later.
+    let floor = 100 * US;
+    assert!(settled(&own, "StepRealtime(5000)", MS + 17 + floor + 1));
+    assert!(settled(&own, "action: Heal", MS + 17 + 2 * (floor + 1)));
+    assert!(settled(
+        &own,
+        "machine: MachineId(2)",
+        14 * MS + 5 + floor + 1
+    ));
+}
+
+/// C1: a flush record is answered one floor after it, whatever the commit
+/// that carried it.
+#[test]
+fn property_flushes_do_not_depend_on_stops() {
+    let end = 20 * MS;
+    let assert = r#"{"assert":{"id":"p","kind":"always","condition":true}}"#;
+    let flush = r#"{"flush":{}}"#;
+    let records = |spec: Spec, session: u32, first: u64, period: u64| {
+        let mut spec = spec;
+        let mut seq = 0;
+        let mut t = first;
+        while t < end {
+            seq += 1;
+            spec = spec.emit(t, property(session, seq, assert));
+            seq += 1;
+            spec = spec.emit(t + 1, property(session, seq, flush));
+            t += period;
+        }
+        spec
+    };
+    let own = holds(
+        Scenario {
+            machines: vec![
+                records(
+                    Spec::busy().every(37 * US, 557 * US, end, BROADCAST, 0),
+                    1,
+                    211 * US + 5,
+                    1_303 * US,
+                ),
+                records(
+                    records(
+                        Spec::idle()
+                            .echo(mac(0))
+                            .every(97 * US + 1, 709 * US, end, mac(0), 10),
+                        1,
+                        151 * US + 3,
+                        1_709 * US,
+                    ),
+                    2,
+                    677 * US + 1,
+                    2_111 * US,
+                ),
+            ],
+            network: jittery(),
+            inputs: Vec::new(),
+            end,
+            breaks: false,
+        },
+        100,
+    );
+    let answered: usize = own
+        .seen
+        .iter()
+        .flatten()
+        .filter(|seen| seen.contains("PropertyReply"))
+        .count();
+    assert!(answered >= 30, "flushes answered: {answered}");
+}
+
+/// C1: a hit is numbered when it is committed and answers a parked
+/// `wait_break` one floor after the hit, whatever the commit that carried
+/// it. A hit nobody waits for is queued for the next `wait_break`, which
+/// returns it at its own admission.
+#[test]
+fn breakpoint_hits_and_wait_break_replies_do_not_depend_on_stops() {
+    let end = 20 * MS;
+    let declare = r#""op":"declare_breaks","names":["leader"]"#;
+    let wait = |timeout: u64| format!(r#""op":"wait_break","timeout_ns":{timeout}"#);
+    let resume = |id: u32| format!(r#""op":"resume_break","break_id":{id}"#);
+    let hit = || Response::Break {
+        name: "leader".into(),
+    };
+    let oracle = Spec::busy()
+        .every(23 * US, 691 * US, end, BROADCAST, 0)
+        .emit(100 * US + 3, call_with(1, declare))
+        .emit(200 * US + 7, call_with(2, &wait(50 * MS)))
+        .emit(3 * MS + 1, call_with(3, &resume(1)))
+        .emit(6 * MS + 11, call_with(4, &wait(50 * MS)))
+        .emit(7 * MS + 5, call_with(5, &resume(2)))
+        // Times out: nothing is hit before it.
+        .emit(8 * MS + 3, call_with(6, &wait(MS)))
+        .emit(11 * MS + 9, call_with(7, &wait(50 * MS)))
+        .emit(15 * MS + 2, call_with(8, &resume(3)));
+    let own = holds(
+        Scenario {
+            machines: vec![
+                oracle,
+                Spec::busy()
+                    .every(53 * US + 1, 401 * US, end, mac(2), 10)
+                    .emit(MS + 7, hit())
+                    .emit(5 * MS + 3, hit())
+                    .emit(
+                        9 * MS + 1,
+                        Response::Break {
+                            name: "follower".into(),
+                        },
+                    )
+                    .emit(12 * MS + 1, hit()),
+                // Its frames reach m1 while it is suspended, at their arrival.
+                Spec::idle()
+                    .echo(mac(1))
+                    .every(83 * US + 1, 457 * US, end, mac(1), 20),
+            ],
+            network: jittery(),
+            inputs: Vec::new(),
+            end,
+            breaks: true,
+        },
+        300,
+    );
+    assert_eq!(replies(&own).len(), 8, "every call answered");
+    assert_eq!(events_with(&own, "BreakHit"), 3);
+    assert_eq!(events_with(&own, "reason: Resumed"), 3);
+}
+
+/// C1: what follows from a machine's exit, the settlement of its pending
+/// commands and the replies to their callers, is due one floor after the
+/// exit, whatever the commit that saw it. A later crash and reboot of the
+/// exited machine change nothing earlier.
+#[test]
+fn machine_exits_do_not_depend_on_stops() {
+    let end = 20 * MS;
+    let m1 = || Target::Name("m1".into());
+    let oracle = Spec::busy()
+        .every(31 * US, 523 * US, end, BROADCAST, 0)
+        .emit(
+            MS + 5,
+            call_with(1, r#""op":"stop","target":{"machine":"m1"}"#),
+        )
+        .emit(
+            9 * MS + 7,
+            call_with(2, r#""op":"pause_process","target":{"machine":"m2"}"#),
+        );
+    let own = holds(
+        Scenario {
+            machines: vec![
+                oracle,
+                // Ready, but never acknowledges: its commands are pending
+                // when it exits.
+                Spec::idle()
+                    .echo(mac(2))
+                    .every(61 * US + 3, 487 * US, end, mac(2), 10)
+                    .emit(10 * US, Response::Ready)
+                    .exit(3 * MS + 5),
+                Spec::busy()
+                    .echo(mac(1))
+                    .every(97 * US + 1, 331 * US, end, mac(1), 20)
+                    .emit(10 * US, Response::Ready)
+                    .exit(10 * MS + 3),
+            ],
+            network: jittery(),
+            inputs: vec![
+                // Queued behind the oracle's pending stop.
+                (
+                    2 * MS,
+                    "restart",
+                    Action::Restart {
+                        target: m1(),
+                        deadline: Duration::from_secs(1),
+                    },
+                ),
+                (5 * MS, "crash", Action::Crash(m1())),
+                (6 * MS + 1, "reboot", Action::Reboot(m1())),
+            ],
+            end,
+            breaks: false,
+        },
+        300,
+    );
+    assert_eq!(replies(&own).len(), 2, "every call answered");
+    assert_eq!(events_with(&own, "status: Unavailable"), 3);
+    assert!(
+        fates(&own, "ReceiverDropped") > 0,
+        "frames for exited machines"
     );
 }
 
@@ -671,6 +1054,7 @@ fn the_end_of_the_run_does_not_depend_on_stops() {
             network: jittery(),
             inputs: Vec::new(),
             end,
+            breaks: false,
         },
         1,
     );
@@ -701,6 +1085,7 @@ fn same_nanosecond_outputs_do_not_depend_on_stops() {
             network: jittery(),
             inputs: Vec::new(),
             end,
+            breaks: false,
         },
         1,
     );
@@ -737,6 +1122,7 @@ fn a_timer_under_a_fast_clock_does_not_depend_on_stops() {
                 },
             )],
             end,
+            breaks: false,
         },
         1,
     );

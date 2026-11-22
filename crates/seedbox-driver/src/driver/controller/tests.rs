@@ -206,23 +206,21 @@ fn configured_reply_never_enters_successor_boot() {
     assert!(replies(&d).is_empty());
 }
 #[test]
-fn omission_preserves_sdk_events_streams_and_commit_timing() {
+fn omission_preserves_sdk_events_streams_and_floor_timing() {
     let specs = vec![
         spec(0, true, vec![(2, call(1, r#""op":"now""#))]),
         spec(1, true, vec![]),
     ];
-    let mut original_sdk = build(specs.clone(), vec![], true);
     let mut sdk = configured(specs.clone(), None, 1);
     let mut other = configured(specs, None, 4);
-    let original_events = advance(&mut original_sdk, 25);
     let configured_events = advance(&mut sdk, 25);
-    assert_eq!(original_events, configured_events);
-    assert_eq!(states(&original_sdk), states(&sdk));
     assert_eq!(configured_events, advance(&mut other, 25));
     assert_eq!(states(&sdk), states(&other));
+    // Without a controller a call is admitted and answered one floor (2 ns)
+    // after it is made, not at the commit of its round.
     let r = replies(&sdk);
-    assert_eq!(r[0].1["admitted_at_ns"], 10);
-    assert_eq!(r[0].1["replied_at_ns"], 10);
+    assert_eq!(r[0].1["admitted_at_ns"], 4);
+    assert_eq!(r[0].1["replied_at_ns"], 4);
 }
 #[test]
 fn both_due_queue_phases_roundtrip_codec_and_workers_without_readmission_or_draws() {

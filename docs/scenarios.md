@@ -37,7 +37,8 @@ over `/run`, say): then it connects to the supervisor's abstract socket
 `/dev/kmsg`, which the supervisor relays, so the evidence reads incomplete.
 
 The engine reduces records at commit, in commit order, and answers a `flush`
-only after reducing every earlier record of that session, on the same boot.
+only after reducing every earlier record of that session, on the same boot,
+one network latency after the `flush` record.
 Every record committed before the run ends is reduced, including other
 machines' records in the oracle's last round, and the supervisor reports each
 session that ends. Records still inside a guest, in a program's socket or the

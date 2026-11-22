@@ -444,3 +444,35 @@ fn public_inputs_enqueue_in_fifo_order_without_admission_or_reservation() {
         .iter()
         .all(|event| matches!(event.kind, EventKind::MachineAdded { .. })));
 }
+
+/// Something new due before a time a machine has already reached, or before
+/// now, is a scheduler bug: the Driver refuses to queue it.
+#[test]
+fn a_timeline_item_before_a_reached_time_is_refused() {
+    let mut d = super::fixture::owned::build(
+        vec![super::fixture::owned::spec(0, true, vec![])],
+        vec![],
+        true,
+    );
+    let wake = |at: u64| {
+        Scheduled::Control(control::Event::Plan(crate::oracle::service::Plan::Wake {
+            token: 1,
+            at,
+        }))
+    };
+    d.execution.machines[0].reached = at(50);
+    assert!(matches!(
+        d.enqueue(at(40), wake(40)),
+        Err(Error::Causality {
+            machine: Some(MachineId(0)),
+            at: t,
+            reached: r,
+        }) if t == at(40) && r == at(50)
+    ));
+    d.execution.clock.set(60);
+    assert!(matches!(
+        d.enqueue(at(55), wake(55)),
+        Err(Error::Causality { machine: None, .. })
+    ));
+    assert!(d.enqueue(at(60), wake(60)).is_ok());
+}
