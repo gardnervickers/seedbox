@@ -103,7 +103,8 @@ range can make later seeds differ from a fresh run of the same seed; replaying a
 seed still matches. See [the spawn project](examples/spawn/seedbox.yaml).
 
 `network.latency` sets the one-way delay between machines and defaults to `1ms`.
-`simulator.quantum` sets the timeslice:
+`simulator.quantum` sets the longest stretch machines run between barriers, and
+the step of paced playback and single stepping:
 
 ```yaml
 network:
@@ -114,7 +115,9 @@ simulator:
 
 `quantum` defaults to `1ms` and must be a positive duration in whole nanoseconds.
 Network latency and scheduled events can shorten a parallel execution window.
-Replay and checkpoints retain the quantum.
+The quantum is a host setting: where machines stop changes nothing they do, so
+it does not change results, and comparison ignores it. Replay and checkpoints
+retain it, and a checkpoint start refuses a different one.
 
 Choose the backend, seed, execution limits and machine threads with CLI flags.
 `run` and `replay` accept `--machine-workers 1..64`; the default is one thread per

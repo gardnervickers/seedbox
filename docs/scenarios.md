@@ -20,8 +20,8 @@ unmet requirements, and lost evidence. There is no per-property tally.
 Each call sends one JSON record over `SOCK_SEQPACKET` to `/run/seedbox/guest.sock`.
 The supervisor relays each as `SBX_PROP1 <session> <seq> <hex>`, uninterpreted,
 and the engine answers `flush` on `SBX_GUEST1 <session> <json>`. Records are at
-most 4096 bytes, IDs 256 and kept details 1024. Times come from frame commit,
-never the guest. The [records](../crates/seedbox-engine-protocol/src/property.rs)
+most 4096 bytes, IDs 256 and kept details 1024. Times are the frame's output
+time on its machine, never a time the guest supplies. The [records](../crates/seedbox-engine-protocol/src/property.rs)
 are `require`, `assert` (kind `always` or `never`), `flush`, and `lost` for
 records the guest library or supervisor could not deliver.
 
@@ -36,7 +36,7 @@ over `/run`, say): then it connects to the supervisor's abstract socket
 `seedbox-guest`, and if that fails too, it reports its records lost on
 `/dev/kmsg`, which the supervisor relays, so the evidence reads incomplete.
 
-The engine reduces records at commit, in commit order, and answers a `flush`
+The engine reduces records in output order (by time, then machine) and answers a `flush`
 only after reducing every earlier record of that session, on the same boot,
 one network latency after the `flush` record.
 Every record stamped up to the end of the run, one network latency after the

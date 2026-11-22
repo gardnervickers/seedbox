@@ -43,11 +43,11 @@ device is absent, so instrumented code checks for it once and skips the write.
 Each hit has a `break_id`, a `source` (`program`, `block_request` or
 [`host`](#hits-from-the-host)), its
 `name`, the `machine` and its `boot`, and `at_ns`, the projected simulation
-time of the hit. A hit becomes visible to the oracle after the round that
-contains it commits. Hits are numbered in committed order, not in the order
-workers reply, and `wait_break` returns the oldest one not yet returned; a
-parked `wait_break` returns it one network latency after the hit. Hits appear
-as `break_hit` and `break_ended` events.
+time of the hit. Hits are numbered by time, and hits of one instant by
+machine, never in the order workers reply or rounds end. The oracle learns of
+a hit one network latency after it: `wait_break` returns the oldest one not
+yet returned, and a parked `wait_break` returns it then. Hits appear as
+`break_hit` and `break_ended` events.
 
 A hit ends in one of these ways, recorded on its `break_ended` event:
 
@@ -118,7 +118,7 @@ applies nothing and returns when the host hits `finish`.
 The guest oracle relay accepts up to 8 connections. Each connection is a
 session, with at most one request in flight, so a connection's calls stay
 sequential. Replies are correlated by session and request ID. The Driver admits
-calls from different sessions in committed order, as it does for calls from
+calls from different sessions in output order, as it does for calls from
 different machines.
 
 Two schedules deadlock, and both are oracle bugs: a handler that waits for
