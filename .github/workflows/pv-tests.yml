@@ -52,12 +52,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+        slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     env:
       SEEDBOX_TEST_SOAK_MINUTES: '110'
       SEEDBOX_TEST_SOAK_LANES: '2'
+      SEEDBOX_TEST_SOAK_WORKLOADS: properties
       # Use the Docker engine checked below, even when Podman's socket exists.
       DOCKER_HOST: unix:///var/run/docker.sock
       CARGO_INCREMENTAL: '0'
@@ -65,12 +66,18 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_PROFILE_RELEASE_DEBUG: '0'
       SUITE: pv
-    steps: &steps
+    steps:
+      - name: Run only on AMD EPYC 7763 hosts
+        run: |
+          grep -m1 '^model name' /proc/cpuinfo
+          if grep -q 'EPYC 7763' /proc/cpuinfo; then echo PROBE=1 >> "$GITHUB_ENV"; fi
       - uses: actions/checkout@v7
+        if: env.PROBE == '1'
         with:
           persist-credentials: false
           submodules: true
       - name: Identify Nix cache inputs
+        if: env.PROBE == '1'
         id: sources
         env:
           NIX_INPUTS: ${{ hashFiles('flake.lock', 'flake.nix', '.gitmodules', 'nix/**', 'Cargo.toml', 'Cargo.lock', 'crates/seedbox-check/**', 'crates/seedbox-exec/**', 'crates/seedbox-test-time/**', 'crates/seedbox-driver/examples/tcg-init', 'crates/seedbox-machine/**/*.nix', 'crates/seedbox-machine/guest-assets.py', 'crates/seedbox-machine/guest-initramfs.py', 'crates/seedbox-machine/guest-static-elf.sh', 'crates/seedbox-machine/guest/**', 'crates/seedbox-machine/src/pv/**', 'crates/seedbox-machine/tests/fixtures/**', 'crates/seedbox-machine/src/machine/disk.rs', 'crates/seedbox-machine/src/machine/disk/**', 'crates/seedbox-machine-tcg/qemu/**', 'examples/minio/inputs.lock.json') }}
@@ -78,6 +85,7 @@ jobs:
           echo "dynamorio=$(git rev-parse HEAD:vendor/dynamorio)" >> "$GITHUB_OUTPUT"
           echo "nix-inputs=$NIX_INPUTS" >> "$GITHUB_OUTPUT"
       - name: Reclaim unused hosted SDK space
+        if: env.PROBE == '1'
         run: |
           # Leave the hosted SDKs alone when the filesystem has enough headroom.
           available=$(df --output=avail -B1 / | tail -n 1)
@@ -86,7 +94,7 @@ jobs:
           fi
           df -h /
       - name: Verify usable KVM before building
-        if: env.SUITE == 'pv'
+        if: env.PROBE == '1' && (env.SUITE == 'pv')
         run: |
           grep -m1 '^vendor_id' /proc/cpuinfo
           grep -m1 '^model name' /proc/cpuinfo
@@ -111,9 +119,11 @@ jobs:
           PYTHON
           docker info
       - uses: cachix/install-nix-action@v31
+        if: env.PROBE == '1'
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - uses: nix-community/cache-nix-action/restore@v7
+        if: env.PROBE == '1'
         id: nix-cache
         with:
           primary-key: ${{ env.SUITE }}-nix-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.sources.outputs.dynamorio }}-${{ steps.sources.outputs.nix-inputs }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -128,8 +138,10 @@ jobs:
             pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-
             pv-nix-${{ runner.os }}-${{ runner.arch }}-
       - name: Prepare and root the Nix development environment
+        if: env.PROBE == '1'
         run: nix develop --profile "$RUNNER_TEMP/pv-dev" --command true
       - uses: Swatinem/rust-cache@v2
+        if: env.PROBE == '1'
         id: cargo-cache
         with:
           key: ${{ env.SUITE }}-${{ hashFiles('flake.lock', 'flake.nix') }}
@@ -139,16 +151,19 @@ jobs:
             . -> build/cargo
           cache-bin: false
       - name: Build and root guest assets from the checkout
+        if: env.PROBE == '1'
         run: |
           seedbox_flake="$(bash tools/dev-flake.sh)?submodules=1"
           nix build "$seedbox_flake#machinePvAssets" "$seedbox_flake#machineTcgAssets" "$seedbox_flake#machineGuestFormatter" "$seedbox_flake#machineGuestFormatterX86" "$seedbox_flake#machineTcgTestFixtures" "$seedbox_flake#machinePvTestFixtures" --out-link "$RUNNER_TEMP/pv-assets"
       # Save expensive dependencies before tests, so a test failure does not
       # force the next run to rebuild the kernel or download the toolchain.
       - uses: nix-community/cache-nix-action/save@v7
+        if: env.PROBE == '1'
         with:
           primary-key: ${{ steps.nix-cache.outputs.primary-key }}
           gc-max-store-size: 5G
       - name: Record cache results
+        if: env.PROBE == '1'
         env:
           NIX_HIT: ${{ steps.nix-cache.outputs.hit }}
           CARGO_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
@@ -159,23 +174,23 @@ jobs:
             du -sh /nix/store
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Portable prerequisites and PV application acceptance
-        if: env.SUITE == 'pv'
+        if: env.PROBE == '1' && (env.SUITE == 'pv')
         run: nix develop --command bash harness/check.sh linux-apps
       - name: Native TCG machine and public-service acceptance
-        if: env.SUITE == 'tcg'
+        if: env.PROBE == '1' && (env.SUITE == 'tcg')
         run: nix develop --command bash harness/check-machine-tcg.sh --skip-portable
       - name: Bound diagnostic artifact storage
-        if: always()
+        if: env.PROBE == '1' && (always())
         # Privileged KVM tests leave root-owned manifests and logs.
         run: sudo python3 tools/pv-ci/artifacts.py
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: env.PROBE == '1' && (always())
         with:
           name: ${{ env.SUITE }}-results-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slot }}
           path: target/pv-artifacts/
           retention-days: 7
       - name: Exclude test state from the Cargo cache
-        if: always()
+        if: env.PROBE == '1' && (always())
         # Diagnostics have been uploaded. Rust-cache archives the target tree,
         # so remove root-owned VM state and per-run reports before its post step.
         run: sudo rm -rf -- target/check-reports target/pv-artifacts

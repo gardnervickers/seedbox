@@ -601,6 +601,7 @@ fn replay_soak() {
                     let path = path.to_str().unwrap();
                     let label = format!("{name}-l{lane}-r{round}");
                     round += 1;
+                    soak_prune();
                     with_server("soak", &label, |cli, directory, state| {
                         let verdicts = soak_round(cli, directory, state, &label, path);
                         tally.lock().unwrap().extend(
@@ -737,6 +738,20 @@ fn soak_diff(state: &Path, label: &str, kind: &str, a: &str, b: &str) {
         "SOAK {label} {kind} diff: {}",
         &report[..report.len().min(200_000)]
     );
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&report) {
+        for machine in value["machines"].as_array().into_iter().flatten() {
+            for difference in machine["differences"].as_array().into_iter().flatten() {
+                if difference["field"] == "/state_digest_parts/ram_pages" {
+                    soak_ram(
+                        label,
+                        machine["machine"].as_str().unwrap_or("?"),
+                        difference["a"].as_str().unwrap_or(""),
+                        difference["b"].as_str().unwrap_or(""),
+                    );
+                }
+            }
+        }
+    }
     let pages = show(
         seedbox_application::diff::replay_ram_pages(&left, &right)
             .map_err(|e| e.to_string())
@@ -763,5 +778,72 @@ fn soak_diff(state: &Path, label: &str, kind: &str, a: &str, b: &str) {
         }
         names.sort();
         println!("SOAK {label} {kind} files {side}: {names:?}");
+    }
+}
+
+/// PROBE ONLY: RAM images the probe worker kept, by page digest.
+const SOAK_RAM: &str = "/tmp/sbx-probe";
+
+fn soak_prune() {
+    for entry in fs::read_dir(SOAK_RAM).into_iter().flatten().flatten() {
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > std::time::Duration::from_secs(900));
+        if old {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn soak_pages(digest: &str) -> Option<std::collections::BTreeMap<u64, Vec<u8>>> {
+    let bytes = fs::read(Path::new(SOAK_RAM).join(format!("{digest}.ram"))).ok()?;
+    Some(
+        bytes
+            .chunks(8 + 4096)
+            .map(|c| {
+                (
+                    u64::from_le_bytes(c[..8].try_into().unwrap()),
+                    c[8..].to_vec(),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn soak_ram(label: &str, machine: &str, a: &str, b: &str) {
+    let (Some(a), Some(b)) = (soak_pages(a), soak_pages(b)) else {
+        println!("SOAK {label} ram {machine}: images missing");
+        return;
+    };
+    let zero = vec![0u8; 4096];
+    let keys: std::collections::BTreeSet<u64> = a.keys().chain(b.keys()).copied().collect();
+    let differing: Vec<u64> = keys
+        .into_iter()
+        .filter(|k| a.get(k).unwrap_or(&zero) != b.get(k).unwrap_or(&zero))
+        .collect();
+    println!(
+        "SOAK {label} ram {machine}: {} differing pages {:x?}",
+        differing.len(),
+        &differing[..differing.len().min(32)]
+    );
+    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    for gpa in differing.iter().take(4) {
+        let (x, y) = (a.get(gpa).unwrap_or(&zero), b.get(gpa).unwrap_or(&zero));
+        let offsets: Vec<usize> = (0..4096).filter(|&i| x[i] != y[i]).collect();
+        println!(
+            "SOAK {label} ram {machine} page {gpa:#x}: {} bytes differ at {:x?}",
+            offsets.len(),
+            &offsets[..offsets.len().min(64)]
+        );
+        for row in (0..4096).step_by(64) {
+            println!(
+                "SOAK {label} ram {machine} page {gpa:#x} +{row:03x} a={} b={}",
+                hex(&x[row..row + 64]),
+                hex(&y[row..row + 64])
+            );
+        }
     }
 }

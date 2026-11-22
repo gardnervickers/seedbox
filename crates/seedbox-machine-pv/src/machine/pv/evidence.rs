@@ -233,6 +233,16 @@ impl PVMachine {
         if pages.len() as u64 != size {
             return Err("PV evidence page file changed during read".into());
         }
+        // PROBE ONLY (never merge): keep the worker's RAM image by its page digest.
+        if let Some((_, digest)) = native.parts.iter().find(|(n, _)| n == "ram_pages") {
+            let dir = std::path::Path::new("/tmp/sbx-probe");
+            let _ = fs::create_dir_all(dir);
+            let temporary = dir.join(format!("{digest}.ram.{}", std::process::id()));
+            if fs::copy(path.with_extension("probe-ram"), &temporary).is_ok() {
+                let _ = fs::rename(&temporary, dir.join(format!("{digest}.ram")));
+            }
+            let _ = fs::remove_file(path.with_extension("probe-ram"));
+        }
         let mut parts = native.parts;
         let pending=serde_json::to_vec(&json!({"input":self.input,"writes":self.writes,"bridge":self.guest,"shutdown":self.shutdown,"pending_ends":self.aux.pending})).map_err(|e|format!("PV pending evidence: {e}"))?;
         parts.push(("pending_io".into(), hex(&Sha256::digest(pending))));
