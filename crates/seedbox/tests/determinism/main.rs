@@ -353,7 +353,9 @@ fn machine_worker_count_never_changes_results() {
 /// take a stop policy (`SEEDBOX_STOP_POLICY`, which the long suites' CLI
 /// build accepts), runs the definition twice: each run ends its rounds at its
 /// own seeded times, and the two must match each other and write the
-/// baseline's output.
+/// baseline's output. Each is stepped through its first quanta, as a
+/// reference run without the policy is, and commits more barriers on the way,
+/// which shows that the policy acted.
 #[test]
 fn stops_and_quantum_never_change_results() {
     let mut run = Run::new("stops");
@@ -372,17 +374,19 @@ fn stops_and_quantum_never_change_results() {
             .await;
             run.release(session.release(&[&baseline])).await;
         }
-        let Some((output, rounds)) = run
-            .oracle("baseline output", async {
-                Ok((
-                    session.logs(&baseline).await?,
-                    session.boundaries(&baseline).await?,
-                ))
+        // A run stepped a quantum at a time must match too; the barriers its
+        // Driver commits on the way are its own.
+        let Some((output, reference)) = run
+            .oracle("StepInvariance", async {
+                let (stepped, counts) = session.stepped().await?;
+                session.same_results(&baseline, &stepped).await?;
+                Ok((session.logs(&baseline).await?, counts))
             })
             .await
         else {
             return;
         };
+        run.release(session.release(&[&baseline])).await;
         // The baseline stays, so the cache keeps the definition's inputs for
         // the next server on this state.
         let document = session.document.clone();
@@ -399,7 +403,7 @@ fn stops_and_quantum_never_change_results() {
         stopped.document = document;
         run.oracle(
             "StopPolicyInvariance",
-            stopped.stop_invariance(&output, rounds),
+            stopped.stop_invariance(&output, &reference),
         )
         .await;
         run.release(stopped.release(&[])).await;
