@@ -54,6 +54,7 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         observations,
         workers: _,
         factory: _,
+        stops: _,
     } = d;
     let ExecutionState {
         clock,

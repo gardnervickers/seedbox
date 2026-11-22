@@ -158,6 +158,12 @@ impl State {
             poisoned: false,
         }
     }
+    /// Replace the time of the last commit that changed this record and
+    /// return the old one. Only for comparing evidence across stop policies.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn replace_committed_at(&mut self, at: u64) -> u64 {
+        std::mem::replace(&mut self.committed_at, at)
+    }
     fn check(&self, boot: u64, observed: u64, commit: u64) -> Result<Change, Error> {
         if self.poisoned {
             return Err(Error::Poisoned);

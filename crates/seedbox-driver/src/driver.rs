@@ -50,6 +50,7 @@ mod network;
 mod network_test_frames;
 pub(crate) use network::Network as NetworkState;
 mod playback;
+pub(crate) mod stops;
 pub use event::{
     BreakEnd, Cause, Event, EventKind, FaultAction, FaultId, FaultOrigin, FaultRecord, FaultTarget,
     SettlementStatus, Transition, TriggerResult,
@@ -397,6 +398,7 @@ pub struct Driver<M: Machine> {
     playback: Playback,
     observations: ObservationState,
     factory: MachineFactory<M>,
+    stops: stops::Stops,
 }
 
 impl<M> Driver<M>
@@ -650,6 +652,7 @@ where
             },
             playback: Playback::default(),
             factory: Box::new(factory),
+            stops: Default::default(),
         };
         for index in 0..driver.execution.machines.len() {
             driver.stage(
@@ -1521,6 +1524,8 @@ where
             .chain(self.causal_bound(&receivers))
             .chain(self.controller_bound(&receivers))
             .fold(upto.min(self.execution.quantum_end), Timestamp::min);
+        // A test's stop policy may end the round earlier, never later.
+        let boundary = self.stops.end(self.now(), boundary);
 
         let initial = self.now();
         let (ran, arrived) = self.run_lanes(boundary, &receivers)?;

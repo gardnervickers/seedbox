@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub mod fixture;
 pub mod native;
 
+pub use crate::driver::stops::StopPolicy;
+
 /// A key unique within this test process, so it is never live twice.
 pub fn auto_key() -> InputKey {
     static NEXT: AtomicU64 = AtomicU64::new(0);

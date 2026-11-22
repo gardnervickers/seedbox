@@ -32,6 +32,41 @@ where
     ) -> std::result::Result<(), CodecError> {
         self.driver.execution.write_policy_evidence(output)
     }
+
+    /// [`Self::write_policy_evidence`] with the fields that record where
+    /// rounds ended written as zero: the quantum end, the round counters and
+    /// each machine lifecycle's last commit time. Everything else is written
+    /// as it stands. Only for comparing runs across stop policies, until
+    /// evidence no longer holds those fields.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn write_policy_evidence_without_stops(
+        &mut self,
+        output: &mut impl Write,
+    ) -> std::result::Result<(), CodecError> {
+        let execution = &mut self.driver.execution;
+        let rounds = (
+            std::mem::replace(&mut execution.quantum_end, Timestamp::from_nanos(0)),
+            std::mem::take(&mut execution.boundary_index),
+            std::mem::take(&mut execution.completed_quanta),
+            std::mem::take(&mut execution.quantum_committed),
+        );
+        let commits: Vec<u64> = execution
+            .machines
+            .iter_mut()
+            .map(|entry| entry.lifecycle.replace_committed_at(0))
+            .collect();
+        let result = execution.write_policy_evidence(output);
+        (
+            execution.quantum_end,
+            execution.boundary_index,
+            execution.completed_quanta,
+            execution.quantum_committed,
+        ) = rounds;
+        for (entry, at) in execution.machines.iter_mut().zip(commits) {
+            entry.lifecycle.replace_committed_at(at);
+        }
+        result
+    }
 }
 
 impl<M> ExecutionState<M> {
