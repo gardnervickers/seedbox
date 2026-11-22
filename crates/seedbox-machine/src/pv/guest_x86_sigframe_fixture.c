@@ -31,9 +31,6 @@ static INTEGER u64 word(const volatile unsigned char *bytes) {
     for (unsigned i = 0; i < 8; ++i) value |= (u64)bytes[i] << (8 * i);
     return value;
 }
-static INTEGER u32 mxcsr(const volatile unsigned char *bytes) {
-    return (u32)bytes[24] | (u32)bytes[25] << 8 | (u32)bytes[26] << 16 | (u32)bytes[27] << 24;
-}
 static INTEGER int zero(const volatile unsigned char *bytes, unsigned from, unsigned to) {
     for (unsigned i = from; i < to; ++i)
         if (bytes[i]) return 0;
@@ -55,23 +52,23 @@ static INTEGER void handler(int signal, void *info, void *context) {
 }
 __asm__(".globl restorer\nrestorer:\n\tmov $15, %eax\n\tsyscall\n\thlt");
 void restorer(void);
-/* Restore x87 initial values, a 0x5a XMM marker or MXCSR alone, and a 0x3c
- * YMM marker as asked, with `present` as XSTATE_BV; then take a signal on an
- * alternate stack whose stale bytes are 0xa5. */
-static INTEGER void deliver(u64 present, u32 csr, int xmm, int ymm) {
+/* Restore initial x87, a 0x5a XMM marker or zero XMM, and a 0x3c YMM marker
+ * or zero YMM, with `present` as XSTATE_BV; then take a signal on an
+ * alternate stack. */
+static INTEGER void deliver(u64 present, int xmm, int ymm) {
     for (unsigned i = 0; i < BYTES; ++i) image[i] = 0;
     image[0] = 0x7f;
     image[1] = 0x03;
-    for (unsigned i = 0; i < 4; ++i) image[24 + i] = (unsigned char)(csr >> (8 * i));
+    image[24] = 0x80; /* MXCSR 0x1f80 */
+    image[25] = 0x1f;
     for (unsigned i = 0; i < 8; ++i) image[512 + i] = (unsigned char)(present >> (8 * i));
     for (unsigned i = 0; i < 256; ++i) {
         image[160 + i] = xmm ? (unsigned char)(i ^ 0x5a) : 0;
         image[576 + i] = ymm ? (unsigned char)(i ^ 0x3c) : 0;
     }
-    for (unsigned i = 0; i < STACK; ++i) ((volatile unsigned char *)altstack)[i] = 0xa5;
     delivered = 0;
     __asm__ volatile("xrstor (%0)" : : "r"(image), "a"(7), "d"(0) : "memory");
-    /* kill(getpid() == 1, SIGUSR1): delivered on this syscall's return. */
+    /* kill(1, SIGUSR1) to this PID 1: delivered as the syscall returns. */
     if (syscall4(62, 1, 10, 0, 0)) fail("SIGFRAME_ERROR: kill\n");
     __asm__ volatile("xsave (%0)" : : "r"(after), "a"(7), "d"(0) : "memory");
     if (!delivered) fail("SIGFRAME_ERROR: signal not delivered\n");
@@ -79,9 +76,12 @@ static INTEGER void deliver(u64 present, u32 csr, int xmm, int ymm) {
 static INTEGER void expect(int ok, const char *message) {
     if (!ok) fail(message);
 }
-/* An absent x87 component in the frame holds its initial values. */
-static INTEGER int x87_initial(const volatile unsigned char *bytes) {
-    return bytes[0] == 0x7f && bytes[1] == 0x03 && zero(bytes, 2, 24) && zero(bytes, 32, 160);
+/* x87 and SSE are always present in a frame; PKRU is the kernel's own. Every
+ * other component is present exactly when it holds noninitial (nonzero) state;
+ * nothing here touches AVX-512 or AMX tile configuration. */
+static INTEGER int bits(u64 ymm) {
+    u64 present = word(frame + 512);
+    return (present & 3) == 3 && (present & 4) == ymm && !(present & ~(u64)0x207);
 }
 __asm__(".globl _start\n_start:\n\tand $-16, %rsp\n\tcall start\n\thlt");
 INTEGER __attribute__((noreturn)) void start(void) {
@@ -98,34 +98,22 @@ INTEGER __attribute__((noreturn)) void start(void) {
     long action[4] = {(long)handler, 0x4 | 0x08000000 | 0x04000000, (long)restorer, 0};
     if (syscall4(13, 10, (long)action, 0, 8)) fail("SIGFRAME_ERROR: rt_sigaction\n");
 
-    /* Present components holding initial values are recorded as absent;
-     * present zero YMM is what a host FPU save/restore can leave. */
-    deliver(7, 0x1f80, 1, 0);
-    expect((word(frame + 512) & 7) == 2, "SIGFRAME_ERROR: initial x87 or zero YMM recorded present\n");
-    expect(x87_initial(frame), "SIGFRAME_ERROR: initial x87 bytes\n");
+    /* Zero YMM loaded as present is what a host FPU save/restore can leave. */
+    deliver(7, 1, 0);
+    expect(bits(0), "SIGFRAME_ERROR: zero YMM recorded present\n");
     expect(pattern(frame, 160, 0x5a), "SIGFRAME_ERROR: live XMM changed\n");
     expect(zero(frame, 576, 832), "SIGFRAME_ERROR: zero YMM bytes\n");
+    expect(pattern(after, 160, 0x5a), "SIGFRAME_ERROR: XMM after sigreturn\n");
+    expect(zero(after, 576, 832), "SIGFRAME_ERROR: YMM after sigreturn\n");
 
-    /* Absent components leave no stale stack bytes behind. */
-    deliver(0, 0x1f80, 0, 0);
-    expect((word(frame + 512) & 7) == 0, "SIGFRAME_ERROR: absent components recorded present\n");
-    expect(x87_initial(frame), "SIGFRAME_ERROR: absent x87 kept stale bytes\n");
-    expect(mxcsr(frame) == 0x1f80, "SIGFRAME_ERROR: MXCSR of absent SSE\n");
-    expect(zero(frame, 160, 416), "SIGFRAME_ERROR: absent SSE kept stale bytes\n");
-    expect(zero(frame, 576, 832), "SIGFRAME_ERROR: absent YMM kept stale bytes\n");
+    deliver(0, 0, 0);
+    expect(bits(0), "SIGFRAME_ERROR: absent YMM recorded present\n");
 
     /* Live YMM stays present and intact through the frame and sigreturn. */
-    deliver(6, 0x1f80, 0, 1);
-    expect((word(frame + 512) & 7) == 4, "SIGFRAME_ERROR: live YMM or zero XMM bits\n");
+    deliver(6, 0, 1);
+    expect(bits(4), "SIGFRAME_ERROR: live YMM recorded absent\n");
     expect(pattern(frame, 576, 0x3c), "SIGFRAME_ERROR: live YMM changed\n");
-    expect(zero(frame, 160, 416), "SIGFRAME_ERROR: zero XMM bytes\n");
-    expect(pattern(after, 576, 0x3c), "SIGFRAME_ERROR: YMM after sigreturn\n");
-
-    /* Zero XMM beside a live MXCSR flag stays present SSE state. */
-    deliver(2, 0x1fa0, 0, 0);
-    expect((word(frame + 512) & 7) == 2, "SIGFRAME_ERROR: SSE with live MXCSR recorded absent\n");
-    expect(mxcsr(frame) == 0x1fa0, "SIGFRAME_ERROR: live MXCSR changed\n");
-    expect(mxcsr(after) == 0x1fa0, "SIGFRAME_ERROR: MXCSR after sigreturn\n");
+    expect(pattern(after, 576, 0x3c), "SIGFRAME_ERROR: live YMM after sigreturn\n");
 
     out("SIGFRAME_CANONICAL\n");
     for (;;) syscall4(34, 0, 0, 0, 0); /* pause() */

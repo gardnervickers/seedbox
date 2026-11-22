@@ -165,12 +165,12 @@ def changes(root):
         "\tWARN_ON_FPU(err);\n"
         "\tif (!err)\n\t\tseedbox_canonicalize_task_xstate(fpstate);\n"))
     # A signal frame's XSAVE runs on live registers, so its presence bits
-    # follow XINUSE too. Canonicalize the frame once the kernel has written it.
+    # follow XINUSE too. Canonicalize them once the kernel has written the frame.
     edit("arch/x86/kernel/fpu/xstate.h", lambda s: replace(
         s,
-        "static inline int xsave_to_user_sigframe(",
+        "static inline int set_xfeature_in_sigframe(",
         "int seedbox_canonicalize_sigframe_xstate(struct xregs_state __user *buf);\n\n"
-        "static inline int xsave_to_user_sigframe("))
+        "static inline int set_xfeature_in_sigframe("))
     edit("arch/x86/kernel/fpu/signal.c", lambda s: replace(
         s,
         "\t\tif (!__clear_user(buf_fx, fpstate->user_size))\n"
@@ -254,66 +254,33 @@ static int seedbox_user_zero(const void __user *from, unsigned int size)
 	return 1;
 }
 
-/* Seedbox: the standard-format XSAVE of a signal frame leaves an absent
- * component's bytes as the stack held them, and XINUSE decides which are
- * absent. Apply the task-save rules to the frame. Standard-format SSE counts
- * as initial only with MXCSR at its default, since the UABI copy of a frame
- * ignores MXCSR once x87, SSE and YMM are all absent.
+/* Seedbox: a signal frame's standard-format XSAVE writes every requested
+ * component, initial ones as their initial bytes, but sets each XSTATE_BV bit
+ * from XINUSE. The kernel already marks x87 and SSE present in every frame and
+ * sets PKRU itself. Every other component XSAVE wrote is initial exactly when
+ * its bytes are zero: record it present exactly when it is not. AMX tile data
+ * is written only when XINUSE says it is in use, so it keeps that rule.
  */
 int seedbox_canonicalize_sigframe_xstate(struct xregs_state __user *buf)
 {
-	struct seedbox_x87 {
-		u16 cwd, swd, twd, fop;
-		u64 rip, rdp;
-	} x87;
-	static const struct seedbox_x87 x87_init = { .cwd = 0x37f };
-	struct fxregs_state __user *legacy = &buf->i387;
-	u64 vectors = current->thread.fpu.fpstate->user_xfeatures &
-		      (XFEATURE_MASK_YMM | XFEATURE_MASK_AVX512);
+	u64 written = current->thread.fpu.fpstate->user_xfeatures &
+		      ~(XFEATURE_MASK_FPSSE | XFEATURE_MASK_PKRU |
+			XFEATURE_MASK_USER_DYNAMIC);
 	u64 features;
 	unsigned int nr;
-	u32 mxcsr;
 	int zero;
 
-	BUILD_BUG_ON(sizeof(x87) != offsetof(struct fxregs_state, mxcsr));
-	if (__get_user(features, &buf->header.xfeatures) ||
-	    __get_user(mxcsr, &legacy->mxcsr) ||
-	    __copy_from_user(&x87, legacy, sizeof(x87)))
+	if (__get_user(features, &buf->header.xfeatures))
 		return -EFAULT;
-
-	zero = seedbox_user_zero(legacy->st_space, sizeof(legacy->st_space));
-	if (zero < 0)
-		return zero;
-	if (!(features & XFEATURE_MASK_FP)) {
-		if (__copy_to_user(legacy, &x87_init, sizeof(x87_init)) ||
-		    __clear_user(legacy->st_space, sizeof(legacy->st_space)))
-			return -EFAULT;
-	} else if (zero && !memcmp(&x87, &x87_init, sizeof(x87))) {
-		features &= ~XFEATURE_MASK_FP;
-	}
-
-	zero = seedbox_user_zero(legacy->xmm_space, sizeof(legacy->xmm_space));
-	if (zero < 0)
-		return zero;
-	if (!(features & XFEATURE_MASK_SSE)) {
-		if (__clear_user(legacy->xmm_space, sizeof(legacy->xmm_space)))
-			return -EFAULT;
-	} else if (zero && mxcsr == MXCSR_DEFAULT) {
-		features &= ~XFEATURE_MASK_SSE;
-	}
-
-	for_each_extended_xfeature(nr, vectors) {
-		void __user *vector = (void __user *)buf + xstate_offsets[nr];
-
-		zero = seedbox_user_zero(vector, xstate_sizes[nr]);
+	for_each_extended_xfeature(nr, written) {
+		zero = seedbox_user_zero((void __user *)buf + xstate_offsets[nr],
+					 xstate_sizes[nr]);
 		if (zero < 0)
 			return zero;
-		if (!(features & BIT_ULL(nr))) {
-			if (!zero && __clear_user(vector, xstate_sizes[nr]))
-				return -EFAULT;
-		} else if (zero) {
+		if (zero)
 			features &= ~BIT_ULL(nr);
-		}
+		else
+			features |= BIT_ULL(nr);
 	}
 	return __put_user(features, &buf->header.xfeatures);
 }
