@@ -85,6 +85,13 @@ fn driver(fail: bool) -> (Driver<EvidenceMachine>, Arc<AtomicUsize>) {
 #[test]
 fn evidence_works_after_finished_without_execution_or_publication() {
     let (mut d, reads) = driver(false);
+    // The oracle exits at 0, and the run ends one floor later.
+    assert_eq!(
+        d.step(Timestamp::from_nanos(100)).unwrap(),
+        StepOutcome::BarrierReached {
+            at: Timestamp::from_nanos(0)
+        }
+    );
     assert!(matches!(
         d.step(Timestamp::from_nanos(100)).unwrap(),
         StepOutcome::Finished { .. }

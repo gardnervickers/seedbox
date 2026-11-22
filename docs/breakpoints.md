@@ -59,9 +59,9 @@ A hit is bound to its machine's boot and suspension. `resume_break` for a hit
 that has already ended is refused with `invalid_state`, so it can never resume
 a later boot.
 
-When the oracle exits, the run finishes as it does today. Suspended machines
-are not resumed and run no further guest work; their hits end with
-`run_ended`.
+When the oracle exits, the run finishes one network latency later. Suspended
+machines are not resumed and run no further guest work; their hits end with
+`run_ended` then.
 
 ## Oracle calls
 

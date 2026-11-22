@@ -440,14 +440,19 @@ fn same_time_process_effects_follow_fifo_input_order() {
             barrier.schedule(at(20), auto_key(), stop(oracle))
         })
         .unwrap();
-    assert!(matches!(
+    assert_eq!(
         driver.step(at(20)).unwrap(),
+        StepOutcome::BarrierReached { at: at(20) }
+    );
+    let responses = outputs(&driver.drain_observations().events);
+    // The oracle's acknowledgement at 20 ends the run one floor later.
+    assert!(matches!(
+        driver.step(at(100)).unwrap(),
         StepOutcome::Finished {
             reason: ExitReason::Shutdown,
             ..
         }
     ));
-    let responses = outputs(&driver.drain_observations().events);
     assert_eq!(
         responses
             .iter()

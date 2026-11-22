@@ -58,6 +58,13 @@ fn driver(fail_run: bool, fail_read: bool) -> (Driver<Native>, Arc<AtomicUsize>)
 #[test]
 fn finished_native_reads_are_stable_without_clock_events_or_ram() {
     let (mut d, reads) = driver(false, false);
+    // The oracle exits at 0, and the run ends one floor later.
+    assert_eq!(
+        d.step(Timestamp::from_nanos(100)).unwrap(),
+        StepOutcome::BarrierReached {
+            at: Timestamp::from_nanos(0)
+        }
+    );
     assert!(matches!(
         d.step(Timestamp::from_nanos(100)).unwrap(),
         StepOutcome::Finished { .. }

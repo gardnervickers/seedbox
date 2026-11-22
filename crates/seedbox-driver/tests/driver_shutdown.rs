@@ -71,10 +71,11 @@ fn shutdown_refreshes_blocked_scheduling_without_cpu_and_later_runs_exit() {
         driver.step(at(2)).unwrap(),
         StepOutcome::BarrierReached { at: at(2) }
     );
+    // It exits at 3, and the run ends one floor later.
     assert_eq!(
-        driver.step(at(100)).unwrap(),
+        run_to(&mut driver, 100),
         StepOutcome::Finished {
-            at: at(3),
+            at: at(13),
             reason: ExitReason::Shutdown
         }
     );
@@ -146,10 +147,11 @@ fn paused_shutdown_is_delivered_once_without_executing_cleanup_until_resume() {
             Ok(())
         })
         .unwrap();
+    // It exits at 12, and the run ends one floor later.
     assert_eq!(
-        driver.step(at(100)).unwrap(),
+        run_to(&mut driver, 100),
         StepOutcome::Finished {
-            at: at(12),
+            at: at(22),
             reason: ExitReason::Shutdown
         }
     );
@@ -393,8 +395,9 @@ fn every_effective_fault_holds_in_order_and_worker_count_does_not_change_results
         );
         assert_eq!(
             *outcomes.last().unwrap(),
+            // The oracle exits at 9, and the run ends one floor later.
             StepOutcome::Finished {
-                at: at(9),
+                at: at(19),
                 reason: ExitReason::Shutdown
             }
         );

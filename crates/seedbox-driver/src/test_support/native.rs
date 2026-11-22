@@ -33,7 +33,8 @@ where
         definition(0),
         others,
         Vec::new(),
-        crate::driver::NetworkConfig::default(),
+        // A floor of one quantum, as the scheduling fixtures use.
+        super::floor(quantum),
         move |_| Ok(machines.next().expect("one fixture per definition")),
     )
 }

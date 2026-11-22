@@ -1037,13 +1037,12 @@ fn machine_exits_do_not_depend_on_stops() {
     );
 }
 
-/// C4: the run ends at the commit of the round in which the oracle exited.
-/// It will end one floor after the exit.
+/// C4: the run ends one floor after the oracle's exit, whatever the commit
+/// that saw it. Every machine runs to the end, and output up to it is published.
 #[test]
-#[ignore = "C4: the run ends at the commit that saw the oracle's exit"]
 fn the_end_of_the_run_does_not_depend_on_stops() {
     let end = 10 * MS;
-    holds(
+    let own = holds(
         Scenario {
             machines: vec![
                 Spec::busy()
@@ -1058,6 +1057,76 @@ fn the_end_of_the_run_does_not_depend_on_stops() {
         },
         1,
     );
+    assert_eq!(
+        own.outcome,
+        "Finished { at: Timestamp(4100123), reason: Shutdown }"
+    );
+}
+
+/// C4: after the oracle's outcome, what is due before the end still happens:
+/// a call it made just before is answered, a peer's flush is answered, and a
+/// host input takes effect. Nothing due at the end or later does, and a
+/// machine suspended at a breakpoint stays suspended until the end.
+#[test]
+fn what_is_due_before_the_end_happens_whatever_the_stops() {
+    let end = 10 * MS;
+    let x = 4 * MS + 123;
+    let f = x + 100 * US;
+    let declare = r#""op":"declare_breaks","names":["leader"]"#;
+    let own = holds(
+        Scenario {
+            machines: vec![
+                Spec::busy()
+                    .every(13 * US, 397 * US, end, BROADCAST, 0)
+                    .emit(100 * US + 3, call_with(1, declare))
+                    .emit(x - 50 * US, call(2, "now"))
+                    .emit(x, Response::ApplicationOutcome { code: 3 })
+                    // Admitted at the end: never answered.
+                    .emit(f - 100 * US, call(3, "now")),
+                Spec::busy()
+                    .echo(mac(0))
+                    .emit(x - 99 * US, property(1, 1, r#"{"flush":{}}"#))
+                    .emit(
+                        x + 1,
+                        Response::Break {
+                            name: "leader".into(),
+                        },
+                    ),
+                Spec::idle().every(97 * US + 1, 331 * US, end, mac(1), 20),
+            ],
+            network: jittery(),
+            inputs: vec![
+                (f - 1, "pause", Action::Pause(Target::Name("m2".into()))),
+                (f, "late", Action::Pause(Target::Name("m1".into()))),
+            ],
+            end,
+            breaks: true,
+        },
+        1,
+    );
+    assert_eq!(
+        own.outcome,
+        format!("Finished {{ at: Timestamp({f}), reason: ProgramExit {{ code: 3 }} }}")
+    );
+    assert_eq!(
+        replies(&own).len(),
+        2,
+        "the call before the outcome answered"
+    );
+    assert!(own.seen[1]
+        .iter()
+        .any(|seen| seen.contains("PropertyReply")));
+    assert_eq!(
+        events_with(&own, "status: Applied"),
+        1,
+        "only the first pause"
+    );
+    assert_eq!(events_with(&own, "BreakHit"), 1);
+    assert_eq!(events_with(&own, "reason: RunEnded"), 1);
+    let last = own.events.iter().filter(|event| event.contains("Output"));
+    assert!(last
+        .map(|event| event.split(' ').nth(2).unwrap().parse::<u64>().unwrap())
+        .all(|at| at <= f));
 }
 
 /// C2: outputs of two machines stamped in the same nanosecond are ordered by

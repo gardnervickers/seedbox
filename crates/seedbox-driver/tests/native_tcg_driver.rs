@@ -232,6 +232,17 @@ fn step(driver: &mut Driver<TcgMachine>, id: MachineId, now: &mut Timestamp, qua
     };
 }
 
+/// Step toward `upto` until the run finishes, blocks or stops, or `upto` is
+/// reached; returns the last outcome.
+fn run_to(driver: &mut Driver<TcgMachine>, upto: Timestamp) -> StepOutcome {
+    loop {
+        match driver.step(upto).unwrap() {
+            StepOutcome::BarrierReached { at } if at < upto => {}
+            outcome => return outcome,
+        }
+    }
+}
+
 fn registers(machine: &mut TcgMachine) -> [u64; 17] {
     fixture::registers(machine).unwrap()
 }
@@ -274,8 +285,13 @@ mod machine {
                 let exited = at(37 + STUB + 1);
                 assert_eq!(
                     driver.step(at(100)).unwrap(),
+                    StepOutcome::BarrierReached { at: exited }
+                );
+                // The run ends one floor (1 ms) after the exit.
+                assert_eq!(
+                    run_to(&mut driver, at(2_000_000)),
                     StepOutcome::Finished {
-                        at: exited,
+                        at: at(exited.as_nanos() + 1_000_000),
                         reason: ExitReason::Shutdown
                     }
                 );
@@ -781,9 +797,10 @@ mod machine {
                         })
                         .unwrap();
                     assert_eq!(
-                        driver.step(at(100)).unwrap(),
+                        run_to(&mut driver, at(100)),
                         StepOutcome::Finished {
-                            at: at(25),
+                            // One floor (10 ns) after the crash.
+                            at: at(35),
                             // Crashing the oracle completes the simulation with its actual
                             // exit reason, not the old all-machines-exited sentinel.
                             reason: ExitReason::Crashed
@@ -1101,10 +1118,11 @@ mod machine {
                         StepOutcome::BarrierReached { at: t(end) }
                     );
                 }
+                // The oracle's crash at t(12) ends the run one floor later.
                 assert_eq!(
-                    driver.step(at(100)).unwrap(),
+                    run_to(&mut driver, at(100)),
                     StepOutcome::Finished {
-                        at: t(12),
+                        at: t(22),
                         reason: ExitReason::Crashed
                     }
                 );
