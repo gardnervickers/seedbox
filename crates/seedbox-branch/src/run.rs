@@ -131,6 +131,16 @@ where
     /// here and going on is the same run as not stopping. Inputs are
     /// delivered at their own times; one for a time the run has passed is
     /// refused as stale.
+    ///
+    /// The trace can trail the run's time. It holds everything machines
+    /// wrote that is stamped before the Driver's committed frontier
+    /// ([`Barrier::committed_before`], read through [`Self::barrier`]);
+    /// what they wrote at the frontier or later may still be held by the
+    /// Driver and reaches the trace as the run goes on. The frontier is
+    /// `until`, or the nanosecond before it while a machine with a slow
+    /// clock could still stamp output there. An action due at `until` is
+    /// handed to the Driver there and takes effect, at `until`, when the run
+    /// goes on.
     pub fn advance(&mut self, until: Timestamp) -> Result<Stop, Error<M::Error>> {
         self.advance_watching(until, None, |_, _| false)
     }
@@ -139,7 +149,10 @@ where
     /// (one Driver quantum when `None`) whether to stop there. Its times
     /// count from where the call starts, and inputs due at one are delivered
     /// before it is asked. It gets the trace and the index of the first
-    /// record added since it was last asked.
+    /// record added since it was last asked. As after [`Self::advance`], the
+    /// trace it sees holds what was stamped before the Driver's committed
+    /// frontier, which can be the nanosecond before the look; a record
+    /// stamped there or at the look itself can arrive with a later look.
     pub fn advance_watching(
         &mut self,
         until: Timestamp,
@@ -326,14 +339,21 @@ impl<S> Branch<S> {
     /// which must be an earlier point of the same run, and replay
     /// `history`'s own inputs up to `until`. The run returned is where
     /// `history` stood at `until`: every input due at or before `until` is
-    /// delivered, as [`Run::advance`] delivers them, and nothing its
-    /// machines did at `until` or later has happened. No input is pending;
-    /// `history`'s later ones are dropped, so what follows is this run's own.
-    /// To leave out an input due at `until`, rewind to a nanosecond earlier.
+    /// delivered, as [`Run::advance`] delivers them, and no machine has run
+    /// past `until`. No input is pending; `history`'s later ones are
+    /// dropped, so what follows is this run's own. To leave out an input due
+    /// at `until`, rewind to a nanosecond earlier.
     ///
     /// The replay is checked against `history`: every machine must say and
     /// do the same things at the same times. A difference is
     /// [`Error::Diverged`], which means the two are not one run after all.
+    /// The check covers what is stamped before the replay's committed
+    /// frontier ([`Barrier::committed_before`]) and before `until`, both
+    /// exclusive: `history` must hold nothing there that the replay lacks.
+    /// What `history` has from the frontier on may not have reached the
+    /// replay's trace yet (see [`Run::advance`]), so it is not required; a
+    /// record the replay does hold must be `history`'s next one whatever its
+    /// time.
     pub fn rewind<M>(
         &self,
         history: History<'_>,
@@ -361,6 +381,11 @@ impl<S> Branch<S> {
         let mut run = self.restore(world)?;
         run.replace_pending(between)?;
         run.advance(until)?;
+        // Records stamped before this are all in the replay's trace; later
+        // ones may still be held by its Driver.
+        let frontier = run
+            .barrier(|barrier| Ok(barrier.committed_before()))?
+            .map_or(until, |frontier| frontier.min(until));
         let from = self.trace.len();
         let expected = history.trace.occurrences(from);
         let found = run.trace.occurrences(from);
@@ -372,12 +397,12 @@ impl<S> Branch<S> {
                 .zip(found)
                 .take_while(|(expected, found)| expected == found)
                 .count();
-            // What history has beyond the replay must not have happened yet
-            // at `until`; a line may have begun before it and ended after,
-            // and the replay then holds its beginning.
+            // What history has beyond the replay must not be committed yet
+            // in the replay; a line may have begun before the frontier and
+            // ended after, and the replay then holds its beginning.
             let ahead = expected[agree..]
                 .iter()
-                .find(|record| record.at < until && !run.trace.begins(record));
+                .find(|record| record.at < frontier && !run.trace.begins(record));
             if let Some(unexpected) = found.get(agree) {
                 return Err(Error::diverged(expected.get(agree), Some(unexpected)));
             }

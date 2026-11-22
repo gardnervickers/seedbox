@@ -9,7 +9,10 @@ use seedbox_driver::{
     pv::{CommandResult, Output, Request, Response, SimulationControlId, Stream},
     test_support::definition,
 };
-use seedbox_machine::machine::{ExitReason, Machine, RunContext, StopReason, Timestamp};
+use seedbox_machine::{
+    clock::ClockRate,
+    machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
+};
 use std::{num::NonZeroU32, time::Duration};
 
 fn at(nanos: u64) -> Timestamp {
@@ -458,6 +461,88 @@ fn rewind_refuses_a_replay_missing_a_line_the_history_wrote() {
     assert!(early
         .rewind(imposter.history(), at(75), &mut restore)
         .is_ok());
+}
+
+/// At nine tenths of simulation time, simulation nanoseconds 10 and 11
+/// share machine nanosecond 9. A run stopped at 11 has not committed what
+/// its machines stamped at 10: the slow machine could still write there.
+/// Rewind compares up to the Driver's committed frontier, not up to 11.
+#[test]
+fn rewind_under_a_slow_clock_compares_up_to_what_the_replay_committed() {
+    let slow = || {
+        input(
+            0,
+            "slow",
+            Action::Drift {
+                target: machine(1),
+                rate: ClockRate::new(-100_000_000).unwrap(),
+            },
+        )
+    };
+    // Machine times 9 and 45: stamped 10 and 50.
+    let scripts = || vec![vec![], vec![(9, says("first\n")), (45, says("second\n"))]];
+    let mut scout = run(scripts(), vec![slow()]);
+    scout.advance(at(5)).unwrap();
+    let early = scout.save().unwrap();
+    scout.advance(at(100)).unwrap();
+    assert_eq!(
+        lines(&scout),
+        [(10, "first".to_owned()), (50, "second".into())]
+    );
+
+    // Stopped at 11, the replay holds the line stamped 10 uncommitted.
+    let mut before = early.rewind(scout.history(), at(11), &mut restore).unwrap();
+    assert_eq!(before.now(), at(11));
+    let frontier = before.barrier(|barrier| Ok(barrier.committed_before()));
+    assert_eq!(frontier.unwrap(), Some(at(10)));
+    assert!(lines(&before).is_empty());
+    // A run restored from a save there holds it too, and says so.
+    let mut saved = restored(&before.save().unwrap());
+    let frontier = saved.barrier(|barrier| Ok(barrier.committed_before()));
+    assert_eq!(frontier.unwrap(), Some(at(10)));
+    saved.advance(at(100)).unwrap();
+    assert_eq!(occurrences(&saved), occurrences(&scout));
+    // It is the scout's run: the line follows, where the scout saw it.
+    before.advance(at(100)).unwrap();
+    assert_eq!(occurrences(&before), occurrences(&scout));
+    // One nanosecond on, nothing can be stamped at 10 any more.
+    let mut after = early.rewind(scout.history(), at(12), &mut restore).unwrap();
+    assert_eq!(lines(&after), [(10, "first".to_owned())]);
+    let frontier = after.barrier(|barrier| Ok(barrier.committed_before()));
+    assert_eq!(frontier.unwrap(), Some(at(12)));
+
+    // Stopped at every nanosecond, the frontier trails the stop by at most
+    // one, never goes back, and never passes a record the trace has yet to
+    // receive.
+    let mut stepped = restored(&early);
+    let (mut frontier, mut seen) = (stepped.now(), stepped.trace().len());
+    for time in 6..=60 {
+        stepped.advance(at(time)).unwrap();
+        assert!(stepped.trace().since(seen).all(|new| new.at >= frontier));
+        let next = stepped.barrier(|barrier| Ok(barrier.committed_before()));
+        let next = next.unwrap().unwrap();
+        assert!(next >= frontier && next >= at(time - 1) && next <= at(time));
+        (frontier, seen) = (next, stepped.trace().len());
+    }
+    assert_eq!(lines(&stepped), lines(&scout));
+
+    // A history with a line stamped 9, before the frontier, that the replay
+    // never writes is still refused, also when rewinding to 11.
+    let mut scripts = scripts();
+    scripts[1].insert(0, (8, says("gone\n")));
+    let mut imposter = run(scripts, vec![slow()]);
+    imposter.advance(at(100)).unwrap();
+    assert_eq!(lines(&imposter)[0], (9, "gone".to_owned()));
+    match early.rewind(imposter.history(), at(11), &mut restore) {
+        Err(Error::Diverged {
+            expected,
+            found: None,
+        }) => assert!(matches!(
+            expected.unwrap().entry,
+            Entry::Line { text, .. } if text == "gone"
+        )),
+        other => panic!("{:?}", other.map(|run| run.now())),
+    }
 }
 
 #[test]

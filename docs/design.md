@@ -65,6 +65,10 @@ Stops and saves are not inputs, and neither changes what a run's machines do
 (see the causal bound above). `Run::advance` stops exactly at the time asked
 for, and `advance_watching` asks its watch every stride of simulated time, one
 quantum unless told otherwise.
+A stopped run's trace holds what its machines wrote before the Driver's
+committed frontier (`Barrier::committed_before`): the stop, or the nanosecond
+before it while a machine with a slow clock can still stamp output there.
+`rewind` checks the replay against the run up to that frontier.
 The trace compares lines and lifecycle changes, which have times of their own;
 settlements are not compared.
 
