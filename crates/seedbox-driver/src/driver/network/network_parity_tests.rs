@@ -118,6 +118,17 @@ fn staged_tx(d: &mut Driver<Mock>, from: usize, bytes: Vec<u8>) {
     d.execution.machines[from].staged.push(response);
     d.commit_boundary().unwrap();
 }
+/// Leave a frame held at the current barrier, as a round that ended where
+/// another machine can still emit leaves it: staged, not yet committed.
+fn held_tx(d: &mut Driver<Mock>, from: usize, bytes: Vec<u8>) {
+    let response = MachineResponse {
+        machine: MachineId(from),
+        boot: d.execution.machines[from].lifecycle.boot(),
+        at: d.now(),
+        payload: tx(bytes),
+    };
+    d.execution.machines[from].staged.push(response);
+}
 fn direct_admit(d: &mut Driver<Mock>, k: &str, a: Action, n: Option<&str>) {
     d.execution.inputs.insert(key(k), LiveInput::Pending);
     d.admit_input(key(k), a, n.map(name), d.now()).unwrap();
@@ -584,6 +595,78 @@ fn apply_rechecks_connection_and_failed_without_effect_does_not_poison() {
         "p2"
     );
     artifact(d.checkpoint().unwrap());
+}
+/// Committing an input first commits the output held at its barrier, and a
+/// held frame changes what the admission sees: a connection closes or opens
+/// when its frame is routed. The projection routes held frames too, so it
+/// agrees with the commit instead of poisoning the Driver there.
+#[test]
+fn prepare_projects_held_frames_into_the_network_it_admits_against() {
+    // A held RST closes the connection the input names.
+    let mut specs = initial();
+    specs[1]
+        .sends
+        .push_back((1, tx(frames::tcp(1, 2, (1234, 80), 7, 0, 2))));
+    let mut d = net(specs, setup(8), 1);
+    advance(&mut d, 4);
+    let open = flow(&d);
+    held_tx(&mut d, 1, frames::tcp(1, 2, (1234, 80), 8, 1, 0x14));
+    let closed = d
+        .with_barrier(|b| {
+            b.prepare_input(
+                key("closed"),
+                Action::DropConnection {
+                    connection: open.clone(),
+                },
+            )
+        })
+        .unwrap();
+    assert!(matches!(closed.outcome(), PreparedOutcome::Rejected(_)));
+    // The projection changed nothing: the connection is still listed until
+    // the held frame commits, and a rejected proposal is refused unchanged.
+    assert!(d.execution.network.selection_available(&open));
+    assert!(matches!(
+        d.with_barrier(|b| b.commit_input(&closed)),
+        Err(Error::InvalidRequest)
+    ));
+    schedule(&mut d, "after", partition(), None);
+    assert_eq!(
+        settled(&d.drain_events(), "after").1,
+        SettlementStatus::Applied
+    );
+    assert!(!d.execution.network.selection_available(&open));
+
+    // A held SYN opens the connection the input names.
+    let mut d = net(initial(), setup(8), 1);
+    advance(&mut d, 4);
+    let syn = frames::tcp(1, 2, (1234, 80), 7, 0, 2);
+    let mut routed = d.execution.network.clone();
+    routed
+        .route(MachineId(1), d.now().as_nanos(), &syn)
+        .unwrap();
+    let opening = routed.connections("fixture-1", "fixture-2", 0).remove(0);
+    assert!(!d.execution.network.selection_available(&opening));
+    held_tx(&mut d, 1, syn);
+    let opened = d
+        .with_barrier(|b| {
+            b.prepare_input(
+                key("opened"),
+                Action::DropConnection {
+                    connection: opening.clone(),
+                },
+            )
+        })
+        .unwrap();
+    assert!(matches!(opened.outcome(), PreparedOutcome::Admitted(_)));
+    assert!(matches!(
+        d.with_barrier(|b| b.commit_input(&opened)).unwrap(),
+        DueOutcome::Applied { .. }
+    ));
+    assert_eq!(
+        settled(&d.drain_events(), "opened").1,
+        SettlementStatus::Applied
+    );
+    assert_eq!(flow(&d), opening);
 }
 #[test]
 fn selection_heal_freezes_counts_at_admission_not_application() {

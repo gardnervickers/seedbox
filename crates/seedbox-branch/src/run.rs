@@ -216,11 +216,21 @@ where
     }
 
     /// Deliver every input due now; whether there was one.
+    ///
+    /// A host breakpoint is admitted at this barrier, so the Driver first
+    /// commits and publishes the output it held here. That output is taken
+    /// into the trace at once: a watch asked next, the caller the run
+    /// returns to and a save taken here must all see it, and a checkpoint
+    /// carries no published events, so a run restored from that save could
+    /// never recover it.
     fn deliver_due(&mut self) -> Result<bool, Error<M::Error>> {
         let mut delivered = false;
         while let Some(input) = self.program.take_due(self.now) {
             self.deliver(input)?;
             delivered = true;
+        }
+        if delivered {
+            self.trace.take(self.driver.drain_observations().events);
         }
         Ok(delivered)
     }

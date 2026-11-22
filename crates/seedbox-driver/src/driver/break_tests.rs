@@ -297,6 +297,37 @@ fn a_suspended_receiver_admits_frames_at_arrival_without_a_budget() {
     assert_eq!(worker.resumed, [55]);
 }
 
+/// A machine is held from its hit, not from the commit that carries the
+/// hit: a frame arriving in the round that wrote the hit is admitted at its
+/// arrival without a budget too.
+#[test]
+fn a_frame_arriving_in_the_round_of_the_hit_is_admitted_without_a_budget() {
+    let frame = Response::TransmitFrame {
+        bytes: vec![2, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 1, 0x88, 0xb5, 9],
+    };
+    // Rounds are one latency (5 ns) long. The hit at 31 and the arrival at
+    // 33 fall in the round from 30 to 35, which commits the hit at 35.
+    let mut driver = build_with(
+        vec![
+            (1, call(1, DECLARE)),
+            (28, frame),
+            (50, call(2, r#""op":"resume_break","break_id":1"#)),
+        ],
+        vec![(31, hit("leader"))],
+        true,
+    );
+    run_to(&mut driver, 100);
+    let worker = guest(&driver, 1);
+    assert_eq!(worker.frames, [33]);
+    assert!(worker.runs.contains(&(33, 33, true)));
+    assert!(worker
+        .runs
+        .iter()
+        .filter(|(_, _, held)| *held)
+        .all(|(now, upto, _)| now == upto));
+    assert_eq!(worker.resumed, [55]);
+}
+
 #[test]
 fn a_suspended_machine_only_crashes_and_its_hit_ends() {
     let mut driver = build(

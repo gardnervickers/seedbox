@@ -119,6 +119,10 @@ The quantum is a host setting: where machines stop changes nothing they do, so
 it does not change results, and comparison ignores it. Replay and checkpoints
 retain it, and a checkpoint start refuses a different one.
 
+The latency is also how long the simulator takes to act on a machine's request: an oracle
+call takes effect, a property `flush` is answered and the run ends one `network.latency`
+after the output that asked, so a larger latency delays each of them.
+
 Choose the backend, seed, execution limits and machine threads with CLI flags.
 `run` and `replay` accept `--machine-workers 1..64`; the default is one thread per
 machine. The count affects host throughput without changing simulation results.

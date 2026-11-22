@@ -336,6 +336,45 @@ fn where_a_run_stops_or_saves_does_not_change_what_its_machines_do() {
     }
 }
 
+/// The server's line at 20 is written by the round that ends at 20 and held
+/// there, since the oracle can still write at 20. The host breakpoint due at
+/// 20 is admitted there, which commits the line. It is in the trace at once,
+/// and in the trace of a run restored from a save taken there: a checkpoint
+/// carries no published output, so the run could not recover it later.
+#[test]
+fn a_save_where_a_host_breakpoint_commits_held_output_keeps_that_output() {
+    let scripts = || {
+        vec![
+            vec![],
+            vec![
+                (5, says("boot\n")),
+                (20, says("held\n")),
+                (45, says("after\n")),
+            ],
+        ]
+    };
+    let cut = vec![Input::host_break(at(20), key("cut"), "unheard")];
+    let mut parent = run(scripts(), cut);
+    assert_eq!(parent.advance(at(20)).unwrap(), Stop::Reached);
+    assert_eq!(parent.now(), at(20));
+    let so_far = [(5, "boot".to_owned()), (20, "held".into())];
+    assert_eq!(lines(&parent), so_far);
+    let saved = parent.save().unwrap();
+    parent.advance(at(100)).unwrap();
+    let mut child = restored(&saved);
+    assert_eq!(lines(&child), so_far);
+    child.advance(at(100)).unwrap();
+    assert_eq!(
+        lines(&child),
+        [
+            (5, "boot".to_owned()),
+            (20, "held".into()),
+            (45, "after".into())
+        ]
+    );
+    assert_eq!(occurrences(&child), occurrences(&parent));
+}
+
 #[test]
 fn rewind_returns_to_just_before_a_line_the_run_already_wrote() {
     // The pause delays the commit lines to 70; only this run knows that.
