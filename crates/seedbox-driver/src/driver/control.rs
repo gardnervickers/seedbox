@@ -1,9 +1,8 @@
 //! Concrete private control ownership. Every machine has a canonical private
 //! key (`machine:N`), which the service uses as its identity for targets,
-//! handles, triggers and replies. Optional display names (which are also
-//! service names) resolve guest and host name targets, never the reverse, so
-//! unnamed machines and duplicate display names stay safely targetable by
-//! identity.
+//! handles and replies. Optional display names (which are also service names)
+//! resolve guest and host name targets, never the reverse, so unnamed machines
+//! and duplicate display names stay safely targetable by identity.
 use super::{Entry, MachineId, Timestamp};
 use crate::{
     definition::MachineDefinition,
@@ -487,69 +486,22 @@ impl<M> Adapter for View<'_, M> {
             .command_owner(boot, id)
             .map_err(|e| format!("command correlation: {e:?}"))
     }
-    fn inspect(
-        &self,
-        handles: &[String],
-        triggers: &[crate::oracle::triggers::Record],
-    ) -> Result<Value, OperationError> {
-        use crate::oracle::triggers::{Status, TriggerAction};
+    fn inspect(&self, handles: &[String]) -> Result<Value, OperationError> {
         let network = self
             .network
             .ok_or_else(|| OperationError::invalid("network view missing"))?;
-        let display = |key: &str| -> Result<String, OperationError> {
-            let i = self.index(key).map_err(OperationError::invalid)?;
-            Ok(self.entries[i]
-                .name
-                .clone()
-                .unwrap_or_else(|| Control::source(MachineId(i))))
-        };
         let mut services = BTreeMap::new();
         let mut machines = Vec::new();
         for (name, state) in states(self.entries, self.machines).map_err(OperationError::invalid)? {
             services.insert(name.clone(), name.clone());
             machines.push(serde_json::json!({"name":name,"state":state.to_string()}));
         }
-        let mut result = serde_json::json!({"services":services,"machines":machines,"active_handles":handles,"network_counters":network.inspect_counts()});
-        if !triggers.is_empty() {
-            let mut records = Vec::new();
-            for r in triggers {
-                let action = match &r.action {
-                    TriggerAction::Stop(name) => {
-                        serde_json::json!({"action":"stop","machine":display(name)?})
-                    }
-                    TriggerAction::Partition { left, right } => {
-                        let side = |names: &[String]| {
-                            names
-                                .iter()
-                                .map(|n| display(n))
-                                .collect::<Result<Vec<_>, _>>()
-                        };
-                        serde_json::json!({"action":"partition","left":side(left)?,"right":side(right)?})
-                    }
-                };
-                let status = match r.status {
-                    Status::Armed => "armed",
-                    Status::Cancelled => "cancelled",
-                    Status::Matched => "matched",
-                    Status::Expired => "expired",
-                    Status::Rejected => "rejected",
-                    Status::Fired => "fired",
-                    Status::CutOff => "cut_off",
-                };
-                let mut record = serde_json::json!({"id":r.id,"source":display(&r.source)?,"marker":r.marker,"armed_at_ns":r.armed_at,"match_deadline_ns":r.match_deadline,"action":action,"prefix":r.prefix,"seen":r.seen,"resets":r.resets,"matched_at_ns":r.matched_at,"effect_at_ns":r.effect_at,"fault_id":r.fault_id,"cancelled_at_ns":r.cancelled_at,"cut_off_at_ns":r.cut_off_at,"status":status});
-                // A trigger has no fault handle until ordinary admission at
-                // its effect. The retained handle is independent of fault_id.
-                if let Some(handle) = &r.handle {
-                    record["handle"] = serde_json::json!(handle);
-                }
-                if let Some(reason) = &r.rejection_reason {
-                    record["rejection_reason"] = serde_json::json!(reason);
-                }
-                records.push(record);
-            }
-            result["triggers"] = serde_json::json!(records);
-        }
-        Ok(result)
+        Ok(serde_json::json!({
+            "services": services,
+            "machines": machines,
+            "active_handles": handles,
+            "network_counters": network.inspect_counts(),
+        }))
     }
 }
 
@@ -657,8 +609,6 @@ pub(super) enum Event {
         action: super::Action,
         handle: Option<super::FaultHandle>,
     },
-    TriggerBoundary,
-    TriggerFinalize,
 }
 impl Control {
     pub(super) fn invoke<T, M>(
@@ -731,7 +681,6 @@ impl Control {
             plans = self.invoke_plans(machines, |service, _| {
                 service.ended(&name, boot, at.as_nanos(), at.as_nanos())
             })?;
-            self.service.source_reset(&name).map_err(|e| e.message)?;
         }
         machines[id.0]
             .lifecycle
@@ -775,10 +724,6 @@ impl Control {
                     )
                 })?)
             }
-            Response::ApplicationOutput { bytes, .. } | Response::BootConsole { bytes } => self
-                .service
-                .committed_bytes(&name, output.at.as_nanos(), bytes, commit.as_nanos())
-                .map_err(|e| e.message)?,
             _ => {}
         }
         machines[output.machine.0]
@@ -883,7 +828,6 @@ impl Control {
                     machine: self.reply_target(source)?,
                     call: *id,
                 },
-                Requester::Trigger(trigger) => FaultOrigin::Trigger { trigger: *trigger },
                 Requester::Input(key) => FaultOrigin::Input {
                     key: super::InputKey::validated(key.clone()),
                 },
@@ -968,11 +912,8 @@ impl Control {
         &self,
         notice: crate::oracle::service::Notice,
     ) -> Result<(Timestamp, super::EventKind), String> {
-        use super::{EventKind, TriggerResult};
-        use crate::oracle::{
-            service::{breaks::BreakEnd, Notice},
-            triggers::Status,
-        };
+        use super::EventKind;
+        use crate::oracle::service::{breaks::BreakEnd, Notice};
         Ok(match notice {
             Notice::Admitted(a) => (
                 Timestamp::from_nanos(a.admitted_at),
@@ -1001,43 +942,6 @@ impl Control {
                     detail: s.detail,
                     network: s.network,
                     counts: s.counts,
-                },
-            ),
-            Notice::TriggerArmed {
-                trigger,
-                source,
-                target,
-                at,
-                deadline,
-            } => (
-                Timestamp::from_nanos(at),
-                EventKind::TriggerArmed {
-                    trigger,
-                    source: self.named(&source)?,
-                    target: target.map(|target| self.named(&target)).transpose()?,
-                    deadline: Timestamp::from_nanos(deadline),
-                },
-            ),
-            Notice::TriggerResolved {
-                trigger,
-                at,
-                status,
-                fault,
-            } => (
-                Timestamp::from_nanos(at),
-                EventKind::TriggerResolved {
-                    trigger,
-                    result: match status {
-                        Status::Fired => TriggerResult::Fired,
-                        Status::Rejected => TriggerResult::Rejected,
-                        Status::Cancelled => TriggerResult::Cancelled,
-                        Status::Expired => TriggerResult::Expired,
-                        Status::CutOff => TriggerResult::CutOff,
-                        Status::Armed | Status::Matched => {
-                            return Err("unresolved trigger notice".into())
-                        }
-                    },
-                    fault: fault.map(super::FaultId),
                 },
             ),
             Notice::BreakHit {

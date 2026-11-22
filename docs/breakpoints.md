@@ -1,11 +1,10 @@
 # Breakpoints
 
 Breakpoints let a program hand control to the oracle at a point it chooses. A
-breakpoint only suspends a machine; the oracle decides what to do. They will
-replace the oracle's triggers (`arm_trigger`, `cancel_trigger`), which weld a
-watch to one fault and report nothing back. Write-to-file breakpoints and
-`break_on_block_request` work on PV today; removing triggers is still to come
-(see [Order of work](#order-of-work)).
+breakpoint only suspends a machine; the oracle decides what to do. To act when
+a program reaches a point, the program writes a breakpoint there and the oracle
+applies the fault in its handler. Write-to-file breakpoints and
+`break_on_block_request` work on PV.
 
 ## The model
 
@@ -170,28 +169,10 @@ through the DynamoRIO client, which already sees every block before it runs,
 so they need no hypervisor debug registers. Their hits would have the same
 shape.
 
-## What is removed
-
-Triggers are removed entirely, with no compatibility path:
-
-- `arm_trigger`, `cancel_trigger` and `inspect().triggers`
-- `oracle/triggers.rs`, `oracle/service/trigger.rs`, and the console marker
-  feed in `driver/control.rs`
-- `TriggerArmed`, `TriggerResolved`, `TriggerResult`, `FaultOrigin::Trigger`
-  and `AdmissionMode::Trigger`
-- `trigger_marker` and the `TriggerBoundary`/`TriggerFinalize` control events
-- in Python: `arm_console_stop`, `arm_console_partition`, `trigger_partition`,
-  `cancel_trigger` and `Trigger`
-- the console-trigger acceptance workload
-  (`harness/acceptance/workloads/triggers.yaml`) and its driver tests
-
-A console marker becomes an explicit breakpoint written by the program. A
-fault the oracle used to arm ahead of time, it now applies in its handler.
-
 ## Order of work
 
 1. Done: several oracle connections.
 2. Done: write-to-file breakpoints, end to end on PV.
 3. Done: `break_on_block_request`, with the held request's in-order
    continuation on resume.
-4. Remove triggers.
+4. Done: remove triggers.

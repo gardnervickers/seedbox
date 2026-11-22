@@ -298,19 +298,3 @@ fn reboot_before_queued_throttle_settles_old_boot_instead_of_retargeting() {
         })
         .unwrap();
 }
-#[test]
-fn unmatched_trigger_expiry_quiesces_without_a_repeated_zero_time_marker() {
-    let arm = r#"{"version":1,"id":1,"op":"arm_trigger","source":{"machine":"peer"},"marker":[120],"match_timeout_ns":1,"fault":{"action":"stop","target":{"machine":"peer"}}}"#;
-    let (mut driver, replies, _) = queued_pair(arm, r#"{"version":1,"id":1,"op":"now"}"#, false);
-    driver.step(at(10)).unwrap();
-    let got = replies.lock().unwrap();
-    let reply: serde_json::Value =
-        serde_json::from_slice(&got.iter().find(|r| r.0 == 1).unwrap().2).unwrap();
-    assert_eq!(reply["ok"], true, "{reply}");
-    drop(got);
-    driver.step(at(11)).unwrap();
-    assert!(matches!(
-        driver.step(at(20)).unwrap(),
-        seedbox_driver::driver::StepOutcome::Blocked { .. }
-    ));
-}
