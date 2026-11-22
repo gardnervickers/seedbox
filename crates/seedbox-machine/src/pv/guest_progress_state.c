@@ -3,7 +3,10 @@
  * values remain live. A synchronous fault also exposes the restored app state
  * to a signal handler before resuming the same checks. On ARM64 the fault
  * comes before its block overwrites x17, so x17 is a dead scratch candidate
- * there whose value the handler still checks. No pacing is involved. */
+ * there whose value the handler still checks. ARM64 also checks x0 and x30,
+ * which a checkpoint that re-enters the code cache directly restores through
+ * the fragment prefix and the clean call's link-register slot. No pacing is
+ * involved. */
 #define _GNU_SOURCE
 #include <signal.h>
 #include <stdint.h>
@@ -23,9 +26,11 @@ static void fault_handler(int signal, siginfo_t *info, void *opaque) {
         context_failure = 1;
     context->uc_mcontext.gregs[REG_RIP] += 2; /* ud2 */
 #elif defined(__aarch64__)
-    if (context->uc_mcontext.regs[1] != UINT64_C(0x12345678) ||
+    if (context->uc_mcontext.regs[0] != UINT64_C(0x12345678) ||
+        context->uc_mcontext.regs[1] != UINT64_C(0x12345678) ||
         context->uc_mcontext.regs[16] != UINT64_C(0x12345678) ||
         context->uc_mcontext.regs[17] != UINT64_C(0x12345678) ||
+        context->uc_mcontext.regs[30] != UINT64_C(0x12345678) ||
         (context->uc_mcontext.pstate & UINT64_C(0xf0000000)) != UINT64_C(0x90000000))
         context_failure = 1;
     context->uc_mcontext.pc += 4; /* permanently undefined instruction */
@@ -103,11 +108,14 @@ __asm__(
     ".type state_branches,%function\n"
     "state_branches:\n"
     "sub sp, sp, #32\n"
+    "str x30, [sp, #8]\n"
     "mov x8, sp\n"
     "mov x1, #0x5678\n"
     "movk x1, #0x1234, lsl #16\n"
+    "mov x0, x1\n"
     "mov x16, x1\n"
     "mov x17, x1\n"
+    "mov x30, x1\n"
     "str x1, [sp]\n"
     "str x1, [sp, #24]\n"
     "dup v0.2d, x1\n"
@@ -134,11 +142,15 @@ __asm__(
     "b.ne 3f\n"
     "mov x3, #0x5678\n"
     "movk x3, #0x1234, lsl #16\n"
+    "cmp x0, x3\n"
+    "b.ne 4f\n"
     "cmp x1, x3\n"
     "b.ne 4f\n"
     "cmp x16, x3\n"
     "b.ne 4f\n"
     "cmp x17, x3\n"
+    "b.ne 4f\n"
+    "cmp x30, x3\n"
     "b.ne 4f\n"
     "mov x2, sp\n"
     "cmp x2, x8\n"
@@ -163,7 +175,7 @@ __asm__(
     "4: mov w0, #2\n b 7f\n"
     "5: mov w0, #3\n b 7f\n"
     "6: mov w0, #4\n"
-    "7: add sp, sp, #32\n ret\n"
+    "7: ldr x30, [sp, #8]\n add sp, sp, #32\n ret\n"
     ".size state_branches,.-state_branches\n");
 #endif
 

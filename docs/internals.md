@@ -43,10 +43,16 @@ same, and it marks instructions with notes rather than allocating labels,
 which keeps DynamoRIO's heap growth the same.
 
 Exhaustion branches to one shared routine instead of emitting a context-save
-sequence in every block. Its clean call puts the scratch register's saved value
-back, charges progress and redirects through DynamoRIO's dispatcher for pending
-signals and JIT synchronization; the resumed block's repeated charge is
-refunded. Charge instructions have no application translation and cannot be
+sequence in every block. Its clean call charges progress, puts the scratch
+register's saved value back and resumes the block from its start, refunding the
+repeated charge. A pending signal, JIT synchronization or flush completes in
+DynamoRIO's dispatcher, so the client redirects through it; when the dispatcher
+would do nothing but look the block up, the fork's `dr_redirect_entry()` returns
+the block's cache entry instead, and the routine jumps there after the clean
+call. Neither path makes a syscall, so the guest sees the same charges; the
+direct one skips copying the 2 KiB machine context with DynamoRIO's byte-wise
+ARM `memcpy`, which cost most of each checkpoint's microseconds.
+Charge instructions have no application translation and cannot be
 relocation points. Until a dead register is overwritten, a fault in an
 application instruction must still report its saved value. Reconstructed
 instruction lists let the client restore it in reported contexts; stored

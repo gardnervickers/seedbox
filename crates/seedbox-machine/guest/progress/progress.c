@@ -40,7 +40,7 @@ static reg_id_t budget_segment;
  * Every block's instrumentation keeps the same length whichever register it
  * uses: fragment sizes decide how the code cache grows, and DynamoRIO's own
  * syscalls for that growth are charged to the guest. */
-enum { BUDGET, SPILL, RESUME, DISPATCH, TLS_WORDS };
+enum { BUDGET, SPILL, RESUME, DISPATCH, ENTRY, TLS_WORDS };
 static uint budget_offset;
 static int segment_field;
 /* Notes mark the instructions during which SCRATCH's application value is only
@@ -126,14 +126,28 @@ static void checkpoint_and_dispatch(void)
 #error Unsupported progress architecture
 #endif
     DR_ASSERT(result > 0);
-    /* Leave through the dispatcher so a pending signal or JIT synchronization
-     * can complete at a safe point. The resumed block charges again: refund
-     * that entry, including when the configured budget is one or UINT32_MAX. */
+    /* The block resumes from its start and charges again: refund that entry,
+     * including when the configured budget is one or UINT32_MAX. */
     ++*budget();
-    dr_mcontext_t machine = { sizeof(machine), DR_MC_ALL };
-    DR_ASSERT(dr_get_mcontext(dr_get_current_drcontext(), &machine));
+    /* A pending signal or JIT synchronization must complete at this safe point,
+     * which the dispatcher provides. When it has nothing to do, entering the
+     * block's fragment directly has the same effect, for a fraction of the cost. */
+    void *context = dr_get_current_drcontext();
+    byte *entry = dr_redirect_entry(context, resume);
+    /* No initializer: the context's SIMD area takes 2 KiB on AArch64, and
+     * zeroing it costs DR's byte-wise memset most of a microsecond. */
+    dr_mcontext_t machine;
+    machine.size = sizeof(machine);
+    machine.flags = entry != NULL ? DR_MC_INTEGER : DR_MC_ALL;
+    DR_ASSERT(dr_get_mcontext(context, &machine));
     /* The exhausted block left before restoring its scratch register. */
     reg_set_value(exhausted_scratch(&machine), &machine, *(reg_t *)(base + slot(SPILL)));
+    if (entry != NULL) {
+        /* The routine restores this context and jumps to the entry. */
+        DR_ASSERT(dr_set_mcontext(context, &machine));
+        *(byte **)(base + slot(ENTRY)) = entry;
+        return;
+    }
     machine.pc = resume;
     dr_redirect_execution(&machine);
     DR_ASSERT(false);
@@ -141,14 +155,18 @@ static void checkpoint_and_dispatch(void)
 
 /* Emit the expensive context-save/call sequence once, outside the code cache.
  * It uses the executing thread's TLS and DR stack, not the emitter's context.
- * It never returns into a fragment that a synchronization may have deleted. */
+ * It goes back into the code cache only at an entry from dr_redirect_entry(),
+ * which DR refuses while a synchronization, flush or signal is pending. */
 static void emit_dispatch(void *context)
 {
     instrlist_t *routine = instrlist_create(context);
     instr_t *end = INSTR_CREATE_label(context);
     instrlist_meta_append(routine, end);
     dr_insert_clean_call_ex(context, routine, end, (void *)checkpoint_and_dispatch,
-        DR_CLEANCALL_READS_APP_CONTEXT | DR_CLEANCALL_ALWAYS_OUT_OF_LINE, 0);
+        DR_CLEANCALL_READS_APP_CONTEXT | DR_CLEANCALL_WRITES_APP_CONTEXT |
+            DR_CLEANCALL_ALWAYS_OUT_OF_LINE, 0);
+    dr_insert_redirect_entry_jump(context, routine, end,
+                                  dr_raw_tls_opnd(context, budget_segment, slot(ENTRY)));
     dispatch_size = dr_page_size();
     dispatch_routine = dr_nonheap_alloc(dispatch_size,
         DR_MEMPROT_READ | DR_MEMPROT_WRITE | DR_MEMPROT_EXEC);
