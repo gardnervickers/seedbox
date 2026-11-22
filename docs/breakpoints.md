@@ -168,11 +168,3 @@ Symbol breakpoints (`module!symbol`) are a later addition. They would go
 through the DynamoRIO client, which already sees every block before it runs,
 so they need no hypervisor debug registers. Their hits would have the same
 shape.
-
-## Order of work
-
-1. Done: several oracle connections.
-2. Done: write-to-file breakpoints, end to end on PV.
-3. Done: `break_on_block_request`, with the held request's in-order
-   continuation on resume.
-4. Done: remove triggers.
