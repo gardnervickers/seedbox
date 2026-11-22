@@ -352,10 +352,12 @@ fn machine_worker_count_never_changes_results() {
 /// 1 ms) must match it. Then a second server on the same state, whose runs
 /// take a stop policy (`SEEDBOX_STOP_POLICY`, which the long suites' CLI
 /// build accepts), runs the definition twice: each run ends its rounds at its
-/// own seeded times, and the two must match each other and write the
-/// baseline's output. Each is stepped through its first quanta, as a
-/// reference run without the policy is, and commits more barriers on the way,
-/// which shows that the policy acted.
+/// own seeded times. Each must match the baseline, whose retained record is
+/// read before its server stops (outcome, witness, full state and fault
+/// history), write the baseline's output, and match the other. Each is
+/// stepped through its first quanta, as a reference run without the policy
+/// is; both commit more barriers on the way than the reference, at different
+/// counts, which shows that the policy acted.
 #[test]
 fn stops_and_quantum_never_change_results() {
     let mut run = Run::new("stops");
@@ -376,11 +378,14 @@ fn stops_and_quantum_never_change_results() {
         }
         // A run stepped a quantum at a time must match too; the barriers its
         // Driver commits on the way are its own.
-        let Some((output, reference)) = run
+        let Some((output, reference, record)) = run
             .oracle("StepInvariance", async {
                 let (stepped, counts) = session.stepped().await?;
                 session.same_results(&baseline, &stepped).await?;
-                Ok((session.logs(&baseline).await?, counts))
+                // The next server cannot compare with this one's runs: it
+                // gets the baseline's output and retained record instead.
+                let record = session.record(&baseline)?;
+                Ok((session.logs(&baseline).await?, counts, record))
             })
             .await
         else {
@@ -403,7 +408,7 @@ fn stops_and_quantum_never_change_results() {
         stopped.document = document;
         run.oracle(
             "StopPolicyInvariance",
-            stopped.stop_invariance(&output, &reference),
+            stopped.stop_invariance((&baseline, &record), &output, &reference),
         )
         .await;
         run.release(stopped.release(&[])).await;

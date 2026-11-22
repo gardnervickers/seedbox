@@ -7,6 +7,7 @@ use seedbox_api::{
     ControlState, EventDelivery, EventKind, ExecutionTermination, InputSource, LogDelivery,
     LogEntry, Phase, PlaybackRate, Simulation, SimulationId, TestVerdict,
 };
+use seedbox_artifacts::record::RunRecord;
 use seedbox_client::Client;
 use seedbox_engine_protocol::host_control::ControlError;
 use seedbox_test::process::Guarded;
@@ -398,6 +399,35 @@ impl Session {
             return Err(format!("{baseline} vs {other}: {comparison:?}"));
         }
         Ok(())
+    }
+
+    /// The retained attempt of a completed run of this session's server.
+    pub fn attempt(&self, id: &SimulationId) -> Result<PathBuf, String> {
+        let mut found = None;
+        for session in std::fs::read_dir(self.state.join("sessions")).map_err(err)? {
+            let attempts = session
+                .map_err(err)?
+                .path()
+                .join(format!("runs/{id}/attempts"));
+            if !attempts.is_dir() {
+                continue;
+            }
+            for attempt in std::fs::read_dir(attempts).map_err(err)? {
+                let attempt = attempt.map_err(err)?.path();
+                if attempt.join("manifest.json").is_file() && found.replace(attempt).is_some() {
+                    return Err(format!("{id}: several retained attempts"));
+                }
+            }
+        }
+        found.ok_or_else(|| format!("{id}: no retained attempt"))
+    }
+
+    /// A completed run's retained record: its outcome and result evidence
+    /// (witness, full state, fault history), checked against its checksum.
+    /// It outlives the server that ran it, which the server's own comparison
+    /// does not.
+    pub fn record(&self, id: &SimulationId) -> Result<RunRecord, String> {
+        seedbox_artifacts::record::inspect(&self.attempt(id)?).map_err(|e| format!("{id}: {e}"))
     }
 
     /// Retained application output in delivery order.
