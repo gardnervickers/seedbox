@@ -43,8 +43,11 @@ same, and it marks instructions with notes rather than allocating labels,
 which keeps DynamoRIO's heap growth the same.
 
 Exhaustion branches to one shared routine instead of emitting a context-save
-sequence in every block. Its clean call puts the scratch register's saved value
-back, charges progress and redirects through DynamoRIO's dispatcher for pending
+sequence in every block. The routine first puts the scratch register's saved
+value back. On ARM it has one entry per register, each reached through its own
+thread-local word, so the register is known from the entry a block took and
+never from register values, which the application controls. Its clean call
+then charges progress and redirects through DynamoRIO's dispatcher for pending
 signals and JIT synchronization; the resumed block's repeated charge is
 refunded. Charge instructions have no application translation and cannot be
 relocation points. Until a dead register is overwritten, a fault in an
