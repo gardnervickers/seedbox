@@ -238,13 +238,18 @@ impl<M> Entry<M> {
             .map(Timestamp::from_nanos)
     }
 
-    /// The machine time a run starting at simulation time `at` begins at.
-    /// A blocked machine woken by its timer starts at the timer's deadline,
-    /// which a fast clock can place before `at`'s own machine time, inside
-    /// that simulation nanosecond: a run covering `at` would have taken the
-    /// timer exactly at its deadline too (C3).
+    /// The machine time a lane's run starting at simulation time `at` begins
+    /// at. A blocked machine woken by its timer starts at the timer's
+    /// deadline, which a fast clock can place before `at`'s own machine time,
+    /// inside that simulation nanosecond: a run covering `at` would have
+    /// taken the timer exactly at its deadline too (C3). A paused machine
+    /// is not woken: it has no lane run, and a zero-budget admission run
+    /// starts at `at`'s machine time (see `batch_views`).
     fn start_time(&self, id: MachineId, at: Timestamp) -> Result<Timestamp, ClockOverflow> {
         let start = self.machine_time(id, at)?;
+        if self.lifecycle.paused() {
+            return Ok(start);
+        }
         Ok(match (self.stopped, self.timer) {
             (
                 StopReason::Blocked {

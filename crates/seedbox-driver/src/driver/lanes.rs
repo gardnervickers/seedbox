@@ -210,7 +210,7 @@ where
             let ids = [id];
             let offered_commands = self.offered_commands(&ids);
             let offered_stops = self.offered_stops(&ids);
-            let (bounds, mut views) = self.batch_views(&ids, start, upto)?;
+            let (bounds, mut views) = self.batch_views(&ids, start, upto, false)?;
             let view = views.pop().expect("one lane view");
             let (machine, job) = self.run_job(view);
             self.workers

@@ -49,31 +49,36 @@ where
     M::Context: 'static,
     M::Error: Send + 'static,
 {
+    /// Give each of `ids` a zero-budget admission run at `now`, the current
+    /// barrier: it takes its due inputs, adopts shared time and makes a due
+    /// timer eligible, and executes nothing.
     pub(super) fn run_batch(
         &mut self,
         ids: &[MachineId],
-        upto: Timestamp,
+        now: Timestamp,
     ) -> Result<(), Error<M::Error>> {
-        self.run_batch_as(ids, upto, None)
+        self.run_batch_as(ids, now, None)
     }
 
-    /// Run a batch. `rebooting` names the operation-local prospective boot of
-    /// a single machine's Reboot admission run: its outputs carry that boot,
-    /// which `Control::admission` commits only after the run is confirmed.
+    /// Run a zero-budget admission batch. `rebooting` names the
+    /// operation-local prospective boot of a single machine's Reboot
+    /// admission run: its outputs carry that boot, which
+    /// `Control::admission` commits only after the run is confirmed.
     pub(super) fn run_batch_as(
         &mut self,
         ids: &[MachineId],
-        upto: Timestamp,
+        now: Timestamp,
         rebooting: Option<u64>,
     ) -> Result<(), Error<M::Error>> {
         if ids.is_empty() {
             return Ok(());
         }
         debug_assert!(rebooting.is_none() || ids.len() == 1);
-        let now = self.now();
+        debug_assert_eq!(now, self.now(), "admission runs happen at the barrier");
+        let upto = now;
         let offered_commands = self.offered_commands(ids);
         let offered_stops = self.offered_stops(ids);
-        let (bounds, views) = self.batch_views(ids, now, upto)?;
+        let (bounds, views) = self.batch_views(ids, now, upto, true)?;
         let reports = self.execute_batch(views, &bounds);
         // Validate each stop in its machine's time base, then convert back.
         // The conversion returns the earliest simulation time whose machine
@@ -136,17 +141,29 @@ where
     /// Map the common barrier into every machine's own time base before
     /// submitting any work: start, bound and due inputs. Inputs that became
     /// due before the last rate change are offered at that change.
+    ///
+    /// An `admission` run has no budget: it starts at `now`'s machine time,
+    /// its bound. Only a lane's run starts at a timer deadline a fast clock
+    /// places inside the nanosecond (`Entry::start_time`); an admission run
+    /// that started there would execute the machine from the deadline to
+    /// the barrier, also while it is paused or after the run has ended.
     pub(super) fn batch_views(
         &self,
         ids: &[MachineId],
         now: Timestamp,
         upto: Timestamp,
+        admission: bool,
     ) -> Result<(BatchBounds, Vec<BatchView>), Error<M::Error>> {
+        debug_assert!(!admission || now == upto);
         let mut bounds = BTreeMap::new();
         let mut views = Vec::with_capacity(ids.len());
         for &id in ids {
             let entry = &self.execution.machines[id.0];
-            let start = entry.start_time(id, now)?;
+            let start = if admission {
+                entry.machine_time(id, now)?
+            } else {
+                entry.start_time(id, now)?
+            };
             let bound = entry.machine_time(id, upto)?;
             let anchor = Timestamp::from_nanos(entry.time.anchor());
             // A run that continues from a barrier nothing needs, with nothing
