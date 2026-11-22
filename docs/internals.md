@@ -54,6 +54,9 @@ value in reported contexts; stored translation tables alone do not.
 TCG budgets QEMU icount steps, not retired instructions: REP I/O costs per iteration plus a final check.
 The TSC and LAPIC timer both count guest nanoseconds, so the guest command line states both rates instead of calibrating them at boot: `tsc_early_khz`, and `lapic_timer_khz` from the TCG kernel's [patch](../crates/seedbox-machine/guest/kernel/tcg-x86_64.patch).
 Idle reports its next virtual timer but cannot jump time itself; the Driver advances the shared clock.
+A run's budget splits a translated block as a timer deadline does, and finds nothing newly pending there:
+timers run between blocks, and an I/O instruction that raises an interrupt ends its block. A run that starts
+where the last stopped, with nothing to deliver, adopts no time, so where runs end leaves no trace.
 A bounded run has no host read timeout; only test-support adds a 600-second stuck-process watchdog.
 The [adapter](../crates/seedbox-machine-tcg/src/machine/tcg.rs) merges frame, console and lifecycle output in occurrence order.
 
@@ -98,11 +101,14 @@ is due one network latency after it, never at the commit that carried it, and qu
 The [Driver](../crates/seedbox-driver/src/driver.rs) assigns fault IDs at admission, never for future overrides.
 Where rounds end is the host's: policy [evidence](../crates/seedbox-driver/src/driver/evidence.rs) holds no quantum,
 commit count or commit time, so evidence at one time is the same under any stops or quantum.
+Tests end rounds at seeded times with a [stop policy](../crates/seedbox-driver/src/driver/stops.rs): scripted
+machines in `tests/driver_stop_policy.rs`, and whole runs through the worker's `SEEDBOX_STOP_POLICY` performance
+parameter, which only a `test-support` worker (the long suites' CLI build) accepts.
 
 ## Machine network delivery
 
 Partitions survive reboots and stack by handle, but do not retract frames already routed.
-A frame stamped T by the round ending at T routes before a partition/heal due at T.
+A frame stamped T routes before a partition/heal due at T.
 Admission-run output after that effect sees the changed policy; zero-budget receive can wake a paused machine.
 A blocked receiver is runnable from a frame's arrival, so rounds end within one network latency of the earliest start of any machine, networked or not, even if it does not wake.
 The [network policy](../crates/seedbox-driver/src/driver/network.rs) checks cuts before random draws and FIFO reservation.
@@ -137,7 +143,7 @@ Lost kernel records fail supervision with an I/O error rather than guessing a vi
 
 Every supervisor serves `/run/seedbox/guest.sock` (and an abstract-namespace twin) and numbers a boot's guest sessions and each session's records from 1; it reports each session that closes, so the ledger stays bounded.
 The kmsg reader that relays OOM victims also relays fatal-signal reports, enabled by `print-fatal-signals`, one per crash; on a machine without `allowCrashes` each is a violation.
-The Driver reduces frames at commit and queues each flush reply one network latency after its flush record, for the same boot only.
+The Driver reduces frames in output order and queues each flush reply one network latency after its flush record, for the same boot only.
 Its [ledger](../crates/seedbox-engine-core/src/properties.rs) keeps first violations, which IDs were required or evaluated, and lost evidence, never a tally; it is Driver checkpoint and policy-evidence state.
 Unmet requirements are read from the final report, so a run's verdict changes only at completion.
 

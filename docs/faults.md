@@ -159,7 +159,7 @@ already drawn its latency and counts for that latency fault, even if the
 machine is then crashed at the hit, and later holds have counted it. The MMIO write
 completes and the machine stops held, exactly as at a breakpoint write: it
 reports the hold as an output, takes inputs without running, and refuses
-capture. The Driver numbers the hit at the barrier that commits that output.
+capture. The Driver numbers the hit in output order, as any breakpoint hit.
 On `resume_break` the request continues when the machine takes the release,
 before the guest runs again, with the arrival it drew: it completes then if
 its due time, counted from its original arrival, has passed, and otherwise at
