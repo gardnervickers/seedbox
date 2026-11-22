@@ -3,6 +3,7 @@ use crate::{Error, Input, Program, Record, Trace, What};
 use seedbox_driver::driver::{Barrier, Checkpoint, Driver, InputKey, StepOutcome};
 use seedbox_engine_protocol::property::Assessment;
 use seedbox_machine::machine::{ExitReason, Machine, Timestamp};
+use std::time::Duration;
 
 /// Steps in a row that may return at the run's time with nothing delivered
 /// before the run counts as stuck: a step can end at the same instant while
@@ -12,8 +13,7 @@ const STALL_LIMIT: u32 = 2;
 /// Why [`Run::advance`] returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stop {
-    /// The run is at the time asked for or just past it: at the first
-    /// barrier the run would have reached without being asked to stop.
+    /// The run is at the time asked for.
     Reached,
     /// The caller's watch asked to stop at this barrier.
     Watched,
@@ -126,30 +126,31 @@ where
         Ok(self.program.extend_pending(inputs, self.now)?)
     }
 
-    /// Run to `until`, delivering each input at the barrier it falls due.
-    ///
-    /// The run stops at the first barrier at or after `until` that it would
-    /// have reached anyway, at most one Driver round past it, never at
-    /// `until` itself. The Driver stamps a guest's effects, such as control
-    /// and property replies, with the round that committed them, so a round
-    /// cut short at an arbitrary time would move every later one and change
-    /// what the machines do. Inputs are delivered at their own times; one
-    /// for a time the run has passed is refused as stale.
+    /// Run to `until` exactly, delivering each input at the barrier it falls
+    /// due. Where a run stops changes nothing its machines do, so stopping
+    /// here and going on is the same run as not stopping. Inputs are
+    /// delivered at their own times; one for a time the run has passed is
+    /// refused as stale.
     pub fn advance(&mut self, until: Timestamp) -> Result<Stop, Error<M::Error>> {
-        self.advance_watching(until, |_, _| false)
+        self.advance_watching(until, None, |_, _| false)
     }
 
-    /// [`Self::advance`], asking `watch` at every barrier whether to stop
-    /// there. It gets the trace and the index of the first record the last
-    /// step added.
+    /// [`Self::advance`], asking `watch` every `stride` of simulated time
+    /// (one Driver quantum when `None`) whether to stop there. Its times
+    /// count from where the call starts, and inputs due at one are delivered
+    /// before it is asked. It gets the trace and the index of the first
+    /// record added since it was last asked.
     pub fn advance_watching(
         &mut self,
         until: Timestamp,
+        stride: Option<Duration>,
         mut watch: impl FnMut(&Trace, usize) -> bool,
     ) -> Result<Stop, Error<M::Error>> {
+        let stride = stride.unwrap_or_else(|| self.driver.quantum());
+        let stride = u64::try_from(stride.as_nanos()).unwrap_or(u64::MAX).max(1);
+        let mut look = self.now.as_nanos().saturating_add(stride);
+        let mut first = self.trace.len();
         let mut stalled = 0;
-        // Inputs due at a barrier are delivered before `watch` sees it, so a
-        // round an input cut is always one the program delivered.
         let mut delivered = false;
         loop {
             if let Some(reason) = self.finished {
@@ -159,16 +160,15 @@ where
             if self.now >= until {
                 return Ok(Stop::Reached);
             }
-            // Only an input cuts a round short; every stop schedule then
-            // sees the same rounds.
             let upto = self
                 .program
                 .next_at()
-                .unwrap_or(Timestamp::from_nanos(u64::MAX));
-            // Time moves toward the caller's bound also while every machine
-            // is idle: the next input, or the caller, is waiting there.
+                .map_or(until, |at| at.min(until))
+                .min(Timestamp::from_nanos(look));
+            // Time moves toward the bound also while every machine is idle:
+            // the next input, the watch or the caller is waiting there.
             let outcome = self.driver.step_toward_external(upto)?;
-            let first = self.trace.take(self.driver.drain_observations().events);
+            self.trace.take(self.driver.drain_observations().events);
             let at = match outcome {
                 StepOutcome::BarrierReached { at } | StepOutcome::Blocked { at } => at,
                 StepOutcome::Finished { at, reason } => {
@@ -192,8 +192,12 @@ where
             }
             self.now = at;
             delivered = self.deliver_due()?;
-            if watch(&self.trace, first) {
-                return Ok(Stop::Watched);
+            if at.as_nanos() >= look {
+                if watch(&self.trace, first) {
+                    return Ok(Stop::Watched);
+                }
+                first = self.trace.len();
+                look = look.saturating_add(stride);
             }
         }
     }
@@ -226,7 +230,6 @@ where
                 handle: None,
             } => barrier.schedule(now, input.key, action).map(|_| true),
             What::Break(name) => barrier.host_break(&name),
-            What::Stop => Ok(true),
         })?;
         if !heard {
             self.missed.push(key);
@@ -327,8 +330,6 @@ impl<S> Branch<S> {
     /// machines did at `until` or later has happened. No input is pending;
     /// `history`'s later ones are dropped, so what follows is this run's own.
     /// To leave out an input due at `until`, rewind to a nanosecond earlier.
-    /// Unless an input already falls due there, the run's program gains a
-    /// [`What::Stop`] at `until`, so the stop is part of the run.
     ///
     /// The replay is checked against `history`: every machine must say and
     /// do the same things at the same times. A difference is
@@ -351,17 +352,12 @@ impl<S> Branch<S> {
         {
             return Err(Error::NotOnHistory);
         }
-        let mut between: Vec<Input> = history.program.delivered()[delivered..]
+        let between: Vec<Input> = history.program.delivered()[delivered..]
             .iter()
             .chain(history.program.pending())
             .filter(|input| input.at <= until)
             .cloned()
             .collect();
-        if until > self.at && !between.iter().any(|input| input.at == until) {
-            let key = InputKey::new(format!("rewind-{}", until.as_nanos()))
-                .expect("a rewind key is a valid input key");
-            between.push(Input::stop(until, key));
-        }
         let mut run = self.restore(world)?;
         run.replace_pending(between)?;
         run.advance(until)?;

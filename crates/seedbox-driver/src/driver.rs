@@ -1113,6 +1113,12 @@ where
         self.step_at(upto, Instant::now())
     }
 
+    /// The quantum: the step of paced playback and the longest round. A host
+    /// setting; where rounds end does not change results.
+    pub fn quantum(&self) -> Duration {
+        Duration::from_nanos(self.execution.quantum_ns)
+    }
+
     /// Step toward a caller-owned future input boundary, even if all machines
     /// are idle or paused individually. Global playback pause/rate and permanent
     /// completion still apply. Time advances only through ordinary Driver
