@@ -15,6 +15,10 @@ A yield only for the run's bound (before the machine's own wake, taking no defer
 interrupt) depends on where the host ends the run, so the [worker](../crates/seedbox-machine-pv/src/machine/pv/worker/mod.rs)
 records nothing for it and advances no reservation epoch; a stopped page publishes the
 machine's wake as its bound, and a run that delivers nothing adopts nothing.
+Two places are easy to miss. Reads before the kernel maps the page count without a
+bound, so at clock setup the guest charges them up to each published bound, yielding
+between runs. And a guest that goes idle exactly at the run's bound blocks there; a
+run ending at the horizon instead would re-enter it for an idle exit of its own.
 
 Some syscalls are not application work at full price. The PV clock leaves the vDSO
 without a clock on both architectures, so time syscalls (`clock_gettime`,

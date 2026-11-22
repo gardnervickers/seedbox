@@ -211,6 +211,43 @@ fn a_yield_only_for_the_runs_bound_leaves_no_trace() {
         assert_eq!(alone.page.word(EXCLUSIVE_EPOCH), 1);
     }
 }
+/// C3: a guest that goes idle exactly at the run's bound blocks there, as it
+/// does when the run would go on. Stopping at the horizon instead would have
+/// the next run enter it again, for an idle exit no other schedule has.
+#[test]
+fn a_guest_idle_at_the_runs_bound_blocks_there() {
+    let start = |vm: &mut Machine<Scripted>| {
+        vm.state.ready = true;
+        vm.state.deadline = Some(30);
+        // The guest has read up to 5 and goes idle there.
+        vm.page.set_word(LAST, 5);
+        vm.native.exits.push_back(idle());
+    };
+    let mut vm = machine();
+    start(&mut vm);
+    assert_eq!(
+        vm.run(0, 5, 1000, false, &[], Vec::new(), &[]).unwrap(),
+        Stop::Blocked(Some(30))
+    );
+    // A later run that delivers nothing does not enter the idle guest.
+    let entries = vm.native.entries;
+    assert_eq!(
+        vm.run(5, 20, 1000, false, &[], Vec::new(), &[]).unwrap(),
+        Stop::Blocked(Some(30))
+    );
+    assert_eq!(vm.native.entries, entries);
+    let mut alone = machine();
+    start(&mut alone);
+    assert_eq!(
+        alone.run(0, 20, 1000, false, &[], Vec::new(), &[]).unwrap(),
+        Stop::Blocked(Some(30))
+    );
+    assert_eq!(vm.state.witness, alone.state.witness);
+    assert_eq!(
+        vm.page.word(EXCLUSIVE_EPOCH),
+        alone.page.word(EXCLUSIVE_EPOCH)
+    );
+}
 /// A yield for the machine's own wake, or to take a deferred interrupt, is
 /// recorded and advances the reservation epoch, without the run's bound.
 #[test]
