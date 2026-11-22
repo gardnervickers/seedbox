@@ -1,7 +1,9 @@
 /* Public PV application-state contract: every taken branch admits a progress
  * checkpoint, while the scratch register, arithmetic flags, stack and SIMD
  * values remain live. A synchronous fault also exposes the restored app state
- * to a signal handler before resuming the same checks. No pacing is involved. */
+ * to a signal handler before resuming the same checks. On ARM64 the fault
+ * comes before its block overwrites x17, so x17 is a dead scratch candidate
+ * there whose value the handler still checks. No pacing is involved. */
 #define _GNU_SOURCE
 #include <signal.h>
 #include <stdint.h>
@@ -22,6 +24,8 @@ static void fault_handler(int signal, siginfo_t *info, void *opaque) {
     context->uc_mcontext.gregs[REG_RIP] += 2; /* ud2 */
 #elif defined(__aarch64__)
     if (context->uc_mcontext.regs[1] != UINT64_C(0x12345678) ||
+        context->uc_mcontext.regs[16] != UINT64_C(0x12345678) ||
+        context->uc_mcontext.regs[17] != UINT64_C(0x12345678) ||
         (context->uc_mcontext.pstate & UINT64_C(0xf0000000)) != UINT64_C(0x90000000))
         context_failure = 1;
     context->uc_mcontext.pc += 4; /* permanently undefined instruction */
@@ -102,13 +106,20 @@ __asm__(
     "mov x8, sp\n"
     "mov x1, #0x5678\n"
     "movk x1, #0x1234, lsl #16\n"
+    "mov x16, x1\n"
+    "mov x17, x1\n"
     "str x1, [sp]\n"
     "str x1, [sp, #24]\n"
     "dup v0.2d, x1\n"
     "mov x9, #30000\n"
     "mov w10, #0x7fffffff\n"
     "adds w10, w10, #1\n"
+    /* A conditional branch always ends a block (an unconditional one to the
+     * next instruction may be elided), so the fault starts the next block. */
+    "cbnz x9, 0f\n"
+    "0:\n"
     ".inst 0\n"
+    "mov x17, x1\n"
     "b 2f\n"
     "1:\n"
     "mov w10, #0x7fffffff\n"
@@ -124,6 +135,10 @@ __asm__(
     "mov x3, #0x5678\n"
     "movk x3, #0x1234, lsl #16\n"
     "cmp x1, x3\n"
+    "b.ne 4f\n"
+    "cmp x16, x3\n"
+    "b.ne 4f\n"
+    "cmp x17, x3\n"
     "b.ne 4f\n"
     "mov x2, sp\n"
     "cmp x2, x8\n"

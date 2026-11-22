@@ -30,15 +30,27 @@ kernel mode, and the charge itself is unchanged.
 The exclusives workload's [CPU-time check](../harness/acceptance/images/exclusives/cputime.c)
 requires compute to accrue user time and fire `ITIMER_VIRTUAL`, and syscalls to stay system time.
 
-Progress instrumentation saves a fixed scratch register in thread-local storage,
-decrements the block budget without changing application flags, and restores the
-register before application execution. Exhaustion branches to one shared routine
-instead of emitting a context-save sequence in every block. Its clean call charges
-progress and redirects through DynamoRIO's dispatcher for pending signals and JIT
-synchronization; the resumed block's repeated charge is refunded. Intermediate
-scratch instructions have no application translation and cannot be relocation
-points. Reconstructed instruction lists also let the client restore the scratch
-value in reported contexts; stored translation tables alone do not.
+Progress instrumentation saves a scratch register in thread-local storage and
+decrements the block budget in it without changing application flags. x86-64
+always uses RCX and restores it before application execution. ARM picks a
+register per block: one the block overwrites before reading it is never
+restored, which keeps a reload off the block's first instructions; otherwise it
+restores a register the block names last or not at all. Every block still
+charges once. The choice must not change simulated time in other ways either:
+DynamoRIO's own syscalls are charged, so the instrumentation keeps the same
+length (a NOP replaces the skipped reload), which keeps code-cache growth the
+same, and it marks instructions with notes rather than allocating labels,
+which keeps DynamoRIO's heap growth the same.
+
+Exhaustion branches to one shared routine instead of emitting a context-save
+sequence in every block. Its clean call puts the scratch register's saved value
+back, charges progress and redirects through DynamoRIO's dispatcher for pending
+signals and JIT synchronization; the resumed block's repeated charge is
+refunded. Charge instructions have no application translation and cannot be
+relocation points. Until a dead register is overwritten, a fault in an
+application instruction must still report its saved value. Reconstructed
+instruction lists let the client restore it in reported contexts; stored
+translation tables alone do not, and the client never asks for them.
 
 ## Reference TCG machine
 
