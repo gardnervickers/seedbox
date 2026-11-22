@@ -21,11 +21,6 @@ pub enum What {
     /// machine has declared does nothing; the trace does not record it, and
     /// `Run::missed` lists the input.
     Break(String),
-    /// Nothing but a stop: the Driver's round ends at this time. A run
-    /// otherwise stops only where it would anyway (see `Run::advance`),
-    /// because cutting a round short changes what follows; a stop in the
-    /// program makes that cut part of the run, reproduced with it.
-    Stop,
 }
 
 /// One timed input. Keys are unique within a program.
@@ -53,14 +48,6 @@ impl Input {
             at,
             key,
             what: What::Break(name.to_owned()),
-        }
-    }
-
-    pub fn stop(at: Timestamp, key: InputKey) -> Self {
-        Self {
-            at,
-            key,
-            what: What::Stop,
         }
     }
 }
