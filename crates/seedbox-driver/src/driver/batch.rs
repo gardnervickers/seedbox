@@ -4,8 +4,8 @@
 use super::*;
 
 /// Each batch machine's start, bound and offered input count, in its own
-/// time base.
-pub(super) type BatchBounds = BTreeMap<MachineId, (Timestamp, Timestamp, usize)>;
+/// time base, and the simulation time its machine times map from.
+pub(super) type BatchBounds = BTreeMap<MachineId, (Timestamp, Timestamp, usize, Timestamp)>;
 
 /// A batch machine's start, bound and due inputs, in its own time base.
 pub(super) type BatchView = (MachineId, Timestamp, Timestamp, VecDeque<Input>);
@@ -81,8 +81,8 @@ where
         // machine time at most the mapped bound maps to at most `upto`.
         let mut accepted = Vec::with_capacity(reports.len());
         for report in reports {
-            let (start, bound, _) = bounds[&report.id];
-            accepted.push(self.accept_run(report, start, bound, now, upto)?);
+            let (start, bound, _, lower) = bounds[&report.id];
+            accepted.push(self.accept_run(report, start, bound, lower, now, upto)?);
         }
         self.confirm_offered_commands(&offered_commands, rebooting)?;
         self.commit_runs(accepted, &offered_stops, rebooting);
@@ -146,9 +146,15 @@ where
         let mut views = Vec::with_capacity(ids.len());
         for &id in ids {
             let entry = &self.execution.machines[id.0];
-            let start = entry.machine_time(id, now)?;
+            let start = entry.start_time(id, now)?;
             let bound = entry.machine_time(id, upto)?;
             let anchor = Timestamp::from_nanos(entry.time.anchor());
+            // A run that continues from a barrier nothing needs, with nothing
+            // delivered, maps from the machine's last shared cut; any other
+            // run starts at a shared cut.
+            let back = self.execution.network.latency_ns().saturating_sub(1);
+            let limit = Timestamp::from_nanos(now.as_nanos().saturating_sub(back));
+            let lower = entry.lower_for(now, limit, self.execution.needed == Some(now));
             let inbox = entry
                 .inbox
                 .iter()
@@ -159,7 +165,7 @@ where
                     })
                 })
                 .collect::<Result<VecDeque<_>, ClockOverflow>>()?;
-            bounds.insert(id, (start, bound, inbox.len()));
+            bounds.insert(id, (start, bound, inbox.len(), lower));
             views.push((id, start, bound, inbox));
         }
         Ok((bounds, views))
@@ -263,12 +269,16 @@ where
     }
 
     /// Validate one run against its machine-time `start` and `bound`, and
-    /// convert its stop and outputs back to simulation time.
+    /// convert its stop and outputs back to simulation time: each output and
+    /// a blocked or exited position to the earliest simulation time at or
+    /// after `lower` that reaches it, a timer to the earliest at or after
+    /// `now`, the run's start.
     pub(super) fn accept_run(
         &self,
         report: RunReport<M::Error>,
         start: Timestamp,
         bound: Timestamp,
+        lower: Timestamp,
         now: Timestamp,
         upto: Timestamp,
     ) -> Result<AcceptedRun, Error<M::Error>> {
@@ -315,7 +325,7 @@ where
         }) {
             return Err(Error::InvalidFrame { id });
         }
-        let simulation = |at| entry.simulation_time(now, at).ok_or(ClockOverflow(id));
+        let simulation = |at| entry.simulation_time(lower, at).ok_or(ClockOverflow(id));
         let (converted, timer) = match stopped {
             StopReason::BoundaryReached => (StopReason::BoundaryReached, None),
             StopReason::Blocked { deadline, .. } => (
@@ -347,7 +357,7 @@ where
             StopReason::BoundaryReached => upto,
             StopReason::Blocked { reached, .. } | StopReason::Exited { reached, .. } => reached,
         };
-        debug_assert!(simulated >= now && simulated <= upto);
+        debug_assert!(simulated >= lower && simulated <= upto);
         Ok(AcceptedRun {
             id,
             reached: simulated,

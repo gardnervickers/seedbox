@@ -58,8 +58,15 @@ fn explicit_disabled_and_noncontroller_calls_poison_without_admission() {
         let mut specs = vec![spec(0, true, vec![]), spec(1, true, vec![])];
         specs[source].sends.push_back((2, call(1, r#""op":"now""#)));
         let mut d = configured(specs, Some(setting), 4);
+        // The call at 2 is committed once no machine can emit before it.
+        let outcome = loop {
+            match d.step(at(10)) {
+                Ok(StepOutcome::BarrierReached { .. }) => {}
+                outcome => break outcome,
+            }
+        };
         assert!(
-            matches!(d.step(at(10)), Err(Error::Control(message)) if message.contains("unauthorized"))
+            matches!(outcome, Err(Error::Control(message)) if message.contains("unauthorized"))
         );
         assert!(matches!(d.step(at(20)), Err(Error::Failed)));
         assert!(!d

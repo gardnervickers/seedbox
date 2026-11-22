@@ -33,6 +33,7 @@ impl<S> Checkpoint<S> {
             stopped,
             playback,
             oracle,
+            needed,
             finishing,
             finished,
             oracle_stops,
@@ -87,6 +88,7 @@ impl<S> Checkpoint<S> {
             stopped,
             playback,
             oracle,
+            needed,
             finishing,
             finished,
             oracle_stops,
@@ -395,6 +397,10 @@ impl Checkpoint<SnapshotReference> {
             "quantum anchor",
         )?;
         require(
+            self.needed.is_none_or(|needed| needed == self.now),
+            "needed barrier before the capture",
+        )?;
+        require(
             self.finishing
                 .is_none_or(|(at, _)| at > self.now && self.finished.is_none())
                 && self.finished.is_none_or(|(at, _)| at <= self.now),
@@ -673,4 +679,4 @@ impl<T: Wire> Wire for Entry<T> {
         })
     }
 }
-wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,quantum_end,machines,events,boundary_index,completed_quanta,quantum_committed,stopped,playback,oracle,finishing,finished,oracle_stops,control,inputs,definitions,network,properties});
+wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,quantum_end,machines,events,boundary_index,completed_quanta,quantum_committed,stopped,playback,oracle,needed,finishing,finished,oracle_stops,control,inputs,definitions,network,properties});

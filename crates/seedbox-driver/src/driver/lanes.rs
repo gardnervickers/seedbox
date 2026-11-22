@@ -166,6 +166,11 @@ where
                 .map(|&index| window.arrivals[index].at);
             let entry = &mut self.execution.machines[id.0];
             let next = entry.next();
+            // A machine whose timer falls inside the simulation nanosecond
+            // it wakes at first runs from the timer's deadline to the end of
+            // that nanosecond, also at a window's end, and only then takes
+            // what arrives in it.
+            let inside = next.is_some() && entry.timer_inside(id);
             if let Some(at) = arrival {
                 if matches!(entry.stopped, StopReason::Exited { .. }) {
                     while let Some(&index) = window.lanes[id.0].front() {
@@ -174,7 +179,7 @@ where
                     }
                     continue;
                 }
-                if next.is_none_or(|start| start >= at) {
+                if next.is_none_or(|start| start > at || start == at && !inside) {
                     // Frames arriving at `at` wait in the inbox for the run
                     // from `at`; a blocked receiver becomes runnable then.
                     while let Some(&index) = window.lanes[id.0].front() {
@@ -196,7 +201,9 @@ where
                     continue;
                 }
             }
-            let Some(start) = next.filter(|&start| start < window.end) else {
+            let Some(start) =
+                next.filter(|&start| start < window.end || start == window.end && inside)
+            else {
                 return Ok(());
             };
             let upto = arrival.map_or(window.end, |at| at.min(window.end));
@@ -230,9 +237,9 @@ where
         run: LaneRun,
     ) -> Result<(), Error<M::Error>> {
         let id = result.id;
-        let (start, bound, offered) = run.bounds[&id];
+        let (start, bound, offered, lower) = run.bounds[&id];
         let report = self.receive_run(result, offered);
-        let accepted = self.accept_run(report, start, bound, run.start, run.upto)?;
+        let accepted = self.accept_run(report, start, bound, lower, run.start, run.upto)?;
         self.confirm_offered_commands(&run.offered_commands, None)?;
         self.commit_runs(vec![accepted], &run.offered_stops, None);
         Ok(())

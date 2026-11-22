@@ -238,6 +238,87 @@ impl<M> Entry<M> {
             .map(Timestamp::from_nanos)
     }
 
+    /// The machine time a run starting at simulation time `at` begins at.
+    /// A blocked machine woken by its timer starts at the timer's deadline,
+    /// which a fast clock can place before `at`'s own machine time, inside
+    /// that simulation nanosecond: a run covering `at` would have taken the
+    /// timer exactly at its deadline too (C3).
+    fn start_time(&self, id: MachineId, at: Timestamp) -> Result<Timestamp, ClockOverflow> {
+        let start = self.machine_time(id, at)?;
+        Ok(match (self.stopped, self.timer) {
+            (
+                StopReason::Blocked {
+                    deadline: Some(due),
+                    ..
+                },
+                Some(timer),
+            ) if due == at => timer.max(self.position).min(start),
+            _ => start,
+        })
+    }
+
+    /// Whether the machine is blocked on a timer whose deadline lies before
+    /// the machine time of the simulation nanosecond it maps to. It runs from
+    /// the deadline to that machine time before anything else due then.
+    fn timer_inside(&self, id: MachineId) -> bool {
+        match (self.stopped, self.timer) {
+            (
+                StopReason::Blocked {
+                    deadline: Some(due),
+                    ..
+                },
+                Some(timer),
+            ) => self
+                .machine_time(id, due)
+                .is_ok_and(|start| timer.max(self.position) < start),
+            _ => false,
+        }
+    }
+
+    /// Whether the machine's next run would only continue from a barrier:
+    /// it reached its bound there and nothing is delivered to it.
+    fn continuing(&self) -> bool {
+        matches!(self.stopped, StopReason::BoundaryReached)
+            && self.timer.is_none()
+            && self.inbox.is_empty()
+    }
+
+    /// The simulation time a run starting at `now` maps machine times from.
+    /// A run that starts at a cut every schedule shares (a needed barrier, a
+    /// wake, an input) maps from `now`. One that only continues from a
+    /// barrier nothing needs maps from the nanosecond before, which a slow
+    /// clock can map to the same machine nanosecond: never before the last
+    /// rate change, nor before `limit`, the earliest time whose consequences,
+    /// one floor later, the run can still commit in time.
+    fn lower_for(&self, now: Timestamp, limit: Timestamp, needed: bool) -> Timestamp {
+        if self.continuing() && !needed {
+            let anchor = Timestamp::from_nanos(self.time.anchor());
+            Timestamp::from_nanos(now.as_nanos().saturating_sub(1))
+                .max(anchor)
+                .max(limit)
+                .min(now)
+        } else {
+            now
+        }
+    }
+
+    /// The earliest simulation time the machine's next run can stamp: its
+    /// next start, or the earliest time at or after its lower limit (see
+    /// `lower_for`) that reaches that start's machine time.
+    fn earliest(&self, id: MachineId, limit: Timestamp, needed: bool) -> Option<Timestamp> {
+        let start = self.next()?;
+        if !self.continuing() {
+            return Some(start);
+        }
+        let lower = self.lower_for(start, limit, needed);
+        Some(
+            self.machine_time(id, start)
+                .ok()
+                .and_then(|machine| self.simulation_time(lower, machine))
+                .map_or(start, |earliest| earliest.min(start)),
+        )
+    }
+
     fn next(&self) -> Option<Timestamp> {
         if self.lifecycle.paused() {
             return None;
@@ -307,6 +388,9 @@ struct ExecutionState<M> {
     failed: bool,
     stopped: bool,
     oracle: MachineId,
+    /// The current barrier, once it is a needed one: every machine is cut
+    /// there in every schedule. Cleared when time moves on.
+    needed: Option<Timestamp>,
     /// The end of the run, one floor after the oracle's terminal output
     /// (C4), until `apply_due` takes it at that time.
     finishing: Option<(Timestamp, ExitReason)>,
@@ -347,12 +431,17 @@ struct ObservationState {
 /// `g(t) = floor(G(t))`. The driver translates at the machine boundary:
 /// - Into the machine: its clock reads `g(now)`, it runs to `g(upto)`, and
 ///   due inputs are offered at `g(at)` (or `g` of the last rate change, if
-///   the input became due before it).
-/// - Out of the machine: an output, `Blocked`/`Exited` position or timer
-///   deadline at machine time `m` maps to the earliest simulation time at or
-///   after the run's start whose `G` reaches `m`. Results are never early;
-///   rounding is to whole nanoseconds. A timer no representable simulation
-///   time reaches never fires. Pending timers are re-converted at a rate change.
+///   the input became due before it). A run woken by its timer starts at the
+///   timer's machine deadline, which a fast clock can place below `g(now)`.
+/// - Out of the machine: a timer deadline at machine time `m` maps to the
+///   earliest simulation time at or after the run's start whose `G` reaches
+///   `m`; an output or `Blocked`/`Exited` position maps likewise, but a run
+///   that only continues from a barrier nothing needs maps from the
+///   nanosecond before its start, so a slow clock's shared machine nanosecond
+///   maps to its first simulation nanosecond whatever barrier fell on the
+///   second. Results are never early; rounding is to whole nanoseconds. A
+///   timer no representable simulation time reaches never fires. Pending
+///   timers are re-converted at a rate change.
 ///
 /// A machine has reached simulation barrier `T` exactly when its machine
 /// position reaches `g(T)`: a machine time `m` maps to at most `T` if and only
@@ -473,7 +562,10 @@ where
     /// publishes it happens, in output publication order, against the network
     /// state at that point of the timeline: a round's commit precedes the
     /// timeline items due at its boundary, and an admission run's commit
-    /// follows the item that caused it. All-ones broadcast reaches every other
+    /// follows the item that caused it. Outputs of one instant commit in
+    /// (machine, emission) order: a barrier nothing needs holds the output at
+    /// or after the earliest time a machine can still emit. All-ones
+    /// broadcast reaches every other
     /// attached machine in identity order, unicast reaches its address's owner,
     /// and any other destination reaches nobody. Each candidate is lost or
     /// delayed by latency plus jitter using streams derived from the sender's
@@ -647,6 +739,7 @@ where
                 failed: false,
                 stopped: false,
                 oracle: MachineId(0),
+                needed: None,
                 finishing: None,
                 finished: None,
                 oracle_stops: BTreeSet::new(),
@@ -1027,9 +1120,10 @@ where
 
     /// Admit, without executing, the zero-time work that still waits at the
     /// current barrier for a machine's next run: frames that arrived for it
-    /// and a timer that came due. Call it once where execution ends, before
-    /// reading final evidence, so that the evidence covers every frame and
-    /// timer due by then, also after completion or a permanent stop.
+    /// and a timer that came due. Output held at the barrier commits first.
+    /// Call it once where execution ends, before reading final evidence, so
+    /// that the evidence covers every output, frame and timer due by then,
+    /// also after completion or a permanent stop.
     pub fn admit_waiting_work(&mut self) -> Result<(), Error<M::Error>> {
         self.check_valid()?;
         let waiting = self
@@ -1040,6 +1134,8 @@ where
             .filter(|(_, entry)| entry.waiting())
             .map(|(index, _)| MachineId(index))
             .collect::<Vec<_>>();
+        let held = self.need_barrier();
+        self.finish_execution(held)?;
         if waiting.is_empty() {
             return Ok(());
         }
@@ -1135,7 +1231,18 @@ where
         }
     }
 
+    /// Commit everything staged: the barrier is a needed one, or nothing can
+    /// emit at the time of any staged output any more.
     fn commit_boundary(&mut self) -> Result<(), Error<M::Error>> {
+        self.commit_before(None)
+    }
+
+    /// Commit the outputs, and the exits, stamped before `watermark`; all of
+    /// them when it is `None`. Later ones stay staged for a later commit: a
+    /// machine that has not passed their time could still emit at it, and
+    /// outputs of one instant are taken in (machine, emission) order (C2).
+    fn commit_before(&mut self, watermark: Option<Timestamp>) -> Result<(), Error<M::Error>> {
+        let before = |at: Timestamp| watermark.is_none_or(|watermark| at < watermark);
         self.execution.boundary_index = self
             .execution
             .boundary_index
@@ -1151,9 +1258,13 @@ where
         }
         let mut outputs = Vec::new();
         for (index, entry) in self.execution.machines.iter_mut().enumerate() {
-            outputs.extend(entry.staged.drain(..).inspect(|output| {
-                debug_assert_eq!(output.machine, MachineId(index));
-            }));
+            let (committed, held): (Vec<_>, Vec<_>) =
+                entry.staged.drain(..).partition(|output| before(output.at));
+            debug_assert!(committed
+                .iter()
+                .all(|output| output.machine == MachineId(index)));
+            outputs.extend(committed);
+            entry.staged = held;
         }
         // Stable sorting preserves each machine's emission order at one time.
         outputs.sort_by_key(|output| (output.at, output.machine));
@@ -1165,7 +1276,9 @@ where
         if self.execution.finished.is_none() && self.execution.finishing.is_none() {
             let terminal = terminal.or_else(|| {
                 match self.execution.machines[self.execution.oracle.0].stopped {
-                    StopReason::Exited { reached, reason } => Some((reached, reason)),
+                    StopReason::Exited { reached, reason } if before(reached) => {
+                        Some((reached, reason))
+                    }
                     _ => None,
                 }
             });
@@ -1184,7 +1297,9 @@ where
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| match entry.stopped {
-                StopReason::Exited { reached, .. } => Some((reached, MachineId(index))),
+                StopReason::Exited { reached, .. } if before(reached) => {
+                    Some((reached, MachineId(index)))
+                }
                 _ => None,
             })
             .collect();
@@ -1233,38 +1348,13 @@ where
         if let Some(reply) = self.reduce_property(output) {
             consequences.push(Consequence::Item(act, Box::new(reply)));
         }
-        let plans = self
-            .execution
-            .control
-            .observe(&mut self.execution.machines, output, act)
-            .map_err(Error::Control)?;
-        consequences.push(Consequence::Plans(plans));
-        let source = match &output.payload {
-            Response::Break { name } => Some(crate::oracle::service::breaks::HitSource::Program(
-                name.clone(),
-            )),
-            &Response::BlockRequestHeld { op, nth } => {
-                Some(crate::oracle::service::breaks::HitSource::BlockRequest { op, nth })
-            }
-            _ => None,
-        };
-        if let Some(source) = source {
-            let display = self.execution.control.display_name(output.machine);
-            let plans = self
-                .execution
-                .control
-                .service
-                .break_hit(
-                    control::Control::source(output.machine),
-                    display,
-                    output.boot,
-                    source,
-                    output.at.as_nanos(),
-                    act.as_nanos(),
-                )
-                .map_err(|failure| Error::Control(failure.message))?;
-            consequences.push(Consequence::Plans(plans));
-        }
+        let plans = Self::observe_output(
+            &mut self.execution.control,
+            &mut self.execution.machines,
+            output,
+            act,
+        )?;
+        consequences.extend(plans.into_iter().map(Consequence::Plans));
         if let Response::SimulationControl { id, payload } = &output.payload {
             if self
                 .execution
@@ -1299,6 +1389,47 @@ where
             ));
         }
         Ok(())
+    }
+
+    /// What control makes of one committed output, acted on at `act`: the
+    /// service's and the lifecycle's observation of it, then a breakpoint
+    /// hit (numbered in committed order). Returns their plans in that order.
+    /// Generic over the machine so that `prepare_input` can project it.
+    fn observe_output<T>(
+        control: &mut control::Control,
+        machines: &mut [Entry<T>],
+        output: &MachineResponse,
+        act: Timestamp,
+    ) -> Result<Vec<Vec<crate::oracle::service::Plan>>, Error<M::Error>> {
+        let mut plans = vec![control
+            .observe(machines, output, act)
+            .map_err(Error::Control)?];
+        let source = match &output.payload {
+            Response::Break { name } => Some(crate::oracle::service::breaks::HitSource::Program(
+                name.clone(),
+            )),
+            &Response::BlockRequestHeld { op, nth } => {
+                Some(crate::oracle::service::breaks::HitSource::BlockRequest { op, nth })
+            }
+            _ => None,
+        };
+        if let Some(source) = source {
+            let display = control.display_name(output.machine);
+            plans.push(
+                control
+                    .service
+                    .break_hit(
+                        control::Control::source(output.machine),
+                        display,
+                        output.boot,
+                        source,
+                        output.at.as_nanos(),
+                        act.as_nanos(),
+                    )
+                    .map_err(|failure| Error::Control(failure.message))?,
+            );
+        }
+        Ok(plans)
     }
 
     /// Fold a machine's exit at `reached` into its lifecycle record, and act
@@ -1588,9 +1719,18 @@ where
         } else {
             boundary
         };
+        if at != initial {
+            self.execution.needed = None;
+        }
         self.execution.clock.set(at.as_nanos());
         if at != initial || ran {
-            self.commit_boundary()?;
+            // A barrier nothing needs commits only what no machine can still
+            // emit before (C2); a needed one commits everything first.
+            if self.barrier_needed(at) {
+                self.commit_boundary()?;
+            } else {
+                self.commit_before(self.watermark())?;
+            }
         }
         if let Some(hold) = self.apply_due(host_now)? {
             return Ok(StepOutcome::held(at, hold));
@@ -1903,10 +2043,80 @@ where
             && self.execution.finishing.is_none()
     }
 
+    /// Whether every schedule cuts every machine at `at`: a timeline item or
+    /// the end of the run is due then, or a frame arrives then for a receiver
+    /// that takes it only at a barrier. At such a barrier everything staged
+    /// commits before what is due (C2).
+    fn barrier_needed(&self, at: Timestamp) -> bool {
+        let receivers = self.lane_receivers();
+        self.execution
+            .events
+            .first_key_value()
+            .is_some_and(|(&due, _)| due == at)
+            || self.execution.finishing.is_some_and(|(end, _)| end == at)
+            || self
+                .execution
+                .network
+                .next_arrival_to(|to| !receivers[to.0])
+                .is_some_and(|arrival| arrival == at.as_nanos())
+    }
+
+    /// The earliest time anything can still emit output: a machine's next
+    /// start, a frame's arrival at a receiver that has not exited, or a
+    /// timeline item. Output stamped before it is final in its order; output
+    /// at or after it may yet be preceded by another machine's. `None` when
+    /// nothing can emit again.
+    fn watermark(&self) -> Option<Timestamp> {
+        let machines = &self.execution.machines;
+        let (limit, needed) = (self.stamp_limit(), self.execution.needed.is_some());
+        let started = machines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| entry.earliest(MachineId(index), limit, needed))
+            .min();
+        let arrival = self
+            .execution
+            .network
+            .next_arrival_to(|to| !matches!(machines[to.0].stopped, StopReason::Exited { .. }))
+            .map(Timestamp::from_nanos);
+        let due = self.execution.events.first_key_value().map(|(&at, _)| at);
+        started.into_iter().chain(arrival).chain(due).min()
+    }
+
+    /// Whether output or an exit waits to be committed.
+    fn holds_output(&self) -> bool {
+        self.execution.machines.iter().any(|entry| {
+            !entry.staged.is_empty()
+                || matches!(entry.stopped, StopReason::Exited { .. })
+                    && entry
+                        .lifecycle
+                        .facts()
+                        .is_ok_and(|facts| !facts.physically_ended)
+        })
+    }
+
+    /// Make the current barrier a needed one: every machine is cut here in
+    /// every schedule, and what is held commits before anything due or
+    /// admitted here (C2).
+    fn need_barrier(&mut self) -> Result<(), Error<M::Error>> {
+        self.execution.needed = Some(self.now());
+        if self.holds_output() {
+            self.commit_boundary()?;
+        }
+        Ok(())
+    }
+
     /// The earliest time a machine can execute in the round: its own next
     /// start, or the arrival of a frame that wakes it inside its lane.
     fn earliest_producer(&self, receivers: &[bool]) -> Option<Timestamp> {
-        let started = self.execution.machines.iter().filter_map(Entry::next).min();
+        let (limit, needed) = (self.stamp_limit(), self.execution.needed.is_some());
+        let started = self
+            .execution
+            .machines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| entry.earliest(MachineId(index), limit, needed))
+            .min();
         let woken = self
             .execution
             .network
@@ -1919,8 +2129,19 @@ where
             })
             .map(Timestamp::from_nanos);
         let earliest = started.into_iter().chain(woken).min()?;
-        debug_assert!(earliest >= self.now(), "eligible producer behind now");
+        debug_assert!(
+            earliest >= self.stamp_limit(),
+            "eligible producer behind now"
+        );
         Some(earliest)
+    }
+
+    /// The earliest time a run starting now may stamp: what it stamps then
+    /// has consequences one floor later, after now. Only a slow clock maps a
+    /// continuing run's machine time before now (see `Entry::lower_for`).
+    fn stamp_limit(&self) -> Timestamp {
+        let back = self.execution.network.latency_ns().saturating_sub(1);
+        Timestamp::from_nanos(self.now().as_nanos().saturating_sub(back))
     }
 
     /// The latest round boundary at which nothing that follows from an
@@ -2236,6 +2457,10 @@ where
         self.check_mutation()?;
         let driver = &mut *self.driver;
         driver.check_valid()?;
+        // The hit is an input admitted here: output held at this barrier
+        // precedes it.
+        let held = driver.need_barrier();
+        driver.finish_execution(held)?;
         let now = driver.now().as_nanos();
         let plans = driver
             .execution

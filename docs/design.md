@@ -28,7 +28,8 @@ frames for a paused or suspended receiver still do. What follows from an output 
 admission, a reply, a released command) is due one network latency after the output, never at
 the round's end, so every runnable machine bounds the round. So is the end of the run: one network
 latency after the oracle's exit, with every machine run to it and its output up to then published.
-Commit orders output by occurrence, not worker completion; worker count cannot change results.
+Commit orders output by occurrence, not worker completion; worker count cannot change results. Output at an
+instant a machine can still reach waits for it, so stops the Driver adds never decide the order of an instant.
 The [Driver](../crates/seedbox-driver/src/driver.rs) owns that bound, not the CPU backends.
 
 ## Checkpoints exclude their observers
