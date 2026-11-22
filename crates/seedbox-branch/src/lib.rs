@@ -17,8 +17,9 @@
 //!
 //! That last holds only if stops and saves change nothing. Saves never do.
 //! [`Run::advance`] stops only where the Driver's rounds end anyway, because
-//! the Driver times a guest's effects by the round that committed them; a
-//! stop that must be exact is a [`What::Stop`] input, part of the program.
+//! where a round ends can still leave a trace in a machine (a PV guest
+//! records the yield at a run's bound); a stop that must be exact is a
+//! [`What::Stop`] input, part of the program.
 //!
 //! [`Run::recover`] and [`Run::judge`] bring a run to a verdict: end what is
 //! in force, tell the oracle to finish, and read the outcome. Everything
