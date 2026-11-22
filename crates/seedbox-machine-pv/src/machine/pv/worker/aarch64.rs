@@ -111,6 +111,12 @@ impl<B: Backend> Machine<B> {
         Ok(())
     }
 
+    /// Whether the guest takes a deferred interrupt at the yield it stopped
+    /// at: one is waiting, and the guest unmasked interrupts to yield.
+    pub(super) fn takes_deferred(&mut self) -> Result<bool> {
+        Ok(self.state.devices.deferred() && self.native.core(PSTATE)? & PSTATE_I == 0)
+    }
+
     /// A semantic guest rendezvous invalidates software exclusive reservations.
     pub(super) fn boundary(&mut self) -> Result<()> {
         let epoch = self

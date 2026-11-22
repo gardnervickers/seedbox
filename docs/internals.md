@@ -11,6 +11,11 @@ Syscall charges sample their price once. Each segment keeps its first clock read
 and interrupt unmask, then charges the remaining ticks together up to the published
 bound. A stopped continuation retains the unpaid charge in guest state.
 
+A yield only for the run's bound (before the machine's own wake, taking no deferred
+interrupt) depends on where the host ends the run, so the [worker](../crates/seedbox-machine-pv/src/machine/pv/worker/mod.rs)
+records nothing for it and advances no reservation epoch; a stopped page publishes the
+machine's wake as its bound, and a run that delivers nothing adopts nothing.
+
 Some syscalls are not application work at full price. The PV clock leaves the vDSO
 without a clock on both architectures, so time syscalls (`clock_gettime`,
 `clock_getres`, `gettimeofday`, and x86 `time`) cost only the clock read they make.
@@ -136,7 +141,7 @@ Unmet requirements are read from the final report, so a run's verdict changes on
 
 Host interruption can clear a hardware reservation without any guest write, making raw store-exclusive failure nondeterministic.
 Translation retains address/value/size/guest epoch and retries physical monitor loss inside the exclusive pair.
-Guest boundaries advance the epoch; watchdog and maintenance exits do not. Value equality alone misses ABA.
+Guest boundaries advance the epoch; watchdog and maintenance exits and bound yields do not. Value equality alone misses ABA.
 The [translator](../vendor/dynamorio/core/arch/aarchxx/mangle.c) and kernel return hook assume one guest CPU.
 
 ## ARM code-cache consistency

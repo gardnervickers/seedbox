@@ -287,18 +287,18 @@ fn port_yield_advances_to_the_deadline_or_run_horizon() {
             }
         );
         assert!(vm.native.responses.iter().all(Option::is_none));
+        use seedbox_machine::machine::execution_evidence::chain;
+        let h = chain::record(
+            &chain::initial(),
+            b'w',
+            8,
+            0,
+            super::super::EVENT_MMIO + 32,
+            3,
+        );
         if deadline.is_none() {
-            use seedbox_machine::machine::execution_evidence::chain;
-            let h = chain::record(
-                &chain::initial(),
-                b'w',
-                8,
-                0,
-                super::super::EVENT_MMIO + 32,
-                3,
-            );
-            let h = chain::record(&h, b'O', 1, 0, YIELD_PORT.into(), 1);
-            assert_eq!(vm.state.witness, chain::record(&h, b'Y', 0, 0, 10, 0));
+            // A yield only for the run's bound leaves no record (C3).
+            assert_eq!(vm.state.witness, h);
         }
     }
 }
@@ -931,6 +931,9 @@ fn shared_virtio_ack_bits_roundtrip_and_host_interrupts_are_invisible() {
         assert_eq!(machine.page.word(VIRTIO_IRQ + 16), 2);
         // Guest accumulates both bits. A host interruption after publication
         // must not consume it; the next semantic exit records the actual word.
+        // That is a yield for the machine's own wake: one only for the run's
+        // bound would leave the word for the next exit (C3).
+        machine.state.deadline = Some(10);
         machine
             .native
             .virtio_publications
