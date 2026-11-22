@@ -416,6 +416,7 @@ where
             observations: ObservationState::default(),
             playback: Playback::from_intent(checkpoint.playback.clone()),
             factory: Box::new(factory),
+            stops: Default::default(),
         })
     }
 }
