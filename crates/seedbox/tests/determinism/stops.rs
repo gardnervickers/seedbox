@@ -1,10 +1,12 @@
 //! Where rounds end and the quantum are host settings: neither may change a
 //! result.
-use crate::session::{err, Session};
+use crate::session::{err, within, Session};
 use crate::trace::{same_output, Record};
 use crate::Outcome;
-use futures_util::StreamExt;
-use seedbox_api::{EventDelivery, SimulationId};
+use seedbox_api::{ControlCommand, SimulationId};
+
+/// Quanta a stepped run takes, one host step each, before it plays to the end.
+const STEPS: usize = 20;
 
 impl Session {
     // ---- QuantumInvariance --------------------------------------------------------
@@ -31,21 +33,19 @@ impl Session {
     /// In a server whose runs take a stop policy, each run ends its rounds at
     /// times seeded by its own output directory, so two runs of the baseline's
     /// definition stop differently from each other and from the Driver's own
-    /// rounds (`rounds` of them in the baseline). They must match each other
-    /// and write the baseline's output.
-    pub async fn stop_invariance(&self, baseline: &[Record], rounds: u64) -> Outcome {
-        let first = self.submit(&self.document, false).await?;
-        let second = self.submit(&self.document, false).await?;
-        self.complete(&first).await?;
-        self.complete(&second).await?;
-        // The policy only adds barriers, so a run it stopped has more.
-        let counts = [
-            self.boundaries(&first).await?,
-            self.boundaries(&second).await?,
-        ];
-        if counts.iter().any(|&count| count <= rounds) || counts[0] == counts[1] {
+    /// rounds, whose barrier counts after each of the first steps are
+    /// `reference`. They must match each other and write the baseline's output.
+    pub async fn stop_invariance(&self, baseline: &[Record], reference: &[u64]) -> Outcome {
+        let (first, first_counts) = self.stepped().await?;
+        let (second, second_counts) = self.stepped().await?;
+        // Without a policy every run commits at the same barriers. A policy
+        // only adds barriers, so one that acted shows more, and two runs
+        // seeded apart show different ones.
+        let more = |counts: &[u64]| counts.last() > reference.last();
+        if !more(&first_counts) || !more(&second_counts) || first_counts == second_counts {
             return Err(format!(
-                "the stop policy did not take effect: {counts:?} barriers against the baseline's {rounds}"
+                "the stop policy did not take effect: barriers after each step \
+                 {first_counts:?} and {second_counts:?}, and the Driver's own {reference:?}"
             ));
         }
         self.same_results(&first, &second).await?;
@@ -57,24 +57,34 @@ impl Session {
         Ok(())
     }
 
-    /// The last barrier position any of a completed run's events names: how
-    /// many times its Driver committed, a host count.
-    pub async fn boundaries(&self, id: &SimulationId) -> Result<u64, String> {
-        let mut stream = self.client.events_with(id, false).await.map_err(err)?;
-        let mut last = 0;
-        while let Some(delivery) = stream.next().await {
-            match delivery.map_err(err)? {
-                EventDelivery::Event { observation, .. } => {
-                    if let Some(position) = observation.position {
-                        last = last.max(position.boundary_index);
+    /// Run the definition paused, step its first [`STEPS`] quanta, then play
+    /// it to the end. Returns the run and how many barriers its Driver had
+    /// committed after each step: a host count, which only a stop policy
+    /// changes.
+    pub async fn stepped(&self) -> Result<(SimulationId, Vec<u64>), String> {
+        let id = self.submit(&self.document, true).await?;
+        self.live(&id).await?;
+        let mut counts = Vec::with_capacity(STEPS);
+        for _ in 0..STEPS {
+            self.control(&id, ControlCommand::Step).await?;
+            // The acknowledgement admits the quantum; it has run once the
+            // worker no longer reports a step in progress.
+            let count = within(120, || format!("{id}: step did not commit"), async {
+                loop {
+                    let state = self.client.playback(&id).await.map_err(err)?.state;
+                    if state.terminal {
+                        return Err(format!("{id} ended within {STEPS} steps"));
+                    }
+                    if !state.stepping {
+                        return Ok(state.position.boundary_index);
                     }
                 }
-                EventDelivery::Closed => break,
-                EventDelivery::Gap { first, last } => {
-                    return Err(format!("{id}: event gap {first}..{last}"));
-                }
-            }
+            })
+            .await?;
+            counts.push(count);
         }
-        Ok(last)
+        self.finish(&id).await?;
+        self.complete(&id).await?;
+        Ok((id, counts))
     }
 }
