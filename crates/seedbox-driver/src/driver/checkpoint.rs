@@ -148,6 +148,16 @@ fn validate<T>(
         return Err("machine suspended at a breakpoint");
     }
     for entry in machines {
+        // A hit held at a barrier nothing needs has not reached the service
+        // yet, but its machine is already suspended.
+        if entry.staged.iter().any(|output| {
+            matches!(
+                output.payload,
+                Response::Break { .. } | Response::BlockRequestHeld { .. }
+            )
+        }) {
+            return Err("machine suspended at a breakpoint");
+        }
         if entry.machine.is_none() || entry.rng.is_none() {
             return Err("machine or RNG is still owned by a worker");
         }
