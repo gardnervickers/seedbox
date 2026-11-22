@@ -325,7 +325,7 @@ pub fn configured(workers: usize, machines: Vec<TestMachine>) -> Driver<TestMach
         definitions[0].clone(),
         definitions[1..].to_vec(),
         Vec::new(),
-        crate::driver::NetworkConfig::default(),
+        super::floor(Duration::from_nanos(10)),
         move |definition| Ok(machines[definition.name.parse::<usize>().unwrap()].clone()),
     )
     .unwrap()

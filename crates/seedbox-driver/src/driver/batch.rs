@@ -84,7 +84,7 @@ where
             let (start, bound, _) = bounds[&report.id];
             accepted.push(self.accept_run(report, start, bound, now, upto)?);
         }
-        self.confirm_offered_commands(&offered_commands, upto, rebooting)?;
+        self.confirm_offered_commands(&offered_commands, rebooting)?;
         self.commit_runs(accepted, &offered_stops, rebooting);
         Ok(())
     }
@@ -359,11 +359,11 @@ where
         })
     }
 
-    /// Confirm every offered guest command the batch consumed from its inbox.
+    /// Confirm every offered guest command the batch consumed from its inbox,
+    /// at the time it was offered.
     pub(super) fn confirm_offered_commands(
         &mut self,
         offered: &[(MachineId, NonZeroU32, Timestamp)],
-        upto: Timestamp,
         rebooting: Option<u64>,
     ) -> Result<(), Error<M::Error>> {
         for &(id, command, at) in offered {
@@ -374,7 +374,7 @@ where
                 let boot = Self::batch_boot(entry, rebooting);
                 self.execution
                     .control
-                    .accepted(id, &mut entry.lifecycle, boot, command, at, upto)
+                    .accepted(id, &mut entry.lifecycle, boot, command, at)
                     .map_err(Error::Control)?;
             }
         }

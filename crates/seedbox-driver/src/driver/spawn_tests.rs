@@ -137,7 +137,7 @@ fn build_prepared(
             .into_iter()
             .map(|n| crate::test_support::spawn_definition(fixture::definition(n)))
             .collect(),
-        crate::driver::NetworkConfig::default(),
+        fixture::floor(Duration::from_nanos(10)),
         move |definition| {
             captured.lock().unwrap().push(definition.name.clone());
             if fail == Some(definition.name.as_str()) {
@@ -302,7 +302,7 @@ fn duplicate_definitions_across_all_lists_fail_before_factories_or_rng() {
                 .into_iter()
                 .map(|n| crate::test_support::spawn_definition(fixture::definition(n)))
                 .collect(),
-            crate::driver::NetworkConfig::default(),
+            fixture::floor(Duration::from_nanos(10)),
             |_| panic!("duplicate invoked machine factory"),
         );
         assert!(matches!(result, Err(Error::DuplicateName(_))));

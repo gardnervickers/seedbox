@@ -16,6 +16,17 @@ pub fn auto_key() -> InputKey {
     InputKey::new(format!("auto-{}", NEXT.fetch_add(1, Ordering::Relaxed))).unwrap()
 }
 
+/// A network floor of one quantum, at most the longest floor (an hour), and
+/// nothing else. What follows from an output is due one floor after it, and
+/// every runnable machine bounds a round by it, so fixtures whose scripts
+/// are timed in nanoseconds use this instead of the default millisecond:
+/// rounds still end at quantum boundaries, and consequences come one quantum
+/// after their output.
+pub fn floor(quantum: std::time::Duration) -> crate::driver::NetworkConfig {
+    let latency = quantum.min(std::time::Duration::from_secs(3600));
+    crate::driver::NetworkConfig::new(latency, std::time::Duration::ZERO, 0).unwrap()
+}
+
 /// A fixed key for tests that correlate events with it.
 pub fn key(text: &str) -> InputKey {
     InputKey::new(text).unwrap()

@@ -34,10 +34,9 @@ where
     }
 
     /// [`Self::write_policy_evidence`] with the fields that record where
-    /// rounds ended written as zero: the quantum end, the round counters and
-    /// each machine lifecycle's last commit time. Everything else is written
-    /// as it stands. Only for comparing runs across stop policies, until
-    /// evidence no longer holds those fields.
+    /// rounds ended written as zero: the quantum end and the round counters.
+    /// Everything else is written as it stands. Only for comparing runs
+    /// across stop policies, until evidence no longer holds those fields.
     #[cfg(any(test, feature = "test-support"))]
     pub fn write_policy_evidence_without_stops(
         &mut self,
@@ -50,11 +49,6 @@ where
             std::mem::take(&mut execution.completed_quanta),
             std::mem::take(&mut execution.quantum_committed),
         );
-        let commits: Vec<u64> = execution
-            .machines
-            .iter_mut()
-            .map(|entry| entry.lifecycle.replace_committed_at(0))
-            .collect();
         let result = execution.write_policy_evidence(output);
         (
             execution.quantum_end,
@@ -62,9 +56,6 @@ where
             execution.completed_quanta,
             execution.quantum_committed,
         ) = rounds;
-        for (entry, at) in execution.machines.iter_mut().zip(commits) {
-            entry.lifecycle.replace_committed_at(at);
-        }
         result
     }
 }

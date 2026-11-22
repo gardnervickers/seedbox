@@ -47,10 +47,11 @@ where
         definition(0),
         others,
         Vec::new(),
-        crate::driver::NetworkConfig::default(),
+        floor(quantum),
         move |_| Ok(machines.next().expect("one fixture per definition")),
     )
 }
+pub(crate) use crate::test_support::floor;
 /// Committed outputs among drained events, in publication order.
 pub(crate) fn outputs(events: &[Event]) -> Vec<MachineResponse> {
     events

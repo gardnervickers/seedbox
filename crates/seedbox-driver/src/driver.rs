@@ -191,6 +191,13 @@ enum Scheduled {
     },
 }
 
+/// What a commit schedules because of one output or exit, held until the
+/// whole commit has been processed and then queued in output order.
+enum Consequence {
+    Item(Timestamp, Box<Scheduled>),
+    Plans(Vec<crate::oracle::service::Plan>),
+}
+
 impl<M> Entry<M> {
     /// Machine `id` joining at `at`, with the identity time mapping from there.
     fn new(id: MachineId, machine: M, seed: u64, at: Timestamp) -> Self {
@@ -1144,61 +1151,6 @@ where
         outputs.sort_by_key(|output| (output.at, output.machine));
         self.route_frames(&outputs)?;
         let terminal = self.oracle_terminal(&outputs);
-        for output in &outputs {
-            self.stage(output.at, EventKind::Output(output.clone()));
-        }
-        let replies = self.reduce_properties(&outputs);
-        let mut plans = vec![];
-        let mut calls = vec![];
-        let now = self.now();
-        let mut hits = vec![];
-        for output in &outputs {
-            let source = match &output.payload {
-                Response::Break { name } => Some(
-                    crate::oracle::service::breaks::HitSource::Program(name.clone()),
-                ),
-                &Response::BlockRequestHeld { op, nth } => {
-                    Some(crate::oracle::service::breaks::HitSource::BlockRequest { op, nth })
-                }
-                _ => None,
-            };
-            if let Some(source) = source {
-                hits.push((output.machine, output.boot, source, output.at));
-            }
-            plans.extend(
-                self.execution
-                    .control
-                    .observe(&mut self.execution.machines, output, now)
-                    .map_err(Error::Control)?,
-            );
-            if let Response::SimulationControl { id, payload } = &output.payload {
-                if self
-                    .execution
-                    .control
-                    .controller
-                    .is_some_and(|setup| setup.controller != Some(output.machine))
-                {
-                    return Err(Error::Control(
-                        "control request from unauthorized machine".into(),
-                    ));
-                }
-                calls.push(control::Event::Call {
-                    source: output.machine,
-                    boot: output.boot,
-                    id: *id,
-                    observed: output.at.as_nanos(),
-                    payload: payload.clone(),
-                });
-            }
-        }
-        for index in 0..self.execution.machines.len() {
-            plans.extend(
-                self.execution
-                    .control
-                    .terminal(&mut self.execution.machines, MachineId(index), now)
-                    .map_err(Error::Control)?,
-            );
-        }
         if self.execution.finished.is_none() {
             let reason = terminal.or_else(|| {
                 match self.execution.machines[self.execution.oracle.0].stopped {
@@ -1210,73 +1162,225 @@ where
                 self.execution.finished = Some((self.now(), reason));
             }
         }
-        // Hits are numbered in committed (at, machine) order.
-        for (machine, boot, source, at) in hits {
-            let display = self.execution.control.display_name(machine);
-            plans.extend(
-                self.execution
-                    .control
-                    .service
-                    .break_hit(
-                        control::Control::source(machine),
-                        display,
-                        boot,
-                        source,
-                        at.as_nanos(),
-                        now.as_nanos(),
-                    )
-                    .map_err(|failure| Error::Control(failure.message))?,
-            );
+        // Outputs, and each machine's exit after its own outputs, take effect
+        // in (time, machine) order, so their facts publish and their
+        // consequences queue in that order however outputs were split
+        // between commits. What follows from each is due one floor after it
+        // (C1); the causal bound commits every output by then.
+        let mut exits: Vec<(Timestamp, MachineId)> = self
+            .execution
+            .machines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| match entry.stopped {
+                StopReason::Exited { reached, .. } => Some((reached, MachineId(index))),
+                _ => None,
+            })
+            .collect();
+        exits.sort();
+        let mut exits = exits.into_iter().peekable();
+        let mut consequences = Vec::new();
+        for output in &outputs {
+            while let Some((reached, id)) =
+                exits.next_if(|&exit| exit < (output.at, output.machine))
+            {
+                self.commit_exit(id, reached, &mut consequences)?;
+            }
+            self.commit_output(output, &mut consequences)?;
+        }
+        for (reached, id) in exits {
+            self.commit_exit(id, reached, &mut consequences)?;
         }
         if self.execution.finished.is_some() {
+            // Once the run has finished nothing more is scheduled.
             let now = self.now().as_nanos();
             self.execution.control.service.cut_off_breaks(now);
         } else {
-            // Replies follow the commit that reduced their requests, behind
-            // every item already due now.
-            if !replies.is_empty() {
-                self.execution
-                    .events
-                    .entry(self.now())
-                    .or_default()
-                    .extend(replies);
+            // Only once the whole commit has been processed, in output order.
+            for consequence in consequences {
+                match consequence {
+                    Consequence::Item(at, item) => self.enqueue(at, *item)?,
+                    Consequence::Plans(plans) => self.control_plans(plans)?,
+                }
             }
-            self.schedule_calls(calls)?;
-            self.control_plans(plans)?;
         }
         self.flush_events()
     }
 
-    /// Reduce committed property evidence in publication order. Returns the
-    /// replies its flush records ask for.
-    fn reduce_properties(&mut self, outputs: &[MachineResponse]) -> Vec<Scheduled> {
-        let mut replies = Vec::new();
-        for output in outputs {
-            let at = output.at.as_nanos();
-            // Boots are counted from zero and fit an incarnation in practice.
-            let incarnation = u32::try_from(output.boot).unwrap_or(u32::MAX);
-            let ledger = &mut self.execution.properties;
-            let name = || self.execution.control.display_name(output.machine);
-            match &output.payload {
-                Response::Property { frame } => {
-                    let reply = ledger.record(&name(), incarnation, at, frame);
-                    if let (Some(reply), Some(session)) = (reply, NonZeroU32::new(frame.session)) {
-                        replies.push(Scheduled::PropertyReply {
-                            machine: output.machine,
-                            boot: output.boot,
-                            session,
-                            payload: serde_json::to_vec(&reply).expect("replies serialize"),
-                        });
-                    }
-                }
-                Response::Crash { report } => ledger.crash(&name(), incarnation, at, report),
-                Response::OutOfMemoryKill { kill } => {
-                    ledger.out_of_memory(&name(), incarnation, at, kill)
-                }
-                _ => {}
-            }
+    /// Publish one committed output and act on it one floor after its time:
+    /// property evidence and its flush reply, the lifecycle record and the
+    /// service, a breakpoint hit (numbered in committed order) and a guest
+    /// call. What it schedules is added to `consequences`.
+    fn commit_output(
+        &mut self,
+        output: &MachineResponse,
+        consequences: &mut Vec<Consequence>,
+    ) -> Result<(), Error<M::Error>> {
+        self.stage(output.at, EventKind::Output(output.clone()));
+        let act = self.consequence_of(output.at)?;
+        if let Some(reply) = self.reduce_property(output) {
+            consequences.push(Consequence::Item(act, Box::new(reply)));
         }
-        replies
+        let plans = self
+            .execution
+            .control
+            .observe(&mut self.execution.machines, output, act)
+            .map_err(Error::Control)?;
+        consequences.push(Consequence::Plans(plans));
+        let source = match &output.payload {
+            Response::Break { name } => Some(crate::oracle::service::breaks::HitSource::Program(
+                name.clone(),
+            )),
+            &Response::BlockRequestHeld { op, nth } => {
+                Some(crate::oracle::service::breaks::HitSource::BlockRequest { op, nth })
+            }
+            _ => None,
+        };
+        if let Some(source) = source {
+            let display = self.execution.control.display_name(output.machine);
+            let plans = self
+                .execution
+                .control
+                .service
+                .break_hit(
+                    control::Control::source(output.machine),
+                    display,
+                    output.boot,
+                    source,
+                    output.at.as_nanos(),
+                    act.as_nanos(),
+                )
+                .map_err(|failure| Error::Control(failure.message))?;
+            consequences.push(Consequence::Plans(plans));
+        }
+        if let Response::SimulationControl { id, payload } = &output.payload {
+            if self
+                .execution
+                .control
+                .controller
+                .is_some_and(|setup| setup.controller != Some(output.machine))
+            {
+                return Err(Error::Control(
+                    "control request from unauthorized machine".into(),
+                ));
+            }
+            // With a controller a call is admitted one control latency after
+            // it, which is never below the floor.
+            let at = match self.execution.control.controller {
+                Some(_) => output
+                    .at
+                    .as_nanos()
+                    .checked_add(self.execution.control.service.reply_latency_ns)
+                    .map(Timestamp::from_nanos)
+                    .ok_or(Error::TimeOverflow)?,
+                None => act,
+            };
+            consequences.push(Consequence::Item(
+                at,
+                Box::new(Scheduled::Control(control::Event::Call {
+                    source: output.machine,
+                    boot: output.boot,
+                    id: *id,
+                    observed: output.at.as_nanos(),
+                    payload: payload.clone(),
+                })),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Fold a machine's exit at `reached` into its lifecycle record, and act
+    /// on its first observation one floor later. What it schedules is added
+    /// to `consequences`.
+    fn commit_exit(
+        &mut self,
+        id: MachineId,
+        reached: Timestamp,
+        consequences: &mut Vec<Consequence>,
+    ) -> Result<(), Error<M::Error>> {
+        let act = self.consequence_of(reached)?;
+        let plans = self
+            .execution
+            .control
+            .terminal(&mut self.execution.machines, id, act)
+            .map_err(Error::Control)?;
+        consequences.push(Consequence::Plans(plans));
+        Ok(())
+    }
+
+    /// When the Driver acts on an output stamped `at`: one network latency
+    /// floor later (C1), never at the commit that happened to carry it.
+    fn consequence_of(&self, at: Timestamp) -> Result<Timestamp, Error<M::Error>> {
+        at.as_nanos()
+            .checked_add(self.execution.network.latency_ns())
+            .map(Timestamp::from_nanos)
+            .ok_or(Error::TimeOverflow)
+    }
+
+    /// Queue `item` on the timeline at `at`, behind items already there. An
+    /// item before now, or before a time some machine has already reached, is
+    /// a scheduler bug: the run fails instead of silently diverging.
+    fn enqueue(&mut self, at: Timestamp, item: Scheduled) -> Result<(), Error<M::Error>> {
+        self.check_causal(at)?;
+        self.execution.events.entry(at).or_default().push_back(item);
+        Ok(())
+    }
+
+    /// Fail with [`Error::Causality`] when something new would be due at
+    /// `at`, before now or before a time some machine has already reached.
+    fn check_causal(&self, at: Timestamp) -> Result<(), Error<M::Error>> {
+        if at < self.now() {
+            return Err(Error::Causality {
+                machine: None,
+                at,
+                reached: self.now(),
+            });
+        }
+        if let Some((index, entry)) = self
+            .execution
+            .machines
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.reached > at)
+        {
+            return Err(Error::Causality {
+                machine: Some(MachineId(index)),
+                at,
+                reached: entry.reached,
+            });
+        }
+        Ok(())
+    }
+
+    /// Reduce one committed output's property evidence, in publication order.
+    /// Returns the reply its flush record asks for.
+    fn reduce_property(&mut self, output: &MachineResponse) -> Option<Scheduled> {
+        let at = output.at.as_nanos();
+        // Boots are counted from zero and fit an incarnation in practice.
+        let incarnation = u32::try_from(output.boot).unwrap_or(u32::MAX);
+        let ledger = &mut self.execution.properties;
+        let name = || self.execution.control.display_name(output.machine);
+        match &output.payload {
+            Response::Property { frame } => {
+                let reply = ledger.record(&name(), incarnation, at, frame)?;
+                let session = NonZeroU32::new(frame.session)?;
+                Some(Scheduled::PropertyReply {
+                    machine: output.machine,
+                    boot: output.boot,
+                    session,
+                    payload: serde_json::to_vec(&reply).expect("replies serialize"),
+                })
+            }
+            Response::Crash { report } => {
+                ledger.crash(&name(), incarnation, at, report);
+                None
+            }
+            Response::OutOfMemoryKill { kill } => {
+                ledger.out_of_memory(&name(), incarnation, at, kill);
+                None
+            }
+            _ => None,
+        }
     }
 
     /// Route committed frames in publication order; they were validated when
@@ -1287,17 +1391,29 @@ where
         let observation_mark = self.observations.frames.mark();
         for output in outputs {
             if let Response::TransmitFrame { bytes } = &output.payload {
+                let machines = &self.execution.machines;
+                // An exited receiver drops its frames whenever they arrive.
+                let reached = |to: MachineId| match machines[to.0].stopped {
+                    StopReason::Exited { .. } => 0,
+                    _ => machines[to.0].reached.as_nanos(),
+                };
                 if let Err(error) = self.execution.network.route_at(
                     position,
                     output.machine,
                     output.at.as_nanos(),
                     bytes,
+                    &reached,
                     &mut self.observations.frames,
                 ) {
                     self.observations.frames.discard(observation_mark);
                     return Err(match error {
                         network::RouteError::ArrivalOverflow => Error::TimeOverflow,
                         network::RouteError::SequenceOverflow => Error::PositionOverflow,
+                        network::RouteError::BeforeReceiver { to, at } => Error::Causality {
+                            machine: Some(to),
+                            at: Timestamp::from_nanos(at),
+                            reached: machines[to.0].reached,
+                        },
                     });
                 }
             }
@@ -1331,36 +1447,6 @@ where
         terminal
     }
 
-    /// Queue committed guest calls on the timeline: at the commit, or after
-    /// the reply latency from their observation with a controller configured.
-    fn schedule_calls(&mut self, calls: Vec<control::Event>) -> Result<(), Error<M::Error>> {
-        for call in calls {
-            let at = match &call {
-                control::Event::Call { observed, .. }
-                    if self.execution.control.controller.is_some() =>
-                {
-                    Timestamp::from_nanos(
-                        observed
-                            .checked_add(self.execution.control.service.reply_latency_ns)
-                            .ok_or(Error::TimeOverflow)?,
-                    )
-                }
-                _ => self.now(),
-            };
-            if at < self.now() {
-                return Err(Error::Control(
-                    "control admission precedes committed boundary".into(),
-                ));
-            }
-            self.execution
-                .events
-                .entry(at)
-                .or_default()
-                .push_back(Scheduled::Control(call));
-        }
-        Ok(())
-    }
-
     fn control_plans(
         &mut self,
         plans: Vec<crate::oracle::service::Plan>,
@@ -1392,20 +1478,15 @@ where
                     let boot = boot.ok_or_else(|| {
                         Error::Control("service reply lacks its caller boot".into())
                     })?;
-                    let at = Timestamp::from_nanos(*at);
-                    if at < self.now() {
-                        return Err(Error::Control("control reply scheduled in the past".into()));
-                    }
-                    self.execution
-                        .events
-                        .entry(at)
-                        .or_default()
-                        .push_back(Scheduled::Control(control::Event::Reply {
+                    self.enqueue(
+                        Timestamp::from_nanos(*at),
+                        Scheduled::Control(control::Event::Reply {
                             target,
                             boot,
                             id: *id,
                             payload: payload.clone(),
-                        }));
+                        }),
+                    )?;
                     continue;
                 }
             }
@@ -1419,14 +1500,7 @@ where
                 | Plan::BreakOnBlockRequest { at, .. } => Timestamp::from_nanos(*at),
                 Plan::Settled(_) => unreachable!(),
             };
-            if at < self.now() {
-                return Err(Error::Control("control plan scheduled in the past".into()));
-            }
-            self.execution
-                .events
-                .entry(at)
-                .or_default()
-                .push_back(Scheduled::Control(control::Event::Plan(plan)));
+            self.enqueue(at, Scheduled::Control(control::Event::Plan(plan)))?;
         }
         Ok(())
     }
@@ -1475,7 +1549,6 @@ where
                     .map(Timestamp::from_nanos),
             )
             .chain(self.causal_bound(&receivers))
-            .chain(self.controller_bound(&receivers))
             .fold(upto.min(self.execution.quantum_end), Timestamp::min);
         // A test's stop policy may end the round earlier, never later.
         let boundary = self.stops.end(self.now(), boundary);
@@ -1812,19 +1885,8 @@ where
 
     /// The earliest time a machine can execute in the round: its own next
     /// start, or the arrival of a frame that wakes it inside its lane.
-    fn earliest_producer(
-        &self,
-        receivers: &[bool],
-        include: impl Fn(MachineId) -> bool,
-    ) -> Option<Timestamp> {
-        let started = self
-            .execution
-            .machines
-            .iter()
-            .enumerate()
-            .filter(|&(index, _)| include(MachineId(index)))
-            .filter_map(|(_, entry)| entry.next())
-            .min();
+    fn earliest_producer(&self, receivers: &[bool]) -> Option<Timestamp> {
+        let started = self.execution.machines.iter().filter_map(Entry::next).min();
         let woken = self
             .execution
             .network
@@ -1834,7 +1896,6 @@ where
                         self.execution.machines[to.0].stopped,
                         StopReason::Exited { .. }
                     )
-                    && include(to)
             })
             .map(Timestamp::from_nanos);
         let earliest = started.into_iter().chain(woken).min()?;
@@ -1842,28 +1903,31 @@ where
         Some(earliest)
     }
 
-    /// The latest round boundary at which no frame sent in the round can be
-    /// due: the earliest time an attached machine can execute, plus latency.
-    /// Positive-budget runs start only at `Entry::next` or at an arrival in
-    /// the receiver's lane, so every send in the round is at or after the
-    /// earliest of them. Blocked machines that no frame wakes, paused and
-    /// exited machines impose none, even with frames arriving for them. An unrepresentable bound imposes none:
-    /// no such arrival exists.
+    /// The latest round boundary at which nothing that follows from an
+    /// output of the round can be due yet: the earliest time any machine can
+    /// execute, or the earliest output staged and not yet committed, plus the
+    /// floor. A frame arrives, and every other consequence is scheduled, at
+    /// least one floor after its output (C1), so a commit is never late for
+    /// either. Positive-budget runs start only at `Entry::next` or at an
+    /// arrival in the receiver's lane, so every output in the round is at or
+    /// after the earliest of them. Blocked machines that no frame wakes,
+    /// paused and exited machines impose none, even with frames arriving for
+    /// them. An unrepresentable bound imposes none: no such consequence exists.
+    ///
+    /// A controller's latency is never below the floor, so this also covers
+    /// the guest calls and replies it times.
     fn causal_bound(&self, receivers: &[bool]) -> Option<Timestamp> {
-        self.earliest_producer(receivers, |id| self.execution.network.attached(id))?
+        let staged = self
+            .execution
+            .machines
+            .iter()
+            .flat_map(|entry| entry.staged.iter().map(|output| output.at));
+        self.earliest_producer(receivers)
+            .into_iter()
+            .chain(staged)
+            .min()?
             .as_nanos()
             .checked_add(self.execution.network.latency_ns())
-            .map(Timestamp::from_nanos)
-    }
-
-    fn controller_bound(&self, receivers: &[bool]) -> Option<Timestamp> {
-        let setup = self.execution.control.controller?;
-        setup.controller?;
-        // Target acknowledgements carry an observed effect time too. Bound all
-        // runnable producers so their effect+latency cannot precede commit.
-        self.earliest_producer(receivers, |_| true)?
-            .as_nanos()
-            .checked_add(setup.latency_ns)
             .map(Timestamp::from_nanos)
     }
 
@@ -2557,6 +2621,14 @@ pub enum Error<E> {
         id: MachineId,
         detail: &'static str,
     },
+    /// A scheduler bug: something new would be due at `at`, before now or
+    /// before the time `machine` has already reached (`reached`). The run
+    /// fails instead of silently diverging.
+    Causality {
+        machine: Option<MachineId>,
+        at: Timestamp,
+        reached: Timestamp,
+    },
     /// A previous step failed; further execution is prohibited.
     Failed,
 }
@@ -2649,6 +2721,17 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
             }
             Self::InvalidBootEnd { id, detail } => {
                 write!(f, "machine {}: invalid boot-end evidence: {detail}", id.0)
+            }
+            Self::Causality {
+                machine,
+                at,
+                reached,
+            } => {
+                write!(f, "scheduler bug: work due at {}", at.as_nanos())?;
+                match machine {
+                    Some(id) => write!(f, " after machine {} reached {}", id.0, reached.as_nanos()),
+                    None => write!(f, " before current time {}", reached.as_nanos()),
+                }
             }
             Self::Failed => f.write_str("driver cannot execute after a failed step"),
         }

@@ -445,11 +445,28 @@ fn unrepresentable_machine_times_fail_or_never_fire() {
         driver.step(at(10)).unwrap(),
         StepOutcome::Blocked { .. }
     ));
-    // A fast busy machine cannot map a bound beyond u64 machine time.
+    // A fast busy machine cannot map a bound beyond u64 machine time. Every
+    // runnable machine bounds a round by one floor after its start, so it
+    // starts closer to the end of time than the longest floor, an hour, and
+    // far enough from it to admit the drift.
+    let start = u64::MAX - 1_000_000_000_000;
     let (machine, _) = Timers::new(&[], true);
-    let mut driver = self::driver(vec![machine], u64::MAX - 1, 1);
-    set_rate(&mut driver, 0, 0, 100_000_000);
-    assert!(driver.step(at(0)).is_ok());
+    let mut machines = vec![machine].into_iter();
+    let mut driver = Driver::new(
+        at(start),
+        Duration::from_nanos(u64::MAX - 1 - start),
+        1,
+        crate::rng::SeededRng::new(0),
+        || Ok(()),
+        fixture::definition(0),
+        vec![],
+        vec![],
+        crate::driver::NetworkConfig::new(Duration::from_secs(3600), Duration::ZERO, 0).unwrap(),
+        move |_| Ok(machines.next().unwrap()),
+    )
+    .unwrap();
+    set_rate(&mut driver, start, 0, 100_000_000);
+    assert!(driver.step(at(start)).is_ok());
     assert!(matches!(
         driver.step(at(u64::MAX - 1)),
         Err(Error::ClockOverflow { id: MachineId(0) })

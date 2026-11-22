@@ -133,12 +133,14 @@ fn flow(d: &Driver<Mock>) -> Connection {
 fn named_host_guest_cross_heals_inspect_numbering_and_typed_counts() {
     let mut specs = initial();
     specs[0].sends.extend([(6,guest(1,json!({"op":"partition","left":[{"machine":"fixture-1"}],"right":[{"machine":"fixture-2"}]}))),(8,guest(2,json!({"op":"inspect"}))),(9,guest(3,json!({"op":"heal","handle":"net"}))),(11,guest(4,json!({"op":"inspect"})))]);
+    // Calls are admitted one floor (10 ns) after they are made, at 16, 18, 19
+    // and 21; the frames and the host shape keep their places between them.
     specs[1].sends.extend([
-        (5, tx(frames::plain(1, 2, 1))),
-        (7, tx(frames::plain(1, 2, 2))),
+        (15, tx(frames::plain(1, 2, 1))),
+        (17, tx(frames::plain(1, 2, 2))),
     ]);
     let mut d = net(specs, setup(32), 2);
-    advance(&mut d, 3);
+    advance(&mut d, 13);
     let mut p = policy(10);
     p.bandwidth_bps = Some(8_000_000_000);
     p.queue_bound_ns = Some(120);
@@ -157,7 +159,7 @@ fn named_host_guest_cross_heals_inspect_numbering_and_typed_counts() {
     let mut events = d.drain_events();
     // Explicit host cuts separate these calls' admission/effect turns; calls
     // emitted together in one positive-budget batch intentionally admit first.
-    for end in [6, 8, 9, 12] {
+    for end in [16, 18, 19, 22] {
         events.extend(advance(&mut d, end));
     }
     let replies = replies(&d);
@@ -340,7 +342,8 @@ fn guest_connection_pages_are_read_only_and_legacy_shaped() {
         .extend((0..35).map(|i| (1, tx(frames::tcp(1, 2, (1000 + i, 80), 7, 0, 2)))));
     specs[0].sends.extend([(3,guest(1,json!({"op":"connections","from":{"machine":"fixture-1"},"to":{"machine":"fixture-2"}}))),(5,guest(2,json!({"op":"connections","from":{"machine":"fixture-1"},"to":{"machine":"fixture-2"},"after":32})))]);
     let mut d = net(specs, setup(0), 2);
-    advance(&mut d, 8);
+    // The calls are admitted one floor (10 ns) after they are made.
+    advance(&mut d, 18);
     let replies = replies(&d);
     assert_eq!(
         replies[&1]["result"]["connections"]
@@ -377,13 +380,16 @@ fn guest_queries_pagination_reincarnation_and_heal_ignore_frame_retention() {
             specs[1]
                 .sends
                 .extend((0..35).map(|i| (1, tx(frames::tcp(1, 2, (1000 + i, 80), 7, 0, 2)))));
+            // Calls are admitted one floor (10 ns) after they are made, at
+            // 13, 14, 15, 19, 21 and 22; these frames fall between the third
+            // and the fourth.
             specs[1].sends.extend([
-                (6, tx(frames::tcp(1, 2, (1000, 80), 8, 1, 0x11))),
-                (8, tx(frames::tcp(1, 2, (1000, 80), 9, 0, 2))),
+                (16, tx(frames::tcp(1, 2, (1000, 80), 8, 1, 0x11))),
+                (18, tx(frames::tcp(1, 2, (1000, 80), 9, 0, 2))),
             ]);
             specs[2]
                 .sends
-                .push_back((7, tx(frames::tcp(2, 1, (80, 1000), 1, 9, 0x11))));
+                .push_back((17, tx(frames::tcp(2, 1, (80, 1000), 1, 9, 0x11))));
             specs[0].sends.extend([
                 (3, guest(1, json!({"op":"connections","from":{"machine":"fixture-1"},"to":{"machine":"fixture-2"}}))),
                 (4, guest(2, json!({"op":"inspect"}))),
@@ -412,7 +418,7 @@ fn guest_queries_pagination_reincarnation_and_heal_ignore_frame_retention() {
                 ),
                 Some("query-shape"),
             );
-            for end in [3, 4, 5, 6, 7, 8, 9, 11, 12, 30] {
+            for end in [13, 14, 15, 16, 17, 18, 19, 21, 22, 30] {
                 advance(&mut d, end);
                 if drain {
                     d.drain_observations();
@@ -469,16 +475,18 @@ fn guest_queries_pagination_reincarnation_and_heal_ignore_frame_retention() {
 #[test]
 fn host_selection_guest_heal_fin_close_reincarnation_and_stale_pn_consumption() {
     let mut specs = initial();
+    // The heal call at 8 is admitted one floor (10 ns) later, at 18: the
+    // frames after it follow that.
     specs[1].sends.extend([
         (1, tx(frames::tcp(1, 2, (1234, 80), 7, 0, 2))),
         (5, tx(frames::tcp(1, 2, (1234, 80), 8, 1, 0x10))),
         (7, tx(frames::tcp(1, 2, (1234, 80), 8, 1, 0x10))),
-        (12, tx(frames::tcp(1, 2, (1234, 80), 8, 1, 0x11))),
-        (16, tx(frames::tcp(1, 2, (1234, 80), 9, 0, 2))),
+        (22, tx(frames::tcp(1, 2, (1234, 80), 8, 1, 0x11))),
+        (26, tx(frames::tcp(1, 2, (1234, 80), 9, 0, 2))),
     ]);
     specs[2]
         .sends
-        .push_back((13, tx(frames::tcp(2, 1, (80, 1234), 1, 9, 0x11))));
+        .push_back((23, tx(frames::tcp(2, 1, (80, 1234), 1, 9, 0x11))));
     specs[0]
         .sends
         .push_back((8, guest(1, json!({"op":"heal","handle":"tcp"}))));
@@ -494,7 +502,7 @@ fn host_selection_guest_heal_fin_close_reincarnation_and_stale_pn_consumption() 
         Some("tcp"),
     );
     let mut events = d.drain_events();
-    events.extend(advance(&mut d, 15));
+    events.extend(advance(&mut d, 25));
     assert!(!d.execution.network.selection_available(&old));
     assert!(d
         .execution
@@ -520,7 +528,7 @@ fn host_selection_guest_heal_fin_close_reincarnation_and_stale_pn_consumption() 
         })
     );
     assert_eq!(replies(&d)[&1]["result"], json!({"matched":2,"dropped":2}));
-    advance(&mut d, 18);
+    advance(&mut d, 28);
     let fresh = flow(&d);
     assert!(fresh.incarnation > old.incarnation);
     schedule(

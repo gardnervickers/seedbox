@@ -3,8 +3,8 @@
 use seedbox_branch::{Branch, Entry, Error, Input, Program, Record, Run, Stop};
 use seedbox_driver::{
     driver::{
-        faults::Engine, Action, Checkpoint, Driver, InputKey, MachineId, MachineState,
-        NetworkConfig, Target, Transition,
+        faults::Engine, Action, Checkpoint, Driver, InputKey, MachineId, MachineState, Target,
+        Transition,
     },
     pv::{CommandResult, Output, Request, Response, SimulationControlId, Stream},
     test_support::definition,
@@ -128,7 +128,7 @@ fn driver(scripts: Scripts) -> Driver<Speaker> {
         names(0),
         (1..scripts.len()).map(names).collect(),
         vec![],
-        NetworkConfig::default(),
+        seedbox_driver::test_support::floor(Duration::from_nanos(10)),
         move |_| {
             Ok(Speaker {
                 script: scripts.next().unwrap(),
@@ -298,9 +298,9 @@ fn a_restored_run_repeats_its_parent_until_its_own_inputs_differ() {
 }
 
 /// The oracle asks at 13 for the server to crash, and the Driver applies a
-/// guest's call at the commit that took it: at the round's end, 20, after
-/// the server's line at 17. Stopping and saving at every nanosecond moves no
-/// round's end, so the line is written; only a stop in the program does.
+/// guest's call one floor (10 ns) after it, at 23, after the server's line at
+/// 17. Stopping and saving at every nanosecond changes nothing, and neither
+/// does a stop in the program.
 #[test]
 fn where_a_run_stops_or_saves_does_not_change_what_its_machines_do() {
     let scripts = || {
@@ -328,12 +328,12 @@ fn where_a_run_stops_or_saves_does_not_change_what_its_machines_do() {
     resumed.advance(at(100)).unwrap();
     assert_eq!(occurrences(&resumed), occurrences(&straight));
 
-    // A stop at 15 in the program ends that round there, so the crash comes
-    // first; it is the program's own, so a replay from boot does the same.
+    // A stop at 15 in the program ends that round there, before the line;
+    // the crash still comes one floor after the call.
     let stop = || vec![Input::stop(at(15), key("stop"))];
     let mut cut = run(scripts(), stop());
     cut.advance(at(100)).unwrap();
-    assert_eq!(lines(&cut), [(5, "boot".to_owned())]);
+    assert_eq!(lines(&cut), lines(&straight));
     let mut again = run(scripts(), stop());
     again.advance(at(100)).unwrap();
     assert_eq!(occurrences(&again), occurrences(&cut));

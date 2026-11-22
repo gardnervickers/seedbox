@@ -78,6 +78,8 @@ A running machine takes those frames and its due timer at the start of its next 
 A paused or suspended receiver admits frames in a zero-budget run. So does a running machine, with its
 due timer, before a later item due then for it and before final evidence is read.
 Plans created by admission append behind existing items; delayed guest replies belong only to the calling boot.
+What follows from a machine's output or exit (a guest call's admission, a reply, a released command, a flush reply)
+is due one network latency after it, never at the commit that carried it, and queues in output order.
 The [Driver](../crates/seedbox-driver/src/driver.rs) assigns fault IDs at admission, never for future overrides.
 
 ## Machine network delivery
@@ -85,7 +87,7 @@ The [Driver](../crates/seedbox-driver/src/driver.rs) assigns fault IDs at admiss
 Partitions survive reboots and stack by handle, but do not retract frames already routed.
 A frame stamped T by the round ending at T routes before a partition/heal due at T.
 Admission-run output after that effect sees the changed policy; zero-budget receive can wake a paused machine.
-A blocked receiver is runnable from a frame's arrival, so rounds end within one network (or controller) latency even if it does not wake.
+A blocked receiver is runnable from a frame's arrival, so rounds end within one network latency of the earliest start of any machine, networked or not, even if it does not wake.
 The [network policy](../crates/seedbox-driver/src/driver/network.rs) checks cuts before random draws and FIFO reservation.
 
 ## Simulated DNS
@@ -118,7 +120,7 @@ Lost kernel records fail supervision with an I/O error rather than guessing a vi
 
 Every supervisor serves `/run/seedbox/guest.sock` (and an abstract-namespace twin) and numbers a boot's guest sessions and each session's records from 1; it reports each session that closes, so the ledger stays bounded.
 The kmsg reader that relays OOM victims also relays fatal-signal reports, enabled by `print-fatal-signals`, one per crash; on a machine without `allowCrashes` each is a violation.
-The Driver reduces frames at commit and queues each flush reply behind items due at that boundary, for the same boot only.
+The Driver reduces frames at commit and queues each flush reply one network latency after its flush record, for the same boot only.
 Its [ledger](../crates/seedbox-engine-core/src/properties.rs) keeps first violations, which IDs were required or evaluated, and lost evidence, never a tally; it is Driver checkpoint and policy-evidence state.
 Unmet requirements are read from the final report, so a run's verdict changes only at completion.
 

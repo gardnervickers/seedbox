@@ -134,7 +134,7 @@ fn make_with(target: Fixture) -> (Driver<Fixture>, MachineId) {
         seedbox_driver::test_support::definition("oracle"),
         vec![seedbox_driver::test_support::definition("target")],
         Vec::new(),
-        seedbox_driver::driver::NetworkConfig::default(),
+        seedbox_driver::test_support::floor(Duration::from_nanos(10)),
         move |definition| {
             Ok(if definition.name == "target" {
                 target.clone()
@@ -393,7 +393,7 @@ fn failed_admission_run_poisons_before_any_response_can_be_observed() {
         seedbox_driver::test_support::definition("oracle"),
         Vec::new(),
         Vec::new(),
-        seedbox_driver::driver::NetworkConfig::default(),
+        seedbox_driver::test_support::floor(Duration::from_nanos(10)),
         |_| {
             Ok(Fixture {
                 fail: true,

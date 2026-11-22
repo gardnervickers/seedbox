@@ -170,7 +170,7 @@ impl World {
                 .map(seedbox_driver::test_support::definition)
                 .into(),
             Vec::new(),
-            seedbox_driver::driver::NetworkConfig::default(),
+            seedbox_driver::test_support::floor(Duration::from_nanos(10)),
             move |definition| {
                 Ok(Fixture {
                     events: match definition.name.as_str() {
@@ -253,8 +253,9 @@ fn positive_sleep_wakes_at_admission_plus_duration_even_if_caller_exits() {
     for crash in [false, true] {
         let mut world = World::new(
             2,
+            // Admitted one floor (10 ns) after it is made.
             vec![call(
-                1,
+                0,
                 1,
                 serde_json::json!({"op":"sleep", "duration_ns":7}),
             )],
@@ -300,7 +301,7 @@ fn positive_sleep_wakes_at_admission_plus_duration_even_if_caller_exits() {
         } else {
             let (received, reply) = world.reply(1);
             assert_eq!(received, 17);
-            assert_eq!(reply["requested_at_ns"], 1);
+            assert_eq!(reply["requested_at_ns"], 0);
             assert_eq!(reply["admitted_at_ns"], 10);
             assert_eq!(reply["effect_at_ns"], 17);
             assert_eq!(reply["replied_at_ns"], 17);
@@ -315,8 +316,9 @@ fn positive_sleep_wakes_at_admission_plus_duration_even_if_caller_exits() {
 fn accepted_peer_effect_finishes_after_its_caller_exits() {
     let mut world = World::new(
         2,
+        // Admitted one floor (10 ns) after it is made.
         vec![call(
-            1,
+            0,
             1,
             serde_json::json!({"op":"stop", "target":{"machine":"peer"}}),
         )],
@@ -341,8 +343,10 @@ fn accepted_peer_effect_finishes_after_its_caller_exits() {
     world.advance(11);
     world.advance(13);
     // The ACK is due at 13: the peer publishes it in its run from there. The
-    // pending stop keeps that round going to its quantum end.
-    assert_eq!(world.step(100), StepOutcome::Blocked { at: at(20) });
+    // pending stop keeps that round going to its quantum end, and the reply
+    // to the crashed caller, due one floor after the ACK, is dropped at 23.
+    assert_eq!(world.step(100), StepOutcome::BarrierReached { at: at(20) });
+    assert_eq!(world.step(100), StepOutcome::Blocked { at: at(23) });
     assert!(world.peer().stopped);
     assert_eq!(world.peer().acknowledgments, [(command, 13)]);
     assert!(world
@@ -350,7 +354,7 @@ fn accepted_peer_effect_finishes_after_its_caller_exits() {
         .with_barrier(|b| Ok(b.machine(world.caller)?.replies.is_empty()))
         .unwrap());
     for _ in 0..3 {
-        assert_eq!(world.step(100), StepOutcome::Blocked { at: at(20) });
+        assert_eq!(world.step(100), StepOutcome::Blocked { at: at(23) });
     }
     assert_eq!(world.peer().commands, [(command, 10)]);
 }
