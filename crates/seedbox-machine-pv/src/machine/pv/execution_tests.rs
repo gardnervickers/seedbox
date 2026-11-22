@@ -205,6 +205,52 @@ fn native_linux_task_initial_fp_encoding_preserves_live_fp_components() {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[test]
+#[ignore = "requires a native PV worker, current PV Linux kernel and fixture clang/linker"]
+fn native_linux_signal_frame_fp_encoding_is_canonical() {
+    // The fixture checks each frame itself: initial or zero components are
+    // recorded absent with initial bytes, live ones stay present and intact.
+    let mut machine = PVMachine::from_boot_inputs(
+        &input("SEEDBOX_PV_WORKER"),
+        fs::read(input("SEEDBOX_PV_KERNEL")).unwrap(),
+        linux::initrd_source(
+            include_str!("../../../../seedbox-machine/src/pv/guest_x86_sigframe_fixture.c").into(),
+        ),
+    )
+    .unwrap();
+    let clock = SimulationClock::new(0);
+    let mut rng = SeededRng::new(7);
+    let guard = seedbox_test_time::HangGuard::new(
+        "positive signal frame checks",
+        std::time::Duration::from_secs(60),
+    );
+    let done = b"SIGFRAME_CANONICAL";
+    for tick in 1..=10_000 {
+        guard
+            .remaining()
+            .expect("signal frame fixture infrastructure hang");
+        let stopped = run(&mut machine, &clock, &mut rng, 1000, tick * 1_000_000, []);
+        clock.set(tick * 1_000_000);
+        let console = String::from_utf8_lossy(&machine.console);
+        assert!(
+            !console.contains("SIGFRAME_ERROR:"),
+            "signal frame FP state is not canonical: {console}"
+        );
+        assert!(
+            !matches!(stopped, StopReason::Exited { .. }),
+            "signal frame fixture exited before its checks: {console}"
+        );
+        if machine.console.windows(done.len()).any(|w| w == done) {
+            return;
+        }
+    }
+    panic!(
+        "signal frame fixture never finished: {}",
+        String::from_utf8_lossy(&machine.console)
+    );
+}
+
 /// Charge two syscall-priced work units through bounded clock reads, writing
 /// one console byte after each, then arm a timer 5000 ns after the last read,
 /// idle, and power off.

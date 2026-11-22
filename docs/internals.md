@@ -278,7 +278,9 @@ The [kernel hook](../crates/seedbox-machine/guest/kernel/arm64/seedbox.c) lets t
 XSAVE buffers can restore identical initial x87, SSE or zero AVX state while differing in presence bits or ignored payload bytes.
 Host interruptions can expose those differences in full-RAM comparison despite equivalent architectural state.
 Kernel task-state saves canonicalize initial/absent x87 and zero/absent YMM and AVX-512; compacted saves also canonicalize initial/absent SSE, preserving noninitial XMM and MXCSR values.
-Standard-format SSE remains unchanged because its MXCSR restore rules differ; direct application XSAVE and some signal paths remain outside the task-save hook.
+Standard-format task SSE remains unchanged because its MXCSR restore rules differ.
+Signal frames hold a standard-format XSAVE of live registers, so the kernel applies the same rules to each frame after writing it; there, SSE is initial only with zero XMM and the default MXCSR.
+Direct application XSAVE remains outside both hooks.
 The [patch](../crates/seedbox-machine/guest/kernel/x86_64/apply.py) changes guest bytes, not the comparison's coverage.
 Live vCPU vector evidence hashes each advertised component's effective value, substituting init state when absent.
 The [digest](../crates/seedbox-machine-pv/src/machine/pv/worker/x86_64/backend/evidence.rs) omits XSTATE_BV, so host FPU save/restore cannot change it.

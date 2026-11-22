@@ -164,13 +164,28 @@ def changes(root):
         "\t/* We should never fault when copying to a kernel buffer: */\n"
         "\tWARN_ON_FPU(err);\n"
         "\tif (!err)\n\t\tseedbox_canonicalize_task_xstate(fpstate);\n"))
+    # A signal frame's XSAVE runs on live registers, so its presence bits
+    # follow XINUSE too. Canonicalize the frame once the kernel has written it.
+    edit("arch/x86/kernel/fpu/xstate.h", lambda s: replace(
+        s,
+        "static inline int xsave_to_user_sigframe(",
+        "int seedbox_canonicalize_sigframe_xstate(struct xregs_state __user *buf);\n\n"
+        "static inline int xsave_to_user_sigframe("))
+    edit("arch/x86/kernel/fpu/signal.c", lambda s: replace(
+        s,
+        "\t\tif (!__clear_user(buf_fx, fpstate->user_size))\n"
+        "\t\t\tgoto retry;\n\t\treturn false;\n\t}\n",
+        "\t\tif (!__clear_user(buf_fx, fpstate->user_size))\n"
+        "\t\t\tgoto retry;\n\t\treturn false;\n\t}\n\n"
+        "\tif (use_xsave() && seedbox_canonicalize_sigframe_xstate(buf_fx))\n"
+        "\t\treturn false;\n"))
     anchor = "\treturn (void *)xsave + xfeature_get_offset(xcomp_bv, xfeature_nr);\n}\n"
     edit("arch/x86/kernel/fpu/xstate.c", lambda s: replace(s, anchor, anchor + """
 /* Seedbox: XINUSE may describe initial state as either present or absent.
  * Canonicalize the saved representation without changing register values.
  * Compacted XRSTOR(S) initializes MXCSR when SSE is absent; standard XRSTOR
  * loads MXCSR independently, so leave standard-format SSE state untouched.
- * This task-save hook does not cover signal frames or application XSAVE.
+ * Signal frames have their own hook below; application XSAVE has none.
  */
 void seedbox_canonicalize_task_xstate(struct fpstate *fpstate)
 {
@@ -219,6 +234,88 @@ void seedbox_canonicalize_task_xstate(struct fpstate *fpstate)
 		else if (!memchr_inv(vector, 0, xstate_sizes[nr]))
 			xsave->header.xfeatures &= ~BIT_ULL(nr);
 	}
+}
+
+/* Whether @size user bytes at @from are zero, or -EFAULT. */
+static int seedbox_user_zero(const void __user *from, unsigned int size)
+{
+	u64 chunk[8];
+	unsigned int n;
+
+	while (size) {
+		n = min_t(unsigned int, size, sizeof(chunk));
+		if (__copy_from_user(chunk, from, n))
+			return -EFAULT;
+		if (memchr_inv(chunk, 0, n))
+			return 0;
+		from += n;
+		size -= n;
+	}
+	return 1;
+}
+
+/* Seedbox: the standard-format XSAVE of a signal frame leaves an absent
+ * component's bytes as the stack held them, and XINUSE decides which are
+ * absent. Apply the task-save rules to the frame. Standard-format SSE counts
+ * as initial only with MXCSR at its default, since the UABI copy of a frame
+ * ignores MXCSR once x87, SSE and YMM are all absent.
+ */
+int seedbox_canonicalize_sigframe_xstate(struct xregs_state __user *buf)
+{
+	struct seedbox_x87 {
+		u16 cwd, swd, twd, fop;
+		u64 rip, rdp;
+	} x87;
+	static const struct seedbox_x87 x87_init = { .cwd = 0x37f };
+	struct fxregs_state __user *legacy = &buf->i387;
+	u64 vectors = current->thread.fpu.fpstate->user_xfeatures &
+		      (XFEATURE_MASK_YMM | XFEATURE_MASK_AVX512);
+	u64 features;
+	unsigned int nr;
+	u32 mxcsr;
+	int zero;
+
+	BUILD_BUG_ON(sizeof(x87) != offsetof(struct fxregs_state, mxcsr));
+	if (__get_user(features, &buf->header.xfeatures) ||
+	    __get_user(mxcsr, &legacy->mxcsr) ||
+	    __copy_from_user(&x87, legacy, sizeof(x87)))
+		return -EFAULT;
+
+	zero = seedbox_user_zero(legacy->st_space, sizeof(legacy->st_space));
+	if (zero < 0)
+		return zero;
+	if (!(features & XFEATURE_MASK_FP)) {
+		if (__copy_to_user(legacy, &x87_init, sizeof(x87_init)) ||
+		    __clear_user(legacy->st_space, sizeof(legacy->st_space)))
+			return -EFAULT;
+	} else if (zero && !memcmp(&x87, &x87_init, sizeof(x87))) {
+		features &= ~XFEATURE_MASK_FP;
+	}
+
+	zero = seedbox_user_zero(legacy->xmm_space, sizeof(legacy->xmm_space));
+	if (zero < 0)
+		return zero;
+	if (!(features & XFEATURE_MASK_SSE)) {
+		if (__clear_user(legacy->xmm_space, sizeof(legacy->xmm_space)))
+			return -EFAULT;
+	} else if (zero && mxcsr == MXCSR_DEFAULT) {
+		features &= ~XFEATURE_MASK_SSE;
+	}
+
+	for_each_extended_xfeature(nr, vectors) {
+		void __user *vector = (void __user *)buf + xstate_offsets[nr];
+
+		zero = seedbox_user_zero(vector, xstate_sizes[nr]);
+		if (zero < 0)
+			return zero;
+		if (!(features & BIT_ULL(nr))) {
+			if (!zero && __clear_user(vector, xstate_sizes[nr]))
+				return -EFAULT;
+		} else if (zero) {
+			features &= ~BIT_ULL(nr);
+		}
+	}
+	return __put_user(features, &buf->header.xfeatures);
 }
 """))
 
