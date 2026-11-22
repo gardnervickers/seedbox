@@ -18,7 +18,9 @@ where
     /// pending scheduled work, unstarted definitions and reduced guest property
     /// evidence. It excludes native
     /// machine bytes, callbacks, worker resources, wall-clock playback pacing,
-    /// already-published host-drain queues and frame-observation buffers.
+    /// already-published host-drain queues and frame-observation buffers, and
+    /// whatever records where rounds ended: the quantum and the commit count.
+    /// Evidence taken at one time is the same under every stop schedule.
     /// No machine callback, native capture, allocation of a checkpoint or RNG
     /// draw occurs. An externally supplied RNG has no cursor evidence and fails.
     /// This is one component of a run witness, not CPU or RAM evidence; callers
@@ -32,32 +34,6 @@ where
     ) -> std::result::Result<(), CodecError> {
         self.driver.execution.write_policy_evidence(output)
     }
-
-    /// [`Self::write_policy_evidence`] with the fields that record where
-    /// rounds ended written as zero: the quantum end and the round counters.
-    /// Everything else is written as it stands. Only for comparing runs
-    /// across stop policies, until evidence no longer holds those fields.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn write_policy_evidence_without_stops(
-        &mut self,
-        output: &mut impl Write,
-    ) -> std::result::Result<(), CodecError> {
-        let execution = &mut self.driver.execution;
-        let rounds = (
-            std::mem::replace(&mut execution.quantum_end, Timestamp::from_nanos(0)),
-            std::mem::take(&mut execution.boundary_index),
-            std::mem::take(&mut execution.completed_quanta),
-            std::mem::take(&mut execution.quantum_committed),
-        );
-        let result = execution.write_policy_evidence(output);
-        (
-            execution.quantum_end,
-            execution.boundary_index,
-            execution.completed_quanta,
-            execution.quantum_committed,
-        ) = rounds;
-        result
-    }
 }
 
 impl<M> ExecutionState<M> {
@@ -69,13 +45,8 @@ impl<M> ExecutionState<M> {
         let ExecutionState {
             clock,
             rng,
-            quantum_ns,
-            quantum_end,
             machines,
             events,
-            boundary_index,
-            completed_quanta,
-            quantum_committed,
             failed,
             stopped,
             oracle,
@@ -90,6 +61,11 @@ impl<M> ExecutionState<M> {
             properties,
             // Declared by the owner, not simulation state.
             engine: _,
+            // Where rounds end is a host choice (C3): the quantum, its anchor
+            // and the commit count change no result, so no evidence holds them.
+            quantum_ns: _,
+            origin: _,
+            boundary_index: _,
         } = self;
         let SimulationRng::Seeded(rng) = rng else {
             return Err(CodecError::Invalid(
@@ -98,11 +74,9 @@ impl<M> ExecutionState<M> {
         };
         output.write_all(b"SBXPOLE\0")?;
         let mut e = Encoder { output };
-        1u32.put(&mut e)?;
+        2u32.put(&mut e)?;
         Timestamp::from_nanos(clock.now()).put(&mut e)?;
         rng.put(&mut e)?;
-        quantum_ns.put(&mut e)?;
-        quantum_end.put(&mut e)?;
         (machines.len() as u64).put(&mut e)?;
         for entry in machines {
             let Entry {
@@ -130,9 +104,6 @@ impl<M> ExecutionState<M> {
             last_ended_published.put(&mut e)?;
         }
         events.put(&mut e)?;
-        boundary_index.put(&mut e)?;
-        completed_quanta.put(&mut e)?;
-        quantum_committed.put(&mut e)?;
         // Temporary host pause/speed/step controls do not change simulated
         // execution identity. Permanent stop is continuing logical authority.
         stopped.put(&mut e)?;
