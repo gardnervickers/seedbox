@@ -404,8 +404,6 @@ impl Publisher {
                 },
             )?,
             EventKind::MachineAdded { .. }
-            | EventKind::TriggerArmed { .. }
-            | EventKind::TriggerResolved { .. }
             | EventKind::ReplyAdmitted { .. }
             | EventKind::BreakHit { .. }
             | EventKind::BreakEnded { .. } => {}

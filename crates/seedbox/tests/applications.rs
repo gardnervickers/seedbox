@@ -61,7 +61,6 @@ applications! {
     runtime => "runtime",
     slow_machine => "slow-machine",
     stale_ack => "stale-ack",
-    triggers => "triggers",
     volume_crash => "volume-crash",
 }
 

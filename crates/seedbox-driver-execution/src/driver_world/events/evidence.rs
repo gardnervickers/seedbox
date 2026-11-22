@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 fn record(names: &BTreeMap<MachineId, String>, record: &FaultRecord) -> Result<Value> {
     let origin = match &record.origin {
         FaultOrigin::Input { key } => json!({"input":key.as_str()}),
-        FaultOrigin::Trigger { trigger } => json!({"trigger":trigger}),
         FaultOrigin::Control { machine, call } => {
             json!({"machine":name(names,*machine)?,"session":call.session.get(),"request":call.request.get()})
         }
@@ -151,21 +150,6 @@ pub(in crate::driver_world) fn encode(
         }
         EventKind::InputRejected { key, rejection } => {
             json!({"type":"input_rejected","key":key.as_str(),"reason":rejection_reason(rejection.reason)?,"detail":rejection.detail})
-        }
-        EventKind::TriggerArmed {
-            trigger,
-            source,
-            target,
-            deadline,
-        } => {
-            json!({"type":"trigger_armed","trigger":trigger,"source":name(names,*source)?,"target":target.map(|id|name(names,id)).transpose()?,"deadline":deadline.as_nanos()})
-        }
-        EventKind::TriggerResolved {
-            trigger,
-            result,
-            fault,
-        } => {
-            json!({"type":"trigger_resolved","trigger":trigger,"result":match result{driver::TriggerResult::Fired=>"fired",driver::TriggerResult::Rejected=>"rejected",driver::TriggerResult::Cancelled=>"cancelled",driver::TriggerResult::Expired=>"expired",driver::TriggerResult::CutOff=>"cut_off"},"fault":fault.map(|id|id.get())})
         }
         EventKind::BreakHit {
             break_id,

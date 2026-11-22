@@ -35,8 +35,6 @@ def decode(value):
     if isinstance(value, dict):
         if "$machine" in value:
             return seedbox.Machine(value["$machine"])
-        if "$bytes" in value:
-            return bytes(value["$bytes"])
         if "$float" in value:
             return float(value["$float"])
         if "$integer" in value:

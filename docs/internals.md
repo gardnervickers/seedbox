@@ -77,7 +77,6 @@ Committed outputs precede due timeline items, then frames, then timer wakeups; s
 A running machine takes those frames and its due timer at the start of its next run, which starts there.
 A paused or suspended receiver admits frames in a zero-budget run. So does a running machine, with its
 due timer, before a later item due then for it and before final evidence is read.
-A trigger found during commit can admit policy before a prequeued host input due at that same boundary.
 Plans created by admission append behind existing items; delayed guest replies belong only to the calling boot.
 The [Driver](../crates/seedbox-driver/src/driver.rs) assigns fault IDs at admission, never for future overrides.
 

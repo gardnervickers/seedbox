@@ -119,7 +119,7 @@ fn checked_admission_and_reply_overflow_poison_without_wrapping() {
 }
 
 #[test]
-fn same_time_input_call_and_trigger_keep_existing_fifo_rules() {
+fn same_time_input_and_reply_keep_existing_fifo_rules() {
     let mut d = configured(
         vec![
             spec(
@@ -127,24 +127,18 @@ fn same_time_input_call_and_trigger_keep_existing_fifo_rules() {
                 true,
                 vec![
                     (0, Response::Ready),
-                    (
-                        0,
-                        call(
-                            1,
-                            r#""op":"arm_trigger","source":{"machine":"fixture-1"},"marker":[120],"match_timeout_ns":20,"fault":{"action":"stop","target":{"machine":"fixture-1"}}"#,
-                        ),
-                    ),
+                    (0, call(1, r#""op":"now""#)),
                     (5, call(2, r#""op":"now""#)),
                 ],
             ),
-            spec(1, true, vec![(0, Response::Ready), (10, output(b"x"))]),
+            spec(1, true, vec![(0, Response::Ready)]),
         ],
         Some(Some(MachineId::ORACLE)),
         4,
     );
     d.schedule(
         at(10),
-        key("host-at-trigger-and-call"),
+        key("host-at-reply"),
         Action::Pause(Target::Machine(MachineId(0))),
     )
     .unwrap();
@@ -165,12 +159,10 @@ fn same_time_input_call_and_trigger_keep_existing_fifo_rules() {
             }
         })
         .collect();
-    assert_eq!(faults.len(), 2);
-    // Committed bytes admit the trigger before timeline processing. Host input
-    // admission then takes its prequeued FIFO turn, but its effect plan appends
-    // behind an already-queued reply. Admission is not effect dispatch.
-    assert!(matches!(faults[0], (time, FaultOrigin::Trigger { .. }) if time == at(10)));
-    assert!(matches!(faults[1], (time, FaultOrigin::Input { .. }) if time == at(10)));
+    assert_eq!(faults.len(), 1);
+    // Host input admission takes its prequeued FIFO turn, but its effect plan
+    // appends behind an already-queued reply. Admission is not effect dispatch.
+    assert!(matches!(faults[0], (time, FaultOrigin::Input { .. }) if time == at(10)));
     let pause = events
         .iter()
         .position(|event| {
@@ -193,14 +185,6 @@ fn same_time_input_call_and_trigger_keep_existing_fifo_rules() {
         .unwrap();
     let host_admission = events.iter().position(|event| event.at == at(10) && matches!(&event.kind, EventKind::FaultAdmitted(record) if matches!(record.origin, FaultOrigin::Input { .. }))).unwrap();
     assert!(host_admission < reply && reply < pause);
-    assert!(states(&d)[1].received.iter().any(|input| input.at == at(10)
-        && matches!(
-            input.payload,
-            crate::pv::Request::Application {
-                command: crate::pv::ApplicationCommand::Stop,
-                ..
-            }
-        )));
     let r = replies(&d);
     assert_eq!(r.len(), 2);
     assert_eq!(r[0].1["admitted_at_ns"], 5);
