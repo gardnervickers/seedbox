@@ -508,10 +508,12 @@ struct ObservationState {
 /// time and make due timers eligible without executing program instructions.
 /// Pausing never freezes the clock or shifts timer deadlines. Retained input
 /// stays queued while paused; crashes still terminate paused machines.
-/// Guest simulation-control calls are interpreted after their full round commits.
-/// Their effects and replies join the same ordered timeline at that barrier;
-/// draining events (`Driver::drain_observations`) only observes them. Accepted control work survives caller
-/// loss. Calls generated together are queued before their generated effects;
+/// A guest simulation-control call is admitted one network latency after the
+/// output that carried it, or one control latency after it with a controller
+/// configured, whichever round committed that output. Its effects and replies
+/// join the same ordered timeline from there; draining events
+/// (`Driver::drain_observations`) only observes them. Accepted control work
+/// survives caller loss. Calls generated together are queued before their generated effects;
 /// dependent operations must await acknowledgment rather than assume that a
 /// concurrent Pause/Resume sequence succeeds. The run ends one network latency
 /// after the oracle's terminal output or exit: what is due before then still
