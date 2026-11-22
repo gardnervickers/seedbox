@@ -1,9 +1,7 @@
 name: PV tests
 
+# TEMPORARY PROBE (never merge): replay-mismatch soak.
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -51,9 +49,15 @@ jobs:
     # A skipped job satisfies the required check; a skipped workflow never does.
     # Run conservatively if change detection fails rather than skipping tests.
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.run_tests == 'true')
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     runs-on: ubuntu-24.04
-    timeout-minutes: 100
+    timeout-minutes: 240
     env:
+      SEEDBOX_TEST_SOAK_MINUTES: '110'
+      SEEDBOX_TEST_SOAK_LANES: '2'
       # Use the Docker engine checked below, even when Podman's socket exists.
       DOCKER_HOST: unix:///var/run/docker.sock
       CARGO_INCREMENTAL: '0'
@@ -157,24 +161,6 @@ jobs:
       - name: Portable prerequisites and PV application acceptance
         if: env.SUITE == 'pv'
         run: nix develop --command bash harness/check.sh linux-apps
-      # linux-apps runs no ignored native driver tests, so run the x86_64 KVM
-      # disk fault and block request breakpoint cases here.
-      - name: Native PV disk faults and block request breakpoints
-        if: env.SUITE == 'pv'
-        run: |
-          seedbox_flake="$(bash tools/dev-flake.sh)?submodules=1"
-          inputs=$(nix build --impure --no-link --print-out-paths \
-            --file nix/build-inputs.nix --argstr flake "$seedbox_flake" \
-            --arg names '[ "machinePvAssets" "machinePvTestFixtures" ]')
-          nix develop --command cargo build --locked -p seedbox-machine-pv --bin seedbox-pv-worker
-          export SEEDBOX_PV_WORKER=$PWD/target/debug/seedbox-pv-worker
-          export SEEDBOX_PV_ASSETS=$inputs/machinePvAssets
-          export SEEDBOX_PV_DISK_PROBE=$inputs/machinePvTestFixtures/bin/disk-probe
-          export SEEDBOX_PV_DISK_IMAGE=$inputs/machinePvTestFixtures/disk/ext4.img
-          nix develop --command cargo test --locked -p seedbox-driver --test native_driver -- \
-            --ignored --test-threads 1 pv_device_faults pv_block_request_breakpoint
-          nix develop --command cargo test --locked -p seedbox-machine-pv --lib -- \
-            --ignored faults_and_holds_outlive
       - name: Native TCG machine and public-service acceptance
         if: env.SUITE == 'tcg'
         run: nix develop --command bash harness/check-machine-tcg.sh --skip-portable
@@ -185,7 +171,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: ${{ env.SUITE }}-results-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ env.SUITE }}-results-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slot }}
           path: target/pv-artifacts/
           retention-days: 7
       - name: Exclude test state from the Cargo cache
@@ -194,17 +180,3 @@ jobs:
         # so remove root-owned VM state and per-run reports before its post step.
         run: sudo rm -rf -- target/check-reports target/pv-artifacts
 
-  # The TCG suite alone needs most of the time limit, so it runs beside the
-  # PV job on its own runner. It needs neither KVM nor an image engine.
-  tcg:
-    needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.run_tests == 'true')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 100
-    env:
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      CARGO_PROFILE_RELEASE_DEBUG: '0'
-      SUITE: tcg
-    steps: *steps

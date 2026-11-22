@@ -567,3 +567,195 @@ esac
         }
     }
 }
+
+/// TEMPORARY PROBE (never merge): repeat workloads' fresh same-seed run and
+/// replay in parallel lanes until a deadline, tallying mismatches instead of
+/// stopping, and print the offline state diff of every mismatching pair.
+#[test]
+fn replay_soak() {
+    let Some(minutes) = std::env::var("SEEDBOX_TEST_SOAK_MINUTES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return;
+    };
+    let lanes = std::env::var("SEEDBOX_TEST_SOAK_LANES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(2);
+    let workloads: Vec<String> = std::env::var("SEEDBOX_TEST_SOAK_WORKLOADS")
+        .unwrap_or_else(|_| "properties,profile".into())
+        .split(',')
+        .map(str::to_owned)
+        .collect();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(minutes * 60);
+    let tally = std::sync::Mutex::new(Vec::<(String, String, &'static str)>::new());
+    std::thread::scope(|scope| {
+        for lane in 0..lanes {
+            let (tally, workloads) = (&tally, &workloads);
+            scope.spawn(move || {
+                let mut round = 0usize;
+                while std::time::Instant::now() < deadline {
+                    let name = &workloads[(round + lane) % workloads.len()];
+                    let path = workload(name);
+                    let path = path.to_str().unwrap();
+                    let label = format!("{name}-l{lane}-r{round}");
+                    round += 1;
+                    with_server("soak", &label, |cli, directory, state| {
+                        let verdicts = soak_round(cli, directory, state, &label, path);
+                        tally.lock().unwrap().extend(
+                            verdicts
+                                .into_iter()
+                                .map(|(kind, verdict)| (label.clone(), kind, verdict)),
+                        );
+                        Ok(())
+                    });
+                }
+            });
+        }
+    });
+    let tally = tally.into_inner().unwrap();
+    let bad: Vec<_> = tally.iter().filter(|(_, _, v)| *v != "MATCH").collect();
+    println!(
+        "SOAK TOTAL {} comparisons, {} not MATCH: {bad:?}",
+        tally.len(),
+        bad.len()
+    );
+    assert!(bad.iter().all(|(_, _, v)| *v != "MISMATCH"));
+}
+
+fn soak_round(
+    cli: &Path,
+    directory: &Path,
+    state: &Path,
+    label: &str,
+    workload: &str,
+) -> Vec<(String, &'static str)> {
+    let lenient = |name: &str, args: &[&str]| -> String {
+        invoke(cli, directory, state, name, args).unwrap_or_else(|_| {
+            fs::read_to_string(directory.join(format!("{name}.log"))).unwrap_or_default()
+        })
+    };
+    let first_output = lenient("first", &["run", workload, "--wall-time", "30m"]);
+    let Ok(first) = simulation_id(&first_output).map(str::to_owned) else {
+        println!("SOAK {label} first did not pass: {}", first_output.trim());
+        return vec![("first".into(), "ERROR")];
+    };
+    let described = lenient(
+        "describe",
+        &["show", "--view", "definition", &first, "--json"],
+    );
+    let Some(seed) = serde_json::from_str::<seedbox_api::Simulation>(&described)
+        .ok()
+        .and_then(|resource| resource.spec.seed)
+        .map(|seed| seed.to_string())
+    else {
+        println!("SOAK {label} no seed: {}", described.trim());
+        return vec![("describe".into(), "ERROR")];
+    };
+    let second_output = lenient(
+        "second",
+        &["run", workload, "--seed", &seed, "--wall-time", "30m"],
+    );
+    let mut verdicts = Vec::new();
+    match simulation_id(&second_output) {
+        Ok(second) => {
+            let fresh = lenient("compare-fresh", &["compare", &first, second, "--json"]);
+            let verdict = soak_verdict(&fresh);
+            println!("SOAK {label} seed {seed} fresh {verdict}");
+            if verdict != "MATCH" {
+                println!("SOAK {label} fresh compare: {}", fresh.trim());
+                soak_diff(state, label, "fresh", &first, second);
+            }
+            verdicts.push(("fresh".into(), verdict));
+        }
+        Err(_) => {
+            println!("SOAK {label} second did not pass: {}", second_output.trim());
+            verdicts.push(("second".into(), "ERROR"));
+        }
+    }
+    let replay = lenient("replay", &["replay", &first, "--wall-time", "30m"]);
+    let replayed = replay.lines().find_map(|line| {
+        line.strip_prefix("MATCH: ")
+            .or_else(|| line.strip_prefix("MISMATCH: "))
+    });
+    let verdict = if replay.lines().any(|line| line.starts_with("MATCH: ")) {
+        "MATCH"
+    } else if replayed.is_some() {
+        "MISMATCH"
+    } else {
+        "ERROR"
+    };
+    println!("SOAK {label} seed {seed} replay {verdict}");
+    if verdict != "MATCH" {
+        println!("SOAK {label} replay output: {}", replay.trim());
+        if let Some(replayed) = replayed {
+            let compared = lenient("compare-replay", &["compare", &first, replayed, "--json"]);
+            println!("SOAK {label} replay compare: {}", compared.trim());
+            soak_diff(state, label, "replay", &first, replayed);
+        }
+    }
+    verdicts.push(("replay".into(), verdict));
+    verdicts
+}
+
+fn soak_verdict(compare: &str) -> &'static str {
+    match serde_json::from_str::<seedbox_api::SimulationComparison>(compare) {
+        Ok(c) if c.status == seedbox_api::ComparisonStatus::Match => "MATCH",
+        Ok(c) if c.status == seedbox_api::ComparisonStatus::Mismatch => "MISMATCH",
+        Ok(_) => "NOT_COMPARABLE",
+        Err(_) => "ERROR",
+    }
+}
+
+fn soak_attempt(state: &Path, id: &str) -> Option<std::path::PathBuf> {
+    for session in fs::read_dir(state.join("sessions")).ok()? {
+        let attempts = session.ok()?.path().join("runs").join(id).join("attempts");
+        if let Ok(entries) = fs::read_dir(&attempts) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    return Some(entry.path());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn soak_diff(state: &Path, label: &str, kind: &str, a: &str, b: &str) {
+    let (Some(left), Some(right)) = (soak_attempt(state, a), soak_attempt(state, b)) else {
+        println!("SOAK {label} {kind} diff: attempts not found");
+        return;
+    };
+    let show = |result: Result<String, String>| result.unwrap_or_else(|e| format!("error: {e}"));
+    let report = show(
+        seedbox_application::diff::diff(&left, &right)
+            .map_err(|e| e.to_string())
+            .and_then(|r| serde_json::to_string(&r).map_err(|e| e.to_string())),
+    );
+    println!("SOAK {label} {kind} diff: {}", &report[..report.len().min(200_000)]);
+    let pages = show(
+        seedbox_application::diff::replay_ram_pages(&left, &right)
+            .map_err(|e| e.to_string())
+            .and_then(|r| serde_json::to_string(&r).map_err(|e| e.to_string())),
+    );
+    println!("SOAK {label} {kind} pages: {}", &pages[..pages.len().min(200_000)]);
+    // List the attempt files so a later probe knows what is retained.
+    for (side, dir) in [("a", &left), ("b", &right)] {
+        let mut names = Vec::new();
+        let mut stack = vec![dir.clone()];
+        while let Some(path) = stack.pop() {
+            for entry in fs::read_dir(&path).into_iter().flatten().flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    names.push(format!("{}={size}", p.strip_prefix(dir).unwrap().display()));
+                }
+            }
+        }
+        names.sort();
+        println!("SOAK {label} {kind} files {side}: {names:?}");
+    }
+}
