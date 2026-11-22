@@ -11,6 +11,11 @@
 //! timers before executing. No instructions execute during the elapsed gap;
 //! an overdue timer becomes deliverable at the adopted time. Shared time may
 //! lag local progress while the driver brings other machines to the same barrier.
+//! A run that starts where the last one stopped, with nothing to deliver,
+//! adopts nothing and draws nothing. Its budget splits a translated block as a
+//! timer deadline does, and the split finds no new interrupt: timers run only
+//! between blocks, and an I/O instruction that raises one ends its block. So
+//! where runs end leaves no trace in the guest or its witness.
 //!
 //! Work is priced in QEMU icount steps, not hardware retirement. Ordinary
 //! instructions and translator-raised exceptions such as `ud2` cost one step.
@@ -1370,6 +1375,9 @@ mod execution_tests;
 
 #[cfg(test)]
 mod network_unit_tests;
+
+#[cfg(test)]
+mod stop_tests;
 
 /// Explicit fixture-only construction and stopped evidence for retained scenarios.
 /// These helpers are absent unless `test-support` is enabled; they never export
