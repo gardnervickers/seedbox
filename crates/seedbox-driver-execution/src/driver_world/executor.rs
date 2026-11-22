@@ -24,9 +24,19 @@ pub struct DriverExecutor {
     runtime: Option<super::binding::Binding>,
     environment: Vec<(OsString, OsString)>,
     session_lease: Option<PathBuf>,
+    /// Seed of a host stop policy for the worker's Driver (see
+    /// [`STOP_POLICY`]).
+    stop_policy: Option<String>,
     #[cfg(feature = "worker-failure")]
     failure_test: Option<(PathBuf, crate::process_lifetime::WorkerFailureInjector)>,
 }
+/// Performance parameter, and launch environment variable, naming the seed of
+/// a stop policy: the worker's Driver ends rounds at seeded times instead of
+/// its own, which must change no result (`seedbox_driver::test_support::
+/// StopPolicy`). Whole-run tests use it to check that a real run does not
+/// depend on where its rounds end. Only a worker built with `test-support`
+/// takes it; any other refuses the run, so a test never passes without it.
+pub const STOP_POLICY: &str = "SEEDBOX_STOP_POLICY";
 impl DriverExecutor {
     /// Test-only monitor override and original-worker injection. `monitor` must
     /// dispatch the real process_lifetime monitor/anchor compiled with worker-failure
@@ -60,6 +70,7 @@ impl DriverExecutor {
             runtime: None,
             environment: vec![],
             session_lease: None,
+            stop_policy: None,
             #[cfg(feature = "worker-failure")]
             failure_test: None,
         })
@@ -113,7 +124,8 @@ impl DriverExecutor {
     /// `None` is only for sessionless/offline callers. No path is inferred or
     /// environment discovered by this library. These are transient host inputs,
     /// never retained simulation metadata. Without this builder the environment
-    /// is empty and no session is borrowed.
+    /// is empty and no session is borrowed. A [`STOP_POLICY`] seed in
+    /// `environment` selects a stop policy, as [`Self::with_stop_policy`] does.
     // The monitor crosses a process boundary; ambient inheritance or searching
     // output ancestors would lose explicit cleanup authority.
     pub fn with_launch_context(
@@ -121,8 +133,19 @@ impl DriverExecutor {
         environment: Vec<(OsString, OsString)>,
         session_lease: Option<PathBuf>,
     ) -> Self {
+        if let Some((_, seed)) = environment.iter().find(|(key, _)| key == STOP_POLICY) {
+            // The run refuses a seed that is not a number.
+            self.stop_policy = Some(seed.to_string_lossy().into_owned());
+        }
         self.environment = environment;
         self.session_lease = session_lease;
+        self
+    }
+    /// End the worker Driver's rounds at times a policy seeded from `seed`
+    /// and the run's output directory draws, so each run stops differently.
+    /// Only a worker built with `test-support` runs it.
+    pub fn with_stop_policy(mut self, seed: u64) -> Self {
+        self.stop_policy = Some(seed.to_string());
         self
     }
     /// Borrow an explicitly selected immutable runtime across worker processes.
@@ -162,7 +185,12 @@ impl ExecutionBackend for DriverExecutor {
         self.profile.clone()
     }
     fn performance_parameters(&self) -> BTreeMap<String, String> {
-        BTreeMap::from([("SEEDBOX_MACHINE_WORKERS".into(), self.workers.to_string())])
+        let mut parameters =
+            BTreeMap::from([("SEEDBOX_MACHINE_WORKERS".into(), self.workers.to_string())]);
+        if let Some(seed) = &self.stop_policy {
+            parameters.insert(STOP_POLICY.into(), seed.clone());
+        }
+        parameters
     }
     fn preflight(&self, _: Option<&std::path::Path>) -> Result<()> {
         // Fail before opening a native admission device or preparing workers.

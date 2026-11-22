@@ -34,8 +34,9 @@ seedbox-machine = { workspace = true, features = ["test-support"] }
 [features]
 # Original-worker failure injection hooks for process-lifetime tests.
 worker-failure = []
-# Opt-in fixtures, such as a synthetic runtime package, for dependents' tests.
-test-support = ["seedbox-machine/test-support"]
+# Opt-in fixtures, such as a synthetic runtime package, for dependents' tests,
+# and the host stop policy whole-run tests give a worker (STOP_POLICY).
+test-support = ["seedbox-machine/test-support", "seedbox-driver/test-support"]
 
 [[bin]]
 name = "seedbox-lifetime-fixture"

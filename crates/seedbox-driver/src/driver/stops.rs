@@ -2,9 +2,9 @@
 //!
 //! A round may end anywhere in `(now, boundary]` without breaking safety: no
 //! frame or timeline item can be due before the boundary the Driver computed,
-//! so a shorter round only adds a barrier. Tests use that to check which
-//! results already do not depend on where rounds end. Outside `test-support`
-//! this is empty and every round ends at the Driver's boundary.
+//! so a shorter round only adds a barrier. Tests use that to check that no
+//! result depends on where rounds end. Outside `test-support` this is empty
+//! and every round ends at the Driver's boundary.
 use super::*;
 
 /// Host-side choice of round ends. Not simulation state: it is never part of
@@ -83,8 +83,9 @@ impl<M: Machine> Driver<M> {
     /// End every later round at a time `policy` draws in `(now, boundary]`
     /// instead of at the Driver's boundary; `None` restores the Driver's own.
     /// Every step then returns at the shortened barrier. Rounds that end early
-    /// change no safety property, but today they can change results; see
-    /// `tests/driver_stop_policy.rs` for what does not depend on them.
+    /// change no result: `tests/driver_stop_policy.rs` checks that on scripted
+    /// machines, and the whole-run determinism oracles on real runs, whose
+    /// worker takes a policy through `STOP_POLICY` in seedbox-driver-execution.
     pub fn set_stop_policy(&mut self, policy: Option<StopPolicy>) {
         self.stops.policy = policy;
     }

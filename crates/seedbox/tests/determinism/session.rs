@@ -534,8 +534,14 @@ impl Session {
 /// The fixture owns its server; `--full-state` makes comparisons include full state.
 pub struct Server(Child);
 impl Server {
-    pub fn start(cli: &Path, state: &Path) -> Result<Self, String> {
+    /// A server whose runs see `environment` as well as this process's.
+    pub fn start_with(
+        cli: &Path,
+        state: &Path,
+        environment: &[(&str, &str)],
+    ) -> Result<Self, String> {
         let mut command = Command::new(cli);
+        command.envs(environment.iter().copied());
         command.args([
             "server",
             "start",

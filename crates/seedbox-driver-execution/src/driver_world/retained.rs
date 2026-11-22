@@ -476,6 +476,15 @@ pub(crate) fn request(
         }
     }
     let workers = workers?;
+    let stop_policy = request
+        .performance_parameters
+        .get(super::STOP_POLICY)
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| bad("invalid Driver stop policy seed"))
+        })
+        .transpose()?;
     super::build::check_program_engine(request.program, &prepared.inventory)?;
     Ok(wire::Request {
         prepared,
@@ -485,6 +494,7 @@ pub(crate) fn request(
         simulated_time_ns: request.limits.simulated_time_ns,
         output: request.output.join(crate::execution::MACHINE_OUTPUT_DIR),
         machine_workers: workers,
+        stop_policy,
         start_paused: request.start_paused,
         full_state: request.prepared.profile.witness_mode
             == crate::execution::WitnessMode::FullState,

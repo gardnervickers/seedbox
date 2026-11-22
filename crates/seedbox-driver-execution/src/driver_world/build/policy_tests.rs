@@ -51,6 +51,7 @@ fn request(inventory: Inventory, output: PathBuf) -> wire::Request {
         host_control: output.join("control"),
         output,
         machine_workers: 1,
+        stop_policy: None,
         start_paused: false,
         full_state: false,
         observations: None,

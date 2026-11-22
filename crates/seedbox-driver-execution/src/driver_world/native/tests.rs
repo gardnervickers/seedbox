@@ -167,6 +167,7 @@ fn tcg_codec_policy_and_name_refuse_before_native_reconstruction() {
         simulated_time_ns: 0,
         output: output.clone(),
         machine_workers: 1,
+        stop_policy: None,
         start_paused: false,
         full_state: false,
         host_control: missing,

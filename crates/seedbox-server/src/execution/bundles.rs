@@ -84,12 +84,14 @@ impl ExecutionService {
     }
 }
 
-/// Ignore only provenance at its owning schema paths. Actual architecture,
-/// backend, launch kind, policies, binaries and
-/// checkpoint state remain comparable execution inputs.
+/// Ignore only provenance at its owning schema paths, and the quantum: it
+/// sets where rounds may end and the step of paced playback, and where rounds
+/// end changes no result. Actual architecture, backend, launch kind,
+/// policies, binaries and checkpoint state remain comparable execution inputs.
 pub(super) fn semantic_definition(
     mut definition: Box<seedbox_spec::definition::Definition>,
 ) -> seedbox_application::Result<Box<seedbox_spec::definition::Definition>> {
+    definition.simulator.quantum_ns = std::num::NonZeroU64::MIN;
     for machine in definition
         .machines
         .values_mut()

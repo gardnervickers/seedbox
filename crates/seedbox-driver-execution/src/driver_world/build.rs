@@ -45,6 +45,32 @@ pub(super) fn open(request: &wire::Request) -> Result<Worker<Native>> {
         fresh(request)
     }
 }
+/// Apply the request's stop policy, which only a test-support build has.
+/// The run's output directory, unique to the attempt, varies the seed, so
+/// two runs of one definition stop at different times.
+fn stop_policy(driver: &mut Driver<Native>, request: &wire::Request) -> Result<()> {
+    let Some(seed) = request.stop_policy else {
+        return Ok(());
+    };
+    #[cfg(feature = "test-support")]
+    {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(request.output.as_os_str().as_encoded_bytes());
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(&digest[..8]);
+        driver.set_stop_policy(Some(seedbox_driver::test_support::StopPolicy::seeded(
+            seed ^ u64::from_le_bytes(bytes),
+        )));
+        Ok(())
+    }
+    #[cfg(not(feature = "test-support"))]
+    {
+        let _ = (driver, seed);
+        Err(bad(
+            "a Driver stop policy needs a worker built with test support",
+        ))
+    }
+}
 fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     let program = program(request)?;
     let assets = materialize_factory(
@@ -130,6 +156,7 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
         .map_err(|e| bad(e.to_string()))?;
     // The engine decides the oracle's device faults and breakpoints.
     driver.set_engine(super::actions::engine(&request.prepared.inventory));
+    stop_policy(&mut driver, request)?;
     if request.start_paused {
         driver
             .with_barrier(|barrier| barrier.set_rate(seedbox_driver::driver::PlaybackRate::Paused))
@@ -331,6 +358,7 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
     )
     .map_err(|e| bad(e.to_string()))?;
     driver.set_engine(super::actions::engine(&request.prepared.inventory));
+    stop_policy(&mut driver, request)?;
     if names.next().is_some() {
         return Err(bad("Driver checkpoint name inventory has unused entries"));
     }
