@@ -162,12 +162,15 @@ where
         Driver::<M>::check_named_action(&action, handle.as_ref())?;
         let mut control = self.driver.execution.control.clone();
         let mut inputs = self.driver.execution.inputs.clone();
+        // Committing the input first commits the output held here, so the
+        // projection applies it to its copies (C2).
+        let machines = self.driver.project_held(&mut control)?;
         for notice in control.service.take_notices() {
             Driver::<M>::track_input(&mut inputs, &notice);
         }
         let admitted = Driver::<M>::input_admission_with_handle(
             &mut control,
-            &self.driver.execution.machines,
+            &machines,
             Some(&self.driver.execution.network),
             &inputs,
             &key,
@@ -252,6 +255,9 @@ where
             return Err(Error::PreparedInputMismatch);
         }
         let result = (|| {
+            // The input makes this barrier a needed one: output held here
+            // commits first, as the projection assumed (C2).
+            self.driver.need_barrier()?;
             let start = self.driver.observations.published.len();
             self.driver
                 .execution
@@ -303,6 +309,63 @@ where
     M::Context: 'static,
     M::Error: Send + 'static,
 {
+    /// Copies of the machines' bookkeeping with the output and exits held at
+    /// this barrier applied to them and to `control`, as committing them
+    /// would: their observations, breakpoint hits and exits, in commit order.
+    /// What they schedule is not projected; it is due a floor later.
+    fn project_held(
+        &self,
+        control: &mut control::Control,
+    ) -> Result<Vec<Entry<()>>, Error<M::Error>> {
+        let mut machines: Vec<Entry<()>> = self
+            .execution
+            .machines
+            .iter()
+            .map(|entry| entry.with_machine(()))
+            .collect();
+        let mut outputs: Vec<_> = machines
+            .iter_mut()
+            .flat_map(|entry| std::mem::take(&mut entry.staged))
+            .collect();
+        outputs.sort_by_key(|output| (output.at, output.machine));
+        let mut exits: Vec<(Timestamp, MachineId)> = machines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| match entry.stopped {
+                StopReason::Exited { reached, .. }
+                    if entry
+                        .lifecycle
+                        .facts()
+                        .is_ok_and(|facts| !facts.physically_ended) =>
+                {
+                    Some((reached, MachineId(index)))
+                }
+                _ => None,
+            })
+            .collect();
+        exits.sort();
+        let mut exits = exits.into_iter().peekable();
+        for output in &outputs {
+            while let Some((reached, id)) =
+                exits.next_if(|&exit| exit < (output.at, output.machine))
+            {
+                let act = self.consequence_of(reached)?;
+                control
+                    .terminal(&mut machines, id, act)
+                    .map_err(Error::Control)?;
+            }
+            let act = self.consequence_of(output.at)?;
+            Self::observe_output(control, &mut machines, output, act)?;
+        }
+        for (reached, id) in exits {
+            let act = self.consequence_of(reached)?;
+            control
+                .terminal(&mut machines, id, act)
+                .map_err(Error::Control)?;
+        }
+        Ok(machines)
+    }
+
     /// Same dispatch owners/order as apply_due: timeline, then frames.
     /// Runnable machines are not zero-time work, including those whose timer
     /// is due now or whose arrived frames wait for their next run.
@@ -373,9 +436,9 @@ where
         Self::input_admission_with_handle(control, machines, None, inputs, key, action, None, now)
     }
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn input_admission_with_handle(
+    pub(super) fn input_admission_with_handle<T>(
         control: &mut control::Control,
-        machines: &[Entry<M>],
+        machines: &[Entry<T>],
         network: Option<&network::Network>,
         inputs: &BTreeMap<InputKey, LiveInput>,
         key: &InputKey,

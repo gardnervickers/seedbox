@@ -33,6 +33,7 @@ pub struct Checkpoint<S> {
     stopped: bool,
     playback: playback::PlaybackIntent,
     oracle: MachineId,
+    needed: Option<Timestamp>,
     finishing: Option<(Timestamp, ExitReason)>,
     finished: Option<(Timestamp, ExitReason)>,
     oracle_stops: BTreeSet<(u64, NonZeroU32)>,
@@ -107,7 +108,7 @@ impl<C: std::error::Error + 'static, E: std::error::Error + 'static> std::error:
 
 impl<T> Entry<T> {
     /// Copy only stopped bookkeeping, supplying the independently owned machine.
-    fn with_machine<U>(&self, machine: U) -> Entry<U> {
+    pub(super) fn with_machine<U>(&self, machine: U) -> Entry<U> {
         Entry {
             machine: Some(machine),
             rng: self.rng.clone(),
@@ -320,6 +321,7 @@ where
             stopped: self.execution.stopped,
             playback: self.playback.checkpoint(),
             oracle: self.execution.oracle,
+            needed: self.execution.needed,
             finishing: self.execution.finishing,
             finished: self.execution.finished,
             oracle_stops: self.execution.oracle_stops.clone(),
@@ -402,6 +404,7 @@ where
                 failed: false,
                 stopped: checkpoint.stopped,
                 oracle: checkpoint.oracle,
+                needed: checkpoint.needed,
                 finishing: checkpoint.finishing,
                 finished: checkpoint.finished,
                 oracle_stops: checkpoint.oracle_stops.clone(),

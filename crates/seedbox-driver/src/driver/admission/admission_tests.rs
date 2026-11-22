@@ -69,6 +69,7 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         failed,
         stopped,
         oracle,
+        needed,
         finishing,
         finished,
         oracle_stops,
@@ -106,6 +107,7 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         failed,
         stopped,
         oracle,
+        needed,
         finishing,
         finished,
         oracle_stops,
@@ -194,7 +196,8 @@ fn paused_commit_holds_without_touching_anchor_or_quantum_and_releases_once() {
         assert_eq!(d.execution.completed_quanta, position.completed_quanta);
         assert_eq!(states(&d), native, "held effect must not run a machine");
         assert!(!d.execution.machines[1].lifecycle.paused());
-        assert_eq!(d.position().boundary_index, position.boundary_index + 1);
+        // Output held at the barrier commits before the input's admission.
+        assert_eq!(d.position().boundary_index, position.boundary_index + 2);
         let events = d.drain_events();
         assert_eq!(
             events
@@ -998,7 +1001,8 @@ fn applied_is_dispatch_not_future_ack_settlement_and_only_zero_budgets_run() {
     assert!(!events
         .iter()
         .any(|e| matches!(e.kind, EventKind::FaultSettled { .. })));
-    d.step(at(6)).unwrap();
+    // Acknowledged at 6, and committed once no machine can emit before it.
+    d.step(at(7)).unwrap();
     assert!(d.drain_events().iter().any(|e| matches!(&e.kind, EventKind::FaultSettled { record: fault, status: SettlementStatus::Applied, .. } if fault == record(&p))));
 }
 

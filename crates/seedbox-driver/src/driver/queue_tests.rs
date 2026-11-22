@@ -270,6 +270,10 @@ fn common_barrier_sorts_worker_outputs_by_identity_then_emission_order() {
         [1, 0],
         "actual result publication must be reverse identity order"
     );
+    // Both machines can still emit at 10, so their output there is held
+    // until the barrier is needed, as where execution ends.
+    assert!(fixture::outputs(&driver.drain_events()).is_empty());
+    driver.admit_waiting_work().unwrap();
     assert_eq!(
         fixture::outputs(&driver.drain_events())
             .iter()

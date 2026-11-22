@@ -73,7 +73,13 @@ memory checks and retention of the complete replay closure still run on every pr
 
 ## Same-time controls
 
-Committed outputs precede due timeline items, then frames, then timer wakeups; same-time items are FIFO.
+Outputs of one instant are ordered by machine, then emission, whatever the rounds: a commit holds output stamped
+at or after the earliest time any machine can still emit, unless a timeline item, a frame for a paused or suspended
+receiver or the end of the run is due at its barrier, or the host admits an input there. Such a needed barrier
+commits everything held first: committed outputs precede due timeline items, then frames, then timer wakeups;
+same-time items are FIFO. A run that only continues from any other barrier maps machine times from the nanosecond
+before it, so a slow clock's shared machine nanosecond maps to its first simulation nanosecond.
+A timer wake starts at the timer's machine deadline, which a fast clock can place inside the nanosecond it wakes at.
 A running machine takes those frames and its due timer at the start of its next run, which starts there.
 A paused or suspended receiver admits frames in a zero-budget run. So does a running machine, with its
 due timer, before a later item due then for it and before final evidence is read.

@@ -106,6 +106,11 @@ where
             return Ok(None);
         }
         let now = self.now();
+        // Output held at a barrier that turns out to be needed commits
+        // before anything due there (C2).
+        if self.barrier_needed(now) {
+            self.need_barrier()?;
+        }
         // The end of the run comes before anything else due then (C4).
         if let Some((at, reason)) = self.execution.finishing {
             debug_assert!(at >= now, "the end of the run passed");

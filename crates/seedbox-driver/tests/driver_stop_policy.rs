@@ -13,8 +13,9 @@
 //!   machine time it was offered, every draw from its RNG stream and every
 //!   output it emitted. The bounds of its runs are not part of it.
 //!
-//! The ignored tests fail today: a stop policy changes their results. Each
-//! names the rule of the coordination design that will make it pass.
+//! One scenario instead adds a single host barrier where a slow clock maps
+//! two simulation nanoseconds to one machine nanosecond, which a random
+//! policy would rarely hit.
 use seedbox_driver::definition::{MacAddress, MachineDefinition, NetworkInterface};
 use seedbox_driver::driver::faults::Engine;
 use seedbox_driver::driver::{
@@ -96,6 +97,8 @@ struct Script {
     echo: Option<[u8; 6]>,
     acks: bool,
     exit: Option<u64>,
+    /// Notices its exit only in a run that could go past it.
+    late_exit: bool,
     exited: bool,
     declared: Vec<String>,
     held: bool,
@@ -176,9 +179,10 @@ impl Machine for Script {
             });
         }
         let end = upto.as_nanos();
+        let late = self.late_exit;
         let exit = self
             .exit
-            .filter(|&exit| exit <= end)
+            .filter(|&exit| exit < end || !late && exit == end)
             .map(|exit| exit.max(start));
         while self
             .sends
@@ -241,6 +245,7 @@ struct Spec {
     echo: Option<[u8; 6]>,
     acks: bool,
     exit: Option<u64>,
+    late_exit: bool,
 }
 impl Spec {
     fn busy() -> Self {
@@ -285,6 +290,14 @@ impl Spec {
         self.exit = Some(t);
         self
     }
+    /// Exit at `t`, noticed only by a run that could go past `t`: a run
+    /// that ends exactly at `t` reaches its bound, and the next one exits at
+    /// its start. Its machine-time behaviour is the same either way.
+    fn late_exit(mut self, t: u64) -> Self {
+        self.exit = Some(t);
+        self.late_exit = true;
+        self
+    }
 }
 
 struct Scenario {
@@ -322,6 +335,11 @@ fn networked(index: usize) -> MachineDefinition {
 /// Run `scenario` to its end. Returns its results and how many barriers the
 /// host saw on the way.
 fn run(scenario: &Scenario, policy: Option<u64>) -> (Results, usize) {
+    run_with(scenario, policy, &[])
+}
+
+/// [`run`], with the host first asking for a barrier at each of `barriers`.
+fn run_with(scenario: &Scenario, policy: Option<u64>, barriers: &[u64]) -> (Results, usize) {
     let seen: Vec<Seen> = scenario.machines.iter().map(|_| Seen::default()).collect();
     let mut machines: VecDeque<Script> = scenario
         .machines
@@ -333,6 +351,7 @@ fn run(scenario: &Scenario, policy: Option<u64>) -> (Results, usize) {
             echo: spec.echo,
             acks: spec.acks,
             exit: spec.exit,
+            late_exit: spec.late_exit,
             exited: false,
             declared: Vec::new(),
             held: false,
@@ -369,6 +388,12 @@ fn run(scenario: &Scenario, policy: Option<u64>) -> (Results, usize) {
         })
         .unwrap();
     driver.set_stop_policy(policy.map(StopPolicy::seeded));
+    for &barrier in barriers {
+        while matches!(
+            driver.step(at(barrier)).unwrap(),
+            StepOutcome::BarrierReached { at: reached } if reached < at(barrier)
+        ) {}
+    }
     let mut barriers = 0;
     let outcome = loop {
         let outcome = driver.step(at(scenario.end)).unwrap();
@@ -1130,11 +1155,10 @@ fn what_is_due_before_the_end_happens_whatever_the_stops() {
 }
 
 /// C2: outputs of two machines stamped in the same nanosecond are ordered by
-/// the commit that carried them. A round that ends at such a nanosecond takes
-/// the busy machine's output, while the blocked one emits in the next round.
-/// They will be ordered by machine.
+/// machine, whatever the commits. A round that ends at such a nanosecond
+/// holds the busy machine's output there until the blocked one, which emits
+/// at it in the next round, has passed it.
 #[test]
-#[ignore = "C2: same-nanosecond outputs of different machines are ordered by commit"]
 fn same_nanosecond_outputs_do_not_depend_on_stops() {
     let end = 200 * US;
     let ties = |spec: Spec| {
@@ -1160,15 +1184,123 @@ fn same_nanosecond_outputs_do_not_depend_on_stops() {
     );
 }
 
-/// Not predicted by the design. A blocked machine wakes at the first
-/// simulation nanosecond whose machine time reaches its deadline. Under a fast
-/// clock that nanosecond's machine time can be past the deadline, so the
-/// machine adopts a later time than it would have reached had a run covered
-/// the deadline. Whether a run covered it depends on where the previous round
-/// ended. C3 (a synthetic stop adopts no time) needs a wake to start at the
-/// deadline itself, which lies inside that simulation nanosecond.
+/// An Ethernet/IPv4/TCP SYN from machine `from`'s address to `to`'s.
+fn syn(from: usize, to: usize, port: u16) -> Response {
+    let mut b = vec![0; 60];
+    b[..6].copy_from_slice(&mac(to));
+    b[6..12].copy_from_slice(&mac(from));
+    b[12..14].copy_from_slice(&[8, 0]);
+    b[14] = 0x45;
+    b[16..18].copy_from_slice(&40u16.to_be_bytes());
+    b[22] = 64;
+    b[23] = 6;
+    b[26..30].copy_from_slice(&[10, 0, 0, from as u8 + 1]);
+    b[30..34].copy_from_slice(&[10, 0, 0, to as u8 + 1]);
+    b[34..36].copy_from_slice(&port.to_be_bytes());
+    b[36..38].copy_from_slice(&80u16.to_be_bytes());
+    b[46] = 0x50;
+    b[47] = 0x02;
+    Response::TransmitFrame { bytes: b }
+}
+
+/// C2: two machines open connections to a third in the same nanoseconds.
+/// Their incarnation numbers follow routing order, which is (machine,
+/// emission) order whatever the commits: the busy machine's SYN at a round's
+/// end is held there until the blocked one, whose SYN comes in the next
+/// round, has passed that nanosecond.
 #[test]
-#[ignore = "C3: a timer under a fast clock wakes past its deadline only after a stop"]
+fn connection_incarnations_do_not_depend_on_stops() {
+    let end = 40 * US;
+    let opens = |spec: Spec, from: usize, first_port: u16| {
+        (0..end / 11).fold(spec, |spec, n| {
+            spec.emit(11 * n + 5, syn(from, 0, first_port + n as u16))
+        })
+    };
+    let connections = |request: u32, from: &str| {
+        call_with(
+            request,
+            &format!(r#""op":"connections","from":{{"machine":"{from}"}},"to":{{"machine":"m0"}}"#),
+        )
+    };
+    let own = holds(
+        Scenario {
+            machines: vec![
+                Spec::busy()
+                    .emit(end - 2 * US, connections(1, "m1"))
+                    .emit(end - 2 * US, connections(2, "m2")),
+                opens(Spec::idle(), 1, 10_000),
+                opens(Spec::busy(), 2, 30_000),
+            ],
+            network: NetworkConfig::new(Duration::from_nanos(700), Duration::ZERO, 0)
+                .unwrap()
+                .into(),
+            inputs: Vec::new(),
+            end,
+            breaks: false,
+        },
+        1,
+    );
+    let listed = replies(&own);
+    assert_eq!(listed.len(), 2, "both listings answered");
+    for reply in listed {
+        let bytes = reply.split("payload: [").nth(1).unwrap();
+        let bytes: Vec<u8> = bytes
+            .trim_end_matches(&[']', ' ', '}'][..])
+            .split(", ")
+            .map(|byte| byte.parse().unwrap())
+            .collect();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains(r#""incarnation":"#), "{text}");
+    }
+    assert!(fates(&own, "Scheduled") >= 2 * (end as usize / 11 - 1));
+}
+
+/// A slow clock maps two simulation nanoseconds to one machine nanosecond. A
+/// machine that notices its exit only by trying to run past it exits at the
+/// start of its next run when a barrier falls on the second of the two; its
+/// exit still maps to the first, as when no barrier falls there.
+#[test]
+fn a_slow_clock_exit_does_not_depend_on_a_barrier_in_its_nanosecond() {
+    let end = 10 * MS;
+    let scenario = Scenario {
+        machines: vec![
+            Spec::busy()
+                .every(13 * US, 397 * US, end, BROADCAST, 0)
+                .late_exit(1_800 * US),
+            Spec::busy().echo(mac(0)),
+        ],
+        network: jittery(),
+        inputs: vec![(
+            0,
+            "slow",
+            Action::Drift {
+                target: Target::Name("m0".into()),
+                rate: ClockRate::new(-100_000_000).unwrap(),
+            },
+        )],
+        end,
+        breaks: false,
+    };
+    // At nine tenths of simulation time, machine time 1.8 ms is reached at
+    // 2 ms and still read at 2 ms + 1 ns.
+    let (own, _) = run(&scenario, None);
+    let (cut, _) = run_with(&scenario, None, &[2 * MS + 1]);
+    assert_eq!(differences(&own, &cut), Vec::<String>::new());
+    assert_eq!(
+        own.outcome,
+        format!(
+            "Finished {{ at: Timestamp({}), reason: Shutdown }}",
+            2 * MS + 100 * US
+        )
+    );
+}
+
+/// A blocked machine wakes at the first simulation nanosecond whose machine
+/// time reaches its deadline. Under a fast clock that nanosecond's machine
+/// time can be past the deadline; the wake starts at the deadline itself,
+/// inside that nanosecond, as a run that covered the deadline would take it
+/// (C3), whatever the previous round's end.
+#[test]
 fn a_timer_under_a_fast_clock_does_not_depend_on_stops() {
     let end = 20 * MS;
     holds(
