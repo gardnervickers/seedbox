@@ -1366,17 +1366,8 @@ where
             act,
         )?;
         consequences.extend(plans.into_iter().map(Consequence::Plans));
+        Self::check_authorized(&self.execution.control, output)?;
         if let Response::SimulationControl { id, payload } = &output.payload {
-            if self
-                .execution
-                .control
-                .controller
-                .is_some_and(|setup| setup.controller != Some(output.machine))
-            {
-                return Err(Error::Control(
-                    "control request from unauthorized machine".into(),
-                ));
-            }
             // With a controller a call is admitted one control latency after
             // it, which is never below the floor.
             let at = match self.execution.control.controller {
@@ -1397,6 +1388,24 @@ where
                     observed: output.at.as_nanos(),
                     payload: payload.clone(),
                 })),
+            ));
+        }
+        Ok(())
+    }
+
+    /// With a controller configured, only it may make a simulation-control
+    /// call: one from any other machine fails the run when it commits.
+    fn check_authorized(
+        control: &control::Control,
+        output: &MachineResponse,
+    ) -> Result<(), Error<M::Error>> {
+        if matches!(output.payload, Response::SimulationControl { .. })
+            && control
+                .controller
+                .is_some_and(|setup| setup.controller != Some(output.machine))
+        {
+            return Err(Error::Control(
+                "control request from unauthorized machine".into(),
             ));
         }
         Ok(())
@@ -1543,24 +1552,46 @@ where
     fn route_frames(&mut self, outputs: &[MachineResponse]) -> Result<(), Error<M::Error>> {
         let position = self.position();
         let observation_mark = self.observations.frames.mark();
+        let routed = Self::route_into(
+            &mut self.execution.network,
+            &self.execution.machines,
+            position,
+            outputs,
+            &mut self.observations.frames,
+        );
+        if routed.is_err() {
+            self.observations.frames.discard(observation_mark);
+        }
+        routed
+    }
+
+    /// Route the frames among `outputs` through `network`, in order.
+    /// `prepare_input` routes held frames through a copy of the network with
+    /// this, exactly as their commit will route them through the real one.
+    fn route_into<T>(
+        network: &mut network::Network,
+        machines: &[Entry<T>],
+        position: Position,
+        outputs: &[MachineResponse],
+        observations: &mut observation::FrameObservations,
+    ) -> Result<(), Error<M::Error>> {
+        // An exited receiver drops its frames whenever they arrive.
+        let reached = |to: MachineId| match machines[to.0].stopped {
+            StopReason::Exited { .. } => 0,
+            _ => machines[to.0].reached.as_nanos(),
+        };
         for output in outputs {
             if let Response::TransmitFrame { bytes } = &output.payload {
-                let machines = &self.execution.machines;
-                // An exited receiver drops its frames whenever they arrive.
-                let reached = |to: MachineId| match machines[to.0].stopped {
-                    StopReason::Exited { .. } => 0,
-                    _ => machines[to.0].reached.as_nanos(),
-                };
-                if let Err(error) = self.execution.network.route_at(
-                    position,
-                    output.machine,
-                    output.at.as_nanos(),
-                    bytes,
-                    &reached,
-                    &mut self.observations.frames,
-                ) {
-                    self.observations.frames.discard(observation_mark);
-                    return Err(match error {
+                network
+                    .route_at(
+                        position,
+                        output.machine,
+                        output.at.as_nanos(),
+                        bytes,
+                        &reached,
+                        observations,
+                    )
+                    .map_err(|error| match error {
                         network::RouteError::ArrivalOverflow => Error::TimeOverflow,
                         network::RouteError::SequenceOverflow => Error::PositionOverflow,
                         network::RouteError::BeforeReceiver { to, at } => Error::Causality {
@@ -1568,8 +1599,7 @@ where
                             at: Timestamp::from_nanos(at),
                             reached: machines[to.0].reached,
                         },
-                    });
-                }
+                    })?;
             }
         }
         Ok(())
