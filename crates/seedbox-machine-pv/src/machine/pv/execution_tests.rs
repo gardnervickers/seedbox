@@ -209,8 +209,9 @@ fn native_linux_task_initial_fp_encoding_preserves_live_fp_components() {
 #[test]
 #[ignore = "requires a native PV worker, current PV Linux kernel and fixture clang/linker"]
 fn native_linux_signal_frame_fp_encoding_is_canonical() {
-    // The fixture checks each frame itself: initial or zero components are
-    // recorded absent with initial bytes, live ones stay present and intact.
+    // The fixture checks each frame itself: zero YMM is recorded absent and
+    // live YMM present, x87 and SSE stay present, and registers survive
+    // sigreturn.
     let mut machine = PVMachine::from_boot_inputs(
         &input("SEEDBOX_PV_WORKER"),
         fs::read(input("SEEDBOX_PV_KERNEL")).unwrap(),

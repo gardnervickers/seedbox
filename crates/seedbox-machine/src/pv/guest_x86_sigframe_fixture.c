@@ -79,9 +79,15 @@ static INTEGER void expect(int ok, const char *message) {
 /* x87 and SSE are always present in a frame; PKRU is the kernel's own. Every
  * other component is present exactly when it holds noninitial (nonzero) state;
  * nothing here touches AVX-512 or AMX tile configuration. */
-static INTEGER int bits(u64 ymm) {
+static INTEGER void bits(u64 ymm, const char *message) {
     u64 present = word(frame + 512);
-    return (present & 3) == 3 && (present & 4) == ymm && !(present & ~(u64)0x207);
+    if ((present & 3) == 3 && (present & 4) == ymm && !(present & ~(u64)0x207))
+        return;
+    char hex[] = "XSTATE_BV=0x0000000000000000\n";
+    for (unsigned i = 0; i < 16; ++i)
+        hex[12 + i] = "0123456789abcdef"[(present >> (60 - 4 * i)) & 15];
+    out(hex);
+    fail(message);
 }
 __asm__(".globl _start\n_start:\n\tand $-16, %rsp\n\tcall start\n\thlt");
 INTEGER __attribute__((noreturn)) void start(void) {
@@ -100,18 +106,18 @@ INTEGER __attribute__((noreturn)) void start(void) {
 
     /* Zero YMM loaded as present is what a host FPU save/restore can leave. */
     deliver(7, 1, 0);
-    expect(bits(0), "SIGFRAME_ERROR: zero YMM recorded present\n");
+    bits(0, "SIGFRAME_ERROR: zero YMM recorded present\n");
     expect(pattern(frame, 160, 0x5a), "SIGFRAME_ERROR: live XMM changed\n");
     expect(zero(frame, 576, 832), "SIGFRAME_ERROR: zero YMM bytes\n");
     expect(pattern(after, 160, 0x5a), "SIGFRAME_ERROR: XMM after sigreturn\n");
     expect(zero(after, 576, 832), "SIGFRAME_ERROR: YMM after sigreturn\n");
 
     deliver(0, 0, 0);
-    expect(bits(0), "SIGFRAME_ERROR: absent YMM recorded present\n");
+    bits(0, "SIGFRAME_ERROR: absent YMM recorded present\n");
 
     /* Live YMM stays present and intact through the frame and sigreturn. */
     deliver(6, 0, 1);
-    expect(bits(4), "SIGFRAME_ERROR: live YMM recorded absent\n");
+    bits(4, "SIGFRAME_ERROR: live YMM recorded absent\n");
     expect(pattern(frame, 576, 0x3c), "SIGFRAME_ERROR: live YMM changed\n");
     expect(pattern(after, 576, 0x3c), "SIGFRAME_ERROR: live YMM after sigreturn\n");
 

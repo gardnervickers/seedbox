@@ -280,8 +280,8 @@ Host interruptions can expose those differences in full-RAM comparison despite e
 Kernel task-state saves canonicalize initial/absent x87 and zero/absent YMM and AVX-512; compacted saves also canonicalize initial/absent SSE, preserving noninitial XMM and MXCSR values.
 Standard-format task SSE remains unchanged because its MXCSR restore rules differ.
 A signal frame's standard-format XSAVE writes initial components as initial bytes but takes presence bits from XINUSE.
-The kernel already marks x87 and SSE present in every frame; the patch then marks each other written component present exactly when its bytes are nonzero.
-AMX tile data, written only when in use, and direct application XSAVE remain outside both hooks.
+The kernel marks x87 and SSE present in every frame and sets PKRU itself; the patch marks each other always-written component present exactly when its bytes are nonzero.
+AMX tile configuration and data, which a frame may leave unwritten when initial, and direct application XSAVE remain outside both hooks.
 The [patch](../crates/seedbox-machine/guest/kernel/x86_64/apply.py) changes guest bytes, not the comparison's coverage.
 Live vCPU vector evidence hashes each advertised component's effective value, substituting init state when absent.
 The [digest](../crates/seedbox-machine-pv/src/machine/pv/worker/x86_64/backend/evidence.rs) omits XSTATE_BV, so host FPU save/restore cannot change it.

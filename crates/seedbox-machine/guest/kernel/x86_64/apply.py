@@ -256,16 +256,17 @@ static int seedbox_user_zero(const void __user *from, unsigned int size)
 
 /* Seedbox: a signal frame's standard-format XSAVE writes every requested
  * component, initial ones as their initial bytes, but sets each XSTATE_BV bit
- * from XINUSE. The kernel already marks x87 and SSE present in every frame and
- * sets PKRU itself. Every other component XSAVE wrote is initial exactly when
- * its bytes are zero: record it present exactly when it is not. AMX tile data
- * is written only when XINUSE says it is in use, so it keeps that rule.
+ * from XINUSE. The epilog after this hook marks x87 and SSE present in every
+ * frame, and the kernel sets PKRU itself. Every other component XSAVE always
+ * writes is initial exactly when its bytes are zero: record it present
+ * exactly when it is not. AMX tile configuration and data may be left
+ * unwritten when initial, so they keep XINUSE's bits.
  */
 int seedbox_canonicalize_sigframe_xstate(struct xregs_state __user *buf)
 {
 	u64 written = current->thread.fpu.fpstate->user_xfeatures &
 		      ~(XFEATURE_MASK_FPSSE | XFEATURE_MASK_PKRU |
-			XFEATURE_MASK_USER_DYNAMIC);
+			XFEATURE_MASK_SIGFRAME_INITOPT);
 	u64 features;
 	unsigned int nr;
 	int zero;
