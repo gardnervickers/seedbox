@@ -733,13 +733,19 @@ fn soak_diff(state: &Path, label: &str, kind: &str, a: &str, b: &str) {
             .map_err(|e| e.to_string())
             .and_then(|r| serde_json::to_string(&r).map_err(|e| e.to_string())),
     );
-    println!("SOAK {label} {kind} diff: {}", &report[..report.len().min(200_000)]);
+    println!(
+        "SOAK {label} {kind} diff: {}",
+        &report[..report.len().min(200_000)]
+    );
     let pages = show(
         seedbox_application::diff::replay_ram_pages(&left, &right)
             .map_err(|e| e.to_string())
             .and_then(|r| serde_json::to_string(&r).map_err(|e| e.to_string())),
     );
-    println!("SOAK {label} {kind} pages: {}", &pages[..pages.len().min(200_000)]);
+    println!(
+        "SOAK {label} {kind} pages: {}",
+        &pages[..pages.len().min(200_000)]
+    );
     // List the attempt files so a later probe knows what is retained.
     for (side, dir) in [("a", &left), ("b", &right)] {
         let mut names = Vec::new();
