@@ -3,7 +3,8 @@
 //! clock and sleeps in two processes; the run is driven once with the
 //! machine's own stops and host barriers every half millisecond, and again
 //! with the same barriers and runs that end early at seeded times, a few
-//! microseconds apart. At every barrier the native witness, the console and
+//! microseconds apart, and nanoseconds apart from boot and after each wake,
+//! where the guest's clock starts and where it goes idle. At every barrier the native witness, the console and
 //! the full state evidence (registers, devices, RAM and the shared page)
 //! must agree.
 use super::*;
@@ -22,6 +23,9 @@ const MS: u64 = 1_000_000;
 const BARRIER: u64 = MS / 2;
 /// The longest run of a split schedule.
 const SPLIT: u64 = 50_000;
+/// Split runs that end at most 4 ns after their start, from boot and after
+/// each wake.
+const TINY: u32 = 16;
 /// Simulated time after both processes are done, so the idle guest is compared too.
 const AFTER: u64 = 3 * MS;
 /// Bound on the simulated length of boot and the workload.
@@ -138,7 +142,8 @@ fn differences(own: &Look, other: &Look) -> String {
 /// processes are done and `AFTER` more), looking at each. A blocked machine
 /// sleeps until its deadline, as the Driver wakes it. With a `split` seed,
 /// most runs end instead at a time drawn in (now, next barrier], at most
-/// `SPLIT` after now. Returns the looks and how many runs the machine took.
+/// `SPLIT` after now, or at most 4 ns after now for `TINY` runs from boot and
+/// from each wake. Returns the looks and how many runs the machine took.
 fn drive(barriers: Option<&[u64]>, split: Option<u64>) -> (Vec<Look>, usize) {
     let mut machine = machine();
     let clock = SimulationClock::new(0);
@@ -152,6 +157,10 @@ fn drive(barriers: Option<&[u64]>, split: Option<u64>) -> (Vec<Look>, usize) {
     let mut runs = 0;
     let mut blocked: Option<Option<u64>> = None;
     let mut done_at = None;
+    // Runs left that end within a few nanoseconds of their start: from boot,
+    // where the guest's clock starts before it can stop, and after each wake,
+    // where the guest takes its timer and goes idle within nanoseconds.
+    let mut tiny = TINY;
     for index in 1.. {
         let target = match barriers {
             Some(barriers) => match barriers.get(index - 1) {
@@ -175,6 +184,7 @@ fn drive(barriers: Option<&[u64]>, split: Option<u64>) -> (Vec<Look>, usize) {
                     Some(deadline) if deadline <= target => {
                         clock.set(deadline);
                         blocked = None;
+                        tiny = TINY;
                     }
                     _ => {
                         clock.set(target);
@@ -188,6 +198,10 @@ fn drive(barriers: Option<&[u64]>, split: Option<u64>) -> (Vec<Look>, usize) {
                     .as_mut()
                     .is_some_and(|stops| stops.next_u32() % 8 != 0);
             let upto = match &mut stops {
+                Some(stops) if split && tiny > 0 => {
+                    tiny -= 1;
+                    now + 1 + stops.next_u64() % (target - now).min(4)
+                }
                 Some(stops) if split => now + 1 + stops.next_u64() % (target - now).min(SPLIT),
                 _ => target,
             };

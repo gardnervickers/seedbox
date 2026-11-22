@@ -728,14 +728,17 @@ impl<B: Backend> Machine<B> {
                 self.finish_stop()?;
                 return Ok(Stop::Held(hold));
             }
-            if self.state.now == upto {
-                self.finish_stop()?;
-                return Ok(Stop::Horizon);
-            }
+            // An idle guest blocks whether or not the run ends at this time:
+            // were it to stop at the horizon instead, the next run would enter
+            // it again and add an idle exit no other schedule has (C3).
             if effect.idle && self.quiet() {
                 self.state.idle = true;
                 self.finish_stop()?;
                 return Ok(Stop::Blocked(self.wake()));
+            }
+            if self.state.now == upto {
+                self.finish_stop()?;
+                return Ok(Stop::Horizon);
             }
             // Host interruptions re-enter above without preparing anything new.
             self.prepare()?;
