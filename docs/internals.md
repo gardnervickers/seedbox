@@ -58,6 +58,16 @@ application instruction must still report its saved value. Reconstructed
 instruction lists let the client restore it in reported contexts; stored
 translation tables alone do not, and the client never asks for them.
 
+A syscall that DynamoRIO can ignore, and whose number its block sets, runs in
+the code cache. A private block cannot link to or from a shared one, so a
+private syscall block cost two dispatcher passes per syscall; the fork's
+`-shared_ignorable_syscall_bbs` (on by default) shares such blocks. Syscalls
+DynamoRIO must see (signal masks and waits, memory maps, descriptors, process
+control), and those whose number the block does not set, still go through the
+dispatcher. With no private blocks, a process no longer commits a private code
+cache page and its heap pages: two or three fewer charged translator
+`mprotect`s per process.
+
 ## Reference TCG machine
 
 TCG budgets QEMU icount steps, not retired instructions: REP I/O costs per iteration plus a final check.
