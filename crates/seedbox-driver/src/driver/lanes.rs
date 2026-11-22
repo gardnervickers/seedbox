@@ -40,6 +40,9 @@ struct Window {
     /// Failed lanes. Lanes after the first failure stop, so the lowest
     /// failing machine is reported whatever the completion order.
     failed: BTreeSet<MachineId>,
+    /// Machines held at a breakpoint (see `Driver::held`): at the round's
+    /// start, or since a run of this round staged their hit.
+    held: Vec<bool>,
     ran: bool,
 }
 
@@ -50,23 +53,42 @@ where
     M::Error: Send + 'static,
 {
     /// Whether frames for each machine can arrive inside its lane: an exited
-    /// receiver drops them there. A paused or suspended receiver admits them
-    /// at a round boundary instead, in a zero-budget run. These states cannot
-    /// change before the round commits.
+    /// receiver drops them there, and a machine held at a breakpoint takes
+    /// them there without a budget (see `held`). Only a paused receiver
+    /// admits them at a round boundary instead, in a zero-budget run. A
+    /// pause changes only at a timeline item, which every schedule shares,
+    /// so this cannot depend on where a round ended; a breakpoint hit's
+    /// commit can, so it must not decide it.
     pub(super) fn lane_receivers(&self) -> Vec<bool> {
-        let breaks = &self.execution.control.service.breaks;
-        let any_suspended = breaks.hits().next().is_some();
         self.execution
             .machines
             .iter()
-            .enumerate()
-            .map(|(index, entry)| {
-                matches!(entry.stopped, StopReason::Exited { .. })
-                    || !entry.lifecycle.paused()
-                        && !(any_suspended
-                            && breaks.suspended(&control::Control::source(MachineId(index))))
+            .map(|entry| {
+                matches!(entry.stopped, StopReason::Exited { .. }) || !entry.lifecycle.paused()
             })
             .collect()
+    }
+
+    /// Whether machine `id` is held at a breakpoint: its hit is committed
+    /// and live, or still staged. A held machine runs no guest work, so its
+    /// lane gives it only zero-budget runs, which admit what arrives for it.
+    /// Both forms hold from the hit until its resume, crash or the end of
+    /// the run, all of which are needed barriers, so the answer is the same
+    /// wherever rounds end.
+    fn held(&self, id: MachineId) -> bool {
+        let breaks = &self.execution.control.service.breaks;
+        Self::staged_hit(&self.execution.machines[id.0].staged)
+            || breaks.hits().next().is_some() && breaks.suspended(&control::Control::source(id))
+    }
+
+    /// Whether `outputs` hold a breakpoint hit, which suspends its machine.
+    fn staged_hit(outputs: &[MachineResponse]) -> bool {
+        outputs.iter().any(|output| {
+            matches!(
+                output.payload,
+                Response::Break { .. } | Response::BlockRequestHeld { .. }
+            )
+        })
     }
 
     /// Run every machine's lane to `end`, taking the frames for `receivers`.
@@ -86,6 +108,12 @@ where
             lanes: vec![VecDeque::new(); self.execution.machines.len()],
             running: BTreeMap::new(),
             failed: BTreeSet::new(),
+            // Only an engine with breakpoints can hold a machine.
+            held: (0..self.execution.machines.len())
+                .map(|index| {
+                    self.execution.control.service.breaks.supported && self.held(MachineId(index))
+                })
+                .collect(),
             ran: false,
         };
         for (at, delivery) in taken {
@@ -108,9 +136,10 @@ where
             let result = self.workers.next(&mut stream).expect("lane runs report");
             let id = result.id;
             let run = window.running.remove(&id).expect("running lane");
-            let finished = self
-                .finish_lane_run(result, run)
-                .and_then(|()| self.advance_lane(id, &mut window, &mut stream));
+            let finished = self.finish_lane_run(result, run).and_then(|hit| {
+                window.held[id.0] |= hit;
+                self.advance_lane(id, &mut window, &mut stream)
+            });
             if let Err(error) = finished {
                 Self::fail_lane(id, error, &mut window, &mut errors);
             }
@@ -206,7 +235,12 @@ where
             else {
                 return Ok(());
             };
-            let upto = arrival.map_or(window.end, |at| at.min(window.end));
+            // A machine held at a breakpoint only admits what arrived.
+            let upto = if window.held[id.0] {
+                start
+            } else {
+                arrival.map_or(window.end, |at| at.min(window.end))
+            };
             let ids = [id];
             let offered_commands = self.offered_commands(&ids);
             let offered_stops = self.offered_stops(&ids);
@@ -230,18 +264,22 @@ where
         }
     }
 
-    /// Accept a lane's finished run and record it on its machine.
+    /// Accept a lane's finished run and record it on its machine. Returns
+    /// whether the run staged a breakpoint hit.
     fn finish_lane_run(
         &mut self,
         result: RunResult<M>,
         run: LaneRun,
-    ) -> Result<(), Error<M::Error>> {
+    ) -> Result<bool, Error<M::Error>> {
         let id = result.id;
         let (start, bound, offered, lower) = run.bounds[&id];
         let report = self.receive_run(result, offered);
         let accepted = self.accept_run(report, start, bound, lower, run.start, run.upto)?;
         self.confirm_offered_commands(&run.offered_commands, None)?;
+        let staged = self.execution.machines[id.0].staged.len();
         self.commit_runs(vec![accepted], &run.offered_stops, None);
-        Ok(())
+        Ok(Self::staged_hit(
+            &self.execution.machines[id.0].staged[staged..],
+        ))
     }
 }

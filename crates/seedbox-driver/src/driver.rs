@@ -606,10 +606,10 @@ where
     /// A frame arriving at `T` is offered exactly at `T`, after every timeline
     /// item due at `T` and before timer wakeups, as [`Request::ReceiveFrame`]
     /// to the receiver's current boot, including while paused. A running
-    /// receiver takes it in its next run, which starts at `T`; a paused or
-    /// suspended one, or one with a later item due at `T`, takes it in a
-    /// zero-budget run first. It is dropped if that boot has exited. Delivery
-    /// means offered to the NIC, not consumed.
+    /// receiver takes it in its next run, which starts at `T`; a paused one,
+    /// one held at a breakpoint, or one with a later item due at `T`, takes
+    /// it in a zero-budget run. It is dropped if that boot has exited.
+    /// Delivery means offered to the NIC, not consumed.
     /// While an attached machine can execute, rounds end no later than its
     /// earliest execution time plus latency, so no frame arrives before the
     /// round that sent it commits. Blocked or paused machines impose no limit;
@@ -617,8 +617,7 @@ where
     /// does not wake it, which also tightens the controller latency bound.
     /// Inside a round, each machine runs to the round's end on its own lane and
     /// takes its timers and frames at their exact times; lanes run side by side.
-    /// Only frames for a paused or suspended receiver end a round at their
-    /// arrival.
+    /// Only frames for a paused receiver end a round at their arrival.
     // Blocked machines impose no bound, so idle simulations still jump to their
     // next event.
     #[allow(clippy::too_many_arguments)]
@@ -1747,10 +1746,11 @@ where
     /// Offer every frame arriving at `now` to its receiver's current boot, in
     /// (sender, sequence, receiver) order. A receiver whose boot has exited
     /// drops the frame. A running receiver takes its frames at the start of its
-    /// next run, which starts at `now`, so a blocked one becomes runnable here.
-    /// A paused or suspended receiver runs no guest work, so it admits them now
-    /// with one zero-budget batch and commit. Returns whether any frame was
-    /// due, so that newly generated timeline items at `now` are processed next.
+    /// next run, which starts at `now`, so a blocked one becomes runnable here;
+    /// one held at a breakpoint gets that run without a budget. A paused
+    /// receiver has no next run, so it admits them now with one zero-budget
+    /// batch and commit. Returns whether any frame was due, so that newly
+    /// generated timeline items at `now` are processed next.
     fn deliver_frames(&mut self, now: Timestamp) -> Result<bool, Error<M::Error>> {
         let due = self.execution.network.take_due(now.as_nanos());
         if due.is_empty() {
@@ -1793,14 +1793,8 @@ where
         // state; the next run, from `now`, does the same before executing.
         let mut admitting = Vec::new();
         for id in receivers {
-            let suspended = self
-                .execution
-                .control
-                .service
-                .breaks
-                .suspended(&control::Control::source(id));
             let entry = &mut self.execution.machines[id.0];
-            if entry.lifecycle.paused() || suspended {
+            if entry.lifecycle.paused() {
                 admitting.push(id);
             } else if let StopReason::Blocked { .. } = entry.stopped {
                 entry.stopped = StopReason::BoundaryReached;
@@ -2050,9 +2044,9 @@ where
     }
 
     /// Whether every schedule cuts every machine at `at`: a timeline item or
-    /// the end of the run is due then, or a frame arrives then for a receiver
-    /// that takes it only at a barrier. At such a barrier everything staged
-    /// commits before what is due (C2).
+    /// the end of the run is due then, or a frame arrives then for a paused
+    /// receiver, which takes it only at a barrier. At such a barrier
+    /// everything staged commits before what is due (C2).
     fn barrier_needed(&self, at: Timestamp) -> bool {
         let receivers = self.lane_receivers();
         self.execution

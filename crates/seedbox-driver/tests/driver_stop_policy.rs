@@ -1289,6 +1289,73 @@ fn connection_incarnations_do_not_depend_on_stops() {
     assert!(fates(&own, "Scheduled") >= 2 * (end as usize / 11 - 1));
 }
 
+/// C2: a machine held at a breakpoint takes the frames that arrive for it in
+/// its lane, without a budget, whether or not a commit has carried its hit
+/// yet. Were such a frame a barrier only once the hit is committed, an
+/// arrival soon after a hit would cut every machine there under some stops
+/// and not under others, and the outputs of other machines stamped in the
+/// arrival's nanosecond would be ordered by that cut: the busy machine's,
+/// emitted before it, ahead of the lower-numbered idle one's, emitted after.
+#[test]
+fn frames_for_a_machine_held_at_a_breakpoint_do_not_depend_on_stops() {
+    const LATENCY: u64 = 700;
+    let pairs = 24_u64;
+    let end = pairs * 10 * US + 5 * US;
+    let said = |n: u64| Response::ApplicationOutput {
+        stream: Stream::Stdout,
+        bytes: n.to_le_bytes().to_vec(),
+    };
+    let mut oracle = Spec::busy().emit(
+        100,
+        call_with(1, r#""op":"declare_breaks","names":["leader"]"#),
+    );
+    let (mut idle, mut busy, mut held) = (Spec::idle(), Spec::busy(), Spec::busy());
+    for n in 0..pairs {
+        // A hit, then a frame that reaches the held machine 40 to 707 ns
+        // later, inside or just past the round the hit was written in. Two
+        // other machines write in the arrival's nanosecond.
+        let hit = 2 * US + n * 10 * US + 37 * n;
+        let arrival = hit + 40 + 29 * n;
+        held = held.emit(
+            hit,
+            Response::Break {
+                name: "leader".into(),
+            },
+        );
+        busy = busy
+            .emit(
+                arrival - LATENCY,
+                Response::TransmitFrame {
+                    bytes: frame(mac(3), ECHO_LIMIT, &n.to_le_bytes()),
+                },
+            )
+            .emit(arrival, said(n));
+        idle = idle.emit(arrival, said(n));
+        let resume = format!(r#""op":"resume_break","break_id":{}"#, n + 1);
+        oracle = oracle.emit(hit + 4 * US, call_with(n as u32 + 2, &resume));
+    }
+    let own = holds(
+        Scenario {
+            machines: vec![oracle, idle, busy, held],
+            network: NetworkConfig::new(Duration::from_nanos(LATENCY), Duration::ZERO, 0)
+                .unwrap()
+                .into(),
+            inputs: Vec::new(),
+            end,
+            breaks: true,
+        },
+        1,
+    );
+    assert_eq!(events_with(&own, "BreakHit"), pairs as usize);
+    assert_eq!(events_with(&own, "reason: Resumed"), pairs as usize);
+    // Every frame reached the machine while it was held.
+    let received = own.seen[3]
+        .iter()
+        .filter(|line| line.contains("ReceiveFrame"))
+        .count();
+    assert_eq!(received, pairs as usize);
+}
+
 /// A slow clock maps two simulation nanoseconds to one machine nanosecond. A
 /// machine that notices its exit only by trying to run past it exits at the
 /// start of its next run when a barrier falls on the second of the two; its
