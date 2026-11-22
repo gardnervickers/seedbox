@@ -124,6 +124,13 @@ pub trait Machine {
     /// speculative state or effects exposed to the caller.
     /// A blocked machine may return without making progress.
     ///
+    /// A stop that delivers nothing leaves no trace: splitting one execution
+    /// into different `run` calls gives the same machine. A call that ends at
+    /// `upto` only because `upto` came first changes no guest-visible state,
+    /// appends nothing to a witness, advances no reservation epoch, draws
+    /// nothing, and leaves no trace of `upto` in the stopped machine; the
+    /// next call that starts there, with nothing to deliver, adopts nothing.
+    ///
     /// # Handling the result
     ///
     /// - [`StopReason::BoundaryReached`]: the machine reached `upto` and is
