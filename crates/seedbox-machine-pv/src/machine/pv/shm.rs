@@ -54,11 +54,12 @@ pub(super) const DESCRIPTOR: i32 = 196;
 /// Bytes in each ring; a longer message passes through in pieces.
 pub(super) const CAPACITY: u64 = 1 << 20;
 /// Workers wait between requests across whole Driver rounds. These budgets
-/// allow longer waits than the coordinator's 200 µs ceiling.
+/// allow longer waits than the coordinator's 200 µs ceiling. Hosts without
+/// a monitored wait keep the bounded spin they had before it.
 fn worker_spin(policy: Idle) -> Duration {
     Duration::from_micros(match policy {
         Idle::Monitor => 400,
-        _ => 500,
+        _ => 1000,
     })
 }
 

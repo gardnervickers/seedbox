@@ -88,8 +88,8 @@ also watches the individual worker pipes for EOF, including while a ticket is
 owed. One Driver at a time holds the doorbell. Another in the same process
 sleeps in its oldest run for that round, on that worker's own pipe. The default
 spin ceiling is 200 µs in the coordinator. macOS ARM64 with timed WFE uses a
-monitored wait and a 400 µs VM ceiling. Other hosts use bounded spinning and a
-500 µs VM ceiling. Both park sooner after consecutive unproductive spins.
+monitored wait and a 400 µs VM ceiling. Other hosts, including Macs without
+FEAT_WFxT, use bounded spinning and a 1 ms VM ceiling. Both park sooner after consecutive unproductive spins.
 [Round loop](../crates/seedbox-driver/src/driver/round.rs) ·
 [Wake protocol](../crates/seedbox-machine/src/host/doorbell.rs)
 
