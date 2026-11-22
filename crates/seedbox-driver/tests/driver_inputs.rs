@@ -549,20 +549,9 @@ fn heal_by_key_or_handle_restores_nominal_and_rejects_inactive_targets() {
 fn hold_script(name: &str) -> Scripted {
     let script = match name {
         "caller" => vec![
-            call(
-                2,
-                1,
-                serde_json::json!({"op":"arm_trigger","source":{"machine":"source"},"marker":b"needle",
-                    "match_timeout_ns":20,"fault":{"action":"stop","target":{"machine":"target"}}}),
-            ),
+            call(5, 1, on("stop", "target")),
             call(7, 2, on("pause", "target")),
         ],
-        "source" => vec![Output {
-            at: at(5),
-            payload: Response::BootConsole {
-                bytes: b"xxneedle".to_vec(),
-            },
-        }],
         _ => vec![],
     };
     Scripted {
@@ -572,9 +561,9 @@ fn hold_script(name: &str) -> Scripted {
 }
 
 #[test]
-fn pause_before_next_fault_holds_trigger_guest_and_input_effects_alike() {
-    let (mut driver, ids) = world(1, &["caller", "source", "target"], &[], hold_script);
-    let target = ids[3];
+fn pause_before_next_fault_holds_guest_and_input_effects_alike() {
+    let (mut driver, ids) = world(1, &["caller", "target"], &[], hold_script);
+    let target = ids[2];
     schedule(
         &mut driver,
         9,
@@ -623,7 +612,13 @@ fn pause_before_next_fault_holds_trigger_guest_and_input_effects_alike() {
         [
             (
                 at(5),
-                FaultOrigin::Trigger { trigger: 1 },
+                FaultOrigin::Control {
+                    machine: ids[1],
+                    call: SimulationControlId {
+                        session: NonZeroU32::new(1).unwrap(),
+                        request: NonZeroU32::new(1).unwrap(),
+                    }
+                },
                 FaultAction::Application(ApplicationCommand::Stop)
             ),
             (

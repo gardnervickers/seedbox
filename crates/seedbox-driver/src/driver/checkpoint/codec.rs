@@ -37,7 +37,6 @@ impl<S> Checkpoint<S> {
             oracle_stops,
             control,
             inputs,
-            trigger_marker,
             definitions,
             network,
             properties,
@@ -91,7 +90,6 @@ impl<S> Checkpoint<S> {
             oracle_stops,
             control,
             inputs,
-            trigger_marker,
             definitions,
             network,
             properties,
@@ -258,10 +256,6 @@ impl Checkpoint<SnapshotReference> {
             FaultOrigin::Control { machine, .. } => {
                 require(machine.0 < self.machines.len(), "fault caller")?
             }
-            FaultOrigin::Trigger { trigger } => require(
-                self.control.service.trigger_persist(trigger),
-                "fault trigger",
-            )?,
             FaultOrigin::Input { .. } => {}
         }
         match &r.target {
@@ -585,7 +579,6 @@ impl Checkpoint<SnapshotReference> {
                             "queued input lacks pending key",
                         )?;
                     }
-                    _ => {}
                 }
             }
         }
@@ -672,4 +665,4 @@ impl<T: Wire> Wire for Entry<T> {
         })
     }
 }
-wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,quantum_end,machines,events,boundary_index,completed_quanta,quantum_committed,stopped,playback,oracle,finished,oracle_stops,control,inputs,trigger_marker,definitions,network,properties});
+wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,quantum_end,machines,events,boundary_index,completed_quanta,quantum_committed,stopped,playback,oracle,finished,oracle_stops,control,inputs,definitions,network,properties});

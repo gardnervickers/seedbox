@@ -92,7 +92,6 @@ impl<M> ExecutionState<M> {
             oracle_stops,
             control,
             inputs,
-            trigger_marker,
             definitions,
             network,
             properties,
@@ -150,7 +149,6 @@ impl<M> ExecutionState<M> {
         oracle_stops.put(&mut e)?;
         control.put(&mut e)?;
         inputs.put(&mut e)?;
-        trigger_marker.put(&mut e)?;
         definitions.put(&mut e)?;
         // Reduced property evidence decides the run's verdict and flush
         // replies, so it is part of the execution's identity.

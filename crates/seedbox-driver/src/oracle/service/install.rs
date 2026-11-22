@@ -7,7 +7,6 @@ impl Service {
     pub(super) fn install(
         &mut self,
         adapter: &mut impl Adapter,
-        mode: AdmissionMode,
         requester: Requester,
         call: Option<Call>,
         target: Subject,
@@ -20,7 +19,7 @@ impl Service {
         let (scope, facts) = match target {
             Subject::Network(scope) => {
                 return self.install_links(
-                    adapter, mode, requester, call, scope, effect, handle, healing, now, deadline,
+                    adapter, requester, call, scope, effect, handle, healing, now, deadline,
                 )
             }
             Subject::Machine(facts) => (
@@ -34,7 +33,6 @@ impl Service {
             Subject::Links { left, right } => {
                 return self.install_links(
                     adapter,
-                    mode,
                     requester,
                     call,
                     Scope::Links { left, right },
@@ -46,13 +44,7 @@ impl Service {
                 );
             }
         };
-        Self::check_machine_effect(
-            mode,
-            &requester,
-            &self.requested(&facts),
-            self.commanded(&facts),
-            &effect,
-        )?;
+        Self::check_machine_effect(&self.requested(&facts), self.commanded(&facts), &effect)?;
         let fault = self.token()?;
         let pending = Pending {
             network: None,
@@ -136,20 +128,16 @@ impl Service {
         (self.pending.values())
             .any(|p| p.effect.guest_command() && p.scope.is_machine(&facts.name, facts.boot))
     }
-    /// Machine-effect admission checks, in order: the control-only
-    /// availability preflight, target state policy, then requester mode.
+    /// Machine-effect admission checks, in order: the availability preflight,
+    /// then target state policy.
     fn check_machine_effect(
-        mode: AdmissionMode,
-        requester: &Requester,
         facts: &Facts,
         commanded: bool,
         effect: &Effect,
     ) -> Result<(), PreparationError> {
         // The control API's physical-availability preflight precedes Faults'
         // policy validation (world_windowed::admit_control/reject_unavailable).
-        // Trigger admission bypasses this control-only wrapper.
-        if matches!(mode, AdmissionMode::Control)
-            && facts.physically_ended
+        if facts.physically_ended
             && facts.vm != Vm::Down
             && matches!(
                 effect,
@@ -197,9 +185,6 @@ impl Service {
         };
         if !allowed {
             return Err(error(ErrorCode::InvalidState, "target state rejects operation").into());
-        }
-        if matches!(mode, AdmissionMode::Trigger) != matches!(requester, Requester::Trigger(_)) {
-            return Err(Failure::from("admission mode does not match its requester").into());
         }
         Ok(())
     }
@@ -253,7 +238,6 @@ impl Service {
     fn install_links(
         &mut self,
         adapter: &mut impl Adapter,
-        mode: AdmissionMode,
         requester: Requester,
         call: Option<Call>,
         scope: Scope,
@@ -273,9 +257,6 @@ impl Service {
                 | Effect::Unselect
         ) {
             return Err(Failure::from("machine effect bound to links").into());
-        }
-        if matches!(mode, AdmissionMode::Trigger) != matches!(requester, Requester::Trigger(_)) {
-            return Err(Failure::from("admission mode does not match its requester").into());
         }
         let network = if effect == Effect::Unselect {
             let plan = handle

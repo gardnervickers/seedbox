@@ -293,22 +293,6 @@ where
                 self.commit_boundary()?;
                 Ok(None)
             }
-            control::Event::TriggerBoundary => {
-                self.execution
-                    .events
-                    .entry(now)
-                    .or_default()
-                    .push_back(Scheduled::Control(control::Event::TriggerFinalize));
-                Ok(None)
-            }
-            control::Event::TriggerFinalize => {
-                self.execution
-                    .control
-                    .service
-                    .expire_triggers(now.as_nanos());
-                self.sync_trigger_marker();
-                Ok(None)
-            }
             control::Event::Plan(Plan::Wake { token, .. }) => {
                 let plans = self
                     .execution

@@ -713,7 +713,7 @@ where
             ));
         }
         let result = (|| {
-            // Existing guest/trigger work due at this barrier precedes a newly
+            // Existing guest work due at this barrier precedes a newly
             // supplied authored entry, matching the live admission boundary.
             let due = self
                 .driver

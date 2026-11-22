@@ -73,7 +73,6 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         oracle_stops,
         control,
         inputs,
-        trigger_marker,
         definitions,
         network,
         properties,
@@ -110,7 +109,6 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         oracle_stops,
         control,
         inputs,
-        trigger_marker,
         definitions,
         network,
         properties

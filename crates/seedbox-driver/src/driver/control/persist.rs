@@ -15,7 +15,7 @@ wire_struct!(Control {
     calls
 });
 wire_struct!(Reservation { id, spec });
-wire_enum!(Event; units {3=>TriggerBoundary,4=>TriggerFinalize} tuples {1=>Plan(v0)} records {0=>Call{source,boot,id,observed,payload},2=>Input{key,action,handle},5=>Reply{target,boot,id,payload}});
+wire_enum!(Event; units {} tuples {1=>Plan(v0)} records {0=>Call{source,boot,id,observed,payload},2=>Input{key,action,handle},5=>Reply{target,boot,id,payload}});
 
 impl Control {
     pub(crate) fn has_pending(&self, id: super::super::FaultId) -> bool {

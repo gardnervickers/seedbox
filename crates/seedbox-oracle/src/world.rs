@@ -370,7 +370,7 @@ impl GuestWorld {
     }
 
     /// The underlying RPC, for calls outside [`World`] (`inspect`,
-    /// `connections`, triggers).
+    /// `connections`).
     pub fn control(&mut self) -> &mut Control {
         &mut self.control
     }

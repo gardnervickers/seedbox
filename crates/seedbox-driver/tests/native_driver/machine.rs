@@ -14,7 +14,7 @@ mod disk_driver_scenario;
 #[cfg(unix)]
 mod driver_input_snapshot_tests;
 #[cfg(unix)]
-mod driver_sleep_trigger_tests;
+mod driver_sleep_tests;
 #[cfg(unix)]
 mod guest_service_snapshot_tests;
 #[cfg(unix)]

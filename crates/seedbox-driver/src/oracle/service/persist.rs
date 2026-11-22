@@ -6,7 +6,7 @@ wire_enum!(CommandKind; units {1=>StepRealtime} tuples {0=>Application(v0)} reco
 wire_enum!(Effect; units {0=>Spawn,1=>Pause,2=>Resume,3=>Crash,4=>Reboot,5=>Shutdown,10=>Partition,11=>Unpartition,13=>Unshape,14=>Select,15=>Unselect} tuples {6=>Execution(v0),7=>Drift(v0),8=>StepRealtime(v0),9=>Process(v0),12=>Shape(v0,v1)} records {16=>Fault{record,fault},17=>Unfault{record}});
 wire_enum!(Scope; units {} tuples {} records {0=>Machine{name,boot},1=>Links{left,right},2=>DirectedLinks{from,to},3=>Connection{connection}});
 wire_enum!(FaultAction; units {1=>Heal} tuples {0=>Effect(v0)} records {});
-wire_enum!(Requester; units {} tuples {1=>Trigger(v0),2=>Input(v0)} records {0=>Call{source,id}});
+wire_enum!(Requester; units {} tuples {2=>Input(v0)} records {0=>Call{source,id}});
 wire_struct!(Admitted {
     record_id,
     fault,
@@ -17,7 +17,7 @@ wire_struct!(Admitted {
     requested_at,
     admitted_at
 });
-wire_enum!(Notice; units {} tuples {0=>Admitted(v0),1=>Settled(v0)} records {2=>TriggerArmed{trigger,source,target,at,deadline},3=>TriggerResolved{trigger,at,status,fault},4=>BreakHit{break_id,machine,boot,name,at},5=>BreakEnded{break_id,at,reason}});
+wire_enum!(Notice; units {} tuples {0=>Admitted(v0),1=>Settled(v0)} records {4=>BreakHit{break_id,machine,boot,name,at},5=>BreakEnded{break_id,at,reason}});
 wire_struct!(Settlement {
     record_id,
     network,
@@ -77,7 +77,6 @@ wire_struct!(Pending {
 wire_struct!(Service {
     reply_latency_ns,
     handles,
-    triggers,
     last,
     last_wake,
     pending,
@@ -225,7 +224,6 @@ impl Service {
         use crate::persistence::require;
         require(!self.poisoned, "poisoned service")?;
         self.handles.check_persist(exists)?;
-        self.triggers.check_persist(now, exists)?;
         self.breaks.check_persist(now, self.last_wake, exists)?;
         // Each record has one pending owner, except a step not yet
         // acknowledged and the unsent heal queued behind it.
@@ -329,10 +327,6 @@ impl Service {
         use crate::persistence::require;
         match r {
             Requester::Call { source, .. } => require(exists(source), "requester source"),
-            Requester::Trigger(id) => require(
-                *id > 0 && *id as usize <= self.triggers.records().len(),
-                "requester trigger",
-            ),
             Requester::Input(s) => require(
                 (1..=128).contains(&s.len())
                     && s.bytes()
@@ -343,9 +337,6 @@ impl Service {
     }
     pub(crate) fn token_persist(&self, fault: u32) -> bool {
         fault > 0 && fault <= self.last
-    }
-    pub(crate) fn trigger_persist(&self, id: u32) -> bool {
-        id > 0 && id as usize <= self.triggers.records().len()
     }
     pub(crate) fn check_notices_persist(
         &self,
@@ -417,35 +408,6 @@ impl Service {
                 self.check_requester_persist(&s.requester, known)?;
                 scope(&s.scope)
             }
-            Notice::TriggerArmed {
-                trigger,
-                source,
-                target,
-                at,
-                deadline,
-            } => require(
-                self.trigger_persist(*trigger)
-                    && known(source)
-                    && target.as_ref().is_none_or(|n| known(n))
-                    && *at <= now
-                    && deadline > at,
-                "armed notice",
-            ),
-            Notice::TriggerResolved {
-                trigger,
-                at,
-                status,
-                fault,
-            } => require(
-                self.trigger_persist(*trigger)
-                    && *at <= now
-                    && !matches!(
-                        status,
-                        super::triggers::Status::Armed | super::triggers::Status::Matched
-                    )
-                    && fault.is_none_or(|f| self.token_persist(f)),
-                "resolved notice",
-            ),
             Notice::BreakHit {
                 break_id,
                 machine,
