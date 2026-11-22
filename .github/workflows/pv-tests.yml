@@ -1,7 +1,9 @@
 name: PV tests
 
-# TEMPORARY PROBE (never merge): replay-mismatch soak.
 on:
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -49,16 +51,9 @@ jobs:
     # A skipped job satisfies the required check; a skipped workflow never does.
     # Run conservatively if change detection fails rather than skipping tests.
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.run_tests == 'true')
-    strategy:
-      fail-fast: false
-      matrix:
-        slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 100
     env:
-      SEEDBOX_TEST_SOAK_MINUTES: '110'
-      SEEDBOX_TEST_SOAK_LANES: '2'
-      SEEDBOX_TEST_SOAK_WORKLOADS: properties
       # Use the Docker engine checked below, even when Podman's socket exists.
       DOCKER_HOST: unix:///var/run/docker.sock
       CARGO_INCREMENTAL: '0'
@@ -66,18 +61,12 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_PROFILE_RELEASE_DEBUG: '0'
       SUITE: pv
-    steps:
-      - name: Run only on AMD EPYC 7763 hosts
-        run: |
-          grep -m1 '^model name' /proc/cpuinfo
-          if grep -q 'EPYC 7763' /proc/cpuinfo; then echo PROBE=1 >> "$GITHUB_ENV"; fi
+    steps: &steps
       - uses: actions/checkout@v7
-        if: env.PROBE == '1'
         with:
           persist-credentials: false
           submodules: true
       - name: Identify Nix cache inputs
-        if: env.PROBE == '1'
         id: sources
         env:
           NIX_INPUTS: ${{ hashFiles('flake.lock', 'flake.nix', '.gitmodules', 'nix/**', 'Cargo.toml', 'Cargo.lock', 'crates/seedbox-check/**', 'crates/seedbox-exec/**', 'crates/seedbox-test-time/**', 'crates/seedbox-driver/examples/tcg-init', 'crates/seedbox-machine/**/*.nix', 'crates/seedbox-machine/guest-assets.py', 'crates/seedbox-machine/guest-initramfs.py', 'crates/seedbox-machine/guest-static-elf.sh', 'crates/seedbox-machine/guest/**', 'crates/seedbox-machine/src/pv/**', 'crates/seedbox-machine/tests/fixtures/**', 'crates/seedbox-machine/src/machine/disk.rs', 'crates/seedbox-machine/src/machine/disk/**', 'crates/seedbox-machine-tcg/qemu/**', 'examples/minio/inputs.lock.json') }}
@@ -85,7 +74,6 @@ jobs:
           echo "dynamorio=$(git rev-parse HEAD:vendor/dynamorio)" >> "$GITHUB_OUTPUT"
           echo "nix-inputs=$NIX_INPUTS" >> "$GITHUB_OUTPUT"
       - name: Reclaim unused hosted SDK space
-        if: env.PROBE == '1'
         run: |
           # Leave the hosted SDKs alone when the filesystem has enough headroom.
           available=$(df --output=avail -B1 / | tail -n 1)
@@ -94,7 +82,7 @@ jobs:
           fi
           df -h /
       - name: Verify usable KVM before building
-        if: env.PROBE == '1' && (env.SUITE == 'pv')
+        if: env.SUITE == 'pv'
         run: |
           grep -m1 '^vendor_id' /proc/cpuinfo
           grep -m1 '^model name' /proc/cpuinfo
@@ -119,11 +107,9 @@ jobs:
           PYTHON
           docker info
       - uses: cachix/install-nix-action@v31
-        if: env.PROBE == '1'
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - uses: nix-community/cache-nix-action/restore@v7
-        if: env.PROBE == '1'
         id: nix-cache
         with:
           primary-key: ${{ env.SUITE }}-nix-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.sources.outputs.dynamorio }}-${{ steps.sources.outputs.nix-inputs }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -138,10 +124,8 @@ jobs:
             pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-
             pv-nix-${{ runner.os }}-${{ runner.arch }}-
       - name: Prepare and root the Nix development environment
-        if: env.PROBE == '1'
         run: nix develop --profile "$RUNNER_TEMP/pv-dev" --command true
       - uses: Swatinem/rust-cache@v2
-        if: env.PROBE == '1'
         id: cargo-cache
         with:
           key: ${{ env.SUITE }}-${{ hashFiles('flake.lock', 'flake.nix') }}
@@ -151,19 +135,16 @@ jobs:
             . -> build/cargo
           cache-bin: false
       - name: Build and root guest assets from the checkout
-        if: env.PROBE == '1'
         run: |
           seedbox_flake="$(bash tools/dev-flake.sh)?submodules=1"
           nix build "$seedbox_flake#machinePvAssets" "$seedbox_flake#machineTcgAssets" "$seedbox_flake#machineGuestFormatter" "$seedbox_flake#machineGuestFormatterX86" "$seedbox_flake#machineTcgTestFixtures" "$seedbox_flake#machinePvTestFixtures" --out-link "$RUNNER_TEMP/pv-assets"
       # Save expensive dependencies before tests, so a test failure does not
       # force the next run to rebuild the kernel or download the toolchain.
       - uses: nix-community/cache-nix-action/save@v7
-        if: env.PROBE == '1'
         with:
           primary-key: ${{ steps.nix-cache.outputs.primary-key }}
           gc-max-store-size: 5G
       - name: Record cache results
-        if: env.PROBE == '1'
         env:
           NIX_HIT: ${{ steps.nix-cache.outputs.hit }}
           CARGO_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
@@ -173,42 +154,57 @@ jobs:
             echo "Cargo exact cache hit: $CARGO_HIT"
             du -sh /nix/store
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: PROBE signal frame canonicalization test
-        if: env.PROBE == '1'
-        continue-on-error: true
+      - name: Portable prerequisites and PV application acceptance
+        if: env.SUITE == 'pv'
+        run: nix develop --command bash harness/check.sh linux-apps
+      # linux-apps runs no ignored native driver tests, so run the x86_64 KVM
+      # disk fault and block request breakpoint cases here.
+      - name: Native PV disk faults and block request breakpoints
+        if: env.SUITE == 'pv'
         run: |
           seedbox_flake="$(bash tools/dev-flake.sh)?submodules=1"
           inputs=$(nix build --impure --no-link --print-out-paths \
             --file nix/build-inputs.nix --argstr flake "$seedbox_flake" \
-            --arg names '[ "machinePvAssets" ]')
-          tools=$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#llvmPackages.clang-unwrapped nixpkgs#lld)
-          export SEEDBOX_PV_CLANG=$(echo "$tools" | grep clang)/bin/clang
-          export SEEDBOX_PV_LD=$(echo "$tools" | grep lld | head -1)/bin/ld.lld
+            --arg names '[ "machinePvAssets" "machinePvTestFixtures" ]')
           nix develop --command cargo build --locked -p seedbox-machine-pv --bin seedbox-pv-worker
           export SEEDBOX_PV_WORKER=$PWD/target/debug/seedbox-pv-worker
-          export SEEDBOX_PV_KERNEL=$inputs/machinePvAssets/kernel
-          ls -la "$SEEDBOX_PV_KERNEL" "$SEEDBOX_PV_CLANG" "$SEEDBOX_PV_LD"
+          export SEEDBOX_PV_ASSETS=$inputs/machinePvAssets
+          export SEEDBOX_PV_DISK_PROBE=$inputs/machinePvTestFixtures/bin/disk-probe
+          export SEEDBOX_PV_DISK_IMAGE=$inputs/machinePvTestFixtures/disk/ext4.img
+          nix develop --command cargo test --locked -p seedbox-driver --test native_driver -- \
+            --ignored --test-threads 1 pv_device_faults pv_block_request_breakpoint
           nix develop --command cargo test --locked -p seedbox-machine-pv --lib -- \
-            --ignored --nocapture native_linux_signal_frame_fp_encoding_is_canonical native_linux_task_initial_fp_encoding
-      - name: Portable prerequisites and PV application acceptance
-        if: env.PROBE == '1' && (env.SUITE == 'pv')
-        run: nix develop --command bash harness/check.sh linux-apps
+            --ignored faults_and_holds_outlive
       - name: Native TCG machine and public-service acceptance
-        if: env.PROBE == '1' && (env.SUITE == 'tcg')
+        if: env.SUITE == 'tcg'
         run: nix develop --command bash harness/check-machine-tcg.sh --skip-portable
       - name: Bound diagnostic artifact storage
-        if: env.PROBE == '1' && (always())
+        if: always()
         # Privileged KVM tests leave root-owned manifests and logs.
         run: sudo python3 tools/pv-ci/artifacts.py
       - uses: actions/upload-artifact@v7
-        if: env.PROBE == '1' && (always())
+        if: always()
         with:
-          name: ${{ env.SUITE }}-results-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slot }}
+          name: ${{ env.SUITE }}-results-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/pv-artifacts/
           retention-days: 7
       - name: Exclude test state from the Cargo cache
-        if: env.PROBE == '1' && (always())
+        if: always()
         # Diagnostics have been uploaded. Rust-cache archives the target tree,
         # so remove root-owned VM state and per-run reports before its post step.
         run: sudo rm -rf -- target/check-reports target/pv-artifacts
 
+  # The TCG suite alone needs most of the time limit, so it runs beside the
+  # PV job on its own runner. It needs neither KVM nor an image engine.
+  tcg:
+    needs: changes
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.run_tests == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      SUITE: tcg
+    steps: *steps

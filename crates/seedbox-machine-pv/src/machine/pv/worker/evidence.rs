@@ -59,11 +59,6 @@ impl<B: Backend> Machine<B> {
             .create_new(true)
             .open(path)
             .map_err(|e| format!("PV evidence page file {}: {e}", path.display()))?;
-        // PROBE ONLY (never merge): nonzero pages as (gpa u64 LE, 4096 bytes).
-        let mut probe_ram = std::io::BufWriter::new(
-            File::create(path.with_extension("probe-ram"))
-                .map_err(|e| format!("probe ram: {e}"))?,
-        );
         let mut ram = Sha256::new();
         let mut region_hash = Sha256::new();
         let mut pages = Sha256::new();
@@ -83,13 +78,7 @@ impl<B: Backend> Machine<B> {
                 unsafe { &self.ram.bytes()[offset..offset + len as usize] }
             };
             ram.update(bytes);
-            for (index, chunk) in bytes.chunks(4096).enumerate() {
-                if chunk.iter().any(|&b| b != 0) {
-                    probe_ram
-                        .write_all(&(base + index as u64 * 4096).to_le_bytes())
-                        .and_then(|()| probe_ram.write_all(chunk))
-                        .map_err(|e| format!("probe ram write: {e}"))?;
-                }
+            for chunk in bytes.chunks(4096) {
                 let digest = Sha256::digest(chunk);
                 file.write_all(&digest[..8])
                     .map_err(|e| format!("PV evidence pages write: {e}"))?;
@@ -97,9 +86,6 @@ impl<B: Backend> Machine<B> {
                 page_bytes = page_bytes.checked_add(8).ok_or("PV page record overflow")?;
             }
         }
-        probe_ram
-            .flush()
-            .map_err(|e| format!("probe ram flush: {e}"))?;
         parts.push(("ram".into(), hex(&ram.finalize())));
         parts.push(("ram_regions".into(), hex(&region_hash.finalize())));
         parts.push(("ram_pages".into(), hex(&pages.finalize())));
