@@ -1254,10 +1254,10 @@ fn unfinished_quantum_and_pending_step_target_survive_restore() {
     .unwrap();
     let c = d.checkpoint().unwrap();
     reference_observer_session(&mut d);
-    assert_eq!(c.quantum_end, at(10));
+    assert_eq!(c.origin, at(0));
     assert!(status(&mut d).stepping);
     let expected = advance(&mut d, 10);
-    assert_eq!(d.execution.completed_quanta, 1);
+    assert_eq!(d.execution.completed_quanta(d.now()), 1);
     assert!(!status(&mut d).stepping);
     for workers in [1, 4] {
         let mut b = restore(&c, workers);

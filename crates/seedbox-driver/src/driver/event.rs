@@ -71,8 +71,10 @@ pub enum EventKind {
         key: InputKey,
         rejection: InputRejection,
     },
-    /// The final outcome of an admitted fault. `at` is when the settlement was
-    /// committed; `outcome_at` is when the outcome occurred, if known. Only
+    /// The final outcome of an admitted fault. `at` is when the settlement took
+    /// effect: the outcome's own time, or the failure's when there is none,
+    /// never the commit that carried it; `outcome_at` is when the outcome
+    /// occurred, if known. Only
     /// [`SettlementStatus::Applied`] proves the change happened.
     FaultSettled {
         record: FaultRecord,

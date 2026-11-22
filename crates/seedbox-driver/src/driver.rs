@@ -378,13 +378,15 @@ type MachineFactory<M> =
 struct ExecutionState<M> {
     clock: Arc<SimulationClock>,
     rng: SimulationRng,
+    /// The quantum and the start its boundaries are anchored at. Host
+    /// choices that cap rounds and pace playback, not simulation state: they
+    /// are outside policy evidence.
     quantum_ns: u64,
-    quantum_end: Timestamp,
+    origin: Timestamp,
     machines: Vec<Entry<M>>,
     events: BTreeMap<Timestamp, VecDeque<Scheduled>>,
+    /// Commits so far: where rounds ended, a host matter outside evidence.
     boundary_index: u64,
-    completed_quanta: u64,
-    quantum_committed: bool,
     failed: bool,
     stopped: bool,
     oracle: MachineId,
@@ -407,6 +409,23 @@ struct ExecutionState<M> {
     /// The engine running the machines, which decides what oracle calls
     /// may ask of them. Not checkpoint state: its owner declares it again.
     engine: Option<faults::Engine>,
+}
+
+impl<M> ExecutionState<M> {
+    /// Quanta completed by `now`: a function of time and the quantum, for
+    /// playback and positions only.
+    fn completed_quanta(&self, now: Timestamp) -> u64 {
+        (now.as_nanos() - self.origin.as_nanos()) / self.quantum_ns
+    }
+
+    /// The first quantum boundary after `now`, which caps a round that starts
+    /// there; `None` past the end of time.
+    fn quantum_end(&self, now: Timestamp) -> Option<Timestamp> {
+        let next = self.completed_quanta(now).checked_add(1)?;
+        next.checked_mul(self.quantum_ns)
+            .and_then(|elapsed| self.origin.as_nanos().checked_add(elapsed))
+            .map(Timestamp::from_nanos)
+    }
 }
 
 /// Already-committed descriptions owned by one observer session. These are
@@ -641,12 +660,10 @@ where
             .ok()
             .filter(|&n| n > 0)
             .ok_or(Error::InvalidQuantum)?;
-        let quantum_end = Timestamp::from_nanos(
-            start
-                .as_nanos()
-                .checked_add(quantum_ns)
-                .ok_or(Error::TimeOverflow)?,
-        );
+        start
+            .as_nanos()
+            .checked_add(quantum_ns)
+            .ok_or(Error::TimeOverflow)?;
         if workers == 0 {
             return Err(Error::InvalidWorkerCount);
         }
@@ -729,13 +746,11 @@ where
             execution: ExecutionState {
                 clock,
                 quantum_ns,
-                quantum_end,
+                origin: start,
                 machines,
                 rng,
                 events: BTreeMap::new(),
                 boundary_index: 0,
-                completed_quanta: 0,
-                quantum_committed: false,
                 failed: false,
                 stopped: false,
                 oracle: MachineId(0),
@@ -1226,7 +1241,7 @@ where
     fn position(&self) -> Position {
         Position {
             boundary_index: self.execution.boundary_index,
-            completed_quanta: self.execution.completed_quanta,
+            completed_quanta: self.execution.completed_quanta(self.now()),
             at: self.now(),
         }
     }
@@ -1248,14 +1263,6 @@ where
             .boundary_index
             .checked_add(1)
             .ok_or(Error::PositionOverflow)?;
-        if self.now() == self.execution.quantum_end && !self.execution.quantum_committed {
-            self.execution.completed_quanta = self
-                .execution
-                .completed_quanta
-                .checked_add(1)
-                .ok_or(Error::PositionOverflow)?;
-            self.execution.quantum_committed = true;
-        }
         let mut outputs = Vec::new();
         for (index, entry) in self.execution.machines.iter_mut().enumerate() {
             let (committed, held): (Vec<_>, Vec<_>) =
@@ -1668,16 +1675,10 @@ where
             return Ok(self.outcome());
         }
 
-        if self.now() == self.execution.quantum_end {
-            self.execution.quantum_committed = false;
-            self.execution.quantum_end = Timestamp::from_nanos(
-                self.execution
-                    .quantum_end
-                    .as_nanos()
-                    .checked_add(self.execution.quantum_ns)
-                    .ok_or(Error::TimeOverflow)?,
-            );
-        }
+        let quantum_end = self
+            .execution
+            .quantum_end(self.now())
+            .ok_or(Error::TimeOverflow)?;
 
         // Known events limit the whole round, and so do frames for receivers
         // that take them only at a boundary. Every other machine takes its
@@ -1697,7 +1698,7 @@ where
             )
             .chain(self.causal_bound(&receivers))
             .chain(self.execution.finishing.map(|(at, _)| at))
-            .fold(upto.min(self.execution.quantum_end), Timestamp::min);
+            .fold(upto.min(quantum_end), Timestamp::min);
         // A test's stop policy may end the round earlier, never later.
         let boundary = self.stops.end(self.now(), boundary);
 

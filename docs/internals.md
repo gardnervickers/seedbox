@@ -87,6 +87,8 @@ Plans created by admission append behind existing items; delayed guest replies b
 What follows from a machine's output or exit (a guest call's admission, a reply, a released command, a flush reply)
 is due one network latency after it, never at the commit that carried it, and queues in output order.
 The [Driver](../crates/seedbox-driver/src/driver.rs) assigns fault IDs at admission, never for future overrides.
+Where rounds end is the host's: policy [evidence](../crates/seedbox-driver/src/driver/evidence.rs) holds no quantum,
+commit count or commit time, so evidence at one time is the same under any stops or quantum.
 
 ## Machine network delivery
 

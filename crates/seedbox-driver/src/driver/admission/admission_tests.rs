@@ -60,12 +60,10 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         clock,
         rng,
         quantum_ns,
-        quantum_end,
+        origin,
         machines,
         events,
         boundary_index,
-        completed_quanta,
-        quantum_committed,
         failed,
         stopped,
         oracle,
@@ -95,14 +93,12 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         clock.now(),
         rng,
         quantum_ns,
-        quantum_end,
+        origin,
         events,
         staged_events,
         published,
         next_sequence,
         boundary_index,
-        completed_quanta,
-        quantum_committed,
         playback.checkpoint(),
         failed,
         stopped,
@@ -171,7 +167,7 @@ fn paused_commit_holds_without_touching_anchor_or_quantum_and_releases_once() {
             .unwrap();
         let before = d.playback.clone();
         let position = d.position();
-        let quantum_end = d.execution.quantum_end;
+        let quantum_end = d.execution.quantum_end(d.now()).unwrap();
         let native = states(&d);
         let p = prepare(&mut d, "live", pause());
         assert_eq!(p.key(), &key("live"));
@@ -192,8 +188,11 @@ fn paused_commit_holds_without_touching_anchor_or_quantum_and_releases_once() {
             "including exact host anchor and step target"
         );
         assert_eq!(d.now(), position.at);
-        assert_eq!(d.execution.quantum_end, quantum_end);
-        assert_eq!(d.execution.completed_quanta, position.completed_quanta);
+        assert_eq!(d.execution.quantum_end(d.now()).unwrap(), quantum_end);
+        assert_eq!(
+            d.execution.completed_quanta(d.now()),
+            position.completed_quanta
+        );
         assert_eq!(states(&d), native, "held effect must not run a machine");
         assert!(!d.execution.machines[1].lifecycle.paused());
         // Output held at the barrier commits before the input's admission.
@@ -232,13 +231,19 @@ fn paused_commit_holds_without_touching_anchor_or_quantum_and_releases_once() {
         if stepping_release {
             d.with_barrier(|b| b.step_quantum()).unwrap();
             d.step(quantum_end).unwrap();
-            assert_eq!(d.execution.completed_quanta, position.completed_quanta + 1);
+            assert_eq!(
+                d.execution.completed_quanta(d.now()),
+                position.completed_quanta + 1
+            );
             assert!(!status(&mut d).stepping);
         } else {
             d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
                 .unwrap();
             d.step(at(3)).unwrap();
-            assert_eq!(d.execution.completed_quanta, position.completed_quanta);
+            assert_eq!(
+                d.execution.completed_quanta(d.now()),
+                position.completed_quanta
+            );
         }
         assert!(d.playback.held.is_none());
         assert!(d.execution.machines[1].lifecycle.paused());
@@ -261,17 +266,17 @@ fn pending_step_survives_due_dispatch_and_next_step_finishes_exactly_one_quantum
     .unwrap();
     let playback = d.playback.clone();
     let now = d.now();
-    let end = d.execution.quantum_end;
-    let quanta = d.execution.completed_quanta;
+    let end = d.execution.quantum_end(d.now()).unwrap();
+    let quanta = d.execution.completed_quanta(d.now());
     let p = prepare(&mut d, "pause", pause());
     assert_eq!(commit(&mut d, &p), DueOutcome::Applied { at: now });
     assert_eq!(d.playback, playback);
     assert_eq!(d.now(), now);
-    assert_eq!(d.execution.quantum_end, end);
-    assert_eq!(d.execution.completed_quanta, quanta);
+    assert_eq!(d.execution.quantum_end(d.now()).unwrap(), end);
+    assert_eq!(d.execution.completed_quanta(d.now()), quanta);
     assert!(d.execution.machines[1].lifecycle.paused());
     d.step(end).unwrap();
-    assert_eq!(d.execution.completed_quanta, quanta + 1);
+    assert_eq!(d.execution.completed_quanta(d.now()), quanta + 1);
     assert!(!status(&mut d).stepping);
     assert!(matches!(
         d.step(at(30)).unwrap(),
@@ -300,8 +305,8 @@ fn limited_waiting_bypassed_without_reanchor_but_armed_hold_uses_existing_semant
         }
         let playback = d.playback.clone();
         let now = d.now();
-        let end = d.execution.quantum_end;
-        let quanta = d.execution.completed_quanta;
+        let end = d.execution.quantum_end(d.now()).unwrap();
+        let quanta = d.execution.completed_quanta(d.now());
         let p = prepare(&mut d, "throttle", throttle());
         let result = commit(&mut d, &p);
         if armed {
@@ -333,8 +338,8 @@ fn limited_waiting_bypassed_without_reanchor_but_armed_hold_uses_existing_semant
             );
         }
         assert_eq!(d.now(), now);
-        assert_eq!(d.execution.quantum_end, end);
-        assert_eq!(d.execution.completed_quanta, quanta);
+        assert_eq!(d.execution.quantum_end(d.now()).unwrap(), end);
+        assert_eq!(d.execution.completed_quanta(d.now()), quanta);
     }
 }
 
@@ -896,7 +901,7 @@ fn a_finishing_commit_keeps_pending_step_and_anchor_until_the_end() {
     .unwrap();
     let playback = d.playback.clone();
     let position = d.position();
-    let end = d.execution.quantum_end;
+    let end = d.execution.quantum_end(d.now()).unwrap();
     let p = prepare(
         &mut d,
         "finish",
@@ -910,8 +915,11 @@ fn a_finishing_commit_keeps_pending_step_and_anchor_until_the_end() {
     );
     assert_eq!(d.playback, playback);
     assert_eq!(d.now(), position.at);
-    assert_eq!(d.execution.quantum_end, end);
-    assert_eq!(d.execution.completed_quanta, position.completed_quanta);
+    assert_eq!(d.execution.quantum_end(d.now()).unwrap(), end);
+    assert_eq!(
+        d.execution.completed_quanta(d.now()),
+        position.completed_quanta
+    );
     // The pending step admits the rest of its quantum, and the next one
     // reaches the end of the run.
     assert_eq!(

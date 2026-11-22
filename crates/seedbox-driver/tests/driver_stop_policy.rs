@@ -1,12 +1,13 @@
 //! What does not depend on where rounds end, on scripted machines.
 //!
-//! Each scenario runs once with the Driver's own round boundaries and once
+//! Each scenario runs once with the Driver's own round boundaries, once
 //! under each of several seeded [`StopPolicy`]s, which end rounds early at
-//! host-drawn times. The runs must agree on:
+//! host-drawn times, and once with each of two other quanta, which move the
+//! Driver's own boundaries. The runs must agree on:
 //!
 //! - the event stream, with each event's `position` removed (it counts commits);
-//! - Driver policy evidence, with the quantum end and the round counters
-//!   written as zero (`Barrier::write_policy_evidence_without_stops`);
+//! - Driver policy evidence, as written, at a few times the host asks for a
+//!   barrier at in every run and at the end;
 //! - frame facts as a multiset, without positions (their interleaving follows
 //!   commits);
 //! - each machine's own record of what it observed: every input with the
@@ -41,6 +42,11 @@ const US: u64 = 1_000;
 const MS: u64 = 1_000_000;
 /// Stop-policy seeds every scenario runs under, besides the Driver's own stops.
 const SEEDS: [u64; 6] = [1, 2, 3, 0x5eed, 0xdead_beef, u64::MAX];
+/// The quantum of every run but those in [`QUANTA`].
+const QUANTUM: Duration = Duration::from_millis(1);
+/// Other quanta every scenario runs with, under the Driver's own stops. The
+/// latency floor stays the network's, whatever the quantum.
+const QUANTA: [Duration; 2] = [Duration::from_micros(250), Duration::from_millis(4)];
 /// Frames with a tag at or above this are not echoed, which bounds chains.
 const ECHO_LIMIT: u8 = 40;
 
@@ -314,7 +320,8 @@ struct Scenario {
 struct Results {
     outcome: String,
     events: Vec<String>,
-    evidence: Vec<u8>,
+    /// Policy evidence at each time the host looked, the last at the end.
+    evidence: Vec<Vec<u8>>,
     frames: Vec<String>,
     seen: Vec<Vec<String>>,
 }
@@ -335,11 +342,17 @@ fn networked(index: usize) -> MachineDefinition {
 /// Run `scenario` to its end. Returns its results and how many barriers the
 /// host saw on the way.
 fn run(scenario: &Scenario, policy: Option<u64>) -> (Results, usize) {
-    run_with(scenario, policy, &[])
+    run_with(scenario, policy, QUANTUM, &[])
 }
 
-/// [`run`], with the host first asking for a barrier at each of `barriers`.
-fn run_with(scenario: &Scenario, policy: Option<u64>, barriers: &[u64]) -> (Results, usize) {
+/// [`run`] with `quantum`, the host first asking for a barrier at each of
+/// `barriers`.
+fn run_with(
+    scenario: &Scenario,
+    policy: Option<u64>,
+    quantum: Duration,
+    barriers: &[u64],
+) -> (Results, usize) {
     let seen: Vec<Seen> = scenario.machines.iter().map(|_| Seen::default()).collect();
     let mut machines: VecDeque<Script> = scenario
         .machines
@@ -362,7 +375,7 @@ fn run_with(scenario: &Scenario, policy: Option<u64>, barriers: &[u64]) -> (Resu
     let definitions: Vec<_> = (0..machines.len()).map(networked).collect();
     let mut driver = Driver::new_seeded(
         at(0),
-        Duration::from_millis(1),
+        quantum,
         2,
         7,
         || Ok(()),
@@ -394,15 +407,33 @@ fn run_with(scenario: &Scenario, policy: Option<u64>, barriers: &[u64]) -> (Resu
             StepOutcome::BarrierReached { at: reached } if reached < at(barrier)
         ) {}
     }
-    let mut barriers = 0;
-    let outcome = loop {
-        let outcome = driver.step(at(scenario.end)).unwrap();
-        barriers += 1;
-        match outcome {
-            StepOutcome::BarrierReached { at } if at.as_nanos() < scenario.end => {}
-            other => break other,
-        }
+    let evidence = |driver: &mut Driver<Script>| {
+        driver
+            .with_barrier(|barrier| {
+                let mut evidence = Vec::new();
+                barrier.write_policy_evidence(&mut evidence).unwrap();
+                Ok(evidence)
+            })
+            .unwrap()
     };
+    // The host looks at the world at a few times every run reaches, and at
+    // the end.
+    let end = scenario.end;
+    let mut looks = Vec::new();
+    let mut barriers = 0;
+    let mut outcome = None;
+    for until in [end / 3 + 7, end / 2 + 1, 2 * end / 3 + 13, end] {
+        outcome = Some(loop {
+            let outcome = driver.step(at(until)).unwrap();
+            barriers += 1;
+            match outcome {
+                StepOutcome::BarrierReached { at } if at.as_nanos() < until => {}
+                other => break other,
+            }
+        });
+        looks.push(evidence(&mut driver));
+    }
+    let outcome = outcome.unwrap();
     let drained = driver.drain_observations();
     let events = drained
         .events
@@ -429,19 +460,10 @@ fn run_with(scenario: &Scenario, policy: Option<u64>, barriers: &[u64]) -> (Resu
         .collect();
     assert_eq!(drained.frames.omitted, 0, "frame facts retained");
     frames.sort();
-    let evidence = driver
-        .with_barrier(|barrier| {
-            let mut evidence = Vec::new();
-            barrier
-                .write_policy_evidence_without_stops(&mut evidence)
-                .unwrap();
-            Ok(evidence)
-        })
-        .unwrap();
     let results = Results {
         outcome: format!("{outcome:?}"),
         events,
-        evidence,
+        evidence: looks,
         frames,
         seen: seen
             .iter()
@@ -456,11 +478,11 @@ fn first_difference(what: &str, a: &[String], b: &[String]) -> Option<String> {
     let index = a.iter().zip(b).position(|(a, b)| a != b);
     match index {
         Some(i) => Some(format!(
-            "{what} differs at {i}:\n  own stops: {}\n  policy:    {}",
+            "{what} differs at {i}:\n  own stops: {}\n  other:     {}",
             a[i], b[i]
         )),
         None if a.len() != b.len() => Some(format!(
-            "{what} lengths differ: own stops {}, policy {}",
+            "{what} lengths differ: own stops {}, other {}",
             a.len(),
             b.len()
         )),
@@ -473,13 +495,15 @@ fn differences(own: &Results, other: &Results) -> Vec<String> {
     let mut found = Vec::new();
     if own.outcome != other.outcome {
         found.push(format!(
-            "outcome: own stops {}, policy {}",
+            "outcome: own stops {}, other {}",
             own.outcome, other.outcome
         ));
     }
     found.extend(first_difference("event stream", &own.events, &other.events));
-    if own.evidence != other.evidence {
-        found.push("policy evidence differs".into());
+    for (index, (a, b)) in own.evidence.iter().zip(&other.evidence).enumerate() {
+        if a != b {
+            found.push(format!("policy evidence differs at look {index}"));
+        }
     }
     found.extend(first_difference("frame facts", &own.frames, &other.frames));
     for (index, (a, b)) in own.seen.iter().zip(&other.seen).enumerate() {
@@ -488,10 +512,10 @@ fn differences(own: &Results, other: &Results) -> Vec<String> {
     found
 }
 
-/// Run `scenario` with the Driver's own stops and under every policy seed.
-/// Returns the results under the Driver's own stops, and what differed from
-/// them under each seed.
-fn compare(scenario: &Scenario) -> (Results, Vec<(u64, Vec<String>)>) {
+/// Run `scenario` with the Driver's own stops, under every policy seed and
+/// with every other quantum. Returns the results under the Driver's own stops,
+/// and what differed from them in each other run.
+fn compare(scenario: &Scenario) -> (Results, Vec<(String, Vec<String>)>) {
     let (own, own_barriers) = run(scenario, None);
     let mut found = Vec::new();
     for seed in SEEDS {
@@ -502,7 +526,14 @@ fn compare(scenario: &Scenario) -> (Results, Vec<(u64, Vec<String>)>) {
         );
         let differences = differences(&own, &other);
         if !differences.is_empty() {
-            found.push((seed, differences));
+            found.push((format!("seed {seed}"), differences));
+        }
+    }
+    for quantum in QUANTA {
+        let (other, _) = run_with(scenario, None, quantum, &[]);
+        let differences = differences(&own, &other);
+        if !differences.is_empty() {
+            found.push((format!("quantum {quantum:?}"), differences));
         }
     }
     (own, found)
@@ -512,7 +543,10 @@ fn compare(scenario: &Scenario) -> (Results, Vec<(u64, Vec<String>)>) {
 /// machines observed at least `at_least` things. Returns the results.
 fn holds(scenario: Scenario, at_least: usize) -> Results {
     let (own, found) = compare(&scenario);
-    assert!(found.is_empty(), "stop policy changed results: {found:#?}");
+    assert!(
+        found.is_empty(),
+        "stops or quantum changed results: {found:#?}"
+    );
     let observed: usize = own.seen.iter().map(Vec::len).sum();
     assert!(
         observed >= at_least,
@@ -1284,7 +1318,7 @@ fn a_slow_clock_exit_does_not_depend_on_a_barrier_in_its_nanosecond() {
     // At nine tenths of simulation time, machine time 1.8 ms is reached at
     // 2 ms and still read at 2 ms + 1 ns.
     let (own, _) = run(&scenario, None);
-    let (cut, _) = run_with(&scenario, None, &[2 * MS + 1]);
+    let (cut, _) = run_with(&scenario, None, QUANTUM, &[2 * MS + 1]);
     assert_eq!(differences(&own, &cut), Vec::<String>::new());
     assert_eq!(
         own.outcome,

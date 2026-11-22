@@ -24,12 +24,10 @@ impl<S> Checkpoint<S> {
             now,
             rng,
             quantum_ns,
-            quantum_end,
+            origin,
             machines,
             events,
             boundary_index,
-            completed_quanta,
-            quantum_committed,
             stopped,
             playback,
             oracle,
@@ -79,12 +77,10 @@ impl<S> Checkpoint<S> {
             now,
             rng,
             quantum_ns,
-            quantum_end,
+            origin,
             machines,
             events,
             boundary_index,
-            completed_quanta,
-            quantum_committed,
             stopped,
             playback,
             oracle,
@@ -371,7 +367,7 @@ impl Checkpoint<SnapshotReference> {
         validate(
             self.now,
             self.quantum_ns,
-            self.quantum_end,
+            self.origin,
             self.oracle,
             &self.machines,
             &self.control,
@@ -380,22 +376,6 @@ impl Checkpoint<SnapshotReference> {
         .map_err(CodecError::Invalid)?;
         self.rng
             .check_persist(crate::rng::RngDomain::Machine, None)?;
-        require(
-            self.completed_quanta <= self.boundary_index
-                && self.quantum_committed == (self.now == self.quantum_end)
-                && (!self.quantum_committed || self.completed_quanta > 0),
-            "quantum counters/position",
-        )?;
-        let ends = u128::from(self.completed_quanta) + u128::from(!self.quantum_committed);
-        let elapsed = ends
-            .checked_mul(u128::from(self.quantum_ns))
-            .ok_or(CodecError::Invalid("quantum counter overflow"))?;
-        require(
-            elapsed <= u128::from(self.quantum_end.as_nanos())
-                && u128::from(self.now.as_nanos())
-                    >= u128::from(self.quantum_end.as_nanos()).saturating_sub(elapsed),
-            "quantum anchor",
-        )?;
         require(
             self.needed.is_none_or(|needed| needed == self.now),
             "needed barrier before the capture",
@@ -626,7 +606,8 @@ impl Checkpoint<SnapshotReference> {
         }
         self.properties.validate().map_err(CodecError::Invalid)?;
         self.check_retired_outputs()?;
-        self.playback.check_persist(self.completed_quanta)?;
+        self.playback
+            .check_persist((self.now.as_nanos() - self.origin.as_nanos()) / self.quantum_ns)?;
         if let Some(held) = &self.playback.held {
             self.check_record(held)?;
             require(
@@ -679,4 +660,4 @@ impl<T: Wire> Wire for Entry<T> {
         })
     }
 }
-wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,quantum_end,machines,events,boundary_index,completed_quanta,quantum_committed,stopped,playback,oracle,needed,finishing,finished,oracle_stops,control,inputs,definitions,network,properties});
+wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,origin,machines,events,boundary_index,stopped,playback,oracle,needed,finishing,finished,oracle_stops,control,inputs,definitions,network,properties});

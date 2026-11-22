@@ -24,12 +24,10 @@ pub struct Checkpoint<S> {
     now: Timestamp,
     rng: SeededRng,
     quantum_ns: u64,
-    quantum_end: Timestamp,
+    origin: Timestamp,
     machines: Vec<Entry<S>>,
     events: BTreeMap<Timestamp, VecDeque<Scheduled>>,
     boundary_index: u64,
-    completed_quanta: u64,
-    quantum_committed: bool,
     stopped: bool,
     playback: playback::PlaybackIntent,
     oracle: MachineId,
@@ -131,13 +129,13 @@ impl<T> Entry<T> {
 fn validate<T>(
     now: Timestamp,
     quantum_ns: u64,
-    quantum_end: Timestamp,
+    origin: Timestamp,
     oracle: MachineId,
     machines: &[Entry<T>],
     control: &control::Control,
     network: &network::Network,
 ) -> Result<(), &'static str> {
-    if quantum_ns == 0 || quantum_end < now {
+    if quantum_ns == 0 || origin > now {
         return Err("invalid quantum boundary");
     }
     if oracle.0 >= machines.len() {
@@ -279,7 +277,7 @@ where
         validate(
             self.now(),
             self.execution.quantum_ns,
-            self.execution.quantum_end,
+            self.execution.origin,
             self.execution.oracle,
             &self.execution.machines,
             &self.execution.control,
@@ -313,11 +311,9 @@ where
             rng,
             machines,
             quantum_ns: self.execution.quantum_ns,
-            quantum_end: self.execution.quantum_end,
+            origin: self.execution.origin,
             events: self.execution.events.clone(),
             boundary_index: self.execution.boundary_index,
-            completed_quanta: self.execution.completed_quanta,
-            quantum_committed: self.execution.quantum_committed,
             stopped: self.execution.stopped,
             playback: self.playback.checkpoint(),
             oracle: self.execution.oracle,
@@ -369,7 +365,7 @@ where
         validate(
             checkpoint.now,
             checkpoint.quantum_ns,
-            checkpoint.quantum_end,
+            checkpoint.origin,
             checkpoint.oracle,
             &checkpoint.machines,
             &checkpoint.control,
@@ -395,12 +391,10 @@ where
                 clock: Arc::new(SimulationClock::new(checkpoint.now.as_nanos())),
                 rng: SimulationRng::Seeded(checkpoint.rng.clone()),
                 quantum_ns: checkpoint.quantum_ns,
-                quantum_end: checkpoint.quantum_end,
+                origin: checkpoint.origin,
                 machines,
                 events: checkpoint.events.clone(),
                 boundary_index: checkpoint.boundary_index,
-                completed_quanta: checkpoint.completed_quanta,
-                quantum_committed: checkpoint.quantum_committed,
                 failed: false,
                 stopped: checkpoint.stopped,
                 oracle: checkpoint.oracle,
