@@ -851,9 +851,10 @@ fn oracle_completion_cuts_off_pending_inputs_without_per_key_events() {
         Action::Pause(Target::Machine(ids[1])),
     );
     let events = run_to(&mut driver, 10);
+    // The outcome at 3 ends the run one floor later.
     assert!(matches!(
         driver.step(at(10)).unwrap(),
-        StepOutcome::Finished { at: t, .. } if t == at(3)
+        StepOutcome::Finished { at: t, .. } if t == at(4)
     ));
     assert_eq!(
         settlement(&events, "before"),

@@ -388,6 +388,16 @@ pub fn held(outcome: &StepOutcome) -> Option<(Timestamp, FaultAction, MachineId)
         _ => None,
     }
 }
+/// Step toward `upto` until the run finishes, blocks or stops, or `upto` is
+/// reached; returns the last outcome.
+pub fn run_to(driver: &mut Driver<TestMachine>, upto: u64) -> StepOutcome {
+    loop {
+        match driver.step(at(upto)).unwrap() {
+            StepOutcome::BarrierReached { at: reached } if reached < at(upto) => {}
+            outcome => return outcome,
+        }
+    }
+}
 pub fn status(driver: &mut Driver<TestMachine>) -> PlaybackStatus {
     driver
         .with_barrier(|barrier| Ok(barrier.playback()))

@@ -33,6 +33,7 @@ impl<S> Checkpoint<S> {
             stopped,
             playback,
             oracle,
+            finishing,
             finished,
             oracle_stops,
             control,
@@ -86,6 +87,7 @@ impl<S> Checkpoint<S> {
             stopped,
             playback,
             oracle,
+            finishing,
             finished,
             oracle_stops,
             control,
@@ -392,6 +394,12 @@ impl Checkpoint<SnapshotReference> {
                     >= u128::from(self.quantum_end.as_nanos()).saturating_sub(elapsed),
             "quantum anchor",
         )?;
+        require(
+            self.finishing
+                .is_none_or(|(at, _)| at > self.now && self.finished.is_none())
+                && self.finished.is_none_or(|(at, _)| at <= self.now),
+            "pending end of the run",
+        )?;
         self.network
             .check_persist(self.machines.len(), self.now.as_nanos(), &self.definitions)?;
         self.rng.check_admissions_persist(
@@ -665,4 +673,4 @@ impl<T: Wire> Wire for Entry<T> {
         })
     }
 }
-wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,quantum_end,machines,events,boundary_index,completed_quanta,quantum_committed,stopped,playback,oracle,finished,oracle_stops,control,inputs,definitions,network,properties});
+wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,quantum_end,machines,events,boundary_index,completed_quanta,quantum_committed,stopped,playback,oracle,finishing,finished,oracle_stops,control,inputs,definitions,network,properties});

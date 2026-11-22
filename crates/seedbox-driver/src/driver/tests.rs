@@ -194,6 +194,16 @@ fn build(start: u64, programs: &[&[Op]]) -> Driver<TestMachine> {
     .unwrap()
 }
 
+/// Step toward `upto` until the run finishes or blocks, or `upto` is reached.
+fn run_to(driver: &mut Driver<TestMachine>, upto: u64) -> StepOutcome {
+    loop {
+        match driver.step(at(upto)).unwrap() {
+            StepOutcome::BarrierReached { at } if at < self::at(upto) => {}
+            outcome => return outcome,
+        }
+    }
+}
+
 fn ids(driver: &mut Driver<TestMachine>) -> Vec<MachineId> {
     driver
         .with_barrier(|barrier| Ok(barrier.machines().map(|(id, _)| id).collect()))
@@ -279,10 +289,11 @@ fn failed_construction_preserves_existing_machines_and_id_order() {
             Ok(())
         })
         .unwrap();
+    // The oracle exits at 0; the run ends one floor later.
     assert_eq!(
-        driver.step(at(1)).unwrap(),
+        run_to(&mut driver, 2000),
         StepOutcome::Finished {
-            at: at(0),
+            at: at(1000),
             reason: ExitReason::Shutdown
         }
     );
@@ -343,12 +354,10 @@ fn idle_jump_respects_limit_and_delivers_timer_at_exact_boundary() {
             Ok(())
         })
         .unwrap();
+    // Every machine has exited, at 23, so the step ends there.
     assert_eq!(
         driver.step(at(50)).unwrap(),
-        StepOutcome::Finished {
-            at: at(23),
-            reason: ExitReason::Shutdown
-        }
+        StepOutcome::BarrierReached { at: at(23) }
     );
     driver
         .with_barrier(|barrier| {
@@ -357,6 +366,14 @@ fn idle_jump_respects_limit_and_delivers_timer_at_exact_boundary() {
             Ok(())
         })
         .unwrap();
+    // It exited at 23; the run ends one floor later.
+    assert_eq!(
+        run_to(&mut driver, 2000),
+        StepOutcome::Finished {
+            at: at(1023),
+            reason: ExitReason::Shutdown
+        }
+    );
 }
 
 #[test]
@@ -469,13 +486,12 @@ fn actions_bound_execution_and_crash_precedes_a_same_time_timer() {
             barrier.schedule(at(5), auto_key(), Action::Crash(Target::Machine(id)))
         })
         .unwrap();
-    assert_eq!(
-        driver.step(at(100)).unwrap(),
-        StepOutcome::Finished {
-            at: at(5),
-            reason: ExitReason::Crashed
-        }
-    );
+    // Crashed at 5, the run ends one floor later.
+    let finished = StepOutcome::Finished {
+        at: at(1005),
+        reason: ExitReason::Crashed,
+    };
+    assert_eq!(run_to(&mut driver, 2000), finished);
     driver
         .with_barrier(|barrier| {
             assert_eq!(
@@ -489,13 +505,7 @@ fn actions_bound_execution_and_crash_precedes_a_same_time_timer() {
             Ok(())
         })
         .unwrap();
-    assert_eq!(
-        driver.step(at(100)).unwrap(),
-        StepOutcome::Finished {
-            at: at(5),
-            reason: ExitReason::Crashed
-        }
-    );
+    assert_eq!(driver.step(at(2000)).unwrap(), finished);
 }
 
 #[test]
@@ -508,9 +518,9 @@ fn future_action_keeps_an_indefinitely_blocked_simulation_alive() {
         StepOutcome::BarrierReached { at: at(10) }
     );
     assert_eq!(
-        driver.step(at(100)).unwrap(),
+        run_to(&mut driver, 2000),
         StepOutcome::Finished {
-            at: at(50),
+            at: at(1050),
             reason: ExitReason::Crashed
         }
     );
@@ -594,9 +604,9 @@ fn invalid_schedule_does_not_mutate_the_queue_or_poison_the_driver() {
         Err(Error::UnknownMachine(_))
     ));
     assert_eq!(
-        driver.step(at(10)).unwrap(),
+        run_to(&mut driver, 2000),
         StepOutcome::Finished {
-            at: at(3),
+            at: at(1003),
             reason: ExitReason::Shutdown
         }
     );
@@ -646,8 +656,9 @@ fn idle_time_does_not_skip_quantum_boundaries() {
         || Ok(vec![machine(0, &[Op::Sleep(25), Op::Exit])]),
     )
     .unwrap();
-    // The machine's timer is taken inside the third window's lane.
-    for end in [10, 20] {
+    // The machine's timer is taken inside the third window's lane, which
+    // ends at its exit, and the run ends one floor after that.
+    for end in [10, 20, 25, 30] {
         assert_eq!(
             driver.step(at(100)).unwrap(),
             StepOutcome::BarrierReached { at: at(end) }
@@ -656,7 +667,7 @@ fn idle_time_does_not_skip_quantum_boundaries() {
     assert_eq!(
         driver.step(at(100)).unwrap(),
         StepOutcome::Finished {
-            at: at(25),
+            at: at(35),
             reason: ExitReason::Shutdown
         }
     );

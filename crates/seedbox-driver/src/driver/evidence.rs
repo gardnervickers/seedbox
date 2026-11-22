@@ -79,6 +79,7 @@ impl<M> ExecutionState<M> {
             failed,
             stopped,
             oracle,
+            finishing,
             finished,
             oracle_stops,
             control,
@@ -136,6 +137,7 @@ impl<M> ExecutionState<M> {
         stopped.put(&mut e)?;
         failed.put(&mut e)?;
         oracle.put(&mut e)?;
+        finishing.put(&mut e)?;
         finished.put(&mut e)?;
         oracle_stops.put(&mut e)?;
         control.put(&mut e)?;

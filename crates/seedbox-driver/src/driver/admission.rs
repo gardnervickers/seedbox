@@ -31,11 +31,6 @@ pub enum DueOutcome {
         at: Timestamp,
         request: Box<SpawnRequest>,
     },
-    /// Zero-time work committed oracle completion; later work was not dispatched.
-    /// Unconsumed step and arm state is preserved. The host may call `step(at)`
-    /// at this returned time to perform ordinary finished-state cancellation;
-    /// that call performs no machine work.
-    Finished { at: Timestamp, reason: ExitReason },
 }
 
 /// A non-mutating admission projection, not a queued request or allocated ID.
@@ -342,9 +337,7 @@ where
             }
             None => {}
         }
-        if let Some((at, reason)) = self.execution.finished {
-            return Ok(DueOutcome::Finished { at, reason });
-        }
+        // The run ends at least one floor after anything admitted now (C4).
         Ok(DueOutcome::Applied { at: self.now() })
     }
 

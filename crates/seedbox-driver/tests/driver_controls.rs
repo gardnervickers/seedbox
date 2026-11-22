@@ -31,15 +31,17 @@ fn initial_pause_holds_current_time_actions_and_dynamic_resume() {
             barrier.set_rate(PlaybackRate::Unlimited)
         })
         .unwrap();
+    // The crash at 0 ends the run one floor later.
     assert_eq!(
         driver.step(at(100)).unwrap(),
         StepOutcome::Finished {
-            at: at(0),
+            at: at(10),
             reason: ExitReason::Crashed
         }
     );
-    // The crash input's admission and its effect each commit a boundary.
-    assert_eq!(status(&mut driver).position.boundary_index, 2);
+    // The crash input's admission and its effect each commit a boundary,
+    // and so does the round to the end.
+    assert_eq!(status(&mut driver).position.boundary_index, 3);
 }
 
 #[test]
@@ -143,22 +145,20 @@ fn pre_crash_hold_retains_exact_current_time_cursor_and_allows_only_playback() {
             barrier.step_quantum()
         })
         .unwrap();
+    // The first crash ends the run one floor later. The second one is due
+    // before then and settles without effect, committing nothing.
     assert_eq!(
         driver.step(at(0)).unwrap(),
-        StepOutcome::Finished {
-            at: at(0),
-            reason: ExitReason::Crashed
-        }
+        StepOutcome::BarrierReached { at: at(0) }
     );
-    assert_eq!(status(&mut driver).position.boundary_index, 3); // Oracle crash ends admission before later occurrences.
+    assert_eq!(status(&mut driver).position.boundary_index, 3);
+    let finished = StepOutcome::Finished {
+        at: at(10),
+        reason: ExitReason::Crashed,
+    };
+    assert_eq!(driver.step(at(100)).unwrap(), finished);
     assert!(!status(&mut driver).stepping);
-    assert_eq!(
-        driver.step(at(100)).unwrap(),
-        StepOutcome::Finished {
-            at: at(0),
-            reason: ExitReason::Crashed
-        }
-    );
+    assert_eq!(driver.step(at(100)).unwrap(), finished);
     driver
         .with_barrier(|barrier| {
             assert!(matches!(barrier.step_quantum(), Err(Error::Completed)));
@@ -189,14 +189,15 @@ fn pre_crash_hold_precedes_same_time_timer_and_counts_quantum_once() {
         assert_eq!(barrier.machine(id)?.log.lock().unwrap().len(), 1);
         barrier.set_rate(PlaybackRate::Unlimited)
     }).unwrap();
+    // The crash at 10 ends the run one floor later, at the next quantum end.
     assert_eq!(
         driver.step(at(100)).unwrap(),
         StepOutcome::Finished {
-            at: at(10),
+            at: at(20),
             reason: ExitReason::Crashed
         }
     );
-    assert_eq!(status(&mut driver).position.completed_quanta, 1);
+    assert_eq!(status(&mut driver).position.completed_quanta, 2);
 }
 
 #[test]
@@ -220,13 +221,24 @@ fn explicit_rate_and_step_controls_cancel_a_pre_crash_arm() {
                 }
             })
             .unwrap();
+        // The crash is not held; it ends the run one floor later.
         assert_eq!(
             driver.step(at(100)).unwrap(),
-            StepOutcome::Finished {
-                at: at(3),
-                reason: ExitReason::Crashed
-            }
+            StepOutcome::BarrierReached { at: at(3) }
         );
+        if !step {
+            assert_eq!(
+                driver.step(at(100)).unwrap(),
+                StepOutcome::BarrierReached { at: at(10) }
+            );
+            assert_eq!(
+                driver.step(at(100)).unwrap(),
+                StepOutcome::Finished {
+                    at: at(13),
+                    reason: ExitReason::Crashed
+                }
+            );
+        }
     }
 }
 

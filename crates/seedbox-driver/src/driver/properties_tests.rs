@@ -150,9 +150,9 @@ fn checkpoints_retain_the_ledger_and_allowed_crashes() {
     }
 }
 
-/// The oracle's exit ends the run at the commit of its round: every
-/// machine's records committed in that round are reduced, and nothing after
-/// it is relayed at all, so no committed record is ever dropped.
+/// The oracle's exit ends the run one floor later: every machine's records
+/// stamped up to then are committed and reduced, and nothing after it is
+/// relayed at all, so no committed record is ever dropped.
 #[test]
 fn records_committed_with_the_oracles_exit_are_reduced() {
     let violate =
@@ -172,8 +172,10 @@ fn records_committed_with_the_oracles_exit_are_reduced() {
                 true,
                 vec![
                     (0, Response::Ready),
-                    (7, property(1, 1, &violate("same round"))),
-                    (15, property(1, 2, &violate("after the run"))),
+                    (7, property(1, 1, &violate("before the end"))),
+                    // The oracle's outcome at 5 ends the run at 15.
+                    (15, property(1, 2, &violate("at the end"))),
+                    (16, property(1, 3, &violate("after the run"))),
                 ],
             ),
         ],
@@ -189,7 +191,7 @@ fn records_committed_with_the_oracles_exit_are_reduced() {
         .into_iter()
         .map(|v| v.id)
         .collect();
-    assert_eq!(ids, ["same round"]);
+    assert_eq!(ids, ["at the end", "before the end"]);
 }
 
 /// A real crash and reboot through the Driver's lifecycle: the new boot

@@ -564,15 +564,24 @@ where
             )
         })
         .unwrap();
+    assert_eq!(
+        session.driver.step(now).unwrap(),
+        StepOutcome::BarrierReached { at: now }
+    );
+    // The crash ends the run one floor (1 ms) later.
     let finished = StepOutcome::Finished {
-        at: now,
+        at: at(now.as_nanos() + 1_000_000),
         reason: ExitReason::Crashed,
     };
-    assert_eq!(session.driver.step(now).unwrap(), finished);
-    assert_eq!(
-        session.driver.step(at(now.as_nanos() + QUANTUM)).unwrap(),
-        finished
-    );
+    let upto = at(now.as_nanos() + QUANTUM);
+    let outcome = loop {
+        match session.driver.step(upto).unwrap() {
+            StepOutcome::BarrierReached { at } if at < upto => {}
+            outcome => break outcome,
+        }
+    };
+    assert_eq!(outcome, finished);
+    assert_eq!(session.driver.step(upto).unwrap(), finished);
     session.drain();
     assert!(session.all_exited());
     // Boot serial output is diagnostic; compare the full event stream,

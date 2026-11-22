@@ -456,19 +456,37 @@ fn final_batch_and_stopped_pending_calls_never_create_or_draw_seed() {
 }
 #[test]
 fn finish_and_stop_cut_off_already_admitted_spawn_effects() {
+    // The oracle's outcome at 0 ends the run one floor later, at 10, before
+    // a spawn admitted with its effect due then.
     let (mut driver, draws, built) = build(
         1,
-        vec![vec![
-            call(1, r#""op":"crash","target":{"machine":"fixture-0"}"#),
-            spawn(2, "fixture-1"),
-        ]],
+        vec![vec![Response::ApplicationOutcome { code: 0 }]],
         None,
     );
+    let Response::SimulationControl { id, payload } = spawn(1, "fixture-1") else {
+        unreachable!()
+    };
+    driver.execution.control.record_call(MachineId(0), id, 0);
+    let plans = driver
+        .execution
+        .control
+        .invoke_plans(&driver.execution.machines, |service, view| {
+            service.admit(
+                view,
+                control::Control::source(MachineId(0)),
+                id,
+                0,
+                10,
+                &payload,
+            )
+        })
+        .unwrap();
+    driver.control_plans(plans).unwrap();
     assert_eq!(
         driver.step(at(10)).unwrap(),
         StepOutcome::Finished {
             at: at(10),
-            reason: ExitReason::Crashed
+            reason: ExitReason::ProgramExit { code: 0 }
         }
     );
     let events = driver.drain_events();

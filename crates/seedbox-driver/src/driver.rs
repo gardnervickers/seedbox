@@ -307,6 +307,10 @@ struct ExecutionState<M> {
     failed: bool,
     stopped: bool,
     oracle: MachineId,
+    /// The end of the run, one floor after the oracle's terminal output
+    /// (C4), until `apply_due` takes it at that time.
+    finishing: Option<(Timestamp, ExitReason)>,
+    /// The end of the run once taken: nothing more is admitted or executed.
     finished: Option<(Timestamp, ExitReason)>,
     oracle_stops: BTreeSet<(u64, NonZeroU32)>,
     control: control::Control,
@@ -396,8 +400,10 @@ struct ObservationState {
 /// draining events (`Driver::drain_observations`) only observes them. Accepted control work survives caller
 /// loss. Calls generated together are queued before their generated effects;
 /// dependent operations must await acknowledgment rather than assume that a
-/// concurrent Pause/Resume sequence succeeds. Oracle completion publishes the full response batch before stopping
-/// further admission.
+/// concurrent Pause/Resume sequence succeeds. The run ends one network latency
+/// after the oracle's terminal output or exit: what is due before then still
+/// happens, every machine runs to that time and its output up to then is
+/// published, and nothing due then or later is admitted.
 pub struct Driver<M: Machine> {
     workers: Workers<M::Context>,
     execution: ExecutionState<M>,
@@ -496,8 +502,7 @@ where
     /// Inside a round, each machine runs to the round's end on its own lane and
     /// takes its timers and frames at their exact times; lanes run side by side.
     /// Only frames for a paused or suspended receiver end a round at their
-    /// arrival. Effects decided at commit, such as control replies and the
-    /// finish time, therefore take the round's end.
+    /// arrival.
     // Blocked machines impose no bound, so idle simulations still jump to their
     // next event.
     #[allow(clippy::too_many_arguments)]
@@ -642,6 +647,7 @@ where
                 failed: false,
                 stopped: false,
                 oracle: MachineId(0),
+                finishing: None,
                 finished: None,
                 oracle_stops: BTreeSet::new(),
                 control,
@@ -974,9 +980,11 @@ where
     /// - [`StepOutcome::Blocked`]: unfinished machines remain, but no runnable
     ///   work, timer, or queued event can advance them. Wait for external input
     ///   or a lifecycle change; do not busy-poll or infer that the test passed.
-    /// - [`StepOutcome::Finished`]: the oracle application or machine terminated. Its reason is retained
-    ///   permanently after publishing the full round's responses. Other machines
-    ///   and scheduled work receive no further execution or admission.
+    /// - [`StepOutcome::Finished`]: the oracle application or machine terminated,
+    ///   and the run ended one network latency later. Its time and reason are
+    ///   retained permanently after publishing every output up to then. Other
+    ///   machines and scheduled work receive no further execution or admission;
+    ///   [`Driver::admit_waiting_work`] admits the frames and timers due then.
     ///
     /// With `upto` equal to the current time, the driver may apply events due
     /// now but must not advance execution or time. It may return the same
@@ -1150,16 +1158,19 @@ where
         // Stable sorting preserves each machine's emission order at one time.
         outputs.sort_by_key(|output| (output.at, output.machine));
         self.route_frames(&outputs)?;
+        // The run ends one floor after the oracle's terminal output, or its
+        // exit (C4). Until then every machine keeps running and what is due
+        // before the end still happens.
         let terminal = self.oracle_terminal(&outputs);
-        if self.execution.finished.is_none() {
-            let reason = terminal.or_else(|| {
+        if self.execution.finished.is_none() && self.execution.finishing.is_none() {
+            let terminal = terminal.or_else(|| {
                 match self.execution.machines[self.execution.oracle.0].stopped {
-                    StopReason::Exited { reason, .. } => Some(reason),
+                    StopReason::Exited { reached, reason } => Some((reached, reason)),
                     _ => None,
                 }
             });
-            if let Some(reason) = reason {
-                self.execution.finished = Some((self.now(), reason));
+            if let Some((at, reason)) = terminal {
+                self.execution.finishing = Some((self.consequence_of(at)?, reason));
             }
         }
         // Outputs, and each machine's exit after its own outputs, take effect
@@ -1192,7 +1203,8 @@ where
             self.commit_exit(id, reached, &mut consequences)?;
         }
         if self.execution.finished.is_some() {
-            // Once the run has finished nothing more is scheduled.
+            // Once the run has finished nothing more is scheduled: only the
+            // admission of work waiting at the end commits after it.
             let now = self.now().as_nanos();
             self.execution.control.service.cut_off_breaks(now);
         } else {
@@ -1421,9 +1433,10 @@ where
         Ok(())
     }
 
-    /// The oracle's terminal outcome among committed outputs: its application
-    /// outcome, or the completion of an offered Stop, which this consumes.
-    fn oracle_terminal(&mut self, outputs: &[MachineResponse]) -> Option<ExitReason> {
+    /// The oracle's first terminal outcome among committed outputs, with its
+    /// time: its application outcome, or the completion of an offered Stop,
+    /// which this consumes.
+    fn oracle_terminal(&mut self, outputs: &[MachineResponse]) -> Option<(Timestamp, ExitReason)> {
         let mut terminal = None;
         for output in outputs {
             if output.machine != self.execution.oracle {
@@ -1431,15 +1444,18 @@ where
             }
             match output.payload {
                 Response::ApplicationOutcome { code } => {
-                    terminal.get_or_insert(ExitReason::ProgramExit {
-                        code: i32::from(code),
-                    });
+                    terminal.get_or_insert((
+                        output.at,
+                        ExitReason::ProgramExit {
+                            code: i32::from(code),
+                        },
+                    ));
                 }
                 Response::CommandAcknowledged { id, result }
                     if self.execution.oracle_stops.remove(&(output.boot, id))
                         && result == crate::pv::CommandResult::Completed =>
                 {
-                    terminal.get_or_insert(ExitReason::Shutdown);
+                    terminal.get_or_insert((output.at, ExitReason::Shutdown));
                 }
                 _ => {}
             }
@@ -1549,6 +1565,7 @@ where
                     .map(Timestamp::from_nanos),
             )
             .chain(self.causal_bound(&receivers))
+            .chain(self.execution.finishing.map(|(at, _)| at))
             .fold(upto.min(self.execution.quantum_end), Timestamp::min);
         // A test's stop policy may end the round earlier, never later.
         let boundary = self.stops.end(self.now(), boundary);
@@ -1877,10 +1894,13 @@ where
             .min_by_key(|&(id, at)| (at, id))
     }
 
+    /// Whether nothing can advance the run: no machine can execute, nothing
+    /// is due, no frame is in flight and no finish is pending.
     fn is_quiescent(&self) -> bool {
         self.next().is_none()
             && self.execution.events.is_empty()
             && self.execution.network.is_idle()
+            && self.execution.finishing.is_none()
     }
 
     /// The earliest time a machine can execute in the round: its own next

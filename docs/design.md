@@ -26,7 +26,8 @@ Inside it each machine runs to the round's end on its own lane, taking its timer
 frames at their exact times. A timer or a running receiver's frame therefore never ends a round;
 frames for a paused or suspended receiver still do. What follows from an output (a call's
 admission, a reply, a released command) is due one network latency after the output, never at
-the round's end, so every runnable machine bounds the round. The finish still takes the round's end.
+the round's end, so every runnable machine bounds the round. So is the end of the run: one network
+latency after the oracle's exit, with every machine run to it and its output up to then published.
 Commit orders output by occurrence, not worker completion; worker count cannot change results.
 The [Driver](../crates/seedbox-driver/src/driver.rs) owns that bound, not the CPU backends.
 

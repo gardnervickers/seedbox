@@ -109,8 +109,9 @@ fn rate_wait_holds_new_current_time_actions_until_host_pacing_permits() {
         driver
             .step_at(at(100), host + Duration::from_nanos(10))
             .unwrap(),
+        // The crash at 10 ends the run one floor later.
         StepOutcome::Finished {
-            at: at(10),
+            at: at(20),
             reason: ExitReason::Crashed
         }
     );

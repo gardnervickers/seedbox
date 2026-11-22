@@ -39,9 +39,9 @@ over `/run`, say): then it connects to the supervisor's abstract socket
 The engine reduces records at commit, in commit order, and answers a `flush`
 only after reducing every earlier record of that session, on the same boot,
 one network latency after the `flush` record.
-Every record committed before the run ends is reduced, including other
-machines' records in the oracle's last round, and the supervisor reports each
-session that ends. Records still inside a guest, in a program's socket or the
+Every record stamped up to the end of the run, one network latency after the
+oracle's exit, is reduced, including other machines' records after that exit,
+and the supervisor reports each session that ends. Records still inside a guest, in a program's socket or the
 supervisor, when its machine crashes or the run ends are physically lost with
 it: flush before relying on them.
 

@@ -69,6 +69,7 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         failed,
         stopped,
         oracle,
+        finishing,
         finished,
         oracle_stops,
         control,
@@ -105,6 +106,7 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         failed,
         stopped,
         oracle,
+        finishing,
         finished,
         oracle_stops,
         control,
@@ -697,12 +699,12 @@ fn stopped_finished_and_poisoned_preflights_never_mutate() {
         }
         if kind == 1 {
             let p = prepare(&mut d, "end", Action::Crash(Target::Machine(MachineId(0))));
+            assert!(matches!(commit(&mut d, &p), DueOutcome::Applied { .. }));
+            // The oracle's crash ends the run one floor later.
+            advance(&mut d, 100);
             assert!(matches!(
-                commit(&mut d, &p),
-                DueOutcome::Finished {
-                    reason: ExitReason::Crashed,
-                    ..
-                }
+                d.execution.finished,
+                Some((_, ExitReason::Crashed))
             ));
         }
         if kind == 2 {
@@ -882,7 +884,7 @@ fn immediate_unavailable_admission_has_exact_record_even_without_pending_effect(
 }
 
 #[test]
-fn due_completion_keeps_pending_step_and_anchor_until_ordinary_step_observes_finish() {
+fn a_finishing_commit_keeps_pending_step_and_anchor_until_the_end() {
     let mut d = ready();
     d.with_barrier(|b| {
         b.set_rate(PlaybackRate::Paused)?;
@@ -897,21 +899,31 @@ fn due_completion_keeps_pending_step_and_anchor_until_ordinary_step_observes_fin
         "finish",
         Action::Crash(Target::Machine(MachineId(0))),
     );
+    // The oracle's crash ends the run one floor later, not at its commit.
+    assert_eq!(commit(&mut d, &p), DueOutcome::Applied { at: position.at });
     assert_eq!(
-        commit(&mut d, &p),
-        DueOutcome::Finished {
-            at: position.at,
-            reason: ExitReason::Crashed
-        }
+        d.execution.finishing,
+        Some((at(position.at.as_nanos() + 10), ExitReason::Crashed))
     );
     assert_eq!(d.playback, playback);
     assert_eq!(d.now(), position.at);
     assert_eq!(d.execution.quantum_end, end);
     assert_eq!(d.execution.completed_quanta, position.completed_quanta);
-    assert!(matches!(
+    // The pending step admits the rest of its quantum, and the next one
+    // reaches the end of the run.
+    assert_eq!(
         d.step(at(100)).unwrap(),
-        StepOutcome::Finished { .. }
-    ));
+        StepOutcome::BarrierReached { at: end }
+    );
+    assert!(!status(&mut d).stepping);
+    d.with_barrier(|b| b.step_quantum()).unwrap();
+    assert_eq!(
+        d.step(at(100)).unwrap(),
+        StepOutcome::Finished {
+            at: at(position.at.as_nanos() + 10),
+            reason: ExitReason::Crashed
+        }
+    );
     assert!(!status(&mut d).stepping);
 }
 

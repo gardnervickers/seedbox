@@ -675,7 +675,12 @@ fn finished_oracle_and_permanent_stop_are_capturable_but_not_resumed() {
             })
             .unwrap();
         } else {
-            advance(&mut d, 5);
+            // The outcome at 3 ends the run one floor later.
+            advance(&mut d, 20);
+            assert_eq!(
+                d.execution.finished,
+                Some((at(13), ExitReason::ProgramExit { code: 17 }))
+            );
         }
         d.execution.oracle_stops.insert((7, nz(31)));
         let before = d.position();
@@ -819,11 +824,11 @@ fn staged_prior_boot_ack_does_not_consume_restored_oracle_stop() {
     for workers in [1, 4] {
         let mut b = restore(&c, workers);
         b.commit_boundary().unwrap();
-        assert!(b.execution.finished.is_none());
+        assert!(b.execution.finishing.is_none());
         assert!(b.execution.oracle_stops.contains(&(1, command)));
         b.execution.machines[0].staged.push(ack(1));
         b.commit_boundary().unwrap();
-        assert_eq!(b.execution.finished, Some((at(0), ExitReason::Shutdown)));
+        assert_eq!(b.execution.finishing, Some((at(10), ExitReason::Shutdown)));
         assert!(!b.execution.oracle_stops.contains(&(1, command)));
     }
 }
