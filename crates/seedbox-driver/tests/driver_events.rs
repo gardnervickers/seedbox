@@ -1,7 +1,7 @@
 //! Public Driver event stream: order, causes, control facts and failure prefixes.
 use seedbox_driver::driver::{
     Action, Cause, Driver, Error, Event, EventKind, FaultAction, FaultId, FaultOrigin, MachineId,
-    SettlementStatus, StepOutcome, Target, Transition, TriggerResult,
+    SettlementStatus, StepOutcome, Target, Transition,
 };
 use seedbox_driver::test_support::{auto_key, key};
 use seedbox_machine::{
@@ -487,135 +487,6 @@ fn fault_ids(events: &[Event]) -> Vec<FaultId> {
         .collect()
 }
 
-fn trigger_script(name: &str) -> Scripted {
-    let arm = |marker: &[u8], timeout: u64, target: &str| {
-        serde_json::json!({"op":"arm_trigger","source":{"machine":"source"},"marker":marker,
-            "match_timeout_ns":timeout,"fault":{"action":"stop","target":{"machine":target}}})
-    };
-    let script = match name {
-        "oracle" => vec![Output {
-            at: at(8),
-            payload: Response::ApplicationOutcome { code: 0 },
-        }],
-        "caller" => vec![
-            call(2, 1, arm(b"needle", 20, "target")),
-            call(2, 2, arm(b"never", 3, "target")),
-            call(2, 3, arm(b"gone", 20, "target")),
-            call(2, 4, arm(b"late", 100, "target")),
-            call(2, 5, arm(b"needle", 20, "peer")),
-            call(
-                3,
-                6,
-                serde_json::json!({"op":"cancel_trigger","trigger_id":3}),
-            ),
-        ],
-        "source" => vec![console(5, b"xxneedle")],
-        _ => vec![],
-    };
-    Scripted {
-        script: script.into(),
-        ..Scripted::default()
-    }
-}
-
-fn trigger_world(workers: usize) -> (Vec<Event>, Vec<MachineId>, StepOutcome) {
-    let (mut driver, ids) = world(
-        1,
-        workers,
-        &["caller", "source", "target", "peer"],
-        trigger_script,
-    );
-    driver
-        .with_barrier(|b| {
-            b.schedule(
-                at(1),
-                key("peer-pause"),
-                Action::Pause(Target::Machine(ids[4])),
-            )
-        })
-        .unwrap();
-    let mut events = driver.drain_observations().events;
-    let mut outcome;
-    loop {
-        outcome = driver.step(at(20)).unwrap();
-        events.extend(driver.drain_observations().events);
-        if !matches!(outcome, StepOutcome::BarrierReached { .. }) {
-            break;
-        }
-    }
-    (events, ids, outcome)
-}
-
-#[test]
-fn triggers_publish_arm_and_final_resolution_before_caused_admission() {
-    let (events, ids, outcome) = trigger_world(2);
-    assert_eq!(
-        outcome,
-        StepOutcome::Finished {
-            at: at(8),
-            reason: ExitReason::ProgramExit { code: 0 }
-        }
-    );
-    assert_dense(&events, 0);
-    let (source, target, peer) = (ids[2], ids[3], ids[4]);
-    let armed: Vec<_> = events
-        .iter()
-        .filter_map(|e| match e.kind {
-            EventKind::TriggerArmed {
-                trigger,
-                source: s,
-                target: t,
-                deadline,
-            } => Some((trigger, s, t, deadline, e.at)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        armed,
-        [
-            (1, source, Some(target), at(22), at(2)),
-            (2, source, Some(target), at(5), at(2)),
-            (3, source, Some(target), at(22), at(2)),
-            (4, source, Some(target), at(102), at(2)),
-            (5, source, Some(peer), at(22), at(2)),
-        ]
-    );
-    let resolved: Vec<_> = events
-        .iter()
-        .enumerate()
-        .filter_map(|(index, e)| match e.kind {
-            EventKind::TriggerResolved {
-                trigger,
-                result,
-                fault,
-            } => Some((index, trigger, result, fault, e.at)),
-            _ => None,
-        })
-        .collect();
-    let summary: Vec<_> = resolved.iter().map(|r| (r.1, r.2, r.4)).collect();
-    assert_eq!(
-        summary,
-        [
-            (3, TriggerResult::Cancelled, at(3)),
-            (1, TriggerResult::Fired, at(5)),
-            (5, TriggerResult::Rejected, at(5)),
-            (2, TriggerResult::Expired, at(5)),
-            (4, TriggerResult::CutOff, at(8)),
-        ]
-    );
-    let (fired_index, _, _, fault, _) = resolved[1];
-    let fault = fault.expect("fired trigger names its fault");
-    let EventKind::FaultAdmitted(record) = &events[fired_index + 1].kind else {
-        panic!("fault admission follows its trigger resolution");
-    };
-    assert_eq!(record.fault, fault);
-    assert_eq!(record.origin, FaultOrigin::Trigger { trigger: 1 });
-    assert_eq!(machine_boot(&record.target).0, target);
-    assert!(events.iter().any(|e| matches!(&e.kind,
-        EventKind::FaultSettled { record, status: SettlementStatus::Applied, .. } if record.fault == fault)));
-    assert!(resolved.iter().all(|r| r.3.is_none() || r.1 == 1));
-}
-
 #[test]
 fn reply_admission_excludes_discarded_and_retired_replies() {
     let (mut driver, ids) = world(1, 2, &["caller", "other"], |name| Scripted {
@@ -738,9 +609,7 @@ fn successful_addition_survives_its_callback_error() {
 #[test]
 fn full_streams_do_not_depend_on_worker_count() {
     let faults = fault_world(1).0;
-    let triggers = trigger_world(1).0;
     for workers in [2, 4] {
         assert_eq!(fault_world(workers).0, faults);
-        assert_eq!(trigger_world(workers).0, triggers);
     }
 }

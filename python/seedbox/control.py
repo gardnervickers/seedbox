@@ -49,13 +49,6 @@ class Partition:
 
 
 @dataclass(frozen=True)
-class Trigger:
-    """Armed trigger identity; no fault handle is reserved until it fires."""
-    id: int
-    effect: Effect
-
-
-@dataclass(frozen=True)
 class Hit:
     """A breakpoint hit. Its machine stays suspended until resumed or crashed.
 
@@ -527,77 +520,6 @@ class World:
         result, effect = self._call("heal", handle=partition.handle)
         counted = isinstance(partition, (ConnectionDrop, DiskError, DiskLatency))
         return result if counted or "queue_counts" in result or "network_fault_counts" in result else effect
-
-
-    def _arm_console(self, source, marker, match_timeout, fault):
-        if not isinstance(marker, bytes) or not 1 <= len(marker) <= 256:
-            raise ValueError("marker must contain 1..=256 bytes")
-        timeout = _nanoseconds(match_timeout)
-        if timeout == 0:
-            raise ValueError("match timeout must be positive")
-        result, effect = self._call("arm_trigger", source=_target(source),
-                                    marker=list(marker), match_timeout_ns=timeout, fault=fault)
-        trigger_id = result.get("trigger_id")
-        if type(trigger_id) is not int or not 1 <= trigger_id <= 64:
-            self.close()
-            raise ProtocolError("arm response lacks a bounded trigger ID")
-        return Trigger(trigger_id, effect)
-
-    def arm_console_stop(self, source, marker, target, *, match_timeout):
-        """Arm once on future console bytes; confirmation means armed, not stopped."""
-        return self._arm_console(source, marker, match_timeout,
-                                 {"action": "stop", "target": _target(target)})
-
-    def arm_console_partition(self, source, marker, left, right, *, match_timeout):
-        """Arm a future partition; look up its handle with trigger_partition after firing."""
-        if isinstance(left, str) or isinstance(right, str):
-            raise ValueError("partition sides must be sequences of targets")
-        return self._arm_console(source, marker, match_timeout,
-                                 {"action": "partition", "left": [_target(t) for t in left],
-                                  "right": [_target(t) for t in right]})
-
-    def trigger_partition(self, trigger):
-        """Inspect a fired partition trigger and return its actual healable handle.
-
-        No handle is reserved by arming. This read-only lookup never waits or
-        fires a trigger; ValueError means it is not a fired partition. The
-        returned effect spans the original arm request, the recorded effect,
-        and this inspection reply. Healing remains an explicit separate call.
-        """
-        if not isinstance(trigger, Trigger):
-            raise TypeError("trigger_partition expects a Trigger returned by this API")
-        state, inspected = self._call("inspect")
-        records = state.get("triggers", [])
-        if not isinstance(records, list) or any(not isinstance(r, dict) for r in records):
-            self.close()
-            raise ProtocolError("invalid inspected trigger records")
-        matching = [r for r in records if type(r.get("id")) is int and r["id"] == trigger.id]
-        if len(matching) > 1:
-            self.close()
-            raise ProtocolError("duplicate inspected trigger identity")
-        if not matching:
-            raise ValueError("trigger is not a fired partition")
-        record = matching[0]
-        action = record.get("action")
-        if not isinstance(action, dict) or not isinstance(record.get("status"), str):
-            self.close()
-            raise ProtocolError("invalid inspected trigger action or status")
-        if record["status"] != "fired" or action.get("action") != "partition":
-            raise ValueError("trigger is not a fired partition")
-        handle, at = record.get("handle"), record.get("effect_at_ns")
-        if (not isinstance(handle, str) or not handle or type(at) is not int
-                or not trigger.effect.admitted_at_ns <= at <= inspected.effect_at_ns):
-            self.close()
-            raise ProtocolError("fired partition lacks an opaque handle or valid effect time")
-        effect = Effect(trigger.effect.requested_at_ns, trigger.effect.admitted_at_ns,
-                        at, inspected.replied_at_ns)
-        return Partition(handle, effect)
-
-    def cancel_trigger(self, trigger):
-        """Cancel at admission; a matched, fired, or expired trigger cannot cancel."""
-        if not isinstance(trigger, Trigger):
-            raise TypeError("cancel expects the Trigger returned by arm_console_*()")
-        return self._call("cancel_trigger", trigger_id=trigger.id)[1]
 
     def declare_breaks(self, names):
         """Replace the breakpoint names that suspend a machine, for later hits."""

@@ -24,8 +24,8 @@ Machines execute concurrently only inside a window bounded by minimum network la
 No frame emitted inside that window can arrive before the round commits.
 Inside it each machine runs to the round's end on its own lane, taking its timers and arriving
 frames at their exact times. A timer or a running receiver's frame therefore never ends a round;
-frames for a paused or suspended receiver still do. Commit-time effects (replies, trigger effects,
-the finish) take the round's end.
+frames for a paused or suspended receiver still do. Commit-time effects (replies, the finish)
+take the round's end.
 Commit orders output by occurrence, not worker completion; worker count cannot change results.
 The [Driver](../crates/seedbox-driver/src/driver.rs) owns that bound, not the CPU backends.
 

@@ -52,7 +52,7 @@ pub(crate) use network::Network as NetworkState;
 mod playback;
 pub use event::{
     BreakEnd, Cause, Event, EventKind, FaultAction, FaultId, FaultOrigin, FaultRecord, FaultTarget,
-    SettlementStatus, Transition, TriggerResult,
+    SettlementStatus, Transition,
 };
 pub use input::{
     Action, FaultHandle, HealTarget, InputKey, InputRejection, InvalidInputKey, RejectionReason,
@@ -303,7 +303,6 @@ struct ExecutionState<M> {
     oracle_stops: BTreeSet<(u64, NonZeroU32)>,
     control: control::Control,
     inputs: BTreeMap<InputKey, LiveInput>,
-    trigger_marker: Option<Timestamp>,
     /// Provided spawn definitions not yet built, by name.
     definitions: Vec<SpawnDefinition>,
     network: network::Network,
@@ -358,11 +357,11 @@ struct ObservationState {
 /// Simulation-control payloads are opaque bytes: every time inside them stays
 /// simulation time, both in replies (`now_ns`, `requested_at_ns`,
 /// `admitted_at_ns`, `effect_at_ns`, `replied_at_ns`) and in requests
-/// (`sleep` `duration_ns`, trigger `match_timeout_ns`, and the effect deadline
-/// a guest command must meet). The call's observation time is its converted
-/// output time. Sleep, trigger matching and deadlines therefore keep their
-/// simulation-time meaning, while a drifting guest's own clocks run at its
-/// rate: a 1 s control `sleep` at +10% spans 1.1 s of that guest's clocks.
+/// (`sleep` `duration_ns` and the effect deadline a guest command must
+/// meet). The call's observation time is its converted output time. Sleep
+/// and deadlines therefore keep their simulation-time meaning, while a
+/// drifting guest's own clocks run at its rate: a 1 s control `sleep` at
+/// +10% spans 1.1 s of that guest's clocks.
 ///
 /// Execution uses a fixed number of workers: whichever thread steps the
 /// driver, which runs one machine of every batch itself, and a pool of threads
@@ -488,8 +487,8 @@ where
     /// Inside a round, each machine runs to the round's end on its own lane and
     /// takes its timers and frames at their exact times; lanes run side by side.
     /// Only frames for a paused or suspended receiver end a round at their
-    /// arrival. Effects decided at commit, such as control replies, trigger
-    /// effects and the finish time, therefore take the round's end.
+    /// arrival. Effects decided at commit, such as control replies and the
+    /// finish time, therefore take the round's end.
     // Blocked machines impose no bound, so idle simulations still jump to their
     // next event.
     #[allow(clippy::too_many_arguments)]
@@ -638,7 +637,6 @@ where
                 oracle_stops: BTreeSet::new(),
                 control,
                 inputs: BTreeMap::new(),
-                trigger_marker: None,
                 definitions: prepared,
                 network,
                 properties: Default::default(),
@@ -709,7 +707,7 @@ where
     /// `FaultAdmitted` or `InputRejected` when it becomes due. Sleep wakeups, internal timeline markers and playback
     /// changes are not published.
     ///
-    /// # Faults and triggers
+    /// # Faults
     ///
     /// Admission and settlement are separate events: `FaultAdmitted` records
     /// policy admission and a later `FaultSettled` reports the outcome. Only
@@ -717,8 +715,7 @@ where
     /// incremental; a settlement repeats the fault's `FaultRecord` so hosts need
     /// no second store to interpret it. A fault's Driver-applied change, when
     /// it takes effect, publishes a `Transition` with `Cause::Fault` before its
-    /// Applied settlement. A fired trigger publishes `TriggerResolved` before the
-    /// admission of the fault it caused.
+    /// Applied settlement.
     ///
     /// # Failure
     ///
@@ -1230,7 +1227,6 @@ where
         }
         if self.execution.finished.is_some() {
             let now = self.now().as_nanos();
-            self.execution.control.service.cut_off_triggers(now);
             self.execution.control.service.cut_off_breaks(now);
         } else {
             // Replies follow the commit that reduced their requests, behind
@@ -1244,16 +1240,6 @@ where
             }
             self.schedule_calls(calls)?;
             self.control_plans(plans)?;
-            let now = self.now().as_nanos();
-            let plans = self
-                .execution
-                .control
-                .invoke_plans(&self.execution.machines, |service, view| {
-                    service.trigger_effects(view, now)
-                })
-                .map_err(Error::Control)?;
-            self.control_plans(plans)?;
-            self.sync_trigger_marker();
         }
         self.flush_events()
     }
@@ -1370,39 +1356,6 @@ where
                 .push_back(Scheduled::Control(call));
         }
         Ok(())
-    }
-
-    fn sync_trigger_marker(&mut self) {
-        let next = self
-            .execution
-            .control
-            .service
-            .trigger_boundary()
-            .map(Timestamp::from_nanos);
-        if next == self.execution.trigger_marker {
-            return;
-        }
-        // Only these internally owned markers are retired. External FIFO
-        // actions and requests at the same timestamp retain their exact order.
-        for events in self.execution.events.values_mut() {
-            events.retain(|event| {
-                !matches!(
-                    event,
-                    Scheduled::Control(
-                        control::Event::TriggerBoundary | control::Event::TriggerFinalize
-                    )
-                )
-            });
-        }
-        self.execution.events.retain(|_, events| !events.is_empty());
-        self.execution.trigger_marker = next;
-        if let Some(at) = next {
-            self.execution
-                .events
-                .entry(at)
-                .or_default()
-                .push_back(Scheduled::Control(control::Event::TriggerBoundary));
-        }
     }
 
     fn control_plans(
@@ -2034,9 +1987,9 @@ where
     }
 
     /// Run at a positive rate until just before the next effective fault
-    /// effect, from any origin: a guest control call, a trigger or a host
-    /// input. An effect is effective when its dispatch check passes at its
-    /// FIFO turn, immediately before the driver applies it; this includes
+    /// effect, from any origin: a guest control call or a host input. An
+    /// effect is effective when its dispatch check passes at its FIFO turn,
+    /// immediately before the driver applies it; this includes
     /// process command dispatch, throttle, heal and spawn. Effects rejected or
     /// made stale (for example by a reboot) at their turn, admissions,
     /// replies, wakes and settlements do not consume the arm.
@@ -2390,13 +2343,12 @@ where
     /// # Admission
     ///
     /// When the input reaches the front of the timeline at `at`, in FIFO order
-    /// with guest calls, trigger work and earlier inputs, the control policy
-    /// admits it exactly as it admits an ordinary guest control call,
+    /// with guest calls and earlier inputs, the control policy admits it
+    /// exactly as it admits an ordinary guest control call,
     /// including the availability preflight that rejects pause, resume,
     /// shutdown and process commands for a physically exited, uncrashed target.
-    /// (Output triggers keep their own admission mode.) Targets resolve and the
-    /// target's current boot is bound at admission. No guest call, reply or
-    /// message is fabricated.
+    /// Targets resolve and the target's current boot is bound at admission.
+    /// No guest call, reply or message is fabricated.
     ///
     /// - Admitted: allocates a fault ID (and a handle for a throttle, drift or
     ///   realtime step) from the

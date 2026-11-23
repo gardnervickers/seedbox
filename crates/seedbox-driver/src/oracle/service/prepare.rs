@@ -19,7 +19,6 @@ impl Service {
         self.valid()?;
         match self.prepare(
             adapter,
-            AdmissionMode::Control,
             Requester::Input(key),
             None,
             command,
@@ -34,11 +33,9 @@ impl Service {
             }
         }
     }
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare(
         &mut self,
         adapter: &mut impl Adapter,
-        mode: AdmissionMode,
         requester: Requester,
         call: Option<Call>,
         command: Command,
@@ -73,9 +70,9 @@ impl Service {
             }
         }
         let (subject, effect, handle, healing) =
-            self.prepare_change(adapter, mode, command, compiled, name)?;
+            self.prepare_change(adapter, command, compiled, name)?;
         self.install(
-            adapter, mode, requester, call, subject, effect, handle, healing, now, deadline,
+            adapter, requester, call, subject, effect, handle, healing, now, deadline,
         )
     }
     /// Split a named command into its checked handle name and inner command.
@@ -101,7 +98,6 @@ impl Service {
     fn prepare_change(
         &mut self,
         adapter: &mut impl Adapter,
-        mode: AdmissionMode,
         command: Command,
         compiled: targets::CompiledTargets<Facts>,
         name: Option<String>,
@@ -113,7 +109,7 @@ impl Service {
             }
             Command::Heal { handle: text } => {
                 let plan = self.handles.heal(&text);
-                self.prepare_heal(adapter, mode, plan)?
+                self.prepare_heal(adapter, plan)?
             }
             Command::HealRecord { record_id } => {
                 if !self.handles.healable_record(record_id) {
@@ -122,7 +118,7 @@ impl Service {
                     );
                 }
                 let plan = self.handles.heal_record(record_id);
-                self.prepare_heal(adapter, mode, plan)?
+                self.prepare_heal(adapter, plan)?
             }
             Command::Shape {
                 policy,
@@ -189,7 +185,7 @@ impl Service {
                 let facts = compiled
                     .machine
                     .ok_or_else(|| Failure::from("missing compiled machine target"))?;
-                self.prepare_step(adapter, mode, facts, nanoseconds, name)?
+                self.prepare_step(adapter, facts, nanoseconds, name)?
             }
             Command::Drift { ppb, .. } => {
                 let facts = compiled
@@ -288,12 +284,11 @@ impl Service {
     fn prepare_step(
         &mut self,
         adapter: &mut impl Adapter,
-        mode: AdmissionMode,
         facts: Facts,
         nanoseconds: Amount,
         name: Option<String>,
     ) -> Result<HandleAdmission, PreparationError> {
-        Self::step_state(mode, &facts)?;
+        Self::step_state(&facts)?;
         // Draw only after admission checks, at this barrier.
         let offset = match nanoseconds {
             Amount::Exact(offset) => offset,
@@ -387,11 +382,10 @@ impl Service {
     fn prepare_heal(
         &mut self,
         adapter: &impl Adapter,
-        mode: AdmissionMode,
         plan: Result<ExecutionPlan, crate::oracle::handles::Error>,
     ) -> Result<HandleAdmission, PreparationError> {
         let plan = plan.map_err(|e| error(ErrorCode::InvalidState, format!("heal: {e}")))?;
-        let subject = match Self::heal_subject(adapter, mode, &plan) {
+        let subject = match Self::heal_subject(adapter, &plan) {
             Ok(s) => s,
             Err(e) => {
                 self.handles
@@ -412,7 +406,6 @@ impl Service {
     /// machine boot; undoing a live step needs the same guest as the step.
     fn heal_subject(
         adapter: &impl Adapter,
-        mode: AdmissionMode,
         plan: &ExecutionPlan,
     ) -> Result<Subject, OperationError> {
         let name = match &plan.target {
@@ -445,24 +438,14 @@ impl Service {
         };
         let facts = adapter.resolve(&Target::Key(name.clone()))?;
         if matches!(plan.change, Change::Step(_)) && !plan.lost {
-            Self::step_state(mode, &facts)?;
+            Self::step_state(&facts)?;
         }
         Ok(Subject::Machine(facts))
     }
-    /// Resolve partition sides to sorted canonical member names before any
-    /// handle allocation: nonempty, attached, unique and disjoint.
-    pub(super) fn partition_sides(
-        adapter: &impl Adapter,
-        left: &[Target],
-        right: &[Target],
-    ) -> Result<(Vec<String>, Vec<String>), OperationError> {
-        targets::sides(left, right, |target| adapter.network_member(target))
-    }
     /// Realtime steps are guest commands and share the process-command state
     /// rules, applied before any seeded draw.
-    fn step_state(mode: AdmissionMode, facts: &Facts) -> Result<(), OperationError> {
-        if matches!(mode, AdmissionMode::Control) && facts.physically_ended && facts.vm != Vm::Down
-        {
+    fn step_state(facts: &Facts) -> Result<(), OperationError> {
+        if facts.physically_ended && facts.vm != Vm::Down {
             return Err(error(ErrorCode::TargetUnavailable, "target VM has exited"));
         }
         // As for process commands: paused is refused; a down target is

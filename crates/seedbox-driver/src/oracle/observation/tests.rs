@@ -381,11 +381,7 @@ fn service_correlation_is_consumed_after_settlement_then_terminal() {
                 .command_owner(boot, id)
                 .map_err(|e| format!("tracker: {e:?}"))
         }
-        fn inspect(
-            &self,
-            _: &[String],
-            _: &[super::super::triggers::Record],
-        ) -> Result<serde_json::Value, OperationError> {
+        fn inspect(&self, _: &[String]) -> Result<serde_json::Value, OperationError> {
             Err(OperationError::unsupported())
         }
     }

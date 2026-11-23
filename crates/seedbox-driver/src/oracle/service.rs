@@ -6,7 +6,6 @@ pub(crate) mod targets;
 
 use super::{
     handles::{Change, ExecutionPlan, HandleTarget, Handles},
-    triggers::{TriggerAction, Triggers},
     *,
 };
 use crate::{
@@ -137,11 +136,7 @@ pub(crate) trait Adapter {
         boot: u64,
         id: NonZeroU32,
     ) -> Result<CommandOwner, String>;
-    fn inspect(
-        &self,
-        handles: &[String],
-        triggers: &[super::triggers::Record],
-    ) -> Result<Value, OperationError>;
+    fn inspect(&self, handles: &[String]) -> Result<Value, OperationError>;
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Effect {
@@ -283,15 +278,14 @@ pub(crate) enum FaultAction {
     Effect(Effect),
     Heal,
 }
-/// Who requested an admitted fault: a guest control call, a matched trigger
-/// or a host input identified by its validated key.
+/// Who requested an admitted fault: a guest control call or a host input
+/// identified by its validated key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Requester {
     Call {
         source: String,
         id: SimulationControlId,
     },
-    Trigger(u32),
     Input(String),
 }
 /// A fault request after operation parsing, independent of its requester.
@@ -501,21 +495,6 @@ pub(crate) struct Admitted {
 pub(crate) enum Notice {
     Admitted(Admitted),
     Settled(Settlement),
-    TriggerArmed {
-        trigger: u32,
-        source: String,
-        /// The Stop target; None for a partition, named by its admission.
-        target: Option<String>,
-        at: u64,
-        deadline: u64,
-    },
-    /// `status` is a final trigger status, never Armed or Matched.
-    TriggerResolved {
-        trigger: u32,
-        at: u64,
-        status: super::triggers::Status,
-        fault: Option<u32>,
-    },
     /// A committed hit suspended `machine` (a canonical key); `at` is the
     /// hit's own time, before its commit.
     BreakHit {
@@ -587,15 +566,6 @@ impl Failure {
         self.settlements = earlier;
     }
 }
-/// Admission policy is independent of whether work has an RPC reply destination.
-/// Ordinary controls apply the API availability preflight; bare trigger faults
-/// use the underlying fault admission path and can settle Unavailable.
-#[derive(Clone, Copy)]
-enum AdmissionMode {
-    Control,
-    Trigger,
-}
-
 type HandleAdmission = (Subject, Effect, Option<ExecutionPlan>, bool);
 enum PreparationError {
     Rejected(OperationError),
@@ -690,7 +660,6 @@ struct Pending {
 pub(crate) struct Service {
     pub(crate) reply_latency_ns: u64,
     handles: Handles,
-    triggers: Triggers,
     last: u32,
     last_wake: u32,
     pending: BTreeMap<u32, Pending>,
@@ -799,7 +768,6 @@ mod call;
 mod install;
 mod prepare;
 mod settle;
-mod trigger;
 
 #[cfg(test)]
 mod tests;
