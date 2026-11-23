@@ -43,6 +43,9 @@ use std::{fs, path::PathBuf, time::Duration};
 fn at(n: u64) -> Timestamp {
     Timestamp::from_nanos(n)
 }
+/// The network latency floor of `NetworkConfig::default()`, in nanoseconds:
+/// what follows from an output is due this long after it.
+const FLOOR: u64 = 1_000_000;
 fn input(name: &str) -> PathBuf {
     std::env::var_os(name)
         .expect("run TCG checks inside nix develop")
@@ -234,13 +237,16 @@ fn early_queued_request_after_restore_runs_real_guest_cleanup() {
         1
     );
     assert!(observed.matches("cleaned\n").count() <= 1);
-    // An already-exited request is harmless and cannot reboot the guest.
+    // The run ends one floor (the default 1 ms latency) after the exit. A
+    // request for the exited machine is then refused and cannot reboot it.
+    let end = at(reached.as_nanos() + FLOOR);
+    let mut outcome = driver.step(end).unwrap();
+    while matches!(outcome, StepOutcome::BarrierReached { at } if at < end) {
+        outcome = driver.step(end).unwrap();
+    }
+    assert!(matches!(outcome, StepOutcome::Finished { at, .. } if at == end));
     assert!(matches!(
-        driver.with_barrier(|b| b.schedule(
-            reached,
-            auto_key(),
-            Action::Shutdown(Target::Machine(id))
-        )),
+        driver.with_barrier(|b| b.schedule(end, auto_key(), Action::Shutdown(Target::Machine(id)))),
         Err(seedbox_driver::driver::Error::Completed)
     ));
     assert!(matches!(
@@ -263,6 +269,14 @@ fn paused_shutdown_stays_pending_until_resume_and_restores_without_duplicate() {
     while !output(&mut driver, id).contains("app\0out\n") {
         guard.remaining().unwrap();
         now = advance(&mut driver, id, now, &mut progress);
+    }
+    // The reply to a call the guest made by now is due one floor after the
+    // call and lives in the Driver until then, not in a machine snapshot.
+    // Let it land, so that the snapshots below hold everything their
+    // branches' fresh Drivers need.
+    let settled = at(now.as_nanos() + FLOOR);
+    while now < settled {
+        now = step(&mut driver, settled);
     }
     let before = output(&mut driver, id);
     let resume = at(now.as_nanos() + 50_000_000);
