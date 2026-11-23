@@ -37,7 +37,6 @@ pub struct Checkpoint<S> {
     oracle_stops: BTreeSet<(u64, NonZeroU32)>,
     control: control::Control,
     inputs: BTreeMap<InputKey, LiveInput>,
-    trigger_marker: Option<Timestamp>,
     definitions: Vec<SpawnDefinition>,
     network: network::Network,
     properties: seedbox_engine_core::properties::Ledger,
@@ -324,7 +323,6 @@ where
             oracle_stops: self.execution.oracle_stops.clone(),
             control: self.execution.control.clone(),
             inputs: self.execution.inputs.clone(),
-            trigger_marker: self.execution.trigger_marker,
             definitions: self.execution.definitions.clone(),
             network: self.execution.network.clone(),
             properties: self.execution.properties.clone(),
@@ -374,7 +372,7 @@ where
             &checkpoint.network,
         )
         .map_err(Error::InvalidCheckpoint)?;
-        let workers = Workers::new(workers, context)?;
+        let workers = Self::execution_workers(workers, context)?;
         let machines = checkpoint
             .machines
             .iter()
@@ -406,7 +404,6 @@ where
                 oracle_stops: checkpoint.oracle_stops.clone(),
                 control: checkpoint.control.clone(),
                 inputs: checkpoint.inputs.clone(),
-                trigger_marker: checkpoint.trigger_marker,
                 definitions: checkpoint.definitions.clone(),
                 network: checkpoint.network.clone(),
                 properties: checkpoint.properties.clone(),

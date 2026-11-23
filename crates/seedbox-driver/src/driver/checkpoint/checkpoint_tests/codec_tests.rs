@@ -190,13 +190,6 @@ fn all_stopped_boundary_families_roundtrip_after_source_destruction() {
                 vec![
                     (0, Response::Ready),
                     (2, call(1, r#""op":"sleep","duration_ns":13"#)),
-                    (
-                        3,
-                        call(
-                            2,
-                            r#""op":"arm_trigger","source":{"machine":"fixture-1"},"marker":[120,121],"match_timeout_ns":20,"fault":{"action":"stop","target":{"machine":"fixture-1"}}"#,
-                        ),
-                    ),
                 ],
             ),
             spec(

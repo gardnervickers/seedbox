@@ -51,12 +51,15 @@ then charges progress and resumes the block from its start, refunding the
 repeated charge. A pending signal, JIT synchronization or flush completes in
 DynamoRIO's dispatcher, so the client redirects through it. On ARM, when the
 dispatcher would do nothing but look the block up, the fork's
-`dr_redirect_entry()` returns the block's cache entry instead, and the routine
-ends with DynamoRIO's jump to it; that jump leaves for the dispatcher after all
-if a signal has arrived since. `dr_redirect_entry()` never waits: it tries the
+`dr_redirect_entry()` finds the block's cache entry instead, and the clean call
+returns into a routine DynamoRIO wrote at the end of the client's page, which
+enters it, or leaves for the dispatcher after all if a signal has arrived since.
+The routine is not among DynamoRIO's generated routines, whose size decides how
+many pages it keeps committed. `dr_redirect_entry()` never waits: it tries the
 locks the lookup needs and refuses when one is held, as the dispatcher would
-wait for it. Neither path makes a syscall of its own, so the guest sees the
-same charges. x86-64 always redirects through the dispatcher.
+wait for it. Neither path makes a syscall of its own, short of waking a thread
+that began to wait for one of those locks, so the guest sees the same charges.
+x86-64 always redirects through the dispatcher.
 Charge instructions have no application translation and cannot be
 relocation points. Until a dead register is overwritten, a fault in an
 application instruction must still report its saved value. Reconstructed
@@ -106,13 +109,34 @@ generated machine setup, epoch, progress budget and memory. Hits verify both ret
 objects; missing objects render again. Image resolution, runtime validation, boot
 memory checks and retention of the complete replay closure still run on every preparation.
 
+## PV round execution
+
+The Driver starts each runnable VM on its own request ring and sweeps the reply
+rings. A ready VM can take its next lane input while another VM is executing.
+The Driver stages each machine's outputs until the barrier, where occurrence
+time and machine identity determine their order. One producer owns each ring.
+It publishes a completed message with one commit, or streams an oversized
+message in pieces as the reader frees space.
+
+A VM increments a shared counter after publishing a reply or freeing room for
+a partial request. The coordinator samples the counter before scanning, arms
+the outstanding VMs for one sleep, then checks the counter again. The first
+armed VM to claim that sleep writes its ticket to a shared pipe. The coordinator
+also watches the individual worker pipes for EOF, including while a ticket is
+owed. One Driver at a time holds the doorbell. Another in the same process
+sleeps in its oldest run for that round, on that worker's own pipe. The default
+spin ceiling is 200 µs in the coordinator. macOS ARM64 with timed WFE uses a
+monitored wait and a 400 µs VM ceiling. Other hosts, including Macs without
+FEAT_WFxT, use bounded spinning and a 1 ms VM ceiling. Both park sooner after consecutive unproductive spins.
+[Round loop](../crates/seedbox-driver/src/driver/round.rs) ·
+[Wake protocol](../crates/seedbox-machine/src/host/doorbell.rs)
+
 ## Same-time controls
 
 Committed outputs precede due timeline items, then frames, then timer wakeups; same-time items are FIFO.
 A running machine takes those frames and its due timer at the start of its next run, which starts there.
 A paused or suspended receiver admits frames in a zero-budget run. So does a running machine, with its
 due timer, before a later item due then for it and before final evidence is read.
-A trigger found during commit can admit policy before a prequeued host input due at that same boundary.
 Plans created by admission append behind existing items; delayed guest replies belong only to the calling boot.
 The [Driver](../crates/seedbox-driver/src/driver.rs) assigns fault IDs at admission, never for future overrides.
 
@@ -313,7 +337,10 @@ The [kernel hook](../crates/seedbox-machine/guest/kernel/arm64/seedbox.c) lets t
 XSAVE buffers can restore identical initial x87, SSE or zero AVX state while differing in presence bits or ignored payload bytes.
 Host interruptions can expose those differences in full-RAM comparison despite equivalent architectural state.
 Kernel task-state saves canonicalize initial/absent x87 and zero/absent YMM and AVX-512; compacted saves also canonicalize initial/absent SSE, preserving noninitial XMM and MXCSR values.
-Standard-format SSE remains unchanged because its MXCSR restore rules differ; direct application XSAVE and some signal paths remain outside the task-save hook.
+Standard-format task SSE remains unchanged because its MXCSR restore rules differ.
+A signal frame's standard-format XSAVE writes initial components as initial bytes but takes presence bits from XINUSE.
+The kernel marks x87 and SSE present in every frame and sets PKRU itself; the patch marks each other always-written component present exactly when its bytes are nonzero.
+AMX tile configuration and data, which a frame may leave unwritten when initial, and direct application XSAVE remain outside both hooks.
 The [patch](../crates/seedbox-machine/guest/kernel/x86_64/apply.py) changes guest bytes, not the comparison's coverage.
 Live vCPU vector evidence hashes each advertised component's effective value, substituting init state when absent.
 The [digest](../crates/seedbox-machine-pv/src/machine/pv/worker/x86_64/backend/evidence.rs) omits XSTATE_BV, so host FPU save/restore cannot change it.
