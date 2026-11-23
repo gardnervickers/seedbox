@@ -130,11 +130,11 @@ where
     ///
     /// The run stops at the first barrier at or after `until` that it would
     /// have reached anyway, at most one Driver round past it, never at
-    /// `until` itself. The Driver stamps a guest's effects, such as control
-    /// and property replies, with the round that committed them, so a round
-    /// cut short at an arbitrary time would move every later one and change
-    /// what the machines do. Inputs are delivered at their own times; one
-    /// for a time the run has passed is refused as stale.
+    /// `until` itself. The Driver no longer times anything by where a round
+    /// ends, but a machine still can: a PV guest records the yield at a
+    /// run's bound, so a round cut short at an arbitrary time could change
+    /// what it does. Inputs are delivered at their own times; one for a time
+    /// the run has passed is refused as stale.
     pub fn advance(&mut self, until: Timestamp) -> Result<Stop, Error<M::Error>> {
         self.advance_watching(until, |_, _| false)
     }
@@ -199,11 +199,21 @@ where
     }
 
     /// Deliver every input due now; whether there was one.
+    ///
+    /// A host breakpoint is admitted at this barrier, so the Driver first
+    /// commits and publishes the output it held here. That output is taken
+    /// into the trace at once: a watch asked next, the caller the run
+    /// returns to and a save taken here must all see it, and a checkpoint
+    /// carries no published events, so a run restored from that save could
+    /// never recover it.
     fn deliver_due(&mut self) -> Result<bool, Error<M::Error>> {
         let mut delivered = false;
         while let Some(input) = self.program.take_due(self.now) {
             self.deliver(input)?;
             delivered = true;
+        }
+        if delivered {
+            self.trace.take(self.driver.drain_observations().events);
         }
         Ok(delivered)
     }

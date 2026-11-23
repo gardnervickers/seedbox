@@ -47,9 +47,12 @@ pub enum Entry {
 }
 
 impl Record {
-    /// Whether this is something a machine did or that happened to it at a
-    /// time of its own, as opposed to a control fact stamped by the commit
-    /// that confirmed it. Only occurrences are compared between runs.
+    /// Whether this is something a machine did or that happened to it, as
+    /// opposed to a control fact: an admission, rejection, settlement or
+    /// breakpoint hit the Driver recorded about it. A control fact carries
+    /// the time it took effect (an admission one network latency after its
+    /// call, a settlement its outcome's time), never the commit that
+    /// published it. Only occurrences are compared between runs.
     pub fn is_occurrence(&self) -> bool {
         !matches!(self.entry, Entry::Event(_))
     }

@@ -238,13 +238,18 @@ impl<M> Entry<M> {
             .map(Timestamp::from_nanos)
     }
 
-    /// The machine time a run starting at simulation time `at` begins at.
-    /// A blocked machine woken by its timer starts at the timer's deadline,
-    /// which a fast clock can place before `at`'s own machine time, inside
-    /// that simulation nanosecond: a run covering `at` would have taken the
-    /// timer exactly at its deadline too (C3).
+    /// The machine time a lane's run starting at simulation time `at` begins
+    /// at. A blocked machine woken by its timer starts at the timer's
+    /// deadline, which a fast clock can place before `at`'s own machine time,
+    /// inside that simulation nanosecond: a run covering `at` would have
+    /// taken the timer exactly at its deadline too (C3). A paused machine
+    /// is not woken: it has no lane run, and a zero-budget admission run
+    /// starts at `at`'s machine time (see `batch_views`).
     fn start_time(&self, id: MachineId, at: Timestamp) -> Result<Timestamp, ClockOverflow> {
         let start = self.machine_time(id, at)?;
+        if self.lifecycle.paused() {
+            return Ok(start);
+        }
         Ok(match (self.stopped, self.timer) {
             (
                 StopReason::Blocked {
@@ -503,10 +508,12 @@ struct ObservationState {
 /// time and make due timers eligible without executing program instructions.
 /// Pausing never freezes the clock or shifts timer deadlines. Retained input
 /// stays queued while paused; crashes still terminate paused machines.
-/// Guest simulation-control calls are interpreted after their full round commits.
-/// Their effects and replies join the same ordered timeline at that barrier;
-/// draining events (`Driver::drain_observations`) only observes them. Accepted control work survives caller
-/// loss. Calls generated together are queued before their generated effects;
+/// A guest simulation-control call is admitted one network latency after the
+/// output that carried it, or one control latency after it with a controller
+/// configured, whichever round committed that output. Its effects and replies
+/// join the same ordered timeline from there; draining events
+/// (`Driver::drain_observations`) only observes them. Accepted control work
+/// survives caller loss. Calls generated together are queued before their generated effects;
 /// dependent operations must await acknowledgment rather than assume that a
 /// concurrent Pause/Resume sequence succeeds. The run ends one network latency
 /// after the oracle's terminal output or exit: what is due before then still
@@ -601,10 +608,10 @@ where
     /// A frame arriving at `T` is offered exactly at `T`, after every timeline
     /// item due at `T` and before timer wakeups, as [`Request::ReceiveFrame`]
     /// to the receiver's current boot, including while paused. A running
-    /// receiver takes it in its next run, which starts at `T`; a paused or
-    /// suspended one, or one with a later item due at `T`, takes it in a
-    /// zero-budget run first. It is dropped if that boot has exited. Delivery
-    /// means offered to the NIC, not consumed.
+    /// receiver takes it in its next run, which starts at `T`; a paused one,
+    /// one held at a breakpoint, or one with a later item due at `T`, takes
+    /// it in a zero-budget run. It is dropped if that boot has exited.
+    /// Delivery means offered to the NIC, not consumed.
     /// While an attached machine can execute, rounds end no later than its
     /// earliest execution time plus latency, so no frame arrives before the
     /// round that sent it commits. Blocked or paused machines impose no limit;
@@ -612,8 +619,7 @@ where
     /// does not wake it, which also tightens the controller latency bound.
     /// Inside a round, each machine runs to the round's end on its own lane and
     /// takes its timers and frames at their exact times; lanes run side by side.
-    /// Only frames for a paused or suspended receiver end a round at their
-    /// arrival.
+    /// Only frames for a paused receiver end a round at their arrival.
     // Blocked machines impose no bound, so idle simulations still jump to their
     // next event.
     #[allow(clippy::too_many_arguments)]
@@ -1362,17 +1368,8 @@ where
             act,
         )?;
         consequences.extend(plans.into_iter().map(Consequence::Plans));
+        Self::check_authorized(&self.execution.control, output)?;
         if let Response::SimulationControl { id, payload } = &output.payload {
-            if self
-                .execution
-                .control
-                .controller
-                .is_some_and(|setup| setup.controller != Some(output.machine))
-            {
-                return Err(Error::Control(
-                    "control request from unauthorized machine".into(),
-                ));
-            }
             // With a controller a call is admitted one control latency after
             // it, which is never below the floor.
             let at = match self.execution.control.controller {
@@ -1393,6 +1390,24 @@ where
                     observed: output.at.as_nanos(),
                     payload: payload.clone(),
                 })),
+            ));
+        }
+        Ok(())
+    }
+
+    /// With a controller configured, only it may make a simulation-control
+    /// call: one from any other machine fails the run when it commits.
+    fn check_authorized(
+        control: &control::Control,
+        output: &MachineResponse,
+    ) -> Result<(), Error<M::Error>> {
+        if matches!(output.payload, Response::SimulationControl { .. })
+            && control
+                .controller
+                .is_some_and(|setup| setup.controller != Some(output.machine))
+        {
+            return Err(Error::Control(
+                "control request from unauthorized machine".into(),
             ));
         }
         Ok(())
@@ -1539,24 +1554,46 @@ where
     fn route_frames(&mut self, outputs: &[MachineResponse]) -> Result<(), Error<M::Error>> {
         let position = self.position();
         let observation_mark = self.observations.frames.mark();
+        let routed = Self::route_into(
+            &mut self.execution.network,
+            &self.execution.machines,
+            position,
+            outputs,
+            &mut self.observations.frames,
+        );
+        if routed.is_err() {
+            self.observations.frames.discard(observation_mark);
+        }
+        routed
+    }
+
+    /// Route the frames among `outputs` through `network`, in order.
+    /// `prepare_input` routes held frames through a copy of the network with
+    /// this, exactly as their commit will route them through the real one.
+    fn route_into<T>(
+        network: &mut network::Network,
+        machines: &[Entry<T>],
+        position: Position,
+        outputs: &[MachineResponse],
+        observations: &mut observation::FrameObservations,
+    ) -> Result<(), Error<M::Error>> {
+        // An exited receiver drops its frames whenever they arrive.
+        let reached = |to: MachineId| match machines[to.0].stopped {
+            StopReason::Exited { .. } => 0,
+            _ => machines[to.0].reached.as_nanos(),
+        };
         for output in outputs {
             if let Response::TransmitFrame { bytes } = &output.payload {
-                let machines = &self.execution.machines;
-                // An exited receiver drops its frames whenever they arrive.
-                let reached = |to: MachineId| match machines[to.0].stopped {
-                    StopReason::Exited { .. } => 0,
-                    _ => machines[to.0].reached.as_nanos(),
-                };
-                if let Err(error) = self.execution.network.route_at(
-                    position,
-                    output.machine,
-                    output.at.as_nanos(),
-                    bytes,
-                    &reached,
-                    &mut self.observations.frames,
-                ) {
-                    self.observations.frames.discard(observation_mark);
-                    return Err(match error {
+                network
+                    .route_at(
+                        position,
+                        output.machine,
+                        output.at.as_nanos(),
+                        bytes,
+                        &reached,
+                        observations,
+                    )
+                    .map_err(|error| match error {
                         network::RouteError::ArrivalOverflow => Error::TimeOverflow,
                         network::RouteError::SequenceOverflow => Error::PositionOverflow,
                         network::RouteError::BeforeReceiver { to, at } => Error::Causality {
@@ -1564,8 +1601,7 @@ where
                             at: Timestamp::from_nanos(at),
                             reached: machines[to.0].reached,
                         },
-                    });
-                }
+                    })?;
             }
         }
         Ok(())
@@ -1742,10 +1778,11 @@ where
     /// Offer every frame arriving at `now` to its receiver's current boot, in
     /// (sender, sequence, receiver) order. A receiver whose boot has exited
     /// drops the frame. A running receiver takes its frames at the start of its
-    /// next run, which starts at `now`, so a blocked one becomes runnable here.
-    /// A paused or suspended receiver runs no guest work, so it admits them now
-    /// with one zero-budget batch and commit. Returns whether any frame was
-    /// due, so that newly generated timeline items at `now` are processed next.
+    /// next run, which starts at `now`, so a blocked one becomes runnable here;
+    /// one held at a breakpoint gets that run without a budget. A paused
+    /// receiver has no next run, so it admits them now with one zero-budget
+    /// batch and commit. Returns whether any frame was due, so that newly
+    /// generated timeline items at `now` are processed next.
     fn deliver_frames(&mut self, now: Timestamp) -> Result<bool, Error<M::Error>> {
         let due = self.execution.network.take_due(now.as_nanos());
         if due.is_empty() {
@@ -1788,14 +1825,8 @@ where
         // state; the next run, from `now`, does the same before executing.
         let mut admitting = Vec::new();
         for id in receivers {
-            let suspended = self
-                .execution
-                .control
-                .service
-                .breaks
-                .suspended(&control::Control::source(id));
             let entry = &mut self.execution.machines[id.0];
-            if entry.lifecycle.paused() || suspended {
+            if entry.lifecycle.paused() {
                 admitting.push(id);
             } else if let StopReason::Blocked { .. } = entry.stopped {
                 entry.stopped = StopReason::BoundaryReached;
@@ -2045,9 +2076,9 @@ where
     }
 
     /// Whether every schedule cuts every machine at `at`: a timeline item or
-    /// the end of the run is due then, or a frame arrives then for a receiver
-    /// that takes it only at a barrier. At such a barrier everything staged
-    /// commits before what is due (C2).
+    /// the end of the run is due then, or a frame arrives then for a paused
+    /// receiver, which takes it only at a barrier. At such a barrier
+    /// everything staged commits before what is due (C2).
     fn barrier_needed(&self, at: Timestamp) -> bool {
         let receivers = self.lane_receivers();
         self.execution

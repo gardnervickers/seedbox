@@ -32,6 +32,8 @@ struct Timers {
     timers: VecDeque<u64>,
     fired: u8,
     busy: bool,
+    /// Its application ends at this machine time.
+    outcome: Option<u64>,
     calls: Calls,
 }
 impl Timers {
@@ -42,6 +44,7 @@ impl Timers {
                 timers: timers.iter().copied().collect(),
                 fired: 0,
                 busy,
+                outcome: None,
                 calls: calls.clone(),
             },
             calls,
@@ -84,6 +87,16 @@ impl Machine for Timers {
             inputs,
         });
         let mut reached = start;
+        if let Some(end) = self.outcome.filter(|&end| end <= upto.as_nanos()) {
+            self.outcome = None;
+            context
+                .outbox
+                .emit(crate::pv::Output {
+                    at: at(end.max(start)),
+                    payload: Response::ApplicationOutcome { code: 0 },
+                })
+                .unwrap();
+        }
         if let Some(&due) = self.timers.front() {
             if due <= upto.as_nanos() {
                 self.timers.pop_front();
@@ -471,4 +484,129 @@ fn unrepresentable_machine_times_fail_or_never_fire() {
         driver.step(at(u64::MAX - 1)),
         Err(Error::ClockOverflow { id: MachineId(0) })
     ));
+}
+
+/// Machines attached to a network with a 10 ns latency, no jitter or loss.
+fn networked(machines: Vec<Timers>, quantum: u64) -> Driver<Timers> {
+    let definition = |index: usize| {
+        let mut definition = fixture::definition(index);
+        definition.network = Some(
+            crate::definition::NetworkInterface::new(
+                crate::definition::MacAddress::new(network_test_frames::mac(index)).unwrap(),
+                std::net::Ipv4Addr::new(10, 0, 0, index as u8 + 1),
+                24,
+            )
+            .unwrap(),
+        );
+        definition
+    };
+    let others = (1..machines.len()).map(definition).collect();
+    let mut machines = machines.into_iter();
+    Driver::new(
+        at(0),
+        Duration::from_nanos(quantum),
+        1,
+        crate::rng::SeededRng::new(0),
+        || Ok(()),
+        definition(0),
+        others,
+        Vec::new(),
+        NetworkConfig::new(Duration::from_nanos(10), Duration::ZERO, 0).unwrap(),
+        move |_| Ok(machines.next().expect("one machine per definition")),
+    )
+    .unwrap()
+}
+
+/// A busy oracle, whose application ends at `outcome`, and a machine at
+/// +10% blocked on a timer at machine time 21 and paused at 5. Machine time
+/// 21 is first reached in simulation nanosecond 20, whose own machine time
+/// is 22: the timer's deadline lies inside that nanosecond.
+fn paused_before_a_timer_inside_its_nanosecond(outcome: Option<u64>) -> (Driver<Timers>, Calls) {
+    let (mut oracle, _) = Timers::new(&[], true);
+    oracle.outcome = outcome;
+    let (fast, calls) = Timers::new(&[21], false);
+    let mut driver = networked(vec![oracle, fast], 10);
+    driver
+        .with_barrier(|b| {
+            b.schedule_clock_rate(at(0), MachineId(1), rate(100_000_000))?;
+            b.schedule(
+                at(5),
+                InputKey::new("pause").unwrap(),
+                Action::Pause(Target::Machine(MachineId(1))),
+            )
+        })
+        .unwrap();
+    (driver, calls)
+}
+
+/// A zero-budget admission run starts at the barrier's machine time, its
+/// bound. Started at the timer's deadline instead, as a lane starts a
+/// machine its timer wakes, it would execute a paused machine for a machine
+/// nanosecond, also where the run ends.
+#[test]
+fn a_paused_machine_admits_frames_without_a_budget_at_a_timer_inside_its_nanosecond() {
+    for finishing in [false, true] {
+        // The run ends at 20, one latency after the oracle's outcome at 10.
+        let (mut driver, calls) =
+            paused_before_a_timer_inside_its_nanosecond(finishing.then_some(10));
+        // A frame for the paused machine arrives at 20.
+        driver
+            .execution
+            .network
+            .route(MachineId(0), 10, &network_test_frames::plain(0, 1, 7))
+            .unwrap();
+        run_until(&mut driver, 20);
+        assert_eq!(driver.now(), at(20));
+        if finishing {
+            assert!(matches!(
+                driver.step(at(20)).unwrap(),
+                StepOutcome::Finished { at: end, .. } if end == at(20)
+            ));
+        }
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                Call {
+                    now: 0,
+                    upto: 5,
+                    inputs: vec![]
+                },
+                Call {
+                    now: 22,
+                    upto: 22,
+                    inputs: vec![22]
+                },
+            ],
+            "finishing {finishing}"
+        );
+    }
+}
+
+/// So does the admission run of an input the host applies at that barrier:
+/// a resume there adopts the barrier's time and finds the timer due.
+#[test]
+fn an_input_applied_at_a_timer_inside_its_nanosecond_gets_no_budget() {
+    let (mut driver, calls) = paused_before_a_timer_inside_its_nanosecond(None);
+    run_until(&mut driver, 20);
+    assert_eq!(driver.now(), at(20));
+    driver
+        .with_barrier(|b| {
+            b.schedule(
+                at(20),
+                InputKey::new("resume").unwrap(),
+                Action::Resume(Target::Machine(MachineId(1))),
+            )?;
+            b.apply_due_now()
+        })
+        .unwrap();
+    assert_eq!(
+        calls.lock().unwrap().last(),
+        Some(&Call {
+            now: 22,
+            upto: 22,
+            inputs: vec![]
+        })
+    );
+    // The timer fires in that run, at the barrier.
+    assert_eq!(fired(&driver.drain_events()), [(20, 1, 1)]);
 }

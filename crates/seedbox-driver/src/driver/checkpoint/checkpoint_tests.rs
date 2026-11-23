@@ -123,6 +123,65 @@ fn unsupported_poisoned_and_structurally_invalid_capture_never_calls_machine() {
     assert!(matches!(d.checkpoint(), Err(Error::InvalidCheckpoint(_))));
 }
 
+/// A breakpoint hit held at a barrier nothing needs has not reached the
+/// service yet, but its machine is already suspended. Capture refuses it as
+/// it refuses a committed hit, before any machine is snapshotted, and so
+/// does the codec for a checkpoint that holds one.
+#[test]
+fn a_staged_breakpoint_hit_refuses_capture_before_any_machine_snapshot() {
+    for held in [
+        Response::Break {
+            name: "leader".into(),
+        },
+        Response::BlockRequestHeld {
+            op: crate::pv::DiskOp::Write,
+            nth: 1,
+        },
+    ] {
+        let mut d = build(
+            vec![spec(0, true, vec![]), spec(1, true, vec![])],
+            vec![],
+            true,
+        );
+        advance(&mut d, 3);
+        let (bytes, _) = artifact(d.checkpoint().unwrap());
+        let captures = |d: &Driver<Mock>| -> Vec<usize> {
+            d.execution
+                .machines
+                .iter()
+                .map(|entry| {
+                    let machine = entry.machine.as_ref().unwrap();
+                    machine.captures.load(Ordering::SeqCst)
+                })
+                .collect()
+        };
+        let before = captures(&d);
+        let hit = MachineResponse {
+            machine: MachineId(1),
+            boot: 0,
+            at: d.now(),
+            payload: held,
+        };
+        d.execution.machines[1].staged.push(hit.clone());
+        assert!(matches!(
+            d.checkpoint(),
+            Err(Error::InvalidCheckpoint(
+                "machine suspended at a breakpoint"
+            ))
+        ));
+        assert_eq!(captures(&d), before, "refused before any snapshot");
+        let mut c = Checkpoint::read_from(&mut &bytes[..], limits()).unwrap();
+        c.machines[1].staged.push(hit);
+        let mut destination = Vec::new();
+        assert!(matches!(
+            c.write_to(&mut destination),
+            Err(crate::persistence::CodecError::Invalid(reason))
+                if reason == "machine suspended at a breakpoint"
+        ));
+        assert!(destination.is_empty());
+    }
+}
+
 #[test]
 fn nth_capture_failure_leaves_source_and_rng_unchanged() {
     let initial = vec![spec(0, true, vec![]), spec(1, true, vec![])];

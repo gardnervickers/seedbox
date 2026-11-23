@@ -124,7 +124,12 @@ where
     /// the same shape rules as schedule at now. Policy rejection is a successful
     /// PreparedOutcome::Rejected, distinct from these outer errors. Only Control
     /// and live-input bookkeeping are cloned, including pending-notice projection
-    /// for Heal(Input). Machines are read-only; no native/factory call, RNG draw
+    /// for Heal(Input), and the network when frames are held at this barrier:
+    /// committing the input commits held output first, so the projection sees
+    /// the connections those frames open or close. A held output that would
+    /// fail that commit (a control call from an unauthorized machine) fails
+    /// the projection with the same error and leaves the Driver unchanged.
+    /// Machines are read-only; no native/factory call, RNG draw
     /// on the source, ID/handle reservation, notice drain or publication occurs.
     /// Dropping a proposal after a journal failure leaves the Driver unchanged.
     /// Readiness, authored cursor, user-handle and checkpoint gates belong to the
@@ -163,15 +168,16 @@ where
         let mut control = self.driver.execution.control.clone();
         let mut inputs = self.driver.execution.inputs.clone();
         // Committing the input first commits the output held here, so the
-        // projection applies it to its copies (C2).
-        let machines = self.driver.project_held(&mut control)?;
+        // projection applies it to its copies (C2): of control, of the
+        // machines' bookkeeping and, when frames are held, of the network.
+        let (machines, network) = self.driver.project_held(&mut control)?;
         for notice in control.service.take_notices() {
             Driver::<M>::track_input(&mut inputs, &notice);
         }
         let admitted = Driver::<M>::input_admission_with_handle(
             &mut control,
             &machines,
-            Some(&self.driver.execution.network),
+            Some(network.as_ref().unwrap_or(&self.driver.execution.network)),
             &inputs,
             &key,
             &action,
@@ -303,6 +309,10 @@ where
     }
 }
 
+/// What `project_held` projects: the machines' bookkeeping after the held
+/// output, and the network after the held frames when any is held.
+type Projected = (Vec<Entry<()>>, Option<network::Network>);
+
 impl<M> Driver<M>
 where
     M: Machine + Send + 'static,
@@ -311,12 +321,15 @@ where
 {
     /// Copies of the machines' bookkeeping with the output and exits held at
     /// this barrier applied to them and to `control`, as committing them
-    /// would: their observations, breakpoint hits and exits, in commit order.
-    /// What they schedule is not projected; it is due a floor later.
-    fn project_held(
-        &self,
-        control: &mut control::Control,
-    ) -> Result<Vec<Entry<()>>, Error<M::Error>> {
+    /// would: held frames routed, then observations, breakpoint hits and
+    /// exits, in commit order. Held frames change what a network admission
+    /// sees (a connection opens or closes when its frame is routed), so they
+    /// are routed through a copy of the network, which is returned; `None`
+    /// when no frame is held and the Driver's own network is unchanged by
+    /// the commit. A held output that would fail the commit fails the
+    /// projection the same way. What held outputs schedule is not projected;
+    /// it is due a floor later.
+    fn project_held(&self, control: &mut control::Control) -> Result<Projected, Error<M::Error>> {
         let mut machines: Vec<Entry<()>> = self
             .execution
             .machines
@@ -328,6 +341,24 @@ where
             .flat_map(|entry| std::mem::take(&mut entry.staged))
             .collect();
         outputs.sort_by_key(|output| (output.at, output.machine));
+        let network = if outputs
+            .iter()
+            .any(|output| matches!(output.payload, Response::TransmitFrame { .. }))
+        {
+            let mut network = self.execution.network.clone();
+            // Frame facts belong to the commit, not to its projection.
+            let mut unobserved = observation::FrameObservations::default();
+            Self::route_into(
+                &mut network,
+                &machines,
+                self.position(),
+                &outputs,
+                &mut unobserved,
+            )?;
+            Some(network)
+        } else {
+            None
+        };
         let mut exits: Vec<(Timestamp, MachineId)> = machines
             .iter()
             .enumerate()
@@ -356,6 +387,7 @@ where
             }
             let act = self.consequence_of(output.at)?;
             Self::observe_output(control, &mut machines, output, act)?;
+            Self::check_authorized(control, output)?;
         }
         for (reached, id) in exits {
             let act = self.consequence_of(reached)?;
@@ -363,7 +395,7 @@ where
                 .terminal(&mut machines, id, act)
                 .map_err(Error::Control)?;
         }
-        Ok(machines)
+        Ok((machines, network))
     }
 
     /// Same dispatch owners/order as apply_due: timeline, then frames.
