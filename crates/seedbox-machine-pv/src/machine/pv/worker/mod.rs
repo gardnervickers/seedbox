@@ -1013,13 +1013,13 @@ pub(crate) fn serve() -> Result<()> {
     };
     let mut io = std::io::BufReader::new(super::shm::accept(capacity, input, stdout.lock())?);
     let mut machine: Option<Machine> = None;
-    while let Some(request) = protocol::receive(&mut io)? {
-        // A Run's frames follow it on the stream; read them before running so
-        // a failed run cannot desynchronize the protocol.
+    while let Some((request, frames)) = super::shm::receive(&mut io, &[], |request, body| {
         let frames = match &request {
-            Request::Run { frames, .. } => super::wire::receive_frames(&mut io, *frames)?,
+            Request::Run { frames, .. } => super::wire::receive_frames(body, *frames)?,
             _ => Vec::new(),
         };
+        Ok((request, frames))
+    })? {
         let mut writes = None;
         let result: Result<Response> = (|| match request {
             Request::Attach { .. } => Err("PV transport already attached".into()),
@@ -1203,13 +1203,7 @@ pub(crate) fn serve() -> Result<()> {
             Ok(answer) => answer,
             Err(error) => Response::Error(error),
         };
-        let ring = io.get_mut();
-        ring.message(&response, |claim| match writes {
-            Some(writes) => super::wire::send_writes(claim, &writes),
-            None => Ok(()),
-        })?;
-        ring.finish_send()
-            .map_err(|e| format!("PV protocol write: {e}"))?;
+        io.get_mut().reply(&response, writes.as_deref())?;
     }
     Ok(())
 }

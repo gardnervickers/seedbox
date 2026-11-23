@@ -1,4 +1,10 @@
 use super::*;
+fn receive_writes(input: &mut impl Read, count: u64) -> Result<Vec<GuestWrite>> {
+    super::receive_writes(&mut Input::Stream(input), count)
+}
+fn receive_frames(input: &mut impl Read, count: u64) -> Result<Vec<Vec<u8>>> {
+    super::receive_frames(&mut Input::Stream(input), count)
+}
 
 fn write(kind: fn(LifecycleWrite) -> GuestWrite, time: u64, bytes: &[u8]) -> GuestWrite {
     kind(LifecycleWrite {

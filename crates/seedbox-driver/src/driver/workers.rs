@@ -160,7 +160,7 @@ impl<C: 'static> Workers<C> {
                 pool: None,
                 threads,
                 caller,
-                idle: Box::new(seedbox_machine::host::idle::SpinThenSleep::default()),
+                idle: seedbox_machine::host::idle::Idle::default().build(),
                 #[cfg(test)]
                 doorbell: None,
                 #[cfg(test)]
@@ -211,7 +211,7 @@ impl<C: 'static> Workers<C> {
                 pool: Some(pool),
                 threads,
                 caller,
-                idle: Box::new(seedbox_machine::host::idle::SpinThenSleep::default()),
+                idle: seedbox_machine::host::idle::Idle::default().build(),
                 #[cfg(test)]
                 doorbell: None,
                 #[cfg(test)]

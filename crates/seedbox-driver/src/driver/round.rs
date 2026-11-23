@@ -109,15 +109,9 @@ where
                 return result;
             }
             match self.workers.idle().idle(attempt, wait.elapsed()) {
-                Action::Spin => match bell.as_ref() {
-                    Some(bell) => {
-                        for _ in 0..64 {
-                            if bell.rung() {
-                                break;
-                            }
-                            std::hint::spin_loop();
-                        }
-                    }
+                // Wait on the publication word sampled before the scan.
+                action @ (Action::Spin | Action::Monitor(_)) => match bell.as_ref() {
+                    Some(bell) => bell.spin(action),
                     None => std::hint::spin_loop(),
                 },
                 Action::Sleep => {

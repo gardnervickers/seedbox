@@ -243,6 +243,10 @@ impl Coordinator<'_> {
     pub fn rung(&self) -> bool {
         self.bell.words.word(PENDING).load(SeqCst) != self.seen
     }
+    /// Wait on the same publication word sampled before the reply scan.
+    pub fn spin(&self, action: super::idle::Action) {
+        super::idle::wait_on_word(action, self.bell.words.word(PENDING), self.seen);
+    }
     /// Arm the watch set for this park. A writer outside the set may also
     /// publish, but it cannot take this ticket: its death could otherwise
     /// strand the coordinator while none of its watched pipes has closed.

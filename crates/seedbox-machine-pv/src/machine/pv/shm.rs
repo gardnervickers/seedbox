@@ -31,8 +31,9 @@
 use super::protocol::{self, Response};
 use seedbox_machine::host::{
     doorbell::Ringer,
-    idle::{Action, IdleStrategy, Outcome, SpinThenSleep},
+    idle::{Action, Idle, IdleStrategy, Outcome},
 };
+use seedbox_machine::pv::transport::GuestWrite;
 use std::{
     io::{self, Read, Write},
     os::{
@@ -51,10 +52,17 @@ type Result<T> = std::result::Result<T, String>;
 /// their fixed descriptors at 197 to 199 and keep sources at 200 and above.
 pub(super) const DESCRIPTOR: i32 = 196;
 /// Bytes in each ring; a longer message passes through in pieces.
-pub(super) const CAPACITY: u64 = 256 << 10;
-/// Workers wait between requests across whole Driver rounds. Park after this
-/// bounded spin, or sooner when consecutive spins have found no work.
-const WORKER_SPIN: Duration = Duration::from_micros(1000);
+pub(super) const CAPACITY: u64 = 1 << 20;
+/// Workers wait between requests across whole Driver rounds. These budgets
+/// allow longer waits than the coordinator's 200 µs ceiling. Hosts without
+/// a monitored wait keep the bounded spin they had before it.
+fn worker_spin(policy: Idle) -> Duration {
+    Duration::from_micros(match policy {
+        Idle::Monitor => 400,
+        _ => 1000,
+    })
+}
+
 /// Control words, each on its own 128-byte line, fill the first 16 KiB. The
 /// request ring follows, then the response ring.
 const LINE: usize = 128;
@@ -201,7 +209,8 @@ pub(crate) fn accept<R: Read, W: Write>(
     };
     protocol::send(&mut wake, &answer)?;
     let (region, bell) = attached?;
-    let idle = Box::new(SpinThenSleep::new(WORKER_SPIN));
+    let policy = Idle::default();
+    let idle = policy.with_budget(worker_spin(policy));
     let mut stream = Stream::new(region, Side::Worker, sleep, wake, idle);
     stream.bell = Some(bell);
     Ok(stream)
@@ -244,8 +253,8 @@ impl Side {
 }
 
 /// One side of the region as a byte stream. It sleeps on `sleep` and wakes
-/// its peer through `wake`. Written bytes reach the peer at `flush`. Every
-/// read publishes its position, so a reader of small pieces buffers it.
+/// its peer through `wake`. A complete contiguous packet returns its credit
+/// after decoding. Buffered stream reads return credit as they consume fragments.
 pub(crate) struct Stream<R, W> {
     region: Region,
     incoming: Ring,
@@ -295,8 +304,7 @@ impl<R: Read, W: Write> Stream<R, W> {
     }
     /// The client's end of an attached region.
     pub(super) fn client(region: Region, sleep: R, wake: W) -> Self {
-        let idle = Box::new(SpinThenSleep::default());
-        Self::new(region, Side::Client, sleep, wake, idle)
+        Self::new(region, Side::Client, sleep, wake, Idle::default().build())
     }
     /// Wait until control word `position` differs from `seen`: spin as the
     /// idle strategy says, then set the `mark` word and sleep on this side's
@@ -306,14 +314,15 @@ impl<R: Read, W: Write> Stream<R, W> {
         let word = self.region.word(position);
         let started = Instant::now();
         let mut attempt = 0;
-        while self.idle.idle(attempt, started.elapsed()) == Action::Spin {
-            for _ in 0..64 {
-                let now = word.load(SeqCst);
-                if now != seen {
-                    self.idle.reset(Outcome::Progress);
-                    return Ok(Some(now));
-                }
-                std::hint::spin_loop();
+        loop {
+            let action = self.idle.idle(attempt, started.elapsed());
+            if action == Action::Sleep {
+                break;
+            }
+            let now = seedbox_machine::host::idle::wait_on_word(action, word, seen);
+            if now != seen {
+                self.idle.reset(Outcome::Progress);
+                return Ok(Some(now));
             }
             attempt += 1;
         }
@@ -394,6 +403,28 @@ impl<R: Read, W: Write> Stream<R, W> {
             .map_err(|e| format!("PV protocol write: {e}"))
     }
 
+    /// A synchronous producer owns its response until every byte has gone
+    /// into the ring. Stream a long trailer from its original buffers as the
+    /// reader returns credit, including across the wrap point.
+    pub(super) fn reply(&mut self, header: &Response, writes: Option<&[GuestWrite]>) -> Result<()> {
+        let mut claim = self.claim().map_err(|e| e.to_string())?;
+        claim.header(header)?;
+        if let Some(writes) = writes {
+            let size = super::wire::writes_size(writes)?;
+            if size > claim.capacity.saturating_sub(claim.used) {
+                let ring = claim.seal(size);
+                let tail = std::mem::take(&mut ring.tail);
+                ring.write_all(tail.get_ref()).map_err(|e| e.to_string())?;
+                return super::wire::send_writes(ring, writes);
+            }
+            super::wire::send_writes(&mut claim, writes)?;
+        }
+        claim
+            .commit()
+            .and_then(|()| self.finish_send())
+            .map_err(|e| format!("PV protocol write: {e}"))
+    }
+
     /// Copy as much of the outstanding request as the worker has made room
     /// for. A worker draining a partial request rings the same shared bell.
     pub(super) fn advance_send(&mut self) -> io::Result<()> {
@@ -442,6 +473,45 @@ impl<R: Read, W: Write> Stream<R, W> {
         self.read_exact(&mut prefix[start..])?;
         Ok(false)
     }
+    /// Published input remaining, waiting for the first byte or peer exit.
+    fn available(&mut self) -> io::Result<usize> {
+        let ring = self.incoming;
+        let capacity = self.region.capacity;
+        if self.readable == self.read {
+            let written = ring.word(WRITTEN);
+            let mut now = self.region.word(written).load(SeqCst);
+            if now == self.read {
+                match self.wait(written, self.read, ring.word(READER_ASLEEP))? {
+                    Some(position) => now = position,
+                    None => return Ok(0),
+                }
+            }
+            if now < self.read || now - self.read > capacity {
+                return Err(corrupt());
+            }
+            self.readable = now;
+        }
+        Ok((self.readable - self.read) as usize)
+    }
+
+    /// Return consumed bytes to the producer after the last use of their contents.
+    fn release(&mut self, count: usize) -> io::Result<()> {
+        let ring = self.incoming;
+        self.read += count as u64;
+        self.region.word(ring.word(READ)).store(self.read, SeqCst);
+        self.wake(ring.word(WRITER_ASLEEP))?;
+        if let Some(bell) = &self.bell {
+            // A fragmented request needs another coordinator pass to send
+            // its next piece. Whole requests produce only the reply ring.
+            if self.read < self.region.word(ring.word(MESSAGE_END)).load(SeqCst)
+                && self.read == self.readable
+            {
+                bell.ring(self.region.word(WATCH))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Publish every written byte and wake a waiting peer.
     fn publish(&mut self) -> io::Result<()> {
         if self.published != self.written {
@@ -474,6 +544,53 @@ impl<R: Read, W: Write> Stream<R, W> {
         Ok(())
     }
 }
+/// Decode one whole packet before releasing its ring interval. The returned
+/// value owns all data needed after this call. A prefetched byte, wrap or
+/// fragment takes the stream path, which also returns credit as it reads.
+pub(super) fn receive<R: Read, W: Write, H: serde::de::DeserializeOwned, T>(
+    io: &mut std::io::BufReader<Stream<R, W>>,
+    prefix: &[u8],
+    decode: impl FnOnce(H, &mut super::wire::Input<'_>) -> Result<T>,
+) -> Result<Option<T>> {
+    use super::wire::Input;
+    if prefix.is_empty() && io.buffer().is_empty() {
+        let ring = io.get_mut();
+        let available = ring.available().map_err(|e| e.to_string())?;
+        if available == 0 {
+            return Ok(None);
+        }
+        let size = ring.region.capacity as usize;
+        let start = ring.read as usize & (size - 1);
+        let end = ring
+            .region
+            .word(ring.incoming.word(MESSAGE_END))
+            .load(SeqCst);
+        if ring.readable == end && available <= size - start {
+            // SAFETY: the interval was published by the producer, which
+            // writes there again only once the read cursor passes it. The
+            // cursor stays pinned until decode has returned its owned result.
+            // This rests on the peer keeping to the protocol: it is Seedbox's
+            // own worker or client, never the guest.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(ring.region.data(ring.incoming).add(start), available)
+            };
+            let mut input = Input::Slice(bytes);
+            let header = input.header()?.ok_or("PV missing protocol header")?;
+            let value = decode(header, &mut input)?;
+            if !matches!(input, Input::Slice([])) {
+                return Err("PV trailing bytes in message".into());
+            }
+            ring.release(available).map_err(|e| e.to_string())?;
+            return Ok(Some(value));
+        }
+    }
+    let mut stream = prefix.chain(io);
+    let mut input = Input::Stream(&mut stream);
+    input
+        .header()?
+        .map(|header| decode(header, &mut input))
+        .transpose()
+}
 /// Take one wakeup; false at EOF.
 fn doorbell(sleep: &mut impl Read) -> io::Result<bool> {
     let mut byte = [0];
@@ -493,23 +610,13 @@ impl<R: Read, W: Write> Read for Stream<R, W> {
         if buf.is_empty() {
             return Ok(0);
         }
-        let ring = self.incoming;
-        let capacity = self.region.capacity;
-        if self.readable == self.read {
-            let written = ring.word(WRITTEN);
-            let mut now = self.region.word(written).load(SeqCst);
-            if now == self.read {
-                match self.wait(written, self.read, ring.word(READER_ASLEEP))? {
-                    Some(position) => now = position,
-                    None => return Ok(0),
-                }
-            }
-            if now < self.read || now - self.read > capacity {
-                return Err(corrupt());
-            }
-            self.readable = now;
+        let available = self.available()?;
+        if available == 0 {
+            return Ok(0);
         }
-        let count = buf.len().min((self.readable - self.read) as usize);
+        let capacity = self.region.capacity;
+        let ring = self.incoming;
+        let count = buf.len().min(available);
         let start = (self.read % capacity) as usize;
         let first = count.min(capacity as usize - start);
         let data = self.region.data(ring);
@@ -519,18 +626,7 @@ impl<R: Read, W: Write> Read for Stream<R, W> {
             std::ptr::copy_nonoverlapping(data.add(start), buf.as_mut_ptr(), first);
             std::ptr::copy_nonoverlapping(data, buf.as_mut_ptr().add(first), count - first);
         }
-        self.read += count as u64;
-        self.region.word(ring.word(READ)).store(self.read, SeqCst);
-        self.wake(ring.word(WRITER_ASLEEP))?;
-        if let Some(bell) = &self.bell {
-            // A fragmented request needs another coordinator pass to send
-            // its next piece. Whole requests produce only the reply ring.
-            if self.read < self.region.word(ring.word(MESSAGE_END)).load(SeqCst)
-                && self.read == self.readable
-            {
-                bell.ring(self.region.word(WATCH))?;
-            }
-        }
+        self.release(count)?;
         Ok(count)
     }
 }
@@ -585,7 +681,7 @@ pub(crate) struct Claim<'a, R, W> {
     used: usize,
     spill: Vec<u8>,
 }
-impl<R: Read, W: Write> Claim<'_, R, W> {
+impl<'a, R: Read, W: Write> Claim<'a, R, W> {
     fn copy(&mut self, offset: usize, bytes: &[u8]) {
         let n = bytes.len().min(self.capacity.saturating_sub(offset));
         if n > 0 {
@@ -613,7 +709,33 @@ impl<R: Read, W: Write> Claim<'_, R, W> {
     }
     /// Encode the length-prefixed JSON header directly into the claim.
     pub(super) fn header(&mut self, value: &impl serde::Serialize) -> Result<()> {
+        // Most headers fit before the wrap. Let serde write to a shrinking
+        // slice directly, then fill the length prefix. A header crossing the
+        // wrap or the limit of current credit uses the full claim writer.
         let at = self.used;
+        let size = self.stream.region.capacity as usize;
+        let start = (self.stream.written as usize + at + 4) & (size - 1);
+        let room = self.capacity.saturating_sub(at + 4).min(size - start);
+        if room >= 128 {
+            let data = self.stream.region.data(self.stream.outgoing);
+            // SAFETY: the claim exclusively owns this contiguous unpublished
+            // interval until commit. No read or credit can expose the interval
+            // to a peer that keeps to the protocol, as Seedbox's own does.
+            let mut slice = unsafe { std::slice::from_raw_parts_mut(data.add(start), room) };
+            match serde_json::to_writer(&mut slice, value) {
+                Ok(()) => {
+                    let length = room - slice.len();
+                    if length > protocol::MAX_MESSAGE {
+                        return Err("PV protocol message too large".into());
+                    }
+                    self.copy(at, &(length as u32).to_le_bytes());
+                    self.used += 4 + length;
+                    return Ok(());
+                }
+                Err(error) if error.io_error_kind() == Some(io::ErrorKind::WriteZero) => {}
+                Err(error) => return Err(format!("PV encode: {error}")),
+            }
+        }
         self.write_all(&[0; 4]).map_err(|e| e.to_string())?;
         serde_json::to_writer(&mut *self, value).map_err(|e| format!("PV encode: {e}"))?;
         let len = self.used - at - 4;
@@ -624,15 +746,19 @@ impl<R: Read, W: Write> Claim<'_, R, W> {
         Ok(())
     }
     pub(super) fn commit(self) -> io::Result<()> {
+        self.seal(0).publish()
+    }
+    /// Set the complete message boundary before publishing any of its prefix.
+    fn seal(self, following: usize) -> &'a mut Stream<R, W> {
         let stream = self.stream;
-        let end = stream.written + self.used as u64;
+        let end = stream.written + self.used as u64 + following as u64;
         stream
             .region
             .word(stream.outgoing.word(MESSAGE_END))
             .store(end, SeqCst);
         stream.written += self.used.min(self.capacity) as u64;
         stream.tail = io::Cursor::new(self.spill);
-        stream.publish()
+        stream
     }
 }
 impl<R: Read, W: Write> Write for Claim<'_, R, W> {
@@ -648,3 +774,6 @@ impl<R: Read, W: Write> Write for Claim<'_, R, W> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "transport-bench")]
+pub(super) mod bench;

@@ -47,6 +47,8 @@ mod policy;
 mod protocol;
 mod retained;
 mod shm;
+#[cfg(feature = "transport-bench")]
+pub use shm::bench::run as benchmark_transport;
 mod wire;
 mod worker;
 use client::Occupant;

@@ -3,7 +3,7 @@ use super::fixture::{auto_key, definition};
 use super::*;
 use crate::definition::{MacAddress, NetworkInterface};
 use seedbox_machine::host::doorbell::{Coordinator, Doorbell, Ringer};
-use seedbox_machine::host::idle::SpinThenSleep;
+use seedbox_machine::host::idle::{Idle, SpinThenSleep};
 use seedbox_machine::machine::SplitRun;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::Ordering::SeqCst;
@@ -1572,19 +1572,25 @@ type Observed = (
 /// machine split (its runs in flight on the Driver's thread) or lent to a
 /// worker as `split` says; returns the barriers and the sorted log.
 fn echo_world(workers: usize, split: [bool; 3]) -> Observed {
-    echo_world_waiting(workers, split, SpinThenSleep::SPIN, false)
+    echo_world_waiting(workers, split, Idle::default(), SpinThenSleep::SPIN, false)
 }
 
 /// As [`echo_world`], each split machine coming back on another thread and
-/// ringing the doorbell if `bell`, and the Driver spinning for `spin` before
-/// each sleep.
-fn echo_world_waiting(workers: usize, split: [bool; 3], spin: Duration, bell: bool) -> Observed {
+/// ringing the doorbell if `bell`, and the Driver waiting as `idle` says for
+/// up to `spin` before each sleep.
+fn echo_world_waiting(
+    workers: usize,
+    split: [bool; 3],
+    idle: Idle,
+    spin: Duration,
+    bell: bool,
+) -> Observed {
     let back = |spec: Spec, splits| match (splits, bell) {
         (false, _) => spec,
         (true, false) => spec.split(),
         (true, true) => spec.bell(),
     };
-    echo_world_as(workers, back, split, spin, None).0
+    echo_world_as(workers, back, split, idle, spin, None).0
 }
 
 /// The echo world with each machine's spec passed through `split` with its
@@ -1594,6 +1600,7 @@ fn echo_world_as(
     workers: usize,
     split: impl Fn(Spec, bool) -> Spec,
     split_machines: [bool; 3],
+    idle: Idle,
     spin: Duration,
     doorbell: Option<&'static Doorbell>,
 ) -> (Observed, usize) {
@@ -1613,7 +1620,7 @@ fn echo_world_as(
         .map(|(spec, splits)| split(spec, splits))
         .collect();
     let (mut driver, log) = world(0, MS, workers, config, specs, Vec::new()).unwrap();
-    driver.workers.set_idle(Box::new(SpinThenSleep::new(spin)));
+    driver.workers.set_idle(idle.with_budget(spin));
     if let Some(doorbell) = doorbell {
         driver.workers.set_doorbell(doorbell);
     }
@@ -1631,6 +1638,14 @@ fn echo_world_as(
         })
         .unwrap();
     ((seen, runs, received, evidence), log.finishes.len())
+}
+
+/// Each built-in strategy with the coordinator's budget and with none, which
+/// sleeps after one look.
+fn waits() -> impl Iterator<Item = (Idle, Duration)> {
+    Idle::ALL
+        .into_iter()
+        .flat_map(|idle| [SpinThenSleep::SPIN, Duration::ZERO].map(|spin| (idle, spin)))
 }
 
 #[test]
@@ -1672,29 +1687,29 @@ fn split_machines_run_their_lanes_as_lent_machines_do() {
 }
 
 #[test]
-fn split_lanes_reach_the_same_results_spinning_or_sleeping_at_once() {
+fn split_lanes_reach_the_same_results_however_the_driver_waits() {
     let lent = echo_world(1, [false; 3]);
-    for spin in [SpinThenSleep::SPIN, Duration::ZERO] {
+    for (idle, spin) in waits() {
         for workers in [1, 3] {
             assert_eq!(
-                echo_world_waiting(workers, [true; 3], spin, false),
+                echo_world_waiting(workers, [true; 3], idle, spin, false),
                 lent,
-                "{spin:?}, {workers} workers"
+                "{idle:?} for {spin:?}, {workers} workers"
             );
         }
     }
 }
 
 #[test]
-fn doorbell_lanes_reach_the_same_results_spinning_or_sleeping_at_once() {
+fn doorbell_lanes_reach_the_same_results_however_the_driver_waits() {
     let lent = echo_world(1, [false; 3]);
-    for spin in [SpinThenSleep::SPIN, Duration::ZERO] {
+    for (idle, spin) in waits() {
         for workers in [1, 3] {
             for split in [[true; 3], [true, false, true]] {
                 assert_eq!(
-                    echo_world_waiting(workers, split, spin, true),
+                    echo_world_waiting(workers, split, idle, spin, true),
                     lent,
-                    "{spin:?}, {workers} workers, {split:?}"
+                    "{idle:?} for {spin:?}, {workers} workers, {split:?}"
                 );
             }
         }
@@ -1719,15 +1734,16 @@ fn contained<T: Send + 'static>(reason: &str, scenario: impl FnOnce() -> T + Sen
 #[test]
 fn runs_that_stop_only_for_a_sleeping_driver_wake_it_with_their_tickets() {
     let lent = echo_world(1, [false; 3]);
-    for spin in [SpinThenSleep::SPIN, Duration::ZERO] {
+    for (idle, spin) in waits() {
         let (observed, finishes, tickets) = contained("every parked run is woken", move || {
             // Its own doorbell: Drivers of other tests cannot hold it.
             let doorbell = Doorbell::detached().unwrap();
             let back = |spec: Spec, _| spec.parked().on(doorbell);
-            let (observed, finishes) = echo_world_as(1, back, [true; 3], spin, Some(doorbell));
+            let (observed, finishes) =
+                echo_world_as(1, back, [true; 3], idle, spin, Some(doorbell));
             (observed, finishes, doorbell.tickets_read())
         });
-        assert_eq!(observed, lent, "{spin:?}");
+        assert_eq!(observed, lent, "{idle:?} for {spin:?}");
         // No run stops before the Driver sleeps in a park that names it. Only
         // that park's ticket ends it, and one park names at most every
         // machine's run.
@@ -1742,7 +1758,7 @@ fn runs_that_stop_only_for_a_sleeping_driver_wake_it_with_their_tickets() {
 #[test]
 fn a_driver_without_the_doorbell_sleeps_in_its_oldest_run_to_the_same_results() {
     let lent = echo_world(1, [false; 3]);
-    for spin in [SpinThenSleep::SPIN, Duration::ZERO] {
+    for (idle, spin) in waits() {
         for split in [[true; 3], [true, false, true]] {
             let (observed, tickets) = contained("every run is finished", move || {
                 let doorbell = Doorbell::detached().unwrap();
@@ -1752,10 +1768,10 @@ fn a_driver_without_the_doorbell_sleeps_in_its_oldest_run_to_the_same_results() 
                     true => spec.bell().on(doorbell),
                     false => spec,
                 };
-                let (observed, _) = echo_world_as(1, back, split, spin, Some(doorbell));
+                let (observed, _) = echo_world_as(1, back, split, idle, spin, Some(doorbell));
                 (observed, doorbell.tickets_read())
             });
-            assert_eq!(observed, lent, "{spin:?}, {split:?}");
+            assert_eq!(observed, lent, "{idle:?} for {spin:?}, {split:?}");
             assert_eq!(tickets, 0, "the Driver never parked on the doorbell");
         }
     }
@@ -1763,7 +1779,7 @@ fn a_driver_without_the_doorbell_sleeps_in_its_oldest_run_to_the_same_results() 
 
 #[test]
 fn a_round_without_the_doorbell_scans_every_run_then_sleeps_in_its_oldest() {
-    for spin in [SpinThenSleep::SPIN, Duration::ZERO] {
+    for (idle, spin) in waits() {
         let waits = contained("the Driver sleeps in each held run", move || {
             let doorbell = Doorbell::detached().unwrap();
             // Another Driver holds the doorbell when the round decides how to
@@ -1773,7 +1789,7 @@ fn a_round_without_the_doorbell_scans_every_run_then_sleeps_in_its_oldest() {
             let config = NetworkConfig::new(Duration::from_millis(1), Duration::ZERO, 0).unwrap();
             let held = || spec(None).busy().held(&release);
             let (mut driver, log) = simple(MS, config, vec![held(), held()]);
-            driver.workers.set_idle(Box::new(SpinThenSleep::new(spin)));
+            driver.workers.set_idle(idle.with_budget(spin));
             driver.workers.set_doorbell(doorbell);
             driver.step(at(MS)).unwrap();
             assert!(release.lock().unwrap().is_none(), "the doorbell was let go");
@@ -1801,6 +1817,9 @@ fn a_round_without_the_doorbell_scans_every_run_then_sleeps_in_its_oldest() {
         // The doorbell was free for the second run's wait, but the round had
         // decided: it parks on no doorbell it did not hold at its first scan.
         let watched = waits.iter().any(|wait| matches!(wait, Waited::Watched(_)));
-        assert!(!watched, "{spin:?}: the round parked after its first scan");
+        assert!(
+            !watched,
+            "{idle:?} for {spin:?}: the round parked after its first scan"
+        );
     }
 }

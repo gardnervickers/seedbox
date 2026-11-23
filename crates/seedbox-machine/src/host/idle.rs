@@ -16,6 +16,8 @@ use std::time::Duration;
 pub enum Action {
     /// Check again after a short busy loop.
     Spin,
+    /// Wait for a write to the watched cache line, up to this remaining budget.
+    Monitor(Duration),
     /// Sleep until the peer's guaranteed wakeup.
     Sleep,
 }
@@ -40,6 +42,62 @@ pub trait IdleStrategy: Send {
     fn idle(&mut self, attempt: u64, waited: Duration) -> Action;
     /// The wait ended.
     fn reset(&mut self, outcome: Outcome);
+}
+
+/// The built-in strategies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Idle {
+    /// [`SpinThenSleep`].
+    SpinThenSleep,
+    /// [`MonitorThenSleep`]: wait for a write to the watched cache line, then
+    /// park.
+    Monitor,
+}
+impl Default for Idle {
+    /// The monitored wait where this host has the one that was measured,
+    /// else the bounded spin.
+    fn default() -> Self {
+        if spin::monitor_by_default() {
+            Self::Monitor
+        } else {
+            Self::SpinThenSleep
+        }
+    }
+}
+impl Idle {
+    pub const ALL: [Self; 2] = [Self::SpinThenSleep, Self::Monitor];
+    /// With the coordinator's budget.
+    pub fn build(self) -> Box<dyn IdleStrategy> {
+        self.with_budget(SpinThenSleep::SPIN)
+    }
+    /// Wait up to `ceiling` before sleeping. A worker waits across a whole
+    /// round and the coordinator only for the first reply, so each endpoint
+    /// has its own budget.
+    pub fn with_budget(self, ceiling: Duration) -> Box<dyn IdleStrategy> {
+        match self {
+            Self::SpinThenSleep => Box::new(SpinThenSleep::new(ceiling)),
+            Self::Monitor => Box::new(MonitorThenSleep(SpinThenSleep::new(ceiling))),
+        }
+    }
+}
+
+mod spin;
+pub use spin::wait_on_word;
+
+/// As [`SpinThenSleep`], but after a wait's first spin it waits on the
+/// watched word for the rest of its budget instead of polling it. A host
+/// with no monitored wait gets a single pause hint in its place.
+pub struct MonitorThenSleep(SpinThenSleep);
+impl IdleStrategy for MonitorThenSleep {
+    fn idle(&mut self, attempt: u64, waited: Duration) -> Action {
+        match self.0.idle(attempt, waited) {
+            Action::Spin if attempt > 0 => Action::Monitor(self.0.spin.saturating_sub(waited)),
+            other => other,
+        }
+    }
+    fn reset(&mut self, outcome: Outcome) {
+        self.0.reset(outcome);
+    }
 }
 
 /// Spin up to `spin`, then sleep. A spin pays only while the peer runs on
@@ -135,6 +193,15 @@ mod tests {
         // Progress restores spinning.
         strategy.reset(Outcome::Progress);
         assert_eq!(strategy.idle(0, Duration::ZERO), Action::Spin);
+    }
+
+    #[test]
+    fn a_monitored_wait_spins_once_then_monitors_for_its_remaining_budget() {
+        let limit = Duration::from_micros(200);
+        let mut monitor = Idle::Monitor.with_budget(limit);
+        assert_eq!(monitor.idle(0, Duration::ZERO), Action::Spin);
+        assert_eq!(monitor.idle(1, limit / 2), Action::Monitor(limit / 2));
+        assert_eq!(monitor.idle(2, limit), Action::Sleep);
     }
 
     #[test]
