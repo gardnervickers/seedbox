@@ -1,13 +1,9 @@
-//! Public automatic-service ordering with timed outputs and actual inbox ACKs.
-use seedbox_driver::driver::{
-    Action, Driver, EventKind, MachineId, MachineResponse, StepOutcome, Target,
-};
+//! Public guest control calls with timed outputs and actual inbox ACKs.
+use seedbox_driver::driver::{Action, Driver, MachineId, StepOutcome, Target};
 use seedbox_driver::test_support::auto_key;
 use seedbox_machine::{
     machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
-    pv::{
-        ApplicationCommand, CommandResult, Output, Request, Response, SimulationControlId, Stream,
-    },
+    pv::{ApplicationCommand, CommandResult, Output, Request, Response, SimulationControlId},
     rng::RngStream,
 };
 use std::{collections::VecDeque, num::NonZeroU32, time::Duration};
@@ -28,10 +24,6 @@ fn call(time: u64, id: u32, operation: serde_json::Value) -> Output {
             payload: serde_json::to_vec(&payload).unwrap(),
         },
     }
-}
-fn arm() -> serde_json::Value {
-    serde_json::json!({"op":"arm_trigger", "source":{"machine":"source"}, "marker":b"needle", "match_timeout_ns":20,
-        "fault":{"action":"stop", "target":{"machine":"peer"}}})
 }
 #[derive(Clone)]
 struct Fixture {
@@ -163,12 +155,10 @@ impl RngStream for Rng {
 struct World {
     driver: Driver<Fixture>,
     caller: MachineId,
-    source: MachineId,
     peer: MachineId,
-    trace: Vec<MachineResponse>,
 }
 impl World {
-    fn new(workers: usize, caller: Vec<Output>, source: Vec<Output>) -> Self {
+    fn new(workers: usize, caller: Vec<Output>) -> Self {
         let mut driver = Driver::new(
             at(0),
             Duration::from_nanos(10),
@@ -176,7 +166,7 @@ impl World {
             Rng,
             || Ok(()),
             seedbox_driver::test_support::definition("oracle"),
-            ["caller", "source", "peer"]
+            ["caller", "peer"]
                 .map(seedbox_driver::test_support::definition)
                 .into(),
             Vec::new(),
@@ -185,7 +175,6 @@ impl World {
                 Ok(Fixture {
                     events: match definition.name.as_str() {
                         "caller" => caller.clone().into(),
-                        "source" => source.clone().into(),
                         _ => VecDeque::new(),
                     },
                     ready: false,
@@ -210,24 +199,12 @@ impl World {
         Self {
             driver,
             caller: ids[1],
-            source: ids[2],
-            peer: ids[3],
-            trace: Vec::new(),
+            peer: ids[2],
         }
     }
     fn step(&mut self, upto: u64) -> StepOutcome {
         let outcome = self.driver.step(at(upto)).unwrap();
-        self.trace.extend(
-            self.driver
-                .drain_observations()
-                .events
-                .into_iter()
-                .filter_map(|event| match event.kind {
-                    EventKind::Output(output) => Some(output),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-        );
+        self.driver.drain_observations();
         outcome
     }
     fn now(&mut self) -> u64 {
@@ -272,151 +249,6 @@ impl World {
 }
 
 #[test]
-fn split_union_marker_admits_stop_at_discovery_commit_and_acknowledges_once() {
-    let mut reference = None;
-    for workers in [1, 2] {
-        let mut request = arm();
-        request["match_timeout_ns"] = 100.into();
-        let mut world = World::new(
-            workers,
-            vec![call(1, 1, request)],
-            vec![
-                Output {
-                    at: at(12),
-                    payload: Response::BootConsole {
-                        bytes: b"ne".to_vec(),
-                    },
-                },
-                Output {
-                    at: at(22),
-                    payload: Response::ApplicationOutput {
-                        stream: Stream::Stdout,
-                        bytes: b"ed".to_vec(),
-                    },
-                },
-                Output {
-                    at: at(23),
-                    payload: Response::ApplicationOutput {
-                        stream: Stream::Stderr,
-                        bytes: b"le".to_vec(),
-                    },
-                },
-                Output {
-                    at: at(42),
-                    payload: Response::BootConsole {
-                        bytes: b"needle".to_vec(),
-                    },
-                },
-            ],
-        );
-        world.advance(10);
-        let (received, reply) = world.reply(1);
-        assert_eq!(received, 10);
-        assert_eq!(reply["ok"], true);
-        assert_eq!(reply["result"]["trigger_id"], 1);
-        world.advance(20);
-        assert!(world.peer().commands.is_empty(), "partial marker fired");
-        world.advance(30);
-        let peer = world.peer();
-        assert_eq!(peer.commands.len(), 1);
-        let command = peer.commands[0].0;
-        assert_eq!(
-            peer.commands[0].1, 30,
-            "must not backdate admission to byte time 23"
-        );
-        assert!(!peer.stopped);
-        assert!(peer.acknowledgments.is_empty());
-        // The ACK is due at 33: the peer publishes it in its run from there.
-        world.advance(33);
-        assert!(!world.peer().stopped);
-        world.advance(40);
-        let peer = world.peer();
-        assert!(peer.stopped);
-        assert_eq!(peer.acknowledgments, [(command, 33)]);
-        assert!(world.trace.iter().any(|event| event.machine == world.peer && event.at == at(33)
-            && matches!(event.payload, Response::CommandAcknowledged { id, result: CommandResult::Completed } if id == command)));
-        // The last byte is the only remaining work: a fired trigger must not
-        // keep the driver runnable toward its obsolete timeout at 110.
-        assert_eq!(world.step(50), StepOutcome::Blocked { at: at(42) });
-        assert_eq!(
-            world.peer().commands,
-            [(command, 30)],
-            "repeated marker fired again"
-        );
-        assert_eq!(world.peer().acknowledgments, [(command, 33)]);
-        assert_eq!(world.step(200), StepOutcome::Blocked { at: at(42) });
-        assert!(world.trace.iter().any(|event| event.machine == world.source
-            && event.at == at(12)
-            && matches!(&event.payload, Response::BootConsole { bytes } if bytes == b"ne")));
-        if let Some(reference) = &reference {
-            assert_eq!(&world.trace, reference);
-        } else {
-            reference = Some(world.trace);
-        }
-    }
-}
-
-#[test]
-fn deadline_bytes_do_not_match_and_exact_deadline_cancel_precedes_expiry() {
-    for cancel in [false, true] {
-        let late_id = if cancel { 3 } else { 2 };
-        let mut calls = vec![call(1, 1, arm())];
-        if cancel {
-            calls.push(call(
-                30,
-                2,
-                serde_json::json!({"op":"cancel_trigger", "trigger_id":1}),
-            ));
-        }
-        calls.push(call(
-            40,
-            late_id,
-            serde_json::json!({"op":"cancel_trigger", "trigger_id":1}),
-        ));
-        let mut world = World::new(
-            2,
-            calls,
-            vec![
-                Output {
-                    at: at(12),
-                    payload: Response::BootConsole {
-                        bytes: b"nee".to_vec(),
-                    },
-                },
-                Output {
-                    at: at(30),
-                    payload: Response::ApplicationOutput {
-                        stream: Stream::Stdout,
-                        bytes: b"dle".to_vec(),
-                    },
-                },
-            ],
-        );
-        world.advance(20);
-        assert!(world.peer().commands.is_empty());
-        world.advance(30);
-        assert!(
-            world.peer().commands.is_empty(),
-            "bytes at the exact deadline cannot match"
-        );
-        if cancel {
-            let (received, reply) = world.reply(2);
-            assert_eq!(received, 30);
-            assert_eq!(reply["ok"], true, "{reply}");
-            assert_eq!(reply["admitted_at_ns"], 30);
-        }
-        world.advance(40);
-        let (_, reply) = world.reply(late_id);
-        assert_eq!(reply["ok"], false);
-        assert_eq!(reply["error"]["code"], "invalid_state");
-        assert!(world.peer().commands.is_empty());
-        for _ in 0..3 {
-            assert_eq!(world.step(100), StepOutcome::Blocked { at: at(40) });
-        }
-    }
-}
-
-#[test]
 fn positive_sleep_wakes_at_admission_plus_duration_even_if_caller_exits() {
     for crash in [false, true] {
         let mut world = World::new(
@@ -426,7 +258,6 @@ fn positive_sleep_wakes_at_admission_plus_duration_even_if_caller_exits() {
                 1,
                 serde_json::json!({"op":"sleep", "duration_ns":7}),
             )],
-            vec![],
         );
         world.advance(10);
         assert!(world
@@ -489,7 +320,6 @@ fn accepted_peer_effect_finishes_after_its_caller_exits() {
             1,
             serde_json::json!({"op":"stop", "target":{"machine":"peer"}}),
         )],
-        vec![],
     );
     world.advance(10);
     let peer = world.peer();
@@ -523,28 +353,4 @@ fn accepted_peer_effect_finishes_after_its_caller_exits() {
         assert_eq!(world.step(100), StepOutcome::Blocked { at: at(20) });
     }
     assert_eq!(world.peer().commands, [(command, 10)]);
-}
-
-#[test]
-fn cancel_before_deadline_removes_the_only_future_wakeup() {
-    let mut world = World::new(
-        2,
-        vec![
-            call(1, 1, arm()),
-            call(
-                20,
-                2,
-                serde_json::json!({"op":"cancel_trigger", "trigger_id":1}),
-            ),
-        ],
-        vec![],
-    );
-    world.advance(20);
-    let (received, reply) = world.reply(2);
-    assert_eq!(received, 20);
-    assert_eq!(reply["ok"], true);
-    assert!(world.peer().commands.is_empty());
-    for _ in 0..3 {
-        assert_eq!(world.step(100), StepOutcome::Blocked { at: at(20) });
-    }
 }

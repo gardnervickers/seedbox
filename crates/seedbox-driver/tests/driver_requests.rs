@@ -319,8 +319,7 @@ fn process_commands_wait_for_readiness_and_unavailable_targets_reject_before_adm
         .unwrap();
     assert_eq!(settled_at, at(10));
     // A physically exited, uncrashed target fails ordinary-control preflight:
-    // rejected with its key and no fault ID (a trigger would admit and settle
-    // Unavailable instead; see the service policy tests).
+    // rejected with its key and no fault ID.
     let (mut driver, id) = make_with(Fixture {
         exit: Some(ExitReason::Shutdown),
         ..Fixture::default()

@@ -1,5 +1,5 @@
-//! Guest simulation-control call admission: queries, sleeps, trigger
-//! arming and fault requests.
+//! Guest simulation-control call admission: queries, sleeps and fault
+//! requests.
 use super::*;
 
 impl Service {
@@ -68,29 +68,24 @@ impl Service {
         let result = match operation {
             Err(e) => Err(e),
             Ok(Operation::Now {}) => Ok(json!({"now_ns":now})),
-            Ok(Operation::Inspect {}) => adapter
-                .inspect(&self.active_handles()?, self.triggers.records())
-                .map(|mut inspected| {
-                    // Suspended machines, each with its live hit.
-                    inspected["breaks"] = self
-                        .breaks
-                        .hits()
-                        .filter(|(_, hit)| hit.suspends())
-                        .map(|(id, hit)| breaks::Breaks::json(id, hit))
-                        .collect();
-                    inspected
-                }),
+            Ok(Operation::Inspect {}) => {
+                adapter
+                    .inspect(&self.active_handles()?)
+                    .map(|mut inspected| {
+                        // Suspended machines, each with its live hit.
+                        inspected["breaks"] = self
+                            .breaks
+                            .hits()
+                            .filter(|(_, hit)| hit.suspends())
+                            .map(|(id, hit)| breaks::Breaks::json(id, hit))
+                            .collect();
+                        inspected
+                    })
+            }
             Ok(Operation::Connections { from, to, after }) => {
                 Self::connections(adapter, &from, &to, after)
             }
             Ok(Operation::Sleep { duration_ns }) => return self.sleep(call, now, duration_ns),
-            Ok(Operation::ArmTrigger {
-                source,
-                marker,
-                match_timeout_ns,
-                fault,
-            }) => self.arm_trigger(adapter, &source, marker, match_timeout_ns, fault, now),
-            Ok(Operation::CancelTrigger { trigger_id }) => self.cancel_trigger(trigger_id, now),
             Ok(Operation::DeclareBreaks { names }) => return self.declare_breaks(call, now, names),
             Ok(Operation::WaitBreak { timeout_ns }) => {
                 return self.wait_break(call, now, timeout_ns)
@@ -136,7 +131,6 @@ impl Service {
                 Err(e) => Err(e),
                 Ok(command) => match self.prepare(
                     adapter,
-                    AdmissionMode::Control,
                     Requester::Call {
                         source: call.source.clone(),
                         id: call.id,
@@ -198,56 +192,6 @@ impl Service {
             token,
             at: now + duration_ns,
         }])
-    }
-    /// Resolve a trigger's source, then its fault targets, and arm it.
-    fn arm_trigger(
-        &mut self,
-        adapter: &impl Adapter,
-        source: &Target,
-        marker: Vec<u8>,
-        match_timeout_ns: u64,
-        fault: TriggerFault,
-        now: u64,
-    ) -> Result<Value, OperationError> {
-        let source = adapter.resolve(source)?;
-        let (action, target) = match fault {
-            TriggerFault::Stop { target } => {
-                let target = adapter.resolve(&target)?;
-                (TriggerAction::Stop(target.name.clone()), Some(target.name))
-            }
-            TriggerFault::Partition { left, right } => {
-                // The same membership rules as an untriggered partition.
-                let (left, right) = Self::partition_sides(adapter, &left, &right)?;
-                (TriggerAction::Partition { left, right }, None)
-            }
-        };
-        let id = self
-            .triggers
-            .arm(source.name.clone(), marker, now, match_timeout_ns, action)
-            .map_err(|e| error(ErrorCode::InvalidState, e))?;
-        let deadline = self.triggers.records()[id as usize - 1].match_deadline;
-        self.notices.push(Notice::TriggerArmed {
-            trigger: id,
-            source: source.name,
-            target,
-            at: now,
-            deadline,
-        });
-        Ok(json!({"trigger_id":id}))
-    }
-    fn cancel_trigger(&mut self, trigger_id: u32, now: u64) -> Result<Value, OperationError> {
-        self.triggers
-            .cancel(trigger_id, now)
-            .map(|_| {
-                self.notices.push(Notice::TriggerResolved {
-                    trigger: trigger_id,
-                    at: now,
-                    status: crate::oracle::triggers::Status::Cancelled,
-                    fault: None,
-                });
-                json!({})
-            })
-            .map_err(|e| error(ErrorCode::InvalidState, e))
     }
     /// A due sleep or `wait_break` timeout wake.
     pub(crate) fn wake(&mut self, token: u32, at: u64) -> Result<Vec<Plan>, Failure> {

@@ -109,11 +109,7 @@ impl Adapter for Owner {
             .map(|&(fault, action, _)| CommandOwner::Service { fault, action })
             .ok_or_else(|| "unissued command".into())
     }
-    fn inspect(
-        &self,
-        _: &[String],
-        _: &[super::super::triggers::Record],
-    ) -> Result<Value, OperationError> {
+    fn inspect(&self, _: &[String]) -> Result<Value, OperationError> {
         Err(OperationError::unsupported())
     }
 }
@@ -199,7 +195,6 @@ fn now_sleep_use_commit_and_survive_source_loss() {
         panic!()
     };
     assert_eq!(at, 30);
-    s.source_reset("caller").unwrap();
     let p = s.wake(token, 30).unwrap();
     assert_eq!(reply(&p)["result"], json!({}));
 }
@@ -336,27 +331,6 @@ fn failures_do_not_fabricate_success_or_continue() {
         .is_err());
 }
 #[test]
-fn batch_trigger_arm_order_and_no_retroactive_effect() {
-    let (mut s, mut o) = (Service::default(), Owner::default());
-    for n in 1..=2 {
-        let p = call(
-            &mut s,
-            &mut o,
-            n,
-            1,
-            json!({"op":"arm_trigger","source":{"machine":"app"},"marker":[n],"match_timeout_ns":100,"fault":{"action":"stop","target":{"machine":"app"}}}),
-        );
-        assert_eq!(reply(&p)["result"]["trigger_id"], n);
-    }
-    s.committed_bytes("app", 3, &[2], 10).unwrap();
-    s.committed_bytes("app", 4, &[1], 10).unwrap();
-    assert!(s.trigger_effects(&mut o, 9).unwrap().is_empty());
-    let p = s.trigger_effects(&mut o, 10).unwrap();
-    assert!(matches!(p[0], Plan::Effect { at: 10, .. }));
-    assert_eq!(s.triggers.records()[0].fault_id, Some(fault(&p)));
-    assert!(s.trigger_effects(&mut o, 10).unwrap().is_empty());
-}
-#[test]
 fn unsupported_projection_and_invalid_target_have_no_effect() {
     let (mut s, mut o) = (Service::default(), Owner::default());
     assert_eq!(
@@ -489,7 +463,6 @@ fn service_copy_retains_owned_pending_work_without_machine_snapshot_claim() {
         panic!()
     };
     let mut copy = s.clone();
-    s.source_reset("caller").unwrap();
     let first = s
         .acknowledged(&o, "app", 0, command, CommandResult::Completed, 11, 11)
         .unwrap();
@@ -676,17 +649,14 @@ fn sleep_wakes_do_not_consume_fault_namespace() {
         1,
         json!({"op":"sleep","duration_ns":100}),
     );
-    call(
+    let p = call(
         &mut s,
         &mut o,
         2,
         1,
-        json!({"op":"arm_trigger","source":{"machine":"app"},"marker":[1],"match_timeout_ns":100,"fault":{"action":"stop","target":{"machine":"app"}}}),
+        json!({"op":"stop","target":{"machine":"app"}}),
     );
-    s.committed_bytes("app", 3, &[1], 10).unwrap();
-    let p = s.trigger_effects(&mut o, 10).unwrap();
     assert_eq!(fault(&p), 1);
-    assert_eq!(s.triggers.records()[0].fault_id, Some(1));
 }
 
 #[test]
@@ -775,40 +745,6 @@ fn physical_peer_exit_preflight_precedes_policy_and_preserves_crash_reboot_path(
 }
 
 #[test]
-fn trigger_admission_bypasses_control_only_physical_exit_preflight() {
-    let (mut s, mut o) = (Service::default(), Owner::default());
-    call(
-        &mut s,
-        &mut o,
-        1,
-        1,
-        json!({"op":"arm_trigger","source":{"machine":"app"},"marker":[1],"match_timeout_ns":100,"fault":{"action":"stop","target":{"machine":"app"}}}),
-    );
-    // Earlier committed bytes can trigger against a peer which has since exited.
-    o.facts.physically_ended = true;
-    let p = call(
-        &mut s,
-        &mut o,
-        2,
-        10,
-        json!({"op":"stop","target":{"machine":"app"}}),
-    );
-    assert_eq!(reply(&p)["error"]["code"], "target_unavailable");
-    assert_eq!(s.last, 0);
-    s.committed_bytes("app", 8, &[1], 10).unwrap();
-    let observations = s.trigger_effects(&mut o, 10).unwrap();
-    assert_eq!(
-        settlement(&observations).status,
-        SettlementStatus::Unavailable
-    );
-    let record = &s.triggers.records()[0];
-    assert_eq!(record.status, super::super::triggers::Status::Fired);
-    assert_eq!(record.fault_id, Some(1));
-    assert!(s.pending.is_empty());
-    assert_eq!(o.next, 40);
-}
-
-#[test]
 fn process_settlement_preserves_correlation_and_only_applied_proves_mutation() {
     let (mut s, mut o) = (Service::default(), Owner::default());
     let p = call(
@@ -848,33 +784,6 @@ fn process_settlement_preserves_correlation_and_only_applied_proves_mutation() {
     assert_eq!(outcome.committed_at, 20);
     assert_eq!(outcome.admitted_at, 10);
     assert_eq!(reply(&p)["effect_at_ns"], 12);
-}
-#[test]
-fn callerless_trigger_unavailable_is_owned_observation_not_fake_reply() {
-    let (mut s, mut o) = (Service::default(), Owner::default());
-    call(
-        &mut s,
-        &mut o,
-        1,
-        1,
-        json!({"op":"arm_trigger","source":{"machine":"app"},"marker":[1],"match_timeout_ns":100,"fault":{"action":"stop","target":{"machine":"app"}}}),
-    );
-    o.facts.physically_ended = true;
-    s.committed_bytes("app", 8, &[1], 10).unwrap();
-    let p = s.trigger_effects(&mut o, 10).unwrap();
-    assert_eq!(p.len(), 1);
-    let outcome = settlement(&p);
-    assert_eq!(outcome.fault, 1);
-    assert_eq!(outcome.status, SettlementStatus::Unavailable);
-    assert_eq!(outcome.outcome_at, Some(10));
-    assert_eq!(outcome.committed_at, 10);
-    assert_eq!(outcome.command, None);
-    assert_eq!(
-        s.triggers.records()[0].status,
-        super::super::triggers::Status::Fired
-    );
-    assert!(s.pending.is_empty());
-    assert!(s.trigger_effects(&mut o, 10).unwrap().is_empty());
 }
 #[test]
 fn malformed_ack_failure_retains_known_fault_without_success_reply() {
@@ -1019,12 +928,8 @@ fn dispatch_allocation_failure_does_not_lose_admitted_fault_evidence() {
         fn command_owner(&self, t: &str, b: u64, id: NonZeroU32) -> Result<CommandOwner, String> {
             self.0.command_owner(t, b, id)
         }
-        fn inspect(
-            &self,
-            h: &[String],
-            t: &[super::super::triggers::Record],
-        ) -> Result<Value, OperationError> {
-            self.0.inspect(h, t)
+        fn inspect(&self, h: &[String]) -> Result<Value, OperationError> {
+            self.0.inspect(h)
         }
     }
     let (mut s, mut o) = (Service::default(), Exhausted(Owner::default()));
@@ -1093,69 +998,6 @@ fn swapped_owner_fault_does_not_retarget_failure_settlement() {
     assert!(!s.pending.contains_key(&fa));
     assert_eq!(s.pending[&fb].command, Some(cb));
     assert!(s.poisoned);
-}
-
-#[test]
-fn fatal_later_trigger_preserves_earlier_owned_settlement_in_arm_order() {
-    struct Targets;
-    impl Adapter for Targets {
-        fn resolve(&self, t: &Target) -> Result<Facts, OperationError> {
-            let (Target::Machine(name) | Target::Service(name) | Target::Key(name)) = t;
-            if !["source", "gone", "live"].contains(&name.as_str()) {
-                return Err(OperationError::invalid("unknown target"));
-            }
-            let mut facts = Owner::default().facts;
-            facts.name = name.clone();
-            facts.physically_ended = name == "gone";
-            Ok(facts)
-        }
-        fn command_id(
-            &mut self,
-            _: &str,
-            _: u64,
-            _: u32,
-            _: CommandKind,
-        ) -> Result<NonZeroU32, String> {
-            Err("shared command IDs exhausted".into())
-        }
-        fn command_owner(&self, _: &str, _: u64, _: NonZeroU32) -> Result<CommandOwner, String> {
-            Err("no accepted command".into())
-        }
-        fn inspect(
-            &self,
-            _: &[String],
-            _: &[super::super::triggers::Record],
-        ) -> Result<Value, OperationError> {
-            Err(OperationError::unsupported())
-        }
-    }
-    let (mut s, mut o) = (Service::default(), Targets);
-    for (n, target) in [(1, "gone"), (2, "live")] {
-        let payload=serde_json::to_vec(&json!({"version":1,"id":n,"op":"arm_trigger","source":{"machine":"source"},"marker":[n],"match_timeout_ns":100,"fault":{"action":"stop","target":{"machine":target}}})).unwrap();
-        s.admit(&mut o, "caller".into(), id(n), 1, 1, &payload)
-            .unwrap();
-    }
-    s.committed_bytes("source", 3, &[1, 2], 10).unwrap();
-    let failure = s.trigger_effects(&mut o, 10).unwrap_err();
-    assert_eq!(
-        failure
-            .settlements
-            .iter()
-            .map(|s| (s.fault, s.status))
-            .collect::<Vec<_>>(),
-        [
-            (1, SettlementStatus::Unavailable),
-            (2, SettlementStatus::Failed)
-        ]
-    );
-    assert_eq!(failure.settlements[0].scope.machine().unwrap().0, "gone");
-    assert_eq!(failure.settlements[1].scope.machine().unwrap().0, "live");
-    for record in s.triggers.records() {
-        assert_eq!(record.status, super::super::triggers::Status::Fired);
-        assert_eq!(record.fault_id, Some(record.id));
-    }
-    assert!(s.poisoned);
-    assert!(s.pending.is_empty());
 }
 
 #[test]
@@ -1296,8 +1138,7 @@ fn ordinary_control_preflight_does_not_depend_on_a_reply_destination() {
         effect: Effect::Process(ApplicationCommand::Stop),
     };
     // Reply correlation cannot choose policy. A host input has no RPC
-    // destination, yet ordinary control rejects it before fault allocation;
-    // bare trigger admission allocates that same fault and reports Unavailable.
+    // destination, yet ordinary control rejects it before fault allocation.
     let rejected = service
         .admit_input(&mut owner, "key".into(), command(), 10, 7)
         .unwrap();
@@ -1305,24 +1146,6 @@ fn ordinary_control_preflight_does_not_depend_on_a_reply_destination() {
     assert_eq!(service.last, 0);
     assert!(service.pending.is_empty());
     assert!(service.take_notices().is_empty());
-    let (fault, plans) = match service.prepare(
-        &mut owner,
-        AdmissionMode::Trigger,
-        Requester::Trigger(1),
-        None,
-        command(),
-        10,
-        PROCESS_EFFECT_TIMEOUT_NS,
-    ) {
-        Ok(result) => result,
-        Err(_) => panic!("bare trigger must admit an unavailable fault"),
-    };
-    assert_eq!(fault, 1);
-    assert_eq!(settlement(&plans).status, SettlementStatus::Unavailable);
-    assert_eq!(settlement(&plans).outcome_at, Some(10));
-    assert!(!plans.iter().any(|plan| matches!(plan, Plan::Reply { .. })));
-    assert!(service.pending.is_empty());
-    assert_eq!(owner.next, 40, "unavailable fault offers no app command");
 }
 
 #[test]
@@ -1875,44 +1698,4 @@ fn guest_partitions_validate_members_before_allocation_and_heal_their_links() {
     let p = s.applied(*fault, 4, 4).unwrap();
     assert_eq!(settlement(&p).action, FaultAction::Heal);
     assert_eq!(settlement(&p).scope, links(&["b", "c"], &["a"]));
-}
-#[test]
-fn triggered_partitions_use_the_same_membership_and_admission() {
-    let (mut s, mut o) = (Service::default(), Owner::default());
-    let p = call(
-        &mut s,
-        &mut o,
-        1,
-        1,
-        json!({"op":"arm_trigger","source":{"machine":"app"},"marker":[1],"match_timeout_ns":100,"fault":{"action":"partition","left":members(&["a"]),"right":members(&["bare"])}}),
-    );
-    assert_eq!(reply(&p)["error"]["code"], "invalid_request");
-    let p = call(
-        &mut s,
-        &mut o,
-        2,
-        1,
-        json!({"op":"arm_trigger","source":{"machine":"app"},"marker":[1],"match_timeout_ns":100,"fault":{"action":"partition","left":members(&["b"]),"right":members(&["a"])}}),
-    );
-    assert_eq!(reply(&p)["result"], json!({"trigger_id":1}));
-    // The watched source keeps its identity; a partition names no target.
-    assert!(s.take_notices().iter().any(|n| matches!(n,
-        Notice::TriggerArmed { source, target: None, .. } if source == "app")));
-    s.committed_bytes("app", 3, &[1], 10).unwrap();
-    let p = s.trigger_effects(&mut o, 10).unwrap();
-    let Plan::Effect {
-        scope,
-        effect: Effect::Partition,
-        handle,
-        ..
-    } = &p[0]
-    else {
-        panic!("triggered partition dispatches: {p:?}");
-    };
-    assert_eq!(
-        (scope, handle.as_deref()),
-        (&links(&["b"], &["a"]), Some("p1"))
-    );
-    assert!(s.take_notices().iter().any(|n| matches!(n,
-        Notice::Admitted(a) if a.requester == Requester::Trigger(1))));
 }
