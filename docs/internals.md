@@ -86,6 +86,28 @@ generated machine setup, epoch, progress budget and memory. Hits verify both ret
 objects; missing objects render again. Image resolution, runtime validation, boot
 memory checks and retention of the complete replay closure still run on every preparation.
 
+## PV round execution
+
+The Driver starts each runnable VM on its own request ring and sweeps the reply
+rings. A ready VM can take its next lane input while another VM is executing.
+The Driver stages each machine's outputs until the barrier, where occurrence
+time and machine identity determine their order. One producer owns each ring.
+It publishes a completed message with one commit, or streams an oversized
+message in pieces as the reader frees space.
+
+A VM increments a shared counter after publishing a reply or freeing room for
+a partial request. The coordinator samples the counter before scanning, arms
+the outstanding VMs for one sleep, then checks the counter again. The first
+armed VM to claim that sleep writes its ticket to a shared pipe. The coordinator
+also watches the individual worker pipes for EOF, including while a ticket is
+owed. One Driver at a time holds the doorbell. Another in the same process
+sleeps in its oldest run for that round, on that worker's own pipe. The default
+spin ceiling is 200 µs in the coordinator. macOS ARM64 with timed WFE uses a
+monitored wait and a 400 µs VM ceiling. Other hosts, including Macs without
+FEAT_WFxT, use bounded spinning and a 1 ms VM ceiling. Both park sooner after consecutive unproductive spins.
+[Round loop](../crates/seedbox-driver/src/driver/round.rs) ·
+[Wake protocol](../crates/seedbox-machine/src/host/doorbell.rs)
+
 ## Same-time controls
 
 Outputs of one instant are ordered by machine, then emission, whatever the rounds: a commit holds output stamped

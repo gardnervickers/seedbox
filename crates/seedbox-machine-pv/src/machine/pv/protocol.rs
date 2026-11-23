@@ -260,6 +260,13 @@ pub(super) fn send(out: &mut impl Write, value: &impl Serialize) -> Result<()> {
         .and_then(|_| out.flush())
         .map_err(|e| format!("PV protocol write: {e}"))
 }
+pub(super) fn header_length(length: [u8; 4]) -> Result<usize> {
+    let length = u32::from_le_bytes(length) as usize;
+    if length > MAX_MESSAGE {
+        return Err("PV protocol message too large".into());
+    }
+    Ok(length)
+}
 pub(super) fn receive<T: DeserializeOwned>(input: &mut impl Read) -> Result<Option<T>> {
     let mut length = [0; 4];
     match input.read(&mut length[..1]) {
@@ -270,10 +277,7 @@ pub(super) fn receive<T: DeserializeOwned>(input: &mut impl Read) -> Result<Opti
     input
         .read_exact(&mut length[1..])
         .map_err(|e| format!("PV protocol header: {e}"))?;
-    let length = u32::from_le_bytes(length) as usize;
-    if length > MAX_MESSAGE {
-        return Err("PV protocol message too large".into());
-    }
+    let length = header_length(length)?;
     let mut bytes = vec![0; length];
     input
         .read_exact(&mut bytes)
