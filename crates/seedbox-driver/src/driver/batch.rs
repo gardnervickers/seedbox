@@ -21,6 +21,88 @@ pub(super) struct RunResult<M: Machine> {
     stopped: Result<StopReason, Error<M::Error>>,
 }
 
+/// A split machine's run in flight on the Driver's thread: what
+/// [`Driver::run_job`] lends a worker job, held while the machine executes
+/// elsewhere (see [`Machine::split_run`]).
+pub(super) struct Flight<M: Machine> {
+    id: MachineId,
+    machine: M,
+    rng: SeededRng,
+    inbox: VecDeque<Input>,
+    outputs: Vec<crate::pv::Output>,
+    start: Timestamp,
+    bound: Timestamp,
+    execution: crate::execution::ExecutionConfig,
+}
+
+/// A split run, unless it finished as it started.
+pub(super) enum Started<M: Machine> {
+    Finished(RunResult<M>),
+    Flying(Flight<M>),
+}
+
+impl<M: Machine> Flight<M> {
+    /// Call the machine with this run's context, reporting a panic as an error.
+    fn call<T>(
+        &mut self,
+        worker: &mut M::Context,
+        call: impl FnOnce(&mut M, &mut RunContext<'_, M::Context>) -> Result<T, M::Error>,
+    ) -> Result<T, Error<M::Error>> {
+        let id = self.id;
+        catch_unwind(AssertUnwindSafe(|| {
+            call(
+                &mut self.machine,
+                &mut RunContext {
+                    worker,
+                    clock: &FixedClock(self.start.as_nanos()),
+                    rng: &mut self.rng,
+                    execution: self.execution,
+                    inbox: Inbox::new(&mut self.inbox, self.start),
+                    outbox: Outbox::new(&mut self.outputs, self.start, self.bound),
+                },
+            )
+        }))
+        .map_err(|_| Error::Panicked { id })
+        .and_then(|result| result.map_err(|source| Error::Machine { id, source }))
+    }
+
+    /// Whether the run has stopped, so that finishing it will not wait.
+    pub(super) fn ready(&mut self) -> Result<bool, Error<M::Error>> {
+        catch_unwind(AssertUnwindSafe(|| {
+            self.machine
+                .split_run()
+                .expect("split run in flight")
+                .ready()
+        }))
+        .map_err(|_| Error::Panicked { id: self.id })
+    }
+
+    pub(super) fn watch_reply(&mut self, ticket: u64) -> Option<std::os::fd::RawFd> {
+        self.machine.split_run()?.watch_reply(ticket)
+    }
+    /// Wait for the run to stop and return it as a worker job would.
+    pub(super) fn finish(mut self, worker: &mut M::Context) -> RunResult<M> {
+        let stopped = self.call(worker, |machine, context| {
+            machine
+                .split_run()
+                .expect("split run in flight")
+                .finish(context)
+        });
+        self.result(stopped)
+    }
+
+    pub(super) fn result(self, stopped: Result<StopReason, Error<M::Error>>) -> RunResult<M> {
+        RunResult {
+            id: self.id,
+            remaining: self.inbox.len(),
+            machine: self.machine,
+            rng: self.rng,
+            outputs: self.outputs,
+            stopped,
+        }
+    }
+}
+
 /// One machine's finished batch run, still in its own time base.
 pub(super) struct RunReport<E> {
     id: MachineId,
@@ -158,34 +240,48 @@ where
         let mut bounds = BTreeMap::new();
         let mut views = Vec::with_capacity(ids.len());
         for &id in ids {
-            let entry = &self.execution.machines[id.0];
-            let start = if admission {
-                entry.machine_time(id, now)?
-            } else {
-                entry.start_time(id, now)?
-            };
-            let bound = entry.machine_time(id, upto)?;
-            let anchor = Timestamp::from_nanos(entry.time.anchor());
-            // A run that continues from a barrier nothing needs, with nothing
-            // delivered, maps from the machine's last shared cut; any other
-            // run starts at a shared cut.
-            let back = self.execution.network.latency_ns().saturating_sub(1);
-            let limit = Timestamp::from_nanos(now.as_nanos().saturating_sub(back));
-            let lower = entry.lower_for(now, limit, self.execution.needed == Some(now));
-            let inbox = entry
-                .inbox
-                .iter()
-                .map(|input| {
-                    Ok(Input {
-                        at: entry.machine_time(id, input.at.max(anchor))?.min(start),
-                        payload: input.payload.clone(),
-                    })
-                })
-                .collect::<Result<VecDeque<_>, ClockOverflow>>()?;
-            bounds.insert(id, (start, bound, inbox.len(), lower));
-            views.push((id, start, bound, inbox));
+            let (view, lower) = self.batch_view(id, now, upto, admission)?;
+            bounds.insert(id, (view.1, view.2, view.3.len(), lower));
+            views.push(view);
         }
         Ok((bounds, views))
+    }
+
+    /// Inputs and bounds for one machine, also used directly by a lane, and
+    /// the simulation time its machine times map from. `admission` is as
+    /// for [`Self::batch_views`].
+    pub(super) fn batch_view(
+        &self,
+        id: MachineId,
+        now: Timestamp,
+        upto: Timestamp,
+        admission: bool,
+    ) -> Result<(BatchView, Timestamp), Error<M::Error>> {
+        let entry = &self.execution.machines[id.0];
+        let start = if admission {
+            entry.machine_time(id, now)?
+        } else {
+            entry.start_time(id, now)?
+        };
+        let bound = entry.machine_time(id, upto)?;
+        let anchor = Timestamp::from_nanos(entry.time.anchor());
+        // A run that continues from a barrier nothing needs, with nothing
+        // delivered, maps from the machine's last shared cut; any other run
+        // starts at a shared cut.
+        let back = self.execution.network.latency_ns().saturating_sub(1);
+        let limit = Timestamp::from_nanos(now.as_nanos().saturating_sub(back));
+        let lower = entry.lower_for(now, limit, self.execution.needed == Some(now));
+        let inbox = entry
+            .inbox
+            .iter()
+            .map(|input| {
+                Ok(Input {
+                    at: entry.machine_time(id, input.at.max(anchor))?.min(start),
+                    payload: input.payload.clone(),
+                })
+            })
+            .collect::<Result<VecDeque<_>, ClockOverflow>>()?;
+        Ok(((id, start, bound, inbox), lower))
     }
 
     /// Run every view on the workers and return each machine and its RNG to
@@ -196,10 +292,17 @@ where
         views: Vec<BatchView>,
         bounds: &BatchBounds,
     ) -> Vec<RunReport<M::Error>> {
-        let jobs = views.into_iter().map(|view| self.run_job(view)).collect();
-        // All jobs finish before changing the clock or returning. Results are
-        // ordered by identity, never by worker completion time.
-        let mut results = self.workers.run(jobs);
+        let mut results = if views.iter().any(|v| self.splits(v.0)) {
+            let mut round = round::Runs::new();
+            let count = views.len();
+            for view in views {
+                self.submit_run(view, &mut round);
+            }
+            (0..count).map(|_| self.next_run(&mut round)).collect()
+        } else {
+            let jobs = views.into_iter().map(|view| self.run_job(view)).collect();
+            self.workers.run(jobs)
+        };
         results.sort_by_key(|result: &RunResult<M>| result.id);
         results
             .into_iter()
@@ -249,6 +352,41 @@ where
             }
         };
         (id.0, job)
+    }
+
+    /// Whether machine `id` executes elsewhere, so that the Driver's thread
+    /// can keep its runs in flight beside others' instead of lending it to a
+    /// worker.
+    pub(super) fn splits(&mut self, id: MachineId) -> bool {
+        self.execution.machines[id.0]
+            .machine
+            .as_mut()
+            .and_then(M::split_run)
+            .is_some()
+    }
+
+    /// Start one view's run on this thread, as [`Driver::run_job`]'s job
+    /// would run it, and keep it in flight unless it finished at once.
+    pub(super) fn start_flight(&mut self, (id, start, bound, inbox): BatchView) -> Started<M> {
+        let entry = &mut self.execution.machines[id.0];
+        let mut flight = Flight {
+            id,
+            machine: entry.machine.take().expect("stopped machine"),
+            rng: entry.rng.take().expect("stopped machine RNG"),
+            inbox,
+            outputs: Vec::new(),
+            start,
+            bound,
+            execution: entry.lifecycle.execution(),
+        };
+        match flight.call(self.workers.caller(), |machine, context| {
+            let split = machine.split_run().expect("split run");
+            split.start(context, bound)
+        }) {
+            Ok(None) => Started::Flying(flight),
+            Ok(Some(stopped)) => Started::Finished(flight.result(Ok(stopped))),
+            Err(error) => Started::Finished(flight.result(Err(error))),
+        }
     }
 
     /// Return a finished run's machine and RNG to its entry and remove the
@@ -412,7 +550,7 @@ where
     /// timer, and staged outputs.
     pub(super) fn commit_runs(
         &mut self,
-        accepted: Vec<AcceptedRun>,
+        accepted: impl IntoIterator<Item = AcceptedRun>,
         offered_stops: &[NonZeroU32],
         rebooting: Option<u64>,
     ) {

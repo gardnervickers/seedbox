@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
+transport-bench = []
 test-support = [
     "seedbox-machine/test-support",
     "dep:seedbox-test",
@@ -50,3 +51,8 @@ kvm-ioctls = "0.24"
 [[test]]
 name = "native_machine"
 path = "tests/native_machine/mod.rs"
+
+[[bench]]
+name = "pv_transport"
+harness = false
+required-features = ["transport-bench"]
