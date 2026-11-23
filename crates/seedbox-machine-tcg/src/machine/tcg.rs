@@ -14,8 +14,14 @@
 //! A run that starts where the last one stopped, with nothing to deliver,
 //! adopts nothing and draws nothing. Its budget splits a translated block as a
 //! timer deadline does, and the split finds no new interrupt: timers run only
-//! between blocks, and an I/O instruction that raises one ends its block. So
-//! where runs end leaves no trace in the guest or its witness.
+//! between blocks, and an I/O instruction that raises one ends its block. A
+//! run too short to complete one instruction (possible only above the nominal
+//! factor) is charged as part of the next instruction only once its CPU has
+//! taken what was pending at its start: an interrupt is delivered at the time
+//! a longer run delivers it, and a CPU that stays halted is charged nothing.
+//! So where runs end should leave no trace in the guest or its witness. The
+//! native `stop_tests` checks that on one Linux guest with one CPU and no
+//! frames, disk or host input, under nominal and throttled pricing.
 //!
 //! Work is priced in QEMU icount steps, not hardware retirement. Ordinary
 //! instructions and translator-raised exceptions such as `ud2` cost one step.

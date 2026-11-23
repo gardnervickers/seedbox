@@ -332,6 +332,62 @@ fn execution_cost_prices_mmio_but_not_hlt_timer_deadlines() {
     }
 }
 
+/// C3 above the nominal factor: a run from a timer wake that is too short to
+/// complete one instruction still takes the pending interrupt at the wake's
+/// time, as a longer run does. Ending such a run before the CPU executed
+/// left the interrupt to the next run, whose witness record carried a later
+/// time.
+#[test]
+fn a_wake_run_too_short_for_an_instruction_takes_its_interrupt_as_a_longer_run_does() {
+    let image = timer(100_000).sti().hlt().inc(Reg::Ebx).spin().image();
+    for factor in [1375, 1_000_000] {
+        let step = u64::from(factor).div_ceil(1000);
+        // Runs after the wake, each this long, before one run to the end.
+        let seen = |split: &[u64]| {
+            let mut machine = start(image.clone());
+            machine
+                .configure_policy(
+                    "m",
+                    &BackendPolicy {
+                        seed: 42,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let stop = drive(&mut machine, 0, 20_000, factor, vec![]);
+            let StopReason::Blocked {
+                deadline: Some(deadline),
+                ..
+            } = stop
+            else {
+                panic!("{stop:?}")
+            };
+            let wake = deadline.as_nanos();
+            let mut now = wake;
+            for length in split {
+                assert_eq!(
+                    drive(&mut machine, now, now + length, factor, vec![]),
+                    StopReason::BoundaryReached
+                );
+                now += length;
+            }
+            // The EOI handler's two instructions, the increment and more.
+            drive(&mut machine, now, wake + 8 * step, factor, vec![]);
+            let witness = machine.execution_evidence().unwrap().expect("witness");
+            (witness, registers(&mut machine))
+        };
+        let whole = seen(&[]);
+        assert_eq!(whole.1[RBX], 1);
+        for split in [&[1][..], &[1, 1, 1], &[2, 1], &[3]] {
+            assert!(
+                split.iter().sum::<u64>() < 8 * step,
+                "splits end before the last run"
+            );
+            assert_eq!(seen(split), whole, "factor {factor}, runs of {split:?} ns");
+        }
+    }
+}
+
 #[test]
 fn execution_cost_timer_inside_partial_charge_matches_segmented_and_restored_cpu() {
     // Interrupts stay disabled: the loop reads the LAPIC IRR into ECX to

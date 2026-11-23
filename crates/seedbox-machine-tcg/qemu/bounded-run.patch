@@ -8,7 +8,7 @@
  #include "qemu/error-report.h"
  #include "system/cpus.h"
  #include "system/qtest.h"
-@@ -53,10 +54,379 @@
+@@ -53,10 +54,391 @@
  /* Do not count executed instructions */
  ICountMode use_icount = ICOUNT_DISABLED;
 
@@ -362,6 +362,18 @@
 +        delay = qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL,
 +                                           QEMU_TIMER_ATTR_ALL);
 +        horizon = delay < 0 ? seedbox_end : now + MIN(delay, seedbox_end - now);
++        /* Only a CPU about to execute its next instruction is charged part
++         * of it. One that is halted, or has deliverable or queued work,
++         * takes that first, as at the start of any run: the kick that starts
++         * a run makes the first pass skip execution, and paying a partial
++         * charge here would end a run too short for one instruction before
++         * the CPU took an interrupt pending at its start, or charge a CPU
++         * that then stays halted. Either leaves a trace of where the run
++         * ended: a later delivery time, or a nanosecond of charge. */
++        if (first_cpu->halted || cpu_has_work(first_cpu) ||
++            !cpu_work_list_empty(first_cpu)) {
++            return;
++        }
 +        if (horizon > now && seedbox_count_until(horizon) == icount_get_raw()) {
 +            /* Pay a partial instruction charge without executing its effects.
 +             * This also handles a timer earlier than the next completion. */
@@ -388,7 +400,7 @@
  }
 
  static void icount_enable_adaptive(void)
-@@ -123,6 +475,9 @@
+@@ -123,6 +487,9 @@
  static int64_t icount_get_locked(void)
  {
      int64_t icount = icount_get_raw_locked();
@@ -398,7 +410,7 @@
      return qatomic_read(&timers_state.qemu_icount_bias) + icount_to_ns(icount);
  }
 
-@@ -295,6 +650,10 @@
+@@ -295,6 +662,10 @@
      int64_t deadline;
 
      assert(icount_enabled());
