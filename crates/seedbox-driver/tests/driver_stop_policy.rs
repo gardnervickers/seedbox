@@ -3,7 +3,10 @@
 //! Each scenario runs once with the Driver's own round boundaries, once
 //! under each of several seeded [`StopPolicy`]s, which end rounds early at
 //! host-drawn times, and once with each of two other quanta, which move the
-//! Driver's own boundaries. The runs must agree on:
+//! Driver's own boundaries. It also runs with machines whose runs stay in
+//! flight on the Driver's thread, as a PV machine's do
+//! ([`Machine::split_run`]), under the Driver's own stops and under each
+//! policy. The runs must agree on:
 //!
 //! - the event stream, with each event's `position` removed (it counts commits);
 //! - Driver policy evidence, as written, at a few times the host asks for a
@@ -27,7 +30,7 @@ use seedbox_driver::test_support::{definition, key, StopPolicy};
 use seedbox_engine_protocol::property::Frame;
 use seedbox_machine::{
     clock::ClockRate,
-    machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
+    machine::{ExitReason, Machine, RunContext, SplitRun, StopReason, Timestamp},
     pv::{CommandResult, Output, Request, Response, SimulationControlId, Stream},
 };
 use seedbox_spec::{backend::CpuBackend, definition::Architecture};
@@ -110,6 +113,10 @@ struct Script {
     held: bool,
     reached: u64,
     seen: Seen,
+    /// Report [`Machine::split_run`]: the run executes in `start` and stays
+    /// in flight until `finish`.
+    split: bool,
+    flight: Option<Result<StopReason, std::io::Error>>,
 }
 
 impl Script {
@@ -233,8 +240,34 @@ impl Machine for Script {
         })
     }
 
+    fn split_run(&mut self) -> Option<&mut dyn SplitRun<(), Self::Error>> {
+        self.split.then_some(self)
+    }
+
     fn snapshot(&mut self) -> Result<(), Self::Error> {
         Ok(())
+    }
+}
+
+impl SplitRun<(), std::io::Error> for Script {
+    fn start(
+        &mut self,
+        context: &mut RunContext<'_, ()>,
+        upto: Timestamp,
+    ) -> Result<Option<StopReason>, std::io::Error> {
+        assert!(self.flight.is_none(), "one run in flight");
+        self.flight = Some(self.run(context, upto));
+        Ok(None)
+    }
+
+    fn ready(&mut self) -> bool {
+        // Completion order is covered by the Driver's network tests; a run
+        // that is not ready at a poll costs this suite an idle wait.
+        true
+    }
+
+    fn finish(&mut self, _: &mut RunContext<'_, ()>) -> Result<StopReason, std::io::Error> {
+        self.flight.take().expect("a run in flight")
     }
 }
 
@@ -353,6 +386,18 @@ fn run_with(
     quantum: Duration,
     barriers: &[u64],
 ) -> (Results, usize) {
+    run_as(scenario, policy, quantum, barriers, false)
+}
+
+/// [`run_with`], every machine's runs staying in flight on the Driver's
+/// thread if `split`.
+fn run_as(
+    scenario: &Scenario,
+    policy: Option<u64>,
+    quantum: Duration,
+    barriers: &[u64],
+    split: bool,
+) -> (Results, usize) {
     let seen: Vec<Seen> = scenario.machines.iter().map(|_| Seen::default()).collect();
     let mut machines: VecDeque<Script> = scenario
         .machines
@@ -370,6 +415,8 @@ fn run_with(
             held: false,
             reached: 0,
             seen: seen.clone(),
+            split,
+            flight: None,
         })
         .collect();
     let definitions: Vec<_> = (0..machines.len()).map(networked).collect();
@@ -513,8 +560,9 @@ fn differences(own: &Results, other: &Results) -> Vec<String> {
 }
 
 /// Run `scenario` with the Driver's own stops, under every policy seed and
-/// with every other quantum. Returns the results under the Driver's own stops,
-/// and what differed from them in each other run.
+/// with every other quantum, and with split machines under the Driver's own
+/// stops and every policy seed. Returns the results under the Driver's own
+/// stops, and what differed from them in each other run.
 fn compare(scenario: &Scenario) -> (Results, Vec<(String, Vec<String>)>) {
     let (own, own_barriers) = run(scenario, None);
     let mut found = Vec::new();
@@ -534,6 +582,13 @@ fn compare(scenario: &Scenario) -> (Results, Vec<(String, Vec<String>)>) {
         let differences = differences(&own, &other);
         if !differences.is_empty() {
             found.push((format!("quantum {quantum:?}"), differences));
+        }
+    }
+    for policy in std::iter::once(None).chain(SEEDS.map(Some)) {
+        let (other, _) = run_as(scenario, policy, QUANTUM, &[], true);
+        let differences = differences(&own, &other);
+        if !differences.is_empty() {
+            found.push((format!("split, policy {policy:?}"), differences));
         }
     }
     (own, found)
