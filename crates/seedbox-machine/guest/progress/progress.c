@@ -40,7 +40,23 @@ static reg_id_t budget_segment;
  * Every block's instrumentation keeps the same length whichever register it
  * uses: fragment sizes decide how the code cache grows, and DynamoRIO's own
  * syscalls for that growth are charged to the guest. */
-enum { BUDGET, SPILL, RESUME, DISPATCH, ENTRY, TLS_WORDS };
+enum {
+    BUDGET,
+    SPILL,
+    RESUME,
+#ifdef AARCH64
+    /* The code cache entry at which the exhaustion routine resumes a block. */
+    ENTRY,
+#endif
+    /* The exhaustion routine's entry. AArch64 has one word per X register:
+     * DISPATCH + n holds the entry for a block whose scratch register is Xn. */
+    DISPATCH,
+#ifdef AARCH64
+    TLS_WORDS = DISPATCH + 31
+#else
+    TLS_WORDS
+#endif
+};
 static uint budget_offset;
 static int segment_field;
 /* Notes mark the instructions during which SCRATCH's application value is only
@@ -84,31 +100,6 @@ static const reg_id_t candidates[] = {
 static const size_t candidate_count = sizeof(candidates) / sizeof(candidates[0]);
 #endif
 
-/* An exhausted AArch64 block branches here through its scratch register, so
- * that register alone holds this routine's address: application registers
- * cannot (a dead scratch is never read before the application overwrites it,
- * and every other one is restored). */
-static reg_id_t exhausted_scratch(dr_mcontext_t *machine)
-{
-#ifdef X86_64
-    (void)machine;
-    return DR_REG_RCX;
-#else
-    reg_id_t found = DR_REG_NULL;
-    for (size_t i = 0; i < candidate_count; i++) {
-        if (reg_get_value(candidates[i], machine) != (reg_t)dispatch_routine)
-            continue;
-        if (found != DR_REG_NULL) {
-            dr_fprintf(STDERR, "seedbox progress: two registers hold the exhaustion routine\n");
-            dr_abort();
-        }
-        found = candidates[i];
-    }
-    DR_ASSERT(found != DR_REG_NULL);
-    return found;
-#endif
-}
-
 static void checkpoint_and_dispatch(void)
 {
     byte *base = dr_get_dr_segment_base(budget_segment);
@@ -129,57 +120,100 @@ static void checkpoint_and_dispatch(void)
     /* The block resumes from its start and charges again: refund that entry,
      * including when the configured budget is one or UINT32_MAX. */
     ++*budget();
+    void *context = dr_get_current_drcontext();
+#ifdef AARCH64
     /* A pending signal or JIT synchronization must complete at this safe point,
      * which the dispatcher provides. When it has nothing to do, entering the
-     * block's fragment directly has the same effect, for a fraction of the cost. */
-    void *context = dr_get_current_drcontext();
+     * block's fragment directly has the same effect, for a fraction of the cost:
+     * the routine restores the saved context and jumps to the entry. Only
+     * AArch64 takes this path: DynamoRIO implements it there alone. */
     byte *entry = dr_redirect_entry(context, resume);
-    /* No initializer: the context's SIMD area takes 2 KiB on AArch64, and
-     * zeroing it costs DR's byte-wise memset most of a microsecond. */
-    dr_mcontext_t machine;
-    machine.size = sizeof(machine);
-    machine.flags = entry != NULL ? DR_MC_INTEGER : DR_MC_ALL;
-    DR_ASSERT(dr_get_mcontext(context, &machine));
-    /* The exhausted block left before restoring its scratch register. */
-    reg_set_value(exhausted_scratch(&machine), &machine, *(reg_t *)(base + slot(SPILL)));
     if (entry != NULL) {
-        /* The routine restores this context and jumps to the entry. */
-        DR_ASSERT(dr_set_mcontext(context, &machine));
         *(byte **)(base + slot(ENTRY)) = entry;
         return;
     }
+#endif
+    dr_mcontext_t machine = { sizeof(machine), DR_MC_ALL };
+    DR_ASSERT(dr_get_mcontext(context, &machine));
     machine.pc = resume;
     dr_redirect_execution(&machine);
     DR_ASSERT(false);
 }
 
+#ifdef AARCH64
+/* Each X register's entry is two instructions at a fixed place in the page. */
+enum { ENTRY_BYTES = 8, ENTRIES_BYTES = 31 * ENTRY_BYTES };
+
+static byte *dispatch_entry(reg_id_t scratch)
+{
+    return dispatch_routine + (scratch - DR_REG_X0) * ENTRY_BYTES;
+}
+#endif
+
 /* Emit the expensive context-save/call sequence once, outside the code cache.
  * It uses the executing thread's TLS and DR stack, not the emitter's context.
  * It goes back into the code cache only at an entry from dr_redirect_entry(),
- * which DR refuses while a synchronization, flush or signal is pending. */
+ * which DR refuses while a synchronization, flush or signal is pending, and
+ * through DR's own jump, which leaves for the dispatcher if a signal has
+ * arrived since.
+ *
+ * An exhausted block left before restoring its scratch register, so the
+ * routine restores it before the clean call saves the application's state.
+ * x86-64 always restores RCX. An AArch64 block enters through its register's
+ * own entry, which restores that register and branches to the shared call:
+ * which register a block used is known from where it entered, never from
+ * register values, which an application controls. */
 static void emit_dispatch(void *context)
 {
     instrlist_t *routine = instrlist_create(context);
     instr_t *end = INSTR_CREATE_label(context);
     instrlist_meta_append(routine, end);
+#ifdef X86_64
+    dr_insert_read_raw_tls(context, routine, end, budget_segment, slot(SPILL), DR_REG_RCX);
+#endif
     dr_insert_clean_call_ex(context, routine, end, (void *)checkpoint_and_dispatch,
-        DR_CLEANCALL_READS_APP_CONTEXT | DR_CLEANCALL_WRITES_APP_CONTEXT |
-            DR_CLEANCALL_ALWAYS_OUT_OF_LINE, 0);
-    dr_insert_redirect_entry_jump(context, routine, end,
-                                  dr_raw_tls_opnd(context, budget_segment, slot(ENTRY)));
+        DR_CLEANCALL_READS_APP_CONTEXT | DR_CLEANCALL_ALWAYS_OUT_OF_LINE, 0);
     dispatch_size = dr_page_size();
     dispatch_routine = dr_nonheap_alloc(dispatch_size,
         DR_MEMPROT_READ | DR_MEMPROT_WRITE | DR_MEMPROT_EXEC);
     DR_ASSERT(dispatch_routine != NULL);
+    byte *shared = dispatch_routine;
+#ifdef AARCH64
+    shared += ENTRIES_BYTES;
+#endif
     size_t length = 0;
     for (instr_t *instruction = instrlist_first(routine); instruction != NULL;
          instruction = instr_get_next(instruction))
         length += instr_length(context, instruction);
-    DR_ASSERT(length <= dispatch_size);
-    byte *last = instrlist_encode(context, routine, dispatch_routine, true);
+    DR_ASSERT(shared + length <= dispatch_routine + dispatch_size);
+    byte *last = instrlist_encode(context, routine, shared, true);
     DR_ASSERT(last != NULL && last <= dispatch_routine + dispatch_size);
     instrlist_clear_and_destroy(context, routine);
 #ifdef AARCH64
+    /* Build each entry only after the shared call's list is destroyed, one at
+     * a time, so its instructions reuse that list's freed memory: DynamoRIO's
+     * heap growth is charged to the guest and must not depend on them. */
+    for (size_t i = 0; i < candidate_count; i++) {
+        instrlist_t *entry = instrlist_create(context);
+        instr_t *branch = INSTR_CREATE_b(context, opnd_create_pc(shared));
+        instrlist_meta_append(entry, branch);
+        dr_insert_read_raw_tls(context, entry, branch, budget_segment, slot(SPILL),
+                               candidates[i]);
+        byte *start = dispatch_entry(candidates[i]);
+        DR_ASSERT(instrlist_encode(context, entry, start, false) == start + ENTRY_BYTES);
+        instrlist_clear_and_destroy(context, entry);
+    }
+    /* A callee that returns has stored a code cache entry: DR's jump to it
+     * follows the clean call. It is built apart from the call for the same
+     * reason as the entries. */
+    instrlist_t *resume = instrlist_create(context);
+    instr_t *resumed = INSTR_CREATE_label(context);
+    instrlist_meta_append(resume, resumed);
+    dr_insert_redirect_entry_jump(context, resume, resumed,
+                                  dr_raw_tls_opnd(context, budget_segment, slot(ENTRY)));
+    last = instrlist_encode(context, resume, last, false);
+    DR_ASSERT(last != NULL && last <= dispatch_routine + dispatch_size);
+    instrlist_clear_and_destroy(context, resume);
     /* Publish generated instructions to AArch64's instruction cache. */
     for (byte *line = dispatch_routine; line < last; line += 4)
         __asm__ volatile("dc cvau, %0" : : "r"(line) : "memory");
@@ -200,7 +234,13 @@ static void thread_init(void *context)
     byte *base = dr_get_dr_segment_base(budget_segment);
     drmgr_set_tls_field(context, segment_field, base);
     *budget() = block_budget;
+#ifdef AARCH64
+    for (size_t i = 0; i < candidate_count; i++)
+        *(byte **)(base + slot(DISPATCH + candidates[i] - DR_REG_X0)) =
+            dispatch_entry(candidates[i]);
+#else
     *(byte **)(base + slot(DISPATCH)) = dispatch_routine;
+#endif
 }
 
 static uint scratch_index(reg_id_t reg)
@@ -426,7 +466,9 @@ static void charge_before(void *context, instrlist_t *block, instr_t *where)
     instrlist_meta_preinsert(block, where, INSTR_CREATE_jmp_ind(context,
         dr_raw_tls_opnd(context, budget_segment, slot(DISPATCH))));
 #else
-    dr_insert_read_raw_tls(context, block, where, budget_segment, slot(DISPATCH), SCRATCH);
+    /* Branch to SCRATCH's own entry of the exhaustion routine. */
+    dr_insert_read_raw_tls(context, block, where, budget_segment,
+                           slot(DISPATCH + SCRATCH - DR_REG_X0), SCRATCH);
     instrlist_meta_preinsert(block, where, INSTR_CREATE_br(context, opnd_create_reg(SCRATCH)));
 #endif
     instrlist_meta_preinsert(block, where, skip);

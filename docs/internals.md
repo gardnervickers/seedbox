@@ -43,15 +43,20 @@ same, and it marks instructions with notes rather than allocating labels,
 which keeps DynamoRIO's heap growth the same.
 
 Exhaustion branches to one shared routine instead of emitting a context-save
-sequence in every block. Its clean call charges progress, puts the scratch
-register's saved value back and resumes the block from its start, refunding the
+sequence in every block. The routine first puts the scratch register's saved
+value back. On ARM it has one entry per register, each reached through its own
+thread-local word, so the register is known from the entry a block took and
+never from register values, which the application controls. Its clean call
+then charges progress and resumes the block from its start, refunding the
 repeated charge. A pending signal, JIT synchronization or flush completes in
-DynamoRIO's dispatcher, so the client redirects through it; when the dispatcher
-would do nothing but look the block up, the fork's `dr_redirect_entry()` returns
-the block's cache entry instead, and the routine jumps there after the clean
-call. Neither path makes a syscall, so the guest sees the same charges; the
-direct one skips copying the 2 KiB machine context with DynamoRIO's byte-wise
-ARM `memcpy`, which cost most of each checkpoint's microseconds.
+DynamoRIO's dispatcher, so the client redirects through it. On ARM, when the
+dispatcher would do nothing but look the block up, the fork's
+`dr_redirect_entry()` returns the block's cache entry instead, and the routine
+ends with DynamoRIO's jump to it; that jump leaves for the dispatcher after all
+if a signal has arrived since. `dr_redirect_entry()` never waits: it tries the
+locks the lookup needs and refuses when one is held, as the dispatcher would
+wait for it. Neither path makes a syscall of its own, so the guest sees the
+same charges. x86-64 always redirects through the dispatcher.
 Charge instructions have no application translation and cannot be
 relocation points. Until a dead register is overwritten, a fault in an
 application instruction must still report its saved value. Reconstructed
