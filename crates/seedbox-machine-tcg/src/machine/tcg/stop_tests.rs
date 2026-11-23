@@ -5,10 +5,12 @@
 //! `pv::stop_tests` drives too) runs it with the machine's own stops and host
 //! barriers every half millisecond, and again with the same barriers and
 //! runs that end early at seeded times, a few microseconds apart, and
-//! nanoseconds (a few instructions) apart from boot and after each wake. At
-//! every barrier the native witness and the console must agree, and so must
-//! the full state evidence (registers, devices, timers, RAM) at every
-//! `STATE`th barrier and the last.
+//! nanoseconds (a few instructions) apart from boot and after each wake. CPU
+//! work is priced at the nominal factor and, in alternating stretches of
+//! `PHASE` barriers, at a throttled non-integral one, so splits also fall
+//! where a fractional charge is carried. At every barrier the native witness
+//! and the console must agree, and so must the full state evidence
+//! (registers, devices, timers, RAM) at every `STATE`th barrier and the last.
 //!
 //! What it covers is this one guest: one CPU, no frames, disk or host input.
 use super::tests::lifecycle_initramfs;
@@ -18,6 +20,12 @@ use seedbox_machine::{execution::ExecutionConfig, test_support::stop_scenario};
 /// Full state evidence is taken at every this many barriers (and the last):
 /// hashing guest RAM at every barrier would dominate the test.
 const STATE: usize = 40;
+/// Barriers per stretch of one execution factor.
+const PHASE: usize = 64;
+/// The throttled factor, in thousandths: each instruction costs 1.375 ns, so
+/// most runs end with a fraction of a nanosecond charged, and a run of 1 ns
+/// can end before the next instruction completes.
+const THROTTLED: u32 = 1375;
 
 /// Replaces the fixture init's "booted" line: two loops that fold the clock
 /// into a value they print, with sleeps of different lengths between reads.
@@ -86,6 +94,16 @@ fn machine() -> TcgMachine {
     machine
 }
 
+/// Nominal pricing for the first `PHASE` barriers, then throttled and
+/// nominal stretches in turn.
+fn execution(barrier: usize) -> ExecutionConfig {
+    if (barrier / PHASE) % 2 == 1 {
+        ExecutionConfig::new(THROTTLED).unwrap()
+    } else {
+        ExecutionConfig::default()
+    }
+}
+
 #[test]
 #[ignore = "requires patched QEMU (SEEDBOX_TCG_QEMU), SEEDBOX_TCG_LINUX and SEEDBOX_TCG_FIRMWARE"]
 fn native_stops_that_deliver_nothing_leave_no_trace() {
@@ -96,7 +114,7 @@ fn native_stops_that_deliver_nothing_leave_no_trace() {
             machine: &machine,
             console: &|machine: &mut TcgMachine| machine.console().unwrap(),
             state_every: STATE,
-            execution: &|_| ExecutionConfig::default(),
+            execution: &execution,
         },
         &[1, 2, 0x5eed],
     );
