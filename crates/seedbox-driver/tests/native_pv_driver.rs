@@ -78,6 +78,44 @@ impl Environment<RawMachine> {
 
 impl<M: Machine<Context = ()>, R: RngStream> Environment<M, R> {}
 
+/// Cold snapshots exercise context creation on both construction paths.
+#[test]
+fn concrete_pv_drivers_create_only_the_callers_context() {
+    use seedbox_driver::{driver::Driver, test_support::definition};
+    let executable = std::env::current_exe().unwrap();
+    let worker = executable.clone();
+    let create = move |_: &seedbox_machine::definition::MachineDefinition| {
+        fixture::boot(&worker, fixture::timed_guest(), b"initrd".to_vec())
+    };
+    let owner = std::thread::current().id();
+    let context = move || {
+        assert_eq!(std::thread::current().id(), owner);
+        Ok(())
+    };
+    let mut driver = Driver::new_seeded(
+        at(0),
+        std::time::Duration::from_millis(1),
+        4,
+        1,
+        context,
+        definition("oracle"),
+        vec![definition("peer")],
+        Vec::new(),
+        seedbox_driver::driver::NetworkConfig::default(),
+        create.clone(),
+    )
+    .unwrap();
+    let saved = driver.checkpoint().unwrap();
+    Driver::from_checkpoint(
+        &saved,
+        6,
+        context,
+        |snap| RawMachine::from_snapshot(&executable, snap).map_err(std::io::Error::other),
+        create,
+    )
+    .unwrap();
+}
+
 mod machine {
     mod pv {
         mod tests {

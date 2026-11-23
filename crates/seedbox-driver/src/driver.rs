@@ -30,6 +30,7 @@ mod checkpoint;
 mod evidence;
 mod execution_evidence;
 mod lanes;
+mod round;
 pub use crate::persistence::{CodecError, DecodeLimits, SnapshotReference};
 pub use checkpoint::{Checkpoint, CheckpointMapError};
 pub use execution_evidence::ExecutionEvidenceRead;
@@ -404,6 +405,13 @@ where
     M::Context: 'static,
     M::Error: Send + 'static,
 {
+    fn execution_workers(
+        requested: usize,
+        context: impl Fn() -> Result<M::Context, M::Error> + Send + Sync + 'static,
+    ) -> Result<Workers<M::Context>, Error<M::Error>> {
+        Workers::new(if M::always_split() { 1 } else { requested }, context)
+    }
+
     /// Construct machines and driver-owned simulation dependencies.
     ///
     /// The supplied arbitrary RNG has no capture contract. Whole-Driver
@@ -584,7 +592,7 @@ where
                 ));
             }
         }
-        let workers = Workers::new(workers, context)?;
+        let workers = Self::execution_workers(workers, context)?;
         let clock = Arc::new(SimulationClock::new(start.as_nanos()));
         let definitions: Vec<_> = std::iter::once(oracle).chain(machines).collect();
         let machines = definitions

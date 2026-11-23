@@ -269,3 +269,71 @@ fn only_powers_of_two_within_bounds_are_capacities() {
     }
     assert!(Region::create(64).is_ok());
 }
+
+#[test]
+fn a_claimed_message_is_published_whole_at_its_commit() {
+    let (mut client, mut worker) = pair(1 << 10, Duration::ZERO);
+    let bytes = message(300, 7);
+    let mut claim = client.claim().unwrap();
+    claim
+        .write_all(&(bytes.len() as u32).to_le_bytes())
+        .unwrap();
+    claim.flush().unwrap();
+    claim.write_all(&bytes).unwrap();
+    claim.flush().unwrap();
+    assert!(!worker.readable(), "nothing is visible before the commit");
+    claim.commit().unwrap();
+    assert!(worker.readable());
+    assert_eq!(receive(&mut worker), bytes);
+    no_pending_wakeup(&mut worker);
+}
+
+#[test]
+fn a_claim_larger_than_the_ring_streams_through_it() {
+    for spin in [SpinThenSleep::SPIN, Duration::ZERO] {
+        let (mut client, mut worker) = pair(64, spin);
+        let bytes = message(1000, 3);
+        let reader = std::thread::spawn(move || {
+            let got = receive(&mut worker);
+            (got, worker)
+        });
+        let sent = bytes.clone();
+        let (got, worker) = bounded("an oversized claim", move || {
+            let mut claim = client.claim().unwrap();
+            claim.write_all(&(sent.len() as u32).to_le_bytes()).unwrap();
+            claim.write_all(&sent).unwrap();
+            claim.commit().unwrap();
+            client.finish_send().unwrap();
+            let received = reader.join().unwrap();
+            drop(client);
+            received
+        });
+        assert_eq!(got, bytes, "{spin:?}");
+        drop(worker);
+    }
+}
+
+#[test]
+fn polling_fragments_preserves_a_wrapped_header_and_large_trailer() {
+    let (mut client, mut worker) = pair(64, Duration::ZERO);
+    let mut prefix = Vec::new();
+    for len in [63, 257, 4096, 7] {
+        let payload = message(len, 19);
+        let mut claim = client.claim().unwrap();
+        claim.header(&payload).unwrap();
+        claim.write_all(&payload).unwrap();
+        claim.commit().unwrap();
+        // The peer takes one available interval per pass. Neither side has
+        // a helper thread: a blocking operation here cannot make progress.
+        while !worker.poll_message(&mut prefix).unwrap() {
+            client.advance_send().unwrap();
+        }
+        let mut input = prefix.as_slice().chain(&mut worker);
+        let header: Vec<u8> = protocol::receive(&mut input).unwrap().unwrap();
+        assert_eq!(header, payload);
+        let mut received = vec![0; len];
+        input.read_exact(&mut received).unwrap();
+        assert_eq!(received, payload);
+        prefix.clear();
+    }
+}

@@ -1,6 +1,7 @@
 //! Host-only process fixture for named PV boot/capture/restore files. No native VM.
 //! An explicit flag is mandatory; Cargo bin-target invocations are benign.
 mod policy_fixture;
+use seedbox_machine_pv::test_support::worker_entry::FixtureTransport;
 use serde_json::{json, Value};
 use std::{
     ffi::OsString,
@@ -29,12 +30,6 @@ fn receive(input: &mut impl Read) -> io::Result<Option<Value>> {
     let mut body = vec![0; length];
     input.read_exact(&mut body)?;
     Ok(Some(serde_json::from_slice(&body)?))
-}
-fn send(output: &mut impl Write, message: Value) -> io::Result<()> {
-    let body = serde_json::to_vec(&message)?;
-    output.write_all(&(body.len() as u32).to_le_bytes())?;
-    output.write_all(&body)?;
-    output.flush()
 }
 fn run(args: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
     assert!(args.iter().any(|a| a == "--seedbox-pv-worker-v1"));
@@ -114,12 +109,10 @@ fn run(args: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
                 "fixture accepts only zero-budget host admissions"
             );
             now = run["upto"].as_u64().unwrap();
-            send(
-                &mut io,
-                json!({"Stopped":{"time":now,"stop":match mode.to_string_lossy().as_ref(){"powered-off"|"psci-powered-off"=>"PoweredOff","reset"|"triplefault"=>"Reset",_=>"Horizon"},"writes":0}}),
+            io.respond(
+                &json!({"Stopped":{"time":now,"stop":match mode.to_string_lossy().as_ref(){"powered-off"|"psci-powered-off"=>"PoweredOff","reset"|"triplefault"=>"Reset",_=>"Horizon"},"writes":0}}),
+                &[255],
             )?;
-            io.write_all(&[255])?;
-            io.flush()?;
             continue;
         } else if command.as_str() == Some("ExecutionEvidence") {
             json!({"ExecutionEvidence":{"chain":native_chain,"pending":[0]}})
@@ -157,7 +150,7 @@ fn run(args: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             panic!("unexpected PV fixture command {command}");
         };
-        send(&mut io, response)?;
+        io.respond(&response, &[])?;
     }
     Ok(())
 }

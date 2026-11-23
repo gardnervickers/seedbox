@@ -1,8 +1,10 @@
 use super::protocol::{receive, send, Request, Response, Result, Stop};
 use super::{shm, wire};
+use seedbox_machine::host::doorbell::Doorbell;
 use seedbox_machine::pv::transport::GuestWrite;
 use std::{
-    io::BufReader,
+    io::{BufReader, Read},
+    os::fd::{AsRawFd, RawFd},
     path::Path,
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{Arc, Mutex, MutexGuard},
@@ -20,6 +22,11 @@ pub(super) struct Worker {
     /// An exchange failed part-way, so the stream may hold half of one. The
     /// worker was terminated and every later request fails.
     lost: bool,
+    /// A `Run` was sent and its answer not yet received.
+    running: bool,
+    /// An incomplete oversized reply, or the transport error from polling.
+    prefix: Vec<u8>,
+    poll_error: Option<String>,
 }
 impl Worker {
     pub(super) fn spawn(executable: &Path) -> Result<Self> {
@@ -31,6 +38,9 @@ impl Worker {
             command.arg(seedbox_machine::process_lease::ENTRY);
         }
         shm::inherit(descriptor, &mut command)?;
+        Doorbell::process()
+            .and_then(|bell| bell.inherit(&mut command))
+            .map_err(|e| format!("PV reply doorbell: {e}"))?;
         command
             .arg("--seedbox-pv-worker-v1")
             .stdin(Stdio::piped())
@@ -47,6 +57,9 @@ impl Worker {
                 child,
                 stream,
                 lost: false,
+                running: false,
+                prefix: Vec::new(),
+                poll_error: None,
             }),
             Err(error) => {
                 // Not yet a Worker, so Drop would not reap it.
@@ -80,6 +93,9 @@ impl Worker {
         if self.lost {
             return Err(LOST.into());
         }
+        if self.running {
+            return Err("PV worker has a run in flight".into());
+        }
         let result = exchange(&mut self.stream);
         if result.is_err() {
             self.lose();
@@ -92,13 +108,14 @@ impl Worker {
             eprintln!("{error}");
         }
     }
-    /// One request without trailers; `Run` goes through [`Worker::run`].
+    /// One request without trailers; `Run` goes through [`Worker::send_run`].
     pub(super) fn call(&mut self, request: Request) -> Result<Response> {
         if matches!(request, Request::Run { .. }) {
             return Err("PV run requires its frame trailer".into());
         }
         let response = self.exchange(|stream| {
-            send(stream.get_mut(), &request)?;
+            stream.get_mut().message(&request, |_| Ok(()))?;
+            stream.get_mut().finish_send().map_err(|e| e.to_string())?;
             match answer(stream)? {
                 Response::Stopped { .. } => Err("PV unexpected run response".into()),
                 other => Ok(other),
@@ -109,23 +126,58 @@ impl Worker {
             other => Ok(other),
         }
     }
-    /// Send a `Run` with its host frames, then receive the stop and the
-    /// guest's writes in emission order.
-    pub(super) fn run(
-        &mut self,
-        mut request: Request,
-        frames: &[Vec<u8>],
-    ) -> Result<(u64, Stop, Vec<GuestWrite>)> {
+    /// Send a run and its frame trailer. Other requests must wait for its reply.
+    pub(super) fn send_run(&mut self, mut request: Request, frames: &[Vec<u8>]) -> Result<()> {
         let Request::Run { frames: count, .. } = &mut request else {
             return Err("PV run requires a Run request".into());
         };
         *count = frames.len() as u64;
         self.exchange(|stream| {
-            send(stream.get_mut(), &request)?;
-            wire::send_frames(stream.get_mut(), frames)?;
-            match answer(stream)? {
+            stream
+                .get_mut()
+                .message(&request, |claim| wire::send_frames(claim, frames))
+        })?;
+        self.running = true;
+        Ok(())
+    }
+    /// Progress this run's request and reply without waiting for bytes or room.
+    pub(super) fn ready(&mut self) -> bool {
+        if !self.running || self.poll_error.is_some() {
+            return true;
+        }
+        let ring = self.stream.get_mut();
+        match ring
+            .advance_send()
+            .and_then(|()| ring.poll_message(&mut self.prefix))
+        {
+            Ok(ready) => ready,
+            Err(error) => {
+                self.poll_error = Some(error.to_string());
+                true
+            }
+        }
+    }
+    /// With a run in flight in a worker that rings the process doorbell: the
+    /// pipe that reaches EOF if the worker exits.
+    pub(super) fn doorbell(&self, ticket: u64) -> Option<RawFd> {
+        (self.running && !self.lost).then(|| self.stream.get_ref().watch(ticket).as_raw_fd())
+    }
+    /// The second half of [`Worker::send_run`]: the stop and the guest's writes.
+    pub(super) fn receive_run(&mut self) -> Result<(u64, Stop, Vec<GuestWrite>)> {
+        if !std::mem::take(&mut self.running) {
+            return Err("PV run answer without a run in flight".into());
+        }
+        let prefix = std::mem::take(&mut self.prefix);
+        let error = self.poll_error.take();
+        self.exchange(|stream| {
+            if let Some(error) = error {
+                return Err(error);
+            }
+            stream.get_mut().finish_send().map_err(|e| e.to_string())?;
+            let mut reply = prefix.as_slice().chain(stream);
+            match answer(&mut reply)? {
                 Response::Stopped { time, stop, writes } => {
-                    Ok(Ok((time, stop, wire::receive_writes(stream, writes)?)))
+                    Ok(Ok((time, stop, wire::receive_writes(&mut reply, writes)?)))
                 }
                 Response::Error(error) => Ok(Err(error)),
                 _ => Err("PV worker returned unexpected run response".into()),
@@ -149,7 +201,7 @@ impl Worker {
         Ok(())
     }
 }
-fn answer(stream: &mut Stream) -> Result<Response> {
+fn answer(stream: &mut impl Read) -> Result<Response> {
     receive(stream)?.ok_or_else(|| "PV worker closed its protocol".into())
 }
 impl Drop for Worker {
@@ -170,10 +222,22 @@ impl Drop for Worker {
 struct Slot {
     seat: Mutex<Seat>,
 }
+type RunReply = (u64, Stop, Vec<GuestWrite>);
+
 struct Seat {
     worker: Worker,
+    /// A snapshot operation needed the protocol between start and finish.
+    completed: Option<Result<RunReply>>,
     /// A machine is running in the worker; a parked worker has none.
     occupied: bool,
+}
+impl Seat {
+    fn snapshot_call(&mut self, request: Request) -> Result<Response> {
+        if self.worker.running {
+            self.completed = Some(self.worker.receive_run());
+        }
+        self.worker.call(request)
+    }
 }
 impl Slot {
     fn seat(&self) -> MutexGuard<'_, Seat> {
@@ -202,6 +266,7 @@ impl Occupant {
             slot: Arc::new(Slot {
                 seat: Mutex::new(Seat {
                     worker: Worker::spawn(executable)?,
+                    completed: None,
                     occupied: true,
                 }),
             }),
@@ -218,13 +283,24 @@ impl Occupant {
     pub(super) fn call(&mut self, request: Request) -> Result<Response> {
         self.slot.seat().worker.call(request)
     }
-    /// As [`Worker::run`].
-    pub(super) fn run(
-        &mut self,
-        request: Request,
-        frames: &[Vec<u8>],
-    ) -> Result<(u64, Stop, Vec<GuestWrite>)> {
-        self.slot.seat().worker.run(request, frames)
+    /// As [`Worker::send_run`].
+    pub(super) fn send_run(&mut self, request: Request, frames: &[Vec<u8>]) -> Result<()> {
+        self.slot.seat().worker.send_run(request, frames)
+    }
+    /// As [`Worker::ready`].
+    pub(super) fn ready(&mut self) -> bool {
+        self.slot.seat().worker.ready()
+    }
+    /// As [`Worker::doorbell`].
+    pub(super) fn doorbell(&self, ticket: u64) -> Option<RawFd> {
+        self.slot.seat().worker.doorbell(ticket)
+    }
+    /// As [`Worker::receive_run`].
+    pub(super) fn receive_run(&mut self) -> Result<(u64, Stop, Vec<GuestWrite>)> {
+        let mut seat = self.slot.seat();
+        seat.completed
+            .take()
+            .unwrap_or_else(|| seat.worker.receive_run())
     }
     /// Keep the stopped machine in the worker as a retained snapshot. `Err`
     /// carries the bytes of RAM pages the worker's snapshots hold when
@@ -305,8 +381,9 @@ impl Version {
             id: self.id,
             verify,
         };
-        match seat.worker.call(request)? {
+        match seat.snapshot_call(request)? {
             Response::Rewound { pages } => {
+                seat.completed = None;
                 seat.occupied = true;
                 let occupant = Occupant {
                     slot: self.slot.clone(),
@@ -324,7 +401,7 @@ impl Version {
             id: self.id,
             path: path.to_owned(),
         };
-        match self.slot.seat().worker.call(request)? {
+        match self.slot.seat().snapshot_call(request)? {
             Response::Exported => Ok(()),
             _ => Err("PV unexpected export response".into()),
         }
@@ -345,7 +422,7 @@ impl Drop for Version {
         if seat.worker.lost {
             return;
         }
-        if let Err(error) = seat.worker.call(Request::Release(self.id)) {
+        if let Err(error) = seat.snapshot_call(Request::Release(self.id)) {
             eprintln!("PV retained snapshot release: {error}");
         }
     }
@@ -370,6 +447,9 @@ pub(crate) fn preboot_errors(executable: &Path) -> Result<Vec<Option<String>>> {
     Ok(vec![
         worker.call(Request::Capture(unused.clone())).err(),
         worker.call(Request::ExportDisk(unused)).err(),
-        worker.run(run, &[vec![0; 60]]).err(),
+        worker
+            .send_run(run, &[vec![0; 60]])
+            .and_then(|_| worker.receive_run())
+            .err(),
     ])
 }
