@@ -116,8 +116,12 @@ simulator:
 `quantum` defaults to `1ms` and must be a positive duration in whole nanoseconds.
 Network latency and scheduled events can shorten a parallel execution window.
 The quantum is a host setting: where machines stop changes nothing they do, so
-it does not change results, and comparison ignores it. Replay and checkpoints
-retain it, and a checkpoint start refuses a different one.
+it does not change results. Comparison ignores a definition's quantum: edit
+`quantumNs` in `seedbox show ID --view definition` output, run that file, and
+`seedbox compare` reports MATCH. A project run again after changing `quantum`
+in `seedbox.yaml` is NOT_COMPARABLE with the earlier run instead, because its
+prepared inputs record the quantum. Replay and checkpoints retain the quantum,
+and a checkpoint start refuses a different one.
 
 The latency is also how long the simulator takes to act on a machine's request: an oracle
 call takes effect, a property `flush` is answered and the run ends one `network.latency`

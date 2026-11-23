@@ -15,7 +15,10 @@ Guest properties and crash reports qualify the oracle's verdict: violations, unm
 Replay uses retained runtime inputs, so MATCH alone cannot validate a changed engine.
 Independent fresh runs exercise the new engine; comparison first checks resolved input compatibility.
 [Comparison](../crates/seedbox-server/src/execution.rs) ignores image names, descriptive host/engine metadata
-and the quantum, not launch contracts or binary inputs. Completion freezes definitions and result evidence in the server;
+and the quantum, not launch contracts or binary inputs. The prepared Driver inputs are binary inputs and record
+the quantum they were prepared with, so a project prepared again with another quantum is NOT_COMPARABLE, while
+a definition resubmitted with only its quantum edited shares its source's inputs and compares.
+Completion freezes definitions and result evidence in the server;
 comparison never reconstructs them from attempt paths. Missing evidence is NOT_COMPARABLE, not a mismatch.
 
 ## Parallelism has a causal bound
