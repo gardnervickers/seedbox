@@ -1,17 +1,38 @@
 use super::*;
+use seedbox_machine::host::idle::SpinThenSleep;
 use std::io::{PipeReader, PipeWriter};
+use std::time::Duration;
 
 type End = Stream<PipeReader, PipeWriter>;
 
+/// How both ends of a test wait: a shipped strategy and its budget.
+type Wait = (Idle, Duration);
+/// Each shipped strategy with the coordinator's budget, and no budget at all,
+/// with which either strategy sleeps after one look.
+fn waits() -> [Wait; 3] {
+    let [spin, monitor] = Idle::ALL.map(|idle| (idle, SpinThenSleep::SPIN));
+    [spin, monitor, (Idle::SpinThenSleep, Duration::ZERO)]
+}
+
 /// Both ends of one region in this process, each with its own pipe.
 fn pair(capacity: u64, spin: Duration) -> (End, End) {
+    pair_idle(capacity, (Idle::SpinThenSleep, spin))
+}
+fn pair_idle(capacity: u64, (idle, budget): Wait) -> (End, End) {
+    pair_waiting(capacity, idle.with_budget(budget), idle.with_budget(budget))
+}
+fn pair_waiting(
+    capacity: u64,
+    client: Box<dyn IdleStrategy>,
+    worker: Box<dyn IdleStrategy>,
+) -> (End, End) {
     let (region, descriptor) = Region::create(capacity).unwrap();
     let peer = Region::map(&descriptor, capacity).unwrap();
     let (client_sleep, worker_wake) = std::io::pipe().unwrap();
     let (worker_sleep, client_wake) = std::io::pipe().unwrap();
     (
-        Stream::new(region, Side::Client, client_sleep, client_wake, spin),
-        Stream::new(peer, Side::Worker, worker_sleep, worker_wake, spin),
+        Stream::new(region, Side::Client, client_sleep, client_wake, client),
+        Stream::new(peer, Side::Worker, worker_sleep, worker_wake, worker),
     )
 }
 
@@ -47,9 +68,9 @@ fn bounded<T: Send + 'static>(reason: &str, body: impl FnOnce() -> T + Send + 's
 }
 
 /// The worker echoes each message and the client checks every echo.
-fn echo(capacity: u64, spin: Duration, lengths: Vec<usize>) -> (End, End) {
+fn echo(capacity: u64, wait: Wait, lengths: Vec<usize>) -> (End, End) {
     bounded("every message echoed", move || {
-        let (mut client, mut worker) = pair(capacity, spin);
+        let (mut client, mut worker) = pair_idle(capacity, wait);
         let count = lengths.len();
         let echo = std::thread::spawn(move || {
             for _ in 0..count {
@@ -79,9 +100,10 @@ fn no_pending_wakeup(end: &mut End) {
 #[test]
 fn messages_round_trip_through_small_and_wrapping_rings() {
     let lengths = vec![0, 1, 59, 60, 61, 64, 65, 200, 4096, 100_000];
-    for spin in [SPIN, Duration::ZERO] {
-        echo(64, spin, lengths.clone());
-        echo(CAPACITY, spin, lengths.clone());
+    // Every strategy delivers the same bytes in the same order.
+    for wait in waits() {
+        echo(64, wait, lengths.clone());
+        echo(CAPACITY, wait, lengths.clone());
     }
 }
 
@@ -89,7 +111,7 @@ fn messages_round_trip_through_small_and_wrapping_rings() {
 fn every_sleep_takes_exactly_one_wakeup() {
     // Without spinning every wait sleeps, so marks often race with progress.
     let lengths: Vec<usize> = (0..20_000).map(|i| i % 97).collect();
-    let (mut client, mut worker) = echo(64, Duration::ZERO, lengths);
+    let (mut client, mut worker) = echo(64, (Idle::SpinThenSleep, Duration::ZERO), lengths);
     no_pending_wakeup(&mut client);
     no_pending_wakeup(&mut worker);
     for ring in [Ring::Requests, Ring::Responses] {
@@ -102,9 +124,9 @@ fn every_sleep_takes_exactly_one_wakeup() {
 #[test]
 fn a_closed_peer_ends_reads_and_breaks_writes() {
     bounded("reads and writes end at a closed peer", || {
-        for spin in [SPIN, Duration::ZERO] {
+        for wait in waits() {
             // Published bytes stay readable; then EOF.
-            let (mut client, mut worker) = pair(64, spin);
+            let (mut client, mut worker) = pair_idle(64, wait);
             worker.write_all(&[1, 2, 3]).unwrap();
             worker.flush().unwrap();
             drop(worker);
@@ -114,7 +136,7 @@ fn a_closed_peer_ends_reads_and_breaks_writes() {
             assert_eq!(client.read(&mut bytes).unwrap(), 0);
 
             // A writer waiting for room learns that the reader is gone.
-            let (mut client, worker) = pair(64, spin);
+            let (mut client, worker) = pair_idle(64, wait);
             drop(worker);
             let error = client.write_all(&[0; 65]).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
@@ -122,42 +144,66 @@ fn a_closed_peer_ends_reads_and_breaks_writes() {
     })
 }
 
+/// A strategy that waits as scripted and reports what its stream tells it.
+struct Scripted {
+    /// Spins before a wait sleeps; `None` spins until progress and says so.
+    spins: Option<u64>,
+    events: std::sync::mpsc::Sender<Event>,
+}
+#[derive(Debug, PartialEq)]
+enum Event {
+    Spinning,
+    Ended(Outcome),
+}
+impl IdleStrategy for Scripted {
+    fn idle(&mut self, attempt: u64, _: Duration) -> Action {
+        match self.spins {
+            None if attempt == 0 => self.events.send(Event::Spinning).unwrap(),
+            Some(spins) if attempt >= spins => return Action::Sleep,
+            _ => {}
+        }
+        Action::Spin
+    }
+    fn reset(&mut self, outcome: Outcome) {
+        self.events.send(Event::Ended(outcome)).unwrap();
+    }
+}
+
 #[test]
-fn a_side_whose_spins_run_out_spins_again_only_on_probes() {
-    // The peer publishes only once the reader marks its wait, so every spin
-    // runs out.
-    bounded("each wait whose spin runs out", || {
-        let (mut client, mut worker) = pair(64, Duration::ZERO);
-        let waits = PROBE as u32;
-        let peer = std::thread::spawn(move || {
-            let guard = seedbox_test_time::HangGuard::new("reader sleeps", Duration::from_secs(60));
-            for _ in 0..waits {
-                let mark = worker.region.word(Ring::Responses.word(READER_ASLEEP));
-                guard
-                    .wait_for(|| (mark.load(SeqCst) != 0).then_some(()))
-                    .unwrap();
+fn a_wait_tells_its_strategy_how_it_ended() {
+    bounded("each scripted wait ends", || {
+        for (spins, expected) in [
+            (None, Outcome::Progress),
+            (Some(1), Outcome::SleptAfterTrying),
+            (Some(0), Outcome::SleptAtOnce),
+        ] {
+            let (events, seen) = std::sync::mpsc::channel();
+            let (mut client, mut worker) = pair_waiting(
+                64,
+                Box::new(Scripted { spins, events }),
+                Box::new(SpinThenSleep::new(Duration::ZERO)),
+            );
+            // The peer publishes only once the reader is where its script
+            // puts it: inside its spin, or asleep with its wait marked.
+            let peer = std::thread::spawn(move || {
+                let guard =
+                    seedbox_test_time::HangGuard::new("the reader waits", Duration::from_secs(60));
+                if spins.is_none() {
+                    assert_eq!(guard.recv(&seen).unwrap(), Event::Spinning);
+                } else {
+                    let mark = worker.region.word(Ring::Responses.word(READER_ASLEEP));
+                    guard
+                        .wait_for(|| (mark.load(SeqCst) != 0).then_some(()))
+                        .unwrap();
+                }
                 worker.write_all(&[0]).unwrap();
                 worker.flush().unwrap();
-            }
-        });
-        let futile: Vec<u32> = (0..waits)
-            .map(|_| {
-                assert_eq!(client.read(&mut [0]).unwrap(), 1);
-                client.futile
-            })
-            .collect();
-        peer.join().unwrap();
-        // FUTILE spins run out; then only the PROBE-th wait spins.
-        let expected: Vec<u32> = (1..=waits)
-            .map(|wait| {
-                if wait == waits {
-                    FUTILE + 1
-                } else {
-                    wait.min(FUTILE)
-                }
-            })
-            .collect();
-        assert_eq!(futile, expected);
+                seen
+            });
+            assert_eq!(client.read(&mut [0]).unwrap(), 1);
+            let ended: Vec<Event> = peer.join().unwrap().try_iter().collect();
+            assert_eq!(ended, [Event::Ended(expected)], "{spins:?}");
+        }
     })
 }
 
@@ -196,13 +242,13 @@ fn assert_corrupt(result: io::Result<usize>) {
 #[test]
 fn positions_outside_the_ring_are_errors_not_reads() {
     // The writer claims more than a whole ring.
-    let (mut client, worker) = pair(64, SPIN);
+    let (mut client, worker) = pair(64, SpinThenSleep::SPIN);
     let written = worker.region.word(Ring::Responses.word(WRITTEN));
     written.store(65, SeqCst);
     assert_corrupt(client.read(&mut [0; 8]));
 
     // The writer's position moves back behind bytes already read.
-    let (mut client, mut worker) = pair(64, SPIN);
+    let (mut client, mut worker) = pair(64, SpinThenSleep::SPIN);
     worker.write_all(&[0; 8]).unwrap();
     worker.flush().unwrap();
     assert_eq!(client.read(&mut [0; 8]).unwrap(), 8);
@@ -211,14 +257,14 @@ fn positions_outside_the_ring_are_errors_not_reads() {
     assert_corrupt(client.read(&mut [0; 8]));
 
     // The reader claims bytes written but not yet published.
-    let (mut client, worker) = pair(64, SPIN);
+    let (mut client, worker) = pair(64, SpinThenSleep::SPIN);
     client.write_all(&[0; 64]).unwrap();
     let read = worker.region.word(Ring::Requests.word(READ));
     read.store(1, SeqCst);
     assert_corrupt(client.write(&[0]));
 
     // The reader's position moves back behind room already reused.
-    let (mut client, worker) = pair(64, SPIN);
+    let (mut client, worker) = pair(64, SpinThenSleep::SPIN);
     client.write_all(&[0; 64]).unwrap();
     client.flush().unwrap();
     let read = worker.region.word(Ring::Requests.word(READ));
@@ -234,4 +280,204 @@ fn only_powers_of_two_within_bounds_are_capacities() {
         assert!(Region::create(capacity).is_err(), "{capacity}");
     }
     assert!(Region::create(64).is_ok());
+}
+
+#[test]
+fn a_claimed_message_is_published_whole_at_its_commit() {
+    let (mut client, mut worker) = pair(1 << 10, Duration::ZERO);
+    let bytes = message(300, 7);
+    let mut claim = client.claim().unwrap();
+    claim
+        .write_all(&(bytes.len() as u32).to_le_bytes())
+        .unwrap();
+    claim.flush().unwrap();
+    claim.write_all(&bytes).unwrap();
+    claim.flush().unwrap();
+    assert!(!worker.readable(), "nothing is visible before the commit");
+    claim.commit().unwrap();
+    assert!(worker.readable());
+    assert_eq!(receive(&mut worker), bytes);
+    no_pending_wakeup(&mut worker);
+}
+
+#[test]
+fn a_claim_larger_than_the_ring_streams_through_it() {
+    for wait in waits() {
+        let (mut client, mut worker) = pair_idle(64, wait);
+        let bytes = message(1000, 3);
+        let reader = std::thread::spawn(move || {
+            let got = receive(&mut worker);
+            (got, worker)
+        });
+        let sent = bytes.clone();
+        let (got, worker) = bounded("an oversized claim", move || {
+            let mut claim = client.claim().unwrap();
+            claim.write_all(&(sent.len() as u32).to_le_bytes()).unwrap();
+            claim.write_all(&sent).unwrap();
+            claim.commit().unwrap();
+            client.finish_send().unwrap();
+            let received = reader.join().unwrap();
+            drop(client);
+            received
+        });
+        assert_eq!(got, bytes, "{wait:?}");
+        drop(worker);
+    }
+}
+
+#[test]
+fn polling_fragments_preserves_a_wrapped_header_and_large_trailer() {
+    let (mut client, worker) = pair(64, Duration::ZERO);
+    let mut worker = io::BufReader::new(worker);
+    let mut prefix = Vec::new();
+    for len in [63, 257, 4096, 7] {
+        let payload = message(len, 19);
+        let mut claim = client.claim().unwrap();
+        claim.header(&payload).unwrap();
+        claim.write_all(&payload).unwrap();
+        claim.commit().unwrap();
+        // The peer takes one available interval per pass. Neither side has
+        // a helper thread: a blocking operation here cannot make progress.
+        while !worker.get_mut().poll_message(&mut prefix).unwrap() {
+            client.advance_send().unwrap();
+        }
+        let (header, received) = super::receive(&mut worker, &prefix, |header: Vec<u8>, input| {
+            let mut bytes = vec![0; len];
+            input.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+            Ok((header, bytes))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(header, payload);
+        assert_eq!(received, payload);
+        prefix.clear();
+    }
+}
+
+#[test]
+fn packet_decoder_borrows_whole_contiguous_messages_and_streams_the_rest() {
+    use crate::machine::pv::wire::Input;
+    for (alignment, length, contiguous) in [(0, 15, true), (61, 15, false), (0, 137, false)] {
+        let (mut client, mut worker) = pair(64, Duration::ZERO);
+        worker.write_all(&vec![0; alignment]).unwrap();
+        worker.flush().unwrap();
+        client.read_exact(&mut vec![0; alignment]).unwrap();
+        let expected = message(length, 19);
+        let sent = expected.clone();
+        bounded(
+            "the fragmented receiver returns credit to the writer",
+            move || {
+                let producer = std::thread::spawn(move || {
+                    worker
+                        .message(&length, |claim| {
+                            claim.write_all(&sent).map_err(|e| e.to_string())
+                        })
+                        .unwrap();
+                    worker.finish_send().unwrap();
+                });
+                let got = super::receive(
+                    &mut io::BufReader::new(client),
+                    &[],
+                    |count: usize, input| {
+                        assert_eq!(matches!(input, Input::Slice(_)), contiguous);
+                        let mut bytes = vec![0; count];
+                        input.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+                        Ok(bytes)
+                    },
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(got, expected);
+                producer.join().unwrap();
+            },
+        );
+    }
+}
+
+#[test]
+fn synchronous_reply_streams_its_validated_trailer_across_fragments() {
+    use crate::machine::pv::protocol::Stop;
+    use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
+
+    bounded(
+        "the polling reader returns credit for each reply fragment",
+        || {
+            let (mut client, mut worker) = pair(64, Duration::ZERO);
+            let bytes = message(4096, 73);
+            let writes = vec![GuestWrite::Console(LifecycleWrite { time: 7, bytes })];
+            let response = Response::Stopped {
+                time: 7,
+                stop: Stop::Horizon,
+                writes: 1,
+            };
+            let producer = std::thread::spawn(move || {
+                worker.reply(&response, Some(&writes)).unwrap();
+                writes
+            });
+            let mut prefix = Vec::new();
+            while !client.poll_message(&mut prefix).unwrap() {
+                std::hint::spin_loop();
+            }
+            assert!(prefix.len() >= 64);
+            let got = super::receive(&mut io::BufReader::new(client), &prefix, |header, input| {
+                match header {
+                    Response::Stopped {
+                        time: 7,
+                        stop: Stop::Horizon,
+                        writes,
+                    } => crate::machine::pv::wire::receive_writes(input, writes),
+                    _ => Err("unexpected reply".into()),
+                }
+            })
+            .unwrap()
+            .unwrap();
+            assert_eq!(got, producer.join().unwrap());
+        },
+    );
+}
+
+#[test]
+fn invalid_last_record_leaves_a_long_reply_unpublished() {
+    use crate::machine::pv::protocol::Stop;
+    use seedbox_machine::pv::transport::{GuestWrite, LifecycleWrite};
+    let (client, mut worker) = pair(64, Duration::ZERO);
+    let writes = [
+        GuestWrite::Console(LifecycleWrite {
+            time: 1,
+            bytes: message(128, 11),
+        }),
+        GuestWrite::Frame(LifecycleWrite {
+            time: 2,
+            bytes: vec![0],
+        }),
+    ];
+    let reply = Response::Stopped {
+        time: 2,
+        stop: Stop::Horizon,
+        writes: 2,
+    };
+    assert!(worker.reply(&reply, Some(&writes)).is_err());
+    assert_eq!(
+        client
+            .region
+            .word(Ring::Responses.word(WRITTEN))
+            .load(SeqCst),
+        0
+    );
+}
+
+#[test]
+fn a_direct_json_header_can_wrap_its_prefix_or_outgrow_its_first_slice() {
+    for alignment in [252, 510] {
+        let (mut writer, mut reader) = pair(512, Duration::ZERO);
+        writer.write_all(&vec![0; alignment]).unwrap();
+        writer.flush().unwrap();
+        reader.read_exact(&mut vec![0; alignment]).unwrap();
+        let expected = vec![255_u8; 100];
+        let mut claim = writer.claim().unwrap();
+        claim.header(&expected).unwrap();
+        claim.commit().unwrap();
+        let got: Vec<u8> = protocol::receive(&mut reader).unwrap().unwrap();
+        assert_eq!(got, expected);
+    }
 }
