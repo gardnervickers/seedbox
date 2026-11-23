@@ -523,9 +523,10 @@ mod machine {
                         .into(),
                     epoch_seconds: 0,
                 };
-                // Hang guard only: main measured ~91 host seconds for 12 such
-                // boots unloaded. Four times that permits concurrent portable
-                // checks; workload failure is determined by guest progress below.
+                // Hang guard only: these nine boots run one after another on the
+                // Driver thread, an estimated ~40 host seconds per configuration
+                // unloaded. The bound leaves room for concurrent portable checks;
+                // workload failure is determined by guest progress below.
                 let guard = HangGuard::new(
                     "paired native Linux boot transport must return",
                     Duration::from_secs(4 * 91),

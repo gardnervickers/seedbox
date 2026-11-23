@@ -3,9 +3,7 @@ use super::{Barrier, Error, Machine, MachineId};
 use seedbox_machine::machine::ExecutionEvidence;
 impl<M> Barrier<'_, M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Observe native interaction evidence at a stopped barrier. Finished and
     /// permanently stopped drivers are allowed; poisoned/in-flight instances
@@ -40,9 +38,7 @@ pub struct ExecutionEvidenceRead<E> {
 
 impl<M> Barrier<'_, M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Read all stopped machines in insertion order, one after another.
     /// Reading evidence does not execute machines or change Driver policy.

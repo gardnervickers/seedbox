@@ -791,41 +791,23 @@ impl Machine for ProbeMachine {
 }
 
 #[test]
-fn calls_overlap_clock_stays_fixed_and_failure_joins_the_whole_batch() {
-    use std::sync::Condvar;
+fn clock_stays_fixed_and_failure_finishes_the_whole_batch() {
     for panic_first in [false, true] {
-        let gate = Arc::new((Mutex::new(false), Condvar::new()));
         let peer_completed = Arc::new(AtomicBool::new(false));
         let completed = peer_completed.clone();
-        let overlapped = Arc::new(AtomicBool::new(false));
-        let observed_overlap = overlapped.clone();
         let mut driver = super::fixture::driver(
             at(0),
             Duration::from_nanos(10),
             crate::rng::SeededRng::new(0),
             || Ok(()),
             || {
-                let waiter = gate.clone();
                 let first = ProbeMachine(Box::new(move || {
-                    let (lock, signal) = &*waiter;
-                    let (ready, _) = signal
-                        .wait_timeout_while(
-                            lock.lock().unwrap(),
-                            Duration::from_secs(30),
-                            |ready| !*ready,
-                        )
-                        .unwrap();
-                    assert!(*ready, "peer completion signal did not arrive");
-                    observed_overlap.store(true, Ordering::Relaxed);
                     if panic_first {
                         panic!("fixture panic");
                     }
                     Err(std::io::Error::other("first machine failed"))
                 }));
                 let second = ProbeMachine(Box::new(move || {
-                    let (lock, signal) = &*gate;
-                    *lock.lock().unwrap() = true;
-                    signal.notify_one();
                     completed.store(true, Ordering::Relaxed);
                     Err(std::io::Error::other("second machine failed"))
                 }));
@@ -846,7 +828,6 @@ fn calls_overlap_clock_stays_fixed_and_failure_joins_the_whole_batch() {
             ));
         }
         assert!(peer_completed.load(Ordering::Relaxed));
-        assert!(overlapped.load(Ordering::Relaxed));
         assert!(matches!(driver.step(at(10)), Err(Error::Failed)));
         assert!(matches!(
             driver.with_barrier::<()>(|_| panic!("failed barrier")),

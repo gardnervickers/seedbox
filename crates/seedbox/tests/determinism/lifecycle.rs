@@ -1,9 +1,15 @@
 //! Machine lifecycle faults and live controls beside the shared program.
 use crate::session::{err, Session, REAL_TIME};
-use crate::trace::{same_output, suffix};
+use crate::trace::{same_output, suffix, Trace};
 use crate::{input, Outcome, SECOND};
 use seedbox_api::{ComparisonStatus, PlaybackRate, SimulationId};
 use serde_json::{json, Value};
+
+/// Reference runs, the documents that rerun them, and what their observers saw.
+pub struct References {
+    /// Name, the document that reruns it, the reference run and its trace.
+    runs: Vec<(&'static str, Value, SimulationId, Trace)>,
+}
 
 /// The shared definition with machines slowed by different factors (so
 /// rounds finish at very different host times), and whole-machine
@@ -73,8 +79,12 @@ impl Session {
     /// The lifecycle variant applies every fault and differs from the
     /// baseline; an interactively controlled and checkpointed lifecycle run
     /// replays from its retained timeline, and a branch from that checkpoint
-    /// continues its output exactly.
-    pub async fn lifecycle_controls(&self, baseline: &SimulationId) -> Outcome {
+    /// continues its output exactly. Returns the baseline, lifecycle,
+    /// controlled and branch references with everything their observers saw.
+    pub async fn lifecycle_references(
+        &self,
+        baseline: &SimulationId,
+    ) -> Result<References, String> {
         let lifecycle = lifecycle_document(&self.document)?;
         let varied = self.submit(&lifecycle, false).await?;
         self.complete(&varied).await?;
@@ -139,12 +149,48 @@ impl Session {
         )
         .map_err(|e| format!("{branch} output differs from {interactive} after {at} ns:\n{e}"))?;
 
-        // Rerunning the retained timeline reproduces the controlled run.
+        // Live admission and checkpoint capture publish host-timed events
+        // that a rerun of the retained timeline does not, so the controlled
+        // run's observations are those of its replay.
         let recorded = self.recorded_document(&interactive).await?;
         let replayed = self.submit(&recorded, false).await?;
         self.complete(&replayed).await?;
         self.same_results(&interactive, &replayed)
             .await
-            .map_err(|e| format!("replay of the controlled run: {e}"))
+            .map_err(|e| format!("replay of the controlled run: {e}"))?;
+
+        let mut runs = Vec::new();
+        for (name, document, id, observed) in [
+            ("baseline", self.document.clone(), baseline, baseline),
+            ("lifecycle", lifecycle, &varied, &varied),
+            ("interactive", recorded, &interactive, &replayed),
+            ("branch", branched, &branch, &branch),
+        ] {
+            runs.push((
+                name,
+                document,
+                id.clone(),
+                Trace::read(self, observed).await?,
+            ));
+        }
+        Ok(References { runs })
+    }
+
+    /// An independent fresh rerun of each reference document (including its
+    /// retained live controls, and the branch from its checkpoint) must
+    /// reproduce outcome, witness, full state and fault history, and exactly
+    /// the logs, events, faults and timeline its reference's observers saw.
+    pub async fn fresh_reruns(&self, references: &References) -> Outcome {
+        for (name, document, reference, trace) in &references.runs {
+            let rerun = &self.submit(document, false).await?;
+            self.complete(rerun).await?;
+            self.same_results(reference, rerun)
+                .await
+                .map_err(|e| format!("{name}: {e}"))?;
+            trace
+                .same(&Trace::read(self, rerun).await?)
+                .map_err(|e| format!("{name} {reference} vs {rerun}: {e}"))?;
+        }
+        Ok(())
     }
 }

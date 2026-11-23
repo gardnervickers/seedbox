@@ -169,9 +169,7 @@ fn validate<T>(
 
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Construct a capturable Driver using the existing deterministic seeded stream.
     ///

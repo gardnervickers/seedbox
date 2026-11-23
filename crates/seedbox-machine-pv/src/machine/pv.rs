@@ -359,7 +359,8 @@ impl Snapshot {
         self.image().expect("snapshot image")
     }
 }
-// Checkpoints are kept and restored across the Driver's worker threads.
+// Checkpoints are shared with and restored on other threads (lazy restores
+// run on scoped threads).
 const _: fn() = || {
     fn shared<T: Clone + Send + Sync>() {}
     shared::<Snapshot>();

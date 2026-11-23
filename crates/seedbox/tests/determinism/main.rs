@@ -304,8 +304,10 @@ fn whole_run_determinism_oracles() {
 
 /// Lifecycle faults apply and change the run; a controlled, checkpointed
 /// lifecycle run replays from its retained timeline and branches exactly.
+/// Independent fresh reruns of the baseline, lifecycle, controlled and branch
+/// documents then reproduce every result and everything observed.
 #[test]
-fn lifecycle_controls_replay_and_branch() {
+fn lifecycle_controls_replay_branch_and_rerun() {
     let mut run = Run::new("lifecycle");
     let state = run.state("state");
     let server = run.server(&state).unwrap();
@@ -314,7 +316,13 @@ fn lifecycle_controls_replay_and_branch() {
         let Some(baseline) = run.oracle("baseline", session.baseline()).await else {
             return;
         };
-        run.oracle("LifecycleControls", session.lifecycle_controls(&baseline))
+        let Some(references) = run
+            .oracle("LifecycleControls", session.lifecycle_references(&baseline))
+            .await
+        else {
+            return;
+        };
+        run.oracle("FreshReruns", session.fresh_reruns(&references))
             .await;
     });
     drop(server);

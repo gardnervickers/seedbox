@@ -15,9 +15,8 @@ pub fn driver<M>(
     make: impl FnOnce() -> Result<Vec<M>, M::Error>,
 ) -> Result<Driver<M>, Error<M::Error>>
 where
+    // The `Send + 'static` factory owns the prebuilt machines.
     M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
 {
     let machines = make().map_err(Error::Construction)?;
     assert!(!machines.is_empty(), "fixture requires an oracle");

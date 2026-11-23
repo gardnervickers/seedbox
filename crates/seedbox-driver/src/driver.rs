@@ -402,9 +402,7 @@ pub struct Driver<M: Machine> {
 
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Construct machines and driver-owned simulation dependencies.
     ///
@@ -859,7 +857,7 @@ where
     /// use seedbox_driver::driver::{Driver, Error, MachineId};
     /// use seedbox_machine::machine::Machine;
     /// fn observe<M>(driver: &mut Driver<M>, id: MachineId) -> Result<bool, Error<M::Error>>
-    /// where M: Machine + Send + 'static, M::Context: 'static, M::Error: Send + 'static {
+    /// where M: Machine {
     ///     driver.with_barrier(|barrier| {
     ///         let _machine = barrier.machine(id)?;
     ///         barrier.paused(id)
@@ -873,7 +871,7 @@ where
     /// use seedbox_driver::driver::{Driver, MachineId};
     /// use seedbox_machine::machine::Machine;
     /// fn escape<M>(driver: &mut Driver<M>, id: MachineId) -> &M
-    /// where M: Machine + Send + 'static, M::Context: 'static, M::Error: Send + 'static {
+    /// where M: Machine {
     ///     driver.with_barrier(|barrier| barrier.machine(id)).ok().unwrap()
     /// }
     /// ```
@@ -1938,9 +1936,7 @@ pub struct Barrier<'a, M: Machine> {
 
 impl<M> Barrier<'_, M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Observe playback and the committed simulation position without progress.
     pub fn playback(&self) -> PlaybackStatus {

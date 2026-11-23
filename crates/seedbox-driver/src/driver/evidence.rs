@@ -7,9 +7,7 @@ use std::io::Write;
 
 impl<M> Barrier<'_, M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Write canonical Driver-owned policy state at this stopped boundary.
     ///

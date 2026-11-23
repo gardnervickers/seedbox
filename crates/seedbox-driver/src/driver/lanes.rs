@@ -48,9 +48,7 @@ struct Window {
 
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Whether frames for each machine can arrive inside its lane: an exited
     /// receiver drops them there. A paused or suspended receiver admits them

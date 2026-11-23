@@ -125,9 +125,7 @@ pub(super) struct AcceptedRun {
 
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     pub(super) fn run_batch(
         &mut self,

@@ -39,9 +39,7 @@ impl<M: Machine> Runs<M> {
 
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     pub(super) fn submit_run(&mut self, view: BatchView, runs: &mut Runs<M>) {
         if self.splits(view.0) {
