@@ -262,9 +262,15 @@ mod guest {
     /// ARM exclusives become compare-and-swap with software reservations.
     /// The application's `IC IVAU` invalidates rewritten code, rather than
     /// code-page write protection and sandboxing; reads of `CTR_EL0` clear
-    /// DIC, so applications cannot legally omit that `IC IVAU`.
-    pub(super) const TRANSLATOR_OPTIONS: &[&str] =
-        &["-ldstex2cas", "-no_hw_cache_consistency", "-fake_ctr_dic"];
+    /// DIC, so applications cannot legally omit that `IC IVAU`. A block that
+    /// runs a syscall inside the code cache is shared like any other block,
+    /// so it links with its neighbours instead of leaving the cache twice.
+    pub(super) const TRANSLATOR_OPTIONS: &[&str] = &[
+        "-ldstex2cas",
+        "-no_hw_cache_consistency",
+        "-fake_ctr_dic",
+        "-shared_ignorable_syscall_bbs",
+    ];
     pub(super) fn kernel(bytes: &[u8]) -> std::io::Result<()> {
         seedbox_machine::machine::assets::kernel(bytes)
     }
