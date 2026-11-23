@@ -8,6 +8,7 @@
 
 use super::Error;
 use rayon::{ThreadPool, ThreadPoolBuilder};
+use seedbox_machine::host::doorbell::Doorbell;
 use std::{
     any::Any,
     cell::{Cell, RefCell},
@@ -109,6 +110,13 @@ pub(super) struct Stream<F, T> {
     outstanding: usize,
 }
 
+impl<F, T> Stream<F, T> {
+    /// Submitted jobs whose results have not been taken.
+    pub(super) fn outstanding(&self) -> usize {
+        self.outstanding
+    }
+}
+
 impl<F, T> Default for Stream<F, T> {
     fn default() -> Self {
         let (send, receive) = mpsc::channel();
@@ -127,6 +135,11 @@ pub(super) struct Workers<C> {
     threads: Vec<JoinHandle<()>>,
     /// Worker 0's context, used on the calling thread.
     caller: C,
+    /// How the calling thread waits for runs in flight.
+    idle: Box<dyn seedbox_machine::host::idle::IdleStrategy>,
+    // Private unit-test doorbell, in place of the process's.
+    #[cfg(test)]
+    doorbell: Option<&'static Doorbell>,
     // Private unit-test witness after a job has published its result. Not
     // present in runtime builds or part of Driver snapshots.
     #[cfg(test)]
@@ -147,6 +160,9 @@ impl<C: 'static> Workers<C> {
                 pool: None,
                 threads,
                 caller,
+                idle: seedbox_machine::host::idle::Idle::default().build(),
+                #[cfg(test)]
+                doorbell: None,
                 #[cfg(test)]
                 result_observer: None,
             });
@@ -195,6 +211,9 @@ impl<C: 'static> Workers<C> {
                 pool: Some(pool),
                 threads,
                 caller,
+                idle: seedbox_machine::host::idle::Idle::default().build(),
+                #[cfg(test)]
+                doorbell: None,
                 #[cfg(test)]
                 result_observer: None,
             }),
@@ -301,17 +320,65 @@ impl<C: 'static> Workers<C> {
         if stream.outstanding == 0 {
             return None;
         }
+        if let Some(result) = self.try_next(stream) {
+            return Some(result);
+        }
+        // Every outstanding job is on a pool thread, which always sends.
         stream.outstanding -= 1;
+        Some(stream.receive.recv().expect("pool job reports"))
+    }
+
+    /// As [`Workers::next`], but `None` instead of waiting while every
+    /// outstanding job is on a pool thread.
+    pub(super) fn try_next<F, T>(&mut self, stream: &mut Stream<F, T>) -> Option<T>
+    where
+        F: FnOnce(&mut C) -> T,
+    {
+        if stream.outstanding == 0 {
+            return None;
+        }
         if let Ok(result) = stream.receive.try_recv() {
+            stream.outstanding -= 1;
             return Some(result);
         }
         while let Some(slot) = stream.slots.pop() {
             if let Some(job) = claim(&slot) {
+                stream.outstanding -= 1;
                 return Some(self.run_here(job));
             }
         }
-        // Every outstanding job is on a pool thread, which always sends.
-        Some(stream.receive.recv().expect("pool job reports"))
+        None
+    }
+
+    /// Worker 0's context, for machine calls on the calling thread.
+    pub(super) fn caller(&mut self) -> &mut C {
+        &mut self.caller
+    }
+
+    /// Wait for runs in flight with `idle` instead.
+    #[cfg(test)]
+    pub(super) fn set_idle(&mut self, idle: Box<dyn seedbox_machine::host::idle::IdleStrategy>) {
+        self.idle = idle;
+    }
+
+    /// The doorbell that this Driver's worker processes ring, if any exists.
+    pub(super) fn doorbell(&self) -> Option<&'static Doorbell> {
+        #[cfg(test)]
+        if self.doorbell.is_some() {
+            return self.doorbell;
+        }
+        Doorbell::existing()
+    }
+
+    /// Use `doorbell` in place of the process's.
+    #[cfg(test)]
+    pub(super) fn set_doorbell(&mut self, doorbell: &'static Doorbell) {
+        self.doorbell = Some(doorbell);
+    }
+
+    /// How the calling thread waits for runs in flight.
+    pub(super) fn idle(&mut self) -> &mut dyn seedbox_machine::host::idle::IdleStrategy {
+        self.idle.as_mut()
     }
 
     fn run_here<F, T>(&mut self, (machine, job): (usize, F)) -> T

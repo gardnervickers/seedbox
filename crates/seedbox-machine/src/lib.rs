@@ -4,6 +4,7 @@ pub mod application;
 pub mod clock;
 pub mod definition;
 pub mod execution;
+pub mod host;
 pub mod machine;
 pub mod pv;
 pub mod rng;

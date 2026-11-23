@@ -382,7 +382,7 @@ where
             &checkpoint.network,
         )
         .map_err(Error::InvalidCheckpoint)?;
-        let workers = Workers::new(workers, context)?;
+        let workers = Self::execution_workers(workers, context)?;
         let machines = checkpoint
             .machines
             .iter()

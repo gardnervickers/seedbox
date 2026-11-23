@@ -148,6 +148,21 @@ pub fn accept_transport<R: std::io::Read, W: Write>(
     capacity: u64,
     sleep: R,
     wake: W,
-) -> Result<impl std::io::Read + Write, String> {
+) -> Result<impl FixtureTransport, String> {
     crate::machine::pv::accept(capacity, sleep, wake)
+}
+
+/// Synthetic workers publish responses through the production claim framing.
+#[cfg(seedbox_pv)]
+pub trait FixtureTransport: std::io::Read {
+    fn respond(&mut self, header: &serde_json::Value, trailer: &[u8]) -> Result<(), String>;
+}
+#[cfg(seedbox_pv)]
+impl<R: std::io::Read, W: Write> FixtureTransport for crate::machine::pv::Stream<R, W> {
+    fn respond(&mut self, header: &serde_json::Value, trailer: &[u8]) -> Result<(), String> {
+        self.message(header, |claim| {
+            claim.write_all(trailer).map_err(|e| e.to_string())
+        })?;
+        self.finish_send().map_err(|e| e.to_string())
+    }
 }

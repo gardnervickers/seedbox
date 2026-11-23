@@ -67,6 +67,30 @@ impl crate::snapshot::Record for Timestamp {
     }
 }
 
+/// Execution that can overlap another machine on the same caller thread.
+pub trait SplitRun<C, E> {
+    /// Start a stopped machine. `Some` completes synchronously. After `None`
+    /// only readiness checks and one finish with the same run context are valid.
+    fn start(
+        &mut self,
+        context: &mut RunContext<'_, C>,
+        upto: Timestamp,
+    ) -> Result<Option<StopReason>, E>;
+
+    /// Poll the transport. Once ready, finish consumes the stop or reports
+    /// the transport failure. Polling never advances guest time.
+    fn ready(&mut self) -> bool;
+
+    /// Subscribe this run to one park on the shared reply doorbell. The
+    /// returned descriptor remains live until finish and signals worker exit.
+    fn watch_reply(&mut self, _ticket: u64) -> Option<std::os::fd::RawFd> {
+        None
+    }
+
+    /// Collect the run, waiting if necessary. An error ends the execution.
+    fn finish(&mut self, context: &mut RunContext<'_, C>) -> Result<StopReason, E>;
+}
+
 pub trait Machine {
     /// Worker-local host resources required to execute this machine. They contain
     /// no persistent simulation dependencies and need not implement Send.
@@ -177,7 +201,32 @@ pub trait Machine {
         &mut self,
         context: &mut RunContext<'_, Self::Context>,
         upto: Timestamp,
-    ) -> Result<StopReason, Self::Error>;
+    ) -> Result<StopReason, Self::Error> {
+        let run = self
+            .split_run()
+            .expect("machine implements run or split_run");
+        match run.start(context, upto)? {
+            Some(stop) => Ok(stop),
+            None => run.finish(context),
+        }
+    }
+
+    /// Every instance of this type supplies a split run. A Driver for this
+    /// concrete type needs only the coordinator's execution context, including
+    /// for evidence reads. A wrapper containing different backends can instead
+    /// select its context count when it selects the backend.
+    fn always_split() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// The transport for a run that can stay in flight. Blocking implementations
+    /// implement `run` and keep the default here.
+    fn split_run(&mut self) -> Option<&mut dyn SplitRun<Self::Context, Self::Error>> {
+        None
+    }
 
     /// Capture the stopped machine without advancing execution.
     ///
