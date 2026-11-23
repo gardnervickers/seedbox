@@ -44,10 +44,6 @@ enum {
     BUDGET,
     SPILL,
     RESUME,
-#ifdef AARCH64
-    /* The code cache entry at which the exhaustion routine resumes a block. */
-    ENTRY,
-#endif
     /* The exhaustion routine's entry. AArch64 has one word per X register:
      * DISPATCH + n holds the entry for a block whose scratch register is Xn. */
     DISPATCH,
@@ -125,13 +121,11 @@ static void checkpoint_and_dispatch(void)
     /* A pending signal or JIT synchronization must complete at this safe point,
      * which the dispatcher provides. When it has nothing to do, entering the
      * block's fragment directly has the same effect, for a fraction of the cost:
-     * the routine restores the saved context and jumps to the entry. Only
-     * AArch64 takes this path: DynamoRIO implements it there alone. */
-    byte *entry = dr_redirect_entry(context, resume);
-    if (entry != NULL) {
-        *(byte **)(base + slot(ENTRY)) = entry;
+     * the clean call returns into DynamoRIO's routine, which enters the fragment
+     * dr_redirect_entry() found. Only AArch64 takes this path: DynamoRIO
+     * implements it there alone. */
+    if (dr_redirect_entry(context, resume) != NULL)
         return;
-    }
 #endif
     dr_mcontext_t machine = { sizeof(machine), DR_MC_ALL };
     DR_ASSERT(dr_get_mcontext(context, &machine));
@@ -154,7 +148,7 @@ static byte *dispatch_entry(reg_id_t scratch)
  * It uses the executing thread's TLS and DR stack, not the emitter's context.
  * It goes back into the code cache only at an entry from dr_redirect_entry(),
  * which DR refuses while a synchronization, flush or signal is pending, and
- * through DR's own jump, which leaves for the dispatcher if a signal has
+ * through DR's own routine, which leaves for the dispatcher if a signal has
  * arrived since.
  *
  * An exhausted block left before restoring its scratch register, so the
@@ -203,17 +197,12 @@ static void emit_dispatch(void *context)
         DR_ASSERT(instrlist_encode(context, entry, start, false) == start + ENTRY_BYTES);
         instrlist_clear_and_destroy(context, entry);
     }
-    /* A callee that returns has stored a code cache entry: DR's jump to it
-     * follows the clean call. It is built apart from the call for the same
-     * reason as the entries. */
-    instrlist_t *resume = instrlist_create(context);
-    instr_t *resumed = INSTR_CREATE_label(context);
-    instrlist_meta_append(resume, resumed);
-    dr_insert_redirect_entry_jump(context, resume, resumed,
-                                  dr_raw_tls_opnd(context, budget_segment, slot(ENTRY)));
-    last = instrlist_encode(context, resume, last, false);
-    DR_ASSERT(last != NULL && last <= dispatch_routine + dispatch_size);
-    instrlist_clear_and_destroy(context, resume);
+    /* A callee that returns has had dr_redirect_entry() find the block's
+     * fragment: DR's routine, written as raw words, follows the clean call and
+     * enters it. */
+    last = dr_emit_redirect_entry_routine(context, last,
+                                          (size_t)(dispatch_routine + dispatch_size - last));
+    DR_ASSERT(last != NULL);
     /* Publish generated instructions to AArch64's instruction cache. */
     for (byte *line = dispatch_routine; line < last; line += 4)
         __asm__ volatile("dc cvau, %0" : : "r"(line) : "memory");
